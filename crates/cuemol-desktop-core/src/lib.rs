@@ -5081,6 +5081,12 @@ impl DesktopAppState {
             .attributes
             .insert("egcolor".to_string(), edge_color.into());
         for (key, value) in specific {
+            if matches!(
+                key.as_str(),
+                "minLevel" | "maxLevel" | "level" | "maxExtent"
+            ) {
+                continue;
+            }
             match key.as_str() {
                 "siglevel" => renderer.siglevel = parse_density_f64(key, value)?,
                 "extent" => renderer.extent = parse_density_f64(key, value)?,
@@ -5191,9 +5197,10 @@ impl DesktopAppState {
                     .iter()
                     .enumerate()
                     .find(|(_, renderer)| renderer.uid == renderer_uid)
+                    .map(|(index, renderer)| (map, index, renderer))
             })
-            .map(|(index, renderer)| {
-                density_renderer_summary(map_uid, renderer, index as i32 + 1, &styles)
+            .map(|(map, index, renderer)| {
+                density_renderer_summary(map_uid, &map.map, renderer, index as i32 + 1, &styles)
             })
             .ok_or_else(|| {
                 CueMolError::NotFound(format!("density renderer {}", renderer_uid.get()))
@@ -5234,6 +5241,7 @@ impl DesktopAppState {
     pub fn add_density_renderer(&mut self, map_uid: Uid, renderer_type: &str) -> Result<Uid> {
         let (kind, default_color, width) = match renderer_type {
             "contour" => (GuiDensityRendererKind::Contour, "#0000ff", 1.0),
+            "gpu_mapmesh" => (GuiDensityRendererKind::Contour, "#00ff00", 1.0),
             "isosurf" => (GuiDensityRendererKind::IsoSurface, "#00ff00", 1.2),
             "gpu_mapvol" => (GuiDensityRendererKind::Volume, "#00ff00", 1.2),
             "*unitcell" | "unitcell" => (GuiDensityRendererKind::UnitCell, "#ffff00", 1.0),
@@ -5261,9 +5269,14 @@ impl DesktopAppState {
             .filter(|renderer| renderer.renderer_type == renderer_type)
             .count()
             + 1;
+        let name = if matches!(renderer_type, "*unitcell" | "unitcell") {
+            "unitcell".to_string()
+        } else {
+            format!("{renderer_type} {serial}")
+        };
         map.renderers.push(GuiDensityRenderer {
             uid,
-            name: format!("{renderer_type} {serial}"),
+            name,
             renderer_type: renderer_type.to_string(),
             kind,
             visible: true,
@@ -5287,7 +5300,10 @@ impl DesktopAppState {
             attributes: BTreeMap::from([
                 ("ui_order".to_string(), ui_order.to_string()),
                 ("autoupdate".to_string(), "true".to_string()),
-                ("dragupdate".to_string(), "false".to_string()),
+                (
+                    "dragupdate".to_string(),
+                    matches!(renderer_type, "gpu_mapmesh" | "gpu_mapvol").to_string(),
+                ),
                 ("bufsize".to_string(), "100".to_string()),
                 ("cullface".to_string(), "false".to_string()),
             ]),
@@ -48636,7 +48652,13 @@ fn density_map_summary(
             .iter()
             .enumerate()
             .map(|(index, renderer)| {
-                density_renderer_summary(object.uid, renderer, index as i32 + 1, styles)
+                density_renderer_summary(
+                    object.uid,
+                    &object.map,
+                    renderer,
+                    index as i32 + 1,
+                    styles,
+                )
             })
             .collect(),
         renderer_groups: object
@@ -48670,6 +48692,7 @@ fn parse_density_i32(name: &str, value: &str) -> Result<i32> {
 
 fn density_renderer_summary(
     map_uid: Uid,
+    map: &DensityMap,
     renderer: &GuiDensityRenderer,
     fallback_ui_order: i32,
     styles: &StyleManager,
@@ -48717,6 +48740,48 @@ fn density_renderer_summary(
     );
     specific.insert("color_mapname".to_string(), renderer.color_mapname.clone());
     specific.insert("xferfn_type".to_string(), renderer.xferfn_type.clone());
+    let sigma = map.den_sigma();
+    let sigma_level = |density: f64| {
+        if sigma.abs() < f64::EPSILON {
+            0.0
+        } else {
+            density / sigma
+        }
+    };
+    specific.insert(
+        "minLevel".to_string(),
+        sigma_level(map.den_min()).to_string(),
+    );
+    specific.insert(
+        "maxLevel".to_string(),
+        sigma_level(map.den_max()).to_string(),
+    );
+    specific.insert("level".to_string(), (renderer.siglevel * sigma).to_string());
+    let col_extent = map.col_no() as f64 * map.col_grid_size() / 2.0;
+    let row_extent = map.row_no() as f64 * map.row_grid_size() / 2.0;
+    let sec_extent = map.sec_no() as f64 * map.sec_grid_size() / 2.0;
+    let max_extent = match renderer.renderer_type.as_str() {
+        "contour" => {
+            let size = renderer
+                .attributes
+                .get("bufsize")
+                .and_then(|value| value.parse::<f64>().ok())
+                .unwrap_or(100.0);
+            (size * map.col_grid_size() / 2.0)
+                .min(size * map.row_grid_size() / 2.0)
+                .min(size * map.sec_grid_size() / 2.0)
+        }
+        "gpu_mapmesh" => (50.0 * map.col_grid_size())
+            .min(50.0 * map.row_grid_size())
+            .min(50.0 * map.sec_grid_size()),
+        "isosurf" => renderer.max_grids as f64 * map.col_grid_size() / 2.0,
+        "gpu_mapvol" => col_extent.max(row_extent).max(sec_extent),
+        _ => 0.0,
+    };
+    specific.insert("maxExtent".to_string(), max_extent.to_string());
+    specific
+        .entry("use_abslevel".to_string())
+        .or_insert_with(|| attribute("use_abslevel", "false"));
     if let Some(color) = renderer.color.rgba8() {
         specific.insert("color".to_string(), qsc_rgba8_string(color));
     }
