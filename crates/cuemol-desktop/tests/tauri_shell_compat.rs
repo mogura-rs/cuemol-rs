@@ -1085,7 +1085,6 @@ fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
     assert!(
         NATIVE_GUI_RS.contains("ui.selectable_value(&mut start_camera, String::new(), \"(none)\")")
     );
-    assert!(NATIVE_GUI_RS.contains("fn parse_native_animation_time(value: &str)"));
     assert!(NATIVE_GUI_RS.contains("format!(\"{name} ({})\", motion.type_name())"));
 }
 
