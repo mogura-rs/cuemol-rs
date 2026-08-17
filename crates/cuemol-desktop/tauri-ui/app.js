@@ -2,7 +2,9 @@
 
 const appShell = document.querySelector(".app-shell");
 const sidePanel = document.querySelector(".side-panel");
+const contentHolder = document.querySelector(".content-holder");
 const mainView = document.querySelector(".main-view");
+const verticalSplitter = document.querySelector(".vertical-splitter");
 const horizontalSplitter = document.querySelector(".horizontal-splitter");
 const viewport = document.getElementById("viewport");
 const viewportImage = document.getElementById("viewport-image");
@@ -117,6 +119,7 @@ const SELECTION_HISTORY_STORAGE_KEY = "cuemol2.selectionHistory.v1";
 const ANIMATION_RENDER_STORAGE_KEY = "cuemol2.animationRender.v1";
 const COMMAND_HISTORY_STORAGE_KEY = "cuemol2.commandHistory.v1";
 const BOTTOM_PANEL_HEIGHT_STORAGE_KEY = "cuemol2.bottomPanelHeight.v1";
+const SIDE_PANEL_WIDTH_STORAGE_KEY = "cuemol2.sidePanelWidth.v1";
 const MAX_RECENT_FILES = 10;
 const MAX_SELECTION_HISTORY = 20;
 const MAX_COMMAND_HISTORY = 100;
@@ -633,6 +636,74 @@ function setupBottomPanelSplitter() {
     setBottomPanelHeight(bottomPanelHeight + (event.key === "ArrowUp" ? 10 : -10), true);
   });
   window.addEventListener("resize", () => setBottomPanelHeight(bottomPanelHeight));
+}
+
+let sidePanelWidth = 248;
+let expandedSidePanelWidth = 248;
+try {
+  const storedSidePanelWidth = Number(localStorage.getItem(SIDE_PANEL_WIDTH_STORAGE_KEY));
+  if (Number.isFinite(storedSidePanelWidth)) {
+    sidePanelWidth = storedSidePanelWidth;
+    if (storedSidePanelWidth >= 100) expandedSidePanelWidth = storedSidePanelWidth;
+  }
+} catch {
+  // Storage can be unavailable in restricted webviews.
+}
+
+function setSidePanelWidth(width, persist = false) {
+  const maximum = Math.max(100, (contentHolder?.getBoundingClientRect().width || 800) - 240);
+  sidePanelWidth = width < 50 ? 0 : Math.min(maximum, Math.max(100, width));
+  if (sidePanelWidth > 0) expandedSidePanelWidth = sidePanelWidth;
+  contentHolder?.style.setProperty("--panel-width", `${sidePanelWidth}px`);
+  contentHolder?.classList.toggle("side-panel-collapsed", sidePanelWidth === 0);
+  verticalSplitter?.setAttribute("aria-valuemax", String(Math.round(maximum)));
+  verticalSplitter?.setAttribute("aria-valuenow", String(Math.round(sidePanelWidth)));
+  verticalSplitter?.setAttribute("aria-expanded", String(sidePanelWidth > 0));
+  if (!persist) return;
+  try {
+    localStorage.setItem(SIDE_PANEL_WIDTH_STORAGE_KEY, String(sidePanelWidth));
+  } catch {
+    // Storage can be unavailable in restricted webviews.
+  }
+}
+
+function setupSidePanelSplitter() {
+  if (!verticalSplitter) return;
+  setSidePanelWidth(sidePanelWidth);
+  verticalSplitter.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = sidePanelWidth;
+    verticalSplitter.setPointerCapture(event.pointerId);
+    verticalSplitter.classList.add("dragging");
+    document.body.classList.add("resizing-side-panel");
+    const resize = (moveEvent) => {
+      setSidePanelWidth(startWidth + moveEvent.clientX - startX);
+    };
+    const finish = (finishEvent) => {
+      if (finishEvent.type !== "pointercancel") resize(finishEvent);
+      setSidePanelWidth(sidePanelWidth, true);
+      verticalSplitter.classList.remove("dragging");
+      document.body.classList.remove("resizing-side-panel");
+      verticalSplitter.removeEventListener("pointermove", resize);
+      verticalSplitter.removeEventListener("pointerup", finish);
+      verticalSplitter.removeEventListener("pointercancel", finish);
+    };
+    verticalSplitter.addEventListener("pointermove", resize);
+    verticalSplitter.addEventListener("pointerup", finish);
+    verticalSplitter.addEventListener("pointercancel", finish);
+  });
+  verticalSplitter.addEventListener("dblclick", () => {
+    setSidePanelWidth(sidePanelWidth === 0 ? expandedSidePanelWidth : 0, true);
+  });
+  verticalSplitter.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+    event.preventDefault();
+    const baseWidth = sidePanelWidth === 0 ? expandedSidePanelWidth : sidePanelWidth;
+    setSidePanelWidth(baseWidth + (event.key === "ArrowRight" ? 10 : -10), true);
+  });
+  window.addEventListener("resize", () => setSidePanelWidth(sidePanelWidth));
 }
 
 function showBottomPanel(name) {
@@ -17196,6 +17267,7 @@ window.addEventListener("drop", (event) => {
   }
 });
 
+setupSidePanelSplitter();
 setupBottomPanelSplitter();
 
 async function start() {

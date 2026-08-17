@@ -506,6 +506,21 @@ summary:focus-visible {
   border-left: 1px solid rgba(0, 0, 0, 0.35);
   background: #d2d2d2;
   cursor: col-resize;
+  touch-action: none;
+}
+
+.vertical-splitter:hover,
+.vertical-splitter.dragging {
+  background: #aaa;
+}
+
+.content-holder.side-panel-collapsed .side-panel {
+  visibility: hidden;
+}
+
+body.resizing-side-panel {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .side-panel {

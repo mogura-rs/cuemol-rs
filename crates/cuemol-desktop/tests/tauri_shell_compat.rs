@@ -36,6 +36,11 @@ fn tauri_shell_matches_the_reference_xul_dock_order() {
     assert!(JS.contains("function setupBottomPanelSplitter()"));
     assert!(JS.contains("BOTTOM_PANEL_HEIGHT_STORAGE_KEY"));
     assert!(JS.contains("startHeight + startY - moveEvent.clientY"));
+    assert!(HTML.contains("aria-label=\"Resize side panel\""));
+    assert!(JS.contains("function setupSidePanelSplitter()"));
+    assert!(JS.contains("SIDE_PANEL_WIDTH_STORAGE_KEY"));
+    assert!(JS.contains("startWidth + moveEvent.clientX - startX"));
+    assert!(CSS.contains(".content-holder.side-panel-collapsed .side-panel"));
 }
 
 #[test]
