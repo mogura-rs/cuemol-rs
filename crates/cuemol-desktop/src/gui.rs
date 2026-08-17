@@ -8510,6 +8510,28 @@ impl GuiApplication {
             .collect::<Vec<_>>();
         ui.add_enabled_ui(supports_coloring, |ui| {
             ui.menu_button("Coloring", |ui| {
+                if !paint.is_empty() {
+                    ui.menu_button("Paint (Secondary str.)", |ui| {
+                        for style in &paint {
+                            let label = if style.description.is_empty() {
+                                style.name.as_str()
+                            } else {
+                                style.description.as_str()
+                            };
+                            if ui.button(label).clicked() {
+                                self.apply_workspace_renderer_style(
+                                    scene_uid,
+                                    object_uid,
+                                    renderer_uid,
+                                    &style.name,
+                                    "coloring",
+                                );
+                                ui.close();
+                            }
+                        }
+                    });
+                    ui.separator();
+                }
                 for (label, style_name) in [
                     ("CPK molcol", "DefaultCPKColoring"),
                     ("CPK dark gray", "DarkCPKColoring"),
@@ -8525,23 +8547,6 @@ impl GuiApplication {
                             object_uid,
                             renderer_uid,
                             style_name,
-                            "coloring",
-                        );
-                        ui.close();
-                    }
-                }
-                for style in &paint {
-                    let label = if style.description.is_empty() {
-                        style.name.as_str()
-                    } else {
-                        style.description.as_str()
-                    };
-                    if ui.button(label).clicked() {
-                        self.apply_workspace_renderer_style(
-                            scene_uid,
-                            object_uid,
-                            renderer_uid,
-                            &style.name,
                             "coloring",
                         );
                         ui.close();
@@ -9158,6 +9163,28 @@ impl GuiApplication {
         );
         ui.add_enabled_ui(supports_coloring, |ui| {
             ui.menu_button("Coloring", |ui| {
+                if !paint.is_empty() {
+                    ui.menu_button("Paint (Secondary str.)", |ui| {
+                        for style in &paint {
+                            let label = if style.description.is_empty() {
+                                style.name.as_str()
+                            } else {
+                                style.description.as_str()
+                            };
+                            if ui.button(label).clicked() {
+                                self.apply_workspace_renderer_style(
+                                    scene_uid,
+                                    object_uid,
+                                    renderer.uid,
+                                    &style.name,
+                                    "coloring",
+                                );
+                                ui.close();
+                            }
+                        }
+                    });
+                    ui.separator();
+                }
                 for (label, style_name) in [
                     ("CPK molcol", "DefaultCPKColoring"),
                     ("CPK dark gray", "DarkCPKColoring"),
@@ -9173,23 +9200,6 @@ impl GuiApplication {
                             object_uid,
                             renderer.uid,
                             style_name,
-                            "coloring",
-                        );
-                        ui.close();
-                    }
-                }
-                for style in &paint {
-                    let label = if style.description.is_empty() {
-                        style.name.as_str()
-                    } else {
-                        style.description.as_str()
-                    };
-                    if ui.button(label).clicked() {
-                        self.apply_workspace_renderer_style(
-                            scene_uid,
-                            object_uid,
-                            renderer.uid,
-                            &style.name,
                             "coloring",
                         );
                         ui.close();
