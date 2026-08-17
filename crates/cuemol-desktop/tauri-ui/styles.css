@@ -605,12 +605,35 @@ body.resizing-side-panel {
 
 .side-body {
   display: none;
+  box-sizing: border-box;
+  height: var(--side-panel-height, auto);
+  overflow: auto;
   padding: 7px;
   background: #f4f4f4;
 }
 
 .side-card.open .side-body {
   display: block;
+}
+
+.side-panel-splitter {
+  height: 6px;
+  border-top: 1px solid #b0b0b0;
+  border-bottom: 1px solid #d7d7d7;
+  background: #c7c7c7;
+  cursor: row-resize;
+}
+
+.side-panel-splitter:hover,
+.side-panel-splitter.dragging,
+.side-panel-splitter:focus-visible {
+  background: #2e78c7;
+  outline: 0;
+}
+
+body.resizing-side-panel-height {
+  cursor: row-resize;
+  user-select: none;
 }
 
 .side-body p {

@@ -8491,6 +8491,7 @@ function restoreDefaultPanels() {
   applySidePanelOrder(SIDE_PANEL_DEFAULT_ORDER);
   document.querySelectorAll("[data-side-card]").forEach((card) => {
     card.hidden = false;
+    setSidePanelCardHeight(card, null);
     const title = card.querySelector(".side-title span:nth-child(2)")?.textContent;
     const open = openPanels.has(title);
     card.classList.toggle("open", open);
@@ -8534,6 +8535,36 @@ function applySidePanelOrder(order) {
   for (const card of cards.values()) sidePanel.append(card);
 }
 
+function setSidePanelCardHeight(card, height, persist = false) {
+  if (!card) return;
+  const numericHeight = Number(height);
+  if (!Number.isFinite(numericHeight) || numericHeight <= 0) {
+    delete card.dataset.panelHeight;
+    card.style.removeProperty("--side-panel-height");
+    card.querySelector(".side-panel-splitter")?.removeAttribute("aria-valuenow");
+  } else {
+    const maximum = Math.max(64, (sidePanel?.clientHeight || 600) - 48);
+    const nextHeight = Math.min(maximum, Math.max(48, numericHeight));
+    card.dataset.panelHeight = String(nextHeight);
+    card.style.setProperty("--side-panel-height", `${nextHeight}px`);
+    const splitter = card.querySelector(".side-panel-splitter");
+    splitter?.setAttribute("aria-valuemin", "48");
+    splitter?.setAttribute("aria-valuemax", String(Math.round(maximum)));
+    splitter?.setAttribute("aria-valuenow", String(Math.round(nextHeight)));
+  }
+  if (persist) saveSidePanelState();
+}
+
+function syncSidePanelSplitters() {
+  const cards = [...document.querySelectorAll("[data-side-card]")].filter(
+    (card) => !card.hidden,
+  );
+  cards.forEach((card, index) => {
+    const splitter = card.querySelector(".side-panel-splitter");
+    if (splitter) splitter.hidden = !card.classList.contains("open") || index === cards.length - 1;
+  });
+}
+
 function saveSidePanelState() {
   const state = { __order: [] };
   for (const card of document.querySelectorAll("[data-side-card]")) {
@@ -8543,6 +8574,7 @@ function saveSidePanelState() {
       state[name] = {
         hidden: card.hidden,
         open: card.classList.contains("open"),
+        height: Number(card.dataset.panelHeight) || null,
       };
     }
   }
@@ -8573,8 +8605,58 @@ function restoreSidePanelState() {
     toggle?.setAttribute("aria-expanded", String(Boolean(saved.open)));
     const disclosure = card.querySelector(".disclosure");
     if (disclosure) disclosure.textContent = saved.open ? "▾" : "▸";
+    setSidePanelCardHeight(card, saved.height);
   }
   syncSidePanelVisibility();
+}
+
+function setupSidePanelHeightSplitters() {
+  for (const card of document.querySelectorAll("[data-side-card]")) {
+    const splitter = document.createElement("div");
+    splitter.className = "side-panel-splitter";
+    splitter.tabIndex = 0;
+    splitter.setAttribute("role", "separator");
+    splitter.setAttribute("aria-orientation", "horizontal");
+    splitter.setAttribute("aria-label", `${sidePanelCardName(card)} panel height`);
+    card.append(splitter);
+    if (card.dataset.panelHeight) setSidePanelCardHeight(card, card.dataset.panelHeight);
+    splitter.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      const body = card.querySelector(".side-body");
+      const startY = event.clientY;
+      const startHeight = body?.getBoundingClientRect().height || 48;
+      splitter.setPointerCapture(event.pointerId);
+      splitter.classList.add("dragging");
+      document.body.classList.add("resizing-side-panel-height");
+      const resize = (moveEvent) => {
+        setSidePanelCardHeight(card, startHeight + moveEvent.clientY - startY);
+      };
+      const finish = (finishEvent) => {
+        if (finishEvent.type !== "pointercancel") resize(finishEvent);
+        saveSidePanelState();
+        splitter.classList.remove("dragging");
+        document.body.classList.remove("resizing-side-panel-height");
+        splitter.removeEventListener("pointermove", resize);
+        splitter.removeEventListener("pointerup", finish);
+        splitter.removeEventListener("pointercancel", finish);
+      };
+      splitter.addEventListener("pointermove", resize);
+      splitter.addEventListener("pointerup", finish);
+      splitter.addEventListener("pointercancel", finish);
+    });
+    splitter.addEventListener("dblclick", () => setSidePanelCardHeight(card, null, true));
+    splitter.addEventListener("keydown", (event) => {
+      if (!["ArrowUp", "ArrowDown"].includes(event.key)) return;
+      event.preventDefault();
+      const current =
+        Number(card.dataset.panelHeight) ||
+        card.querySelector(".side-body")?.getBoundingClientRect().height ||
+        48;
+      setSidePanelCardHeight(card, current + (event.key === "ArrowDown" ? 10 : -10), true);
+    });
+  }
+  syncSidePanelSplitters();
 }
 
 function setupSidePanelReordering() {
@@ -8613,6 +8695,7 @@ function setupSidePanelReordering() {
       const after = event.clientY >= card.getBoundingClientRect().top + card.offsetHeight / 2;
       sidePanel.insertBefore(sourceCard, after ? card.nextSibling : card);
       clearDropIndicators();
+      syncSidePanelSplitters();
       saveSidePanelState();
     });
   }
@@ -8659,6 +8742,7 @@ function syncSidePanelVisibility() {
   document.querySelectorAll("[data-panel-menu]").forEach((element) => {
     element.classList.toggle("checked", !sidePanelCard(element.dataset.panelMenu)?.hidden);
   });
+  syncSidePanelSplitters();
 }
 
 function closeSidePanelCard(card) {
@@ -16919,6 +17003,7 @@ document.querySelectorAll("[data-panel-toggle]").forEach((element) => {
     element.querySelector(".disclosure").textContent = open ? "▾" : "▸";
     const name = element.querySelector("span:nth-child(2)")?.textContent;
     if (open && name) renderSidePanel(name);
+    syncSidePanelSplitters();
     saveSidePanelState();
     scheduleRender(140);
   });
@@ -17496,6 +17581,7 @@ window.addEventListener("drop", (event) => {
 
 restoreSidePanelState();
 setupSidePanelReordering();
+setupSidePanelHeightSplitters();
 setupSidePanelSplitter();
 setupBottomPanelSplitter();
 setupRibbonCollapse();
