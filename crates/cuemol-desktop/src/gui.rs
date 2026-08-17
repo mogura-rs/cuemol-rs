@@ -9064,18 +9064,20 @@ impl GuiApplication {
         );
         let mut history_pick = None;
         ui.horizontal(|ui| {
-            ui.add_enabled_ui(!self.selection_history.is_empty(), |ui| {
-                ui.menu_button("↶", |ui| {
+            ui.menu_button("↶", |ui| {
+                if self.selection_history.is_empty() {
+                    ui.add_enabled(false, egui::Button::new("(no history)"));
+                } else {
                     for past in self.selection_history.iter().rev() {
                         if ui.selectable_label(false, past).clicked() {
                             history_pick = Some(past.clone());
                             ui.close();
                         }
                     }
-                })
-                .response
-                .on_hover_text("History");
-            });
+                }
+            })
+            .response
+            .on_hover_text("History");
             if ui.button("↖").on_hover_text("Select").clicked() {
                 if let Some(object_uid) = self.selection_target_object() {
                     self.apply_molecule_selection(

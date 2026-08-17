@@ -103,9 +103,11 @@ fn tauri_reference_panels_are_bound_to_shared_core_data() {
     assert!(JS.contains("selectionEditorAdd.addEventListener(\"click\""));
     assert!(JS.contains("label: \"Around/Expand\""));
     assert!(JS.contains("selectionHistoryEntries.map((entry) => ({"));
+    assert!(JS.contains("[{ label: \"(no history)\", disabled: true }]"));
     assert!(NATIVE_GUI_RS.contains("enum NativeSelectionEditorItem"));
     assert!(NATIVE_GUI_RS.contains("fn compose_native_selection_editor("));
     assert!(NATIVE_GUI_RS.contains("\"Around/Expand\""));
+    assert!(NATIVE_GUI_RS.contains("egui::Button::new(\"(no history)\")"));
     assert!(!NATIVE_GUI_RS.contains("ui.label(\"Whole molecule\")"));
     assert!(JS.contains("item.supportsColoring"));
     assert!(JS.contains("PaintColoring"));

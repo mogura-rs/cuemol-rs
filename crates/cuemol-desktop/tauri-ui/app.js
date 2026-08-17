@@ -312,7 +312,7 @@ function rememberSelection(selection) {
 }
 
 function renderSelectionHistory() {
-  selectionHistory.disabled = selectionHistoryEntries.length === 0;
+  selectionHistory.disabled = false;
 }
 
 function requestPdbHistory() {
@@ -15641,12 +15641,15 @@ selectionObject.addEventListener("change", () => {
 });
 
 selectionHistory.addEventListener("click", (event) => {
-  showWorkspaceContextMenu(event, selectionHistoryEntries.map((entry) => ({
-    label: entry,
-    action: () => {
-      selectionInput.value = entry;
-    },
-  })));
+  const items = selectionHistoryEntries.length
+    ? selectionHistoryEntries.map((entry) => ({
+        label: entry,
+        action: () => {
+          selectionInput.value = entry;
+        },
+      }))
+    : [{ label: "(no history)", disabled: true }];
+  showWorkspaceContextMenu(event, items);
 });
 
 selectionEditorAdd.addEventListener("click", (event) => {
