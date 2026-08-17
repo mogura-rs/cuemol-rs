@@ -6601,7 +6601,7 @@ impl GuiApplication {
                         } else {
                             if !matches!(
                                 renderer.renderer_type.as_str(),
-                                "*selection" | "selection" | "*namelabel" | "name_label"
+                                "*selection" | "selection"
                             ) {
                                 self.workspace_renderer_selection_menu(
                                     ui,
@@ -6609,7 +6609,6 @@ impl GuiApplication {
                                     object_uid,
                                     renderer.uid,
                                 );
-                                ui.separator();
                             }
                             if renderer.renderer_type == "*selection"
                                 || (!renderer.renderer_type.starts_with('*')
@@ -6639,7 +6638,6 @@ impl GuiApplication {
                                         }
                                     }
                                 });
-                                ui.separator();
                             }
                             if renderer.renderer_type != "*selection" {
                                 self.workspace_renderer_style_menus(
@@ -7414,11 +7412,8 @@ impl GuiApplication {
             .molecule_selection_text(object_uid)
             .unwrap_or_default()
             .to_string();
-        ui.menu_button("Change selection", |ui| {
-            if ui
-                .add_enabled(!current.is_empty(), egui::Button::new("Current"))
-                .clicked()
-            {
+        ui.menu_button("Change sel", |ui| {
+            if ui.button("Current").clicked() {
                 self.set_workspace_renderer_selection(
                     scene_uid,
                     object_uid,
@@ -7427,8 +7422,12 @@ impl GuiApplication {
                 );
                 ui.close();
             }
+            if ui.button("All").clicked() {
+                self.set_workspace_renderer_selection(scene_uid, object_uid, renderer_uid, "*");
+                ui.close();
+            }
+            ui.separator();
             for (label, selection) in [
-                ("All", "*"),
                 ("Protein", "protein"),
                 ("Nucleic acid", "nucleic"),
                 ("Water", "water"),

@@ -8121,30 +8121,12 @@ async function workspaceRendererContextItems(scene, object, renderer) {
     );
     return items;
   }
-  items.push(
-    { label: renderer.name, disabled: true },
-    null,
-    {
-      label: renderer.visible ? "Hide" : "Show",
-      action: () =>
-        mutate("set_workspace_visible", {
-          target: {
-            kind: "renderer",
-            objectUid: object.uid,
-            rendererUid: renderer.uid,
-          },
-          visible: !renderer.visible,
-        }),
-    },
-  );
   const styleOptions =
     renderer.rendererType === "*selection"
       ? []
       : await cachedWorkspaceRendererStyles(scene.uid, renderer.rendererType);
-  const selectionReadonly = ["*selection", "selection", "*namelabel", "name_label"].includes(
-    renderer.rendererType,
-  );
-  if (!selectionReadonly) {
+  const selectionHidden = ["*selection", "selection"].includes(renderer.rendererType);
+  if (!selectionHidden) {
     const changeSelection = (label, selection) => ({
       label,
       action: () =>
@@ -8182,123 +8164,120 @@ async function workspaceRendererContextItems(scene, object, renderer) {
       })),
     });
   }
-  if (renderer.rendererType !== "*selection") {
-    const lowerType = renderer.rendererType.replace(/^\*/, "").toLowerCase();
-    const suffix = ["name_label", "namelabel"].includes(lowerType)
-      ? "label"
-      : lowerType === "gpu_mapmesh"
-        ? "contour"
-        : lowerType;
-    const shapeStyles = styleOptions.filter((style) => {
-      const name = style.name.toLowerCase();
-      return name.endsWith(suffix) && !name.startsWith("egline");
+  const lowerType = renderer.rendererType.replace(/^\*/, "").toLowerCase();
+  const suffix = ["name_label", "namelabel"].includes(lowerType)
+    ? "label"
+    : lowerType === "gpu_mapmesh"
+      ? "contour"
+      : lowerType;
+  const shapeStyles = styleOptions.filter((style) => {
+    const name = style.name.toLowerCase();
+    return name.endsWith(suffix) && !name.startsWith("egline");
+  });
+  const edgeStyles = styleOptions.filter((style) => style.name.toLowerCase().startsWith("egline"));
+  const paintStyles = styleOptions.filter((style) => style.name.toLowerCase().endsWith("paint"));
+  const applyStyle = (styleName, component) => () =>
+    mutate("apply_workspace_renderer_style", {
+      input: {
+        objectUid: object.uid,
+        rendererUid: renderer.uid,
+        styleName,
+        component,
+      },
     });
-    const edgeStyles = styleOptions.filter((style) => style.name.toLowerCase().startsWith("egline"));
-    const paintStyles = styleOptions.filter((style) => style.name.toLowerCase().endsWith("paint"));
-    const applyStyle = (styleName, component) => () =>
-      mutate("apply_workspace_renderer_style", {
-        input: {
-          objectUid: object.uid,
-          rendererUid: renderer.uid,
-          styleName,
-          component,
-        },
-      });
-    const supportsColoring = !["selection", "*selection", "name_label", "*namelabel", "atomintr"].includes(
-      renderer.rendererType,
+  const supportsColoring = ![
+    "selection",
+    "*selection",
+    "name_label",
+    "*namelabel",
+    "atomintr",
+  ].includes(renderer.rendererType);
+  const coloringChildren = [];
+  if (paintStyles.length > 0) {
+    coloringChildren.push(
+      {
+        label: "Paint (Secondary str.)",
+        children: paintStyles.map((style) => ({
+          label: style.description || style.name,
+          action: applyStyle(style.name, "coloring"),
+        })),
+      },
+      null,
     );
-    if (supportsColoring) {
-      const coloringChildren = [];
-      if (paintStyles.length > 0) {
-        coloringChildren.push(
-          {
-            label: "Paint (Secondary str.)",
-            children: paintStyles.map((style) => ({
-              label: style.description || style.name,
-              action: applyStyle(style.name, "coloring"),
-            })),
-          },
-          null,
-        );
-      }
-      coloringChildren.push(
-        { label: "CPK molcol", action: applyStyle("DefaultCPKColoring", "coloring") },
-        { label: "CPK dark gray", action: applyStyle("DarkCPKColoring", "coloring") },
-        { label: "CPK light gray", action: applyStyle("LightCPKColoring", "coloring") },
-        null,
-        {
-          label: "B-factor",
-          action: () =>
-            mutate("set_workspace_renderer_coloring", {
-              input: { objectUid: object.uid, rendererUid: renderer.uid, preset: "bfactor" },
-            }),
-        },
-        {
-          label: "Rainbow",
-          action: () =>
-            mutate("set_workspace_renderer_coloring", {
-              input: { objectUid: object.uid, rendererUid: renderer.uid, preset: "rainbow" },
-            }),
-        },
-      );
-      items.push({ label: "Coloring", children: coloringChildren });
-    }
-    if (renderer.coloringType === "PaintColoring" && object.selection) {
-      items.push({
-        label: "Paint",
-        children: workspacePaintMenuChildren((color) => () =>
-          mutate("insert_workspace_renderer_paint", {
-            input: { objectUid: object.uid, rendererUid: renderer.uid, color },
-          })),
-      });
-    }
-    const styleChildren = shapeStyles.map((style) => ({
-      label: style.description || style.name,
-      action: applyStyle(style.name, "shape"),
-    }));
-    if (shapeStyles.length > 0 && edgeStyles.length > 0) styleChildren.push(null);
-    styleChildren.push(
-      ...edgeStyles.map((style) => ({
-        label: style.description || style.name,
-        action: applyStyle(style.name, "edge"),
-      })),
-    );
-    if (styleChildren.length > 0) items.push({ label: "Style", children: styleChildren });
   }
+  coloringChildren.push(
+    { label: "CPK molcol", action: applyStyle("DefaultCPKColoring", "coloring") },
+    { label: "CPK dark gray", action: applyStyle("DarkCPKColoring", "coloring") },
+    { label: "CPK light gray", action: applyStyle("LightCPKColoring", "coloring") },
+    null,
+    {
+      label: "B-factor",
+      action: () =>
+        mutate("set_workspace_renderer_coloring", {
+          input: { objectUid: object.uid, rendererUid: renderer.uid, preset: "bfactor" },
+        }),
+    },
+    {
+      label: "Rainbow",
+      action: () =>
+        mutate("set_workspace_renderer_coloring", {
+          input: { objectUid: object.uid, rendererUid: renderer.uid, preset: "rainbow" },
+        }),
+    },
+  );
+  items.push({ label: "Coloring", disabled: !supportsColoring, children: coloringChildren });
+  items.push({
+    label: "Paint",
+    disabled: renderer.coloringType !== "PaintColoring",
+    children: workspacePaintMenuChildren((color) => () =>
+      mutate("insert_workspace_renderer_paint", {
+        input: { objectUid: object.uid, rendererUid: renderer.uid, color },
+      })),
+  });
+  const styleChildren = shapeStyles.map((style) => ({
+    label: style.description || style.name,
+    action: applyStyle(style.name, "shape"),
+  }));
+  if (shapeStyles.length > 0 && edgeStyles.length > 0) styleChildren.push(null);
+  styleChildren.push(
+    ...edgeStyles.map((style) => ({
+      label: style.description || style.name,
+      action: applyStyle(style.name, "edge"),
+    })),
+  );
+  items.push({ label: "Style", disabled: selectionHidden, children: styleChildren });
   items.push(
     {
-      label: "Edit style…",
+      label: "Edit style...",
       action: async () => {
         if (!scene.active && !(await mutate("activate_scene", { sceneUid: scene.uid }))) return;
         await showApplyRendererStyleDialog(object, renderer, styleOptions);
       },
     },
     {
-      label: "Create style…",
+      label: "Create style...",
       action: async () => {
         if (!scene.active) await mutate("activate_scene", { sceneUid: scene.uid });
         await rendererStyleCreateEditor(object, renderer);
       },
     },
+    null,
   );
   if (renderer.rendererType === "atomintr") {
     items.push({
-      label: "Edit interaction list…",
+      label: "Edit interaction list...",
       action: () => showEditInteractionListDialog(object, renderer),
     });
   }
   items.push(
-    null,
-    {
-      label: "Rename…",
-      action: () => beginWorkspaceInlineRename("renderer", object.uid, renderer.uid),
-    },
     {
       label: "Copy",
+      disabled: selectionHidden,
       action: () => copyWorkspaceRenderer(object.uid, renderer.uid),
     },
+    null,
     {
-      label: "New Renderer…",
+      label: "New Renderer...",
       action: () =>
         mutate("add_renderer", {
           objectUid: object.uid,
@@ -8318,7 +8297,7 @@ async function workspaceRendererContextItems(scene, object, renderer) {
         }),
     },
     null,
-    { label: "Properties…", action: () => showReferenceDialog("Renderer Properties") },
+    { label: "Properties...", action: () => showReferenceDialog("Renderer Properties") },
   );
   return items;
 }
