@@ -456,6 +456,8 @@ fn tauri_open_recent_matches_the_reference_mru_contract() {
     assert!(JS.contains("const MAX_RECENT_FILES = 10"));
     assert!(JS.contains("entry.path !== path"));
     assert!(JS.contains("recentFiles.unshift({ path, ftype })"));
+    assert!(JS.contains("entry.ftype === \"script\""));
+    assert!(JS.contains("addRecentFile(path, \"script\")"));
     assert!(JS.contains("localStorage.setItem(RECENT_STORAGE_KEY"));
     assert!(JS.contains("button(\"Clear Menu\""));
     assert!(JS.contains("await openSelectedPaths([entry.path])"));
@@ -466,6 +468,14 @@ fn tauri_open_recent_matches_the_reference_mru_contract() {
     assert!(JS.contains("mutateWithViewport(\"open_path_with_renderer_setup\""));
     assert!(JS.contains("mutateWithViewport(\"open_paths\", { paths: directPaths })"));
     assert!(JS.contains("snapshot?.openedPaths"));
+    assert!(NATIVE_GUI_RS.contains("const MAX_RECENT_PATHS: usize = 10"));
+    assert!(NATIVE_GUI_RS.contains("fn load_recent_paths("));
+    assert!(NATIVE_GUI_RS.contains("fn persist_recent_paths("));
+    assert!(NATIVE_GUI_RS.contains("fn is_script_file("));
+    assert!(NATIVE_GUI_RS.contains("self.add_recent_path(path)"));
+    assert!(NATIVE_GUI_RS.contains("mru:{index}:path"));
+    assert!(NATIVE_GUI_RS.contains(".filter(|path| path.is_file())"));
+    assert!(NATIVE_GUI_RS.contains("egui::Button::new(\"(none)\")"));
 }
 
 #[test]

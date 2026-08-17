@@ -38,6 +38,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::window::{Window, WindowId};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
+const MAX_RECENT_PATHS: usize = 10;
 const RENDER_PRESETS: &[(&str, u32, u32)] = &[
     ("HD 720", 1280, 720),
     ("Full HD", 1920, 1080),
@@ -4230,6 +4231,20 @@ fn load_left_panel_heights(state: &DesktopAppState) -> [Option<f32>; LeftPanel::
     })
 }
 
+fn load_recent_paths(state: &DesktopAppState) -> Vec<PathBuf> {
+    let length = state
+        .config_value("mru:length")
+        .parse::<usize>()
+        .unwrap_or(0)
+        .min(MAX_RECENT_PATHS);
+    (0..length)
+        .filter_map(|index| {
+            let path = state.config_value(&format!("mru:{index}:path"));
+            (!path.is_empty()).then(|| PathBuf::from(path))
+        })
+        .collect()
+}
+
 impl GuiApplication {
     fn new() -> Self {
         let mut state = DesktopAppState::new();
@@ -4254,6 +4269,7 @@ impl GuiApplication {
         });
         let left_panel_order = parse_left_panel_order(&state.config_value("left_panel:order"));
         let left_panel_heights = load_left_panel_heights(&state);
+        let recent_paths = load_recent_paths(&state);
         let left_panel_width = state
             .config_value("left_panel:width")
             .parse::<f32>()
@@ -4526,7 +4542,7 @@ impl GuiApplication {
             plugin_dir: default_user_dir("plugins"),
             addon_dir: default_user_dir("addons"),
             last_loaded_path: None,
-            recent_paths: Vec::new(),
+            recent_paths,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             modified_scenes: std::collections::BTreeSet::new(),
@@ -5030,19 +5046,35 @@ impl GuiApplication {
                         ui.close();
                     }
                     ui.menu_button("Open Recent", |ui| {
-                        let recent_paths = self.recent_paths.clone();
+                        let recent_paths = self
+                            .recent_paths
+                            .iter()
+                            .filter(|path| path.is_file())
+                            .cloned()
+                            .collect::<Vec<_>>();
                         for path in recent_paths {
-                            let label = path.to_string_lossy();
-                            if ui.button(label.as_ref()).clicked() {
-                                self.open_path = label.to_string();
+                            let full_path = path.to_string_lossy().into_owned();
+                            let label = path
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or(full_path.as_str());
+                            if ui.button(label).on_hover_text(&full_path).clicked() {
+                                self.open_path = full_path;
                                 self.request_open_recent_path(camera);
                                 ui.close();
                             }
                         }
-                        if !self.recent_paths.is_empty() {
-                            ui.separator();
+                        if self.recent_paths.iter().all(|path| !path.is_file()) {
+                            ui.add_enabled(false, egui::Button::new("(none)"));
                         }
-                        if ui.button("Clear Menu").clicked() {
+                        ui.separator();
+                        if ui
+                            .add_enabled(
+                                !self.recent_paths.is_empty(),
+                                egui::Button::new("Clear Menu"),
+                            )
+                            .clicked()
+                        {
                             self.clear_recent_paths();
                             ui.close();
                         }
@@ -16579,7 +16611,9 @@ impl GuiApplication {
     fn choose_execute_script(&mut self) {
         if let Some(path) = native_file_dialog(NativeFileDialog::OpenScript, &self.script_path) {
             self.script_path = path.to_string_lossy().into_owned();
-            self.load_script_into_log();
+            if self.load_script_into_log() {
+                self.add_recent_path(path);
+            }
         }
     }
 
@@ -16691,6 +16725,11 @@ impl GuiApplication {
         let path = PathBuf::from(self.open_path.trim());
         if is_scene_file(&path) {
             self.open_scene_current_path(camera);
+        } else if is_script_file(&path) {
+            self.script_path = path.to_string_lossy().into_owned();
+            if self.load_script_into_log() {
+                self.add_recent_path(path);
+            }
         } else {
             self.request_open_current_path(camera);
         }
@@ -17713,12 +17752,12 @@ impl GuiApplication {
         }
     }
 
-    fn load_script_into_log(&mut self) {
+    fn load_script_into_log(&mut self) -> bool {
         let script = match fs::read_to_string(self.script_path.trim()) {
             Ok(script) => script,
             Err(error) => {
                 self.set_status(format!("Error: {error}"));
-                return;
+                return false;
             }
         };
         // Run the JS with the embedded boa engine (cuemol.print/select/color).
@@ -17735,8 +17774,12 @@ impl GuiApplication {
                 self.log_lines
                     .push(format!("Exec internal JS: {} done.", self.script_path));
                 self.set_status("Script executed");
+                true
             }
-            Err(error) => self.set_status(format!("Script error: {error}")),
+            Err(error) => {
+                self.set_status(format!("Script error: {error}"));
+                false
+            }
         }
     }
 
@@ -19745,6 +19788,7 @@ impl GuiApplication {
             parse_left_panel_order(&self.state.config_value("left_panel:order"));
         self.left_panel_heights = load_left_panel_heights(&self.state);
         self.left_panel_drag_start_heights.fill(None);
+        self.recent_paths = load_recent_paths(&self.state);
         self.left_panel_width = self
             .state
             .config_value("left_panel:width")
@@ -27326,12 +27370,28 @@ impl GuiApplication {
     fn add_recent_path(&mut self, path: PathBuf) {
         self.recent_paths.retain(|existing| existing != &path);
         self.recent_paths.insert(0, path);
-        self.recent_paths.truncate(10);
+        self.recent_paths.truncate(MAX_RECENT_PATHS);
+        self.persist_recent_paths();
     }
 
     fn clear_recent_paths(&mut self) {
         self.recent_paths.clear();
+        self.persist_recent_paths();
         self.set_status("Recent files cleared");
+    }
+
+    fn persist_recent_paths(&mut self) {
+        self.state
+            .put_config_value("mru:length", self.recent_paths.len().to_string());
+        for index in 0..MAX_RECENT_PATHS {
+            let path = self
+                .recent_paths
+                .get(index)
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            self.state
+                .put_config_value(&format!("mru:{index}:path"), path);
+        }
     }
 
     fn restore_panels(&mut self) {
@@ -32367,6 +32427,12 @@ fn is_scene_file(path: &Path) -> bool {
         .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "qsc" | "pse"))
 }
 
+fn is_script_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("js"))
+}
+
 fn download_url_to_cache(url: &str) -> Result<PathBuf> {
     let path = url_cache_path(url);
     download_to_cache(url, &path)
@@ -32885,6 +32951,31 @@ mod tests {
                 size: PhysicalSize::new(320, 8192),
             }
         );
+    }
+
+    #[test]
+    fn native_recent_files_persist_the_reference_mru_order() {
+        let mut app = GuiApplication::new();
+        for index in 0..12 {
+            app.add_recent_path(PathBuf::from(format!("/tmp/recent-{index}.pdb")));
+        }
+        app.add_recent_path(PathBuf::from("/tmp/recent-5.pdb"));
+
+        assert_eq!(app.recent_paths.len(), MAX_RECENT_PATHS);
+        assert_eq!(app.recent_paths[0], PathBuf::from("/tmp/recent-5.pdb"));
+        assert_eq!(app.recent_paths[1], PathBuf::from("/tmp/recent-11.pdb"));
+        assert_eq!(app.state.config_value("mru:length"), "10");
+        assert_eq!(load_recent_paths(&app.state), app.recent_paths);
+
+        app.clear_recent_paths();
+        assert!(app.recent_paths.is_empty());
+        assert_eq!(app.state.config_value("mru:length"), "0");
+        for index in 0..MAX_RECENT_PATHS {
+            assert!(app
+                .state
+                .config_value(&format!("mru:{index}:path"))
+                .is_empty());
+        }
     }
 
     #[test]
@@ -38454,13 +38545,16 @@ mod tests {
         )
         .unwrap();
         app.script_path = script.to_string_lossy().to_string();
-        app.load_script_into_log();
+        assert!(app.load_script_into_log());
         assert!(
             app.log_lines.iter().any(|line| line.contains("val=5")),
             "JS executed + printed, log: {:?}",
             app.log_lines
         );
         assert_eq!(app.selection_text, "chain A", "script applied a selection");
+        app.open_path = script.to_string_lossy().into_owned();
+        app.request_open_recent_path(&mut camera);
+        assert_eq!(app.recent_paths.first(), Some(&script));
         let _ = std::fs::remove_file(&script);
     }
 

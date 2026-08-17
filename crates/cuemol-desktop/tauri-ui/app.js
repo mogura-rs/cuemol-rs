@@ -293,7 +293,7 @@ function loadRecentFiles() {
           entry &&
           typeof entry.path === "string" &&
           entry.path.length > 0 &&
-          (entry.ftype === "obj" || entry.ftype === "scene"),
+          (entry.ftype === "obj" || entry.ftype === "scene" || entry.ftype === "script"),
       )
       .slice(0, MAX_RECENT_FILES);
   } catch {
@@ -412,7 +412,8 @@ function rememberPdbHistory(pdbId) {
 }
 
 function recentFileType(path) {
-  return /\.(qsc|pse)$/i.test(path) ? "scene" : "obj";
+  if (/\.(qsc|pse)$/i.test(path)) return "scene";
+  return /\.js$/i.test(path) ? "script" : "obj";
 }
 
 function fileBasename(path) {
@@ -453,7 +454,10 @@ function renderRecentMenu() {
     for (const entry of recentFiles) {
       const open = button(fileBasename(entry.path), "", async () => {
         closeMenus();
-        const opened = await openSelectedPaths([entry.path]);
+        const opened =
+          entry.ftype === "script"
+            ? await executeScriptPath(entry.path)
+            : await openSelectedPaths([entry.path]);
         if (!opened) {
           recentFiles = recentFiles.filter((item) => item.path !== entry.path);
           saveRecentFiles();
@@ -8465,9 +8469,16 @@ async function chooseExecuteScriptFile() {
     filters: [{ name: "Internal Javascript (*.js)", extensions: ["js"] }],
   });
   if (!path) return;
+  await executeScriptPath(path);
+}
+
+async function executeScriptPath(path) {
   if (await mutate("execute_script_file", { path })) {
+    addRecentFile(path, "script");
     showBottomPanel("output");
+    return true;
   }
+  return false;
 }
 
 async function executeOutputCommand() {
