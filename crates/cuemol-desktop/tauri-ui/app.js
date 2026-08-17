@@ -56,6 +56,7 @@ const coloringType = document.getElementById("coloring-type");
 const coloringDeck = document.getElementById("coloring-deck");
 const symmetryContent = document.getElementById("symmetry-content");
 const densityContent = document.getElementById("density-content");
+const viewContent = document.getElementById("view-content");
 const sequenceView = document.getElementById("sequence-view");
 const referenceDialog = document.getElementById("reference-dialog");
 const dialogTitle = document.getElementById("dialog-title");
@@ -187,6 +188,7 @@ let selectionEditorSelectedIndex = -1;
 let coloringTargetKey = null;
 let symmetryTargetKey = null;
 let densityPanelTargetKey = null;
+let viewPanelCamera = null;
 let coloringPaintSelectedIndex = -1;
 let coloringGradientSelectedIndex = -1;
 let selectionHistoryEntries = loadSelectionHistory();
@@ -8280,6 +8282,9 @@ function renderSidePanel(name) {
     case "Density map":
       renderDensity();
       break;
+    case "View":
+      renderView();
+      break;
     case "Animation":
       renderAnimation();
       break;
@@ -14291,6 +14296,204 @@ function renderDensity() {
   densityContent.append(controls);
 }
 
+function viewDialWheel(label, action, step = 1) {
+  const wheel = document.createElement("button");
+  wheel.type = "button";
+  wheel.className = "view-dial-wheel";
+  wheel.textContent = "↔";
+  wheel.setAttribute("aria-label", `Adjust ${label}`);
+  let previousX = null;
+  const stop = (event) => {
+    previousX = null;
+    wheel.classList.remove("active");
+    if (event?.pointerId !== undefined && wheel.hasPointerCapture(event.pointerId)) {
+      wheel.releasePointerCapture(event.pointerId);
+    }
+  };
+  wheel.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    previousX = event.clientX;
+    wheel.classList.add("active");
+    wheel.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  });
+  wheel.addEventListener("pointermove", (event) => {
+    if (previousX === null) return;
+    const delta = event.clientX - previousX;
+    if (Math.abs(delta) < 1) return;
+    previousX = event.clientX;
+    cameraCommand(action, delta * step);
+  });
+  wheel.addEventListener("pointerup", stop);
+  wheel.addEventListener("pointercancel", stop);
+  wheel.addEventListener(
+    "wheel",
+    (event) => {
+      event.preventDefault();
+      cameraCommand(action, -Math.sign(event.deltaY) * step);
+    },
+    { passive: false },
+  );
+  wheel.addEventListener("keydown", (event) => {
+    if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+    event.preventDefault();
+    cameraCommand(action, (event.key === "ArrowRight" ? 1 : -1) * step);
+  });
+  return wheel;
+}
+
+function viewDialSection(title) {
+  const section = document.createElement("section");
+  section.className = "view-dial-section";
+  const heading = document.createElement("div");
+  heading.className = "view-dial-heading";
+  heading.textContent = title;
+  section.append(heading);
+  return section;
+}
+
+function viewDialRow({ label, wheelAction, valueField, setAction, decimals, unit, relative = false }) {
+  const row = document.createElement("label");
+  row.className = "view-dial-row";
+  const caption = document.createElement("span");
+  caption.textContent = label;
+  const input = document.createElement("input");
+  input.type = "number";
+  input.step = decimals === 0 ? "1" : "0.01";
+  input.value = relative ? "0" : "";
+  if (valueField) input.dataset.viewField = valueField;
+  input.addEventListener("change", async () => {
+    const value = Number(input.value);
+    if (!Number.isFinite(value) || (!relative && value <= 0 && !valueField.startsWith("center"))) {
+      const current = relative ? 0 : viewPanelFieldValue(valueField);
+      input.value = Number.isFinite(current) ? Number(current).toFixed(decimals) : "";
+      return;
+    }
+    await cameraCommand(setAction, value);
+    if (relative) input.value = "0";
+  });
+  const suffix = document.createElement("span");
+  suffix.className = "view-dial-unit";
+  suffix.textContent = unit;
+  row.append(caption, viewDialWheel(label, wheelAction), input, suffix);
+  return row;
+}
+
+function viewPanelFieldValue(field) {
+  if (!viewPanelCamera) return null;
+  if (field.startsWith("center-")) {
+    return viewPanelCamera.center[Number(field.slice(-1))];
+  }
+  return viewPanelCamera[field];
+}
+
+function syncViewPanelControls() {
+  if (!viewContent || !viewPanelCamera) return;
+  viewContent.querySelectorAll("[data-view-field]").forEach((input) => {
+    if (document.activeElement === input) return;
+    const value = viewPanelFieldValue(input.dataset.viewField);
+    if (!Number.isFinite(value)) return;
+    const decimals = input.dataset.viewField.startsWith("center-") ? 2 : 0;
+    input.value = Number(value).toFixed(decimals);
+  });
+  const perspective = viewContent.querySelector("#view-perspective");
+  if (perspective) perspective.checked = Boolean(viewPanelCamera.perspective);
+  const centerMarkSelect = viewContent.querySelector("#view-center-mark");
+  if (centerMarkSelect && document.activeElement !== centerMarkSelect) {
+    centerMarkSelect.value = viewPanelCamera.centerMark || "none";
+  }
+}
+
+function renderView() {
+  if (!viewContent) return;
+  viewContent.replaceChildren();
+
+  const rotation = viewDialSection("Rotation");
+  for (const axis of ["X", "Y", "Z"]) {
+    rotation.append(
+      viewDialRow({
+        label: `Rot${axis}:`,
+        wheelAction: `rotate-${axis.toLowerCase()}`,
+        setAction: `rotate-${axis.toLowerCase()}`,
+        decimals: 0,
+        unit: "°",
+        relative: true,
+      }),
+    );
+  }
+
+  const translation = viewDialSection("Translation");
+  for (const [index, axis] of ["X", "Y", "Z"].entries()) {
+    translation.append(
+      viewDialRow({
+        label: `Tra${axis}:`,
+        wheelAction: `translate-${axis.toLowerCase()}`,
+        valueField: `center-${index}`,
+        setAction: `set-center-${axis.toLowerCase()}`,
+        decimals: 2,
+        unit: "Å",
+      }),
+    );
+  }
+
+  const zoomSlab = viewDialSection("Zoom / Slab");
+  for (const [label, field, adjustAction, setAction] of [
+    ["Zoom:", "zoom", "adjust-zoom", "set-zoom"],
+    ["Slab:", "slab", "adjust-slab", "set-slab"],
+    ["Dist:", "distance", "adjust-distance", "set-distance"],
+  ]) {
+    zoomSlab.append(
+      viewDialRow({
+        label,
+        wheelAction: adjustAction,
+        valueField: field,
+        setAction,
+        decimals: 0,
+        unit: "Å",
+      }),
+    );
+  }
+
+  const projection = viewDialSection("Projection");
+  const perspectiveRow = document.createElement("label");
+  perspectiveRow.className = "view-setting-row";
+  const perspectiveLabel = document.createElement("span");
+  perspectiveLabel.textContent = "Perspective:";
+  const perspective = document.createElement("input");
+  perspective.id = "view-perspective";
+  perspective.name = "projection";
+  perspective.value = "perspective";
+  perspective.type = "checkbox";
+  perspective.addEventListener("change", () => {
+    if (Boolean(viewPanelCamera?.perspective) !== perspective.checked) {
+      cameraCommand("projection");
+    }
+  });
+  perspectiveRow.append(perspectiveLabel, perspective);
+
+  const centerMarkRow = document.createElement("label");
+  centerMarkRow.className = "view-setting-row";
+  const centerMarkLabel = document.createElement("span");
+  centerMarkLabel.textContent = "Center mark:";
+  const centerMarkSelect = document.createElement("select");
+  centerMarkSelect.id = "view-center-mark";
+  for (const [value, label] of [
+    ["none", "None"],
+    ["cross", "Crosshair"],
+    ["axis", "Axis"],
+  ]) {
+    centerMarkSelect.append(new Option(label, value));
+  }
+  centerMarkSelect.addEventListener("change", () =>
+    cameraCommand(`center-mark-${centerMarkSelect.value}`),
+  );
+  centerMarkRow.append(centerMarkLabel, centerMarkSelect);
+  projection.append(perspectiveRow, centerMarkRow);
+
+  viewContent.append(rotation, translation, zoomSlab, projection);
+  syncViewPanelControls();
+}
+
 function renderSequence() {
   if (!document.querySelector('[data-bottom-panel="sequence"]')?.classList.contains("active")) {
     return;
@@ -14967,6 +15170,7 @@ function scheduleSecondaryPanelRender() {
     if (sidePanelIsExpanded("Coloring")) renderColoring();
     if (sidePanelIsExpanded("Symmetry")) renderSymmetry();
     if (sidePanelIsExpanded("Density map")) renderDensity();
+    if (sidePanelIsExpanded("View")) renderView();
     renderSequence();
     if (document.querySelector('[data-bottom-panel="trajectory"]')?.classList.contains("active")) {
       renderTrajectory();
@@ -15179,6 +15383,21 @@ function applyViewport(result, sequence) {
   }
   renderSize.textContent = `${result.width} × ${result.height}`;
   if (
+    Array.isArray(result.center) &&
+    result.center.length === 3 &&
+    [result.zoom, result.distance, result.slab, ...result.center].every(Number.isFinite)
+  ) {
+    viewPanelCamera = {
+      center: result.center,
+      zoom: result.zoom,
+      distance: result.distance,
+      slab: result.slab,
+      perspective: Boolean(result.perspective),
+      centerMark: result.centerMark === "crosshair" ? "cross" : result.centerMark,
+    };
+    syncViewPanelControls();
+  }
+  if (
     snapshot &&
     typeof result.perspective === "boolean" &&
     snapshot.perspective !== result.perspective
@@ -15365,6 +15584,35 @@ function enqueueCameraCommand(action, x, y) {
     if (action === "pan" || action === "rotate") {
       pending.x += x;
       pending.y += y;
+      return;
+    }
+    if (
+      [
+        "rotate-x",
+        "rotate-y",
+        "rotate-z",
+        "translate-x",
+        "translate-y",
+        "translate-z",
+        "adjust-zoom",
+        "adjust-slab",
+        "adjust-distance",
+      ].includes(action)
+    ) {
+      pending.x += x;
+      return;
+    }
+    if (
+      [
+        "set-center-x",
+        "set-center-y",
+        "set-center-z",
+        "set-zoom",
+        "set-slab",
+        "set-distance",
+      ].includes(action)
+    ) {
+      pending.x = x;
       return;
     }
     if (action === "zoom" || action === "slab") {

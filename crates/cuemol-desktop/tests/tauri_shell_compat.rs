@@ -223,6 +223,55 @@ fn tauri_densitymap_panel_matches_reference_renderer_controls() {
 }
 
 #[test]
+fn tauri_view_panel_matches_reference_fakedials() {
+    assert!(HTML.contains("id=\"view-content\""));
+    for label in [
+        "Rotation",
+        "Rot${axis}:",
+        "Translation",
+        "Tra${axis}:",
+        "Zoom / Slab",
+        "Zoom:",
+        "Slab:",
+        "Dist:",
+        "Perspective:",
+        "Center mark:",
+        "Crosshair",
+    ] {
+        assert!(JS.contains(label), "missing Tauri View control {label}");
+    }
+    for action in [
+        "rotate-x",
+        "rotate-y",
+        "rotate-z",
+        "translate-x",
+        "translate-y",
+        "translate-z",
+        "set-center-x",
+        "adjust-zoom",
+        "set-slab",
+        "set-distance",
+    ] {
+        assert!(JS.contains(action), "missing View action {action}");
+        assert!(TAURI_APP_RS.contains(action));
+    }
+    assert!(JS.contains("function viewDialWheel("));
+    assert!(JS.contains("wheel.setPointerCapture(event.pointerId)"));
+    assert!(JS.contains("viewPanelCamera = {"));
+    assert!(TAURI_APP_RS.contains("center: [f64; 3]"));
+    assert!(TAURI_APP_RS.contains("zoom: self.camera.zoom()"));
+    assert!(CSS.contains(".view-dial-row"));
+    assert!(CSS.contains("cursor: ew-resize"));
+    let view_body = HTML
+        .split("<div class=\"side-body view-body\">")
+        .nth(1)
+        .and_then(|source| source.split("</section>").next())
+        .expect("View panel body");
+    assert!(!view_body.contains("Background"));
+    assert!(!view_body.contains("Fit view"));
+}
+
+#[test]
 fn tauri_main_menu_matches_the_reference_inventory() {
     for menu in [
         "File",

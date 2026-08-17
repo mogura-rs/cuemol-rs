@@ -1537,27 +1537,97 @@ summary:focus-visible {
   white-space: nowrap;
 }
 
-.view-body fieldset {
-  display: flex;
-  gap: 9px;
-  margin: 0 0 6px;
-  padding: 4px 7px 6px;
-  border: 1px solid #bbb;
+.view-body {
+  overflow-y: auto;
 }
 
-.view-body legend {
+#view-content {
+  display: grid;
+  gap: 5px;
+}
+
+.view-dial-section {
+  display: grid;
+  gap: 2px;
+}
+
+.view-dial-heading {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #333;
+  font-weight: 600;
+}
+
+.view-dial-heading::after {
+  height: 1px;
+  flex: 1;
+  background: #aaa;
+  content: "";
+}
+
+.view-dial-row {
+  display: grid;
+  grid-template-columns: 42px 30px minmax(0, 1fr) 13px;
+  gap: 3px;
+  align-items: center;
+  padding-left: 8px;
+}
+
+.view-dial-row > span:first-child {
+  text-align: right;
+}
+
+.view-dial-row input[type="number"] {
+  width: 100%;
+  min-width: 0;
+  min-height: 21px;
+  padding: 1px 3px;
+  text-align: right;
+}
+
+.view-dial-wheel {
+  min-width: 0;
+  min-height: 21px;
+  padding: 0 3px;
+  border: 1px solid #999;
+  border-radius: 8px;
+  background: linear-gradient(#fff, #d8d8d8);
+  color: #444;
+  cursor: ew-resize;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.view-dial-wheel.active {
+  border-color: #467ba8;
+  background: #c7def1;
+}
+
+.view-dial-unit {
   color: #555;
 }
 
-.view-body label {
-  display: flex;
+.view-setting-row {
+  display: grid;
+  grid-template-columns: 86px minmax(0, 1fr);
+  gap: 5px;
   align-items: center;
-  gap: 3px;
+  padding-left: 8px;
 }
 
-.view-body input {
+.view-setting-row > span {
+  text-align: right;
+}
+
+.view-setting-row input {
   min-height: auto;
   margin: 0;
+  justify-self: start;
+}
+
+.view-setting-row select {
+  min-width: 0;
 }
 
 .animation-body {
