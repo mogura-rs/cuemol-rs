@@ -657,8 +657,12 @@ fn tauri_sequence_panel_matches_reference_mouse_and_context_operations() {
         .expect("native Sequence panel");
     assert!(native_sequence.contains("egui::ScrollArea::both()"));
     assert!(native_sequence.contains("NATIVE_SEQUENCE_RULER_HEIGHT"));
-    assert!(native_sequence.contains("[140.0, NATIVE_SEQUENCE_ROW_HEIGHT]"));
+    assert!(native_sequence.contains("egui::vec2(140.0, NATIVE_SEQUENCE_ROW_HEIGHT)"));
     assert!(native_sequence.contains("sequence_residue_column"));
+    assert!(native_sequence.contains("native_sequence_ruler"));
+    assert!(native_sequence.contains("native_sequence_names"));
+    assert!(native_sequence.contains("native_sequence_grid"));
+    assert!(native_sequence.contains("scroll_offset(scroll_offset)"));
     assert!(!native_sequence.contains("horizontal_wrapped"));
 }
 
