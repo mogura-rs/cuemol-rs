@@ -124,6 +124,16 @@ const BOTTOM_PANEL_HEIGHT_STORAGE_KEY = "cuemol2.bottomPanelHeight.v1";
 const SIDE_PANEL_WIDTH_STORAGE_KEY = "cuemol2.sidePanelWidth.v1";
 const SIDE_PANEL_STATE_STORAGE_KEY = "cuemol2.sidePanelState.v1";
 const RIBBON_COLLAPSED_STORAGE_KEY = "cuemol2.ribbonCollapsed.v1";
+const SIDE_PANEL_DEFAULT_ORDER = [
+  "Workspace",
+  "MolStruct",
+  "Selection",
+  "Coloring",
+  "Symmetry",
+  "Density map",
+  "View",
+  "Animation",
+];
 const MAX_RECENT_FILES = 10;
 const MAX_SELECTION_HISTORY = 20;
 const MAX_COMMAND_HISTORY = 100;
@@ -8478,6 +8488,7 @@ function applyCenterMark(value) {
 
 function restoreDefaultPanels() {
   const openPanels = new Set(["Workspace", "MolStruct", "Selection", "Coloring", "Density map"]);
+  applySidePanelOrder(SIDE_PANEL_DEFAULT_ORDER);
   document.querySelectorAll("[data-side-card]").forEach((card) => {
     card.hidden = false;
     const title = card.querySelector(".side-title span:nth-child(2)")?.textContent;
@@ -8504,6 +8515,23 @@ function sidePanelCard(name) {
 
 function sidePanelCardName(card) {
   return card?.querySelector(".side-title span:nth-child(2)")?.textContent || "";
+}
+
+function applySidePanelOrder(order) {
+  const cards = new Map(
+    [...document.querySelectorAll("[data-side-card]")].map((card) => [
+      sidePanelCardName(card),
+      card,
+    ]),
+  );
+  for (const name of order) {
+    const card = cards.get(name);
+    if (card) {
+      sidePanel.append(card);
+      cards.delete(name);
+    }
+  }
+  for (const card of cards.values()) sidePanel.append(card);
 }
 
 function saveSidePanelState() {
@@ -8534,20 +8562,7 @@ function restoreSidePanelState() {
   }
   if (!state || typeof state !== "object") return;
   if (Array.isArray(state.__order)) {
-    const cards = new Map(
-      [...document.querySelectorAll("[data-side-card]")].map((card) => [
-        sidePanelCardName(card),
-        card,
-      ]),
-    );
-    for (const name of state.__order) {
-      const card = cards.get(name);
-      if (card) {
-        sidePanel.append(card);
-        cards.delete(name);
-      }
-    }
-    for (const card of cards.values()) sidePanel.append(card);
+    applySidePanelOrder(state.__order);
   }
   for (const card of document.querySelectorAll("[data-side-card]")) {
     const saved = state[sidePanelCardName(card)];

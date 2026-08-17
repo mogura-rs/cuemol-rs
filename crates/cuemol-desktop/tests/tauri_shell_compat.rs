@@ -411,6 +411,8 @@ fn tauri_window_menu_toggles_reference_panels_and_lists_windows() {
     assert!(JS.contains("function saveSidePanelState()"));
     assert!(JS.contains("function restoreSidePanelState()"));
     assert!(JS.contains("function setupSidePanelReordering()"));
+    assert!(JS.contains("SIDE_PANEL_DEFAULT_ORDER"));
+    assert!(JS.contains("applySidePanelOrder(SIDE_PANEL_DEFAULT_ORDER)"));
     assert!(JS.contains("state.__order.push(name)"));
     assert!(JS.contains("sidePanel.insertBefore(sourceCard"));
     assert!(CSS.contains(".side-card.panel-drop-before::before"));
