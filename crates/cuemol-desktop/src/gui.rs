@@ -20860,6 +20860,10 @@ impl GuiApplication {
     }
 
     fn open_aux_renderer_dialog(&mut self, selection: WorkspaceAuxSelection) {
+        self.new_renderer_group = self
+            .workspace_aux_group_summary(selection)
+            .map(|(_, group)| group.name)
+            .or_else(|| self.workspace_aux_renderer_group_name(selection));
         match selection {
             WorkspaceAuxSelection::CameraRoot { .. }
             | WorkspaceAuxSelection::Camera { .. }
@@ -20867,7 +20871,6 @@ impl GuiApplication {
             | WorkspaceAuxSelection::Style { .. } => return,
             WorkspaceAuxSelection::DensityMap { map_uid, .. } => {
                 self.new_renderer_owner = Some(NativePropertyObject::DensityMap(map_uid));
-                self.new_renderer_group = None;
                 self.new_renderer_recenter = false;
                 self.new_renderer_density_move_view = false;
                 if !DENSITY_RENDERER_TYPES.contains(&self.new_renderer_type.as_str()) {
@@ -20889,7 +20892,6 @@ impl GuiApplication {
             }
             WorkspaceAuxSelection::Surface { surface_uid, .. } => {
                 self.new_renderer_owner = Some(NativePropertyObject::Surface(surface_uid));
-                self.new_renderer_group = None;
                 self.new_renderer_recenter = crate::load_renderer_setup_preferences().recenter;
                 self.new_renderer_density_move_view = false;
                 self.new_renderer_type = "molsurf".to_string();
@@ -20903,7 +20905,6 @@ impl GuiApplication {
             }
             WorkspaceAuxSelection::Lightweight { object_uid, .. } => {
                 self.new_renderer_owner = Some(NativePropertyObject::Lightweight(object_uid));
-                self.new_renderer_group = None;
                 self.new_renderer_recenter = crate::load_renderer_setup_preferences().recenter;
                 self.new_renderer_density_move_view = false;
                 self.new_renderer_type = "lwrend".to_string();
@@ -29038,7 +29039,7 @@ mod tests {
             renderer_uid: Some(group_uid),
         };
         app.open_aux_renderer_dialog(group_selection);
-        app.new_renderer_group = Some("maps".to_string());
+        assert_eq!(app.new_renderer_group.as_deref(), Some("maps"));
         app.new_renderer_type = "contour".to_string();
         app.new_renderer_name = "group contour".to_string();
         app.create_renderer_from_dialog(&mut CameraController::default());
@@ -29054,9 +29055,7 @@ mod tests {
             map_uid,
             renderer_uid: Some(member_uid),
         };
-        let member_group = app.workspace_aux_renderer_group_name(member_selection);
         app.open_aux_renderer_dialog(member_selection);
-        app.new_renderer_group = member_group;
         assert_eq!(app.new_renderer_group.as_deref(), Some("maps"));
         app.set_workspace_renderer_group_collapsed(
             scene_uid,

@@ -13083,32 +13083,36 @@ async function handleAction(action, depth = 0) {
       const lwObject = ["lwObject", "lwRenderer"].includes(workspaceSelectionKind)
         ? selectedLwObject()
         : null;
-      if (lwObject) {
-        await mutate("add_lw_renderer", { objectUid: lwObject.uid });
-        break;
-      }
-      if (!object && !map && !surface) {
+      if (!object && !map && !surface && !lwObject) {
         showError("Select an object first.");
         return;
       }
-      const rendererTypeValue = rendererType.value;
-      if (map) {
-        await mutate("add_density_renderer", {
-          mapUid: map.uid,
-          rendererType: rendererTypeValue,
-        });
-      } else if (surface) {
-        await mutate("add_surface_renderer", {
-          surfaceUid: surface.uid,
-        });
-      } else {
-        await mutate("add_renderer", {
-          objectUid: object.uid,
-          rendererType: rendererTypeValue,
-          groupName:
-            workspaceSelectionKind === "rendererGroup" ? selectedRenderer()?.name || null : null,
-        });
-      }
+      const scene = snapshot.scenes.find((candidate) => candidate.active);
+      if (!scene) return;
+      const currentRenderer = object
+        ? selectedRenderer()
+        : map
+          ? selectedDensityRenderer()
+          : surface
+            ? selectedSurfaceRenderer()
+            : selectedLwRenderer();
+      const groupName = currentRenderer
+        ? currentRenderer.rendererType === "*group"
+          ? currentRenderer.name
+          : currentRenderer.group
+        : null;
+      await showNewWorkspaceRendererDialog(
+        scene,
+        object
+          ? "renderer"
+          : map
+            ? "densityRenderer"
+            : surface
+              ? "surfaceRenderer"
+              : "lwRenderer",
+        object || map || surface || lwObject,
+        groupName,
+      );
       break;
     }
     case "delete-workspace-item": {

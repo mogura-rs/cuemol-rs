@@ -328,7 +328,6 @@ fn tauri_workspace_exposes_lightweight_objects_and_renderers() {
         "selectedLwRenderer",
         "set_lw_object_properties",
         "set_lw_renderer_properties",
-        "add_lw_renderer",
         "dataId",
         "copyWorkspaceRenderer(object.uid, renderer.uid)",
         "pasteWorkspaceRenderers(object.uid)",
@@ -1093,7 +1092,15 @@ fn tauri_workspace_preserves_renderer_group_hierarchy() {
     assert!(JS.contains("workspaceSelectionKind === \"rendererGroup\""));
     assert!(JS.contains("workspaceProperties.addEventListener(\"click\", async () =>"));
     assert!(JS.contains("await renameWorkspaceRendererGroup(scene, \"rendererGroup\""));
-    assert!(JS.contains("groupName:"));
+    assert!(JS.contains("groupName,"));
+    let add_renderer = JS
+        .split("case \"add-renderer\": {")
+        .nth(1)
+        .and_then(|source| source.split("case \"delete-workspace-item\":").next())
+        .expect("Workspace Add action");
+    assert!(add_renderer.contains("await showNewWorkspaceRendererDialog("));
+    assert!(add_renderer.contains("currentRenderer.rendererType === \"*group\""));
+    assert!(!add_renderer.contains("mutate(\"add_renderer\""));
     assert!(JS.contains("function workspaceRendererGroupTwisty(object, renderer)"));
     assert!(
         JS.contains("async function openWorkspaceRendererProperty(scene, kind, object, renderer)")
@@ -1110,6 +1117,10 @@ fn tauri_workspace_preserves_renderer_group_hierarchy() {
     assert!(CSS.contains(".workspace-object-twisty"));
     assert!(NATIVE_GUI_RS.contains("fn set_workspace_renderer_group_collapsed("));
     assert!(NATIVE_GUI_RS.contains("fn set_workspace_object_collapsed("));
+    assert!(NATIVE_GUI_RS.contains(".workspace_aux_group_summary(selection)"));
+    assert!(
+        NATIVE_GUI_RS.contains(".or_else(|| self.workspace_aux_renderer_group_name(selection))")
+    );
     assert!(NATIVE_GUI_RS.contains("if response.double_clicked()"));
     assert!(NATIVE_GUI_RS.contains("self.open_renderer_group_rename("));
     assert!(NATIVE_GUI_RS.contains("if let Some(group_name) = self.selected_renderer_group_name()"));
@@ -1827,11 +1838,9 @@ fn tauri_workspace_properties_match_the_reference_renderer_pages() {
         "set_density_map_properties",
         "set_density_renderer_properties",
         "set_density_renderer_visible",
-        "add_density_renderer",
         "set_surface_properties",
         "set_surface_renderer_properties",
         "set_surface_renderer_visible",
-        "add_surface_renderer",
         "set_workspace_visible",
         "set_workspace_items_visible",
         "set_workspace_locked",
