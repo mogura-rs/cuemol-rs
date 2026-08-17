@@ -568,6 +568,38 @@ function dialogField(label, value, type = "text", parent = dialogContent) {
   return input;
 }
 
+function animationTimeParts(seconds) {
+  const totalMilliseconds = Math.round(Math.abs(Number(seconds) || 0) * 1000);
+  const sign = Number(seconds) < 0 ? "-" : "";
+  return [
+    `${sign}${Math.floor(totalMilliseconds / 3_600_000)}`,
+    String(Math.floor(totalMilliseconds / 60_000) % 60).padStart(2, "0"),
+    String(Math.floor(totalMilliseconds / 1000) % 60).padStart(2, "0"),
+    String(totalMilliseconds % 1000).padStart(3, "0"),
+  ];
+}
+
+function renderReadonlyAnimationTime(host, seconds) {
+  if (host.children.length === 0) {
+    host.classList.add("animation-time-editor", "animation-time-readonly");
+    for (const separator of [":", ":", ".", ""]) {
+      const value = document.createElement("span");
+      value.className = "animation-time-value";
+      host.append(value);
+      if (separator) {
+        const marker = document.createElement("span");
+        marker.className = "animation-time-separator";
+        marker.textContent = separator;
+        host.append(marker);
+      }
+    }
+  }
+  const values = host.querySelectorAll(".animation-time-value");
+  animationTimeParts(seconds).forEach((value, index) => {
+    values[index].textContent = value;
+  });
+}
+
 function dialogTimeField(label, seconds, parent = dialogContent) {
   const wrapper = document.createElement("div");
   wrapper.className = "dialog-field";
@@ -622,16 +654,9 @@ function dialogTimeField(label, seconds, parent = dialogContent) {
     return sign * (hours * 3600 + minutes * 60 + wholeSeconds + milliseconds / 1000);
   };
   const writeSeconds = (value) => {
-    const totalMilliseconds = Math.round(Math.abs(Number(value) || 0) * 1000);
-    const sign = Number(value) < 0 ? "-" : "";
-    const hours = Math.floor(totalMilliseconds / 3_600_000);
-    const minutes = Math.floor(totalMilliseconds / 60_000) % 60;
-    const wholeSeconds = Math.floor(totalMilliseconds / 1000) % 60;
-    const milliseconds = totalMilliseconds % 1000;
-    inputs[0].value = `${sign}${hours}`;
-    inputs[1].value = String(minutes).padStart(2, "0");
-    inputs[2].value = String(wholeSeconds).padStart(2, "0");
-    inputs[3].value = String(milliseconds).padStart(3, "0");
+    animationTimeParts(value).forEach((part, index) => {
+      inputs[index].value = part;
+    });
   };
   function adjust(direction) {
     const increments = [3600, 60, 1, 0.1];
@@ -14346,7 +14371,7 @@ function renderAnimation() {
     }
   }
   const total = snapshot.animationDuration;
-  animationDuration.textContent = formatAnimationObjectTime(total);
+  renderReadonlyAnimationTime(animationDuration, total);
   const cameraOptions = [
     ["", "(none)"],
     ...snapshot.cameras

@@ -1346,6 +1346,10 @@ summary:focus-visible {
   flex: 1;
 }
 
+.animation-summary .animation-time-readonly {
+  flex: 1;
+}
+
 .animation-columns,
 .animation-row {
   display: grid;
@@ -3061,6 +3065,22 @@ summary:focus-visible {
 
 .animation-time-separator {
   flex: 0 0 auto;
+}
+
+.animation-time-readonly {
+  box-sizing: border-box;
+  gap: 1px;
+  padding: 1px 5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.animation-time-readonly .animation-time-value {
+  min-width: 2ch;
+  text-align: right;
+}
+
+.animation-time-readonly .animation-time-value:last-child {
+  min-width: 3ch;
 }
 
 .animation-time-spinner {

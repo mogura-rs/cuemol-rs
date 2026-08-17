@@ -967,7 +967,8 @@ fn animation_render_uses_cancellable_progress_and_reference_frame_controls() {
 fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
     assert!(HTML.contains("id=\"animation-start-camera\""));
     assert!(JS.contains("snapshot.animationStartCamera || \"\""));
-    assert!(JS.contains("animationDuration.textContent = formatAnimationObjectTime(total)"));
+    assert!(JS.contains("renderReadonlyAnimationTime(animationDuration, total)"));
+    assert!(JS.contains("function renderReadonlyAnimationTime(host, seconds)"));
     assert!(HTML.contains("<option value=\"\">(none)</option>"));
     assert!(JS.contains("mutate(\"set_animation_start_camera\""));
     assert!(TAURI_APP_RS.contains("fn set_animation_start_camera("));
@@ -988,6 +989,7 @@ fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
     assert!(CSS.contains(".animation-time-editor"));
     assert!(NATIVE_GUI_RS.contains("fn native_animation_time_ui("));
     assert!(NATIVE_GUI_RS.contains("native_animation_time_parts(*value)"));
+    assert!(NATIVE_GUI_RS.contains("format_native_animation_time_editor(animation.length())"));
     assert!(!JS.contains("workspacePropertyPage([\"Common settings\", object.typeName])"));
     for label in [
         "Relative to",

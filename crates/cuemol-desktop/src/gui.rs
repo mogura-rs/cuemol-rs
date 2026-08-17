@@ -10627,7 +10627,7 @@ impl GuiApplication {
             .is_some_and(|index| index + 1 < animation.size());
         ui.horizontal(|ui| {
             ui.label("Duration:");
-            ui.label(format_native_animation_time(animation.length()));
+            ui.monospace(format_native_animation_time_editor(animation.length()));
         });
         ui.horizontal(|ui| {
             ui.label("Start cam:");
@@ -27654,6 +27654,13 @@ fn format_native_animation_time(value: i64) -> String {
     }
 }
 
+fn format_native_animation_time_editor(value: i64) -> String {
+    let (negative, hours, minutes, seconds, milliseconds) =
+        native_animation_time_parts(time_to_seconds(value));
+    let sign = if negative { "-" } else { "" };
+    format!("{sign}{hours}:{minutes:02}:{seconds:02}.{milliseconds:03}")
+}
+
 fn unique_native_animation_name(animation: &AnimMgr, prefix: &str) -> String {
     (1_u32..)
         .map(|index| format!("{prefix}{index}"))
@@ -34862,6 +34869,10 @@ mod tests {
         assert_eq!(
             format_native_animation_time(time_from_seconds(-1.25)),
             "-1.25"
+        );
+        assert_eq!(
+            format_native_animation_time_editor(time_from_seconds(3_723.456)),
+            "1:02:03.456"
         );
         assert_eq!(
             native_animation_time_parts(3_723.456),
