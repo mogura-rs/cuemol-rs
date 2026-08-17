@@ -8053,6 +8053,13 @@ enum ModelRequest {
         target_object_uid: u64,
         source_object_uid: u64,
         frame_name: String,
+        insert_before: Option<usize>,
+    },
+    InsertMorphFrameFromFile {
+        target_object_uid: u64,
+        path: String,
+        frame_name: String,
+        insert_before: Option<usize>,
     },
     RemoveMorphFrame {
         object_uid: u64,
@@ -11886,6 +11893,7 @@ fn handle_model_request(
             target_object_uid,
             source_object_uid,
             frame_name,
+            insert_before,
         } => {
             if frame_name.trim().is_empty() {
                 return Err("a morph frame name is required".to_string());
@@ -11893,13 +11901,34 @@ fn handle_model_request(
             let undo = model.capture_undo();
             let summary = model
                 .desktop
-                .append_morph_frame_from_object(
+                .insert_morph_frame_from_object(
                     Uid::new(target_object_uid),
                     Uid::new(source_object_uid),
                     frame_name.trim(),
+                    insert_before,
                 )
                 .map_err(|error| error.to_string())?;
             model.status = format!("Morph frame appended: {} frame(s)", summary.frame_count);
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::InsertMorphFrameFromFile {
+            target_object_uid,
+            path,
+            frame_name,
+            insert_before,
+        } => {
+            let undo = model.capture_undo();
+            let summary = model
+                .desktop
+                .insert_morph_frame_from_path(
+                    Uid::new(target_object_uid),
+                    &path,
+                    frame_name.trim(),
+                    insert_before,
+                )
+                .map_err(|error| error.to_string())?;
+            model.status = format!("Morph PDB frame added: {} frame(s)", summary.frame_count);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -15246,6 +15275,7 @@ fn append_morph_frame(
     target_object_uid: u64,
     source_object_uid: u64,
     frame_name: String,
+    insert_before: Option<usize>,
     state: State<'_, ManagedState>,
 ) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(
@@ -15254,6 +15284,26 @@ fn append_morph_frame(
             target_object_uid,
             source_object_uid,
             frame_name,
+            insert_before,
+        },
+    )?)
+}
+
+#[tauri::command]
+fn insert_morph_frame_from_file(
+    target_object_uid: u64,
+    path: String,
+    frame_name: String,
+    insert_before: Option<usize>,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::InsertMorphFrameFromFile {
+            target_object_uid,
+            path,
+            frame_name,
+            insert_before,
         },
     )?)
 }
@@ -16040,6 +16090,7 @@ pub fn run() -> Result<(), tauri::Error> {
             poll_apbs_calculation,
             cancel_apbs_calculation,
             append_morph_frame,
+            insert_morph_frame_from_file,
             remove_morph_frame,
             apply_morph_frame,
             set_display_option,
@@ -23092,10 +23143,27 @@ mod tests {
                     target_object_uid: first,
                     source_object_uid: source,
                     frame_name: name.to_string(),
+                    insert_before: None,
                 },
             )
             .unwrap();
         }
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::InsertMorphFrameFromFile {
+                target_object_uid: first,
+                path: pdb.to_string_lossy().to_string(),
+                frame_name: "file-frame".to_string(),
+                insert_before: Some(1),
+            },
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected a morph-frame snapshot");
+        };
+        assert_eq!(snapshot.morphs[0].frames.len(), 3);
+        assert_eq!(snapshot.morphs[0].frames[1].name, "file-frame");
+        assert_eq!(snapshot.morphs[0].frames[1].source_type, "pdb");
         handle_model_request(
             &mut model,
             ModelRequest::ApplyMorphFrame {
@@ -23116,7 +23184,7 @@ mod tests {
             panic!("expected a snapshot");
         };
         assert_eq!(snapshot.morphs.len(), 1);
-        assert_eq!(snapshot.morphs[0].frames.len(), 1);
+        assert_eq!(snapshot.morphs[0].frames.len(), 2);
 
         for path in [surface_path, cut_path, pqr_path, input_path] {
             let _ = std::fs::remove_file(path);

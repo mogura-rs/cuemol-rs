@@ -2452,6 +2452,7 @@ enum InteractionMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NativeFileDialog {
     OpenObject,
+    OpenMorphPdb,
     OpenTrajectoryTopology,
     OpenTrajectoryBlock,
     OpenPsf,
@@ -19330,22 +19331,67 @@ impl GuiApplication {
             self.set_status("No morph source selected");
             return;
         };
+        let frame_count = self.state.morph_frame_summaries(target).len();
+        let insert_before = self.morph_selected_frame.map(|index| index + 1);
+        let inserted_index = insert_before
+            .filter(|index| *index < frame_count)
+            .unwrap_or(frame_count);
         let scene_uid = self.state.scene_manager().scene_uid_for_object(target);
         let undo = self.capture_undo();
-        match self.state.append_morph_frame_from_object(
+        match self.state.insert_morph_frame_from_object(
             target,
             source,
             self.morph_frame_name.trim(),
+            insert_before,
         ) {
             Ok(summary) => {
                 self.push_undo_snapshot(undo);
                 if let Some(scene_uid) = scene_uid {
                     self.modified_scenes.insert(scene_uid);
                 }
-                self.morph_selected_frame = summary.frame_count.checked_sub(1);
+                self.morph_selected_frame = Some(inserted_index);
                 self.rebuild_snapshot();
                 self.set_status(format!(
                     "Morph frame appended: {} frames / {} atoms",
+                    summary.frame_count, summary.atom_count
+                ));
+            }
+            Err(error) => {
+                self.state = undo.state;
+                self.set_error(error);
+            }
+        }
+    }
+
+    fn insert_morph_frame_from_pdb_path(&mut self, path: &Path) {
+        let Some(target) = self.morph_target else {
+            self.set_status("No morph target selected");
+            return;
+        };
+        let frame_count = self.state.morph_frame_summaries(target).len();
+        let insert_before = self.morph_selected_frame.map(|index| index + 1);
+        let inserted_index = insert_before
+            .filter(|index| *index < frame_count)
+            .unwrap_or(frame_count);
+        let frame_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "frame".to_string());
+        let scene_uid = self.state.scene_manager().scene_uid_for_object(target);
+        let undo = self.capture_undo();
+        match self
+            .state
+            .insert_morph_frame_from_path(target, path, frame_name, insert_before)
+        {
+            Ok(summary) => {
+                self.push_undo_snapshot(undo);
+                if let Some(scene_uid) = scene_uid {
+                    self.modified_scenes.insert(scene_uid);
+                }
+                self.morph_selected_frame = Some(inserted_index);
+                self.rebuild_snapshot();
+                self.set_status(format!(
+                    "Morph PDB frame added: {} frames / {} atoms",
                     summary.frame_count, summary.atom_count
                 ));
             }
@@ -26771,9 +26817,18 @@ impl GuiApplication {
             [ui.available_width(), 22.0],
             egui::TextEdit::singleline(&mut self.morph_frame_name),
         );
-        if ui.button("Append Frame").clicked() {
-            self.append_morph_frame();
-        }
+        ui.menu_button("Add ▾", |ui| {
+            if ui.button("Add PDB file...").clicked() {
+                if let Some(path) = native_file_dialog(NativeFileDialog::OpenMorphPdb, "") {
+                    self.insert_morph_frame_from_pdb_path(&path);
+                }
+                ui.close();
+            }
+            if ui.button("Add MolCoord...").clicked() {
+                self.append_morph_frame();
+                ui.close();
+            }
+        });
         ui.horizontal(|ui| {
             ui.label("Frame");
             ui.add(egui::DragValue::new(&mut self.morph_frame_value).speed(0.05));
@@ -32212,6 +32267,10 @@ const OBJECT_OPEN_FILTERS: &[NativeFileFilter] = &[
         extensions: &["ply"],
     },
 ];
+const MORPH_PDB_OPEN_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
+    label: "PDB Coordinates (*.pdb;*.ent;*.pdb.gz)",
+    extensions: &["pdb", "ent", "pdb.gz"],
+}];
 const SCENE_OPEN_FILTERS: &[NativeFileFilter] = &[
     NativeFileFilter {
         label: "CueMol Scene",
@@ -32312,6 +32371,12 @@ fn native_file_dialog_spec(dialog: NativeFileDialog) -> NativeFileDialogSpec {
         NativeFileDialog::OpenObject => NativeFileDialogSpec {
             title: "Select a File",
             filters: OBJECT_OPEN_FILTERS,
+            default_extension: None,
+            save: false,
+        },
+        NativeFileDialog::OpenMorphPdb => NativeFileDialogSpec {
+            title: "Select a PDB File",
+            filters: MORPH_PDB_OPEN_FILTERS,
             default_extension: None,
             save: false,
         },

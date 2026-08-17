@@ -14858,12 +14858,77 @@ impl DesktopAppState {
         source_object: Uid,
         frame_name: impl Into<String>,
     ) -> Result<GuiMorphSummary> {
+        self.insert_morph_frame_from_object(target_object, source_object, frame_name, None)
+    }
+
+    pub fn insert_morph_frame_from_object(
+        &mut self,
+        target_object: Uid,
+        source_object: Uid,
+        frame_name: impl Into<String>,
+        insert_before: Option<usize>,
+    ) -> Result<GuiMorphSummary> {
         let source_molecule = self
             .scene_manager()
             .object(source_object)
             .ok_or_else(|| CueMolError::NotFound(format!("source object {}", source_object.get())))?
             .mol()
             .clone();
+        self.insert_morph_frame(
+            target_object,
+            source_molecule,
+            frame_name.into(),
+            format!("object:{}", source_object.get()),
+            "molecule".to_string(),
+            insert_before,
+        )
+    }
+
+    pub fn insert_morph_frame_from_path(
+        &mut self,
+        target_object: Uid,
+        path: impl AsRef<Path>,
+        frame_name: impl Into<String>,
+        insert_before: Option<usize>,
+    ) -> Result<GuiMorphSummary> {
+        let path = path.as_ref();
+        let format = guess_path_format(path, &self.stream_manager)?;
+        if format != "pdb" {
+            return Err(CueMolError::invalid_argument(format!(
+                "unsupported morph frame file format: {format}"
+            )));
+        }
+        let input = cuemol_molstr::read_text_maybe_compressed(path)?;
+        let source_molecule = read_molecule_bytes(input.as_bytes(), format)?;
+        let frame_name = {
+            let requested = frame_name.into();
+            if requested.trim().is_empty() {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "frame".to_string())
+            } else {
+                requested
+            }
+        };
+        self.insert_morph_frame(
+            target_object,
+            source_molecule,
+            frame_name,
+            path.to_string_lossy().into_owned(),
+            format.to_string(),
+            insert_before,
+        )
+    }
+
+    fn insert_morph_frame(
+        &mut self,
+        target_object: Uid,
+        source_molecule: MolCoord,
+        frame_name: String,
+        source: String,
+        source_type: String,
+        insert_before: Option<usize>,
+    ) -> Result<GuiMorphSummary> {
         let target_molecule = self
             .scene_manager()
             .object(target_object)
@@ -14873,13 +14938,17 @@ impl DesktopAppState {
         let target_atom_count = target_molecule.atom_count();
         let morph = self.morphs.entry(target_object).or_default();
         *morph.molecule_mut() = target_molecule;
-        let positions = morph.positions_for_molecule(&source_molecule);
-        morph.append_frame(MorphFrame::new(
+        let frame = MorphFrame::new(
             frame_name,
-            format!("object:{}", source_object.get()),
-            "molecule",
-            positions,
-        ));
+            source,
+            source_type,
+            morph.positions_for_molecule(&source_molecule),
+        );
+        if let Some(index) = insert_before {
+            morph.insert_frame_before(frame, index);
+        } else {
+            morph.append_frame(frame);
+        }
         Ok(GuiMorphSummary {
             object_uid: target_object,
             frame_count: morph.frame_size(),
@@ -65970,13 +66039,20 @@ attribute \"dep\" string \"positions\"
             .append_morph_frame_from_object(first, second, "second")
             .unwrap();
         assert_eq!(morph.frame_count, 2);
+        let morph = app
+            .insert_morph_frame_from_path(first, root.join("1CRN.pdb"), "file-frame", Some(1))
+            .unwrap();
+        assert_eq!(morph.frame_count, 3);
         let frames = app.morph_frame_summaries(first);
         assert_eq!(frames[0].name, "start");
-        assert_eq!(frames[1].name, "second");
+        assert_eq!(frames[1].name, "file-frame");
+        assert!(frames[1].source.ends_with("1CRN.pdb"));
+        assert_eq!(frames[1].source_type, "pdb");
+        assert_eq!(frames[2].name, "second");
         let applied = app.apply_morph_frame(first, 0.5).unwrap();
         assert_eq!(applied.atom_count, 327);
         assert_eq!(app.morph_frame_value(first), Some(0.5));
-        assert_eq!(app.remove_morph_frame(first, 1).unwrap().frame_count, 1);
+        assert_eq!(app.remove_morph_frame(first, 1).unwrap().frame_count, 2);
 
         for path in [
             surface_path,

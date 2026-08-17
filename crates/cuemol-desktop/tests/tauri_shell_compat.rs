@@ -360,6 +360,7 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "save_pov_render_image",
         "clear_pov_render_result",
         "append_morph_frame",
+        "insert_morph_frame_from_file",
         "remove_morph_frame",
         "apply_morph_frame",
         "clear_log",
@@ -1221,7 +1222,14 @@ fn atom_interaction_context_menu_uses_the_dedicated_list_editor() {
 
 #[test]
 fn morph_animation_tool_uses_the_reference_frame_columns() {
-    for label in ["Morph animation tool", "Name", "Source", "No morph frames."] {
+    for label in [
+        "Morph animation tool",
+        "Name",
+        "Source",
+        "No morph frames.",
+        "Add PDB file...",
+        "Add MolCoord...",
+    ] {
         assert!(JS.contains(label), "missing morph-frame behavior {label}");
     }
     assert!(JS.contains("MORPH_NAME_COLUMN_WIDTH_STORAGE_KEY"));
@@ -1229,12 +1237,17 @@ fn morph_animation_tool_uses_the_reference_frame_columns() {
     assert!(JS.contains("morph-frame-columns"));
     assert!(JS.contains("morph-column-splitter"));
     assert!(JS.contains("morphFrame.source || morphFrame.sourceType"));
+    assert!(JS.contains("insert_morph_frame_from_file"));
+    assert!(JS.contains("insertBefore"));
     assert!(CSS.contains("var(--morph-name-width"));
     assert!(CSS.contains(".morph-frame-row > :nth-child(2)"));
     assert!(NATIVE_GUI_RS.contains("fn remove_selected_morph_frame"));
     assert!(NATIVE_GUI_RS.contains("morph_editor:name_width"));
     assert!(NATIVE_GUI_RS.contains("MORPH_COLUMN_SPLITTER_WIDTH"));
     assert!(NATIVE_GUI_RS.contains("morph_frame_summaries"));
+    assert!(NATIVE_GUI_RS.contains("NativeFileDialog::OpenMorphPdb"));
+    assert!(NATIVE_GUI_RS.contains("insert_morph_frame_from_pdb_path"));
+    assert!(TAURI_APP_RS.contains("InsertMorphFrameFromFile"));
 }
 
 #[test]

@@ -6642,25 +6642,66 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       const frame = dialogField("Frame", String(selectedMorph()?.frame ?? 0), "number");
       frame.min = "0";
       frame.step = "0.05";
-      const add = button("Add", "dialog-primary", async () => {
-        await mutate("append_morph_frame", {
+      const insertionPosition = () => {
+        const frames = selectedMorph()?.frames || [];
+        const insertBefore = selectedMorphFrameIndex === null
+          ? null
+          : Math.min(selectedMorphFrameIndex + 1, frames.length);
+        return {
+          insertBefore,
+          insertedIndex: insertBefore ?? frames.length,
+        };
+      };
+      const addMolCoord = button("Add MolCoord...", "dialog-primary", async () => {
+        const { insertBefore, insertedIndex } = insertionPosition();
+        const changed = await mutate("append_morph_frame", {
           targetObjectUid: Number(target.value),
           sourceObjectUid: Number(source.value),
           frameName: frameName.value,
+          insertBefore,
+        }, () => {});
+        if (changed) {
+          selectedMorphFrameIndex = insertedIndex;
+          renderMorphFrames();
+        }
+      });
+      const addPdb = button("Add PDB file...", "", async () => {
+        const path = await dialog.open({
+          directory: false,
+          multiple: false,
+          filters: [{
+            name: "PDB Coordinates",
+            extensions: ["pdb", "ent", "pdb.gz"],
+          }],
         });
-        referenceDialog.close();
+        if (!path) return;
+        const { insertBefore, insertedIndex } = insertionPosition();
+        const selectedPath = String(path);
+        const selectedName = selectedPath.split(/[\\/]/).pop() || "frame";
+        const changed = await mutate("insert_morph_frame_from_file", {
+          targetObjectUid: Number(target.value),
+          path: selectedPath,
+          frameName: selectedName,
+          insertBefore,
+        }, () => {});
+        if (changed) {
+          selectedMorphFrameIndex = insertedIndex;
+          renderMorphFrames();
+        }
       });
       const remove = button("Delete", "", async () => {
         if (selectedMorphFrameIndex === null) {
           showError("Select a morph frame first.");
           return;
         }
-        await mutate("remove_morph_frame", {
+        const changed = await mutate("remove_morph_frame", {
           objectUid: Number(target.value),
           index: selectedMorphFrameIndex,
-        });
-        selectedMorphFrameIndex = null;
-        referenceDialog.close();
+        }, () => {});
+        if (changed) {
+          selectedMorphFrameIndex = null;
+          renderMorphFrames();
+        }
       });
       const apply = button("Apply frame", "", async () => {
         await mutate("apply_morph_frame", {
@@ -6711,7 +6752,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         renderMorphFrames();
       });
       renderMorphFrames();
-      dialogActions(remove, apply, add);
+      dialogActions(remove, apply, addPdb, addMolCoord);
     }
   } else if (title === "POV-Ray rendering") {
     const renderTargets = (snapshot?.views || []).flatMap((view) => {
