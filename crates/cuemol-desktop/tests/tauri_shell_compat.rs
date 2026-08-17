@@ -94,8 +94,15 @@ fn tauri_reference_panels_are_bound_to_shared_core_data() {
     assert!(JS.contains("event.shiftKey"));
     assert!(JS.contains("composeSelectionEditorExpression()"));
     assert!(JS.contains("selectionActiveTab = element.dataset.selectionTab"));
+    assert!(HTML.contains("data-selection-tab=\"command\" aria-label=\"Input command\""));
+    assert!(HTML.contains("data-selection-tab=\"editor\" aria-label=\"Editor\""));
     assert!(JS.contains("byres ((${selection}) around ${item.args})"));
     assert!(JS.contains("await applySelectionCommand()"));
+    assert!(!HTML.contains("id=\"selection-editor-add-kind\""));
+    assert!(HTML.contains("id=\"selection-editor-add\" type=\"button\" aria-label=\"Add selection item\" aria-haspopup=\"menu\""));
+    assert!(JS.contains("selectionEditorAdd.addEventListener(\"click\""));
+    assert!(JS.contains("label: \"Around/Expand\""));
+    assert!(JS.contains("selectionHistoryEntries.map((entry) => ({"));
     assert!(JS.contains("item.supportsColoring"));
     assert!(JS.contains("PaintColoring"));
     assert!(JS.contains("CPKColoring"));

@@ -16,7 +16,7 @@ const selectionEditorPanel = document.getElementById("selection-editor-panel");
 const selectionHistory = document.getElementById("selection-history");
 const selectionEditorList = document.getElementById("selection-editor-list");
 const selectionEditorApply = document.getElementById("selection-editor-apply");
-const selectionEditorAddKind = document.getElementById("selection-editor-add-kind");
+const selectionEditorAdd = document.getElementById("selection-editor-add");
 const selectionEditorDelete = document.getElementById("selection-editor-delete");
 const selectionEditorClear = document.getElementById("selection-editor-clear");
 const selectionChainCandidates = document.getElementById("selection-chain-candidates");
@@ -312,18 +312,6 @@ function rememberSelection(selection) {
 }
 
 function renderSelectionHistory() {
-  selectionHistory.replaceChildren();
-  const placeholder = document.createElement("option");
-  placeholder.value = "";
-  placeholder.textContent = selectionHistoryEntries.length ? "History" : "(no history)";
-  selectionHistory.append(placeholder);
-  for (const entry of selectionHistoryEntries) {
-    const option = document.createElement("option");
-    option.value = entry;
-    option.textContent = entry;
-    selectionHistory.append(option);
-  }
-  selectionHistory.value = "";
   selectionHistory.disabled = selectionHistoryEntries.length === 0;
 }
 
@@ -13052,8 +13040,6 @@ function updateSelectionEditorUi() {
   selectionEditorApply.disabled = !selectionObjectUid || !selected;
   selectionEditorDelete.disabled = !selected;
   selectionEditorClear.disabled = !selected;
-  const aroundOption = selectionEditorAddKind.querySelector('option[value="around"]');
-  if (aroundOption) aroundOption.disabled = selectionEditorItems.length === 0;
 }
 
 function selectionBoolOpControl(item, index) {
@@ -15334,9 +15320,6 @@ async function handleAction(action, depth = 0) {
     case "selection-editor-apply":
       await applySelectionEditor();
       break;
-    case "selection-editor-add":
-      addSelectionEditorItem(selectionEditorAddKind.value);
-      break;
     case "selection-editor-delete":
       deleteSelectionEditorItem();
       break;
@@ -15657,9 +15640,25 @@ selectionObject.addEventListener("change", () => {
   renderSelectionPanel();
 });
 
-selectionHistory.addEventListener("change", () => {
-  if (selectionHistory.value) selectionInput.value = selectionHistory.value;
-  selectionHistory.value = "";
+selectionHistory.addEventListener("click", (event) => {
+  showWorkspaceContextMenu(event, selectionHistoryEntries.map((entry) => ({
+    label: entry,
+    action: () => {
+      selectionInput.value = entry;
+    },
+  })));
+});
+
+selectionEditorAdd.addEventListener("click", (event) => {
+  showWorkspaceContextMenu(event, [
+    { label: "Hierarchical", action: () => addSelectionEditorItem("hier") },
+    { label: "Terminal", action: () => addSelectionEditorItem("term") },
+    {
+      label: "Around/Expand",
+      disabled: selectionEditorItems.length === 0,
+      action: () => addSelectionEditorItem("around"),
+    },
+  ]);
 });
 
 molstructObject.addEventListener("change", () => {

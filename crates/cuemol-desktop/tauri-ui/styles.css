@@ -956,7 +956,7 @@ summary:focus-visible {
 }
 
 .selection-tabs button {
-  flex: 1;
+  flex: 0 0 42px;
   border: 0;
   border-right: 1px solid #bbb;
   border-radius: 0;
@@ -987,8 +987,7 @@ summary:focus-visible {
 }
 
 #selection-history {
-  min-width: 0;
-  flex: 1;
+  min-width: 30px;
 }
 
 .selection-editor-list {

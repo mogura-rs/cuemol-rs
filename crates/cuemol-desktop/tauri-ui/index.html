@@ -347,13 +347,13 @@
             <div class="side-body selection-body">
               <select id="selection-object" aria-label="Molecule"></select>
               <div class="selection-tabs" role="tablist">
-                <button class="active" type="button" role="tab" data-selection-tab="command" aria-selected="true" title="Input command">Command</button>
-                <button type="button" role="tab" data-selection-tab="editor" aria-selected="false" title="Editor">Editor</button>
+                <button class="active" type="button" role="tab" data-selection-tab="command" aria-label="Input command" aria-selected="true" title="Input command"><span aria-hidden="true">A↝</span></button>
+                <button type="button" role="tab" data-selection-tab="editor" aria-label="Editor" aria-selected="false" title="Editor"><span aria-hidden="true">▤</span></button>
               </div>
               <div id="selection-command-panel" class="selection-tab-panel">
                 <textarea id="selection-input" rows="3" spellcheck="false" placeholder="Input selection command"></textarea>
                 <div class="workspace-tools selection-tools">
-                  <select id="selection-history" aria-label="Selection history" title="History"><option value="">History</option></select>
+                  <button id="selection-history" type="button" aria-label="Selection history" aria-haspopup="menu" title="History">↶⌄</button>
                   <button id="selection-command-apply" type="button" data-action="selection-command-apply" title="Select">↖</button>
                   <button id="selection-command-clear" type="button" data-action="selection-command-clear" title="Clear input">×</button>
                 </div>
@@ -362,12 +362,7 @@
                 <div id="selection-editor-list" class="selection-editor-list"></div>
                 <div class="workspace-tools selection-editor-tools">
                   <button id="selection-editor-apply" type="button" data-action="selection-editor-apply" title="Select" disabled>↖</button>
-                  <select id="selection-editor-add-kind" aria-label="Selection item type" title="Add item">
-                    <option value="hier">Hierarchical</option>
-                    <option value="term">Terminal</option>
-                    <option value="around">Around/Expand</option>
-                  </select>
-                  <button id="selection-editor-add" type="button" data-action="selection-editor-add" title="Add">＋</button>
+                  <button id="selection-editor-add" type="button" aria-label="Add selection item" aria-haspopup="menu" title="Add">＋⌄</button>
                   <button id="selection-editor-delete" type="button" data-action="selection-editor-delete" title="Delete" disabled>−</button>
                   <button id="selection-editor-clear" type="button" data-action="selection-editor-clear" title="Delete all" disabled>×</button>
                 </div>
