@@ -996,7 +996,6 @@ struct GuiApplication {
     object_save_path: String,
     view_save_path: String,
     export_path: String,
-    log_save_path: String,
     pdb_id: String,
     pdb_history: Vec<String>,
     pdb_history_loaded: bool,
@@ -2133,7 +2132,6 @@ enum NativeFileDialog {
     SaveRenderedImage,
     ExportScene,
     OpenScript,
-    SaveLog,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4076,7 +4074,6 @@ impl GuiApplication {
             object_save_path: "object.pdb".to_string(),
             view_save_path: "current_view.cam".to_string(),
             export_path: "scene.pov".to_string(),
-            log_save_path: "cuemol.log".to_string(),
             pdb_id: String::new(),
             pdb_history: Vec::new(),
             pdb_history_loaded: false,
@@ -13659,29 +13656,29 @@ impl GuiApplication {
                 80.0
             })
             .show(ctx, |ui| {
+                let content_size = egui::vec2(
+                    ui.available_width(),
+                    (ui.available_height() - 27.0).max(20.0),
+                );
+                ui.allocate_ui_with_layout(
+                    content_size,
+                    egui::Layout::top_down(egui::Align::LEFT),
+                    |ui| match self.bottom_tab {
+                        BottomTab::Output => self.output_tab(ui),
+                        BottomTab::Sequence => self.sequence_tab(ui, camera),
+                        BottomTab::Trajectory => self.trajectory_tab(ui),
+                    },
+                );
+                ui.separator();
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.bottom_tab, BottomTab::Output, "Output");
                     ui.selectable_value(&mut self.bottom_tab, BottomTab::Sequence, "Sequence");
                     ui.selectable_value(&mut self.bottom_tab, BottomTab::Trajectory, "Trajectory");
                 });
-                ui.separator();
-                match self.bottom_tab {
-                    BottomTab::Output => self.output_tab(ui),
-                    BottomTab::Sequence => self.sequence_tab(ui, camera),
-                    BottomTab::Trajectory => self.trajectory_tab(ui),
-                }
             });
     }
 
     fn output_tab(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            if ui.button("Clear").clicked() {
-                self.clear_log();
-            }
-            if ui.button("Save As").clicked() {
-                self.choose_save_log();
-            }
-        });
         let log_height = (ui.available_height() - 26.0).max(20.0);
         egui::ScrollArea::vertical()
             .stick_to_bottom(true)
@@ -15929,13 +15926,6 @@ impl GuiApplication {
         }
     }
 
-    fn choose_save_log(&mut self) {
-        if let Some(path) = native_file_dialog(NativeFileDialog::SaveLog, &self.log_save_path) {
-            self.log_save_path = path.to_string_lossy().into_owned();
-            self.save_log();
-        }
-    }
-
     fn keyboard_shortcuts(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         if ctx.wants_keyboard_input() {
             return;
@@ -16757,13 +16747,6 @@ impl GuiApplication {
                 Ok(count) => self.set_status(format!("Exported {count} atoms to {path}")),
                 Err(error) => self.set_error(error),
             }
-        }
-    }
-
-    fn save_log(&mut self) {
-        match fs::write(self.log_save_path.trim(), self.log_lines.join("\n")) {
-            Ok(()) => self.set_status(format!("Saved log {}", self.log_save_path.trim())),
-            Err(error) => self.set_status(format!("Error: {error}")),
         }
     }
 
@@ -29849,10 +29832,6 @@ const SCRIPT_OPEN_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
     label: "Internal Javascript (*.js)",
     extensions: &["js"],
 }];
-const LOG_SAVE_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
-    label: "Text log",
-    extensions: &["log", "txt"],
-}];
 
 fn native_file_dialog_spec(dialog: NativeFileDialog) -> NativeFileDialogSpec {
     match dialog {
@@ -29981,12 +29960,6 @@ fn native_file_dialog_spec(dialog: NativeFileDialog) -> NativeFileDialogSpec {
             filters: SCRIPT_OPEN_FILTERS,
             default_extension: None,
             save: false,
-        },
-        NativeFileDialog::SaveLog => NativeFileDialogSpec {
-            title: "Save log contents",
-            filters: LOG_SAVE_FILTERS,
-            default_extension: Some("log"),
-            save: true,
         },
     }
 }

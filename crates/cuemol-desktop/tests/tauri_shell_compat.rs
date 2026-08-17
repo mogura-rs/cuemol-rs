@@ -582,6 +582,23 @@ fn tauri_output_prompt_executes_javascript_with_reference_history() {
             "missing native Output prompt binding {binding}"
         );
     }
+    let native_bottom = NATIVE_GUI_RS
+        .split("fn bottom_panel(")
+        .nth(1)
+        .and_then(|source| source.split("fn output_tab(").next())
+        .expect("native bottom dock");
+    assert!(
+        native_bottom.find("self.output_tab(ui)").unwrap()
+            < native_bottom.find("BottomTab::Output, \"Output\"").unwrap(),
+        "native bottom tabs must follow the content"
+    );
+    let native_output = NATIVE_GUI_RS
+        .split("fn output_tab(")
+        .nth(1)
+        .and_then(|source| source.split("fn load_command_history(").next())
+        .expect("native Output panel");
+    assert!(!native_output.contains("button(\"Clear\")"));
+    assert!(!native_output.contains("button(\"Save As\")"));
 }
 
 #[test]
