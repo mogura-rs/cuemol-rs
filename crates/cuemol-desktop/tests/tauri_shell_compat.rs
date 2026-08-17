@@ -995,8 +995,8 @@ fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
     }
     assert!(JS.contains("mutate(\"set_animation_object_properties\""));
     assert!(JS.contains("button(\"Reset all to default\""));
-    assert!(JS.contains("globalThis.confirm(\"Reset all to default?\")"));
     assert!(JS.contains("function defaultAnimationObjectProperties(object)"));
+    assert!(JS.contains("optional.reset(defaults)"));
     assert!(JS.contains("Object.assign(input, { angle: 0, axis: [0, 1, 0] })"));
     assert!(JS.contains("keepQuaternionPositive: true"));
     assert!(JS.contains("fade: true"));
@@ -1022,7 +1022,7 @@ fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
     assert!(NATIVE_GUI_RS.contains("animation_selection: std::collections::BTreeSet<usize>"));
     assert!(NATIVE_GUI_RS.contains("fn delete_animation_motions("));
     assert!(NATIVE_GUI_RS.contains("fn move_animation_motions("));
-    assert!(NATIVE_GUI_RS.contains("fn reset_animation_properties("));
+    assert!(NATIVE_GUI_RS.contains("draft.reset_defaultable()"));
     assert!(NATIVE_GUI_RS.contains("ui.button(\"Reset all to default\")"));
     assert!(NATIVE_GUI_RS.contains("response.context_menu(|ui|"));
     assert!(NATIVE_GUI_RS.contains("ui.strong(\"Name\")"));

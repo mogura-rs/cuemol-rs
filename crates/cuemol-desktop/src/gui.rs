@@ -1182,7 +1182,6 @@ struct GuiApplication {
     animation_selection: std::collections::BTreeSet<usize>,
     animation_selection_anchor: Option<usize>,
     animation_properties_draft: Option<NativeAnimationProperties>,
-    animation_reset_confirmation: bool,
     animation_start_camera: Option<CameraController>,
     animation_start_state: Option<DesktopAppState>,
     animation_render_settings: AnimationRenderSettings,
@@ -3693,7 +3692,6 @@ impl GuiApplication {
             animation_selection: std::collections::BTreeSet::new(),
             animation_selection_anchor: None,
             animation_properties_draft: None,
-            animation_reset_confirmation: false,
             animation_start_camera: None,
             animation_start_state: None,
             animation_render_settings: AnimationRenderSettings::default(),
@@ -10249,26 +10247,7 @@ impl GuiApplication {
             .ok_or_else(|| format!("animation object {index} was not found"))?;
         let draft = NativeAnimationProperties::from_motion(index, motion);
         self.set_animation_selection(index);
-        self.animation_reset_confirmation = false;
         self.animation_properties_draft = Some(draft);
-        Ok(())
-    }
-
-    fn reset_animation_properties(
-        &mut self,
-        index: usize,
-        camera: &mut CameraController,
-    ) -> std::result::Result<(), String> {
-        let animation = self.active_animation_manager()?;
-        let motion = animation
-            .motions()
-            .get(index)
-            .ok_or_else(|| format!("animation object {index} was not found"))?;
-        let mut draft = NativeAnimationProperties::from_motion(index, motion);
-        draft.reset_defaultable();
-        self.apply_animation_properties(&draft, camera)?;
-        self.animation_reset_confirmation = false;
-        self.set_status("Animation object properties reset to default");
         Ok(())
     }
 
@@ -15449,7 +15428,6 @@ impl GuiApplication {
         let mut open = true;
         let mut accept = false;
         let mut cancel = false;
-        let mut reset = false;
         egui::Window::new("Animation object properties")
             .open(&mut open)
             .collapsible(false)
@@ -15625,7 +15603,7 @@ impl GuiApplication {
                 ui.separator();
                 ui.horizontal(|ui| {
                     if ui.button("Reset all to default").clicked() {
-                        self.animation_reset_confirmation = true;
+                        draft.reset_defaultable();
                     }
                     if ui.button("OK").clicked() {
                         accept = true;
@@ -15634,31 +15612,9 @@ impl GuiApplication {
                         cancel = true;
                     }
                 });
-                if self.animation_reset_confirmation {
-                    ui.separator();
-                    ui.label("Reset all to default?");
-                    ui.horizontal(|ui| {
-                        if ui.button("Reset").clicked() {
-                            reset = true;
-                            self.animation_reset_confirmation = false;
-                        }
-                        if ui.button("Cancel reset").clicked() {
-                            self.animation_reset_confirmation = false;
-                        }
-                    });
-                }
             });
 
-        if reset {
-            match self.reset_animation_properties(draft.index, camera) {
-                Ok(()) => {}
-                Err(error) => {
-                    self.animation_properties_draft = Some(draft);
-                    self.set_status(format!("Error: {error}"));
-                }
-            }
-        } else if accept {
-            self.animation_reset_confirmation = false;
+        if accept {
             match self.apply_animation_properties(&draft, camera) {
                 Ok(()) => {}
                 Err(error) => {
@@ -15668,8 +15624,6 @@ impl GuiApplication {
             }
         } else if open && !cancel {
             self.animation_properties_draft = Some(draft);
-        } else {
-            self.animation_reset_confirmation = false;
         }
     }
 
@@ -34596,7 +34550,12 @@ mod tests {
         );
 
         let undo_count = app.undo_stack.len();
-        app.reset_animation_properties(0, &mut camera).unwrap();
+        let animation = app.state.scene_animation(scene_uid).unwrap().unwrap();
+        let mut reset_draft = NativeAnimationProperties::from_motion(0, &animation.motions()[0]);
+        reset_draft.reset_defaultable();
+        assert_eq!(app.undo_stack.len(), undo_count);
+        app.apply_animation_properties(&reset_draft, &mut camera)
+            .unwrap();
         assert_eq!(app.undo_stack.len(), undo_count + 1);
         let animation = app.state.scene_animation(scene_uid).unwrap().unwrap();
         let AnimMotion::Spin(spin) = &animation.motions()[0] else {

@@ -7429,6 +7429,10 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           angle: Number(angle.value),
           axis: [Number(axisX.value), Number(axisY.value), Number(axisZ.value)],
         });
+        optional.reset = (defaults) => {
+          angle.value = String(defaults.angle);
+          [axisX.value, axisY.value, axisZ.value] = defaults.axis.map(String);
+        };
       } else if (object.typeName === "CamMotion") {
         const cameras = snapshot.cameras
           .filter((camera) => camera.sceneUid === snapshot.activeSceneUid)
@@ -7462,6 +7466,13 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           ignoreSlab: ignoreSlab.checked,
           keepQuaternionPositive: keepQuaternion.checked,
         });
+        optional.reset = (defaults) => {
+          ignoreRotate.checked = defaults.ignoreRotate;
+          ignoreCenter.checked = defaults.ignoreCenter;
+          ignoreZoom.checked = defaults.ignoreZoom;
+          ignoreSlab.checked = defaults.ignoreSlab;
+          keepQuaternion.checked = defaults.keepQuaternionPositive;
+        };
       } else if (object.typeName === "ShowHideAnim") {
         const readTargets = rendererTargets(object.rendererNames);
         const showHide = dialogSelect(
@@ -7486,6 +7497,11 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           fade: fade.checked,
           targetAlpha: Number(targetAlpha.value),
         });
+        optional.reset = (defaults) => {
+          showHide.value = defaults.hide ? "hide" : "show";
+          fade.checked = defaults.fade;
+          targetAlpha.value = String(defaults.targetAlpha);
+        };
       } else if (object.typeName === "SlideInOutAnim") {
         const readTargets = rendererTargets(object.rendererNames);
         const showHide = dialogSelect(
@@ -7512,6 +7528,11 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           direction: Number(direction.value),
           distance: Number(distance.value),
         });
+        optional.reset = (defaults) => {
+          showHide.value = defaults.hide ? "hide" : "show";
+          direction.value = String(defaults.direction);
+          distance.value = String(defaults.distance);
+        };
       } else if (object.typeName === "MolAnim") {
         const morphs = snapshot.morphs.map((morph) => {
           const target = snapshot.objects.find((item) => item.uid === morph.objectUid);
@@ -7553,6 +7574,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           startValue: Number(startValue.value),
           endValue: Number(endValue.value),
         });
+        optional.reset = () => {};
       } else if (object.typeName === "RealPropAnim") {
         const readTargets = rendererTargets(object.rendererNames);
         const property = dialogField(
@@ -7579,6 +7601,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           startValue: Number(startValue.value),
           endValue: Number(endValue.value),
         });
+        optional.reset = () => {};
       } else if (object.typeName === "RendXformAnim") {
         const readTargets = rendererTargets(object.rendererNames);
         const startPosition = object.startPosition || [0, 0, 0];
@@ -7596,17 +7619,18 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           startPosition: fields.slice(0, 3).map((field) => Number(field.value)),
           endPosition: fields.slice(3).map((field) => Number(field.value)),
         });
+        optional.reset = () => {};
       } else {
         typePage.append(dialogParagraph("This animation type has no dedicated settings."));
         optional.read = () => ({});
+        optional.reset = () => {};
       }
 
-      const reset = button("Reset all to default", "", async () => {
-        if (!globalThis.confirm("Reset all to default?")) return;
-        const changed = await mutate("set_animation_object_properties", {
-          input: defaultAnimationObjectProperties(object),
-        });
-        if (changed) referenceDialog.close();
+      const reset = button("Reset all to default", "", () => {
+        const defaults = defaultAnimationObjectProperties(object);
+        disabled.checked = defaults.disabled;
+        quadric.value = String(defaults.quadric);
+        optional.reset(defaults);
       });
       const apply = button("OK", "dialog-primary", async () => {
         const changed = await mutate("set_animation_object_properties", {
