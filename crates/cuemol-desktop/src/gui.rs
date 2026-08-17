@@ -4097,6 +4097,7 @@ impl GuiApplication {
     fn new() -> Self {
         let mut state = DesktopAppState::new();
         state.new_scene("Untitled 1", true);
+        let show_toolbar = !config_bool(&state, "cuemol2.ui.ribbon.collapsed", false);
         let sequence_name_width = state
             .config_value("sequence_panel:name_width")
             .parse::<f32>()
@@ -4227,7 +4228,7 @@ impl GuiApplication {
             ribbon_tab: RibbonTab::Home,
             interaction_mode: InteractionMode::Rotate,
             measure_mode: MeasureMode::Distance,
-            show_toolbar: true,
+            show_toolbar,
             show_workspace: true,
             left_panel_visible: [true; LeftPanel::ALL.len()],
             reset_left_panel_layout: false,
@@ -5043,7 +5044,7 @@ impl GuiApplication {
                 });
                 ui.menu_button("Window", |ui| {
                     if ui.button("Show/Hide Topbar").clicked() {
-                        self.show_toolbar = !self.show_toolbar;
+                        self.toggle_toolbar();
                         ui.close();
                     }
                     ui.separator();
@@ -26760,6 +26761,14 @@ impl GuiApplication {
         self.set_status("Panel layout restored");
     }
 
+    fn toggle_toolbar(&mut self) {
+        self.show_toolbar = !self.show_toolbar;
+        self.state.put_config_value(
+            "cuemol2.ui.ribbon.collapsed",
+            (!self.show_toolbar).to_string(),
+        );
+    }
+
     fn open_renderer_dialog(&mut self, object_uid: cuemol_core::Uid) {
         self.open_renderer_dialog_in_group(object_uid, None);
     }
@@ -32849,6 +32858,19 @@ mod tests {
     #[test]
     fn native_window_panel_menu_restores_reference_defaults() {
         let mut app = GuiApplication::new();
+        assert!(app.show_toolbar);
+        app.toggle_toolbar();
+        assert!(!app.show_toolbar);
+        assert_eq!(
+            app.state.config_value("cuemol2.ui.ribbon.collapsed"),
+            "true"
+        );
+        app.toggle_toolbar();
+        assert!(app.show_toolbar);
+        assert_eq!(
+            app.state.config_value("cuemol2.ui.ribbon.collapsed"),
+            "false"
+        );
         assert!(app.left_panel_visible.iter().all(|visible| *visible));
         app.left_panel_visible[LeftPanel::Workspace.index()] = false;
         app.reset_left_panel_layout = false;
