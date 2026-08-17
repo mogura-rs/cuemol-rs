@@ -7192,7 +7192,11 @@ impl AppModel {
         Ok(())
     }
 
-    fn capture_undo(&self) -> AppModelUndo {
+    fn capture_undo(&mut self) -> AppModelUndo {
+        if self.animation_start_desktop.is_some() {
+            let _ = self.restore_animation_playback(false);
+            self.animation_elapsed = 0.0;
+        }
         AppModelUndo {
             desktop: self.desktop.clone(),
             camera: self.camera.clone(),
@@ -21438,6 +21442,64 @@ mod tests {
         assert_eq!(restored.qsc_attr("alpha"), original.qsc_attr("alpha"));
         assert!(model.animation_start_desktop.is_none());
         assert_eq!(model.animation_elapsed, 0.0);
+    }
+
+    #[test]
+    fn edits_while_animation_is_paused_are_not_lost_on_stop() {
+        let (mut model, object_uid, renderer_uid) = model_with_renderer();
+        handle_model_request(
+            &mut model,
+            ModelRequest::AddAnimationObject {
+                kind: "hide".to_string(),
+                after_index: None,
+            },
+        )
+        .unwrap();
+        handle_model_request(&mut model, ModelRequest::SeekAnimation(0.5)).unwrap();
+        assert!(model.animation_start_desktop.is_some());
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetRendererVisible {
+                object_uid: object_uid.get(),
+                renderer_uid: renderer_uid.get(),
+                visible: false,
+            },
+        )
+        .unwrap();
+        assert!(model.animation_start_desktop.is_none());
+        assert!(!model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(renderer_uid)
+            .unwrap()
+            .is_visible());
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::AnimationControl("stop".to_string()),
+        )
+        .unwrap();
+        assert!(!model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(renderer_uid)
+            .unwrap()
+            .is_visible());
+
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert!(model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .renderer(renderer_uid)
+            .unwrap()
+            .is_visible());
     }
 
     #[test]

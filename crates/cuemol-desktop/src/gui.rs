@@ -23303,7 +23303,13 @@ impl GuiApplication {
         self.set_status("Log cleared");
     }
 
-    fn capture_undo(&self) -> GuiUndoSnapshot {
+    fn capture_undo(&mut self) -> GuiUndoSnapshot {
+        if let Some(state) = self.animation_start_state.take() {
+            self.state = state;
+            self.animation_playing = false;
+            self.animation_elapsed = 0.0;
+            self.rebuild_snapshot();
+        }
         GuiUndoSnapshot {
             state: self.state.clone(),
             selected_object: self.selected_object,
@@ -23333,6 +23339,10 @@ impl GuiApplication {
 
     fn restore_gui_undo_state(&mut self, snapshot: GuiUndoSnapshot) {
         self.state = snapshot.state;
+        self.animation_playing = false;
+        self.animation_elapsed = 0.0;
+        self.animation_start_camera = None;
+        self.animation_start_state = None;
         self.selected_object = snapshot.selected_object;
         self.selected_renderer = snapshot.selected_renderer;
         self.workspace_aux_selection = snapshot.workspace_aux_selection;
@@ -34147,6 +34157,30 @@ mod tests {
             .unwrap();
         assert_eq!(restored.is_visible(), original.is_visible());
         assert_eq!(restored.qsc_attr("alpha"), original.qsc_attr("alpha"));
+
+        app.seek_animation(0.5, &mut camera).unwrap();
+        app.set_renderer_visibility(object.uid, renderer.uid, false);
+        assert!(app.animation_start_state.is_none());
+        app.restore_animation_playback(&mut camera, false).unwrap();
+        assert!(!app
+            .state
+            .scene_manager()
+            .object(object.uid)
+            .unwrap()
+            .renderer(renderer.uid)
+            .unwrap()
+            .is_visible());
+        app.undo(&mut camera);
+        assert_eq!(
+            app.state
+                .scene_manager()
+                .object(object.uid)
+                .unwrap()
+                .renderer(renderer.uid)
+                .unwrap()
+                .is_visible(),
+            original.is_visible()
+        );
     }
 
     #[test]
