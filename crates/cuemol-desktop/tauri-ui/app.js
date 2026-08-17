@@ -4610,6 +4610,87 @@ function showTextPromptDialog({ title, label, defaultValue = "", confirmLabel = 
   });
 }
 
+function showSurfaceRegenerateDialog(object) {
+  if (referenceDialog.open) referenceDialog.close();
+  dialogTitle.textContent = "Mol surface tool";
+  dialogContent.replaceChildren(dialogParagraph("Create solvent-excluded surface:"));
+  dialogFooter.hidden = false;
+  referenceDialog.className = "reference-dialog surface-regenerate-dialog";
+
+  const molecule = dialogSelect(
+    "Target molecule:",
+    [[object.originalMolecule, object.originalMolecule]],
+    object.originalMolecule,
+  );
+  molecule.disabled = true;
+  const selectionEnabled = dialogCheckbox(
+    "Selection:",
+    Boolean(object.originalSelection),
+  );
+  selectionEnabled.disabled = true;
+  const selection = dialogField("Selection expression:", object.originalSelection || "");
+  selection.disabled = true;
+  const name = dialogField("Surface name:", object.name);
+  name.disabled = true;
+  const density = dialogField(
+    "Density (/Å):",
+    String(object.originalDensity > 0 ? object.originalDensity : 1),
+    "number",
+  );
+  density.min = "1";
+  density.step = "1";
+  const probeRadius = dialogField(
+    "Probe radius (Å):",
+    String(object.originalProbeRadius),
+    "number",
+  );
+  probeRadius.disabled = true;
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      referenceDialog.removeEventListener("close", onClose);
+      resolve(value);
+    };
+    const onClose = () => {
+      if (!referenceDialog.open) finish(null);
+    };
+    referenceDialog.addEventListener("close", onClose);
+    const cancel = button("Cancel", "", () => {
+      finish(null);
+      referenceDialog.close();
+    });
+    const submit = () => {
+      const value = Math.trunc(Number(density.value));
+      if (!Number.isFinite(value) || value < 1) return;
+      finish(value);
+      referenceDialog.close();
+    };
+    const confirm = button("OK", "dialog-primary", submit);
+    const updateState = () => {
+      const value = Number(density.value);
+      confirm.disabled = !Number.isFinite(value) || value < 1;
+    };
+    density.addEventListener("input", updateState);
+    density.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || confirm.disabled) return;
+      event.preventDefault();
+      submit();
+    });
+    updateState();
+    dialogActions(cancel, confirm);
+    if (!referenceDialog.open && referenceDialog.showModal) {
+      referenceDialog.showModal();
+    }
+    setTimeout(() => {
+      density.focus();
+      density.select();
+    }, 0);
+  });
+}
+
 function showConfirmationDialog({ title, message, confirmLabel = "OK" }) {
   if (referenceDialog.open) referenceDialog.close();
   dialogTitle.textContent = title;
@@ -7873,8 +7954,10 @@ function workspaceAuxObjectContextItems(scene, kind, object) {
     items.push({
       label: "Regenerate surface...",
       action: async () => {
+        const density = await showSurfaceRegenerateDialog(object);
+        if (density === null) return;
         if (!(await activate())) return;
-        await mutate("regenerate_surface", { surfaceUid: object.uid });
+        await mutate("regenerate_surface", { surfaceUid: object.uid, density });
       },
     });
   }

@@ -6690,6 +6690,7 @@ enum ModelRequest {
     },
     RegenerateSurface {
         surface_uid: u64,
+        density: f64,
     },
     CreateCamera(String),
     SaveCamera(String),
@@ -8410,11 +8411,14 @@ fn handle_model_request(
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
-        ModelRequest::RegenerateSurface { surface_uid } => {
+        ModelRequest::RegenerateSurface {
+            surface_uid,
+            density,
+        } => {
             let undo = model.capture_undo();
             let triangle_count = model
                 .desktop
-                .regenerate_surface_object(Uid::new(surface_uid))
+                .regenerate_surface_object_with_density(Uid::new(surface_uid), density)
                 .map_err(|error| error.to_string())?;
             model.status = format!("Regenerated surface: {triangle_count} triangle(s)");
             model.invalidate_mesh(false);
@@ -11148,11 +11152,15 @@ fn add_surface_renderer(
 #[tauri::command]
 fn regenerate_surface(
     surface_uid: u64,
+    density: f64,
     state: State<'_, ManagedState>,
 ) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(
         &state,
-        ModelRequest::RegenerateSurface { surface_uid },
+        ModelRequest::RegenerateSurface {
+            surface_uid,
+            density,
+        },
     )?)
 }
 

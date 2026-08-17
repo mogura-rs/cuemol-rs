@@ -5063,6 +5063,18 @@ impl DesktopAppState {
     }
 
     pub fn regenerate_surface_object(&mut self, surface_uid: Uid) -> Result<usize> {
+        let density = self
+            .surface_summary(surface_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("surface {}", surface_uid.get())))?
+            .original_density;
+        self.regenerate_surface_object_with_density(surface_uid, density)
+    }
+
+    pub fn regenerate_surface_object_with_density(
+        &mut self,
+        surface_uid: Uid,
+        density: f64,
+    ) -> Result<usize> {
         let scene_uid = self
             .scene_manager()
             .scene_uid_for_surface(surface_uid)
@@ -5101,11 +5113,7 @@ impl DesktopAppState {
         let selection = (!summary.original_selection.trim().is_empty())
             .then(|| parse_selector(&summary.original_selection))
             .transpose()?;
-        let density = if summary.original_density > 0.0 {
-            summary.original_density
-        } else {
-            -1.0
-        };
+        let density = if density > 0.0 { density } else { -1.0 };
         let probe_radius = if summary.original_probe_radius >= 0.0 {
             summary.original_probe_radius
         } else {
@@ -62418,7 +62426,11 @@ attribute \"dep\" string \"positions\"
             .atoms_mut()[0]
             .position = Vector4::new3(10.0, 0.0, 0.0);
 
-        assert!(app.regenerate_surface_object(surface_uid).unwrap() > 0);
+        assert!(
+            app.regenerate_surface_object_with_density(surface_uid, 2.0)
+                .unwrap()
+                > 0
+        );
         let regenerated = app
             .scene_manager()
             .scene(scene_uid)
@@ -62427,6 +62439,10 @@ attribute \"dep\" string \"positions\"
             .unwrap();
         let regenerated =
             cuemol_surface::qdf::read_qdf_surface_bytes(&regenerated.raw_data).unwrap();
+        assert_eq!(
+            app.surface_summary(surface_uid).unwrap().original_density,
+            2.0
+        );
         let after_min_x = regenerated
             .mesh()
             .vertices()

@@ -1276,6 +1276,11 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("generate_density_surface"));
     assert!(JS.contains("label: \"Regenerate surface...\""));
     assert!(JS.contains("regenerate_surface"));
+    assert!(JS.contains("function showSurfaceRegenerateDialog(object)"));
+    assert!(JS.contains("dialogTitle.textContent = \"Mol surface tool\""));
+    assert!(JS.contains("surfaceUid: object.uid, density"));
+    assert!(TAURI_APP_RS.contains("regenerate_surface_object_with_density"));
+    assert!(NATIVE_GUI_RS.contains("fn surface_regenerate_dialog("));
     assert!(CSS.contains(".workspace-context-menu.has-submenu"));
     assert!(JS.contains("WORKSPACE_PAINT_MONOCHROME"));
     assert!(JS.contains("function workspacePaintMenuChildren(action)"));

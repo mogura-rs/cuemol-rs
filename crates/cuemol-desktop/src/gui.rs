@@ -802,6 +802,17 @@ struct NativeStyleDeleteDraft {
 }
 
 #[derive(Debug, Clone)]
+struct NativeSurfaceRegenerateDraft {
+    scene_uid: cuemol_core::Uid,
+    surface_uid: cuemol_core::Uid,
+    molecule: String,
+    selection: String,
+    surface_name: String,
+    density: f64,
+    probe_radius: f64,
+}
+
+#[derive(Debug, Clone)]
 struct NativeWorkspaceDeleteConfirmation {
     target: NativeWorkspaceTarget,
     title: &'static str,
@@ -1035,6 +1046,7 @@ struct GuiApplication {
     object_properties_draft: Option<NativeObjectProperties>,
     renderer_properties_draft: Option<NativeRendererProperties>,
     renderer_group_rename_draft: Option<NativeRendererGroupRenameDraft>,
+    surface_regenerate_draft: Option<NativeSurfaceRegenerateDraft>,
     show_bottom_panel: bool,
     show_about: bool,
     show_options: bool,
@@ -3340,6 +3352,7 @@ impl GuiApplication {
             object_properties_draft: None,
             renderer_properties_draft: None,
             renderer_group_rename_draft: None,
+            surface_regenerate_draft: None,
             show_bottom_panel: true,
             show_about: false,
             show_options: false,
@@ -6170,7 +6183,7 @@ impl GuiApplication {
         };
         if can_regenerate && ui.button("Regenerate surface...").clicked() {
             self.activate_workspace_scene(scene_uid, camera);
-            self.regenerate_workspace_surface(selection);
+            self.open_surface_regenerate_dialog(selection);
             ui.close();
         }
         ui.menu_button("Selection", |ui| {
@@ -13178,6 +13191,7 @@ impl GuiApplication {
         self.object_props_dialog(ctx);
         self.renderer_props_dialog(ctx);
         self.renderer_group_rename_dialog(ctx);
+        self.surface_regenerate_dialog(ctx);
         self.scene_props_dialog(ctx);
         self.view_props_dialog(ctx, camera);
         self.camera_visibility_dialog(ctx);
@@ -16011,6 +16025,69 @@ impl GuiApplication {
             self.apply_renderer_group_rename(draft);
         } else if open && !cancel {
             self.renderer_group_rename_draft = Some(draft);
+        }
+    }
+
+    fn surface_regenerate_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut draft) = self.surface_regenerate_draft.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut accept = false;
+        let mut cancel = false;
+        egui::Window::new("Mol surface tool")
+            .open(&mut open)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.label("Create solvent-excluded surface:");
+                egui::Grid::new("surface-regenerate-fields")
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        ui.label("Target molecule:");
+                        ui.add_enabled(false, egui::TextEdit::singleline(&mut draft.molecule));
+                        ui.end_row();
+
+                        ui.label("Selection:");
+                        let mut use_selection = !draft.selection.is_empty();
+                        ui.horizontal(|ui| {
+                            ui.add_enabled(false, egui::Checkbox::without_text(&mut use_selection));
+                            ui.add_enabled(false, egui::TextEdit::singleline(&mut draft.selection));
+                        });
+                        ui.end_row();
+
+                        ui.label("Surface name:");
+                        ui.add_enabled(false, egui::TextEdit::singleline(&mut draft.surface_name));
+                        ui.end_row();
+
+                        ui.label("Density (/Å):");
+                        ui.add(
+                            egui::DragValue::new(&mut draft.density)
+                                .range(1.0..=100.0)
+                                .speed(1.0)
+                                .max_decimals(0),
+                        );
+                        ui.end_row();
+
+                        ui.label("Probe radius (Å):");
+                        ui.add_enabled(
+                            false,
+                            egui::DragValue::new(&mut draft.probe_radius).max_decimals(1),
+                        );
+                        ui.end_row();
+                    });
+                ui.horizontal(|ui| {
+                    if ui.button("OK").clicked() {
+                        accept = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if accept {
+            self.regenerate_workspace_surface(draft);
+        } else if open && !cancel {
+            self.surface_regenerate_draft = Some(draft);
         }
     }
 
@@ -21862,7 +21939,7 @@ impl GuiApplication {
         }
     }
 
-    fn regenerate_workspace_surface(&mut self, selection: WorkspaceAuxSelection) {
+    fn open_surface_regenerate_dialog(&mut self, selection: WorkspaceAuxSelection) {
         let WorkspaceAuxSelection::Surface {
             scene_uid,
             surface_uid,
@@ -21872,11 +21949,30 @@ impl GuiApplication {
             self.set_status("Select a molecular surface");
             return;
         };
+        let Some(surface) = self.state.surface_summary(surface_uid) else {
+            self.set_status("Select a molecular surface");
+            return;
+        };
+        self.surface_regenerate_draft = Some(NativeSurfaceRegenerateDraft {
+            scene_uid,
+            surface_uid,
+            molecule: surface.original_molecule,
+            selection: surface.original_selection,
+            surface_name: surface.name,
+            density: surface.original_density.max(1.0),
+            probe_radius: surface.original_probe_radius,
+        });
+    }
+
+    fn regenerate_workspace_surface(&mut self, draft: NativeSurfaceRegenerateDraft) {
         let undo = self.capture_undo();
-        match self.state.regenerate_surface_object(surface_uid) {
+        match self
+            .state
+            .regenerate_surface_object_with_density(draft.surface_uid, draft.density.trunc())
+        {
             Ok(triangle_count) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(scene_uid);
+                self.modified_scenes.insert(draft.scene_uid);
                 self.rebuild_snapshot();
                 self.set_status(format!("Regenerated surface: {triangle_count} triangle(s)"));
             }
@@ -28889,7 +28985,24 @@ mod tests {
     fn native_workspace_surface_properties_apply_add_delete_and_undo() {
         let mut app = GuiApplication::new();
         let scene_uid = app.state.active_scene().unwrap();
+        app.state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("source", cuemol_molstr::MolCoord::new());
         let data = "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+        let mut surface_node = cuemol_core::LDom2Node::new();
+        surface_node.set_tag_name("object");
+        surface_node.set_type_name("MolSurfObj");
+        surface_node.set_str_attr("orig_mol", "source");
+        surface_node.set_str_attr("orig_sel", "chain A");
+        surface_node.set_str_attr("orig_den", "2");
+        surface_node.set_str_attr("orig_prad", "1.4");
+        let mut renderer_node = cuemol_core::LDom2Node::new();
+        renderer_node.set_tag_name("renderer");
+        renderer_node.set_type_name("molsurf");
+        renderer_node.set_str_attr("name", "molsurf1");
+        surface_node.append_child_node(renderer_node);
         let surface_uid = app
             .state
             .scene_manager_mut()
@@ -28902,7 +29015,7 @@ mod tests {
                 srctype: "obj".to_string(),
                 data: data.to_string(),
                 raw_data: data.as_bytes().to_vec(),
-                qsc_node: None,
+                qsc_node: Some(surface_node),
             });
         let renderer_uid = app.state.surface_summary(surface_uid).unwrap().renderers[0].uid;
         let mut renderer =
@@ -28934,6 +29047,18 @@ mod tests {
         assert_eq!(surface.renderers[0].name, "surface mesh");
         assert_eq!(surface.renderers[0].specific["drawmode"], "line");
         assert_eq!(surface.renderers[0].specific["colormode"], "multigrad");
+
+        app.open_surface_regenerate_dialog(WorkspaceAuxSelection::Surface {
+            scene_uid,
+            surface_uid,
+            renderer_uid: None,
+        });
+        let regenerate = app.surface_regenerate_draft.take().unwrap();
+        assert_eq!(regenerate.molecule, "source");
+        assert_eq!(regenerate.selection, "chain A");
+        assert_eq!(regenerate.surface_name, "edited surface");
+        assert_eq!(regenerate.density, 2.0);
+        assert_eq!(regenerate.probe_radius, 1.4);
 
         app.open_aux_renderer_dialog(WorkspaceAuxSelection::Surface {
             scene_uid,
