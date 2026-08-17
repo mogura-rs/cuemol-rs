@@ -1302,9 +1302,11 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("label: \"Style file\""));
     assert!(JS.contains("function loadWorkspaceStyleFile(scene)"));
     assert!(JS.contains("function saveWorkspaceStyleFile(scene, style, saveAs)"));
+    assert!(JS.contains("function reloadWorkspaceStyleFile(scene, style)"));
     assert!(JS.contains("mutate(\"load_style_file\""));
+    assert!(JS.contains("mutateWithoutViewport(\"reload_style_file\""));
     assert!(JS.contains("mutateWithoutViewport(\"save_style_file\""));
-    assert!(JS.contains("globalThis.alert?.(\"Not implemented!!\")"));
+    assert!(!JS.contains("Not implemented!!"));
     assert!(JS.contains("function updateWorkspaceStyle(style, update)"));
     assert!(JS.contains("label: \"New Style...\""));
     assert!(JS.contains("async function openNewStyleFlow()"));

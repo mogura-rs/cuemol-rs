@@ -5914,7 +5914,7 @@ impl GuiApplication {
                                     )
                                     .clicked()
                                 {
-                                    self.set_status("Not implemented!!");
+                                    self.reload_workspace_style_file(selection);
                                     ui.close();
                                 }
                                 if ui
@@ -18295,6 +18295,32 @@ impl GuiApplication {
                 self.push_undo_snapshot(undo);
                 self.modified_scenes.insert(summary.scene_uid);
                 self.set_status(format!("Saved style file {}", path.display()));
+            }
+            Err(error) => self.set_status(format!("Style file error: {error}")),
+        }
+    }
+
+    fn reload_workspace_style_file(&mut self, selection: WorkspaceAuxSelection) {
+        let Some(summary) = self.style_summary_for_selection(selection) else {
+            self.set_status("Style not found");
+            return;
+        };
+        let Some(local_index) = summary.local_index else {
+            self.set_status("Global styles cannot be reloaded here");
+            return;
+        };
+        let undo = self.capture_undo();
+        match self
+            .state
+            .reload_scene_style_file(summary.scene_uid, local_index)
+        {
+            Ok(()) => {
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(summary.scene_uid);
+                if self.state.active_scene() == Some(summary.scene_uid) {
+                    self.rebuild_snapshot();
+                }
+                self.set_status(format!("Reloaded style file {}", summary.source));
             }
             Err(error) => self.set_status(format!("Style file error: {error}")),
         }

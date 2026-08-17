@@ -8269,6 +8269,22 @@ async function saveWorkspaceStyleFile(scene, style, saveAs) {
   }
 }
 
+async function reloadWorkspaceStyleFile(scene, style) {
+  if (
+    !(await mutateWithoutViewport("reload_style_file", {
+      sceneUid: scene.uid,
+      localIndex: style.localIndex,
+    }))
+  ) {
+    return;
+  }
+  selectedStyleIndex = activeStyles().findIndex(
+    (candidate) => candidate.localIndex === style.localIndex,
+  );
+  workspaceSelectionKind = "style";
+  renderShell();
+}
+
 async function openNewStyleFlow() {
   const used = new Set(
     activeStyles()
@@ -8359,7 +8375,10 @@ function workspaceStyleContextItems(scene, style = null) {
         {
           label: "Reload",
           disabled: !style?.source,
-          action: () => globalThis.alert?.("Not implemented!!"),
+          action: async () => {
+            if (!(await activate())) return;
+            await reloadWorkspaceStyleFile(scene, style);
+          },
         },
         {
           label: "Save",

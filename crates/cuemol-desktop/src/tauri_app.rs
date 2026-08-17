@@ -6800,6 +6800,10 @@ enum ModelRequest {
         scene_uid: u64,
         path: String,
     },
+    ReloadStyleFile {
+        scene_uid: u64,
+        local_index: usize,
+    },
     SaveStyleFile {
         scene_uid: u64,
         local_index: usize,
@@ -8690,6 +8694,31 @@ fn handle_model_request(
                 .style_summaries(scene_uid)
                 .iter()
                 .any(|style| style.local_index == Some(local_index)));
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::ReloadStyleFile {
+            scene_uid,
+            local_index,
+        } => {
+            let scene_uid = Uid::new(scene_uid);
+            let undo = model.capture_undo();
+            let source = model
+                .desktop
+                .style_summaries(scene_uid)
+                .into_iter()
+                .find(|style| style.local_index == Some(local_index))
+                .ok_or_else(|| format!("style {local_index} not found"))?
+                .source;
+            model
+                .desktop
+                .reload_scene_style_file(scene_uid, local_index)
+                .map_err(|error| error.to_string())?;
+            model.status = format!("Reloaded style file {source}");
+            if model.desktop.active_scene() == Some(scene_uid) {
+                model.invalidate_mesh(false);
+            }
+            model.modified_scenes.insert(scene_uid);
+            model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SaveStyleFile {
@@ -11767,6 +11796,21 @@ fn load_style_file(
 }
 
 #[tauri::command]
+fn reload_style_file(
+    scene_uid: u64,
+    local_index: usize,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::ReloadStyleFile {
+            scene_uid,
+            local_index,
+        },
+    )?)
+}
+
+#[tauri::command]
 fn save_style_file(
     scene_uid: u64,
     local_index: usize,
@@ -13795,6 +13839,7 @@ pub fn run() -> Result<(), tauri::Error> {
             clear_camera_visibility,
             create_style,
             load_style_file,
+            reload_style_file,
             save_style_file,
             create_renderer_style,
             get_style_properties,
@@ -19063,6 +19108,41 @@ mod tests {
                 .source,
             input_path.to_string_lossy()
         );
+
+        std::fs::write(
+            &input_path,
+            "<styles id=\"external\"><style id=\"Narrow\" width=\"1\"/></styles>",
+        )
+        .unwrap();
+        handle_model_request(
+            &mut model,
+            ModelRequest::ReloadStyleFile {
+                scene_uid: scene_uid.get(),
+                local_index,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            model.status,
+            format!("Reloaded style file {}", input_path.to_string_lossy())
+        );
+        assert!(model
+            .desktop
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_styles()[local_index]
+            .data
+            .contains("Narrow"));
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert!(model
+            .desktop
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_styles()[local_index]
+            .data
+            .contains("Wide"));
 
         let _ = std::fs::remove_file(input_path);
         let _ = std::fs::remove_file(output_path);

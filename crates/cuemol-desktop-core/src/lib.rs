@@ -3466,6 +3466,66 @@ impl DesktopAppState {
         Ok(())
     }
 
+    pub fn reload_scene_style_file(&mut self, scene_uid: Uid, local_index: usize) -> Result<()> {
+        let style = self
+            .scene_manager()
+            .scene(scene_uid)
+            .and_then(|scene| scene.loaded_styles().get(local_index))
+            .cloned()
+            .ok_or_else(|| CueMolError::NotFound(format!("style {local_index}")))?;
+        let source = style.node.str_attr("src").to_string();
+        if source.trim().is_empty() {
+            return Err(CueMolError::invalid_argument(
+                "style is not linked to a file",
+            ));
+        }
+        let resolved_path = self.resolve_scene_path(scene_uid, Path::new(&source))?;
+        let data = fs::read_to_string(resolved_path)?;
+        let tree = parse_ldom2_xml(&data)?;
+        if tree.top().tag_name() != "styles" {
+            return Err(CueMolError::invalid_argument(
+                "style XML root must be <styles>",
+            ));
+        }
+        let name = tree.top().str_attr("id").to_string();
+        if name.trim().is_empty() {
+            return Err(CueMolError::invalid_argument(
+                "external style file must have an id",
+            ));
+        }
+
+        let scene = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        if scene
+            .loaded_styles()
+            .iter()
+            .enumerate()
+            .any(|(index, style)| {
+                index != local_index && style.node.str_attr("id").as_str() == name
+            })
+        {
+            return Err(CueMolError::invalid_argument(format!(
+                "style already exists: {name}"
+            )));
+        }
+        let mut node = LDom2Node::new();
+        node.set_tag_name("styles");
+        node.set_str_attr("id", name);
+        node.set_str_attr("src", source);
+        if style.node.str_attr("readonly").equals_ignore_case("true") {
+            node.set_str_attr("readonly", "true");
+        }
+        let style = scene
+            .loaded_styles_mut()
+            .get_mut(local_index)
+            .expect("style index was checked above");
+        style.node = node;
+        style.data = data;
+        Ok(())
+    }
+
     pub fn create_scene_renderer_style(
         &mut self,
         scene_uid: Uid,
@@ -63776,6 +63836,73 @@ attribute \"dep\" string \"positions\"
             .style_summaries(scene_uid)
             .iter()
             .all(|style| style.local_index.is_none()));
+    }
+
+    #[test]
+    fn desktop_style_file_reload_replaces_linked_data_atomically() {
+        let style_path = std::env::temp_dir().join(format!(
+            "cuemol-desktop-style-reload-{}.xml",
+            std::process::id()
+        ));
+        std::fs::write(
+            &style_path,
+            "<styles id=\"external\"><style id=\"Wide\" width=\"3\"/></styles>",
+        )
+        .unwrap();
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("styles", true).result_scene;
+        let local_index = app
+            .load_scene_style_file(scene_uid, &style_path, true)
+            .unwrap();
+
+        std::fs::write(
+            &style_path,
+            "<styles id=\"renamed\"><style id=\"Narrow\" width=\"1\"/></styles>",
+        )
+        .unwrap();
+        app.reload_scene_style_file(scene_uid, local_index).unwrap();
+        let reloaded = app
+            .style_summaries(scene_uid)
+            .into_iter()
+            .find(|style| style.local_index == Some(local_index))
+            .unwrap();
+        assert_eq!(reloaded.name, "renamed");
+        assert_eq!(reloaded.source, style_path.to_string_lossy());
+        assert!(reloaded.read_only);
+        assert!(!reloaded.modified);
+        assert!(app
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_styles()[local_index]
+            .data
+            .contains("Narrow"));
+
+        app.create_scene_style(scene_uid, "duplicate").unwrap();
+        std::fs::write(
+            &style_path,
+            "<styles id=\"duplicate\"><style id=\"Conflict\"/></styles>",
+        )
+        .unwrap();
+        assert!(app.reload_scene_style_file(scene_uid, local_index).is_err());
+        let preserved = &app
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_styles()[local_index];
+        assert_eq!(preserved.node.str_attr("id").as_str(), "renamed");
+        assert!(preserved.data.contains("Narrow"));
+
+        std::fs::write(&style_path, "<scene/>").unwrap();
+        assert!(app.reload_scene_style_file(scene_uid, local_index).is_err());
+        assert!(app
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_styles()[local_index]
+            .data
+            .contains("Narrow"));
+        let _ = std::fs::remove_file(style_path);
     }
 
     #[test]
