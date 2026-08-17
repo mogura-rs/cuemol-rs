@@ -1182,6 +1182,7 @@ struct GuiApplication {
     animation_selection: std::collections::BTreeSet<usize>,
     animation_selection_anchor: Option<usize>,
     animation_properties_draft: Option<NativeAnimationProperties>,
+    animation_pending_add: Option<(AnimKind, usize)>,
     animation_start_camera: Option<CameraController>,
     animation_start_state: Option<DesktopAppState>,
     animation_render_settings: AnimationRenderSettings,
@@ -3692,6 +3693,7 @@ impl GuiApplication {
             animation_selection: std::collections::BTreeSet::new(),
             animation_selection_anchor: None,
             animation_properties_draft: None,
+            animation_pending_add: None,
             animation_start_camera: None,
             animation_start_state: None,
             animation_render_settings: AnimationRenderSettings::default(),
@@ -10010,6 +10012,7 @@ impl GuiApplication {
         };
     }
 
+    #[cfg(test)]
     fn add_animation_motion(
         &mut self,
         kind: AnimKind,
@@ -10039,6 +10042,87 @@ impl GuiApplication {
         self.set_animation_selection(insertion_index);
         self.animation_elapsed = 0.0;
         self.push_undo_snapshot(undo);
+        self.set_status(format!("Added {} animation", kind.label()));
+        Ok(())
+    }
+
+    fn open_new_animation_properties(
+        &mut self,
+        kind: AnimKind,
+        camera: &mut CameraController,
+    ) -> std::result::Result<(), String> {
+        self.restore_animation_playback(camera, false)?;
+        let animation = self.active_animation_manager()?;
+        let insertion_index = self
+            .animation_selected
+            .map(|index| index.saturating_add(1).min(animation.size()))
+            .unwrap_or_else(|| animation.size());
+        let reference = insertion_index
+            .checked_sub(1)
+            .and_then(|index| animation.motions().get(index))
+            .map(|motion| motion.base().name().to_string())
+            .unwrap_or_default();
+        let name = unique_native_animation_name(&animation, native_animation_name_prefix(kind));
+        let motion = new_native_animation_motion(kind, name, reference);
+        self.animation_pending_add = Some((kind, insertion_index));
+        self.animation_properties_draft = Some(NativeAnimationProperties::from_motion(
+            insertion_index,
+            &motion,
+        ));
+        Ok(())
+    }
+
+    fn commit_new_animation_properties(
+        &mut self,
+        kind: AnimKind,
+        insertion_index: usize,
+        draft: &NativeAnimationProperties,
+        camera: &mut CameraController,
+    ) -> std::result::Result<(), String> {
+        let undo = self.capture_undo();
+        let rollback = undo.clone();
+        let mut animation = self.active_animation_manager()?;
+        if animation.startcam().is_empty() {
+            let scene_uid = self
+                .state
+                .active_scene()
+                .ok_or_else(|| "no active scene".to_string())?;
+            if !self
+                .state
+                .camera_summaries(scene_uid)
+                .iter()
+                .any(|summary| summary.name == "__current")
+            {
+                self.state
+                    .save_scene_camera(scene_uid, camera.to_qsys_camera("__current"), false)
+                    .map_err(|error| error.to_string())?;
+            }
+            animation.set_startcam("__current");
+        }
+        let insertion_index = insertion_index.min(animation.size());
+        let reference = insertion_index
+            .checked_sub(1)
+            .and_then(|index| animation.motions().get(index))
+            .map(|motion| motion.base().name().to_string())
+            .unwrap_or_default();
+        let name = unique_native_animation_name(&animation, native_animation_name_prefix(kind));
+        let motion = new_native_animation_motion(kind, name, reference);
+        if insertion_index == animation.size() {
+            animation.append_motion(motion);
+        } else {
+            animation.insert_motion_before(insertion_index, motion);
+        }
+        self.set_active_animation_manager(&animation)?;
+        let mut draft = draft.clone();
+        draft.index = insertion_index;
+        if let Err(error) = self.apply_animation_properties(&draft, camera) {
+            self.restore_gui_undo_state(rollback);
+            return Err(error);
+        }
+        let _intermediate_undo = self.undo_stack.pop();
+        self.push_undo_snapshot(undo);
+        self.set_animation_selection(insertion_index);
+        self.animation_elapsed = 0.0;
         self.set_status(format!("Added {} animation", kind.label()));
         Ok(())
     }
@@ -10247,6 +10331,7 @@ impl GuiApplication {
             .ok_or_else(|| format!("animation object {index} was not found"))?;
         let draft = NativeAnimationProperties::from_motion(index, motion);
         self.set_animation_selection(index);
+        self.animation_pending_add = None;
         self.animation_properties_draft = Some(draft);
         Ok(())
     }
@@ -10685,7 +10770,7 @@ impl GuiApplication {
                 }
             });
         if let Some(kind) = add {
-            if let Err(error) = self.add_animation_motion(kind, camera) {
+            if let Err(error) = self.open_new_animation_properties(kind, camera) {
                 self.set_status(format!("Error: {error}"));
             }
         }
@@ -15402,6 +15487,7 @@ impl GuiApplication {
         let Some(mut draft) = self.animation_properties_draft.take() else {
             return;
         };
+        let pending_add = self.animation_pending_add;
         let reference_names = self
             .active_animation_manager()
             .map(|animation| {
@@ -15409,7 +15495,7 @@ impl GuiApplication {
                     .motions()
                     .iter()
                     .enumerate()
-                    .filter(|(index, _)| *index != draft.index)
+                    .filter(|(index, _)| pending_add.is_some() || *index != draft.index)
                     .map(|(_, motion)| motion.base().name().to_string())
                     .collect::<Vec<_>>()
             })
@@ -15615,8 +15701,15 @@ impl GuiApplication {
             });
 
         if accept {
-            match self.apply_animation_properties(&draft, camera) {
-                Ok(()) => {}
+            let result = if let Some((kind, insertion_index)) = pending_add {
+                self.commit_new_animation_properties(kind, insertion_index, &draft, camera)
+            } else {
+                self.apply_animation_properties(&draft, camera)
+            };
+            match result {
+                Ok(()) => {
+                    self.animation_pending_add = None;
+                }
                 Err(error) => {
                     self.animation_properties_draft = Some(draft);
                     self.set_status(format!("Error: {error}"));
@@ -15624,6 +15717,8 @@ impl GuiApplication {
             }
         } else if open && !cancel {
             self.animation_properties_draft = Some(draft);
+        } else {
+            self.animation_pending_add = None;
         }
     }
 
@@ -34344,6 +34439,56 @@ mod tests {
                 .unwrap()
                 .size(),
             2
+        );
+    }
+
+    #[test]
+    fn native_animation_add_waits_for_property_acceptance() {
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        let scene_uid = app.state.active_scene().unwrap();
+        let undo_count = app.undo_stack.len();
+
+        app.open_new_animation_properties(AnimKind::Spin, &mut camera)
+            .unwrap();
+        assert_eq!(
+            app.state
+                .scene_animation(scene_uid)
+                .unwrap()
+                .unwrap_or_default()
+                .size(),
+            0
+        );
+        assert_eq!(app.undo_stack.len(), undo_count);
+        let (kind, insertion_index) = app.animation_pending_add.unwrap();
+        let mut draft = app.animation_properties_draft.take().unwrap();
+        draft.name = "custom-spin".to_string();
+        draft.angle = Some(90.0);
+        app.commit_new_animation_properties(kind, insertion_index, &draft, &mut camera)
+            .unwrap();
+
+        let animation = app.state.scene_animation(scene_uid).unwrap().unwrap();
+        assert_eq!(animation.size(), 1);
+        assert_eq!(animation.startcam(), "__current");
+        assert!(app
+            .state
+            .camera_summaries(scene_uid)
+            .iter()
+            .any(|summary| summary.name == "__current"));
+        let AnimMotion::Spin(spin) = &animation.motions()[0] else {
+            panic!("expected SimpleSpin");
+        };
+        assert_eq!(spin.base().name(), "custom-spin");
+        assert_eq!(spin.angle(), 90.0);
+        assert_eq!(app.undo_stack.len(), undo_count + 1);
+        app.undo(&mut camera);
+        assert_eq!(
+            app.state
+                .scene_animation(scene_uid)
+                .unwrap()
+                .unwrap_or_default()
+                .size(),
+            0
         );
     }
 

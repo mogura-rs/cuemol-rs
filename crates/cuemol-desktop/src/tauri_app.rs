@@ -6739,6 +6739,52 @@ impl AppModel {
             .map_err(|error| error.to_string())
     }
 
+    fn add_animation_object(
+        &mut self,
+        kind: &str,
+        after_index: Option<usize>,
+        properties: Option<AnimationObjectPropertiesInput>,
+    ) -> Result<AnimKind, String> {
+        let kind = animation_kind(kind).ok_or_else(|| format!("unsupported animation: {kind}"))?;
+        self.restore_animation_playback(false)?;
+        self.animation_elapsed = 0.0;
+        let undo = self.capture_undo();
+        let mut animation = self.active_animation_manager()?;
+        if animation.startcam().is_empty() {
+            self.persist_camera()?;
+            animation.set_startcam("__current");
+        }
+        let prefix = animation_name_prefix(kind);
+        let name = unique_animation_name(&animation, prefix);
+        let insertion_index = after_index
+            .map(|index| index.saturating_add(1).min(animation.size()))
+            .unwrap_or_else(|| animation.size());
+        let reference = insertion_index
+            .checked_sub(1)
+            .and_then(|index| animation.motions().get(index))
+            .map(AnimMotion::base)
+            .map(|object| object.name().to_string())
+            .unwrap_or_default();
+        let motion = new_animation_motion(kind, name, reference);
+        if insertion_index == animation.size() {
+            animation.append_motion(motion);
+        } else {
+            animation.insert_motion_before(insertion_index, motion);
+        }
+        self.set_active_animation_manager(&animation)?;
+        if let Some(mut properties) = properties {
+            properties.index = insertion_index;
+            if let Err(error) = self.set_animation_object_properties(properties) {
+                self.restore_undo(undo)?;
+                return Err(error);
+            }
+        }
+        self.reset_animation_playback();
+        self.status = format!("Added {} animation", kind.label());
+        self.push_undo(undo);
+        Ok(kind)
+    }
+
     fn set_animation_object_properties(
         &mut self,
         input: AnimationObjectPropertiesInput,
@@ -7748,6 +7794,11 @@ enum ModelRequest {
     AddAnimationObject {
         kind: String,
         after_index: Option<usize>,
+    },
+    AddConfiguredAnimationObject {
+        kind: String,
+        after_index: Option<usize>,
+        properties: AnimationObjectPropertiesInput,
     },
     DeleteAnimationObject(usize),
     DeleteAnimationObjects(Vec<usize>),
@@ -11514,37 +11565,15 @@ fn handle_model_request(
             )))
         }
         ModelRequest::AddAnimationObject { kind, after_index } => {
-            let kind =
-                animation_kind(&kind).ok_or_else(|| format!("unsupported animation: {kind}"))?;
-            model.restore_animation_playback(false)?;
-            model.animation_elapsed = 0.0;
-            let undo = model.capture_undo();
-            let mut animation = model.active_animation_manager()?;
-            if animation.startcam().is_empty() {
-                model.persist_camera()?;
-                animation.set_startcam("__current");
-            }
-            let prefix = animation_name_prefix(kind);
-            let name = unique_animation_name(&animation, prefix);
-            let insertion_index = after_index
-                .map(|index| index.saturating_add(1).min(animation.size()))
-                .unwrap_or_else(|| animation.size());
-            let reference = insertion_index
-                .checked_sub(1)
-                .and_then(|index| animation.motions().get(index))
-                .map(AnimMotion::base)
-                .map(|object| object.name().to_string())
-                .unwrap_or_default();
-            let motion = new_animation_motion(kind, name, reference);
-            if insertion_index == animation.size() {
-                animation.append_motion(motion);
-            } else {
-                animation.insert_motion_before(insertion_index, motion);
-            }
-            model.set_active_animation_manager(&animation)?;
-            model.reset_animation_playback();
-            model.status = format!("Added {} animation", kind.label());
-            model.push_undo(undo);
+            model.add_animation_object(&kind, after_index, None)?;
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::AddConfiguredAnimationObject {
+            kind,
+            after_index,
+            properties,
+        } => {
+            model.add_animation_object(&kind, after_index, Some(properties))?;
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::DeleteAnimationObject(index) => {
@@ -14794,12 +14823,18 @@ fn select_screen_rect(
 fn add_animation_object(
     kind: String,
     after_index: Option<usize>,
+    input: Option<AnimationObjectPropertiesInput>,
     state: State<'_, ManagedState>,
 ) -> Result<AppSnapshot, String> {
-    snapshot_response(request_model(
-        &state,
-        ModelRequest::AddAnimationObject { kind, after_index },
-    )?)
+    let request = match input {
+        Some(properties) => ModelRequest::AddConfiguredAnimationObject {
+            kind,
+            after_index,
+            properties,
+        },
+        None => ModelRequest::AddAnimationObject { kind, after_index },
+    };
+    snapshot_response(request_model(&state, request)?)
 }
 
 #[tauri::command]
@@ -21670,6 +21705,48 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["NoopAnimObj", "SimpleSpin"]
         );
+    }
+
+    #[test]
+    fn configured_animation_add_commits_properties_in_one_undo_step() {
+        let mut model = model_without_gpu();
+        let motion = new_animation_motion(AnimKind::Spin, "SimpleSpin1".to_string(), String::new());
+        let mut properties = animation_properties_input(&animation_object_dto(0, &motion));
+        properties.name = "custom-spin".to_string();
+        properties.duration = 1.0;
+        properties.angle = Some(90.0);
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::AddConfiguredAnimationObject {
+                kind: "simple-spin".to_string(),
+                after_index: None,
+                properties,
+            },
+        )
+        .unwrap();
+
+        let snapshot = model.snapshot();
+        assert_eq!(snapshot.animation_objects.len(), 1);
+        assert_eq!(snapshot.animation_objects[0].name, "custom-spin");
+        assert_eq!(snapshot.animation_objects[0].angle, Some(90.0));
+        assert_eq!(model.undo_stack.len(), 1);
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert!(model.snapshot().animation_objects.is_empty());
+
+        let motion = new_animation_motion(AnimKind::Spin, "SimpleSpin1".to_string(), String::new());
+        let properties = animation_properties_input(&animation_object_dto(0, &motion));
+        assert!(handle_model_request(
+            &mut model,
+            ModelRequest::AddConfiguredAnimationObject {
+                kind: "simple-spin".to_string(),
+                after_index: None,
+                properties,
+            },
+        )
+        .is_err());
+        assert!(model.snapshot().animation_objects.is_empty());
+        assert!(model.undo_stack.is_empty());
     }
 
     #[test]

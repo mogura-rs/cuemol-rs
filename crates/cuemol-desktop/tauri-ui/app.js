@@ -212,6 +212,7 @@ let atomPickerTarget = null;
 let selectedAnimationIndex = null;
 let selectedAnimationIndices = new Set();
 let selectedAnimationAnchor = null;
+let pendingAnimationAdd = null;
 let selectedMorphFrameIndex = null;
 let lastModelLogCount = 0;
 let animationTimer = null;
@@ -7327,7 +7328,8 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       dialogActions(apply);
     }
   } else if (title === "Animation object properties") {
-    const object = snapshot?.animationObjects.find(
+    const pending = pendingAnimationAdd;
+    const object = pending?.object || snapshot?.animationObjects.find(
       (item) => item.index === selectedAnimationIndex,
     );
     if (!object) {
@@ -7340,7 +7342,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       const name = dialogField("Name", object.name, "text", commonPage);
       const disabled = dialogCheckbox("Disabled", object.disabled, commonPage);
       const referenceOptions = snapshot.animationObjects
-        .filter((item) => item.index !== object.index && item.name)
+        .filter((item) => (pending || item.index !== object.index) && item.name)
         .map((item) => [item.name, item.name]);
       if (
         object.timeRefName
@@ -7633,19 +7635,33 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         optional.reset(defaults);
       });
       const apply = button("OK", "dialog-primary", async () => {
-        const changed = await mutate("set_animation_object_properties", {
-          input: {
-            index: object.index,
-            name: name.value,
-            disabled: disabled.checked,
-            timeRefName: timeReference.value,
-            start: Number(start.value),
-            duration: Number(duration.value),
-            quadric: Number(quadric.value),
-            ...optional.read(),
-          },
-        });
-        if (changed) referenceDialog.close();
+        const input = {
+          index: object.index,
+          name: name.value,
+          disabled: disabled.checked,
+          timeRefName: timeReference.value,
+          start: Number(start.value),
+          duration: Number(duration.value),
+          quadric: Number(quadric.value),
+          ...optional.read(),
+        };
+        const changed = pending
+          ? await mutate("add_animation_object", {
+              kind: pending.kind,
+              afterIndex: pending.afterIndex,
+              input,
+            })
+          : await mutate("set_animation_object_properties", { input });
+        if (changed) {
+          if (pending) {
+            const index = Math.min(object.index, snapshot.animationObjects.length - 1);
+            selectedAnimationIndex = index;
+            selectedAnimationIndices = new Set([index]);
+            selectedAnimationAnchor = index;
+            pendingAnimationAdd = null;
+          }
+          referenceDialog.close();
+        }
       });
       dialogActions(reset, apply, button("Cancel", "", () => referenceDialog.close()));
     }
@@ -13851,18 +13867,81 @@ const animationAddKinds = [
   ["No operation", "noop"],
 ];
 
+function newAnimationObjectDraft(kind, index) {
+  const presets = {
+    "simple-spin": ["SimpleSpin", "SimpleSpin"],
+    "camera-motion": ["CamMotion", "CamMotion"],
+    show: ["ShowHideAnim", "ShowAnim"],
+    hide: ["ShowHideAnim", "HideAnim"],
+    "slide-in": ["SlideInOutAnim", "SlideInAnim"],
+    "slide-out": ["SlideInOutAnim", "SlideOutAnim"],
+    "mol-anim": ["MolAnim", "MolAnim"],
+    noop: ["NoopAnimObj", "NoopAnimObj"],
+  };
+  const [typeName, prefix] = presets[kind] || presets.noop;
+  const names = new Set(snapshot.animationObjects.map((object) => object.name));
+  let suffix = 1;
+  while (names.has(`${prefix}${suffix}`)) suffix += 1;
+  const reference = index > 0 ? snapshot.animationObjects[index - 1]?.name || "" : "";
+  const object = {
+    index,
+    name: `${prefix}${suffix}`,
+    typeName,
+    disabled: false,
+    timeRefName: reference,
+    relativeStart: 0,
+    duration: 1,
+    quadric: 0,
+  };
+  if (kind === "simple-spin") {
+    Object.assign(object, { angle: 360, axis: [0, 1, 0] });
+  } else if (kind === "camera-motion") {
+    Object.assign(object, {
+      targetCamera: "",
+      ignoreRotate: false,
+      ignoreCenter: false,
+      ignoreZoom: false,
+      ignoreSlab: false,
+      keepQuaternionPositive: true,
+    });
+  } else if (kind === "show" || kind === "hide") {
+    Object.assign(object, {
+      rendererNames: "",
+      hide: kind === "hide",
+      fade: true,
+      targetAlpha: 1,
+    });
+  } else if (kind === "slide-in" || kind === "slide-out") {
+    Object.assign(object, {
+      rendererNames: "",
+      hide: kind === "slide-out",
+      direction: 0,
+      distance: 1,
+    });
+  } else if (kind === "mol-anim") {
+    const morph = snapshot.morphs[0];
+    const molecule = snapshot.objects.find((item) => item.uid === morph?.objectUid);
+    Object.assign(object, {
+      moleculeName: molecule?.name || "",
+      propertyName: "frame",
+      startValue: 0,
+      endValue: 1,
+    });
+  }
+  return object;
+}
+
 async function addAnimationObject(kind = animationKind.value) {
   const insertionIndex = selectedAnimationIndex === null
     ? snapshot.animationObjects.length
     : selectedAnimationIndex + 1;
-  await mutate("add_animation_object", {
+  if (referenceDialog.open) referenceDialog.close();
+  pendingAnimationAdd = {
     kind,
     afterIndex: selectedAnimationIndex,
-  });
-  selectedAnimationIndex = Math.min(insertionIndex, snapshot.animationObjects.length - 1);
-  selectedAnimationIndices = new Set([selectedAnimationIndex]);
-  selectedAnimationAnchor = selectedAnimationIndex;
-  renderAnimation();
+    object: newAnimationObjectDraft(kind, insertionIndex),
+  };
+  await showReferenceDialog("Animation object properties");
 }
 
 async function deleteSelectedAnimationObjects() {
@@ -15534,6 +15613,7 @@ document.addEventListener("pointerdown", (event) => {
 
 referenceDialog.addEventListener("close", () => {
   closeWorkspaceContextMenu();
+  pendingAnimationAdd = null;
   atomPickerTarget = null;
   viewport.classList.remove("atom-picking");
 });
