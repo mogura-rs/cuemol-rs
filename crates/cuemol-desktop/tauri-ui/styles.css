@@ -2045,7 +2045,9 @@ summary:focus-visible {
 
 .sequence-view {
   display: grid;
-  gap: 7px;
+  gap: 0;
+  width: max-content;
+  min-width: 100%;
 }
 
 .sequence-view > p {
@@ -2054,16 +2056,31 @@ summary:focus-visible {
 
 .sequence-chain {
   display: grid;
-  gap: 3px;
+  grid-template-columns: 180px max-content;
+  min-height: 21px;
+  border-bottom: 1px solid #ddd;
 }
 
 .sequence-chain > strong {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  padding: 2px 6px;
+  overflow: hidden;
+  border-right: 1px solid #aaa;
+  background: #fff;
   font: 600 11px var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sequence-residues {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  align-items: stretch;
 }
 
 .sequence-cell {

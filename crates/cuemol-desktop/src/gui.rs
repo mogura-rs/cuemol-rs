@@ -13909,167 +13909,179 @@ impl GuiApplication {
         let primary_down = ui.input(|input| input.pointer.primary_down());
         let primary_released = ui.input(|input| input.pointer.primary_released());
         let shift = ui.input(|input| input.modifiers.shift);
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::ScrollArea::both().show(ui, |ui| {
             for chain in &chains {
                 let chain_disp = if chain.chain_id.is_empty() {
                     "_"
                 } else {
                     chain.chain_id.as_str()
                 };
-                ui.monospace(format!(
+                let title = format!(
                     "{} : chain {} ({} res)",
                     chain.object_name,
                     chain_disp,
                     chain.residues.len()
-                ));
+                );
                 let current_selection = self.sequence_current_selection(chain.object_uid);
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    for (position, residue) in chain.residues.iter().enumerate() {
-                        let sequence_position = NativeSequencePosition {
-                            object_uid: chain.object_uid,
-                            chain_id: chain.chain_id.clone(),
-                            position,
-                        };
-                        let response = ui
-                            .selectable_label(
-                                residue.selected,
-                                egui::RichText::new(&residue.letter).monospace(),
-                            )
-                            .on_hover_text(format!(
-                                "{} {}",
-                                residue.res_name.trim(),
-                                residue.residue_index
-                            ));
-                        let pointer_over = pointer_position
-                            .is_some_and(|position| response.rect.contains(position));
-                        if primary_pressed && pointer_over {
-                            self.sequence_drag_start = Some(sequence_position.clone());
-                            self.sequence_drag_end = Some(sequence_position.clone());
-                            if !shift {
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        [180.0, 20.0],
+                        egui::Label::new(egui::RichText::new(title).monospace()),
+                    );
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        for (position, residue) in chain.residues.iter().enumerate() {
+                            let sequence_position = NativeSequencePosition {
+                                object_uid: chain.object_uid,
+                                chain_id: chain.chain_id.clone(),
+                                position,
+                            };
+                            let response = ui
+                                .selectable_label(
+                                    residue.selected,
+                                    egui::RichText::new(&residue.letter).monospace(),
+                                )
+                                .on_hover_text(format!(
+                                    "{} {}",
+                                    residue.res_name.trim(),
+                                    residue.residue_index
+                                ));
+                            let pointer_over = pointer_position
+                                .is_some_and(|position| response.rect.contains(position));
+                            if primary_pressed && pointer_over {
+                                self.sequence_drag_start = Some(sequence_position.clone());
+                                self.sequence_drag_end = Some(sequence_position.clone());
+                                if !shift {
+                                    self.sequence_marker = Some(sequence_position.clone());
+                                }
+                            }
+                            if primary_down
+                                && pointer_over
+                                && self.sequence_drag_start.as_ref().is_some_and(|start| {
+                                    sequence_positions_share_row(start, &sequence_position)
+                                })
+                            {
+                                self.sequence_drag_end = Some(sequence_position.clone());
+                                ui.ctx().request_repaint();
+                            }
+                            if response.secondary_clicked() {
                                 self.sequence_marker = Some(sequence_position.clone());
                             }
-                        }
-                        if primary_down
-                            && pointer_over
-                            && self.sequence_drag_start.as_ref().is_some_and(|start| {
-                                sequence_positions_share_row(start, &sequence_position)
-                            })
-                        {
-                            self.sequence_drag_end = Some(sequence_position.clone());
-                            ui.ctx().request_repaint();
-                        }
-                        if response.secondary_clicked() {
-                            self.sequence_marker = Some(sequence_position.clone());
-                        }
-                        if self.sequence_marker.as_ref() == Some(&sequence_position) {
-                            ui.painter().line_segment(
-                                [response.rect.left_bottom(), response.rect.right_bottom()],
-                                egui::Stroke::new(2.0, ui.visuals().text_color()),
-                            );
-                        }
-                        if sequence_position_in_drag_range(
-                            &sequence_position,
-                            self.sequence_drag_start.as_ref(),
-                            self.sequence_drag_end.as_ref(),
-                        ) {
-                            ui.painter().rect_stroke(
-                                response.rect,
-                                0.0,
-                                egui::Stroke::new(1.0, ui.visuals().widgets.active.fg_stroke.color),
-                                egui::StrokeKind::Inside,
-                            );
-                        }
-                        response.context_menu(|ui| {
-                            ui.add_enabled(
-                                false,
-                                egui::Button::new(format!(
-                                    "{} {}{} {}",
-                                    chain.object_name,
-                                    if chain.chain_id.is_empty() {
-                                        "_"
-                                    } else {
-                                        &chain.chain_id
-                                    },
-                                    residue.residue_index,
-                                    residue.res_name.trim()
-                                )),
-                            );
-                            ui.separator();
-                            if ui.button("Center here").clicked() {
-                                action = Some(NativeSequenceAction::Center {
-                                    object_uid: chain.object_uid,
-                                    selection: residue.selection.clone(),
-                                });
-                                ui.close();
+                            if self.sequence_marker.as_ref() == Some(&sequence_position) {
+                                ui.painter().line_segment(
+                                    [response.rect.left_bottom(), response.rect.right_bottom()],
+                                    egui::Stroke::new(2.0, ui.visuals().text_color()),
+                                );
                             }
-                            if ui.button("Toggle sel").clicked() {
-                                action = Some(NativeSequenceAction::Range {
-                                    object_uid: chain.object_uid,
-                                    anchor_selection: residue.selection.clone(),
-                                    range_selection: residue.selection.clone(),
-                                    toggle: true,
-                                    center_selection: None,
-                                });
-                                ui.close();
+                            if sequence_position_in_drag_range(
+                                &sequence_position,
+                                self.sequence_drag_start.as_ref(),
+                                self.sequence_drag_end.as_ref(),
+                            ) {
+                                ui.painter().rect_stroke(
+                                    response.rect,
+                                    0.0,
+                                    egui::Stroke::new(
+                                        1.0,
+                                        ui.visuals().widgets.active.fg_stroke.color,
+                                    ),
+                                    egui::StrokeKind::Inside,
+                                );
                             }
-                            for (label, by_residue) in [("Around Byresid", true), ("Around", false)]
-                            {
-                                ui.menu_button(label, |ui| {
-                                    for radius in [3.0_f64, 5.0, 7.0, 10.0] {
-                                        if ui.button(format!("{radius:.0} Å")).clicked() {
-                                            if !current_selection.is_empty() {
-                                                action = Some(NativeSequenceAction::Selection {
-                                                    object_uid: chain.object_uid,
-                                                    expression: around_selection_expression(
-                                                        &current_selection,
-                                                        radius,
-                                                        by_residue,
-                                                    ),
-                                                    status: "Around mol selection",
-                                                });
+                            response.context_menu(|ui| {
+                                ui.add_enabled(
+                                    false,
+                                    egui::Button::new(format!(
+                                        "{} {}{} {}",
+                                        chain.object_name,
+                                        if chain.chain_id.is_empty() {
+                                            "_"
+                                        } else {
+                                            &chain.chain_id
+                                        },
+                                        residue.residue_index,
+                                        residue.res_name.trim()
+                                    )),
+                                );
+                                ui.separator();
+                                if ui.button("Center here").clicked() {
+                                    action = Some(NativeSequenceAction::Center {
+                                        object_uid: chain.object_uid,
+                                        selection: residue.selection.clone(),
+                                    });
+                                    ui.close();
+                                }
+                                if ui.button("Toggle sel").clicked() {
+                                    action = Some(NativeSequenceAction::Range {
+                                        object_uid: chain.object_uid,
+                                        anchor_selection: residue.selection.clone(),
+                                        range_selection: residue.selection.clone(),
+                                        toggle: true,
+                                        center_selection: None,
+                                    });
+                                    ui.close();
+                                }
+                                for (label, by_residue) in
+                                    [("Around Byresid", true), ("Around", false)]
+                                {
+                                    ui.menu_button(label, |ui| {
+                                        for radius in [3.0_f64, 5.0, 7.0, 10.0] {
+                                            if ui.button(format!("{radius:.0} Å")).clicked() {
+                                                if !current_selection.is_empty() {
+                                                    action =
+                                                        Some(NativeSequenceAction::Selection {
+                                                            object_uid: chain.object_uid,
+                                                            expression: around_selection_expression(
+                                                                &current_selection,
+                                                                radius,
+                                                                by_residue,
+                                                            ),
+                                                            status: "Around mol selection",
+                                                        });
+                                                }
+                                                ui.close();
                                             }
-                                            ui.close();
                                         }
-                                    }
-                                });
-                            }
-                            ui.separator();
-                            if ui.button("Unselect all").clicked() {
-                                action = Some(NativeSequenceAction::Selection {
-                                    object_uid: chain.object_uid,
-                                    expression: String::new(),
-                                    status: "Unselect all",
-                                });
-                                ui.close();
-                            }
-                            if ui.button("Invert sel").clicked() {
-                                action = Some(NativeSequenceAction::Selection {
-                                    object_uid: chain.object_uid,
-                                    expression: invert_selection_expression(&current_selection),
-                                    status: "Invert sel",
-                                });
-                                ui.close();
-                            }
-                            ui.separator();
-                            if ui.button("Copy sequence").clicked() {
-                                action = Some(NativeSequenceAction::Copy(
-                                    chain
-                                        .residues
-                                        .iter()
-                                        .map(|residue| {
-                                            if residue.letter == "X" {
-                                                "*"
-                                            } else {
-                                                residue.letter.as_str()
-                                            }
-                                        })
-                                        .collect(),
-                                ));
-                                ui.close();
-                            }
-                        });
-                    }
+                                    });
+                                }
+                                ui.separator();
+                                if ui.button("Unselect all").clicked() {
+                                    action = Some(NativeSequenceAction::Selection {
+                                        object_uid: chain.object_uid,
+                                        expression: String::new(),
+                                        status: "Unselect all",
+                                    });
+                                    ui.close();
+                                }
+                                if ui.button("Invert sel").clicked() {
+                                    action = Some(NativeSequenceAction::Selection {
+                                        object_uid: chain.object_uid,
+                                        expression: invert_selection_expression(&current_selection),
+                                        status: "Invert sel",
+                                    });
+                                    ui.close();
+                                }
+                                ui.separator();
+                                if ui.button("Copy sequence").clicked() {
+                                    action = Some(NativeSequenceAction::Copy(
+                                        chain
+                                            .residues
+                                            .iter()
+                                            .map(|residue| {
+                                                if residue.letter == "X" {
+                                                    "*"
+                                                } else {
+                                                    residue.letter.as_str()
+                                                }
+                                            })
+                                            .collect(),
+                                    ));
+                                    ui.close();
+                                }
+                            });
+                        }
+                    });
                 });
                 ui.separator();
             }
