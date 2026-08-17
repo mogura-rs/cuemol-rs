@@ -13,7 +13,6 @@ use cuemol_anim::{
     AnimMgr, AnimMotion, CamMotion, MolAnim, NoopAnimObj, ShowHideAnim, SimpleSpin, SlideInOutAnim,
 };
 use cuemol_core::{LDom2Node, Quat, Uid, Vector4, NANOS_PER_SECOND};
-use cuemol_molstr::{parse_selector, ResidRangeSet};
 use cuemol_qsys::{Camera, CenterMark, StereoMode, View};
 use cuemol_render::{
     tessellate_snapshot, PovSceneExporter, RenderBond, RenderMesh, RenderSceneSnapshot,
@@ -4478,32 +4477,15 @@ impl AppModel {
         range_selection: &str,
         toggle: bool,
     ) -> Result<String, String> {
-        let current_selection = self.molecule_selection_for_sequence(object_uid)?;
-        let object = self
-            .desktop
-            .scene_manager()
-            .object(object_uid)
-            .ok_or_else(|| format!("object {} not found", object_uid.get()))?;
-        let molecule = object.mol();
-        let mut ranges = ResidRangeSet::new();
-        if !current_selection.is_empty() {
-            let current = parse_selector(&current_selection).map_err(|error| error.to_string())?;
-            ranges.from_sel(molecule, &current);
-        }
-        let anchor = parse_selector(anchor_selection).map_err(|error| error.to_string())?;
-        let mut anchor_ranges = ResidRangeSet::new();
-        anchor_ranges.from_sel(molecule, &anchor);
-        let selected = anchor_ranges
-            .residues()
-            .iter()
-            .any(|residue| ranges.contains_key(residue));
-        let range = parse_selector(range_selection).map_err(|error| error.to_string())?;
-        if toggle && selected {
-            ranges.remove(molecule, &range);
-        } else {
-            ranges.append(molecule, &range);
-        }
-        Ok(ranges.to_string())
+        self.desktop
+            .molecule_residue_range_selection_text(
+                object_uid,
+                &self.selection,
+                anchor_selection,
+                range_selection,
+                toggle,
+            )
+            .map_err(|error| error.to_string())
     }
 
     fn center_sequence_target(
@@ -4511,14 +4493,10 @@ impl AppModel {
         object_uid: Uid,
         target_selection: &str,
     ) -> Result<bool, String> {
-        let selector = parse_selector(target_selection).map_err(|error| error.to_string())?;
         let center = self
             .desktop
-            .scene_manager()
-            .object(object_uid)
-            .ok_or_else(|| format!("object {} not found", object_uid.get()))?
-            .mol()
-            .center_pos(Some(&selector));
+            .molecule_selection_center_for_text(object_uid, target_selection)
+            .map_err(|error| error.to_string())?;
         if let Some(center) = center {
             self.camera.set_center(center);
             return Ok(true);

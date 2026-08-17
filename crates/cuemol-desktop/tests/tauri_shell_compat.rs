@@ -601,7 +601,18 @@ fn tauri_sequence_panel_matches_reference_mouse_and_context_operations() {
     assert!(CSS.contains(".sequence-cell.marked"));
     assert!(CSS.contains(".sequence-cell.range-preview"));
     assert!(TAURI_APP_RS.contains("fn apply_sequence_action("));
-    assert!(TAURI_APP_RS.contains("ResidRangeSet::new()"));
+    assert!(TAURI_APP_RS.contains("molecule_residue_range_selection_text"));
+    for binding in [
+        "NativeSequenceAction",
+        "native_sequence_range_action",
+        "response.context_menu",
+        "sequence_position_in_drag_range",
+    ] {
+        assert!(
+            NATIVE_GUI_RS.contains(binding),
+            "missing native Sequence binding {binding}"
+        );
+    }
 }
 
 #[test]

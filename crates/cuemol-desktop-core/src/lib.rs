@@ -20,7 +20,7 @@ use cuemol_molstr::{
     AtomIntrKind, AtomIntrLine, LoadObjectResult, LoadedDensityMap, LoadedLWObject,
     LoadedLWRenderer, LoadedStyle, LoadedSurface, MolCommandManager, MolCoord, MolObject,
     MolRenderer, MolSceneManager, NewRendererResult, NewSceneResult, QdfMolFileReader,
-    QdfMolFileWriter, QscLoadStatus, Selector, StreamManager,
+    QdfMolFileWriter, QscLoadStatus, ResidRangeSet, Selector, StreamManager,
 };
 use cuemol_molvis::{
     anisou_mesh_snapshot_with_options, apply_object_coloring, apply_renderer_styles,
@@ -4194,6 +4194,55 @@ impl DesktopAppState {
             .object(object_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
         Ok(object.mol().selection_text())
+    }
+
+    pub fn molecule_residue_range_selection_text(
+        &self,
+        object_uid: Uid,
+        fallback_selection: &str,
+        anchor_selection: &str,
+        range_selection: &str,
+        toggle: bool,
+    ) -> Result<String> {
+        let object = self
+            .scene_manager()
+            .object(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        let molecule = object.mol();
+        let current_selection = if molecule.selection_text().trim().is_empty() {
+            fallback_selection.trim()
+        } else {
+            molecule.selection_text()
+        };
+        let mut ranges = ResidRangeSet::new();
+        if !current_selection.is_empty() {
+            ranges.from_sel(molecule, &parse_selector(current_selection)?);
+        }
+        let mut anchor_ranges = ResidRangeSet::new();
+        anchor_ranges.from_sel(molecule, &parse_selector(anchor_selection)?);
+        let anchor_selected = anchor_ranges
+            .residues()
+            .iter()
+            .any(|residue| ranges.contains_key(residue));
+        let range = parse_selector(range_selection)?;
+        if toggle && anchor_selected {
+            ranges.remove(molecule, &range);
+        } else {
+            ranges.append(molecule, &range);
+        }
+        Ok(ranges.to_string())
+    }
+
+    pub fn molecule_selection_center_for_text(
+        &self,
+        object_uid: Uid,
+        selection: &str,
+    ) -> Result<Option<Vector4>> {
+        let object = self
+            .scene_manager()
+            .object(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        Ok(object.mol().center_pos(Some(&parse_selector(selection)?)))
     }
 
     pub fn selected_molecule_center(&self, object_uid: Uid) -> Result<Option<Vector4>> {

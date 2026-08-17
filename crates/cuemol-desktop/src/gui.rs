@@ -1128,6 +1128,9 @@ struct GuiApplication {
     background: SceneBackground,
     color_proofing: bool,
     bottom_tab: BottomTab,
+    sequence_marker: Option<NativeSequencePosition>,
+    sequence_drag_start: Option<NativeSequencePosition>,
+    sequence_drag_end: Option<NativeSequencePosition>,
     trajectory_target: Option<cuemol_core::Uid>,
     trajectory_playing: bool,
     trajectory_loop: bool,
@@ -1802,6 +1805,98 @@ enum BottomTab {
     Output,
     Sequence,
     Trajectory,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeSequencePosition {
+    object_uid: cuemol_core::Uid,
+    chain_id: String,
+    position: usize,
+}
+
+#[derive(Debug, Clone)]
+enum NativeSequenceAction {
+    Range {
+        object_uid: cuemol_core::Uid,
+        anchor_selection: String,
+        range_selection: String,
+        toggle: bool,
+        center_selection: Option<String>,
+    },
+    Selection {
+        object_uid: cuemol_core::Uid,
+        expression: String,
+        status: &'static str,
+    },
+    Center {
+        object_uid: cuemol_core::Uid,
+        selection: String,
+    },
+    Copy(String),
+}
+
+fn sequence_positions_share_row(
+    lhs: &NativeSequencePosition,
+    rhs: &NativeSequencePosition,
+) -> bool {
+    lhs.object_uid == rhs.object_uid && lhs.chain_id == rhs.chain_id
+}
+
+fn sequence_position_in_drag_range(
+    position: &NativeSequencePosition,
+    start: Option<&NativeSequencePosition>,
+    end: Option<&NativeSequencePosition>,
+) -> bool {
+    let (Some(start), Some(end)) = (start, end) else {
+        return false;
+    };
+    if !sequence_positions_share_row(start, end) || !sequence_positions_share_row(start, position) {
+        return false;
+    }
+    let (first, last) = if start.position <= end.position {
+        (start.position, end.position)
+    } else {
+        (end.position, start.position)
+    };
+    (first..=last).contains(&position.position)
+}
+
+fn native_sequence_range_action(
+    chains: &[crate::GuiSeqChain],
+    start: &NativeSequencePosition,
+    end: &NativeSequencePosition,
+    toggle: bool,
+    center: bool,
+) -> Option<NativeSequenceAction> {
+    if !sequence_positions_share_row(start, end) {
+        return None;
+    }
+    let chain = chains
+        .iter()
+        .find(|chain| chain.object_uid == start.object_uid && chain.chain_id == start.chain_id)?;
+    let anchor_selection = chain.residues.get(start.position)?.selection.clone();
+    let center_selection = if center {
+        Some(chain.residues.get(end.position)?.selection.clone())
+    } else {
+        None
+    };
+    let (first, last) = if start.position <= end.position {
+        (start.position, end.position)
+    } else {
+        (end.position, start.position)
+    };
+    let range_selection = chain.residues[first..=last]
+        .iter()
+        .map(|residue| residue.selection.as_str())
+        .collect::<Vec<_>>()
+        .join("|");
+    Some(NativeSequenceAction::Range {
+        object_uid: start.object_uid,
+        anchor_selection,
+        range_selection,
+        toggle,
+        center_selection,
+    })
 }
 
 /// Selection-panel tab (CueMol2 `selection-panel.xul`): the free-text Command tab
@@ -4070,6 +4165,9 @@ impl GuiApplication {
             background: SceneBackground::Black,
             color_proofing: false,
             bottom_tab: BottomTab::Output,
+            sequence_marker: None,
+            sequence_drag_start: None,
+            sequence_drag_end: None,
             trajectory_target: None,
             trajectory_playing: false,
             trajectory_loop: false,
@@ -4290,7 +4388,7 @@ impl GuiApplication {
         // Register the status bar before the bottom dock so it sits at the very bottom.
         self.status_bar(ctx);
         if self.show_bottom_panel {
-            self.bottom_panel(ctx);
+            self.bottom_panel(ctx, camera);
         }
         if self.show_workspace && self.left_panel_visible.iter().any(|visible| *visible) {
             self.left_panel(ctx, camera);
@@ -13546,7 +13644,7 @@ impl GuiApplication {
         self.show_inspector = open;
     }
 
-    fn bottom_panel(&mut self, ctx: &egui::Context) {
+    fn bottom_panel(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         egui::TopBottomPanel::bottom("bottom_panel")
             .resizable(true)
             .default_height(150.0)
@@ -13564,7 +13662,7 @@ impl GuiApplication {
                 ui.separator();
                 match self.bottom_tab {
                     BottomTab::Output => self.output_tab(ui),
-                    BottomTab::Sequence => self.sequence_tab(ui),
+                    BottomTab::Sequence => self.sequence_tab(ui, camera),
                     BottomTab::Trajectory => self.trajectory_tab(ui),
                 }
             });
@@ -13588,17 +13686,102 @@ impl GuiApplication {
             });
     }
 
-    /// Interactive per-residue sequence viewer (CueMol2 `seqpanel`): each residue is a
-    /// clickable 1-letter cell that selects it; cells whose atoms are in the current
-    /// selection are highlighted, so the sequence and the 3D selection stay in sync.
-    /// Built from the shared-core `active_sequence_view`.
-    fn sequence_tab(&mut self, ui: &mut egui::Ui) {
+    fn sequence_current_selection(&self, object_uid: cuemol_core::Uid) -> String {
+        self.state
+            .molecule_selection_text(object_uid)
+            .ok()
+            .filter(|selection| !selection.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| self.selection_text.trim().to_string())
+    }
+
+    fn apply_native_sequence_action(
+        &mut self,
+        action: NativeSequenceAction,
+        camera: &mut CameraController,
+        ctx: &egui::Context,
+    ) {
+        match action {
+            NativeSequenceAction::Range {
+                object_uid,
+                anchor_selection,
+                range_selection,
+                toggle,
+                center_selection,
+            } => match self.state.molecule_residue_range_selection_text(
+                object_uid,
+                &self.selection_text,
+                &anchor_selection,
+                &range_selection,
+                toggle,
+            ) {
+                Ok(expression) => {
+                    if self.apply_molecule_selection(
+                        object_uid,
+                        expression,
+                        "Toggle select atom(s)",
+                    ) {
+                        if let Some(selection) = center_selection {
+                            match self
+                                .state
+                                .molecule_selection_center_for_text(object_uid, &selection)
+                            {
+                                Ok(Some(center)) => {
+                                    camera.target = Vec3::new(
+                                        center.x as f32,
+                                        center.y as f32,
+                                        center.z as f32,
+                                    );
+                                }
+                                Ok(None) => {}
+                                Err(error) => self.set_error(error),
+                            }
+                        }
+                    }
+                }
+                Err(error) => self.set_error(error),
+            },
+            NativeSequenceAction::Selection {
+                object_uid,
+                expression,
+                status,
+            } => {
+                self.apply_molecule_selection(object_uid, expression, status);
+            }
+            NativeSequenceAction::Center {
+                object_uid,
+                selection,
+            } => match self
+                .state
+                .molecule_selection_center_for_text(object_uid, &selection)
+            {
+                Ok(Some(center)) => {
+                    camera.target = Vec3::new(center.x as f32, center.y as f32, center.z as f32);
+                    self.set_status("Center here");
+                }
+                Ok(None) => {}
+                Err(error) => self.set_error(error),
+            },
+            NativeSequenceAction::Copy(sequence) => {
+                ctx.copy_text(sequence);
+                self.set_status("Sequence copied");
+            }
+        }
+    }
+
+    /// Interactive per-residue sequence viewer (CueMol2 `seqpanel`).
+    fn sequence_tab(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
         let chains = self.state.active_sequence_view(&self.selection_text);
         if chains.is_empty() {
             ui.weak("No molecule loaded.");
             return;
         }
-        let mut clicked: Option<(cuemol_core::Uid, String)> = None;
+        let mut action = None;
+        let pointer_position = ui.input(|input| input.pointer.hover_pos());
+        let primary_pressed = ui.input(|input| input.pointer.primary_pressed());
+        let primary_down = ui.input(|input| input.pointer.primary_down());
+        let primary_released = ui.input(|input| input.pointer.primary_released());
+        let shift = ui.input(|input| input.modifiers.shift);
         egui::ScrollArea::vertical().show(ui, |ui| {
             for chain in &chains {
                 let chain_disp = if chain.chain_id.is_empty() {
@@ -13612,9 +13795,15 @@ impl GuiApplication {
                     chain_disp,
                     chain.residues.len()
                 ));
+                let current_selection = self.sequence_current_selection(chain.object_uid);
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
-                    for residue in &chain.residues {
+                    for (position, residue) in chain.residues.iter().enumerate() {
+                        let sequence_position = NativeSequencePosition {
+                            object_uid: chain.object_uid,
+                            chain_id: chain.chain_id.clone(),
+                            position,
+                        };
                         let response = ui
                             .selectable_label(
                                 residue.selected,
@@ -13623,19 +13812,169 @@ impl GuiApplication {
                             .on_hover_text(format!(
                                 "{} {}",
                                 residue.res_name.trim(),
-                                residue.res_id
+                                residue.residue_index
                             ));
-                        if response.clicked() {
-                            clicked = Some((chain.object_uid, residue.selection.clone()));
+                        let pointer_over = pointer_position
+                            .is_some_and(|position| response.rect.contains(position));
+                        if primary_pressed && pointer_over {
+                            self.sequence_drag_start = Some(sequence_position.clone());
+                            self.sequence_drag_end = Some(sequence_position.clone());
+                            if !shift {
+                                self.sequence_marker = Some(sequence_position.clone());
+                            }
                         }
+                        if primary_down
+                            && pointer_over
+                            && self.sequence_drag_start.as_ref().is_some_and(|start| {
+                                sequence_positions_share_row(start, &sequence_position)
+                            })
+                        {
+                            self.sequence_drag_end = Some(sequence_position.clone());
+                            ui.ctx().request_repaint();
+                        }
+                        if response.secondary_clicked() {
+                            self.sequence_marker = Some(sequence_position.clone());
+                        }
+                        if self.sequence_marker.as_ref() == Some(&sequence_position) {
+                            ui.painter().line_segment(
+                                [response.rect.left_bottom(), response.rect.right_bottom()],
+                                egui::Stroke::new(2.0, ui.visuals().text_color()),
+                            );
+                        }
+                        if sequence_position_in_drag_range(
+                            &sequence_position,
+                            self.sequence_drag_start.as_ref(),
+                            self.sequence_drag_end.as_ref(),
+                        ) {
+                            ui.painter().rect_stroke(
+                                response.rect,
+                                0.0,
+                                egui::Stroke::new(1.0, ui.visuals().widgets.active.fg_stroke.color),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
+                        response.context_menu(|ui| {
+                            ui.add_enabled(
+                                false,
+                                egui::Button::new(format!(
+                                    "{} {}{} {}",
+                                    chain.object_name,
+                                    if chain.chain_id.is_empty() {
+                                        "_"
+                                    } else {
+                                        &chain.chain_id
+                                    },
+                                    residue.residue_index,
+                                    residue.res_name.trim()
+                                )),
+                            );
+                            ui.separator();
+                            if ui.button("Center here").clicked() {
+                                action = Some(NativeSequenceAction::Center {
+                                    object_uid: chain.object_uid,
+                                    selection: residue.selection.clone(),
+                                });
+                                ui.close();
+                            }
+                            if ui.button("Toggle sel").clicked() {
+                                action = Some(NativeSequenceAction::Range {
+                                    object_uid: chain.object_uid,
+                                    anchor_selection: residue.selection.clone(),
+                                    range_selection: residue.selection.clone(),
+                                    toggle: true,
+                                    center_selection: None,
+                                });
+                                ui.close();
+                            }
+                            for (label, by_residue) in [("Around Byresid", true), ("Around", false)]
+                            {
+                                ui.menu_button(label, |ui| {
+                                    for radius in [3.0_f64, 5.0, 7.0, 10.0] {
+                                        if ui.button(format!("{radius:.0} Å")).clicked() {
+                                            if !current_selection.is_empty() {
+                                                action = Some(NativeSequenceAction::Selection {
+                                                    object_uid: chain.object_uid,
+                                                    expression: around_selection_expression(
+                                                        &current_selection,
+                                                        radius,
+                                                        by_residue,
+                                                    ),
+                                                    status: "Around mol selection",
+                                                });
+                                            }
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                            }
+                            ui.separator();
+                            if ui.button("Unselect all").clicked() {
+                                action = Some(NativeSequenceAction::Selection {
+                                    object_uid: chain.object_uid,
+                                    expression: String::new(),
+                                    status: "Unselect all",
+                                });
+                                ui.close();
+                            }
+                            if ui.button("Invert sel").clicked() {
+                                action = Some(NativeSequenceAction::Selection {
+                                    object_uid: chain.object_uid,
+                                    expression: invert_selection_expression(&current_selection),
+                                    status: "Invert sel",
+                                });
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button("Copy sequence").clicked() {
+                                action = Some(NativeSequenceAction::Copy(
+                                    chain
+                                        .residues
+                                        .iter()
+                                        .map(|residue| {
+                                            if residue.letter == "X" {
+                                                "*"
+                                            } else {
+                                                residue.letter.as_str()
+                                            }
+                                        })
+                                        .collect(),
+                                ));
+                                ui.close();
+                            }
+                        });
                     }
                 });
                 ui.separator();
             }
         });
 
-        if let Some((object_uid, selection)) = clicked {
-            self.apply_molecule_selection(object_uid, selection, "Selected sequence residue");
+        if primary_released {
+            let start = self.sequence_drag_start.take();
+            let end = self.sequence_drag_end.take();
+            if let (Some(start), Some(end)) = (start, end) {
+                if sequence_positions_share_row(&start, &end) {
+                    if start.position != end.position {
+                        self.sequence_marker = Some(end.clone());
+                        action = native_sequence_range_action(&chains, &start, &end, true, false);
+                    } else if shift {
+                        if let Some(marker) = self
+                            .sequence_marker
+                            .clone()
+                            .filter(|marker| sequence_positions_share_row(marker, &end))
+                        {
+                            self.sequence_marker = Some(end.clone());
+                            action =
+                                native_sequence_range_action(&chains, &marker, &end, false, false);
+                        }
+                    } else {
+                        self.sequence_marker = Some(end.clone());
+                        action = native_sequence_range_action(&chains, &start, &end, true, true);
+                    }
+                }
+            }
+        }
+        if let Some(action) = action {
+            self.apply_native_sequence_action(action, camera, ui.ctx());
         }
     }
 
@@ -35973,6 +36312,55 @@ mod tests {
     }
 
     #[test]
+    fn native_sequence_range_and_context_actions_match_reference() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C  \n\
+             ATOM      2  CA  GLY A   2      10.000   0.000   0.000  1.00 10.00           C  \n\
+             ATOM      3  CA  SER A   3      20.000   0.000   0.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        let object_uid = app
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule_with_source_type("molecule", molecule, "pdb");
+        let chains = app.state.active_sequence_view("");
+        let position = |value| NativeSequencePosition {
+            object_uid,
+            chain_id: "A".to_string(),
+            position: value,
+        };
+        let start = position(0);
+        let middle = position(1);
+        let end = position(2);
+        assert!(sequence_position_in_drag_range(
+            &middle,
+            Some(&start),
+            Some(&end)
+        ));
+
+        let mut camera = CameraController::default();
+        let ctx = egui::Context::default();
+        let range = native_sequence_range_action(&chains, &start, &middle, false, false).unwrap();
+        app.apply_native_sequence_action(range, &mut camera, &ctx);
+        assert_eq!(app.selection_text, "'A'.1:2.*");
+
+        let context_toggle =
+            native_sequence_range_action(&chains, &end, &end, true, false).unwrap();
+        app.apply_native_sequence_action(context_toggle, &mut camera, &ctx);
+        assert_eq!(app.selection_text, "'A'.1:3.*");
+        assert_eq!(camera.target, Vec3::ZERO);
+
+        let click = native_sequence_range_action(&chains, &end, &end, true, true).unwrap();
+        app.apply_native_sequence_action(click, &mut camera, &ctx);
+        assert_eq!(app.selection_text, "'A'.1:2.*");
+        assert!((camera.target.x - 20.0).abs() < 1.0e-6);
+    }
+
+    #[test]
     fn native_trajectory_playback_skips_stale_frames_without_undo() {
         let Some(path) = reference_pdb_path() else {
             return;
@@ -35997,6 +36385,7 @@ mod tests {
         app.bottom_tab = BottomTab::Trajectory;
 
         let ctx = egui::Context::default();
+        let mut camera = CameraController::default();
         let output = ctx.run(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -36005,7 +36394,7 @@ mod tests {
                 )),
                 ..egui::RawInput::default()
             },
-            |ctx| app.bottom_panel(ctx),
+            |ctx| app.bottom_panel(ctx, &mut camera),
         );
         assert!(!output.shapes.is_empty());
 
