@@ -7371,10 +7371,15 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       );
       duration.min = "0.1";
       duration.step = "0.001";
-      const quadric = dialogField("Quadric", String(object.quadric), "number", commonPage);
+      const quadric = dialogField(
+        "Quadric (%)",
+        String(object.quadric * 100),
+        "number",
+        commonPage,
+      );
       quadric.min = "0";
-      quadric.max = "0.5";
-      quadric.step = "0.01";
+      quadric.max = "50";
+      quadric.step = "5";
 
       const rendererNames = [
         ...snapshot.objects,
@@ -7422,7 +7427,9 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       const optional = {};
       if (object.typeName === "SimpleSpin") {
         const angle = dialogField("Rotation angle", String(object.angle), "number", typePage);
-        angle.step = "1";
+        angle.min = "0";
+        angle.max = "360";
+        angle.step = "5";
         const axis = object.axis || [0, 1, 0];
         const axisModeValue = axis[0] === 1 && axis[1] === 0 && axis[2] === 0
           ? "xaxis"
@@ -7554,12 +7561,18 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           "number",
           typePage,
         );
+        direction.min = "0";
+        direction.max = "360";
+        direction.step = "5";
         const distance = dialogField(
           "Distance (W/2)",
           String(object.distance),
           "number",
           typePage,
         );
+        distance.min = "0";
+        distance.max = "2";
+        distance.step = "0.1";
         optional.read = () => ({
           rendererNames: readTargets(),
           hide: showHide.value === "hide",
@@ -7600,12 +7613,18 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           "number",
           typePage,
         );
+        startValue.min = "0";
+        startValue.max = "1";
+        startValue.step = "0.1";
         const endValue = dialogField(
           "End value",
           String(object.endValue),
           "number",
           typePage,
         );
+        endValue.min = "0";
+        endValue.max = "1";
+        endValue.step = "0.1";
         optional.read = () => ({
           moleculeName: molecule.value,
           propertyName: property.value,
@@ -7667,7 +7686,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       const reset = button("Reset all to default", "", () => {
         const defaults = defaultAnimationObjectProperties(object);
         disabled.checked = defaults.disabled;
-        quadric.value = String(defaults.quadric);
+        quadric.value = String(defaults.quadric * 100);
         optional.reset(defaults);
       });
       const apply = button("OK", "dialog-primary", async () => {
@@ -7678,7 +7697,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           timeRefName: timeReference.value,
           start: Number(start.value),
           duration: Number(duration.value),
-          quadric: Number(quadric.value),
+          quadric: Number(quadric.value) / 100,
           ...optional.read(),
         };
         const changed = pending

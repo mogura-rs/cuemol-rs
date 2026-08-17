@@ -15592,11 +15592,14 @@ impl GuiApplication {
                         );
                         ui.end_row();
                         ui.label("Quadric:");
+                        let mut quadric_percent = draft.quadric * 100.0;
                         ui.add(
-                            egui::DragValue::new(&mut draft.quadric)
-                                .range(0.0..=0.5)
-                                .speed(0.01),
+                            egui::DragValue::new(&mut quadric_percent)
+                                .range(0.0..=50.0)
+                                .speed(5.0)
+                                .suffix("%"),
                         );
+                        draft.quadric = quadric_percent / 100.0;
                         ui.end_row();
                     });
                 ui.separator();
@@ -15606,7 +15609,12 @@ impl GuiApplication {
                         if let Some(angle) = &mut draft.angle {
                             ui.horizontal(|ui| {
                                 ui.label("Rotation angle:");
-                                ui.add(egui::DragValue::new(angle).speed(1.0));
+                                ui.add(
+                                    egui::DragValue::new(angle)
+                                        .range(0.0..=360.0)
+                                        .speed(5.0)
+                                        .suffix("°"),
+                                );
                             });
                         }
                         if let Some(axis) = &mut draft.axis {
@@ -15700,13 +15708,23 @@ impl GuiApplication {
                         if let Some(value) = &mut draft.direction {
                             ui.horizontal(|ui| {
                                 ui.label("Direction angle:");
-                                ui.add(egui::DragValue::new(value).speed(1.0));
+                                ui.add(
+                                    egui::DragValue::new(value)
+                                        .range(0.0..=360.0)
+                                        .speed(5.0)
+                                        .suffix("°"),
+                                );
                             });
                         }
                         if let Some(value) = &mut draft.distance {
                             ui.horizontal(|ui| {
                                 ui.label("Distance:");
-                                ui.add(egui::DragValue::new(value).speed(0.1));
+                                ui.add(
+                                    egui::DragValue::new(value)
+                                        .range(0.0..=2.0)
+                                        .speed(0.1)
+                                        .suffix(" W/2"),
+                                );
                             });
                         }
                     }
@@ -15730,13 +15748,23 @@ impl GuiApplication {
                             });
                         }
                         animation_optional_text_ui(ui, "Property:", &mut draft.property_name);
-                        animation_value_range_ui(ui, &mut draft.start_value, &mut draft.end_value);
+                        animation_value_range_ui(
+                            ui,
+                            &mut draft.start_value,
+                            &mut draft.end_value,
+                            true,
+                        );
                     }
                     "RealPropAnim" => {
                         ui.heading("RealPropAnim");
                         animation_renderer_names_ui(ui, &mut draft.renderer_names);
                         animation_optional_text_ui(ui, "Property:", &mut draft.property_name);
-                        animation_value_range_ui(ui, &mut draft.start_value, &mut draft.end_value);
+                        animation_value_range_ui(
+                            ui,
+                            &mut draft.start_value,
+                            &mut draft.end_value,
+                            false,
+                        );
                     }
                     "RendXformAnim" => {
                         ui.heading("RendXformAnim");
@@ -27370,17 +27398,32 @@ fn animation_renderer_names_ui(ui: &mut egui::Ui, value: &mut Option<String>) {
     animation_optional_text_ui(ui, "Renderer names:", value);
 }
 
-fn animation_value_range_ui(ui: &mut egui::Ui, start: &mut Option<f64>, end: &mut Option<f64>) {
+fn animation_value_range_ui(
+    ui: &mut egui::Ui,
+    start: &mut Option<f64>,
+    end: &mut Option<f64>,
+    unit_range: bool,
+) {
     if let Some(start) = start {
         ui.horizontal(|ui| {
             ui.label("Start value:");
-            ui.add(egui::DragValue::new(start).speed(0.1));
+            let value = egui::DragValue::new(start).speed(0.1);
+            ui.add(if unit_range {
+                value.range(0.0..=1.0)
+            } else {
+                value
+            });
         });
     }
     if let Some(end) = end {
         ui.horizontal(|ui| {
             ui.label("End value:");
-            ui.add(egui::DragValue::new(end).speed(0.1));
+            let value = egui::DragValue::new(end).speed(0.1);
+            ui.add(if unit_range {
+                value.range(0.0..=1.0)
+            } else {
+                value
+            });
         });
     }
 }
