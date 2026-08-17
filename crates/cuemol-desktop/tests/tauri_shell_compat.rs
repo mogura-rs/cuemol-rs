@@ -887,6 +887,9 @@ fn pov_render_matches_the_reference_options_and_cancellable_flow() {
         "Copy to clipboard",
         "Unzoom",
         "const zoomLevels = [10, 25, 50, 75, 100, 125, 150, 200, 300]",
+        "`${scene.uid},${view.uid}`",
+        "sceneUid",
+        "viewUid",
     ] {
         assert!(JS.contains(label), "missing POV-Ray option {label}");
     }

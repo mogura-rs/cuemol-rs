@@ -30,7 +30,7 @@ pub(crate) use pov_job::{
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 mod pov_labels;
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
-pub(crate) use pov_labels::{collect_pov_labels, overlay_pov_labels};
+pub(crate) use pov_labels::{collect_pov_labels, collect_scene_pov_labels, overlay_pov_labels};
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 use std::collections::{BTreeMap, HashMap};

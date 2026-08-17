@@ -16,12 +16,12 @@ use tauri::State;
 
 use crate::offscreen::{camera_depth_range, camera_mvp, encode_rgba_png, SceneRenderer};
 use crate::{
-    anim_step, atoms_in_screen_rect, collect_pov_labels, create_apbs_work_dir, create_pov_work_dir,
-    overlay_pov_labels, pick_atom_screen, run_apbs_process, run_pov_process, AnimKind, AnimObject,
-    ApbsProcessOutput, ApbsProcessTask, DesktopAppState, GuiApbsChargeMethod, GuiApbsOptions,
-    GuiApbsPaths, GuiAtomLabel, GuiPovSceneOptions, PovProcessOptions, PovProcessOutput,
-    PovProcessTask, WorkspaceCameraClipboard, WorkspaceObjectClipboard, WorkspaceRendererClipboard,
-    WorkspaceStyleClipboard, MOLECULE_RENDERER_TYPES,
+    anim_step, atoms_in_screen_rect, collect_scene_pov_labels, create_apbs_work_dir,
+    create_pov_work_dir, overlay_pov_labels, pick_atom_screen, run_apbs_process, run_pov_process,
+    AnimKind, AnimObject, ApbsProcessOutput, ApbsProcessTask, DesktopAppState, GuiApbsChargeMethod,
+    GuiApbsOptions, GuiApbsPaths, GuiAtomLabel, GuiPovSceneOptions, PovProcessOptions,
+    PovProcessOutput, PovProcessTask, WorkspaceCameraClipboard, WorkspaceObjectClipboard,
+    WorkspaceRendererClipboard, WorkspaceStyleClipboard, MOLECULE_RENDERER_TYPES,
 };
 
 const MAX_VIEW_DIM: u32 = 1_600;
@@ -1403,6 +1403,8 @@ struct ApbsCalculationInput {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PovRenderInput {
+    scene_uid: u64,
+    view_uid: u64,
     width: u32,
     height: u32,
     threads: u32,
@@ -10597,6 +10599,23 @@ fn handle_model_request(
             if !input.include_dir.trim().is_empty() && !Path::new(&input.include_dir).is_dir() {
                 return Err("POV-Ray include directory does not exist".to_string());
             }
+            model.persist_camera()?;
+            let scene_uid = Uid::new(input.scene_uid);
+            let view_uid = Uid::new(input.view_uid);
+            let target_view = model
+                .desktop
+                .view_summaries()
+                .into_iter()
+                .find(|view| view.uid == view_uid && view.scene_uid == scene_uid)
+                .ok_or_else(|| "POV-Ray render target no longer exists".to_string())?;
+            let target_camera = if target_view.active {
+                model.camera.clone()
+            } else {
+                model
+                    .desktop
+                    .view_camera(view_uid)
+                    .ok_or_else(|| "POV-Ray target view no longer exists".to_string())?
+            };
             if let Some(result) = model.pov_render_result.take() {
                 let _ = fs::remove_dir_all(result.work_dir);
             }
@@ -10610,10 +10629,11 @@ fn handle_model_request(
                 show_edge_lines: input.edge_lines,
                 use_pixel_labels: input.pixel_labels,
             };
-            if let Err(error) = model.desktop.export_active_scene_pov_with_camera(
+            if let Err(error) = model.desktop.export_scene_pov_with_camera(
                 &input_path,
+                scene_uid,
                 &model.selection,
-                &model.camera,
+                &target_camera,
                 scene_options,
             ) {
                 let _ = fs::remove_dir_all(work_dir);
@@ -10656,9 +10676,10 @@ fn handle_model_request(
                     verbose: true,
                 },
             };
-            let labels = collect_pov_labels(
+            let labels = collect_scene_pov_labels(
                 &model.desktop,
-                &model.camera,
+                scene_uid,
+                &target_camera,
                 input.width,
                 input.height,
                 input.pixel_labels,
@@ -20144,6 +20165,17 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let mut model = model_without_gpu();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let view_uid = model.desktop.active_view_summary().unwrap().uid;
+        let mut target_camera = Camera::new();
+        target_camera.set_center(Vector4::new3(4.0, 5.0, 6.0));
+        target_camera.set_cam_dist(12.0);
+        model
+            .desktop
+            .set_active_view_camera(&target_camera)
+            .unwrap();
+        let active_scene = model.desktop.new_scene("other", true).result_scene;
+        model.camera = Camera::new();
         let script =
             std::env::temp_dir().join(format!("cuemol-tauri-pov-test-{}.sh", std::process::id()));
         let saved =
@@ -20160,6 +20192,8 @@ mod tests {
         let response = handle_model_request(
             &mut model,
             ModelRequest::StartPovRender(PovRenderInput {
+                scene_uid: scene_uid.get(),
+                view_uid: view_uid.get(),
                 width: 800,
                 height: 600,
                 threads: 4,
@@ -20202,6 +20236,17 @@ mod tests {
             );
         };
         assert_eq!(preview, "data:image/png;base64,UE5H");
+        assert_eq!(model.desktop.active_scene(), Some(active_scene));
+        let pov = fs::read_to_string(
+            model
+                .pov_render_result
+                .as_ref()
+                .unwrap()
+                .work_dir
+                .join("render.pov"),
+        )
+        .unwrap();
+        assert!(pov.contains("#declare _camera_pos = <4.000000,5.000000,18.000000>"));
         assert!(model
             .log_lines
             .iter()

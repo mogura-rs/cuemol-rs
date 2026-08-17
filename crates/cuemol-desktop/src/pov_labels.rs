@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use ab_glyph::{point, Font, FontRef, ScaleFont};
+use cuemol_core::Uid;
 use cuemol_gfx::Rgba8;
 
 use crate::{DesktopAppState, GuiAtomLabel};
@@ -12,15 +13,30 @@ pub(crate) fn collect_pov_labels(
     height: u32,
     enabled: bool,
 ) -> Vec<GuiAtomLabel> {
+    let Some(scene_uid) = state.active_scene() else {
+        return Vec::new();
+    };
+    collect_scene_pov_labels(state, scene_uid, camera, width, height, enabled)
+}
+
+pub(crate) fn collect_scene_pov_labels(
+    state: &DesktopAppState,
+    scene_uid: Uid,
+    camera: &cuemol_qsys::Camera,
+    width: u32,
+    height: u32,
+    enabled: bool,
+) -> Vec<GuiAtomLabel> {
     if !enabled || width == 0 || height == 0 {
         return Vec::new();
     }
     const MAX_LABELS: usize = 10_000;
     let aspect = f64::from(width) / f64::from(height);
     let mvp = crate::offscreen::camera_mvp(camera, aspect);
-    let mut labels = state.active_name_labels(mvp, width as f32, height as f32, MAX_LABELS);
+    let mut labels = state.name_labels(scene_uid, mvp, width as f32, height as f32, MAX_LABELS);
     if labels.len() < MAX_LABELS {
-        labels.extend(state.active_atom_intr_labels(
+        labels.extend(state.atom_intr_labels(
+            scene_uid,
             mvp,
             width as f32,
             height as f32,

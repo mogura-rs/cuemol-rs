@@ -6009,12 +6009,16 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       dialogActions(remove, apply, add);
     }
   } else if (title === "POV-Ray rendering") {
-    const scene = snapshot?.scenes.find((item) => item.active);
+    const renderTargets = (snapshot?.views || []).flatMap((view) => {
+      const scene = snapshot?.scenes.find((item) => item.uid === view.sceneUid);
+      return scene ? [[`${scene.uid},${view.uid}`, `${scene.name}:${view.name}`]] : [];
+    });
+    const activeView = snapshot?.views.find((view) => view.active);
     const currentViewSize = viewportDimensions();
-    dialogSelect(
+    const target = dialogSelect(
       "Target",
-      scene ? [[scene.uid, scene.name]] : [],
-      scene?.uid ?? "",
+      renderTargets,
+      activeView ? `${activeView.sceneUid},${activeView.uid}` : renderTargets[0]?.[0] || "",
     );
     const mainGroup = dialogGroup("Main options");
     const width = dialogField(
@@ -6351,6 +6355,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     preview.addEventListener("load", updatePreviewZoom);
 
     const controls = [
+      target,
       width,
       height,
       unit,
@@ -6465,8 +6470,11 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       }
       persistSettings();
       try {
+        const [sceneUid, viewUid] = target.value.split(",").map(Number);
         const state = await invoke("start_pov_render", {
           input: {
+            sceneUid,
+            viewUid,
             width: widthPixels,
             height: heightPixels,
             threads: Number(threads.value),

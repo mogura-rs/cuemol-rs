@@ -1,12 +1,13 @@
 // AnimKind/AnimObject + the `anim_spin_direction` timeline stepper are shared via core
 // so both desktop front ends drive the animation timeline identically.
 use crate::{
-    anim_step, collect_pov_labels, create_apbs_work_dir, create_pov_work_dir, overlay_pov_labels,
-    run_apbs_process, run_pov_process, run_pov_process_with_poll, AnimKind, AnimObject,
-    ApbsProcessOutput, ApbsProcessTask, DesktopAppState, GuiApbsChargeMethod, GuiApbsOptions,
-    GuiApbsPaths, GuiAtomLabel, GuiLoadedPath, GuiPovSceneOptions, GuiSequenceSummary,
-    GuiStructObject, PovProcessOptions, PovProcessOutput, PovProcessTask, WorkspaceCameraClipboard,
-    WorkspaceObjectClipboard, WorkspaceRendererClipboard, WorkspaceStyleClipboard,
+    anim_step, collect_pov_labels, collect_scene_pov_labels, create_apbs_work_dir,
+    create_pov_work_dir, overlay_pov_labels, run_apbs_process, run_pov_process,
+    run_pov_process_with_poll, AnimKind, AnimObject, ApbsProcessOutput, ApbsProcessTask,
+    DesktopAppState, GuiApbsChargeMethod, GuiApbsOptions, GuiApbsPaths, GuiAtomLabel,
+    GuiLoadedPath, GuiPovSceneOptions, GuiSequenceSummary, GuiStructObject, PovProcessOptions,
+    PovProcessOutput, PovProcessTask, WorkspaceCameraClipboard, WorkspaceObjectClipboard,
+    WorkspaceRendererClipboard, WorkspaceStyleClipboard,
 };
 use cuemol_core::{parse_ldom2_xml, write_ldom2_xml, CueMolError, LDom2Node, Result, Vector4};
 use cuemol_gfx::Rgba8;
@@ -762,6 +763,8 @@ fn png_unit_to_pixels(value: f64, unit: NativePngUnit, dpi: u32) -> u32 {
 
 #[derive(Debug, Clone)]
 struct NativePovRenderSettings {
+    target_scene_uid: Option<cuemol_core::Uid>,
+    target_view_uid: Option<cuemol_core::Uid>,
     width: u32,
     height: u32,
     size_initialized: bool,
@@ -790,6 +793,8 @@ struct NativePovRenderSettings {
 impl Default for NativePovRenderSettings {
     fn default() -> Self {
         Self {
+            target_scene_uid: None,
+            target_view_uid: None,
             width: 1_000,
             height: 1_000,
             size_initialized: false,
@@ -11248,6 +11253,10 @@ impl GuiApplication {
 
     fn open_pov_render_tool(&mut self) {
         self.render_backend = "POV-Ray".to_string();
+        if let Some(view) = self.state.active_view_summary() {
+            self.pov_render_settings.target_scene_uid = Some(view.scene_uid);
+            self.pov_render_settings.target_view_uid = Some(view.uid);
+        }
         if !self.pov_render_settings.size_initialized {
             if let Some(rect) = self.viewport_rect {
                 self.pov_render_settings.width = rect.width().round().max(1.0) as u32;
@@ -11262,16 +11271,59 @@ impl GuiApplication {
 
     fn render_tab(&mut self, ui: &mut egui::Ui, camera: &CameraController) {
         let running = self.pov_render_job.is_some();
-        let scene_name = self
+        let scenes = self.state.scene_summaries();
+        let target_views = self
             .state
-            .active_scene_summary()
-            .map_or_else(|| "(none)".to_string(), |scene| scene.name);
-        let view_name = self
-            .state
-            .active_view_summary()
-            .map_or_else(|| "(none)".to_string(), |view| view.name);
-        ui.label(format!("Target: {scene_name}:{view_name}"));
+            .view_summaries()
+            .into_iter()
+            .filter_map(|view| {
+                let scene = scenes.iter().find(|scene| scene.uid == view.scene_uid)?;
+                Some((
+                    view.uid,
+                    view.scene_uid,
+                    format!("{}:{}", scene.name, view.name),
+                ))
+            })
+            .collect::<Vec<_>>();
+        if self
+            .pov_render_settings
+            .target_view_uid
+            .is_none_or(|selected| {
+                !target_views
+                    .iter()
+                    .any(|(view_uid, _, _)| *view_uid == selected)
+            })
+        {
+            if let Some((view_uid, scene_uid, _)) = target_views.first() {
+                self.pov_render_settings.target_view_uid = Some(*view_uid);
+                self.pov_render_settings.target_scene_uid = Some(*scene_uid);
+            }
+        }
+        let selected_target = target_views
+            .iter()
+            .find(|(view_uid, _, _)| Some(*view_uid) == self.pov_render_settings.target_view_uid)
+            .map_or("(none)", |(_, _, label)| label.as_str());
         ui.add_enabled_ui(!running, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Target:");
+                egui::ComboBox::from_id_salt("native_pov_target")
+                    .selected_text(selected_target)
+                    .show_ui(ui, |ui| {
+                        for (view_uid, scene_uid, label) in &target_views {
+                            if ui
+                                .selectable_label(
+                                    Some(*view_uid) == self.pov_render_settings.target_view_uid,
+                                    label,
+                                )
+                                .clicked()
+                            {
+                                self.pov_render_settings.target_view_uid = Some(*view_uid);
+                                self.pov_render_settings.target_scene_uid = Some(*scene_uid);
+                                ui.close();
+                            }
+                        }
+                    });
+            });
             ui.separator();
             ui.strong("Main options");
             egui::Grid::new("native_pov_main_options")
@@ -11743,6 +11795,34 @@ impl GuiApplication {
             self.set_status("POV-Ray include directory does not exist");
             return;
         }
+        let (Some(scene_uid), Some(view_uid)) =
+            (settings.target_scene_uid, settings.target_view_uid)
+        else {
+            self.set_status("POV-Ray render target is required");
+            return;
+        };
+        if !self
+            .state
+            .view_summaries()
+            .iter()
+            .any(|view| view.uid == view_uid && view.scene_uid == scene_uid)
+        {
+            self.set_status("POV-Ray render target no longer exists");
+            return;
+        }
+        let qsys_camera = if self
+            .state
+            .active_view_summary()
+            .is_some_and(|view| view.uid == view_uid)
+        {
+            camera.to_qsys_camera("__pov_render")
+        } else {
+            let Some(camera) = self.state.view_camera(view_uid) else {
+                self.set_status("POV-Ray target view no longer exists");
+                return;
+            };
+            camera
+        };
         self.clear_pov_render_result();
         let work_dir = match create_pov_work_dir() {
             Ok(path) => path,
@@ -11753,7 +11833,6 @@ impl GuiApplication {
         };
         let pov_path = work_dir.join("render.pov");
         let image_path = work_dir.join("render.png");
-        let qsys_camera = camera.to_qsys_camera("__pov_render");
         let scene_options = GuiPovSceneOptions {
             perspective: Some(settings.perspective),
             use_clip_z: settings.clip_plane,
@@ -11761,8 +11840,9 @@ impl GuiApplication {
             show_edge_lines: settings.edge_lines,
             use_pixel_labels: settings.pixel_labels,
         };
-        if let Err(error) = self.state.export_active_scene_pov_with_camera(
+        if let Err(error) = self.state.export_scene_pov_with_camera(
             &pov_path,
+            scene_uid,
             &self.selection_text,
             &qsys_camera,
             scene_options,
@@ -11795,13 +11875,14 @@ impl GuiApplication {
                 verbose: true,
             },
         };
-        let label_settings = AnimationRenderSettings {
-            width: task.options.width,
-            height: task.options.height,
-            pov_labels: settings.pixel_labels,
-            ..AnimationRenderSettings::default()
-        };
-        let labels = animation_frame_labels(&self.state, &label_settings, &qsys_camera);
+        let labels = collect_scene_pov_labels(
+            &self.state,
+            scene_uid,
+            &qsys_camera,
+            task.options.width,
+            task.options.height,
+            settings.pixel_labels,
+        );
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel);
         let (sender, receiver) = mpsc::channel();
@@ -30532,6 +30613,13 @@ mod tests {
         permissions.set_mode(0o755);
         fs::set_permissions(&script, permissions).unwrap();
 
+        app.open_pov_render_tool();
+        let target_scene = app.pov_render_settings.target_scene_uid.unwrap();
+        let mut target_camera = cuemol_qsys::Camera::new();
+        target_camera.set_center(Vector4::new3(4.0, 5.0, 6.0));
+        target_camera.set_cam_dist(12.0);
+        app.state.set_active_view_camera(&target_camera).unwrap();
+        let active_scene = app.state.new_scene("other", true).result_scene;
         app.pov_render_settings.executable = script.to_string_lossy().into_owned();
         app.pov_render_settings.width = 800;
         app.pov_render_settings.height = 600;
@@ -30546,6 +30634,10 @@ mod tests {
         assert!(app.pov_render_job.is_none(), "{}", app.status);
         let result = app.pov_render_result.as_ref().expect("rendered image");
         assert_eq!(fs::read(&result.image_path).unwrap(), b"PNG");
+        let pov = fs::read_to_string(result.work_dir.join("render.pov")).unwrap();
+        assert!(pov.contains("#declare _camera_pos = <4.000000,5.000000,18.000000>"));
+        assert_eq!(app.state.active_scene(), Some(active_scene));
+        assert_ne!(target_scene, active_scene);
         assert!(app
             .log_lines
             .iter()

@@ -6791,6 +6791,10 @@ impl DesktopAppState {
             .map(View::camera)
     }
 
+    pub fn view_camera(&self, view_uid: Uid) -> Option<cuemol_qsys::Camera> {
+        self.command_manager.view(view_uid).map(View::camera)
+    }
+
     pub fn set_active_view_camera(&mut self, camera: &cuemol_qsys::Camera) -> Result<()> {
         let scene_uid = self
             .active_scene
@@ -12570,7 +12574,21 @@ impl DesktopAppState {
         camera: &Camera,
         options: GuiPovSceneOptions,
     ) -> Result<usize> {
-        let snapshot = self.active_render_snapshot(selection_text)?;
+        let scene_uid = self
+            .active_scene
+            .ok_or_else(|| CueMolError::invalid_argument("no active scene"))?;
+        self.export_scene_pov_with_camera(path, scene_uid, selection_text, camera, options)
+    }
+
+    pub fn export_scene_pov_with_camera(
+        &self,
+        path: impl AsRef<Path>,
+        scene_uid: Uid,
+        selection_text: &str,
+        camera: &Camera,
+        options: GuiPovSceneOptions,
+    ) -> Result<usize> {
+        let snapshot = self.render_snapshot(scene_uid, selection_text)?;
         let mesh = cuemol_render::tessellate_snapshot(&snapshot);
         let mut camera = camera.clone();
         if let Some(perspective) = options.perspective {
@@ -12778,6 +12796,17 @@ impl DesktopAppState {
         let Some(scene_uid) = self.active_scene else {
             return Vec::new();
         };
+        self.atom_intr_labels(scene_uid, mvp, width, height, max)
+    }
+
+    pub fn atom_intr_labels(
+        &self,
+        scene_uid: Uid,
+        mvp: [[f32; 4]; 4],
+        width: f32,
+        height: f32,
+        max: usize,
+    ) -> Vec<GuiAtomLabel> {
         let Some(scene) = self.scene_manager().scene(scene_uid) else {
             return Vec::new();
         };
@@ -12905,6 +12934,17 @@ impl DesktopAppState {
         let Some(scene_uid) = self.active_scene else {
             return Vec::new();
         };
+        self.name_labels(scene_uid, mvp, width, height, max)
+    }
+
+    pub fn name_labels(
+        &self,
+        scene_uid: Uid,
+        mvp: [[f32; 4]; 4],
+        width: f32,
+        height: f32,
+        max: usize,
+    ) -> Vec<GuiAtomLabel> {
         let Some(scene) = self.scene_manager().scene(scene_uid) else {
             return Vec::new();
         };
@@ -64176,6 +64216,55 @@ attribute \"dep\" string \"positions\"
         let _ = std::fs::remove_file(pdb_path);
         let _ = std::fs::remove_file(pov_path);
         let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    fn pov_export_can_target_an_inactive_scene_view() {
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-inactive-scene-pov-{}.pov",
+            std::process::id()
+        ));
+        let mut app = DesktopAppState::new();
+        let target_scene = app.new_scene("target", true).result_scene;
+        let target_view = app.active_view_summary().unwrap().uid;
+        let molecule = read_pdb_str(
+            "ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        let object_uid = app
+            .scene_manager_mut()
+            .scene_mut(target_scene)
+            .unwrap()
+            .add_molecule("target molecule", molecule);
+        app.scene_manager_mut()
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("cpk", "atoms");
+        let mut target_camera = Camera::new();
+        target_camera.set_center(Vector4::new3(4.0, 5.0, 6.0));
+        target_camera.set_cam_dist(12.0);
+        target_camera.set_perspective(false);
+        app.set_active_view_camera(&target_camera).unwrap();
+
+        let active_scene = app.new_scene("active", true).result_scene;
+        assert_ne!(active_scene, target_scene);
+        assert_eq!(app.active_scene(), Some(active_scene));
+        let restored_camera = app.view_camera(target_view).unwrap();
+        assert_eq!(restored_camera.center(), target_camera.center());
+        let count = app
+            .export_scene_pov_with_camera(
+                &path,
+                target_scene,
+                "",
+                &restored_camera,
+                GuiPovSceneOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        let pov = std::fs::read_to_string(&path).unwrap();
+        assert!(pov.contains("#declare _camera_pos = <4.000000,5.000000,18.000000>"));
+        assert_eq!(app.active_scene(), Some(active_scene));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
