@@ -13192,14 +13192,41 @@ workspaceProperties.addEventListener("click", async () => {
     await showStyleProperties(selectedStyle());
   } else if (workspaceSelectionKind === "camera" && selectedCamera()) {
     await showReferenceDialog("Camera Properties");
-  } else if (["renderer", "rendererGroup"].includes(workspaceSelectionKind) && selectedRenderer()) {
+  } else if (workspaceSelectionKind === "rendererGroup" && selectedRenderer()) {
+    const object = selectedObject();
+    const scene = snapshot.scenes.find((candidate) => candidate.uid === object?.sceneUid);
+    if (scene && object) {
+      await renameWorkspaceRendererGroup(scene, "rendererGroup", object, selectedRenderer());
+    }
+  } else if (workspaceSelectionKind === "renderer" && selectedRenderer()) {
     showReferenceDialog("Renderer Properties");
   } else if (workspaceSelectionKind === "densityRenderer" && selectedDensityRenderer()) {
-    showReferenceDialog("Renderer Properties");
+    const object = selectedDensityMap();
+    const renderer = selectedDensityRenderer();
+    const scene = snapshot.scenes.find((candidate) => candidate.uid === object?.sceneUid);
+    if (renderer.rendererType === "*group" && scene && object) {
+      await renameWorkspaceRendererGroup(scene, "densityRenderer", object, renderer);
+    } else {
+      showReferenceDialog("Renderer Properties");
+    }
   } else if (workspaceSelectionKind === "surfaceRenderer" && selectedSurfaceRenderer()) {
-    showReferenceDialog("Renderer Properties");
+    const object = selectedSurface();
+    const renderer = selectedSurfaceRenderer();
+    const scene = snapshot.scenes.find((candidate) => candidate.uid === object?.sceneUid);
+    if (renderer.rendererType === "*group" && scene && object) {
+      await renameWorkspaceRendererGroup(scene, "surfaceRenderer", object, renderer);
+    } else {
+      showReferenceDialog("Renderer Properties");
+    }
   } else if (workspaceSelectionKind === "lwRenderer" && selectedLwRenderer()) {
-    showReferenceDialog("Renderer Properties");
+    const object = selectedLwObject();
+    const renderer = selectedLwRenderer();
+    const scene = snapshot.scenes.find((candidate) => candidate.uid === object?.sceneUid);
+    if (renderer.rendererType === "*group" && scene && object) {
+      await renameWorkspaceRendererGroup(scene, "lwRenderer", object, renderer);
+    } else {
+      showReferenceDialog("Renderer Properties");
+    }
   } else if (workspaceSelectionKind === "object" && selectedObject()) {
     showReferenceDialog("Object Properties");
   } else if (workspaceSelectionKind === "densityMap" && selectedDensityMap()) {

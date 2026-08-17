@@ -1091,6 +1091,8 @@ fn tauri_workspace_preserves_renderer_group_hierarchy() {
     assert!(JS.contains("function groupedMoleculeRenderers(renderers)"));
     assert!(JS.contains("candidate.group === renderer.name"));
     assert!(JS.contains("workspaceSelectionKind === \"rendererGroup\""));
+    assert!(JS.contains("workspaceProperties.addEventListener(\"click\", async () =>"));
+    assert!(JS.contains("await renameWorkspaceRendererGroup(scene, \"rendererGroup\""));
     assert!(JS.contains("groupName:"));
     assert!(JS.contains("function workspaceRendererGroupTwisty(object, renderer)"));
     assert!(JS.contains("mutateWithoutViewport(\"set_workspace_renderer_collapsed\""));
@@ -1104,6 +1106,8 @@ fn tauri_workspace_preserves_renderer_group_hierarchy() {
     assert!(CSS.contains(".workspace-object-twisty"));
     assert!(NATIVE_GUI_RS.contains("fn set_workspace_renderer_group_collapsed("));
     assert!(NATIVE_GUI_RS.contains("fn set_workspace_object_collapsed("));
+    assert!(NATIVE_GUI_RS.contains("if let Some(group_name) = self.selected_renderer_group_name()"));
+    assert!(NATIVE_GUI_RS.contains("self.workspace_aux_group_summary(selection)"));
 }
 
 #[test]

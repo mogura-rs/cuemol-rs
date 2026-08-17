@@ -5887,7 +5887,15 @@ impl GuiApplication {
                 if let (Some(object_uid), Some(renderer_uid)) =
                     (self.selected_object, self.selected_renderer)
                 {
-                    self.open_renderer_properties(object_uid, renderer_uid);
+                    if let Some(group_name) = self.selected_renderer_group_name() {
+                        self.open_renderer_group_rename(
+                            NativePropertyObject::Molecule(object_uid),
+                            renderer_uid,
+                            &group_name,
+                        );
+                    } else {
+                        self.open_renderer_properties(object_uid, renderer_uid);
+                    }
                 } else if let Some(object_uid) = self.selected_object {
                     self.open_object_properties(object_uid);
                 } else if let Some(selection) = self.workspace_aux_selection {
@@ -5900,7 +5908,15 @@ impl GuiApplication {
                             self.open_style_properties(selection);
                         }
                         WorkspaceAuxSelection::StyleRoot { .. } => {}
-                        _ => self.open_aux_properties(selection),
+                        _ => {
+                            if let Some((owner, group)) =
+                                self.workspace_aux_group_summary(selection)
+                            {
+                                self.open_renderer_group_rename(owner, group.uid, &group.name);
+                            } else {
+                                self.open_aux_properties(selection);
+                            }
+                        }
                     }
                 } else {
                     self.open_scene_properties();
