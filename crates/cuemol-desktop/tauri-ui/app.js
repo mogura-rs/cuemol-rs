@@ -7795,6 +7795,15 @@ async function renameWorkspaceRendererGroup(scene, kind, object, renderer) {
   });
 }
 
+async function openWorkspaceRendererProperty(scene, kind, object, renderer) {
+  clearWorkspaceRenameTimer();
+  if (renderer.rendererType === "*group") {
+    await renameWorkspaceRendererGroup(scene, kind, object, renderer);
+  } else {
+    showReferenceDialog("Renderer Properties");
+  }
+}
+
 function workspaceCameraInlineRenameInput(scene, camera) {
   const input = document.createElement("input");
   input.className = "workspace-inline-rename";
@@ -9564,10 +9573,9 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           renderer.uid,
         );
         configureWorkspaceRendererDrag(rendererRow, object, renderer, isRenaming);
-        rendererRow.addEventListener("dblclick", () => {
-          clearWorkspaceRenameTimer();
-          showReferenceDialog("Renderer Properties");
-        });
+        rendererRow.addEventListener("dblclick", () =>
+          openWorkspaceRendererProperty(scene, selectionKind, object, renderer),
+        );
         rendererRow.addEventListener("contextmenu", async (event) => {
           event.preventDefault();
           if (showWorkspaceMultipleContextMenu(event, rendererTarget)) return;
@@ -9725,10 +9733,9 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           renderer,
           rendererIsRenaming,
         );
-        rendererRow.addEventListener("dblclick", () => {
-          clearWorkspaceRenameTimer();
-          showReferenceDialog("Renderer Properties");
-        });
+        rendererRow.addEventListener("dblclick", () =>
+          openWorkspaceRendererProperty(scene, "surfaceRenderer", surface, renderer),
+        );
         rendererRow.addEventListener("contextmenu", async (event) => {
           event.preventDefault();
           if (showWorkspaceMultipleContextMenu(event, rendererTarget)) return;
@@ -9879,10 +9886,9 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           renderer.uid,
         );
         configureWorkspaceRendererDrag(rendererRow, map, renderer, rendererIsRenaming);
-        rendererRow.addEventListener("dblclick", () => {
-          clearWorkspaceRenameTimer();
-          showReferenceDialog("Renderer Properties");
-        });
+        rendererRow.addEventListener("dblclick", () =>
+          openWorkspaceRendererProperty(scene, "densityRenderer", map, renderer),
+        );
         rendererRow.addEventListener("contextmenu", async (event) => {
           event.preventDefault();
           if (showWorkspaceMultipleContextMenu(event, rendererTarget)) return;
@@ -10035,10 +10041,9 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           renderer.uid,
         );
         configureWorkspaceRendererDrag(rendererRow, object, renderer, rendererIsRenaming);
-        rendererRow.addEventListener("dblclick", () => {
-          clearWorkspaceRenameTimer();
-          showReferenceDialog("Renderer Properties");
-        });
+        rendererRow.addEventListener("dblclick", () =>
+          openWorkspaceRendererProperty(scene, "lwRenderer", object, renderer),
+        );
         rendererRow.addEventListener("contextmenu", async (event) => {
           event.preventDefault();
           if (showWorkspaceMultipleContextMenu(event, rendererTarget)) return;

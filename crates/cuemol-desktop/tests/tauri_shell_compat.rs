@@ -1095,6 +1095,10 @@ fn tauri_workspace_preserves_renderer_group_hierarchy() {
     assert!(JS.contains("await renameWorkspaceRendererGroup(scene, \"rendererGroup\""));
     assert!(JS.contains("groupName:"));
     assert!(JS.contains("function workspaceRendererGroupTwisty(object, renderer)"));
+    assert!(
+        JS.contains("async function openWorkspaceRendererProperty(scene, kind, object, renderer)")
+    );
+    assert!(JS.contains("if (renderer.rendererType === \"*group\")"));
     assert!(JS.contains("mutateWithoutViewport(\"set_workspace_renderer_collapsed\""));
     assert!(JS.contains("node.renderer.uiCollapsed"));
     assert!(JS.contains("function workspaceObjectTwisty(object)"));
@@ -1106,6 +1110,8 @@ fn tauri_workspace_preserves_renderer_group_hierarchy() {
     assert!(CSS.contains(".workspace-object-twisty"));
     assert!(NATIVE_GUI_RS.contains("fn set_workspace_renderer_group_collapsed("));
     assert!(NATIVE_GUI_RS.contains("fn set_workspace_object_collapsed("));
+    assert!(NATIVE_GUI_RS.contains("if response.double_clicked()"));
+    assert!(NATIVE_GUI_RS.contains("self.open_renderer_group_rename("));
     assert!(NATIVE_GUI_RS.contains("if let Some(group_name) = self.selected_renderer_group_name()"));
     assert!(NATIVE_GUI_RS.contains("self.workspace_aux_group_summary(selection)"));
 }

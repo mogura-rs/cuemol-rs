@@ -4861,6 +4861,14 @@ impl GuiApplication {
                 self.selected_renderer = None;
                 self.workspace_aux_selection = None;
             }
+            if scene_response.double_clicked() {
+                self.activate_workspace_scene(scene.uid, camera);
+                self.workspace_multiple_selection.clear();
+                self.selected_object = None;
+                self.selected_renderer = None;
+                self.workspace_aux_selection = None;
+                self.open_scene_properties();
+            }
             let scene_background = self
                 .state
                 .scene_manager()
@@ -4972,7 +4980,8 @@ impl GuiApplication {
                                                 locked,
                                             );
                                         }
-                                        if ui.selectable_label(selected, label).clicked() {
+                                        let response = ui.selectable_label(selected, label);
+                                        if response.clicked() {
                                             self.activate_workspace_scene(scene.uid, camera);
                                             let (multiple, range) = ui.input(|input| {
                                                 (input.modifiers.command, input.modifiers.shift)
@@ -4984,6 +4993,9 @@ impl GuiApplication {
                                                 self.selected_renderer = None;
                                                 self.workspace_aux_selection = None;
                                             }
+                                        }
+                                        if response.double_clicked() {
+                                            self.open_object_properties(object.uid);
                                         }
                                     })
                                 },
@@ -5087,7 +5099,8 @@ impl GuiApplication {
                                             );
                                         }
                                         let label = format!("{} ({})", map.name, map.class_name);
-                                        if ui.selectable_label(selected, label).clicked() {
+                                        let response = ui.selectable_label(selected, label);
+                                        if response.clicked() {
                                             self.activate_workspace_scene(scene.uid, camera);
                                             let (multiple, range) = ui.input(|input| {
                                                 (input.modifiers.command, input.modifiers.shift)
@@ -5100,6 +5113,9 @@ impl GuiApplication {
                                                 self.workspace_aux_selection =
                                                     Some(object_selection);
                                             }
+                                        }
+                                        if response.double_clicked() {
+                                            self.open_density_map_properties(map.uid);
                                         }
                                     })
                                 },
@@ -5203,7 +5219,8 @@ impl GuiApplication {
                                         }
                                         let label =
                                             format!("{} ({})", surface.name, surface.class_name);
-                                        if ui.selectable_label(selected, label).clicked() {
+                                        let response = ui.selectable_label(selected, label);
+                                        if response.clicked() {
                                             self.activate_workspace_scene(scene.uid, camera);
                                             let (multiple, range) = ui.input(|input| {
                                                 (input.modifiers.command, input.modifiers.shift)
@@ -5216,6 +5233,9 @@ impl GuiApplication {
                                                 self.workspace_aux_selection =
                                                     Some(object_selection);
                                             }
+                                        }
+                                        if response.double_clicked() {
+                                            self.open_surface_properties(surface.uid);
                                         }
                                     })
                                 },
@@ -5316,7 +5336,8 @@ impl GuiApplication {
                                         }
                                         let label =
                                             format!("{} ({})", object.name, object.class_name);
-                                        if ui.selectable_label(selected, label).clicked() {
+                                        let response = ui.selectable_label(selected, label);
+                                        if response.clicked() {
                                             self.activate_workspace_scene(scene.uid, camera);
                                             let (multiple, range) = ui.input(|input| {
                                                 (input.modifiers.command, input.modifiers.shift)
@@ -5329,6 +5350,9 @@ impl GuiApplication {
                                                 self.workspace_aux_selection =
                                                     Some(object_selection);
                                             }
+                                        }
+                                        if response.double_clicked() {
+                                            self.open_lw_object_properties(object.uid);
                                         }
                                     })
                                 },
@@ -6697,7 +6721,8 @@ impl GuiApplication {
                     } else {
                         format!("{} ({})", renderer.name, renderer.renderer_type)
                     };
-                    if ui.selectable_label(selected, label).clicked() {
+                    let response = ui.selectable_label(selected, label);
+                    if response.clicked() {
                         self.activate_workspace_scene(scene_uid, camera);
                         let (multiple, range) =
                             ui.input(|input| (input.modifiers.command, input.modifiers.shift));
@@ -6705,6 +6730,13 @@ impl GuiApplication {
                             self.selected_object = None;
                             self.selected_renderer = None;
                             self.workspace_aux_selection = Some(selection);
+                        }
+                    }
+                    if response.double_clicked() {
+                        if is_group {
+                            self.open_renderer_group_rename(owner, renderer.uid, &renderer.name);
+                        } else {
+                            self.open_aux_properties(selection);
                         }
                     }
                 });
@@ -6862,6 +6894,17 @@ impl GuiApplication {
                             self.selected_object = Some(object_uid);
                             self.selected_renderer = Some(renderer.uid);
                             self.workspace_aux_selection = None;
+                        }
+                    }
+                    if response.double_clicked() {
+                        if is_group {
+                            self.open_renderer_group_rename(
+                                NativePropertyObject::Molecule(object_uid),
+                                renderer.uid,
+                                &renderer.name,
+                            );
+                        } else {
+                            self.open_renderer_properties(object_uid, renderer.uid);
                         }
                     }
                     response.context_menu(|ui| {
