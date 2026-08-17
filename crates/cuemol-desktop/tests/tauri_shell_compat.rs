@@ -1064,6 +1064,11 @@ fn close_tab_matches_last_modified_view_confirmation_flow() {
     assert!(CSS.contains(".reference-dialog.confirm-close-dialog"));
     assert!(NATIVE_GUI_RS.contains("fn close_tab_dialog"));
     assert!(NATIVE_GUI_RS.contains("close_after_scene_save"));
+    assert!(NATIVE_GUI_RS.contains("fn request_application_exit"));
+    assert!(NATIVE_GUI_RS.contains("fn application_exit_dialog"));
+    assert!(NATIVE_GUI_RS.contains("Save All"));
+    assert!(NATIVE_GUI_RS.contains("app.exit_ready"));
+    assert!(NATIVE_GUI_RS.contains("app.persist_config_state()"));
     assert!(TAURI_APP_RS.contains(".close_active_view()"));
 }
 

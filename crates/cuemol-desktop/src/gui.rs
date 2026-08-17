@@ -418,12 +418,13 @@ impl NativeRunner {
             return;
         }
         if matches!(event, WindowEvent::CloseRequested) {
-            if let Some(app) = self.app.as_ref() {
-                if let Err(error) = app.persist_config_state() {
-                    eprintln!("Failed to save native session: {error}");
-                }
+            if let Some(app) = self.app.as_mut() {
+                app.request_application_exit();
+                window.request_redraw();
+            } else {
+                event_loop.exit();
             }
-            std::process::exit(0);
+            return;
         }
         if matches!(event, WindowEvent::RedrawRequested) && self.should_exit_now() {
             event_loop.exit();
@@ -453,6 +454,13 @@ impl NativeRunner {
                 let full_output = self.egui_ctx.run(raw_input, |ctx| {
                     app.ui(ctx, &mut gpu.camera);
                 });
+                if app.exit_ready {
+                    if let Err(error) = app.persist_config_state() {
+                        eprintln!("Failed to save native session: {error}");
+                    }
+                    event_loop.exit();
+                    return;
+                }
                 egui_state.handle_platform_output(window.as_ref(), full_output.platform_output);
                 let paint_jobs = self
                     .egui_ctx
@@ -1027,6 +1035,8 @@ struct GuiApplication {
     multiple_delete_draft: Option<NativeMultipleDeleteDraft>,
     close_tab_draft: Option<NativeCloseTabDraft>,
     close_after_scene_save: bool,
+    exit_confirmation: bool,
+    exit_ready: bool,
     reload_scene_draft: Option<NativeReloadSceneDraft>,
     atom_intr_edit_draft: Option<NativeAtomIntrEditDraft>,
     renderer_setup_draft: Option<NativeRendererSetupDraft>,
@@ -4221,6 +4231,8 @@ impl GuiApplication {
             multiple_delete_draft: None,
             close_tab_draft: None,
             close_after_scene_save: false,
+            exit_confirmation: false,
+            exit_ready: false,
             reload_scene_draft: None,
             atom_intr_edit_draft: None,
             renderer_setup_draft: None,
@@ -16998,6 +17010,52 @@ impl GuiApplication {
         self.set_status("New window mapped to a new scene in this native runner");
     }
 
+    fn request_application_exit(&mut self) {
+        let has_modified_scene = self
+            .state
+            .scene_summaries()
+            .iter()
+            .any(|scene| self.modified_scenes.contains(&scene.uid));
+        self.exit_confirmation = has_modified_scene;
+        self.exit_ready = !has_modified_scene;
+    }
+
+    fn save_modified_scenes_for_exit(&mut self, camera: &mut CameraController) -> bool {
+        let scene_uids = self
+            .state
+            .scene_summaries()
+            .into_iter()
+            .filter_map(|scene| {
+                self.modified_scenes
+                    .contains(&scene.uid)
+                    .then_some(scene.uid)
+            })
+            .collect::<Vec<_>>();
+        for scene_uid in scene_uids {
+            self.activate_workspace_scene(scene_uid, camera);
+            if self.state.active_scene() != Some(scene_uid) {
+                return false;
+            }
+            let path = self
+                .state
+                .active_scene_source_path()
+                .filter(|path| path.is_file())
+                .map(Path::to_path_buf)
+                .or_else(|| {
+                    native_file_dialog(NativeFileDialog::SaveScene, self.save_path.as_str())
+                });
+            let Some(path) = path else {
+                self.set_status("Application exit canceled");
+                return false;
+            };
+            self.save_current_scene_to_path(camera, &path);
+            if self.modified_scenes.contains(&scene_uid) {
+                return false;
+            }
+        }
+        true
+    }
+
     fn close_current_scene(&mut self, camera: &mut CameraController) {
         let Some(scene) = self.state.active_scene_summary() else {
             self.set_status("No active tab");
@@ -18577,6 +18635,7 @@ impl GuiApplication {
         self.style_delete_dialog(ctx);
         self.multiple_delete_dialog(ctx);
         self.close_tab_dialog(ctx, camera);
+        self.application_exit_dialog(ctx, camera);
         self.reload_scene_dialog(ctx, camera);
         self.atom_intr_edit_dialog(ctx);
         self.renderer_setup_dialog(ctx, camera);
@@ -26220,6 +26279,73 @@ impl GuiApplication {
         }
     }
 
+    fn application_exit_dialog(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
+        if !self.exit_confirmation {
+            return;
+        }
+        let modified_scenes = self
+            .state
+            .scene_summaries()
+            .into_iter()
+            .filter(|scene| self.modified_scenes.contains(&scene.uid))
+            .collect::<Vec<_>>();
+        if modified_scenes.is_empty() {
+            self.exit_confirmation = false;
+            self.exit_ready = true;
+            return;
+        }
+        let mut open = true;
+        let mut result = None;
+        egui::Window::new("Quit CueMol2")
+            .default_width(420.0)
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("Save changes before quitting?");
+                for scene in &modified_scenes {
+                    ui.label(format!(
+                        "• {}",
+                        nonempty_or(scene.name.clone(), "(unnamed)")
+                    ));
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        result = Some("cancel");
+                    }
+                    if ui.button("Don't Save").clicked() {
+                        result = Some("discard");
+                    }
+                    if ui.button("Save All").clicked() {
+                        result = Some("save");
+                    }
+                });
+            });
+        match result {
+            Some("discard") => {
+                self.exit_confirmation = false;
+                self.exit_ready = true;
+            }
+            Some("save") => {
+                if self.save_modified_scenes_for_exit(camera) {
+                    self.exit_confirmation = false;
+                    self.exit_ready = true;
+                }
+            }
+            Some("cancel") => {
+                self.exit_confirmation = false;
+                self.exit_ready = false;
+                self.set_status("Application exit canceled");
+            }
+            _ if !open => {
+                self.exit_confirmation = false;
+                self.exit_ready = false;
+            }
+            _ => {}
+        }
+    }
+
     fn reload_scene_dialog(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         let Some(draft) = self.reload_scene_draft.take() else {
             return;
@@ -32808,6 +32934,33 @@ mod tests {
         app.close_current_tab_unchecked(&mut camera);
         assert!(app.state.scene_summaries().is_empty());
         assert!(app.state.view_summaries().is_empty());
+    }
+
+    #[test]
+    fn native_application_exit_requires_confirmation_for_modified_scenes() {
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.request_application_exit();
+        assert!(app.exit_ready);
+        assert!(!app.exit_confirmation);
+
+        app.exit_ready = false;
+        let scene_uid = app.state.active_scene().unwrap();
+        app.modified_scenes.insert(scene_uid);
+        app.request_application_exit();
+        assert!(!app.exit_ready);
+        assert!(app.exit_confirmation);
+
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-native-exit-save-{}-{}.qsc",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        app.save_current_scene_to_path(&camera, &path);
+        app.modified_scenes.insert(scene_uid);
+        assert!(app.save_modified_scenes_for_exit(&mut camera));
+        assert!(!app.modified_scenes.contains(&scene_uid));
+        fs::remove_file(path).expect("remove exit-save scene");
     }
 
     #[test]
