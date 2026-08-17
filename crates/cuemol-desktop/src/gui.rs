@@ -418,6 +418,11 @@ impl NativeRunner {
             return;
         }
         if matches!(event, WindowEvent::CloseRequested) {
+            if let Some(app) = self.app.as_ref() {
+                if let Err(error) = app.persist_config_state() {
+                    eprintln!("Failed to save native session: {error}");
+                }
+            }
             std::process::exit(0);
         }
         if matches!(event, WindowEvent::RedrawRequested) && self.should_exit_now() {
@@ -4098,6 +4103,16 @@ impl GuiApplication {
         let mut state = DesktopAppState::new();
         state.new_scene("Untitled 1", true);
         let show_toolbar = !config_bool(&state, "cuemol2.ui.ribbon.collapsed", false);
+        let left_panel_visible = LeftPanel::ALL.map(|panel| {
+            !matches!(
+                state
+                    .config_value(&format!("left_panel:{}:visible", panel.title()))
+                    .trim()
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "false" | "0" | "no" | "off"
+            )
+        });
         let sequence_name_width = state
             .config_value("sequence_panel:name_width")
             .parse::<f32>()
@@ -4230,7 +4245,7 @@ impl GuiApplication {
             measure_mode: MeasureMode::Distance,
             show_toolbar,
             show_workspace: true,
-            left_panel_visible: [true; LeftPanel::ALL.len()],
+            left_panel_visible,
             reset_left_panel_layout: false,
             // CueMol2 opens properties on demand (no docked inspector); start closed.
             show_inspector: false,
@@ -5058,9 +5073,19 @@ impl GuiApplication {
                     }
                     ui.menu_button("Panels", |ui| {
                         for panel in LeftPanel::ALL {
-                            let visible = &mut self.left_panel_visible[panel.index()];
-                            if ui.checkbox(visible, panel.title()).clicked() && *visible {
-                                self.show_workspace = true;
+                            let index = panel.index();
+                            if ui
+                                .checkbox(&mut self.left_panel_visible[index], panel.title())
+                                .changed()
+                            {
+                                let visible = self.left_panel_visible[index];
+                                self.state.put_config_value(
+                                    &format!("left_panel:{}:visible", panel.title()),
+                                    visible.to_string(),
+                                );
+                                if visible {
+                                    self.show_workspace = true;
+                                }
                             }
                         }
                     });
@@ -5317,11 +5342,32 @@ impl GuiApplication {
                         } else if reset_layout {
                             state.set_open(panel.default_open());
                         }
+                        let mut close_panel = false;
                         state
-                            .show_header(ui, |ui| ui.label(panel.title()))
+                            .show_header(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(panel.title());
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            close_panel = ui
+                                                .small_button("×")
+                                                .on_hover_text("Close panel")
+                                                .clicked();
+                                        },
+                                    );
+                                });
+                            })
                             .body(|ui| {
                                 self.left_panel_body(ui, camera, panel);
                             });
+                        if close_panel {
+                            self.left_panel_visible[panel.index()] = false;
+                            self.state.put_config_value(
+                                &format!("left_panel:{}:visible", panel.title()),
+                                "false".to_string(),
+                            );
+                        }
                     }
                     self.reset_left_panel_layout = false;
                 });
@@ -19241,6 +19287,10 @@ impl GuiApplication {
                     .put_config_value(&format!("shortcut:{}:{field}", shortcut.id), value);
             }
         }
+        self.persist_config_state()
+    }
+
+    fn persist_config_state(&self) -> std::result::Result<(), String> {
         let path = PathBuf::from(self.config_path.trim());
         if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
             fs::create_dir_all(parent).map_err(|error| {
@@ -19256,6 +19306,23 @@ impl GuiApplication {
     }
 
     fn apply_stored_preferences(&mut self) {
+        self.show_toolbar = !config_bool(&self.state, "cuemol2.ui.ribbon.collapsed", false);
+        self.left_panel_visible = LeftPanel::ALL.map(|panel| {
+            !matches!(
+                self.state
+                    .config_value(&format!("left_panel:{}:visible", panel.title()))
+                    .trim()
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "false" | "0" | "no" | "off"
+            )
+        });
+        self.sequence_name_width = self
+            .state
+            .config_value("sequence_panel:name_width")
+            .parse::<f32>()
+            .unwrap_or(140.0)
+            .clamp(50.0, 400.0);
         for (style_key, config_key) in [
             ("DefaultLabel.font_name", "style:DefaultLabel.font_name"),
             ("DefaultLabel.font_size", "style:DefaultLabel.font_size"),
@@ -26757,6 +26824,12 @@ impl GuiApplication {
     fn restore_panels(&mut self) {
         self.show_workspace = true;
         self.left_panel_visible.fill(true);
+        for panel in LeftPanel::ALL {
+            self.state.put_config_value(
+                &format!("left_panel:{}:visible", panel.title()),
+                "true".to_string(),
+            );
+        }
         self.reset_left_panel_layout = true;
         self.set_status("Panel layout restored");
     }
@@ -32748,10 +32821,16 @@ mod tests {
     fn native_startup_applies_preloaded_config_without_file_io() {
         let app = GuiApplication::new_with_config_source(NativeConfigSource {
             path: Some(PathBuf::from("preloaded.conf")),
-            input: Ok(Some("view_input:tbrad\t1.25\n".to_string())),
+            input: Ok(Some(
+                "view_input:tbrad\t1.25\ncuemol2.ui.ribbon.collapsed\ttrue\nleft_panel:Workspace:visible\tfalse\nsequence_panel:name_width\t220\n"
+                    .to_string(),
+            )),
         });
         assert_eq!(app.state.config_value("view_input:tbrad"), "1.25");
         assert_eq!(app.state.view_input_config().tbrad(), 1.25);
+        assert!(!app.show_toolbar);
+        assert!(!app.left_panel_visible[LeftPanel::Workspace.index()]);
+        assert_eq!(app.sequence_name_width, 220.0);
         assert_eq!(app.status, "Loaded config preloaded.conf");
     }
 
@@ -32857,7 +32936,13 @@ mod tests {
 
     #[test]
     fn native_window_panel_menu_restores_reference_defaults() {
+        let path = std::env::temp_dir().join(format!(
+            "cuemol-native-panel-session-{}-{}.tsv",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
         let mut app = GuiApplication::new();
+        app.config_path = path.to_string_lossy().into_owned();
         assert!(app.show_toolbar);
         app.toggle_toolbar();
         assert!(!app.show_toolbar);
@@ -32873,6 +32958,15 @@ mod tests {
         );
         assert!(app.left_panel_visible.iter().all(|visible| *visible));
         app.left_panel_visible[LeftPanel::Workspace.index()] = false;
+        app.state
+            .put_config_value("left_panel:Workspace:visible", "false".to_string());
+        app.persist_config_state().expect("save native session");
+        let input = fs::read_to_string(&path).expect("read native session");
+        let mut app = GuiApplication::new_with_config_source(NativeConfigSource {
+            path: Some(path.clone()),
+            input: Ok(Some(input)),
+        });
+        assert!(!app.left_panel_visible[LeftPanel::Workspace.index()]);
         app.reset_left_panel_layout = false;
         app.show_workspace = false;
 
@@ -32880,8 +32974,19 @@ mod tests {
 
         assert!(app.show_workspace);
         assert!(app.left_panel_visible.iter().all(|visible| *visible));
+        for panel in LeftPanel::ALL {
+            assert_eq!(
+                app.state
+                    .config_value(&format!("left_panel:{}:visible", panel.title())),
+                "true"
+            );
+        }
         assert!(app.reset_left_panel_layout);
         assert!(!app.show_inspector);
+        app.persist_config_state().expect("save restored session");
+        let input = fs::read_to_string(&path).expect("read restored session");
+        assert!(input.contains("left_panel:Workspace:visible\ttrue"));
+        fs::remove_file(path).expect("remove native session");
     }
 
     #[test]

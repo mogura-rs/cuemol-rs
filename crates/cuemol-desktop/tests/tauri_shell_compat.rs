@@ -406,6 +406,9 @@ fn tauri_window_menu_toggles_reference_panels_and_lists_windows() {
     assert!(JS.contains("function saveSidePanelState()"));
     assert!(JS.contains("function restoreSidePanelState()"));
     assert!(JS.contains("for (const name of openPanels) renderSidePanel(name)"));
+    assert!(NATIVE_GUI_RS.contains("left_panel:{}:visible"));
+    assert!(NATIVE_GUI_RS.contains(".small_button(\"×\")"));
+    assert!(NATIVE_GUI_RS.contains("Close panel"));
     assert!(JS.contains("getAllWebviewWindows"));
     assert!(JS.contains("await appWindow.setFocus()"));
     assert!(CAPABILITIES.contains(r#""cuemol-*""#));
