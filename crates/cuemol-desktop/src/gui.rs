@@ -1134,6 +1134,7 @@ struct GuiApplication {
     background: SceneBackground,
     color_proofing: bool,
     bottom_tab: BottomTab,
+    bottom_panel_height: f32,
     sequence_marker: Option<NativeSequencePosition>,
     sequence_drag_start: Option<NativeSequencePosition>,
     sequence_drag_end: Option<NativeSequencePosition>,
@@ -1816,6 +1817,24 @@ enum BottomTab {
     Output,
     Sequence,
     Trajectory,
+}
+
+impl BottomTab {
+    fn config_name(self) -> &'static str {
+        match self {
+            Self::Output => "output",
+            Self::Sequence => "sequence",
+            Self::Trajectory => "trajectory",
+        }
+    }
+
+    fn from_config(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "sequence" => Self::Sequence,
+            "trajectory" => Self::Trajectory,
+            _ => Self::Output,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4127,6 +4146,13 @@ impl GuiApplication {
             .parse::<f32>()
             .unwrap_or(250.0)
             .clamp(220.0, 360.0);
+        let bottom_tab = BottomTab::from_config(&state.config_value("bottom_panel:tab"));
+        let bottom_panel_height = state
+            .config_value("bottom_panel:height")
+            .parse::<f32>()
+            .unwrap_or(150.0)
+            .clamp(80.0, 600.0);
+        let show_bottom_panel = config_bool(&state, "bottom_panel:visible", true);
         let sequence_name_width = state
             .config_value("sequence_panel:name_width")
             .parse::<f32>()
@@ -4230,7 +4256,8 @@ impl GuiApplication {
             snapshot_revision: 0,
             background: SceneBackground::Black,
             color_proofing: false,
-            bottom_tab: BottomTab::Output,
+            bottom_tab,
+            bottom_panel_height,
             sequence_marker: None,
             sequence_drag_start: None,
             sequence_drag_end: None,
@@ -4269,7 +4296,7 @@ impl GuiApplication {
             renderer_properties_draft: None,
             renderer_group_rename_draft: None,
             surface_regenerate_draft: None,
-            show_bottom_panel: true,
+            show_bottom_panel,
             show_about: false,
             show_options: false,
             options_pane: OptionsPane::Misc,
@@ -4461,6 +4488,8 @@ impl GuiApplication {
         self.status_bar(ctx);
         if self.show_bottom_panel {
             self.bottom_panel(ctx, camera);
+        } else {
+            self.collapsed_bottom_panel(ctx);
         }
         if self.show_workspace && self.left_panel_visible.iter().any(|visible| *visible) {
             self.left_panel(ctx, camera);
@@ -13762,9 +13791,10 @@ impl GuiApplication {
     }
 
     fn bottom_panel(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
-        egui::TopBottomPanel::bottom("bottom_panel")
+        let mut collapse = false;
+        let response = egui::TopBottomPanel::bottom("bottom_panel")
             .resizable(true)
-            .default_height(150.0)
+            .default_height(self.bottom_panel_height)
             .min_height(if self.bottom_tab == BottomTab::Trajectory {
                 205.0
             } else {
@@ -13786,9 +13816,67 @@ impl GuiApplication {
                 );
                 ui.separator();
                 ui.horizontal(|ui| {
+                    let previous = self.bottom_tab;
                     ui.selectable_value(&mut self.bottom_tab, BottomTab::Output, "Output");
                     ui.selectable_value(&mut self.bottom_tab, BottomTab::Sequence, "Sequence");
                     ui.selectable_value(&mut self.bottom_tab, BottomTab::Trajectory, "Trajectory");
+                    if self.bottom_tab != previous {
+                        self.state.put_config_value(
+                            "bottom_panel:tab",
+                            self.bottom_tab.config_name().to_string(),
+                        );
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        collapse = ui
+                            .small_button("▾")
+                            .on_hover_text("Collapse bottom panel")
+                            .clicked();
+                    });
+                });
+            });
+        let height = response.response.rect.height().clamp(80.0, 600.0);
+        if (self.bottom_panel_height - height).abs() >= 0.5 {
+            self.bottom_panel_height = height;
+            self.state
+                .put_config_value("bottom_panel:height", height.to_string());
+        }
+        if collapse {
+            self.show_bottom_panel = false;
+            self.state
+                .put_config_value("bottom_panel:visible", "false".to_string());
+        }
+    }
+
+    fn collapsed_bottom_panel(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::bottom("bottom_panel_collapsed")
+            .exact_height(28.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let previous = self.bottom_tab;
+                    let mut expand = ui
+                        .small_button("▴")
+                        .on_hover_text("Expand bottom panel")
+                        .clicked();
+                    expand |= ui
+                        .selectable_value(&mut self.bottom_tab, BottomTab::Output, "Output")
+                        .clicked();
+                    expand |= ui
+                        .selectable_value(&mut self.bottom_tab, BottomTab::Sequence, "Sequence")
+                        .clicked();
+                    expand |= ui
+                        .selectable_value(&mut self.bottom_tab, BottomTab::Trajectory, "Trajectory")
+                        .clicked();
+                    if self.bottom_tab != previous {
+                        self.state.put_config_value(
+                            "bottom_panel:tab",
+                            self.bottom_tab.config_name().to_string(),
+                        );
+                    }
+                    if expand {
+                        self.show_bottom_panel = true;
+                        self.state
+                            .put_config_value("bottom_panel:visible", "true".to_string());
+                    }
                 });
             });
     }
@@ -19360,6 +19448,14 @@ impl GuiApplication {
             .parse::<f32>()
             .unwrap_or(250.0)
             .clamp(220.0, 360.0);
+        self.bottom_tab = BottomTab::from_config(&self.state.config_value("bottom_panel:tab"));
+        self.bottom_panel_height = self
+            .state
+            .config_value("bottom_panel:height")
+            .parse::<f32>()
+            .unwrap_or(150.0)
+            .clamp(80.0, 600.0);
+        self.show_bottom_panel = config_bool(&self.state, "bottom_panel:visible", true);
         self.sequence_name_width = self
             .state
             .config_value("sequence_panel:name_width")
@@ -26729,6 +26825,10 @@ impl GuiApplication {
                 self.trajectory_scrub_preview = None;
                 self.bottom_tab = BottomTab::Trajectory;
                 self.show_bottom_panel = true;
+                self.state
+                    .put_config_value("bottom_panel:tab", "trajectory".to_string());
+                self.state
+                    .put_config_value("bottom_panel:visible", "true".to_string());
                 self.sync_active_scene_properties();
                 self.rebuild_snapshot();
                 if setup.recenter {
@@ -32871,7 +32971,7 @@ mod tests {
         let app = GuiApplication::new_with_config_source(NativeConfigSource {
             path: Some(PathBuf::from("preloaded.conf")),
             input: Ok(Some(
-                "view_input:tbrad\t1.25\ncuemol2.ui.ribbon.collapsed\ttrue\nleft_panel:Workspace:visible\tfalse\nleft_panel:Workspace:collapsed\ttrue\nleft_panel:width\t310\nsequence_panel:name_width\t220\n"
+                "view_input:tbrad\t1.25\ncuemol2.ui.ribbon.collapsed\ttrue\nleft_panel:Workspace:visible\tfalse\nleft_panel:Workspace:collapsed\ttrue\nleft_panel:width\t310\nbottom_panel:visible\tfalse\nbottom_panel:tab\tsequence\nbottom_panel:height\t240\nsequence_panel:name_width\t220\n"
                     .to_string(),
             )),
         });
@@ -32881,6 +32981,9 @@ mod tests {
         assert!(!app.left_panel_visible[LeftPanel::Workspace.index()]);
         assert!(!app.left_panel_open[LeftPanel::Workspace.index()]);
         assert_eq!(app.left_panel_width, 310.0);
+        assert!(!app.show_bottom_panel);
+        assert_eq!(app.bottom_tab, BottomTab::Sequence);
+        assert_eq!(app.bottom_panel_height, 240.0);
         assert_eq!(app.sequence_name_width, 220.0);
         assert_eq!(app.status, "Loaded config preloaded.conf");
     }
@@ -37285,6 +37388,11 @@ mod tests {
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             app.ui(ctx, &mut camera);
         });
+        app.show_bottom_panel = false;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            app.ui(ctx, &mut camera);
+        });
+        app.show_bottom_panel = true;
 
         // With a real molecule (when the reference tree is present), drive every
         // section body directly so the non-empty branches run too.

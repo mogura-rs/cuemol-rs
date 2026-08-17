@@ -35,6 +35,11 @@ fn tauri_shell_matches_the_reference_xul_dock_order() {
     assert!(CSS.contains("var(--bottom-panel-height, 148px)"));
     assert!(JS.contains("function setupBottomPanelSplitter()"));
     assert!(JS.contains("BOTTOM_PANEL_HEIGHT_STORAGE_KEY"));
+    assert!(NATIVE_GUI_RS.contains("bottom_panel:height"));
+    assert!(NATIVE_GUI_RS.contains("bottom_panel:visible"));
+    assert!(NATIVE_GUI_RS.contains("bottom_panel:tab"));
+    assert!(NATIVE_GUI_RS.contains("Collapse bottom panel"));
+    assert!(NATIVE_GUI_RS.contains("Expand bottom panel"));
     assert!(JS.contains("startHeight + startY - moveEvent.clientY"));
     assert!(JS.contains("expandedBottomPanelHeight"));
     assert!(JS.contains("bottomPanelHeight === 0 ? expandedBottomPanelHeight"));
