@@ -7491,14 +7491,7 @@ function workspaceObjectContextItems(scene, object) {
     null,
     {
       label: "New Renderer...",
-      action: async () => {
-        if (!scene.active && !(await mutate("activate_scene", { sceneUid: scene.uid }))) return;
-        await mutate("add_renderer", {
-          objectUid: object.uid,
-          rendererType: rendererType.value,
-          groupName: null,
-        });
-      },
+      action: () => showNewWorkspaceRendererDialog(scene, "renderer", object),
     },
     {
       label: "New Group...",
@@ -7808,19 +7801,12 @@ function workspaceAuxObjectContextItems(scene, kind, object) {
     null,
     {
       label: "New Renderer...",
-      action: async () => {
-        if (!(await activate())) return;
-        if (isLightweight) {
-          await mutate("add_lw_renderer", { objectUid: object.uid });
-        } else if (isDensityMap) {
-          await mutate("add_density_renderer", {
-            mapUid: object.uid,
-            rendererType: rendererType.value,
-          });
-        } else {
-          await mutate("add_surface_renderer", { surfaceUid: object.uid });
-        }
-      },
+      action: () =>
+        showNewWorkspaceRendererDialog(
+          scene,
+          isLightweight ? "lwRenderer" : isDensityMap ? "densityRenderer" : "surfaceRenderer",
+          object,
+        ),
     },
     {
       label: "New Group...",
@@ -7874,26 +7860,6 @@ async function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
     if (snapshot.activeSceneUid === scene.uid) return true;
     return mutate("activate_scene", { sceneUid: scene.uid });
   };
-  const addRenderer = async (groupName = null) => {
-    if (!(await activate())) return;
-    if (kind === "lwRenderer") {
-      await mutate("add_lw_renderer", {
-        objectUid: object.uid,
-        groupName,
-      });
-    } else if (kind === "densityRenderer") {
-      await mutate("add_density_renderer", {
-        mapUid: object.uid,
-        rendererType: rendererType.value,
-        groupName,
-      });
-    } else {
-      await mutate("add_surface_renderer", {
-        surfaceUid: object.uid,
-        groupName,
-      });
-    }
-  };
   if (renderer.rendererType === "*group") {
     return [
       {
@@ -7921,7 +7887,7 @@ async function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
       },
       {
         label: "New Renderer...",
-        action: () => addRenderer(renderer.name),
+        action: () => showNewWorkspaceRendererDialog(scene, kind, object, renderer.name),
       },
       {
         label: "Delete",
@@ -8070,7 +8036,7 @@ async function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
     null,
     {
       label: "New Renderer...",
-      action: () => addRenderer(),
+      action: () => showNewWorkspaceRendererDialog(scene, kind, object),
     },
     {
       label: "Delete",
@@ -8160,6 +8126,124 @@ function workspacePaintMenuChildren(action) {
   return children;
 }
 
+async function showNewWorkspaceRendererDialog(scene, kind, object, groupName = null) {
+  if (!scene.active && !(await mutate("activate_scene", { sceneUid: scene.uid }))) return;
+  if (referenceDialog.open) referenceDialog.close();
+  dialogTitle.textContent = "Setup renderer";
+  dialogContent.replaceChildren();
+  dialogFooter.hidden = false;
+  referenceDialog.className = "reference-dialog renderer-setup-dialog";
+
+  const compatibleTypes =
+    kind === "renderer"
+      ? MOLECULE_RENDERER_TYPES
+      : kind === "densityRenderer"
+        ? DENSITY_RENDERER_TYPES
+        : kind === "surfaceRenderer"
+          ? SURFACE_RENDERER_TYPES
+          : LIGHTWEIGHT_RENDERER_TYPES;
+  const selectedType = compatibleTypes.includes(rendererType.value)
+    ? rendererType.value
+    : compatibleTypes[0];
+  const objectName = dialogField("Object:", object.name);
+  objectName.disabled = true;
+  const type = dialogSelect(
+    "Renderer type:",
+    compatibleTypes.map((value) => [value, value]),
+    selectedType,
+  );
+  const existingNames = new Set(
+    [snapshot.objects, snapshot.densityMaps, snapshot.surfaces, snapshot.lwObjects]
+      .flat()
+      .filter((candidate) => candidate.sceneUid === scene.uid)
+      .flatMap((candidate) => candidate.renderers || [])
+      .map((candidate) => candidate.name),
+  );
+  const suggestName = () => {
+    const base = type.value.replace(/^\*/, "");
+    let serial = 1;
+    while (existingNames.has(`${base}${serial}`)) serial += 1;
+    return `${base}${serial}`;
+  };
+  const name = dialogField("Renderer name:", suggestName());
+  let automaticName = name.value;
+  type.addEventListener("change", () => {
+    if (name.value === automaticName || !name.value.trim()) {
+      automaticName = suggestName();
+      name.value = automaticName;
+    }
+  });
+  name.addEventListener("input", () => {
+    create.disabled = !name.value.trim();
+  });
+
+  let useSelection = null;
+  let selection = null;
+  if (kind === "renderer") {
+    useSelection = dialogCheckbox("Selection:", Boolean(object.selection));
+    selection = dialogField("Selection", object.selection || "*");
+    selection.disabled = !useSelection.checked;
+    useSelection.addEventListener("change", () => {
+      selection.disabled = !useSelection.checked;
+    });
+  }
+  const recenter =
+    kind === "densityRenderer"
+      ? dialogSelect(
+          "Centering:",
+          [
+            ["map", "Set map center"],
+            ["view", "Move view center"],
+          ],
+          "map",
+        )
+      : dialogCheckbox("Recenter view", true);
+
+  const cancel = button("Cancel", "", () => referenceDialog.close());
+  const create = button("OK", "dialog-primary", async () => {
+    const rendererName = name.value.trim();
+    if (!rendererName) return;
+    const changed = await mutate("create_workspace_renderer", {
+      input: {
+        kind,
+        objectUid: object.uid,
+        rendererType: type.value,
+        rendererName,
+        selection: useSelection?.checked ? selection.value : null,
+        groupName,
+      },
+    });
+    if (!changed) return;
+    const collection =
+      kind === "renderer"
+        ? snapshot.objects
+        : kind === "densityRenderer"
+          ? snapshot.densityMaps
+          : kind === "surfaceRenderer"
+            ? snapshot.surfaces
+            : snapshot.lwObjects;
+    const target = collection
+      .find((candidate) => candidate.uid === object.uid)
+      ?.renderers.find((candidate) => candidate.name === rendererName);
+    if (kind === "renderer") {
+      selectedObjectUid = object.uid;
+      selectedRendererUid = target?.uid ?? null;
+      workspaceSelectionKind = target ? "renderer" : "object";
+    } else {
+      selectWorkspaceAuxItem(kind, object.uid, target?.uid ?? null);
+    }
+    renderShell();
+    referenceDialog.close();
+    const shouldRecenter =
+      kind === "densityRenderer" ? recenter.value === "view" : recenter.checked;
+    if (shouldRecenter) await fitWorkspaceItem();
+  });
+  dialogActions(cancel, create);
+  if (!referenceDialog.open && referenceDialog.showModal) referenceDialog.showModal();
+  name.focus();
+  name.select();
+}
+
 async function workspaceRendererContextItems(scene, object, renderer) {
   const items = [];
   if (renderer.rendererType === "*group") {
@@ -8180,11 +8264,7 @@ async function workspaceRendererContextItems(scene, object, renderer) {
       {
         label: "New Renderer...",
         action: () =>
-          mutate("add_renderer", {
-            objectUid: object.uid,
-            rendererType: rendererType.value,
-            groupName: renderer.name,
-          }),
+          showNewWorkspaceRendererDialog(scene, "renderer", object, renderer.name),
       },
       {
         label: "Delete",
@@ -8357,12 +8437,7 @@ async function workspaceRendererContextItems(scene, object, renderer) {
     null,
     {
       label: "New Renderer...",
-      action: () =>
-        mutate("add_renderer", {
-          objectUid: object.uid,
-          rendererType: rendererType.value,
-          groupName: null,
-        }),
+      action: () => showNewWorkspaceRendererDialog(scene, "renderer", object),
     },
     {
       label: "Delete",
