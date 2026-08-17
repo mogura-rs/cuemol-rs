@@ -857,8 +857,8 @@ pub struct GuiStructObject {
     pub chains: Vec<GuiStructChain>,
 }
 
-/// Desktop timeline quick-add presets. Full QIF animation object models live in
-/// `cuemol_anim`; these presets provide the common interactive camera/object actions.
+/// Desktop timeline quick-add presets for the QIF animation object models in
+/// `cuemol_anim`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnimKind {
     Spin,
@@ -885,84 +885,6 @@ impl AnimKind {
             Self::HideAnim => "Hide",
             Self::MolAnim => "MolAnim",
         }
-    }
-}
-
-/// One animation object in the timeline (CueMol2 `anim-panel` row): a kind + duration.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AnimObject {
-    pub kind: AnimKind,
-    pub duration: f64,
-}
-
-/// The per-frame camera action for the active animation object: a rotation direction
-/// (`+1`/`-1`/`0` for Spin / Rock-by-phase / hold) and a slide direction (`-1` zoom in
-/// for SlideIn, `+1` zoom out for SlideOut, `0` otherwise). Each front end multiplies
-/// these by its own per-frame angle / zoom step, so the timeline stays shared while the
-/// camera API stays front-end-specific.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct AnimFrame {
-    pub elapsed: f64,
-    pub rotate_dir: f64,
-    pub slide_dir: f64,
-    /// Target object visibility for Show/Hide objects (`None` = leave unchanged). The
-    /// front end applies it only when the current visibility differs (so it re-renders
-    /// once on entry, not every frame).
-    pub set_visible: Option<bool>,
-    /// Trajectory playback progress 0..1 for a MolAnim object (`None` otherwise). The
-    /// front end maps it to a trajectory frame via `apply_trajectory_fraction`.
-    pub frame_fraction: Option<f64>,
-}
-
-/// Advance an animation timeline by `dt` seconds (looping at the total duration) and
-/// return the active object's per-frame camera action. An empty list spins forever.
-pub fn anim_step(objects: &[AnimObject], elapsed: f64, dt: f64) -> AnimFrame {
-    if objects.is_empty() {
-        return AnimFrame {
-            elapsed: 0.0,
-            rotate_dir: 1.0,
-            slide_dir: 0.0,
-            set_visible: None,
-            frame_fraction: None,
-        };
-    }
-    let total: f64 = objects.iter().map(|object| object.duration.max(0.01)).sum();
-    let mut next = elapsed + dt;
-    if next >= total {
-        next %= total;
-    }
-    let mut acc = 0.0;
-    for object in objects {
-        let d = object.duration.max(0.01);
-        if next < acc + d {
-            let progress = (next - acc) / d; // 0..1 within this segment
-            let (rotate_dir, slide_dir, set_visible, frame_fraction) = match object.kind {
-                AnimKind::Spin => (1.0, 0.0, None, None),
-                AnimKind::CameraMotion => (0.0, 0.0, None, None),
-                AnimKind::Rock => (if progress < 0.5 { 1.0 } else { -1.0 }, 0.0, None, None),
-                AnimKind::Pause => (0.0, 0.0, None, None),
-                AnimKind::SlideIn => (0.0, -1.0, None, None),
-                AnimKind::SlideOut => (0.0, 1.0, None, None),
-                AnimKind::ShowAnim => (0.0, 0.0, Some(true), None),
-                AnimKind::HideAnim => (0.0, 0.0, Some(false), None),
-                AnimKind::MolAnim => (0.0, 0.0, None, Some(progress)),
-            };
-            return AnimFrame {
-                elapsed: next,
-                rotate_dir,
-                slide_dir,
-                set_visible,
-                frame_fraction,
-            };
-        }
-        acc += d;
-    }
-    AnimFrame {
-        elapsed: next,
-        rotate_dir: 0.0,
-        slide_dir: 0.0,
-        set_visible: None,
-        frame_fraction: None,
     }
 }
 
@@ -57309,33 +57231,6 @@ end_header
         );
         // Off-screen → None.
         assert!(project_to_image(id, [5.0, 0.0, 0.0], 800.0, 600.0).is_none());
-    }
-
-    #[test]
-    fn anim_spin_direction_sequences_objects() {
-        let objects = vec![
-            AnimObject {
-                kind: AnimKind::Spin,
-                duration: 1.0,
-            },
-            AnimObject {
-                kind: AnimKind::Pause,
-                duration: 1.0,
-            },
-        ];
-        // In the Spin segment (0..1) → rotate +1.
-        let frame = anim_step(&objects, 0.0, 0.1);
-        assert!((frame.elapsed - 0.1).abs() < 1e-6 && frame.rotate_dir == 1.0);
-        // In the Pause segment (1..2) → no rotation.
-        assert_eq!(anim_step(&objects, 1.0, 0.1).rotate_dir, 0.0);
-        // Empty list → fallback spin (+1).
-        assert_eq!(anim_step(&[], 0.0, 0.1).rotate_dir, 1.0);
-        // SlideIn → slide_dir -1 (zoom in); SlideOut → +1.
-        let slide = vec![AnimObject {
-            kind: AnimKind::SlideIn,
-            duration: 1.0,
-        }];
-        assert_eq!(anim_step(&slide, 0.0, 0.1).slide_dir, -1.0);
     }
 
     #[test]

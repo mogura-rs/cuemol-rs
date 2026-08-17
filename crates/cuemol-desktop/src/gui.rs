@@ -1,15 +1,18 @@
-// AnimKind/AnimObject + the `anim_spin_direction` timeline stepper are shared via core
-// so both desktop front ends drive the animation timeline identically.
 use crate::{
-    anim_step, collect_pov_labels, collect_scene_pov_labels, create_apbs_work_dir,
-    create_pov_work_dir, overlay_pov_labels, run_apbs_process, run_pov_process,
-    run_pov_process_with_poll, AnimKind, AnimObject, ApbsProcessOutput, ApbsProcessTask,
-    DesktopAppState, GuiApbsChargeMethod, GuiApbsOptions, GuiApbsPaths, GuiAtomLabel,
-    GuiLoadedPath, GuiPovSceneOptions, GuiSequenceSummary, GuiStructObject, PovProcessOptions,
-    PovProcessOutput, PovProcessTask, WorkspaceCameraClipboard, WorkspaceObjectClipboard,
-    WorkspaceRendererClipboard, WorkspaceStyleClipboard,
+    collect_pov_labels, collect_scene_pov_labels, create_apbs_work_dir, create_pov_work_dir,
+    overlay_pov_labels, run_apbs_process, run_pov_process, run_pov_process_with_poll, AnimKind,
+    ApbsProcessOutput, ApbsProcessTask, DesktopAppState, GuiApbsChargeMethod, GuiApbsOptions,
+    GuiApbsPaths, GuiAtomLabel, GuiLoadedPath, GuiPovSceneOptions, GuiSequenceSummary,
+    GuiStructObject, PovProcessOptions, PovProcessOutput, PovProcessTask, WorkspaceCameraClipboard,
+    WorkspaceObjectClipboard, WorkspaceRendererClipboard, WorkspaceStyleClipboard,
 };
-use cuemol_core::{parse_ldom2_xml, write_ldom2_xml, CueMolError, LDom2Node, Result, Vector4};
+use cuemol_anim::{
+    AnimMgr, AnimMotion, CamMotion, MolAnim, NoopAnimObj, ShowHideAnim, SimpleSpin, SlideInOutAnim,
+};
+use cuemol_core::{
+    parse_ldom2_xml, time_from_seconds, time_to_seconds, write_ldom2_xml, CueMolError, LDom2Node,
+    Result, Vector4, NANOS_PER_SECOND,
+};
 use cuemol_gfx::Rgba8;
 use cuemol_qsys::{StereoMode, View};
 use cuemol_render::{
@@ -1174,11 +1177,10 @@ struct GuiApplication {
     viewport_menu: Option<ViewportMenu>,
     perf_measure: bool,
     animation_playing: bool,
-    animation_loop: bool,
-    /// Animation timeline objects (CueMol2 `anim-panel` list) + the elapsed playback
-    /// time in seconds while playing.
-    animation_objects: Vec<AnimObject>,
     animation_elapsed: f32,
+    animation_selected: Option<usize>,
+    animation_start_camera: Option<CameraController>,
+    animation_start_state: Option<DesktopAppState>,
     animation_render_settings: AnimationRenderSettings,
     animation_render_job: Option<AnimationRenderJob>,
     animation_render_log: Vec<String>,
@@ -1365,8 +1367,7 @@ struct AnimationRenderJob {
 
 #[derive(Debug)]
 struct AnimationRenderRestore {
-    renderer_visibility: Vec<(cuemol_core::Uid, cuemol_core::Uid, bool)>,
-    trajectory_frames: Vec<(cuemol_core::Uid, usize)>,
+    state: DesktopAppState,
     camera: CameraController,
     elapsed: f32,
 }
@@ -3525,9 +3526,10 @@ impl GuiApplication {
             viewport_menu: None,
             perf_measure: false,
             animation_playing: false,
-            animation_loop: false,
-            animation_objects: Vec::new(),
             animation_elapsed: 0.0,
+            animation_selected: None,
+            animation_start_camera: None,
+            animation_start_state: None,
             animation_render_settings: AnimationRenderSettings::default(),
             animation_render_job: None,
             animation_render_log: Vec::new(),
@@ -4009,6 +4011,10 @@ impl GuiApplication {
                     };
                     let label = format!("{}:{}", scene.name, view.name);
                     if ui.selectable_label(view.active, label).clicked() && !view.active {
+                        if let Err(error) = self.restore_animation_playback(camera, false) {
+                            self.set_status(format!("Error: {error}"));
+                            continue;
+                        }
                         let current = camera.to_qsys_camera("__current");
                         let _ = self.state.set_active_view_camera(&current);
                         match self.state.activate_view(view.uid) {
@@ -4021,6 +4027,8 @@ impl GuiApplication {
                         self.selected_object = None;
                         self.selected_renderer = None;
                         self.workspace_aux_selection = None;
+                        self.animation_selected = None;
+                        self.animation_elapsed = 0.0;
                         self.sync_active_scene_properties();
                         self.rebuild_snapshot();
                     }
@@ -4338,7 +4346,7 @@ impl GuiApplication {
             match self.ribbon_tab {
                 RibbonTab::Home => self.ribbon_home(ui, camera),
                 RibbonTab::Measure => self.ribbon_measure(ui),
-                RibbonTab::Animation => self.ribbon_animation(ui),
+                RibbonTab::Animation => self.ribbon_animation(ui, camera),
             }
         });
     }
@@ -4445,12 +4453,8 @@ impl GuiApplication {
         }
     }
 
-    fn ribbon_animation(&mut self, ui: &mut egui::Ui) {
-        let total = self
-            .animation_objects
-            .iter()
-            .map(|object| object.duration.max(0.01))
-            .sum::<f64>() as f32;
+    fn ribbon_animation(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
+        let total = self.animation_duration() as f32;
         ui.horizontal(|ui| {
             let play_label = if self.animation_playing {
                 "⏸ Pause"
@@ -4461,7 +4465,11 @@ impl GuiApplication {
                 .add_enabled(total > 0.0, egui::Button::new(play_label))
                 .clicked()
             {
-                self.animation_playing = !self.animation_playing;
+                if self.animation_playing {
+                    self.animation_playing = false;
+                } else if let Err(error) = self.begin_animation_playback(camera) {
+                    self.set_status(format!("Error: {error}"));
+                }
             }
             if ui
                 .add_enabled(
@@ -4470,14 +4478,31 @@ impl GuiApplication {
                 )
                 .clicked()
             {
-                self.animation_playing = false;
-                self.animation_elapsed = 0.0;
+                if let Err(error) = self.restore_animation_playback(camera, false) {
+                    self.set_status(format!("Error: {error}"));
+                } else {
+                    self.animation_elapsed = 0.0;
+                }
             }
-            ui.checkbox(&mut self.animation_loop, "Loop");
+            let mut loop_enabled = self.animation_loop_enabled();
+            if ui.checkbox(&mut loop_enabled, "Loop").changed() {
+                if let Err(error) = self.set_animation_loop_enabled(loop_enabled, camera) {
+                    self.set_status(format!("Error: {error}"));
+                }
+            }
             if total > 0.0 {
-                ui.add(
-                    egui::Slider::new(&mut self.animation_elapsed, 0.0..=total).show_value(false),
-                );
+                let changed = ui
+                    .add(
+                        egui::Slider::new(&mut self.animation_elapsed, 0.0..=total)
+                            .show_value(false),
+                    )
+                    .changed();
+                if changed {
+                    let elapsed = self.animation_elapsed;
+                    if let Err(error) = self.seek_animation(elapsed, camera) {
+                        self.set_status(format!("Error: {error}"));
+                    }
+                }
             } else {
                 ui.add_enabled(
                     false,
@@ -4547,7 +4572,7 @@ impl GuiApplication {
             LeftPanel::Symmetry => self.symmetry_section(ui),
             LeftPanel::DensityMap => self.densitymap_section(ui),
             LeftPanel::View => self.view_section(ui, camera),
-            LeftPanel::Animation => self.animation_section(ui),
+            LeftPanel::Animation => self.animation_section(ui, camera),
         }
     }
 
@@ -8155,6 +8180,10 @@ impl GuiApplication {
         if self.state.active_scene() == Some(scene_uid) {
             return;
         }
+        if let Err(error) = self.restore_animation_playback(camera, false) {
+            self.set_status(format!("Error: {error}"));
+            return;
+        }
         if self.state.active_view_summary().is_some() {
             let current = camera.to_qsys_camera("__current");
             if let Err(error) = self.state.set_active_view_camera(&current) {
@@ -8166,6 +8195,8 @@ impl GuiApplication {
             self.set_status(format!("Scene {} was not found", scene_uid.get()));
             return;
         }
+        self.animation_selected = None;
+        self.animation_elapsed = 0.0;
         self.sync_active_scene_properties();
         self.rebuild_snapshot();
         if let Some(next) = self.state.active_view_camera() {
@@ -9302,65 +9333,199 @@ impl GuiApplication {
         }
     }
 
-    /// Advance the animation timeline by `dt` seconds, driving the camera from the
-    /// active object via the shared-core `anim_spin_direction` (CueMol2 anim playback;
-    /// empty list → a simple continuous spin).
-    fn advance_animation(&mut self, dt: f32, camera: &mut CameraController) {
-        let total = self
-            .animation_objects
-            .iter()
-            .map(|object| object.duration.max(0.01))
-            .sum::<f64>() as f32;
-        if total > 0.0 && !self.animation_loop && self.animation_elapsed + dt >= total {
-            self.animation_elapsed = total;
-            self.animation_playing = false;
-            return;
-        }
-        let frame = anim_step(
-            &self.animation_objects,
-            self.animation_elapsed as f64,
-            dt as f64,
-        );
-        self.apply_animation_frame(frame, dt, camera);
+    fn active_animation_manager(&self) -> std::result::Result<AnimMgr, String> {
+        let scene_uid = self
+            .state
+            .active_scene()
+            .ok_or_else(|| "no active scene".to_string())?;
+        self.state
+            .scene_animation(scene_uid)
+            .map_err(|error| error.to_string())
+            .map(Option::unwrap_or_default)
     }
 
-    fn apply_animation_frame(
+    fn set_active_animation_manager(
         &mut self,
-        frame: crate::AnimFrame,
-        dt: f32,
+        animation: &AnimMgr,
+    ) -> std::result::Result<(), String> {
+        let scene_uid = self
+            .state
+            .active_scene()
+            .ok_or_else(|| "no active scene".to_string())?;
+        self.state
+            .set_scene_animation(scene_uid, Some(animation))
+            .map_err(|error| error.to_string())
+    }
+
+    fn animation_duration(&self) -> f64 {
+        self.active_animation_manager()
+            .map(|animation| time_to_seconds(animation.length()))
+            .unwrap_or(0.0)
+    }
+
+    fn animation_loop_enabled(&self) -> bool {
+        self.active_animation_manager()
+            .map(|animation| animation.loop_enabled())
+            .unwrap_or(false)
+    }
+
+    fn set_animation_loop_enabled(
+        &mut self,
+        enabled: bool,
         camera: &mut CameraController,
-    ) {
-        self.animation_elapsed = frame.elapsed as f32;
-        if frame.rotate_dir != 0.0 {
-            camera.rotate_by(frame.rotate_dir as f32 * 120.0 * dt, 0.0);
+    ) -> std::result::Result<(), String> {
+        self.restore_animation_playback(camera, false)?;
+        let undo = self.capture_undo();
+        let mut animation = self.active_animation_manager()?;
+        animation.set_loop_enabled(enabled);
+        self.set_active_animation_manager(&animation)?;
+        self.animation_elapsed = 0.0;
+        self.push_undo_snapshot(undo);
+        self.set_status(format!("Animation loop: {enabled}"));
+        Ok(())
+    }
+
+    fn begin_animation_playback(
+        &mut self,
+        camera: &CameraController,
+    ) -> std::result::Result<(), String> {
+        let duration = self.animation_duration();
+        if duration <= 0.0 {
+            return Err("no animation objects".to_string());
         }
-        if frame.slide_dir != 0.0 {
-            // zoom_by: +step zooms in, so SlideIn (slide_dir -1) → +step.
-            camera.zoom_by(-frame.slide_dir as f32 * 20.0 * dt);
+        if f64::from(self.animation_elapsed) >= duration {
+            self.animation_elapsed = 0.0;
         }
-        if let Some(target) = frame.set_visible {
-            self.apply_anim_visibility(target);
+        if self.animation_start_state.is_none() {
+            self.state
+                .set_active_view_camera(&camera.to_qsys_camera("__current"))
+                .map_err(|error| error.to_string())?;
+            self.animation_start_camera = Some(camera.clone());
+            self.animation_start_state = Some(self.state.clone());
         }
-        if let Some(fraction) = frame.frame_fraction {
-            if let Some(object_uid) = self
-                .state
-                .active_object_summaries()
-                .first()
-                .map(|object| object.uid)
-            {
-                if self.state.object_has_trajectory(object_uid) {
-                    self.state.apply_trajectory_fraction(object_uid, fraction);
-                    self.rebuild_snapshot();
-                }
+        self.animation_playing = true;
+        Ok(())
+    }
+
+    fn restore_animation_playback(
+        &mut self,
+        camera: &mut CameraController,
+        preserve_camera: bool,
+    ) -> std::result::Result<(), String> {
+        let final_camera = camera.clone();
+        let start_camera = self.animation_start_camera.take();
+        if let Some(state) = self.animation_start_state.take() {
+            self.state = state;
+        }
+        if preserve_camera {
+            *camera = final_camera;
+        } else if let Some(start_camera) = start_camera {
+            *camera = start_camera;
+        }
+        if self.state.active_view_summary().is_some() {
+            self.state
+                .set_active_view_camera(&camera.to_qsys_camera("__current"))
+                .map_err(|error| error.to_string())?;
+        }
+        self.animation_playing = false;
+        self.rebuild_snapshot();
+        Ok(())
+    }
+
+    fn apply_active_animation_time(
+        &mut self,
+        elapsed: f64,
+        camera: &mut CameraController,
+    ) -> std::result::Result<(), String> {
+        let scene_uid = self
+            .state
+            .active_scene()
+            .ok_or_else(|| "no active scene".to_string())?;
+        let view_uid = self
+            .state
+            .active_view_summary()
+            .map(|view| view.uid)
+            .ok_or_else(|| "no active view".to_string())?;
+        let animation = self.active_animation_manager()?;
+        if animation.startcam().is_empty() {
+            if let Some(start_camera) = self.animation_start_camera.as_ref() {
+                self.state
+                    .set_active_view_camera(&start_camera.to_qsys_camera("__current"))
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        let animated_camera = self
+            .state
+            .apply_scene_animation_time(scene_uid, time_from_seconds(elapsed), view_uid)
+            .map_err(|error| error.to_string())?;
+        *camera = CameraController::from_qsys_camera(&animated_camera);
+        self.rebuild_snapshot();
+        Ok(())
+    }
+
+    fn seek_animation(
+        &mut self,
+        elapsed: f32,
+        camera: &mut CameraController,
+    ) -> std::result::Result<(), String> {
+        self.begin_animation_playback(camera)?;
+        self.animation_playing = false;
+        let elapsed = elapsed.clamp(0.0, self.animation_duration() as f32);
+        self.apply_active_animation_time(f64::from(elapsed), camera)?;
+        self.animation_elapsed = elapsed;
+        Ok(())
+    }
+
+    /// Advance the scene-backed animation timeline by `dt` seconds.
+    fn advance_animation(&mut self, dt: f32, camera: &mut CameraController) {
+        let Ok(animation) = self.active_animation_manager() else {
+            self.animation_playing = false;
+            return;
+        };
+        let total = time_to_seconds(animation.length()) as f32;
+        if total <= 0.0 {
+            self.animation_playing = false;
+            self.set_status("No animation objects");
+            return;
+        }
+        let step = dt.clamp(0.0, 0.25);
+        let reaches_end = !animation.loop_enabled() && self.animation_elapsed + step >= total;
+        let elapsed = if reaches_end {
+            total
+        } else if animation.loop_enabled() {
+            (self.animation_elapsed + step) % total
+        } else {
+            self.animation_elapsed + step
+        };
+        if let Err(error) = self.apply_active_animation_time(f64::from(elapsed), camera) {
+            self.animation_playing = false;
+            self.set_status(format!("Error: {error}"));
+            return;
+        }
+        self.animation_elapsed = elapsed;
+        if reaches_end {
+            if let Err(error) = self.restore_animation_playback(camera, true) {
+                self.set_status(format!("Error: {error}"));
+            } else {
+                self.animation_elapsed = total;
+                self.set_status("Animation finished");
             }
         }
     }
 
-    fn start_animation_render(&mut self, camera: &CameraController) {
+    fn start_animation_render(&mut self, camera: &mut CameraController) {
         if self.animation_render_job.is_some() {
             return;
         }
-        if self.animation_objects.is_empty() {
+        if let Err(error) = self.restore_animation_playback(camera, false) {
+            self.set_status(format!("Error: {error}"));
+            return;
+        }
+        let Ok(animation) = self.active_animation_manager() else {
+            self.set_status("No animation in active scene");
+            return;
+        };
+        if animation.size() == 0 || animation.length() <= 0 {
             self.set_status("No animation in active scene");
             return;
         }
@@ -9391,7 +9556,7 @@ impl GuiApplication {
             return;
         }
         let total_frames = animation_render_frame_count(
-            &self.animation_objects,
+            time_to_seconds(animation.length()),
             settings.fps,
             settings.duplicate_last_frame,
         );
@@ -9433,26 +9598,8 @@ impl GuiApplication {
         &self,
         camera: &CameraController,
     ) -> AnimationRenderRestore {
-        let renderer_visibility = self
-            .state
-            .active_object_summaries()
-            .into_iter()
-            .flat_map(|object| {
-                self.state
-                    .renderer_summaries(object.uid)
-                    .into_iter()
-                    .map(move |renderer| (object.uid, renderer.uid, renderer.visible))
-            })
-            .collect();
-        let trajectory_frames = self
-            .state
-            .active_trajectory_summaries()
-            .into_iter()
-            .map(|trajectory| (trajectory.object_uid, trajectory.current_frame))
-            .collect();
         AnimationRenderRestore {
-            renderer_visibility,
-            trajectory_frames,
+            state: self.state.clone(),
             camera: camera.clone(),
             elapsed: self.animation_elapsed,
         }
@@ -9555,7 +9702,12 @@ impl GuiApplication {
 
         let concurrency = job.settings.concurrency as usize;
         while job.next_frame < job.total_frames && job.frame_receivers.len() < concurrency {
-            self.schedule_animation_frame(&mut job, camera);
+            if let Err(error) = self.schedule_animation_frame(&mut job, camera) {
+                let message = format!("Animation rendering failed: {error}");
+                self.animation_render_log.push(message.clone());
+                self.finish_animation_render(job, camera, &message);
+                return;
+            }
         }
         if !job.frame_receivers.is_empty() {
             self.animation_render_job = Some(job);
@@ -9587,19 +9739,31 @@ impl GuiApplication {
         &mut self,
         job: &mut AnimationRenderJob,
         camera: &mut CameraController,
-    ) {
+    ) -> std::result::Result<(), String> {
         let index = job.next_frame;
-        let dt = if index == 0 {
-            0.0
-        } else {
-            1.0 / job.settings.fps as f32
-        };
-        let frame = anim_step(
-            &self.animation_objects,
-            self.animation_elapsed as f64,
-            f64::from(dt),
-        );
-        self.apply_animation_frame(frame, dt, camera);
+        let elapsed = f64::from(index) / f64::from(job.settings.fps);
+        let scene_uid = self
+            .state
+            .active_scene()
+            .ok_or_else(|| "no active scene".to_string())?;
+        let view_uid = self
+            .state
+            .active_view_summary()
+            .map(|view| view.uid)
+            .ok_or_else(|| "no active view".to_string())?;
+        let animation = self.active_animation_manager()?;
+        if animation.startcam().is_empty() {
+            self.state
+                .set_active_view_camera(&job.restore.camera.to_qsys_camera("__current"))
+                .map_err(|error| error.to_string())?;
+        }
+        let animated_camera = self
+            .state
+            .apply_scene_animation_time(scene_uid, time_from_seconds(elapsed), view_uid)
+            .map_err(|error| error.to_string())?;
+        *camera = CameraController::from_qsys_camera(&animated_camera);
+        self.animation_elapsed = elapsed as f32;
+        self.rebuild_snapshot();
         let mut frame_camera = camera.clone();
         frame_camera.perspective = job.settings.perspective;
         let qsys_camera = frame_camera.to_qsys_camera("__animation_render");
@@ -9620,6 +9784,7 @@ impl GuiApplication {
         });
         job.next_frame += 1;
         job.frame_receivers.push(receiver);
+        Ok(())
     }
 
     fn finish_animation_render(
@@ -9628,49 +9793,202 @@ impl GuiApplication {
         camera: &mut CameraController,
         status: &str,
     ) {
-        for (object_uid, renderer_uid, visible) in job.restore.renderer_visibility {
-            let _ = self
-                .state
-                .set_renderer_visible(object_uid, renderer_uid, visible);
-        }
-        for (object_uid, frame) in job.restore.trajectory_frames {
-            let _ = self.state.apply_trajectory_frame(object_uid, frame);
-        }
+        self.state = job.restore.state;
         *camera = job.restore.camera;
         self.animation_elapsed = job.restore.elapsed;
         self.animation_playing = false;
+        self.animation_start_camera = None;
+        self.animation_start_state = None;
         self.rebuild_snapshot();
         self.set_status(status);
     }
 
-    /// Set every renderer's visibility for a Show/Hide animation object, re-tessellating
-    /// only if something actually changed (so it fires once on entry, not every frame).
-    fn apply_anim_visibility(&mut self, target: bool) {
-        let mut changed = false;
-        let objects: Vec<_> = self
-            .state
-            .active_object_summaries()
-            .iter()
-            .map(|object| object.uid)
-            .collect();
-        for object_uid in objects {
-            for renderer in self.state.renderer_summaries(object_uid) {
-                if renderer.visible != target {
-                    let _ = self
-                        .state
-                        .set_renderer_visible(object_uid, renderer.uid, target);
-                    changed = true;
-                }
-            }
+    fn add_animation_motion(
+        &mut self,
+        kind: AnimKind,
+        camera: &mut CameraController,
+    ) -> std::result::Result<(), String> {
+        self.restore_animation_playback(camera, false)?;
+        let undo = self.capture_undo();
+        let mut animation = self.active_animation_manager()?;
+        let insertion_index = self
+            .animation_selected
+            .map(|index| index.saturating_add(1).min(animation.size()))
+            .unwrap_or_else(|| animation.size());
+        let reference = insertion_index
+            .checked_sub(1)
+            .and_then(|index| animation.motions().get(index))
+            .map(|motion| motion.base().name().to_string())
+            .unwrap_or_default();
+        let prefix = native_animation_name_prefix(kind);
+        let name = unique_native_animation_name(&animation, prefix);
+        let motion = new_native_animation_motion(kind, name, reference);
+        if insertion_index == animation.size() {
+            animation.append_motion(motion);
+        } else {
+            animation.insert_motion_before(insertion_index, motion);
         }
-        if changed {
-            self.rebuild_snapshot();
-        }
+        self.set_active_animation_manager(&animation)?;
+        self.animation_selected = Some(insertion_index);
+        self.animation_elapsed = 0.0;
+        self.push_undo_snapshot(undo);
+        self.set_status(format!("Added {} animation", kind.label()));
+        Ok(())
     }
 
-    /// Animation panel — the timeline object list (CueMol2 `anim-panel`): Add (Spin /
-    /// Rock / Pause) / Delete / Move up·down + Play / Stop.
-    fn animation_section(&mut self, ui: &mut egui::Ui) {
+    fn set_animation_start_camera(
+        &mut self,
+        name: &str,
+        camera: &mut CameraController,
+    ) -> std::result::Result<(), String> {
+        self.restore_animation_playback(camera, false)?;
+        let scene_uid = self
+            .state
+            .active_scene()
+            .ok_or_else(|| "no active scene".to_string())?;
+        if name != "__current"
+            && !self
+                .state
+                .camera_summaries(scene_uid)
+                .iter()
+                .any(|summary| summary.name == name)
+        {
+            return Err(format!("camera {name} was not found"));
+        }
+        let undo = self.capture_undo();
+        let mut animation = self.active_animation_manager()?;
+        animation.set_startcam(name);
+        self.set_active_animation_manager(&animation)?;
+        self.animation_elapsed = 0.0;
+        self.push_undo_snapshot(undo);
+        self.set_status(format!("Animation start camera: {name}"));
+        Ok(())
+    }
+
+    fn delete_animation_motion(
+        &mut self,
+        index: usize,
+        camera: &mut CameraController,
+    ) -> std::result::Result<(), String> {
+        self.restore_animation_playback(camera, false)?;
+        let mut animation = self.active_animation_manager()?;
+        let Some(deleted) = animation.motions().get(index) else {
+            return Err(format!("animation object {index} was not found"));
+        };
+        let deleted_name = deleted.base().name().to_string();
+        let replacement_reference = deleted.base().time_ref_name().to_string();
+        let referencing = animation
+            .motions()
+            .iter()
+            .filter(|motion| motion.base().time_ref_name() == deleted_name)
+            .map(|motion| motion.base().uid())
+            .collect::<Vec<_>>();
+        let undo = self.capture_undo();
+        for uid in referencing {
+            animation.edit_motion_by_uid(uid, "timeRefName", "", |motion| {
+                motion
+                    .base_mut()
+                    .set_time_ref_name(replacement_reference.clone());
+            });
+        }
+        animation.remove_at(index);
+        self.set_active_animation_manager(&animation)?;
+        self.animation_selected = if animation.size() == 0 {
+            None
+        } else {
+            Some(index.min(animation.size() - 1))
+        };
+        self.animation_elapsed = 0.0;
+        self.push_undo_snapshot(undo);
+        self.set_status("Animation object deleted");
+        Ok(())
+    }
+
+    fn move_animation_motion(
+        &mut self,
+        index: usize,
+        direction: i32,
+        camera: &mut CameraController,
+    ) -> std::result::Result<(), String> {
+        self.restore_animation_playback(camera, false)?;
+        let mut animation = self.active_animation_manager()?;
+        if index >= animation.size() {
+            return Err(format!("animation object {index} was not found"));
+        }
+        let target = if direction < 0 {
+            index.checked_sub(1)
+        } else {
+            index
+                .checked_add(1)
+                .filter(|target| *target < animation.size())
+        }
+        .ok_or_else(|| "animation object cannot move farther".to_string())?;
+        let undo = self.capture_undo();
+        let mut motions = animation.motions().to_vec();
+        motions.swap(index, target);
+        animation.clear();
+        for motion in motions {
+            animation.append_motion(motion);
+        }
+        self.set_active_animation_manager(&animation)?;
+        self.animation_selected = Some(target);
+        self.animation_elapsed = 0.0;
+        self.push_undo_snapshot(undo);
+        self.set_status("Animation object moved");
+        Ok(())
+    }
+
+    fn set_animation_motion_duration(
+        &mut self,
+        index: usize,
+        duration: f64,
+        camera: &mut CameraController,
+    ) -> std::result::Result<(), String> {
+        if !duration.is_finite() || duration < 0.0 {
+            return Err("animation duration must be non-negative".to_string());
+        }
+        self.restore_animation_playback(camera, false)?;
+        let mut animation = self.active_animation_manager()?;
+        let uid = animation
+            .motions()
+            .get(index)
+            .map(|motion| motion.base().uid())
+            .ok_or_else(|| format!("animation object {index} was not found"))?;
+        let undo = self.capture_undo();
+        animation.edit_motion_by_uid(uid, "end", "", |motion| {
+            let start = motion.base().rel_start();
+            motion
+                .base_mut()
+                .set_rel_end(start.saturating_add(time_from_seconds(duration)));
+        });
+        animation
+            .try_resolve_rel_time()
+            .map_err(|error| error.to_string())?;
+        self.set_active_animation_manager(&animation)?;
+        self.animation_elapsed = 0.0;
+        self.push_undo_snapshot(undo);
+        self.set_status("Animation duration changed");
+        Ok(())
+    }
+
+    /// Animation panel backed by the active scene's serialized `AnimMgr`.
+    fn animation_section(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
+        let animation = self.active_animation_manager().unwrap_or_default();
+        if self
+            .animation_selected
+            .is_some_and(|index| index >= animation.size())
+        {
+            self.animation_selected = None;
+        }
+        let mut add = None;
+        let mut delete = None;
+        let mut move_by = None;
+        let mut duration_edit = None;
+        let mut start_camera = animation.startcam().to_string();
+        if start_camera.is_empty() {
+            start_camera = "__current".to_string();
+        }
+        let original_start_camera = start_camera.clone();
         ui.horizontal(|ui| {
             ui.menu_button("Add", |ui| {
                 for kind in [
@@ -9685,10 +10003,7 @@ impl GuiApplication {
                     AnimKind::MolAnim,
                 ] {
                     if ui.button(kind.label()).clicked() {
-                        self.animation_objects.push(AnimObject {
-                            kind,
-                            duration: 3.0,
-                        });
+                        add = Some(kind);
                         ui.close();
                     }
                 }
@@ -9699,43 +10014,101 @@ impl GuiApplication {
                 "▶ Play"
             };
             if ui.button(play).clicked() {
-                self.animation_playing = !self.animation_playing;
+                if self.animation_playing {
+                    self.animation_playing = false;
+                } else if let Err(error) = self.begin_animation_playback(camera) {
+                    self.set_status(format!("Error: {error}"));
+                }
             }
             if ui.button("⏹ Stop").clicked() {
-                self.animation_playing = false;
-                self.animation_elapsed = 0.0;
+                if let Err(error) = self.restore_animation_playback(camera, false) {
+                    self.set_status(format!("Error: {error}"));
+                } else {
+                    self.animation_elapsed = 0.0;
+                }
             }
         });
+        ui.horizontal(|ui| {
+            ui.label("Start camera:");
+            egui::ComboBox::from_id_salt("native_animation_start_camera")
+                .selected_text(if start_camera == "__current" {
+                    "Current view"
+                } else {
+                    &start_camera
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut start_camera, "__current".to_string(), "Current view");
+                    if let Some(scene_uid) = self.state.active_scene() {
+                        for summary in self.state.camera_summaries(scene_uid) {
+                            let name = summary.name;
+                            ui.selectable_value(&mut start_camera, name.clone(), name);
+                        }
+                    }
+                });
+        });
         ui.separator();
-        if self.animation_objects.is_empty() {
-            ui.weak("No animation objects — Add a Spin / Rock / Pause (or Play for a spin).");
-            return;
+        if animation.size() == 0 {
+            ui.weak("No animation objects");
         }
-        let mut delete: Option<usize> = None;
-        let mut move_up: Option<usize> = None;
-        for (index, object) in self.animation_objects.iter_mut().enumerate() {
+        for (index, motion) in animation.motions().iter().enumerate() {
+            let base = motion.base();
+            let mut duration = time_to_seconds(base.rel_end() - base.rel_start()).max(0.0);
             ui.horizontal(|ui| {
-                ui.label(format!("{}. {}", index + 1, object.kind.label()));
-                ui.add(
-                    egui::DragValue::new(&mut object.duration)
-                        .speed(0.1)
-                        .range(0.1..=60.0)
-                        .suffix(" s"),
-                );
+                if ui
+                    .selectable_label(
+                        self.animation_selected == Some(index),
+                        format!("{}. {} ({})", index + 1, base.name(), motion.type_name()),
+                    )
+                    .clicked()
+                {
+                    self.animation_selected = Some(index);
+                }
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut duration)
+                            .speed(0.1)
+                            .range(0.0..=86_400.0)
+                            .suffix(" s"),
+                    )
+                    .changed()
+                {
+                    duration_edit = Some((index, duration));
+                }
                 if index > 0 && ui.small_button("↑").clicked() {
-                    move_up = Some(index);
+                    move_by = Some((index, -1));
+                }
+                if index + 1 < animation.size() && ui.small_button("↓").clicked() {
+                    move_by = Some((index, 1));
                 }
                 if ui.small_button("🗑").on_hover_text("Delete").clicked() {
                     delete = Some(index);
                 }
             });
         }
-        if let Some(index) = move_up {
-            self.animation_objects.swap(index - 1, index);
+        if let Some(kind) = add {
+            if let Err(error) = self.add_animation_motion(kind, camera) {
+                self.set_status(format!("Error: {error}"));
+            }
+        }
+        if start_camera != original_start_camera {
+            if let Err(error) = self.set_animation_start_camera(&start_camera, camera) {
+                self.set_status(format!("Error: {error}"));
+            }
         }
         if let Some(index) = delete {
-            self.animation_objects.remove(index);
-            self.animation_elapsed = 0.0;
+            if let Err(error) = self.delete_animation_motion(index, camera) {
+                self.set_status(format!("Error: {error}"));
+            }
+        }
+        if let Some((index, direction)) = move_by {
+            if let Err(error) = self.move_animation_motion(index, direction, camera) {
+                self.set_status(format!("Error: {error}"));
+            }
+        }
+        if let Some((index, duration)) = duration_edit {
+            if let Err(error) = self.set_animation_motion_duration(index, duration, camera) {
+                self.set_status(format!("Error: {error}"));
+            }
         }
     }
 
@@ -10893,7 +11266,7 @@ impl GuiApplication {
         }
     }
 
-    fn animation_render_tool_ui(&mut self, ui: &mut egui::Ui, camera: &CameraController) {
+    fn animation_render_tool_ui(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
         ui.horizontal(|ui| {
             ui.selectable_value(
                 &mut self.animation_render_settings.tab,
@@ -25978,15 +26351,63 @@ fn default_animation_render_concurrency() -> u32 {
         .unwrap_or(2)
 }
 
-fn animation_render_frame_count(
-    objects: &[AnimObject],
-    fps: u32,
-    duplicate_last_frame: bool,
-) -> u32 {
-    let duration = objects
-        .iter()
-        .map(|object| object.duration.max(0.01))
-        .sum::<f64>();
+fn native_animation_name_prefix(kind: AnimKind) -> &'static str {
+    match kind {
+        AnimKind::Spin => "SimpleSpin",
+        AnimKind::CameraMotion => "CamMotion",
+        AnimKind::Rock => "Rock",
+        AnimKind::Pause => "NoopAnimObj",
+        AnimKind::SlideIn => "SlideInAnim",
+        AnimKind::SlideOut => "SlideOutAnim",
+        AnimKind::ShowAnim => "ShowAnim",
+        AnimKind::HideAnim => "HideAnim",
+        AnimKind::MolAnim => "MolAnim",
+    }
+}
+
+fn unique_native_animation_name(animation: &AnimMgr, prefix: &str) -> String {
+    (1_u32..)
+        .map(|index| format!("{prefix}{index}"))
+        .find(|name| animation.get_by_name(name).is_none())
+        .expect("animation name index is bounded by memory")
+}
+
+fn new_native_animation_motion(kind: AnimKind, name: String, reference: String) -> AnimMotion {
+    let mut motion = match kind {
+        AnimKind::Spin | AnimKind::Rock => {
+            let mut value = SimpleSpin::new();
+            value.set_angle(if kind == AnimKind::Rock { 45.0 } else { 360.0 });
+            AnimMotion::Spin(value)
+        }
+        AnimKind::CameraMotion => AnimMotion::Camera(CamMotion::new()),
+        AnimKind::Pause => AnimMotion::Noop(NoopAnimObj::new()),
+        AnimKind::SlideIn | AnimKind::SlideOut => {
+            let mut value = SlideInOutAnim::new();
+            value.set_hide(kind == AnimKind::SlideOut);
+            AnimMotion::Slide(value)
+        }
+        AnimKind::ShowAnim | AnimKind::HideAnim => {
+            let mut value = ShowHideAnim::new();
+            value.set_hide(kind == AnimKind::HideAnim);
+            AnimMotion::ShowHide(value)
+        }
+        AnimKind::MolAnim => {
+            let mut value = MolAnim::new();
+            value.set_prop("frame");
+            value.set_start_value(0.0);
+            value.set_end_value(1.0);
+            AnimMotion::Molecule(value)
+        }
+    };
+    let object = motion.base_mut();
+    object.set_name(name);
+    object.set_time_ref_name(reference);
+    object.set_rel_start(0);
+    object.set_rel_end(NANOS_PER_SECOND);
+    motion
+}
+
+fn animation_render_frame_count(duration: f64, fps: u32, duplicate_last_frame: bool) -> u32 {
     let intervals = (duration * f64::from(fps.max(1)))
         .round()
         .clamp(1.0, f64::from(u32::MAX - 1)) as u32;
@@ -27839,18 +28260,8 @@ mod tests {
     #[test]
     fn animation_render_helpers_define_frame_sequence_and_output_names() {
         assert!((1..=8).contains(&default_animation_render_concurrency()));
-        let objects = vec![
-            AnimObject {
-                kind: AnimKind::Spin,
-                duration: 1.25,
-            },
-            AnimObject {
-                kind: AnimKind::Pause,
-                duration: 0.75,
-            },
-        ];
-        assert_eq!(animation_render_frame_count(&objects, 30, false), 60);
-        assert_eq!(animation_render_frame_count(&objects, 30, true), 61);
+        assert_eq!(animation_render_frame_count(2.0, 30, false), 60);
+        assert_eq!(animation_render_frame_count(2.0, 30, true), 61);
         assert_eq!(
             sanitize_animation_base_name("  demo frame/1  "),
             "demo_frame_1"
@@ -28038,10 +28449,8 @@ mod tests {
         let mut app = GuiApplication::new();
         let mut camera = CameraController::default();
         let base_name = format!("cuemol-animation-parallel-test-{}", std::process::id());
-        app.animation_objects = vec![AnimObject {
-            kind: AnimKind::Spin,
-            duration: 1.0,
-        }];
+        app.add_animation_motion(AnimKind::Spin, &mut camera)
+            .unwrap();
         app.animation_render_settings = AnimationRenderSettings {
             output_dir: std::env::temp_dir().to_string_lossy().into_owned(),
             base_name: base_name.clone(),
@@ -28053,7 +28462,7 @@ mod tests {
             ..Default::default()
         };
 
-        app.start_animation_render(&camera);
+        app.start_animation_render(&mut camera);
         app.poll_animation_render(&mut camera);
         let job = app.animation_render_job.as_ref().expect("render job");
         assert_eq!(job.next_frame, 3);
@@ -32292,7 +32701,7 @@ mod tests {
                     app.symmetry_section(ui);
                     app.densitymap_section(ui);
                     app.view_section(ui, &mut camera);
-                    app.animation_section(ui);
+                    app.animation_section(ui, &mut camera);
                 });
             });
             // MolStruct chain-select wrote a selection; Symmetry found 1CRN's cell.
@@ -32963,28 +33372,133 @@ mod tests {
         // A Spin object rotates the camera while active; a Pause object holds it.
         let mut app = GuiApplication::new();
         let mut camera = CameraController::default();
-        app.animation_objects.push(AnimObject {
-            kind: AnimKind::Spin,
-            duration: 3.0,
-        });
+        app.add_animation_motion(AnimKind::Spin, &mut camera)
+            .unwrap();
+        app.begin_animation_playback(&camera).unwrap();
         let before = camera.orientation;
         app.advance_animation(0.1, &mut camera);
         assert!(
             !camera.orientation.abs_diff_eq(before, 1.0e-5),
             "a Spin object rotates the camera"
         );
-
-        app.animation_objects = vec![AnimObject {
-            kind: AnimKind::Pause,
-            duration: 3.0,
-        }];
-        app.animation_elapsed = 0.0;
+        app.restore_animation_playback(&mut camera, false).unwrap();
+        let scene_uid = app.state.active_scene().unwrap();
+        app.state
+            .set_scene_animation(scene_uid, Some(&AnimMgr::new()))
+            .unwrap();
+        app.animation_selected = None;
+        app.add_animation_motion(AnimKind::Pause, &mut camera)
+            .unwrap();
+        app.begin_animation_playback(&camera).unwrap();
         let still = camera.orientation;
         app.advance_animation(0.1, &mut camera);
         assert!(
             camera.orientation.abs_diff_eq(still, 1.0e-6),
             "a Pause object holds the camera"
         );
+    }
+
+    #[test]
+    fn native_animation_list_edits_the_scene_manager_and_undoes() {
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.add_animation_motion(AnimKind::Spin, &mut camera)
+            .unwrap();
+        app.add_animation_motion(AnimKind::Pause, &mut camera)
+            .unwrap();
+
+        let scene_uid = app.state.active_scene().unwrap();
+        let animation = app.state.scene_animation(scene_uid).unwrap().unwrap();
+        assert_eq!(animation.size(), 2);
+        assert_eq!(animation.motions()[0].type_name(), "SimpleSpin");
+        assert_eq!(
+            animation.motions()[1].base().time_ref_name(),
+            animation.motions()[0].base().name()
+        );
+
+        app.set_animation_motion_duration(0, 2.5, &mut camera)
+            .unwrap();
+        let animation = app.state.scene_animation(scene_uid).unwrap().unwrap();
+        assert_eq!(
+            animation.motions()[0].base().rel_end(),
+            time_from_seconds(2.5)
+        );
+
+        app.move_animation_motion(1, -1, &mut camera).unwrap();
+        let animation = app.state.scene_animation(scene_uid).unwrap().unwrap();
+        assert_eq!(animation.motions()[0].type_name(), "NoopAnimObj");
+        app.delete_animation_motion(1, &mut camera).unwrap();
+        let animation = app.state.scene_animation(scene_uid).unwrap().unwrap();
+        assert_eq!(animation.size(), 1);
+        assert_eq!(animation.motions()[0].base().time_ref_name(), "");
+
+        app.undo(&mut camera);
+        assert_eq!(
+            app.state
+                .scene_animation(scene_uid)
+                .unwrap()
+                .unwrap()
+                .size(),
+            2
+        );
+    }
+
+    #[test]
+    fn native_animation_seek_applies_typed_properties_and_restores() {
+        let Some(pdb) = reference_pdb_path() else {
+            return;
+        };
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.open_path = pdb.to_string_lossy().into_owned();
+        app.open_current_path(&mut camera);
+        let object = app.state.active_object_summaries().remove(0);
+        let renderer = app.state.renderer_summaries(object.uid).remove(0);
+        let original = app
+            .state
+            .scene_manager()
+            .object(object.uid)
+            .unwrap()
+            .renderer(renderer.uid)
+            .unwrap()
+            .clone();
+
+        let mut motion =
+            new_native_animation_motion(AnimKind::HideAnim, "HideAnim1".to_string(), String::new());
+        let AnimMotion::ShowHide(value) = &mut motion else {
+            unreachable!();
+        };
+        value.set_rend(format!("{}/{}", object.name, renderer.name));
+        value.set_hide(true);
+        value.set_fade(true);
+        value.set_tgt_alpha(0.8);
+        let mut animation = AnimMgr::new();
+        animation.append_motion(motion);
+        app.state
+            .set_scene_animation(app.state.active_scene().unwrap(), Some(&animation))
+            .unwrap();
+
+        app.seek_animation(0.5, &mut camera).unwrap();
+        let animated = app
+            .state
+            .scene_manager()
+            .object(object.uid)
+            .unwrap()
+            .renderer(renderer.uid)
+            .unwrap();
+        assert!(animated.is_visible());
+        assert_eq!(animated.qsc_attr("alpha"), Some("0.4"));
+
+        app.restore_animation_playback(&mut camera, false).unwrap();
+        let restored = app
+            .state
+            .scene_manager()
+            .object(object.uid)
+            .unwrap()
+            .renderer(renderer.uid)
+            .unwrap();
+        assert_eq!(restored.is_visible(), original.is_visible());
+        assert_eq!(restored.qsc_attr("alpha"), original.qsc_attr("alpha"));
     }
 
     #[test]
@@ -32995,12 +33509,20 @@ mod tests {
         let mut app = GuiApplication::new();
         let mut camera = CameraController::default();
 
-        app.animation_playing = true;
+        app.add_animation_motion(AnimKind::Spin, &mut camera)
+            .unwrap();
+        app.begin_animation_playback(&camera).unwrap();
         let before = camera.orientation;
         let _ = ctx.run(egui::RawInput::default(), |ctx| app.ui(ctx, &mut camera));
         assert!(
             !camera.orientation.abs_diff_eq(before, 1.0e-4),
             "playing must spin the camera"
+        );
+
+        app.restore_animation_playback(&mut camera, false).unwrap();
+        assert!(
+            camera.orientation.abs_diff_eq(before, 1.0e-6),
+            "stop must restore the starting camera"
         );
 
         app.animation_playing = false;
@@ -33499,16 +34021,10 @@ mod tests {
                 app.apply_object_coloring(uid, ColoringMode::Rainbow);
             }
             // A couple of animation objects so the Animation panel list renders.
-            app.animation_objects = vec![
-                AnimObject {
-                    kind: AnimKind::Spin,
-                    duration: 3.0,
-                },
-                AnimObject {
-                    kind: AnimKind::Pause,
-                    duration: 1.0,
-                },
-            ];
+            app.add_animation_motion(AnimKind::Spin, &mut camera)
+                .unwrap();
+            app.add_animation_motion(AnimKind::Pause, &mut camera)
+                .unwrap();
             let mut harness = egui_kittest::Harness::builder()
                 .with_size(egui::vec2(420.0, 1500.0))
                 .build(|ctx| {
@@ -33536,7 +34052,7 @@ mod tests {
                             app.view_section(ui, &mut camera);
                             ui.separator();
                             ui.heading("Animation");
-                            app.animation_section(ui);
+                            app.animation_section(ui, &mut camera);
                         });
                     });
                 });
