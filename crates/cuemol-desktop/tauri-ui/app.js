@@ -14950,21 +14950,26 @@ function renderMultiGradientColoring(target, state) {
   }, coloringGradientSelectedIndex < 0);
   coloringDeck.append(toolbar);
 
-  const preset = coloringSelect(
-    "coloring-gradient-preset",
-    "rainbow1",
-    [["rainbow1", "Rainbow"], ["resmap1", "ResMap"], ["heatmap1", "Heat map"]],
-    () => {},
-  );
-  const applyPreset = button("Apply", "", () => {
-    state.gradientEntries = gradientPreset(preset.value, state.attrs.color_mapname || "");
-    coloringGradientSelectedIndex = -1;
-    commitColoring(target, state.type, state);
-  });
-  const presetRow = document.createElement("div");
-  presetRow.className = "coloring-paint-editor";
-  presetRow.append(preset, applyPreset);
-  coloringDeck.append(presetRow);
+  const presetMenu = document.createElement("details");
+  presetMenu.className = "coloring-gradient-preset-menu";
+  const presetSummary = document.createElement("summary");
+  presetSummary.textContent = "Load preset";
+  const presetPopup = document.createElement("div");
+  presetPopup.className = "coloring-gradient-preset-popup";
+  for (const [name, label] of [
+    ["rainbow1", "Rainbow"],
+    ["resmap1", "ResMap"],
+    ["heatmap1", "HeatMap"],
+  ]) {
+    presetPopup.append(button(label, "", () => {
+      presetMenu.open = false;
+      state.gradientEntries = gradientPreset(name, state.attrs.color_mapname || "");
+      coloringGradientSelectedIndex = -1;
+      commitColoring(target, state.type, state);
+    }));
+  }
+  presetMenu.append(presetSummary, presetPopup);
+  toolbar.append(presetMenu);
 }
 
 function renderColoringDeck(target) {

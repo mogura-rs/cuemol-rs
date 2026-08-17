@@ -790,9 +790,13 @@ fn paint_coloring_columns_are_resizable_and_persistent() {
     assert!(JS.contains("coloring-gradient-histogram"));
     assert!(JS.contains("function loadGradientHistogram("));
     assert!(JS.contains("get_density_histogram"));
+    assert!(JS.contains("coloring-gradient-preset-menu"));
+    assert!(JS.contains("coloring-gradient-preset-popup"));
+    assert!(JS.contains("presetSummary.textContent = \"Load preset\""));
     assert!(JS.contains("coloringGradientKeepRatio"));
     assert!(CSS.contains(".coloring-gradient-preview-range"));
     assert!(CSS.contains(".coloring-gradient-histogram"));
+    assert!(CSS.contains(".coloring-gradient-preset-menu > summary::after"));
     assert!(CSS.contains(".coloring-gradient-keep-ratio"));
     let native_paint = NATIVE_GUI_RS
         .split("fn object_paint_coloring_ui(")
@@ -816,6 +820,7 @@ fn paint_coloring_columns_are_resizable_and_persistent() {
     assert!(native_gradient.contains("ui.monospace(color)"));
     assert!(native_gradient.contains("density_histogram(map.uid, minimum, maximum, 128)"));
     assert!(native_gradient.contains("native_gradient_preview_ui("));
+    assert!(native_gradient.contains("Load preset ▾"));
     assert!(native_gradient.contains("coloring_gradient_keep_ratio"));
     assert!(NATIVE_GUI_RS.contains("fn adjust_native_gradient_value("));
 }

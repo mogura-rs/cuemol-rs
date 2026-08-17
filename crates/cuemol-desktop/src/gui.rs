@@ -11886,7 +11886,7 @@ impl GuiApplication {
             .find(|map| map.name == *map_name)
             .map(|map| (map.min_density, map.max_density))
             .unwrap_or((-1.0, 1.0));
-        ui.menu_button("Preset ▾", |ui| {
+        ui.menu_button("Load preset ▾", |ui| {
             for (name, label) in [
                 ("rainbow", "Rainbow"),
                 ("resmap", "ResMap"),
