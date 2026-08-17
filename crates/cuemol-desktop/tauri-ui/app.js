@@ -34,6 +34,12 @@ const dragReadout = document.getElementById("drag-readout");
 const errorAlertDialog = document.getElementById("error-alert-dialog");
 const errorAlertTitle = document.getElementById("error-alert-title");
 const errorAlertMessage = document.getElementById("error-alert-message");
+const confirmationDialog = document.getElementById("confirmation-dialog");
+const confirmationTitle = document.getElementById("confirmation-title");
+const confirmationMessage = document.getElementById("confirmation-message");
+const confirmationClose = document.getElementById("confirmation-close");
+const confirmationCancel = document.getElementById("confirmation-cancel");
+const confirmationAccept = document.getElementById("confirmation-accept");
 const streamProgressDialog = document.getElementById("stream-progress-dialog");
 const streamProgressTitle = document.getElementById("stream-progress-title");
 const streamProgressReadout = document.getElementById("stream-progress-readout");
@@ -4696,37 +4702,41 @@ function showSurfaceRegenerateDialog(object) {
 }
 
 function showConfirmationDialog({ title, message, confirmLabel = "OK" }) {
-  if (referenceDialog.open) referenceDialog.close();
-  dialogTitle.textContent = title;
-  dialogContent.replaceChildren(dialogParagraph(message));
-  dialogFooter.hidden = false;
-  referenceDialog.className = "reference-dialog confirmation-dialog";
+  if (confirmationDialog.open) confirmationDialog.close();
+  confirmationTitle.textContent = title;
+  confirmationMessage.replaceChildren(dialogParagraph(message));
+  confirmationAccept.textContent = confirmLabel;
 
   return new Promise((resolve) => {
     let settled = false;
     const finish = (value) => {
       if (settled) return;
       settled = true;
-      referenceDialog.removeEventListener("close", onClose);
+      confirmationDialog.removeEventListener("close", onClose);
+      confirmationClose.removeEventListener("click", cancel);
+      confirmationCancel.removeEventListener("click", cancel);
+      confirmationAccept.removeEventListener("click", confirm);
       resolve(value);
     };
     const onClose = () => {
-      if (!referenceDialog.open) finish(false);
+      if (!confirmationDialog.open) finish(false);
     };
-    referenceDialog.addEventListener("close", onClose);
-    const cancel = button("Cancel", "", () => {
+    const cancel = () => {
       finish(false);
-      referenceDialog.close();
-    });
-    const confirm = button(confirmLabel, "dialog-primary", () => {
+      confirmationDialog.close();
+    };
+    const confirm = () => {
       finish(true);
-      referenceDialog.close();
-    });
-    dialogActions(cancel, confirm);
-    if (!referenceDialog.open && referenceDialog.showModal) {
-      referenceDialog.showModal();
+      confirmationDialog.close();
+    };
+    confirmationDialog.addEventListener("close", onClose);
+    confirmationClose.addEventListener("click", cancel);
+    confirmationCancel.addEventListener("click", cancel);
+    confirmationAccept.addEventListener("click", confirm);
+    if (!confirmationDialog.open && confirmationDialog.showModal) {
+      confirmationDialog.showModal();
     }
-    setTimeout(() => confirm.focus(), 0);
+    setTimeout(() => confirmationAccept.focus(), 0);
   });
 }
 
@@ -7689,11 +7699,21 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         optional.reset = () => {};
       }
 
-      const reset = button("Reset all to default", "", () => {
+      const reset = button("Reset all to default", "", async () => {
+        const confirmed = await showConfirmationDialog({
+          title: "Animation object properties",
+          message: "Reset all to default?",
+        });
+        if (!confirmed) return;
+        if (pending) {
+          pendingAnimationAdd = null;
+          referenceDialog.close();
+          return;
+        }
         const defaults = defaultAnimationObjectProperties(object);
-        disabled.checked = defaults.disabled;
-        quadric.value = String(defaults.quadric * 100);
-        optional.reset(defaults);
+        if (await mutate("reset_animation_object_properties", { input: defaults })) {
+          referenceDialog.close();
+        }
       });
       const apply = button("OK", "dialog-primary", async () => {
         const startSeconds = parseAnimationObjectTime(start.value);

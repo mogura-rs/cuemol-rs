@@ -1007,7 +1007,9 @@ fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
     assert!(JS.contains("showWorkspaceContextMenu(event, animationAddKinds.map"));
     assert!(JS.contains("pendingAnimationAdd = {"));
     assert!(JS.contains("await showReferenceDialog(\"Animation object properties\")"));
-    assert!(JS.contains("optional.reset(defaults)"));
+    assert!(JS.contains("message: \"Reset all to default?\""));
+    assert!(JS.contains("mutate(\"reset_animation_object_properties\""));
+    assert!(HTML.contains("id=\"confirmation-dialog\""));
     assert!(JS.contains("Object.assign(input, { angle: 0, axis: [0, 1, 0] })"));
     assert!(JS.contains("String(object.quadric * 100)"));
     assert!(JS.contains("quadric: Number(quadric.value) / 100"));
@@ -1046,6 +1048,8 @@ fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
         assert!(JS.contains(&format!("label: \"{label}\"")));
     }
     assert!(TAURI_APP_RS.contains("fn set_animation_object_properties("));
+    assert!(TAURI_APP_RS.contains("fn reset_animation_object_properties("));
+    assert!(TAURI_APP_RS.contains("ResetAnimationObjectProperties"));
     assert!(TAURI_APP_RS.contains("AddConfiguredAnimationObject"));
     assert!(TAURI_APP_RS.contains("animation.insert_motion_before(insertion_index, motion)"));
     assert!(TAURI_APP_RS.contains("fn delete_animation_objects("));
@@ -1057,6 +1061,7 @@ fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
     assert!(NATIVE_GUI_RS.contains("fn move_animation_motions("));
     assert!(NATIVE_GUI_RS.contains("fn open_new_animation_properties("));
     assert!(NATIVE_GUI_RS.contains("draft.reset_defaultable()"));
+    assert!(NATIVE_GUI_RS.contains("ui.label(\"Reset all to default?\")"));
     assert!(NATIVE_GUI_RS.contains("ui.button(\"Reset all to default\")"));
     assert!(NATIVE_GUI_RS.contains("response.context_menu(|ui|"));
     assert!(NATIVE_GUI_RS.contains("ui.strong(\"Name\")"));

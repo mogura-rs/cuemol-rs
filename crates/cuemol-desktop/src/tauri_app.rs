@@ -7815,6 +7815,7 @@ enum ModelRequest {
         duration: f64,
     },
     SetAnimationObjectProperties(AnimationObjectPropertiesInput),
+    ResetAnimationObjectProperties(AnimationObjectPropertiesInput),
     AnimationControl(String),
     SetAnimationLoop(bool),
     SetAnimationStartCamera(String),
@@ -11625,6 +11626,15 @@ fn handle_model_request(
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
+        ModelRequest::ResetAnimationObjectProperties(input) => {
+            model.restore_animation_playback(false)?;
+            model.animation_elapsed = 0.0;
+            let undo = model.capture_undo();
+            model.set_animation_object_properties(input)?;
+            model.status = "Reset all to default".to_string();
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
         ModelRequest::AnimationControl(action) => {
             match action.as_str() {
                 "play" => {
@@ -14906,6 +14916,17 @@ fn set_animation_object_properties(
 }
 
 #[tauri::command]
+fn reset_animation_object_properties(
+    input: AnimationObjectPropertiesInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::ResetAnimationObjectProperties(input),
+    )?)
+}
+
+#[tauri::command]
 fn animation_control(
     action: String,
     state: State<'_, ManagedState>,
@@ -15482,6 +15503,7 @@ pub fn run() -> Result<(), tauri::Error> {
             move_animation_objects,
             set_animation_duration,
             set_animation_object_properties,
+            reset_animation_object_properties,
             animation_control,
             set_animation_loop,
             set_animation_start_camera,
@@ -21893,6 +21915,59 @@ mod tests {
         let restored = model.snapshot();
         assert_eq!(restored.animation_objects[0].name, "SimpleSpin1");
         assert_eq!(restored.animation_objects[1].time_ref_name, "SimpleSpin1");
+    }
+
+    #[test]
+    fn animation_object_property_reset_applies_immediately_with_undo() {
+        let mut model = model_without_gpu();
+        handle_model_request(
+            &mut model,
+            ModelRequest::AddAnimationObject {
+                kind: "simple-spin".to_string(),
+                after_index: None,
+            },
+        )
+        .unwrap();
+        let mut changed = animation_properties_input(&model.snapshot().animation_objects[0]);
+        changed.disabled = true;
+        changed.quadric = 0.2;
+        changed.angle = Some(180.0);
+        changed.axis = Some([1.0, 0.0, 0.0]);
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetAnimationObjectProperties(changed),
+        )
+        .unwrap();
+
+        let changed_snapshot = model.snapshot();
+        let changed = &changed_snapshot.animation_objects[0];
+        let changed_name = changed.name.clone();
+        let mut defaults = animation_properties_input(changed);
+        defaults.disabled = false;
+        defaults.quadric = 0.0;
+        defaults.angle = Some(0.0);
+        defaults.axis = Some([0.0, 1.0, 0.0]);
+        let undo_count = model.undo_stack.len();
+        handle_model_request(
+            &mut model,
+            ModelRequest::ResetAnimationObjectProperties(defaults),
+        )
+        .unwrap();
+        let reset = &model.snapshot().animation_objects[0];
+        assert_eq!(reset.name, changed_name);
+        assert!(!reset.disabled);
+        assert_eq!(reset.quadric, 0.0);
+        assert_eq!(reset.angle, Some(0.0));
+        assert_eq!(reset.axis, Some([0.0, 1.0, 0.0]));
+        assert_eq!(model.status, "Reset all to default");
+        assert_eq!(model.undo_stack.len(), undo_count + 1);
+
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        let restored = &model.snapshot().animation_objects[0];
+        assert!(restored.disabled);
+        assert_eq!(restored.quadric, 0.2);
+        assert_eq!(restored.angle, Some(180.0));
+        assert_eq!(restored.axis, Some([1.0, 0.0, 0.0]));
     }
 
     #[test]
