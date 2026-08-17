@@ -7342,43 +7342,34 @@ function workspaceStyleContextItems(scene, style = null) {
     return mutate("activate_scene", { sceneUid: scene.uid });
   };
   const newStyle = {
-    label: "New Style…",
+    label: "New Style...",
     action: async () => {
       if (!(await activate())) return;
       await openNewStyleFlow();
     },
   };
   const loadStyle = {
-    label: "Load…",
+    label: "Load ...",
     action: async () => {
       if (!(await activate())) return;
       await loadWorkspaceStyleFile(scene);
     },
   };
-  const items = [{ label: style?.name || "Styles", disabled: true }, null, newStyle];
-  if (!style) {
-    if (workspaceStyleClipboardName) {
-      items.push({ label: "Paste Style", action: () => pasteWorkspaceStyle(scene) });
-    }
-    items.push(null, { label: "Style file", children: [loadStyle] });
-    return items;
-  }
-
-  items.push(
-    null,
+  const items = [
+    newStyle,
     {
       label: "Copy",
-      disabled: style.localIndex === null,
+      disabled: !style || style.localIndex === null,
       action: () => copyWorkspaceStyle(scene.uid, style),
     },
-  );
-  if (workspaceStyleClipboardName) {
-    items.push({ label: "Paste Style", action: () => pasteWorkspaceStyle(scene) });
-  }
-  items.push(
+    {
+      label: "Paste",
+      disabled: !workspaceStyleClipboardName,
+      action: () => pasteWorkspaceStyle(scene),
+    },
     {
       label: "Delete",
-      disabled: style.localIndex === null,
+      disabled: !style || style.localIndex === null,
       action: () =>
         mutateWithoutViewport("destroy_style", {
           sceneUid: style.sceneUid,
@@ -7392,20 +7383,20 @@ function workspaceStyleContextItems(scene, style = null) {
         loadStyle,
         {
           label: "Reload",
-          disabled: !style.source,
+          disabled: !style?.source,
           action: () => globalThis.alert?.("Not implemented!!"),
         },
         {
           label: "Save",
-          disabled: style.localIndex === null,
+          disabled: !style || style.localIndex === null,
           action: async () => {
             if (!(await activate())) return;
             await saveWorkspaceStyleFile(scene, style, false);
           },
         },
         {
-          label: "Save As…",
-          disabled: style.localIndex === null,
+          label: "Save As...",
+          disabled: !style || style.localIndex === null,
           action: async () => {
             if (!(await activate())) return;
             await saveWorkspaceStyleFile(scene, style, true);
@@ -7415,27 +7406,31 @@ function workspaceStyleContextItems(scene, style = null) {
     },
     null,
     {
-      label: "Edit…",
-      action: async () => {
-        if (!(await activate())) return;
-        await showStyleProperties(style);
-      },
-    },
-    {
       label: "Read-only",
-      checked: Boolean(style.readOnly),
-      disabled: style.localIndex === null || (!style.readOnly && Boolean(style.modified)),
+      checked: Boolean(style?.readOnly),
+      disabled:
+        !style ||
+        style.localIndex === null ||
+        (!style.readOnly && Boolean(style.modified)),
       action: () => updateWorkspaceStyle(style, { readOnly: !style.readOnly }),
     },
-    null,
     {
-      label: "Properties…",
+      label: "Rename...",
+      disabled: !style,
       action: async () => {
         if (!(await activate())) return;
         await showStyleProperties(style);
       },
     },
-  );
+    {
+      label: "Edit...",
+      disabled: !style,
+      action: async () => {
+        if (!(await activate())) return;
+        await showStyleProperties(style);
+      },
+    },
+  ];
   return items;
 }
 

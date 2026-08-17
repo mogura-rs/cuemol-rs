@@ -1196,12 +1196,12 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("mutateWithoutViewport(\"save_style_file\""));
     assert!(JS.contains("globalThis.alert?.(\"Not implemented!!\")"));
     assert!(JS.contains("function updateWorkspaceStyle(style, update)"));
-    assert!(JS.contains("label: \"New Style…\""));
+    assert!(JS.contains("label: \"New Style...\""));
     assert!(JS.contains("async function openNewStyleFlow()"));
     assert!(JS.contains("title: \"New Style\""));
     assert!(JS.contains("label: \"Name for new style:\""));
     assert!(JS.contains("defaultValue: `style_${index}`"));
-    assert!(NATIVE_GUI_RS.contains("ui.button(\"New Style…\")"));
+    assert!(NATIVE_GUI_RS.contains("ui.button(\"New Style...\")"));
     assert!(NATIVE_GUI_RS.contains("egui::Window::new(\"New Style\")"));
     assert!(NATIVE_GUI_RS.contains("ui.label(\"Name for new style:\")"));
     assert!(JS.contains("label: \"New Group…\""));
@@ -1605,21 +1605,39 @@ fn tauri_workspace_exposes_reference_style_nodes_and_actions() {
         .nth(1)
         .and_then(|source| source.split("function workspaceObjectContextItems").next())
         .expect("Tauri style context menu");
-    assert!(tauri_style_menu.contains("style?.name || \"Styles\""));
-    assert!(tauri_style_menu.contains("label: \"Paste Style\""));
-    assert!(tauri_style_menu.contains("label: \"Load…\""));
-    assert!(tauri_style_menu.contains("label: \"Save As…\""));
-    assert!(tauri_style_menu.contains("label: \"Edit…\""));
-    assert!(tauri_style_menu.contains("label: \"Properties…\""));
-    assert!(!tauri_style_menu.contains("label: \"Rename...\""));
+    let mut cursor = 0;
+    for item in [
+        "label: \"New Style...\"",
+        "label: \"Copy\"",
+        "label: \"Paste\"",
+        "label: \"Delete\"",
+        "label: \"Style file\"",
+        "label: \"Read-only\"",
+        "label: \"Rename...\"",
+        "label: \"Edit...\"",
+    ] {
+        let relative = tauri_style_menu[cursor..]
+            .find(item)
+            .unwrap_or_else(|| panic!("missing style menu item {item}"));
+        cursor += relative + item.len();
+    }
+    for item in [
+        "label: \"Load ...\"",
+        "label: \"Reload\"",
+        "label: \"Save\"",
+        "label: \"Save As...\"",
+    ] {
+        assert!(
+            tauri_style_menu.contains(item),
+            "missing style file item {item}"
+        );
+    }
+    assert!(!tauri_style_menu.contains("style?.name || \"Styles\""));
+    assert!(!tauri_style_menu.contains("label: \"Paste Style\""));
+    assert!(!tauri_style_menu.contains("label: \"Properties…\""));
+    assert!(tauri_style_menu.contains("disabled: !style || style.localIndex === null"));
+    assert!(tauri_style_menu.contains("disabled: !workspaceStyleClipboardName"));
     assert!(!tauri_style_menu.contains("globalThis.prompt"));
-    let tauri_style_root = tauri_style_menu
-        .split("if (!style) {")
-        .nth(1)
-        .and_then(|source| source.split("return items;").next())
-        .expect("Tauri style-root context menu");
-    assert!(tauri_style_root.contains("children: [loadStyle]"));
-    assert!(!tauri_style_root.contains("label: \"Reload\""));
 
     let native_style_menu = NATIVE_GUI_RS
         .split("let root_selection = WorkspaceAuxSelection::StyleRoot")
@@ -1630,12 +1648,25 @@ fn tauri_workspace_exposes_reference_style_nodes_and_actions() {
                 .next()
         })
         .expect("native style context menus");
-    assert!(native_style_menu.contains("ui.weak(\"Styles\")"));
-    assert!(native_style_menu.contains("ui.button(\"Paste Style\")"));
-    assert!(native_style_menu.contains("ui.button(\"Load…\")"));
-    assert!(native_style_menu.contains("ui.button(\"Edit…\")"));
-    assert!(native_style_menu.contains("ui.button(\"Properties…\")"));
-    assert!(!native_style_menu.contains("egui::Button::new(\"Rename...\")"));
+    assert!(!native_style_menu.contains("ui.weak(\"Styles\")"));
+    assert!(!native_style_menu.contains("Paste Style"));
+    for item in [
+        "ui.button(\"New Style...\")",
+        "egui::Button::new(\"Copy\")",
+        "egui::Button::new(\"Paste\")",
+        "egui::Button::new(\"Delete\")",
+        "ui.button(\"Load ...\")",
+        "egui::Button::new(\"Reload\")",
+        "egui::Button::new(\"Save\")",
+        "egui::Button::new(\"Save As...\")",
+        "egui::Button::new(\"Rename...\")",
+        "egui::Button::new(\"Edit...\")",
+    ] {
+        assert!(
+            native_style_menu.contains(item),
+            "missing native style item {item}"
+        );
+    }
 }
 
 #[test]
