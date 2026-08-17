@@ -8211,6 +8211,7 @@ async function showNewWorkspaceRendererDialog(scene, kind, object, groupName = n
         rendererName,
         selection: useSelection?.checked ? selection.value : null,
         groupName,
+        densityCentering: kind === "densityRenderer" ? recenter.value : null,
       },
     });
     if (!changed) return;

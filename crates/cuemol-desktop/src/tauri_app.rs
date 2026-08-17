@@ -1182,6 +1182,7 @@ struct WorkspaceNewRendererInput {
     renderer_name: String,
     selection: Option<String>,
     group_name: Option<String>,
+    density_centering: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -3548,6 +3549,12 @@ impl AppModel {
                 renderer_uid
             }
             "densityRenderer" => {
+                let density_centering = input.density_centering.as_deref().unwrap_or("map");
+                if !matches!(density_centering, "map" | "view") {
+                    return Err(format!(
+                        "unsupported density renderer centering: {density_centering}"
+                    ));
+                }
                 let renderer_uid = self
                     .desktop
                     .add_density_renderer(object_uid, renderer_type)
@@ -3562,6 +3569,11 @@ impl AppModel {
                         input.group_name.as_deref(),
                     )
                     .map_err(|error| error.to_string())?;
+                if density_centering == "map" {
+                    self.desktop
+                        .set_density_renderer_center(object_uid, renderer_uid, self.camera.center())
+                        .map_err(|error| error.to_string())?;
+                }
                 renderer_uid
             }
             "surfaceRenderer" => {
@@ -15461,6 +15473,7 @@ mod tests {
                 renderer_name: "invalid selection".to_string(),
                 selection: Some("bad selector (".to_string()),
                 group_name: None,
+                density_centering: None,
             }),
         );
         assert!(invalid.is_err());
@@ -15476,6 +15489,7 @@ mod tests {
                 renderer_name: "atoms".to_string(),
                 selection: Some("protein".to_string()),
                 group_name: None,
+                density_centering: None,
             }),
         )
         .unwrap();
@@ -15499,6 +15513,9 @@ mod tests {
             model
                 .desktop
                 .add_density_map(scene_uid, "map", cuemol_xtal::DensityMap::new());
+        model
+            .camera
+            .set_center(cuemol_core::Vector4::new3(3.0, 4.0, 5.0));
         handle_model_request(
             &mut model,
             ModelRequest::CreateWorkspaceRenderer(WorkspaceNewRendererInput {
@@ -15508,12 +15525,14 @@ mod tests {
                 renderer_name: "density surface".to_string(),
                 selection: None,
                 group_name: None,
+                density_centering: Some("map".to_string()),
             }),
         )
         .unwrap();
         let density_renderer = &model.snapshot().density_maps[0].renderers[0];
         assert_eq!(density_renderer.name, "density surface");
         assert_eq!(density_renderer.renderer_type, "isosurf");
+        assert_eq!(density_renderer.specific["center"], "(3,4,5)");
     }
 
     #[test]

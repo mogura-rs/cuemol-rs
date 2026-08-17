@@ -4851,6 +4851,28 @@ impl DesktopAppState {
         Ok(uid)
     }
 
+    pub fn set_density_renderer_center(
+        &mut self,
+        map_uid: Uid,
+        renderer_uid: Uid,
+        center: Vector4,
+    ) -> Result<()> {
+        let map = self
+            .density_maps
+            .get_mut(&map_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("density map {}", map_uid.get())))?;
+        let renderer = map
+            .renderers
+            .iter_mut()
+            .find(|renderer| renderer.uid == renderer_uid)
+            .ok_or_else(|| {
+                CueMolError::NotFound(format!("density renderer {}", renderer_uid.get()))
+            })?;
+        renderer.center = center;
+        map.modified = true;
+        Ok(())
+    }
+
     pub fn add_density_contour_renderer(
         &mut self,
         map_uid: Uid,

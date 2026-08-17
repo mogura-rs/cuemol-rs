@@ -1144,6 +1144,10 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("create_workspace_renderer"));
     assert!(JS.contains("async function showNewWorkspaceRendererDialog("));
     assert!(JS.contains("dialogTitle.textContent = \"Setup renderer\""));
+    assert!(JS.contains("densityCentering: kind === \"densityRenderer\" ? recenter.value : null"));
+    assert!(TAURI_APP_RS.contains("set_density_renderer_center("));
+    assert!(NATIVE_GUI_RS.contains("\"Set map center\""));
+    assert!(NATIVE_GUI_RS.contains("\"Move view center\""));
     assert!(JS.contains("cachedWorkspaceRendererStyles"));
     assert!(JS.contains("apply_workspace_renderer_style"));
     assert!(JS.contains("showApplyRendererStyleDialog(object, renderer, styleOptions)"));
