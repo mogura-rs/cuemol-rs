@@ -48,6 +48,7 @@ const ANIMATION_COLUMN_SPLITTER_WIDTH: f32 = 5.0;
 const COLORING_PAINT_SELECTION_COLUMN_DEFAULT_WIDTH: f32 = 105.0;
 const COLORING_PAINT_SELECTION_COLUMN_MIN_WIDTH: f32 = 60.0;
 const COLORING_PAINT_COLUMN_SPLITTER_WIDTH: f32 = 5.0;
+const COLORING_GRADIENT_PARAM_COLUMN_DEFAULT_WIDTH: f32 = 105.0;
 const RENDER_PRESETS: &[(&str, u32, u32)] = &[
     ("HD 720", 1280, 720),
     ("Full HD", 1920, 1080),
@@ -1208,6 +1209,8 @@ struct GuiApplication {
     coloring_paint_selection_column_width: f32,
     coloring_paint_selection_column_drag_start_width: Option<f32>,
     coloring_gradient_selected: Option<usize>,
+    coloring_gradient_param_column_width: f32,
+    coloring_gradient_param_column_drag_start_width: Option<f32>,
     snapshot: RenderSceneSnapshot,
     /// Monotonic generation used to avoid rebuilding immutable GPU scene buffers
     /// during camera-only and egui-only redraws.
@@ -4502,6 +4505,11 @@ impl GuiApplication {
             .parse::<f32>()
             .unwrap_or(COLORING_PAINT_SELECTION_COLUMN_DEFAULT_WIDTH)
             .clamp(COLORING_PAINT_SELECTION_COLUMN_MIN_WIDTH, 400.0);
+        let coloring_gradient_param_column_width = state
+            .config_value("coloring_gradient:param_width")
+            .parse::<f32>()
+            .unwrap_or(COLORING_GRADIENT_PARAM_COLUMN_DEFAULT_WIDTH)
+            .clamp(COLORING_PAINT_SELECTION_COLUMN_MIN_WIDTH, 400.0);
         Self {
             state,
             open_path: "../cuemol2/tests/test_data/1CRN.pdb".to_string(),
@@ -4599,6 +4607,8 @@ impl GuiApplication {
             coloring_paint_selection_column_width,
             coloring_paint_selection_column_drag_start_width: None,
             coloring_gradient_selected: None,
+            coloring_gradient_param_column_width,
+            coloring_gradient_param_column_drag_start_width: None,
             selected_renderer: None,
             snapshot: RenderSceneSnapshot::empty(),
             snapshot_revision: 0,
@@ -11246,24 +11256,123 @@ impl GuiApplication {
         {
             self.coloring_gradient_selected = entries.len().checked_sub(1);
         }
+        let minimum_width =
+            2.0 * COLORING_PAINT_SELECTION_COLUMN_MIN_WIDTH + COLORING_PAINT_COLUMN_SPLITTER_WIDTH;
+        let available_width = ui.available_width().max(minimum_width);
+        let param_width = self.coloring_gradient_param_column_width.clamp(
+            COLORING_PAINT_SELECTION_COLUMN_MIN_WIDTH,
+            (available_width
+                - COLORING_PAINT_SELECTION_COLUMN_MIN_WIDTH
+                - COLORING_PAINT_COLUMN_SPLITTER_WIDTH)
+                .max(COLORING_PAINT_SELECTION_COLUMN_MIN_WIDTH),
+        );
+        let color_width = (available_width - param_width - COLORING_PAINT_COLUMN_SPLITTER_WIDTH)
+            .max(COLORING_PAINT_SELECTION_COLUMN_MIN_WIDTH);
+        let header_height = ui.spacing().interact_size.y;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.add_sized(
+                [param_width, header_height],
+                egui::Label::new(egui::RichText::new("Param").strong()),
+            );
+            let (splitter_rect, splitter) = ui.allocate_exact_size(
+                egui::vec2(COLORING_PAINT_COLUMN_SPLITTER_WIDTH, header_height),
+                egui::Sense::drag(),
+            );
+            let splitter = splitter
+                .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+                .on_hover_text("Resize Param column; double-click to reset");
+            ui.painter().line_segment(
+                [splitter_rect.center_top(), splitter_rect.center_bottom()],
+                egui::Stroke::new(
+                    1.0,
+                    if splitter.hovered() || splitter.dragged() {
+                        ui.visuals().text_color()
+                    } else {
+                        ui.visuals().widgets.noninteractive.bg_stroke.color
+                    },
+                ),
+            );
+            if splitter.double_clicked() {
+                self.coloring_gradient_param_column_width =
+                    COLORING_GRADIENT_PARAM_COLUMN_DEFAULT_WIDTH;
+                self.coloring_gradient_param_column_drag_start_width = None;
+                self.state.put_config_value(
+                    "coloring_gradient:param_width",
+                    self.coloring_gradient_param_column_width.to_string(),
+                );
+            } else {
+                if splitter.drag_started() {
+                    self.coloring_gradient_param_column_drag_start_width = Some(param_width);
+                }
+                if splitter.dragged() {
+                    if let Some(initial_width) =
+                        self.coloring_gradient_param_column_drag_start_width
+                    {
+                        let maximum = (available_width
+                            - COLORING_PAINT_SELECTION_COLUMN_MIN_WIDTH
+                            - COLORING_PAINT_COLUMN_SPLITTER_WIDTH)
+                            .max(COLORING_PAINT_SELECTION_COLUMN_MIN_WIDTH);
+                        self.coloring_gradient_param_column_width = (initial_width
+                            + splitter.drag_delta().x)
+                            .clamp(COLORING_PAINT_SELECTION_COLUMN_MIN_WIDTH, maximum);
+                        ui.ctx().request_repaint();
+                    }
+                }
+                if splitter.drag_stopped() {
+                    self.coloring_gradient_param_column_drag_start_width = None;
+                    self.state.put_config_value(
+                        "coloring_gradient:param_width",
+                        self.coloring_gradient_param_column_width.to_string(),
+                    );
+                }
+            }
+            ui.add_sized(
+                [color_width, header_height],
+                egui::Label::new(egui::RichText::new("Color").strong()),
+            );
+        });
+        ui.separator();
         egui::ScrollArea::vertical()
             .id_salt("native_coloring_gradient_list")
             .max_height(140.0)
             .show(ui, |ui| {
                 for (index, (value, color)) in entries.iter().enumerate() {
+                    let row_height = ui.spacing().interact_size.y;
                     ui.horizontal(|ui| {
-                        if let Some(swatch) = native_style_color(color) {
-                            ui.colored_label(swatch, "■");
-                        }
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        let label = format!("{value:.6}");
                         if ui
-                            .selectable_label(
-                                self.coloring_gradient_selected == Some(index),
-                                format!("{value:.6}"),
+                            .add_sized(
+                                [param_width, row_height],
+                                egui::Button::selectable(
+                                    self.coloring_gradient_selected == Some(index),
+                                    &label,
+                                ),
                             )
+                            .on_hover_text(&label)
                             .clicked()
                         {
                             self.coloring_gradient_selected = Some(index);
                         }
+                        let (separator, _) = ui.allocate_exact_size(
+                            egui::vec2(COLORING_PAINT_COLUMN_SPLITTER_WIDTH, row_height),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter().line_segment(
+                            [separator.center_top(), separator.center_bottom()],
+                            ui.visuals().widgets.noninteractive.bg_stroke,
+                        );
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(color_width, row_height),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                if let Some(swatch) = native_style_color(color) {
+                                    ui.colored_label(swatch, "■");
+                                }
+                                ui.monospace(color);
+                            },
+                        );
                     });
                 }
             });
@@ -20335,6 +20444,13 @@ impl GuiApplication {
             .unwrap_or(COLORING_PAINT_SELECTION_COLUMN_DEFAULT_WIDTH)
             .clamp(COLORING_PAINT_SELECTION_COLUMN_MIN_WIDTH, 400.0);
         self.coloring_paint_selection_column_drag_start_width = None;
+        self.coloring_gradient_param_column_width = self
+            .state
+            .config_value("coloring_gradient:param_width")
+            .parse::<f32>()
+            .unwrap_or(COLORING_GRADIENT_PARAM_COLUMN_DEFAULT_WIDTH)
+            .clamp(COLORING_PAINT_SELECTION_COLUMN_MIN_WIDTH, 400.0);
+        self.coloring_gradient_param_column_drag_start_width = None;
         for (style_key, config_key) in [
             ("DefaultLabel.font_name", "style:DefaultLabel.font_name"),
             ("DefaultLabel.font_size", "style:DefaultLabel.font_size"),
@@ -34093,7 +34209,7 @@ mod tests {
         let app = GuiApplication::new_with_config_source(NativeConfigSource {
             path: Some(PathBuf::from("preloaded.conf")),
             input: Ok(Some(
-                "view_input:tbrad\t1.25\ncuemol2.ui.ribbon.collapsed\ttrue\nleft_panel:Workspace:visible\tfalse\nleft_panel:Workspace:collapsed\ttrue\nleft_panel:Workspace:height\t185\nleft_panel:order\tAnimation|Workspace|MolStruct|Selection|Coloring|Symmetry|Density map|View\nleft_panel:width\t310\nbottom_panel:visible\tfalse\nbottom_panel:tab\tsequence\nbottom_panel:height\t240\nsequence_panel:name_width\t220\nanimation_panel:name_width\t180\nanimation_panel:start_width\t70\ncoloring_paint:selection_width\t165\nanimation_render:height\t720\nanimation_render:concurrency\t6\nanimation_render:duplicate_last_frame\ttrue\nanimation_render:backend\tUmbreon\nanimation_render:pov_shadow\ttrue\nanimation_render:make_movie\ttrue\nanimation_render:movie_format\tgifanim\nmru:length\t2\nmru:0:path\t/tmp/recent.qsc\nmru:1:path\t/tmp/recent.pdb\nselection_history:length\t2\nselection_history:0\tchain A\nselection_history:1\tname CA\n"
+                "view_input:tbrad\t1.25\ncuemol2.ui.ribbon.collapsed\ttrue\nleft_panel:Workspace:visible\tfalse\nleft_panel:Workspace:collapsed\ttrue\nleft_panel:Workspace:height\t185\nleft_panel:order\tAnimation|Workspace|MolStruct|Selection|Coloring|Symmetry|Density map|View\nleft_panel:width\t310\nbottom_panel:visible\tfalse\nbottom_panel:tab\tsequence\nbottom_panel:height\t240\nsequence_panel:name_width\t220\nanimation_panel:name_width\t180\nanimation_panel:start_width\t70\ncoloring_paint:selection_width\t165\ncoloring_gradient:param_width\t155\nanimation_render:height\t720\nanimation_render:concurrency\t6\nanimation_render:duplicate_last_frame\ttrue\nanimation_render:backend\tUmbreon\nanimation_render:pov_shadow\ttrue\nanimation_render:make_movie\ttrue\nanimation_render:movie_format\tgifanim\nmru:length\t2\nmru:0:path\t/tmp/recent.qsc\nmru:1:path\t/tmp/recent.pdb\nselection_history:length\t2\nselection_history:0\tchain A\nselection_history:1\tname CA\n"
                     .to_string(),
             )),
         });
@@ -34115,6 +34231,7 @@ mod tests {
         assert_eq!(app.animation_name_column_width, 180.0);
         assert_eq!(app.animation_start_column_width, 70.0);
         assert_eq!(app.coloring_paint_selection_column_width, 165.0);
+        assert_eq!(app.coloring_gradient_param_column_width, 155.0);
         assert_eq!(app.animation_render_settings.height, 720);
         assert_eq!(app.animation_render_settings.concurrency, 6);
         assert!(app.animation_render_settings.duplicate_last_frame);

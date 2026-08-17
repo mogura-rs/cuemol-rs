@@ -776,6 +776,16 @@ fn paint_coloring_columns_are_resizable_and_persistent() {
     assert!(native_paint.contains("coloring_paint:selection_width"));
     assert!(native_paint.contains("splitter.drag_delta().x"));
     assert!(native_paint.contains("ui.monospace(color)"));
+    let native_gradient = NATIVE_GUI_RS
+        .split("fn multi_gradient_coloring_ui(")
+        .nth(1)
+        .and_then(|source| source.split("fn default_coloring_details(").next())
+        .expect("native Multi-gradient coloring panel");
+    assert!(native_gradient.contains("RichText::new(\"Param\").strong()"));
+    assert!(native_gradient.contains("RichText::new(\"Color\").strong()"));
+    assert!(native_gradient.contains("coloring_gradient:param_width"));
+    assert!(native_gradient.contains("splitter.drag_delta().x"));
+    assert!(native_gradient.contains("ui.monospace(color)"));
 }
 
 #[test]
