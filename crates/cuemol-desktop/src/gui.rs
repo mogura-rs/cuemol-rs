@@ -1113,6 +1113,7 @@ struct GuiApplication {
     coloring_end_hue: f32,
     coloring_target: Option<NativeColoringTarget>,
     coloring_paint_selected: Option<usize>,
+    coloring_gradient_selected: Option<usize>,
     snapshot: RenderSceneSnapshot,
     /// Monotonic generation used to avoid rebuilding immutable GPU scene buffers
     /// during camera-only and egui-only redraws.
@@ -1944,6 +1945,8 @@ enum ColoringMode {
     Rainbow,
     Bfac,
     Script,
+    Electrostatic,
+    MultiGradient,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1953,19 +1956,29 @@ enum NativeColoringTarget {
         object_uid: cuemol_core::Uid,
         renderer_uid: cuemol_core::Uid,
     },
+    DensityRenderer {
+        map_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+    },
+    SurfaceRenderer {
+        surface_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+    },
 }
 
 type NativeColoringDetails = (
     Option<String>,
     std::collections::BTreeMap<String, String>,
     Vec<(String, String)>,
+    Vec<(f64, String)>,
     Option<String>,
 );
 
 impl NativeColoringTarget {
-    fn object_uid(self) -> cuemol_core::Uid {
+    fn molecule_uid(self) -> Option<cuemol_core::Uid> {
         match self {
-            Self::Object(object_uid) | Self::Renderer { object_uid, .. } => object_uid,
+            Self::Object(object_uid) | Self::Renderer { object_uid, .. } => Some(object_uid),
+            Self::DensityRenderer { .. } | Self::SurfaceRenderer { .. } => None,
         }
     }
 }
@@ -2501,6 +2514,55 @@ fn native_coloring_number_ui(
         }
     });
     changed
+}
+
+fn native_electrostatic_coloring_defaults(
+    map_name: String,
+) -> std::collections::BTreeMap<String, String> {
+    [
+        ("elepot".to_string(), map_name),
+        ("lowpar".to_string(), "-10".to_string()),
+        ("midpar".to_string(), "0".to_string()),
+        ("highpar".to_string(), "10".to_string()),
+        ("lowcol".to_string(), "#ff0000".to_string()),
+        ("midcol".to_string(), "#ffffff".to_string()),
+        ("highcol".to_string(), "#0000ff".to_string()),
+        ("ramp_above".to_string(), "false".to_string()),
+        ("ramp_value".to_string(), "1.4".to_string()),
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn native_gradient_preset(name: &str, minimum: f64, maximum: f64) -> Vec<(f64, String)> {
+    match name {
+        "resmap" => {
+            let delta = (maximum - minimum) / 4.0;
+            ["#0f77cf", "#87e3e7", "#ffffff", "#cf8faf", "#9e205e"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, color)| (minimum + delta * index as f64, color.to_string()))
+                .collect()
+        }
+        "heatmap" => vec![
+            (minimum, "#ff0000".to_string()),
+            (
+                minimum + (maximum - minimum) * 0.6666,
+                "#ffff00".to_string(),
+            ),
+            (maximum, "#ffffff".to_string()),
+        ],
+        _ => {
+            let delta = (maximum - minimum) / 5.0;
+            [
+                "#ff0000", "#ffff00", "#00ff00", "#00ffff", "#0000ff", "#ff00ff",
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, color)| (minimum + delta * index as f64, color.to_string()))
+            .collect()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3971,6 +4033,7 @@ impl GuiApplication {
             coloring_end_hue: 0.0,
             coloring_target: None,
             coloring_paint_selected: None,
+            coloring_gradient_selected: None,
             selected_renderer: None,
             snapshot: RenderSceneSnapshot::empty(),
             snapshot_revision: 0,
@@ -9597,6 +9660,33 @@ impl GuiApplication {
                 }
             }
         }
+        for map in self.state.active_density_map_summaries() {
+            for renderer in map.renderers.iter().filter(|renderer| {
+                matches!(
+                    renderer.renderer_type.as_str(),
+                    "contour" | "isosurf" | "gpu_mapmesh" | "gpu_mapvol"
+                )
+            }) {
+                targets.push((
+                    NativeColoringTarget::DensityRenderer {
+                        map_uid: map.uid,
+                        renderer_uid: renderer.uid,
+                    },
+                    format!("{} → {}", map.name, renderer.name),
+                ));
+            }
+        }
+        for surface in self.state.active_surface_summaries() {
+            for renderer in &surface.renderers {
+                targets.push((
+                    NativeColoringTarget::SurfaceRenderer {
+                        surface_uid: surface.uid,
+                        renderer_uid: renderer.uid,
+                    },
+                    format!("{} → {}", surface.name, renderer.name),
+                ));
+            }
+        }
         let preferred = self
             .selected_object
             .zip(self.selected_renderer)
@@ -9620,6 +9710,29 @@ impl GuiApplication {
             .find(|(target, _)| Some(*target) == selected_target)
             .map(|(_, name)| name.clone())
             .unwrap_or_default();
+        let mode_options: &[(&str, ColoringMode)] = match selected_target {
+            Some(NativeColoringTarget::Object(_) | NativeColoringTarget::Renderer { .. }) => &[
+                ("Paint coloring", ColoringMode::Paint),
+                ("Solid coloring", ColoringMode::Solid),
+                ("CPK coloring", ColoringMode::Cpk),
+                ("Bfac/Occ coloring", ColoringMode::Bfac),
+                ("Rainbow coloring", ColoringMode::Rainbow),
+            ],
+            Some(NativeColoringTarget::DensityRenderer { .. }) => &[
+                ("Solid coloring", ColoringMode::Solid),
+                ("Multi-gradient coloring", ColoringMode::MultiGradient),
+            ],
+            Some(NativeColoringTarget::SurfaceRenderer { .. }) => &[
+                ("Solid coloring", ColoringMode::Solid),
+                ("Electrostatic potential", ColoringMode::Electrostatic),
+                ("Multi-gradient coloring", ColoringMode::MultiGradient),
+            ],
+            None => &[],
+        };
+        let can_reset = matches!(
+            selected_target,
+            Some(NativeColoringTarget::Object(_) | NativeColoringTarget::Renderer { .. })
+        );
         let mut requested_mode = None;
         ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt("coloring-target")
@@ -9630,33 +9743,32 @@ impl GuiApplication {
                     }
                 });
             ui.menu_button("▾", |ui| {
-                for (label, mode) in [
-                    ("Paint coloring", ColoringMode::Paint),
-                    ("Solid coloring", ColoringMode::Solid),
-                    ("CPK coloring", ColoringMode::Cpk),
-                    ("Bfac/Occ coloring", ColoringMode::Bfac),
-                    ("Rainbow coloring", ColoringMode::Rainbow),
-                ] {
-                    if ui.button(label).clicked() {
-                        requested_mode = Some(mode);
+                for (label, mode) in mode_options {
+                    if ui.button(*label).clicked() {
+                        requested_mode = Some(*mode);
                         ui.close();
                     }
                 }
-                ui.separator();
-                if ui.button("Reset to default style").clicked() {
-                    requested_mode = Some(ColoringMode::Element);
-                    ui.close();
+                if can_reset {
+                    ui.separator();
+                    if ui.button("Reset to default style").clicked() {
+                        requested_mode = Some(ColoringMode::Element);
+                        ui.close();
+                    }
                 }
             });
         });
         if self.coloring_target != selected_target {
             self.coloring_paint_selected = None;
+            self.coloring_gradient_selected = None;
         }
         self.coloring_target = selected_target;
         let Some(target) = selected_target else {
             return;
         };
-        self.molstruct_object = Some(target.object_uid());
+        if let Some(object_uid) = target.molecule_uid() {
+            self.molstruct_object = Some(object_uid);
+        }
 
         if let Some(mode) = requested_mode {
             self.coloring_paint_selected = None;
@@ -9668,11 +9780,19 @@ impl GuiApplication {
                     object_uid,
                     renderer_uid,
                 } => self.apply_renderer_coloring(object_uid, renderer_uid, mode),
+                NativeColoringTarget::DensityRenderer {
+                    map_uid,
+                    renderer_uid,
+                } => self.apply_density_coloring(map_uid, renderer_uid, mode),
+                NativeColoringTarget::SurfaceRenderer {
+                    surface_uid,
+                    renderer_uid,
+                } => self.apply_surface_coloring(surface_uid, renderer_uid, mode),
             }
             return;
         }
 
-        let (coloring_type, mut attrs, mut paint_entries, mut default_color) = {
+        let (coloring_type, mut attrs, mut paint_entries, mut gradient_entries, mut default_color) = {
             match target {
                 NativeColoringTarget::Object(object_uid) => {
                     let Some(object) = self.state.scene_manager().object(object_uid) else {
@@ -9682,6 +9802,7 @@ impl GuiApplication {
                         object.coloring_type().map(str::to_string),
                         object.coloring_attrs().clone(),
                         object.paint_coloring().to_vec(),
+                        Vec::new(),
                         object.mol().default_color().script_string(),
                     )
                 }
@@ -9708,7 +9829,115 @@ impl GuiApplication {
                                 .or_else(|| Some(object.mol().default_color().script_string()))
                         })
                         .unwrap_or_else(|| "#ffffff".to_string());
-                    (coloring_type, attrs, paint_entries, default_color)
+                    (
+                        coloring_type,
+                        attrs,
+                        paint_entries,
+                        Vec::new(),
+                        default_color,
+                    )
+                }
+                NativeColoringTarget::DensityRenderer {
+                    map_uid,
+                    renderer_uid,
+                } => {
+                    let Some(renderer) = self.state.density_map_summary(map_uid).and_then(|map| {
+                        map.renderers
+                            .into_iter()
+                            .find(|renderer| renderer.uid == renderer_uid)
+                    }) else {
+                        return;
+                    };
+                    let mode = renderer
+                        .specific
+                        .get("colormode")
+                        .map(String::as_str)
+                        .unwrap_or("solid");
+                    let mut attrs = std::collections::BTreeMap::new();
+                    if mode == "multigrad" {
+                        if let Some(value) = renderer.specific.get("color_mapname") {
+                            attrs.insert("color_mapname".to_string(), value.clone());
+                        }
+                    } else if let Some(value) = renderer.specific.get("color") {
+                        attrs.insert("color".to_string(), value.clone());
+                    }
+                    (
+                        Some(
+                            if mode == "multigrad" {
+                                "MultiGradientColoring"
+                            } else {
+                                "SolidColoring"
+                            }
+                            .to_string(),
+                        ),
+                        attrs,
+                        Vec::new(),
+                        renderer.multi_gradient,
+                        renderer
+                            .specific
+                            .get("color")
+                            .cloned()
+                            .unwrap_or_else(|| "#ffffff".to_string()),
+                    )
+                }
+                NativeColoringTarget::SurfaceRenderer {
+                    surface_uid,
+                    renderer_uid,
+                } => {
+                    let Some(renderer) =
+                        self.state.surface_summary(surface_uid).and_then(|surface| {
+                            surface
+                                .renderers
+                                .into_iter()
+                                .find(|renderer| renderer.uid == renderer_uid)
+                        })
+                    else {
+                        return;
+                    };
+                    let mode = renderer
+                        .specific
+                        .get("colormode")
+                        .map(String::as_str)
+                        .unwrap_or("solid");
+                    let allowed = match mode {
+                        "potential" => &[
+                            "elepot",
+                            "lowpar",
+                            "midpar",
+                            "highpar",
+                            "lowcol",
+                            "midcol",
+                            "highcol",
+                            "ramp_above",
+                            "ramp_value",
+                        ][..],
+                        "multigrad" => &["color_mapname", "ramp_above", "ramp_value"][..],
+                        _ => &["defaultcolor"][..],
+                    };
+                    let attrs = renderer
+                        .specific
+                        .iter()
+                        .filter(|(name, _)| allowed.contains(&name.as_str()))
+                        .map(|(name, value)| (name.clone(), value.clone()))
+                        .collect();
+                    (
+                        Some(
+                            match mode {
+                                "potential" => "ElectrostaticColoring",
+                                "multigrad" => "MultiGradientColoring",
+                                _ => "SolidColoring",
+                            }
+                            .to_string(),
+                        ),
+                        attrs,
+                        Vec::new(),
+                        renderer.multi_gradient,
+                        renderer
+                            .specific
+                            .get("defaultcolor")
+                            .cloned()
+                            .unwrap_or_else(|| "#ffffff".to_string()),
+                    )
                 }
             }
         };
@@ -9719,6 +9948,8 @@ impl GuiApplication {
             Some("RainbowColoring") => ColoringMode::Rainbow,
             Some("BfacColoring") => ColoringMode::Bfac,
             Some("ScriptColoring") => ColoringMode::Script,
+            Some("ElectrostaticColoring") => ColoringMode::Electrostatic,
+            Some("MultiGradientColoring") => ColoringMode::MultiGradient,
             _ => ColoringMode::Element,
         };
         let mut changed = false;
@@ -9841,6 +10072,12 @@ impl GuiApplication {
                     )
                     .changed();
             }
+            ColoringMode::Electrostatic => {
+                changed |= self.electrostatic_coloring_ui(ui, &mut attrs);
+            }
+            ColoringMode::MultiGradient => {
+                changed |= self.multi_gradient_coloring_ui(ui, &mut attrs, &mut gradient_entries);
+            }
         }
 
         if changed {
@@ -9862,6 +10099,27 @@ impl GuiApplication {
                     coloring_type,
                     attrs,
                     paint_entries,
+                    default_color,
+                ),
+                NativeColoringTarget::DensityRenderer {
+                    map_uid,
+                    renderer_uid,
+                } => self.commit_density_coloring_details(
+                    map_uid,
+                    renderer_uid,
+                    mode,
+                    attrs,
+                    gradient_entries,
+                ),
+                NativeColoringTarget::SurfaceRenderer {
+                    surface_uid,
+                    renderer_uid,
+                } => self.commit_surface_coloring_details(
+                    surface_uid,
+                    renderer_uid,
+                    mode,
+                    attrs,
+                    gradient_entries,
                     default_color,
                 ),
             }
@@ -9990,6 +10248,197 @@ impl GuiApplication {
         changed
     }
 
+    fn electrostatic_coloring_ui(
+        &self,
+        ui: &mut egui::Ui,
+        attrs: &mut std::collections::BTreeMap<String, String>,
+    ) -> bool {
+        let maps = self
+            .state
+            .active_density_map_summaries()
+            .into_iter()
+            .filter(|map| map.class_name == "ElePotMap")
+            .collect::<Vec<_>>();
+        let mut changed = false;
+        let map_name = attrs
+            .entry("elepot".to_string())
+            .or_insert_with(|| maps.first().map(|map| map.name.clone()).unwrap_or_default());
+        ui.horizontal(|ui| {
+            ui.label("Potential map");
+            let selected = if map_name.is_empty() {
+                "(none)"
+            } else {
+                map_name.as_str()
+            };
+            egui::ComboBox::from_id_salt("native_coloring_electrostatic_map")
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    if maps.is_empty() {
+                        ui.add_enabled(false, egui::Button::new("(none)"));
+                    }
+                    for map in &maps {
+                        changed |= ui
+                            .selectable_value(map_name, map.name.clone(), &map.name)
+                            .changed();
+                    }
+                });
+        });
+        for (name, label, fallback) in [
+            ("lowpar", "Low value", -10.0),
+            ("midpar", "Middle value", 0.0),
+            ("highpar", "High value", 10.0),
+        ] {
+            changed |= native_coloring_number_ui(ui, label, attrs, name, fallback, 0.1);
+        }
+        for (name, label, fallback) in [
+            ("lowcol", "Low color", "#ff0000"),
+            ("midcol", "Middle color", "#ffffff"),
+            ("highcol", "High color", "#0000ff"),
+        ] {
+            let value = attrs
+                .entry(name.to_string())
+                .or_insert_with(|| fallback.to_string());
+            changed |= native_coloring_color_ui(ui, label, value);
+        }
+        let mut ramp_above = attrs.get("ramp_above").is_some_and(|value| value == "true");
+        if ui.checkbox(&mut ramp_above, "Ramp above").changed() {
+            attrs.insert("ramp_above".to_string(), ramp_above.to_string());
+            changed = true;
+        }
+        changed |= native_coloring_number_ui(ui, "Ramp distance", attrs, "ramp_value", 1.4, 0.1);
+        changed
+    }
+
+    fn multi_gradient_coloring_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        attrs: &mut std::collections::BTreeMap<String, String>,
+        entries: &mut Vec<(f64, String)>,
+    ) -> bool {
+        let maps = self.state.active_density_map_summaries();
+        let mut changed = false;
+        let map_name = attrs
+            .entry("color_mapname".to_string())
+            .or_insert_with(|| maps.first().map(|map| map.name.clone()).unwrap_or_default());
+        ui.horizontal(|ui| {
+            ui.label("Color map");
+            let selected = if map_name.is_empty() {
+                "(none)"
+            } else {
+                map_name.as_str()
+            };
+            egui::ComboBox::from_id_salt("native_coloring_gradient_map")
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    if maps.is_empty() {
+                        ui.add_enabled(false, egui::Button::new("(none)"));
+                    }
+                    for map in &maps {
+                        changed |= ui
+                            .selectable_value(map_name, map.name.clone(), &map.name)
+                            .changed();
+                    }
+                });
+        });
+
+        if self
+            .coloring_gradient_selected
+            .is_some_and(|index| index >= entries.len())
+        {
+            self.coloring_gradient_selected = entries.len().checked_sub(1);
+        }
+        egui::ScrollArea::vertical()
+            .id_salt("native_coloring_gradient_list")
+            .max_height(140.0)
+            .show(ui, |ui| {
+                for (index, (value, color)) in entries.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if let Some(swatch) = native_style_color(color) {
+                            ui.colored_label(swatch, "■");
+                        }
+                        if ui
+                            .selectable_label(
+                                self.coloring_gradient_selected == Some(index),
+                                format!("{value:.6}"),
+                            )
+                            .clicked()
+                        {
+                            self.coloring_gradient_selected = Some(index);
+                        }
+                    });
+                }
+            });
+
+        if let Some(index) = self.coloring_gradient_selected {
+            if let Some((value, color)) = entries.get_mut(index) {
+                ui.horizontal(|ui| {
+                    ui.label("Value");
+                    changed |= ui.add(egui::DragValue::new(value).speed(0.1)).changed();
+                });
+                changed |= native_coloring_color_ui(ui, "Color", color);
+            }
+        }
+
+        let mut add = false;
+        let mut delete = false;
+        let mut clear = false;
+        ui.horizontal(|ui| {
+            add = ui.button("＋").on_hover_text("Add gradient node").clicked();
+            delete = ui
+                .add_enabled(
+                    self.coloring_gradient_selected.is_some(),
+                    egui::Button::new("−"),
+                )
+                .on_hover_text("Delete gradient node")
+                .clicked();
+            clear = ui
+                .add_enabled(!entries.is_empty(), egui::Button::new("×"))
+                .on_hover_text("Delete all gradient nodes")
+                .clicked();
+        });
+        if add {
+            entries.push((0.0, "#ffffff".to_string()));
+            entries.sort_by(|left, right| left.0.total_cmp(&right.0));
+            self.coloring_gradient_selected = entries.iter().position(|(value, _)| *value == 0.0);
+            changed = true;
+        } else if delete {
+            if let Some(index) = self.coloring_gradient_selected {
+                entries.remove(index);
+                self.coloring_gradient_selected =
+                    entries.len().checked_sub(1).map(|last| index.min(last));
+                changed = true;
+            }
+        } else if clear {
+            entries.clear();
+            self.coloring_gradient_selected = None;
+            changed = true;
+        }
+        if changed {
+            entries.sort_by(|left, right| left.0.total_cmp(&right.0));
+        }
+
+        let (minimum, maximum) = maps
+            .iter()
+            .find(|map| map.name == *map_name)
+            .map(|map| (map.min_density, map.max_density))
+            .unwrap_or((-1.0, 1.0));
+        ui.menu_button("Preset ▾", |ui| {
+            for (name, label) in [
+                ("rainbow", "Rainbow"),
+                ("resmap", "ResMap"),
+                ("heatmap", "Heat map"),
+            ] {
+                if ui.button(label).clicked() {
+                    *entries = native_gradient_preset(name, minimum, maximum);
+                    self.coloring_gradient_selected = None;
+                    changed = true;
+                    ui.close();
+                }
+            }
+        });
+        changed
+    }
+
     /// Build the reference defaults shared by object and renderer coloring targets.
     fn default_coloring_details(
         &self,
@@ -9997,7 +10446,7 @@ impl GuiApplication {
         mode: ColoringMode,
     ) -> NativeColoringDetails {
         match mode {
-            ColoringMode::Element => (None, Default::default(), Vec::new(), None),
+            ColoringMode::Element => (None, Default::default(), Vec::new(), Vec::new(), None),
             ColoringMode::Paint => (
                 Some("PaintColoring".to_string()),
                 Default::default(),
@@ -10007,11 +10456,13 @@ impl GuiApplication {
                     ("nucleic".to_string(), "#ffff00".to_string()),
                     ("*".to_string(), "#fffaf0".to_string()),
                 ],
+                Vec::new(),
                 None,
             ),
             ColoringMode::Solid => (
                 Some("SolidColoring".to_string()),
                 Default::default(),
+                Vec::new(),
                 Vec::new(),
                 self.state
                     .scene_manager()
@@ -10033,6 +10484,7 @@ impl GuiApplication {
                 .map(|(name, value)| (name.to_string(), value.to_string()))
                 .collect(),
                 Vec::new(),
+                Vec::new(),
                 None,
             ),
             ColoringMode::Rainbow => {
@@ -10049,7 +10501,13 @@ impl GuiApplication {
                 );
                 attrs.insert("sat".to_string(), "1".to_string());
                 attrs.insert("bri".to_string(), "1".to_string());
-                (Some("RainbowColoring".to_string()), attrs, Vec::new(), None)
+                (
+                    Some("RainbowColoring".to_string()),
+                    attrs,
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                )
             }
             ColoringMode::Bfac => (
                 Some("BfacColoring".to_string()),
@@ -10065,6 +10523,7 @@ impl GuiApplication {
                 .map(|(name, value)| (name.to_string(), value.to_string()))
                 .collect(),
                 Vec::new(),
+                Vec::new(),
                 None,
             ),
             ColoringMode::Script => (
@@ -10073,13 +10532,28 @@ impl GuiApplication {
                     .into_iter()
                     .collect(),
                 Vec::new(),
+                Vec::new(),
+                None,
+            ),
+            ColoringMode::Electrostatic => (
+                Some("ElectrostaticColoring".to_string()),
+                native_electrostatic_coloring_defaults(String::new()),
+                Vec::new(),
+                Vec::new(),
+                None,
+            ),
+            ColoringMode::MultiGradient => (
+                Some("MultiGradientColoring".to_string()),
+                Default::default(),
+                Vec::new(),
+                native_gradient_preset("rainbow", -1.0, 1.0),
                 None,
             ),
         }
     }
 
     fn apply_object_coloring(&mut self, object_uid: cuemol_core::Uid, mode: ColoringMode) {
-        let (coloring_type, attrs, paint_entries, default_color) =
+        let (coloring_type, attrs, paint_entries, _, default_color) =
             self.default_coloring_details(object_uid, mode);
         self.commit_object_coloring_details(
             object_uid,
@@ -10096,7 +10570,7 @@ impl GuiApplication {
         renderer_uid: cuemol_core::Uid,
         mode: ColoringMode,
     ) {
-        let (coloring_type, attrs, paint_entries, default_color) =
+        let (coloring_type, attrs, paint_entries, _, default_color) =
             self.default_coloring_details(object_uid, mode);
         self.commit_renderer_coloring_details(
             object_uid,
@@ -10104,6 +10578,82 @@ impl GuiApplication {
             coloring_type,
             attrs,
             paint_entries,
+            default_color,
+        );
+    }
+
+    fn apply_density_coloring(
+        &mut self,
+        map_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+        mode: ColoringMode,
+    ) {
+        let maps = self.state.active_density_map_summaries();
+        let map_name = maps.first().map(|map| map.name.clone()).unwrap_or_default();
+        let (minimum, maximum) = maps
+            .iter()
+            .find(|map| map.uid == map_uid)
+            .map(|map| (map.min_density, map.max_density))
+            .unwrap_or((-1.0, 1.0));
+        let (attrs, gradient_entries) = match mode {
+            ColoringMode::MultiGradient => (
+                [("color_mapname".to_string(), map_name)]
+                    .into_iter()
+                    .collect(),
+                native_gradient_preset("rainbow", minimum, maximum),
+            ),
+            _ => (
+                [("color".to_string(), "#ffffff".to_string())]
+                    .into_iter()
+                    .collect(),
+                Vec::new(),
+            ),
+        };
+        self.commit_density_coloring_details(map_uid, renderer_uid, mode, attrs, gradient_entries);
+    }
+
+    fn apply_surface_coloring(
+        &mut self,
+        surface_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+        mode: ColoringMode,
+    ) {
+        let maps = self.state.active_density_map_summaries();
+        let map_name = maps.first().map(|map| map.name.clone()).unwrap_or_default();
+        let electrostatic_map_name = maps
+            .iter()
+            .find(|map| map.class_name == "ElePotMap")
+            .map(|map| map.name.clone())
+            .unwrap_or_default();
+        let (minimum, maximum) = maps
+            .first()
+            .map(|map| (map.min_density, map.max_density))
+            .unwrap_or((-1.0, 1.0));
+        let (attrs, gradient_entries, default_color) = match mode {
+            ColoringMode::Electrostatic => (
+                native_electrostatic_coloring_defaults(electrostatic_map_name),
+                Vec::new(),
+                None,
+            ),
+            ColoringMode::MultiGradient => (
+                [
+                    ("color_mapname".to_string(), map_name),
+                    ("ramp_above".to_string(), "false".to_string()),
+                    ("ramp_value".to_string(), "1.4".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+                native_gradient_preset("rainbow", minimum, maximum),
+                None,
+            ),
+            _ => (Default::default(), Vec::new(), Some("#ffffff".to_string())),
+        };
+        self.commit_surface_coloring_details(
+            surface_uid,
+            renderer_uid,
+            mode,
+            attrs,
+            gradient_entries,
             default_color,
         );
     }
@@ -10149,6 +10699,68 @@ impl GuiApplication {
             attrs,
             paint_entries,
             default_color,
+        ) {
+            self.set_status(format!("Coloring failed: {error}"));
+            return;
+        }
+        self.push_undo_snapshot(undo);
+        self.rebuild_snapshot();
+        self.set_status("Applied coloring");
+    }
+
+    fn commit_density_coloring_details(
+        &mut self,
+        map_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+        mode: ColoringMode,
+        attrs: std::collections::BTreeMap<String, String>,
+        gradient_entries: Vec<(f64, String)>,
+    ) {
+        let color_mode = if mode == ColoringMode::MultiGradient {
+            "multigrad"
+        } else {
+            "solid"
+        };
+        let undo = self.capture_undo();
+        if let Err(error) = self.state.set_density_renderer_coloring(
+            map_uid,
+            renderer_uid,
+            color_mode,
+            &attrs,
+            &gradient_entries,
+        ) {
+            self.set_status(format!("Coloring failed: {error}"));
+            return;
+        }
+        self.push_undo_snapshot(undo);
+        self.rebuild_snapshot();
+        self.set_status("Applied coloring");
+    }
+
+    fn commit_surface_coloring_details(
+        &mut self,
+        surface_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+        mode: ColoringMode,
+        mut attrs: std::collections::BTreeMap<String, String>,
+        gradient_entries: Vec<(f64, String)>,
+        default_color: Option<String>,
+    ) {
+        let color_mode = match mode {
+            ColoringMode::Electrostatic => "potential",
+            ColoringMode::MultiGradient => "multigrad",
+            _ => "solid",
+        };
+        if let Some(default_color) = default_color {
+            attrs.insert("defaultcolor".to_string(), default_color);
+        }
+        let undo = self.capture_undo();
+        if let Err(error) = self.state.set_surface_renderer_coloring(
+            surface_uid,
+            renderer_uid,
+            color_mode,
+            &attrs,
+            &gradient_entries,
         ) {
             self.set_status(format!("Coloring failed: {error}"));
             return;
@@ -35303,6 +35915,77 @@ mod tests {
         assert_eq!(
             app.state.renderer_coloring_state(object_uid, renderer.uid),
             before
+        );
+    }
+
+    #[test]
+    fn native_aux_coloring_targets_apply_gradient_and_potential_modes() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let map_uid = app
+            .state
+            .add_density_map(scene_uid, "potential", synthetic_gaussian_map());
+        let density_renderer_uid = app.state.add_density_renderer(map_uid, "isosurf").unwrap();
+
+        app.apply_density_coloring(map_uid, density_renderer_uid, ColoringMode::MultiGradient);
+        let renderer = app
+            .state
+            .density_map_summary(map_uid)
+            .unwrap()
+            .renderers
+            .into_iter()
+            .find(|renderer| renderer.uid == density_renderer_uid)
+            .unwrap();
+        assert_eq!(renderer.specific["colormode"], "multigrad");
+        assert_eq!(renderer.specific["color_mapname"], "potential");
+        assert_eq!(renderer.multi_gradient.len(), 6);
+        app.undo(&mut CameraController::default());
+        assert_eq!(
+            app.state.density_map_summary(map_uid).unwrap().renderers[0].specific["colormode"],
+            "solid"
+        );
+
+        let data = "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+        let mut surface_node = cuemol_core::LDom2Node::new();
+        surface_node.set_tag_name("object");
+        surface_node.set_type_name("MolSurfObj");
+        let mut renderer_node = cuemol_core::LDom2Node::new();
+        renderer_node.set_tag_name("renderer");
+        renderer_node.set_type_name("molsurf");
+        renderer_node.set_str_attr("name", "surface");
+        surface_node.append_child_node(renderer_node);
+        let surface_uid = app
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_loaded_surface(cuemol_molstr::LoadedSurface {
+                uid: cuemol_core::Uid::new(0),
+                name: "surface".to_string(),
+                object_type: "MolSurfObj".to_string(),
+                srctype: "obj".to_string(),
+                data: data.to_string(),
+                raw_data: data.as_bytes().to_vec(),
+                qsc_node: Some(surface_node),
+            });
+        let surface_renderer_uid = app.state.surface_summary(surface_uid).unwrap().renderers[0].uid;
+
+        app.apply_surface_coloring(
+            surface_uid,
+            surface_renderer_uid,
+            ColoringMode::Electrostatic,
+        );
+        let renderer = &app.state.surface_summary(surface_uid).unwrap().renderers[0];
+        assert_eq!(renderer.specific["colormode"], "potential");
+        assert_eq!(renderer.specific["elepot"], "");
+        assert_eq!(renderer.specific["lowcol"], "#ff0000");
+        app.undo(&mut CameraController::default());
+        assert_ne!(
+            app.state.surface_summary(surface_uid).unwrap().renderers[0]
+                .specific
+                .get("colormode")
+                .map(String::as_str),
+            Some("potential")
         );
     }
 

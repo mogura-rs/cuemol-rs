@@ -102,6 +102,8 @@ fn tauri_reference_panels_are_bound_to_shared_core_data() {
         "CPK coloring",
         "Bfac/Occ coloring",
         "Rainbow coloring",
+        "Electrostatic potential",
+        "Multi-gradient coloring",
         "Reset to default style",
     ] {
         assert!(
