@@ -402,6 +402,9 @@ fn tauri_window_menu_toggles_reference_panels_and_lists_windows() {
     assert!(JS.contains("event.stopPropagation()"));
     assert!(JS.contains("sidePanel.hidden = !anyVisible"));
     assert!(CSS.contains(".content-holder.no-visible-side-panels"));
+    assert!(JS.contains("SIDE_PANEL_STATE_STORAGE_KEY"));
+    assert!(JS.contains("function saveSidePanelState()"));
+    assert!(JS.contains("function restoreSidePanelState()"));
     assert!(JS.contains("for (const name of openPanels) renderSidePanel(name)"));
     assert!(JS.contains("getAllWebviewWindows"));
     assert!(JS.contains("await appWindow.setFocus()"));

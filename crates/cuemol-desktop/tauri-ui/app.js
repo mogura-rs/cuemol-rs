@@ -122,6 +122,7 @@ const ANIMATION_RENDER_STORAGE_KEY = "cuemol2.animationRender.v1";
 const COMMAND_HISTORY_STORAGE_KEY = "cuemol2.commandHistory.v1";
 const BOTTOM_PANEL_HEIGHT_STORAGE_KEY = "cuemol2.bottomPanelHeight.v1";
 const SIDE_PANEL_WIDTH_STORAGE_KEY = "cuemol2.sidePanelWidth.v1";
+const SIDE_PANEL_STATE_STORAGE_KEY = "cuemol2.sidePanelState.v1";
 const RIBBON_COLLAPSED_STORAGE_KEY = "cuemol2.ribbonCollapsed.v1";
 const MAX_RECENT_FILES = 10;
 const MAX_SELECTION_HISTORY = 20;
@@ -8489,6 +8490,7 @@ function restoreDefaultPanels() {
   });
   syncSidePanelVisibility();
   if (sidePanelWidth === 0) setSidePanelWidth(expandedSidePanelWidth, true);
+  saveSidePanelState();
   for (const name of openPanels) renderSidePanel(name);
   document.querySelector(".side-panel")?.scrollTo({ top: 0 });
   scheduleRender(140);
@@ -8498,6 +8500,49 @@ function sidePanelCard(name) {
   return [...document.querySelectorAll("[data-side-card]")].find(
     (item) => item.querySelector(".side-title span:nth-child(2)")?.textContent === name,
   );
+}
+
+function sidePanelCardName(card) {
+  return card?.querySelector(".side-title span:nth-child(2)")?.textContent || "";
+}
+
+function saveSidePanelState() {
+  const state = {};
+  for (const card of document.querySelectorAll("[data-side-card]")) {
+    const name = sidePanelCardName(card);
+    if (name) {
+      state[name] = {
+        hidden: card.hidden,
+        open: card.classList.contains("open"),
+      };
+    }
+  }
+  try {
+    localStorage.setItem(SIDE_PANEL_STATE_STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // Storage can be unavailable in restricted webviews.
+  }
+}
+
+function restoreSidePanelState() {
+  let state;
+  try {
+    state = JSON.parse(localStorage.getItem(SIDE_PANEL_STATE_STORAGE_KEY) || "null");
+  } catch {
+    return;
+  }
+  if (!state || typeof state !== "object") return;
+  for (const card of document.querySelectorAll("[data-side-card]")) {
+    const saved = state[sidePanelCardName(card)];
+    if (!saved || typeof saved !== "object") continue;
+    card.hidden = Boolean(saved.hidden);
+    card.classList.toggle("open", Boolean(saved.open));
+    const toggle = card.querySelector("[data-panel-toggle]");
+    toggle?.setAttribute("aria-expanded", String(Boolean(saved.open)));
+    const disclosure = card.querySelector(".disclosure");
+    if (disclosure) disclosure.textContent = saved.open ? "▾" : "▸";
+  }
+  syncSidePanelVisibility();
 }
 
 function sidePanelIsExpanded(name) {
@@ -8547,6 +8592,7 @@ function closeSidePanelCard(card) {
   if (!card) return;
   card.hidden = true;
   syncSidePanelVisibility();
+  saveSidePanelState();
   scheduleRender(140);
 }
 
@@ -16717,6 +16763,7 @@ document.querySelectorAll("[data-panel-menu]").forEach((element) => {
     }
     if (!card.hidden) card.scrollIntoView({ block: "nearest" });
     if (!card.hidden && card.classList.contains("open")) renderSidePanel(element.dataset.panelMenu);
+    saveSidePanelState();
     scheduleRender(140);
   });
 });
@@ -16755,6 +16802,7 @@ document.querySelectorAll("[data-panel-toggle]").forEach((element) => {
     element.querySelector(".disclosure").textContent = open ? "▾" : "▸";
     const name = element.querySelector("span:nth-child(2)")?.textContent;
     if (open && name) renderSidePanel(name);
+    saveSidePanelState();
     scheduleRender(140);
   });
 });
@@ -17329,6 +17377,7 @@ window.addEventListener("drop", (event) => {
   }
 });
 
+restoreSidePanelState();
 setupSidePanelSplitter();
 setupBottomPanelSplitter();
 setupRibbonCollapse();
