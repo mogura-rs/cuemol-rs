@@ -1,6 +1,8 @@
 "use strict";
 
 const appShell = document.querySelector(".app-shell");
+const ribbon = document.querySelector(".ribbon");
+const ribbonCollapse = document.querySelector("[data-ribbon-collapse]");
 const sidePanel = document.querySelector(".side-panel");
 const contentHolder = document.querySelector(".content-holder");
 const mainView = document.querySelector(".main-view");
@@ -120,6 +122,7 @@ const ANIMATION_RENDER_STORAGE_KEY = "cuemol2.animationRender.v1";
 const COMMAND_HISTORY_STORAGE_KEY = "cuemol2.commandHistory.v1";
 const BOTTOM_PANEL_HEIGHT_STORAGE_KEY = "cuemol2.bottomPanelHeight.v1";
 const SIDE_PANEL_WIDTH_STORAGE_KEY = "cuemol2.sidePanelWidth.v1";
+const RIBBON_COLLAPSED_STORAGE_KEY = "cuemol2.ribbonCollapsed.v1";
 const MAX_RECENT_FILES = 10;
 const MAX_SELECTION_HISTORY = 20;
 const MAX_COMMAND_HISTORY = 100;
@@ -717,6 +720,37 @@ function setupSidePanelSplitter() {
     setSidePanelWidth(baseWidth + (event.key === "ArrowRight" ? 10 : -10), true);
   });
   window.addEventListener("resize", () => setSidePanelWidth(sidePanelWidth));
+}
+
+let ribbonCollapsed = false;
+try {
+  ribbonCollapsed = localStorage.getItem(RIBBON_COLLAPSED_STORAGE_KEY) === "true";
+} catch {
+  // Storage can be unavailable in restricted webviews.
+}
+
+function setRibbonCollapsed(collapsed, persist = false) {
+  ribbonCollapsed = Boolean(collapsed);
+  ribbon?.classList.toggle("collapsed", ribbonCollapsed);
+  ribbonCollapse?.setAttribute("aria-expanded", String(!ribbonCollapsed));
+  if (ribbonCollapse) {
+    ribbonCollapse.title = ribbonCollapsed ? "Expand ribbon" : "Collapse ribbon";
+  }
+  if (persist) {
+    try {
+      localStorage.setItem(RIBBON_COLLAPSED_STORAGE_KEY, String(ribbonCollapsed));
+    } catch {
+      // Storage can be unavailable in restricted webviews.
+    }
+  }
+  if (snapshot) scheduleRender(140);
+}
+
+function setupRibbonCollapse() {
+  setRibbonCollapsed(ribbonCollapsed);
+  ribbonCollapse?.addEventListener("click", () => {
+    setRibbonCollapsed(!ribbonCollapsed, true);
+  });
 }
 
 function showBottomPanel(name) {
@@ -8566,8 +8600,7 @@ async function handleLocalAction(action) {
       recordStatus(`Performance measure: ${performanceMeasure ? "on" : "off"}`);
       break;
     case "toggle-ribbon":
-      document.querySelector(".ribbon")?.classList.toggle("collapsed");
-      scheduleRender(140);
+      setRibbonCollapsed(!ribbonCollapsed, true);
       break;
     case "clear-log":
       await mutateWithoutViewport("clear_log", {}, renderStatusAndLog);
@@ -16695,14 +16728,9 @@ document.querySelectorAll("[data-ribbon-select]").forEach((element) => {
     document.querySelectorAll("[data-ribbon-panel]").forEach((panel) => {
       panel.classList.toggle("active", panel.dataset.ribbonPanel === target);
     });
+    setRibbonCollapsed(false, true);
     if (target === "animation") renderAnimation();
-    scheduleRender(140);
   });
-});
-
-document.querySelector("[data-ribbon-collapse]")?.addEventListener("click", () => {
-  document.querySelector(".ribbon")?.classList.toggle("collapsed");
-  scheduleRender(140);
 });
 
 document.querySelectorAll("[data-panel-toggle]").forEach((element) => {
@@ -17282,6 +17310,7 @@ window.addEventListener("drop", (event) => {
 
 setupSidePanelSplitter();
 setupBottomPanelSplitter();
+setupRibbonCollapse();
 
 async function start() {
   if (!invoke) {

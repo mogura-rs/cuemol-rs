@@ -44,6 +44,9 @@ fn tauri_shell_matches_the_reference_xul_dock_order() {
     assert!(JS.contains("SIDE_PANEL_WIDTH_STORAGE_KEY"));
     assert!(JS.contains("startWidth + moveEvent.clientX - startX"));
     assert!(CSS.contains(".content-holder.side-panel-collapsed .side-panel"));
+    assert!(JS.contains("RIBBON_COLLAPSED_STORAGE_KEY"));
+    assert!(JS.contains("function setRibbonCollapsed(collapsed, persist = false)"));
+    assert!(JS.contains("setRibbonCollapsed(false, true)"));
 }
 
 #[test]
