@@ -171,7 +171,9 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "clear_log",
         "execute_script_file",
         "export_pov",
-        "render_animation",
+        "start_animation_render",
+        "poll_animation_render",
+        "cancel_animation_render",
         "open_pdb",
         "merge_molecules",
         "save_object",
@@ -883,6 +885,51 @@ fn png_export_matches_the_reference_options_dialog() {
     assert!(CSS.contains("width: min(360px, calc(100vw - 48px))"));
     assert!(TAURI_APP_RS.contains("export_active_scene_png_with_options"));
     assert!(TAURI_APP_RS.contains("GuiPngExportOptions"));
+}
+
+#[test]
+fn animation_render_uses_cancellable_progress_and_reference_frame_controls() {
+    let start = JS
+        .find("} else if (title === \"Animation rendering\")")
+        .unwrap();
+    let end = JS[start + 1..]
+        .find("} else if (title === \"Save File As\")")
+        .map(|offset| start + 1 + offset)
+        .unwrap();
+    let dialog = &JS[start..end];
+
+    for label in [
+        "Target scene",
+        "Output dir",
+        "Output base name",
+        "Width (px)",
+        "Height (px)",
+        "Frame rate (fps)",
+        "Loop",
+        "Projection",
+        "Progress",
+    ] {
+        assert!(
+            dialog.contains(label),
+            "missing animation render field {label}"
+        );
+    }
+    for command in [
+        "start_animation_render",
+        "poll_animation_render",
+        "cancel_animation_render",
+    ] {
+        assert!(
+            dialog.contains(command),
+            "missing animation render command {command}"
+        );
+    }
+    assert!(dialog.contains("duplicateLastFrame: loop.checked"));
+    assert!(dialog.contains("setInterval(poll, 150)"));
+    assert!(dialog.contains("if (running) event.preventDefault()"));
+    assert!(TAURI_APP_RS.contains("struct TauriAnimationRenderJob"));
+    assert!(TAURI_APP_RS.contains("restore: AppModelUndo"));
+    assert!(TAURI_APP_RS.contains("spawn_tauri_animation_frame(task)"));
 }
 
 #[test]

@@ -6633,10 +6633,11 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     );
     dialogActions(savePov, saveImage, copyImage, close, render);
   } else if (title === "Animation rendering") {
-    const scene = snapshot?.scenes.find((item) => item.active);
-    dialogSelect(
+    const scenes = snapshot?.scenes || [];
+    const scene = scenes.find((item) => item.active) || scenes[0];
+    const targetScene = dialogSelect(
       "Target scene",
-      scene ? [[scene.uid, scene.name]] : [],
+      scenes.map((item) => [item.uid, item.name]),
       scene?.uid ?? "",
     );
     const outputDir = dialogField("Output dir", "");
@@ -6654,7 +6655,22 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       ],
       30,
     );
-    dialogCheckbox("Loop", false);
+    const loop = dialogCheckbox("Loop", false);
+    const projection = dialogSelect(
+      "Projection",
+      [
+        ["perspec", "Perspective"],
+        ["ortho", "Orthographic"],
+      ],
+      snapshot?.perspective === false ? "ortho" : "perspec",
+    );
+    const progress = document.createElement("progress");
+    progress.max = 1;
+    progress.value = 0;
+    progress.setAttribute("aria-label", "Progress");
+    const progressText = dialogParagraph("Ready");
+    progressText.className = "dialog-hint";
+    dialogContent.append(progress, progressText);
     const chooseDir = button("Change output dir…", "", async () => {
       if (!dialog?.open) {
         showError("The Tauri dialog plugin is unavailable.");
@@ -6663,22 +6679,124 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       const path = await dialog.open({ directory: true, multiple: false });
       if (path) outputDir.value = path;
     });
-    const start = button("Start", "dialog-primary", async () => {
-      await mutateWithoutViewport(
-        "render_animation",
-        {
-          outputDir: outputDir.value,
-          baseName: baseName.value,
-          width: Number(width.value),
-          height: Number(height.value),
-          frameRate: Number(frameRate.value),
-        },
-        renderStatusAndLog,
-      );
-      showBottomPanel("output");
-      referenceDialog.close();
+    const controls = [
+      targetScene,
+      outputDir,
+      baseName,
+      width,
+      height,
+      frameRate,
+      loop,
+      projection,
+      chooseDir,
+    ];
+    let running = false;
+    let stopping = false;
+    let pollTimer = null;
+    let pollPending = false;
+    const headerClose = referenceDialog.querySelector('button[aria-label="Close"]');
+    const close = button("Close", "", () => referenceDialog.close());
+    const finish = () => {
+      clearInterval(pollTimer);
+      pollTimer = null;
+      pollPending = false;
+      running = false;
+      controls.forEach((control) => { control.disabled = false; });
+      close.disabled = false;
+      if (headerClose) headerClose.disabled = false;
+      startStop.disabled = false;
+      startStop.textContent = "Start";
+    };
+    const poll = async () => {
+      if (!running || pollPending) return;
+      pollPending = true;
+      try {
+        const state = await invoke("poll_animation_render");
+        if (state.startsWith("running:")) {
+          const [, completed, total] = state.split(":");
+          const count = Number(completed);
+          const frameCount = Math.max(1, Number(total));
+          progress.value = count / frameCount;
+          progressText.textContent = `Rendering frame ${count} / ${frameCount}`;
+          return;
+        }
+        if (state === "stopping") return;
+        finish();
+        if (state.startsWith("complete:")) {
+          const count = Number(state.slice("complete:".length));
+          progress.value = 1;
+          progressText.textContent = `Animation rendered: ${count} frame(s)`;
+          const completedSnapshot = await invoke("get_snapshot");
+          snapshot = completedSnapshot;
+          renderStatusAndLog();
+          showBottomPanel("output");
+        } else if (state.startsWith("error:")) {
+          const message = state.slice("error:".length);
+          progressText.textContent = message;
+          if (!stopping) showError(message);
+        }
+        stopping = false;
+      } catch (error) {
+        finish();
+        showError(error);
+      } finally {
+        pollPending = false;
+      }
+    };
+    const startStop = button("Start", "dialog-primary", async () => {
+      if (running) {
+        stopping = true;
+        startStop.disabled = true;
+        progressText.textContent = "Stopping animation rendering...";
+        try {
+          await invoke("cancel_animation_render");
+        } catch (error) {
+          showError(error);
+        }
+        return;
+      }
+      try {
+        const state = await invoke("start_animation_render", {
+          input: {
+            sceneUid: Number(targetScene.value),
+            outputDir: outputDir.value,
+            baseName: baseName.value,
+            width: Number(width.value),
+            height: Number(height.value),
+            frameRate: Number(frameRate.value),
+            perspective: projection.value === "perspec",
+            duplicateLastFrame: loop.checked,
+          },
+        });
+        if (!state.startsWith("running:")) {
+          throw new Error(`Unexpected animation render state: ${state}`);
+        }
+        running = true;
+        stopping = false;
+        controls.forEach((control) => { control.disabled = true; });
+        close.disabled = true;
+        if (headerClose) headerClose.disabled = true;
+        startStop.textContent = "Stop";
+        progress.value = 0;
+        progressText.textContent = "Starting animation rendering...";
+        pollTimer = setInterval(poll, 150);
+      } catch (error) {
+        showError(error);
+      }
     });
-    dialogActions(chooseDir, start);
+    const preventCloseWhileRunning = (event) => {
+      if (running) event.preventDefault();
+    };
+    referenceDialog.addEventListener("cancel", preventCloseWhileRunning);
+    referenceDialog.addEventListener(
+      "close",
+      () => {
+        clearInterval(pollTimer);
+        referenceDialog.removeEventListener("cancel", preventCloseWhileRunning);
+      },
+      { once: true },
+    );
+    dialogActions(close, startStop);
   } else if (title === "Save File As") {
     const object = selectedWorkspaceObjectForSave();
     if (!object) {
