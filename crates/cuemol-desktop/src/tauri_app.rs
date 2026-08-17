@@ -7163,6 +7163,7 @@ enum ModelRequest {
     SavePovRenderImage {
         path: String,
     },
+    ClearPovRenderResult,
     RenderAnimation {
         output_dir: String,
         base_name: String,
@@ -10804,6 +10805,16 @@ fn handle_model_request(
             model.status = format!("Saved rendered image: {path}");
             Ok(ModelResponse::Message("saved".to_string()))
         }
+        ModelRequest::ClearPovRenderResult => {
+            if model.pov_render_job.is_some() {
+                return Err("cannot clear a running POV-Ray render".to_string());
+            }
+            if let Some(result) = model.pov_render_result.take() {
+                fs::remove_dir_all(result.work_dir)
+                    .map_err(|error| format!("failed to clear POV-Ray result: {error}"))?;
+            }
+            Ok(ModelResponse::Message("cleared".to_string()))
+        }
         ModelRequest::RenderAnimation {
             output_dir,
             base_name,
@@ -13452,6 +13463,11 @@ fn save_pov_render_image(path: String, state: State<'_, ManagedState>) -> Result
 }
 
 #[tauri::command]
+fn clear_pov_render_result(state: State<'_, ManagedState>) -> Result<String, String> {
+    message_response(request_model(&state, ModelRequest::ClearPovRenderResult)?)
+}
+
+#[tauri::command]
 fn render_animation(
     output_dir: String,
     base_name: String,
@@ -13899,6 +13915,7 @@ pub fn run() -> Result<(), tauri::Error> {
             poll_pov_render,
             cancel_pov_render,
             save_pov_render_image,
+            clear_pov_render_result,
             render_animation,
             render_viewport,
             update_camera,
@@ -20260,9 +20277,12 @@ mod tests {
         .unwrap();
         assert!(matches!(response, ModelResponse::Message(ref value) if value == "saved"));
         assert_eq!(fs::read(&saved).unwrap(), b"PNG");
-        if let Some(result) = model.pov_render_result.take() {
-            fs::remove_dir_all(result.work_dir).unwrap();
-        }
+        let work_dir = model.pov_render_result.as_ref().unwrap().work_dir.clone();
+        let response =
+            handle_model_request(&mut model, ModelRequest::ClearPovRenderResult).unwrap();
+        assert!(matches!(response, ModelResponse::Message(ref value) if value == "cleared"));
+        assert!(model.pov_render_result.is_none());
+        assert!(!work_dir.exists());
         fs::remove_file(saved).unwrap();
         fs::remove_file(script).unwrap();
     }

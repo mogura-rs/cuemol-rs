@@ -164,6 +164,7 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "poll_pov_render",
         "cancel_pov_render",
         "save_pov_render_image",
+        "clear_pov_render_result",
         "append_morph_frame",
         "remove_morph_frame",
         "apply_morph_frame",
@@ -890,6 +891,8 @@ fn pov_render_matches_the_reference_options_and_cancellable_flow() {
         "`${scene.uid},${view.uid}`",
         "sceneUid",
         "viewUid",
+        "Rendered image is not saved. Save image?",
+        "Don't Save",
     ] {
         assert!(JS.contains(label), "missing POV-Ray option {label}");
     }
@@ -898,6 +901,7 @@ fn pov_render_matches_the_reference_options_and_cancellable_flow() {
         "poll_pov_render",
         "cancel_pov_render",
         "save_pov_render_image",
+        "clear_pov_render_result",
     ] {
         assert!(JS.contains(command), "missing POV-Ray flow {command}");
         assert!(

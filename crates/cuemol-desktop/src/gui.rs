@@ -1124,6 +1124,7 @@ struct GuiApplication {
     pov_render_result: Option<NativePovRenderResult>,
     pov_preview_texture: Option<AnimationPreviewTexture>,
     pov_preview_zoom: u32,
+    pov_close_confirmation: bool,
     ribbon_tab: RibbonTab,
     interaction_mode: InteractionMode,
     measure_mode: MeasureMode,
@@ -3473,6 +3474,7 @@ impl GuiApplication {
             pov_render_result: None,
             pov_preview_texture: None,
             pov_preview_zoom: 100,
+            pov_close_confirmation: false,
             ribbon_tab: RibbonTab::Home,
             interaction_mode: InteractionMode::Rotate,
             measure_mode: MeasureMode::Distance,
@@ -11253,6 +11255,7 @@ impl GuiApplication {
 
     fn open_pov_render_tool(&mut self) {
         self.render_backend = "POV-Ray".to_string();
+        self.pov_close_confirmation = false;
         if let Some(view) = self.state.active_view_summary() {
             self.pov_render_settings.target_scene_uid = Some(view.scene_uid);
             self.pov_render_settings.target_view_uid = Some(view.uid);
@@ -11682,6 +11685,29 @@ impl GuiApplication {
                 self.start_pov_render(camera);
             }
         });
+        if self.pov_close_confirmation {
+            ui.group(|ui| {
+                ui.label("Rendered image is not saved. Save image?");
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        self.pov_close_confirmation = false;
+                    }
+                    if ui.button("Don't Save").clicked() {
+                        self.close_pov_render_tool();
+                    }
+                    if ui.button("Save").clicked() {
+                        self.save_pov_rendered_image();
+                        if self
+                            .pov_render_result
+                            .as_ref()
+                            .is_some_and(|result| result.saved)
+                        {
+                            self.close_pov_render_tool();
+                        }
+                    }
+                });
+            });
+        }
     }
 
     fn persist_pov_render_settings(&mut self) {
@@ -11964,6 +11990,24 @@ impl GuiApplication {
             let _ = fs::remove_dir_all(result.work_dir);
         }
         self.pov_preview_texture = None;
+        self.pov_close_confirmation = false;
+    }
+
+    fn close_pov_render_tool(&mut self) {
+        self.clear_pov_render_result();
+        self.tool_dialog = None;
+    }
+
+    fn request_close_pov_render_tool(&mut self) {
+        if self
+            .pov_render_result
+            .as_ref()
+            .is_some_and(|result| !result.saved)
+        {
+            self.pov_close_confirmation = true;
+        } else {
+            self.close_pov_render_tool();
+        }
     }
 
     fn save_pov_rendered_image(&mut self) {
@@ -19821,8 +19865,10 @@ impl GuiApplication {
             }
             if title == "POV-Ray rendering" {
                 self.persist_pov_render_settings();
+                self.request_close_pov_render_tool();
+            } else {
+                self.tool_dialog = None;
             }
-            self.tool_dialog = None;
         }
     }
 
@@ -30642,7 +30688,15 @@ mod tests {
             .log_lines
             .iter()
             .any(|line| line.contains("POV-Ray> render complete")));
-        app.clear_pov_render_result();
+        let work_dir = result.work_dir.clone();
+        app.request_close_pov_render_tool();
+        assert!(app.pov_close_confirmation);
+        assert!(work_dir.exists());
+        app.pov_render_result.as_mut().unwrap().saved = true;
+        app.request_close_pov_render_tool();
+        assert!(app.pov_render_result.is_none());
+        assert!(!work_dir.exists());
+        assert!(app.tool_dialog.is_none());
         fs::remove_file(script).unwrap();
     }
 

@@ -6387,6 +6387,8 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     let pollTimer = null;
     let pollPending = false;
     let renderedImage = "";
+    let renderedSaved = false;
+    let savePrompt = null;
     const persistSettings = () => {
       localStorage.setItem("cuemol.povWidth", width.value);
       localStorage.setItem("cuemol.povHeight", height.value);
@@ -6412,22 +6414,26 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       localStorage.setItem("cuemol.povAmbientFraction", ambientFraction.value);
     };
     const headerClose = referenceDialog.querySelector('button[aria-label="Close"]');
-    const close = button("Close", "", () => referenceDialog.close());
+    const close = button("Close", "", () => requestClose());
     const savePov = button("Save POV scene…", "", async () => {
       const path = await chooseOutputPath("cuemol.pov", "POV-Ray scene", ["pov"]);
       if (!path) return;
       await mutateWithoutViewport("export_pov", { path }, renderStatusAndLog);
     });
-    const saveImage = button("Save image…", "", async () => {
+    const saveRenderedImage = async () => {
       const path = await chooseOutputPath("cuemol.png", "PNG image", ["png"]);
-      if (!path) return;
+      if (!path) return false;
       try {
         await invoke("save_pov_render_image", { path });
+        renderedSaved = true;
         progress.textContent = `Saved: ${path}`;
+        return true;
       } catch (error) {
         showError(error);
+        return false;
       }
-    });
+    };
+    const saveImage = button("Save image…", "", saveRenderedImage);
     saveImage.disabled = true;
     const copyImage = button("Copy to clipboard", "", async () => {
       try {
@@ -6439,6 +6445,46 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       }
     });
     copyImage.disabled = true;
+    const removeSavePrompt = () => {
+      savePrompt?.remove();
+      savePrompt = null;
+    };
+    const showSavePrompt = () => {
+      if (savePrompt) return;
+      savePrompt = document.createElement("section");
+      savePrompt.className = "pov-save-prompt";
+      savePrompt.append(dialogParagraph("Rendered image is not saved. Save image?"));
+      const actions = document.createElement("div");
+      actions.className = "dialog-actions";
+      const cancelClose = button("Cancel", "", removeSavePrompt);
+      const discard = button("Don't Save", "dialog-danger", () => {
+        removeSavePrompt();
+        referenceDialog.close();
+      });
+      const saveAndClose = button("Save", "dialog-primary", async () => {
+        if (await saveRenderedImage()) {
+          removeSavePrompt();
+          referenceDialog.close();
+        }
+      });
+      actions.append(cancelClose, discard, saveAndClose);
+      savePrompt.append(actions);
+      dialogContent.append(savePrompt);
+      savePrompt.scrollIntoView({ block: "nearest" });
+    };
+    function requestClose() {
+      if (running) return;
+      if (renderedImage && !renderedSaved) {
+        showSavePrompt();
+      } else {
+        referenceDialog.close();
+      }
+    }
+    const onHeaderClose = (event) => {
+      event.preventDefault();
+      requestClose();
+    };
+    headerClose?.addEventListener("click", onHeaderClose);
     const render = button("Render", "dialog-primary", async () => {
       if (running) {
         stopping = true;
@@ -6500,6 +6546,10 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         if (state !== "running") throw new Error(`Unexpected POV-Ray state: ${state}`);
         running = true;
         stopping = false;
+        renderedImage = "";
+        renderedSaved = false;
+        preview.hidden = true;
+        removeSavePrompt();
         controls.forEach((control) => { control.disabled = true; });
         close.disabled = true;
         savePov.disabled = true;
@@ -6537,6 +6587,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         finishPolling();
         if (state.startsWith("complete:")) {
           renderedImage = state.slice("complete:".length);
+          renderedSaved = false;
           preview.src = renderedImage;
           preview.hidden = false;
           renderProgress.value = 1;
@@ -6560,16 +6611,23 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         pollPending = false;
       }
     };
-    const preventCloseWhileRunning = (event) => {
-      if (running) event.preventDefault();
+    const preventUnsafeClose = (event) => {
+      if (running) {
+        event.preventDefault();
+      } else if (renderedImage && !renderedSaved) {
+        event.preventDefault();
+        showSavePrompt();
+      }
     };
-    referenceDialog.addEventListener("cancel", preventCloseWhileRunning);
+    referenceDialog.addEventListener("cancel", preventUnsafeClose);
     referenceDialog.addEventListener(
       "close",
       () => {
         persistSettings();
         clearInterval(pollTimer);
-        referenceDialog.removeEventListener("cancel", preventCloseWhileRunning);
+        referenceDialog.removeEventListener("cancel", preventUnsafeClose);
+        headerClose?.removeEventListener("click", onHeaderClose);
+        void invoke("clear_pov_render_result").catch(() => {});
       },
       { once: true },
     );

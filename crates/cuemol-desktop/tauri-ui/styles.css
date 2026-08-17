@@ -2113,6 +2113,20 @@ summary:focus-visible {
   background-size: 8px 8px;
 }
 
+.pov-save-prompt {
+  position: sticky;
+  bottom: 0;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid #9a7b26;
+  background: #fff7d6;
+  box-shadow: 0 -3px 12px rgba(0, 0, 0, 0.16);
+}
+
+.pov-save-prompt .dialog-actions {
+  margin-top: 8px;
+}
+
 .stream-progress-dialog progress {
   width: 100%;
 }
