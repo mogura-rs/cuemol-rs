@@ -7343,34 +7343,31 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       const disabled = dialogCheckbox("Disabled", object.disabled, commonPage);
       const referenceOptions = snapshot.animationObjects
         .filter((item) => (pending || item.index !== object.index) && item.name)
-        .map((item) => [item.name, item.name]);
+        .map((item) => [item.name, `${item.name} (${item.typeName})`]);
       if (
         object.timeRefName
         && !referenceOptions.some(([value]) => value === object.timeRefName)
       ) {
         referenceOptions.push([object.timeRefName, object.timeRefName]);
       }
+      const start = dialogField(
+        "Start time",
+        formatAnimationObjectTime(object.relativeStart),
+        "text",
+        commonPage,
+      );
       const timeReference = dialogSelect(
         "Relative to",
-        [["", "Absolute"], ...referenceOptions],
+        [["", "(absolute)"], ...referenceOptions],
         object.timeRefName || "",
         commonPage,
       );
-      const start = dialogField(
-        "Start (seconds)",
-        String(object.relativeStart),
-        "number",
-        commonPage,
-      );
-      start.step = "0.001";
       const duration = dialogField(
-        "Duration (seconds)",
-        String(object.duration),
-        "number",
+        "Duration",
+        formatAnimationObjectTime(object.duration),
+        "text",
         commonPage,
       );
-      duration.min = "0.1";
-      duration.step = "0.001";
       const quadric = dialogField(
         "Quadric (%)",
         String(object.quadric * 100),
@@ -7709,13 +7706,25 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         optional.reset(defaults);
       });
       const apply = button("OK", "dialog-primary", async () => {
+        const startSeconds = parseAnimationObjectTime(start.value);
+        const durationSeconds = parseAnimationObjectTime(duration.value);
+        if (
+          startSeconds === null
+          || Math.abs(startSeconds) > 86400
+          || durationSeconds === null
+          || durationSeconds < 0.001
+          || durationSeconds > 86400
+        ) {
+          showError("Enter time as H:M:S.mmm within the supported range.");
+          return;
+        }
         const input = {
           index: object.index,
           name: name.value,
           disabled: disabled.checked,
           timeRefName: timeReference.value,
-          start: Number(start.value),
-          duration: Number(duration.value),
+          start: startSeconds,
+          duration: durationSeconds,
           quadric: Number(quadric.value) / 100,
           ...optional.read(),
         };
@@ -13858,17 +13867,37 @@ function formatAnimationTime(seconds) {
 
 function formatAnimationObjectTime(seconds) {
   const totalMillis = Math.round(Number(seconds) * 1000) || 0;
-  const totalSeconds = Math.trunc(totalMillis / 1000);
-  const millis = ((totalMillis % 1000) + 1000) % 1000;
+  const sign = totalMillis < 0 ? "-" : "";
+  const absoluteMillis = Math.abs(totalMillis);
+  const totalSeconds = Math.trunc(absoluteMillis / 1000);
+  const millis = absoluteMillis % 1000;
   const hours = Math.trunc(totalSeconds / 3600);
   const totalMinutes = Math.trunc(totalSeconds / 60);
   const minutes = Math.trunc((totalSeconds % 3600) / 60);
   const secondsPart = totalSeconds % 60;
   const fraction = String(millis).padStart(3, "0").replace(/0+$/, "");
   const secondsText = fraction ? `${secondsPart}.${fraction}` : String(secondsPart);
-  if (hours > 0) return `${hours}:${minutes}:${secondsText}`;
-  if (totalMinutes > 0) return `${totalMinutes}:${secondsText}`;
-  return secondsText;
+  if (hours > 0) return `${sign}${hours}:${minutes}:${secondsText}`;
+  if (totalMinutes > 0) return `${sign}${totalMinutes}:${secondsText}`;
+  return `${sign}${secondsText}`;
+}
+
+function parseAnimationObjectTime(value) {
+  const parts = String(value).trim().split(":");
+  if (parts.length < 1 || parts.length > 3 || parts.some((part) => part === "")) {
+    return null;
+  }
+  const values = parts.map(Number);
+  if (values.some((part) => !Number.isFinite(part))) return null;
+  let seconds;
+  if (values.length === 3) {
+    seconds = values[0] * 3600 + values[1] * 60 + values[2];
+  } else if (values.length === 2) {
+    seconds = values[0] * 60 + values[1];
+  } else {
+    [seconds] = values;
+  }
+  return Number.isFinite(seconds) ? seconds : null;
 }
 
 function defaultAnimationObjectProperties(object) {

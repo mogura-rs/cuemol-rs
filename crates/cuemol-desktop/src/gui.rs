@@ -11,7 +11,7 @@ use cuemol_anim::{
 };
 use cuemol_core::{
     parse_ldom2_xml, time_from_seconds, time_to_seconds, write_ldom2_xml, CueMolError, LDom2Node,
-    Result, Vector4, NANOS_PER_SECOND,
+    LScrTime, Result, Vector4, NANOS_PER_SECOND,
 };
 use cuemol_gfx::Rgba8;
 use cuemol_qsys::{StereoMode, View};
@@ -15499,7 +15499,7 @@ impl GuiApplication {
             return;
         };
         let pending_add = self.animation_pending_add;
-        let reference_names = self
+        let reference_options = self
             .active_animation_manager()
             .map(|animation| {
                 animation
@@ -15507,7 +15507,11 @@ impl GuiApplication {
                     .iter()
                     .enumerate()
                     .filter(|(index, _)| pending_add.is_some() || *index != draft.index)
-                    .map(|(_, motion)| motion.base().name().to_string())
+                    .map(|(_, motion)| {
+                        let name = motion.base().name().to_string();
+                        let label = format!("{name} ({})", motion.type_name());
+                        (name, label)
+                    })
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -15555,40 +15559,52 @@ impl GuiApplication {
                         ui.label("Disabled:");
                         ui.checkbox(&mut draft.disabled, "");
                         ui.end_row();
-                        ui.label("Time reference:");
+                        ui.label("Start time:");
+                        ui.add(
+                            egui::DragValue::new(&mut draft.start)
+                                .range(-86_400.0..=86_400.0)
+                                .speed(0.1)
+                                .custom_formatter(|value, _| {
+                                    format_native_animation_time(time_from_seconds(value))
+                                })
+                                .custom_parser(parse_native_animation_time),
+                        );
+                        ui.end_row();
+                        ui.label("Relative to:");
                         egui::ComboBox::from_id_salt("animation_property_time_reference")
                             .selected_text(if draft.time_ref_name.is_empty() {
-                                "None"
+                                "(absolute)"
                             } else {
-                                &draft.time_ref_name
+                                reference_options
+                                    .iter()
+                                    .find(|(name, _)| name == &draft.time_ref_name)
+                                    .map(|(_, label)| label.as_str())
+                                    .unwrap_or(&draft.time_ref_name)
                             })
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(
                                     &mut draft.time_ref_name,
                                     String::new(),
-                                    "None",
+                                    "(absolute)",
                                 );
-                                for name in &reference_names {
+                                for (name, label) in &reference_options {
                                     ui.selectable_value(
                                         &mut draft.time_ref_name,
                                         name.clone(),
-                                        name,
+                                        label,
                                     );
                                 }
                             });
                         ui.end_row();
-                        ui.label("Start (seconds):");
-                        ui.add(
-                            egui::DragValue::new(&mut draft.start)
-                                .range(-86_400.0..=86_400.0)
-                                .speed(0.1),
-                        );
-                        ui.end_row();
-                        ui.label("Duration (seconds):");
+                        ui.label("Duration:");
                         ui.add(
                             egui::DragValue::new(&mut draft.duration)
                                 .range(0.001..=86_400.0)
-                                .speed(0.1),
+                                .speed(0.1)
+                                .custom_formatter(|value, _| {
+                                    format_native_animation_time(time_from_seconds(value))
+                                })
+                                .custom_parser(parse_native_animation_time),
                         );
                         ui.end_row();
                         ui.label("Quadric:");
@@ -27502,6 +27518,12 @@ fn format_native_animation_time(value: i64) -> String {
     }
 }
 
+fn parse_native_animation_time(value: &str) -> Option<f64> {
+    let mut time = LScrTime::new();
+    time.set_str_value(value.trim()).ok()?;
+    Some(time.sec_real())
+}
+
 fn unique_native_animation_name(animation: &AnimMgr, prefix: &str) -> String {
     (1_u32..)
         .map(|index| format!("{prefix}{index}"))
@@ -34711,6 +34733,9 @@ mod tests {
             format_native_animation_time(time_from_seconds(-1.25)),
             "-1.25"
         );
+        assert_eq!(parse_native_animation_time("1:2:3.456"), Some(3_723.456));
+        assert_eq!(parse_native_animation_time("2:3"), Some(123.0));
+        assert_eq!(parse_native_animation_time("invalid"), None);
     }
 
     #[test]

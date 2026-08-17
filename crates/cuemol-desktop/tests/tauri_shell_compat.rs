@@ -976,8 +976,8 @@ fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
     for label in [
         "Common settings",
         "Relative to",
-        "Start (seconds)",
-        "Duration (seconds)",
+        "Start time",
+        "Duration",
         "Quadric",
         "Rotation angle",
         "Spin axis X",
@@ -1019,6 +1019,9 @@ fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
     assert!(JS.contains("fade: true"));
     assert!(JS.contains("distance: 1"));
     assert!(JS.contains("function formatAnimationObjectTime(seconds)"));
+    assert!(JS.contains("function parseAnimationObjectTime(value)"));
+    assert!(JS.contains("`${item.name} (${item.typeName})`"));
+    assert!(JS.contains("[\"\", \"(absolute)\"]"));
     assert!(JS.contains("afterIndex: selectedAnimationIndex"));
     assert!(JS.contains("row.addEventListener(\"dblclick\""));
     assert!(JS.contains("let selectedAnimationIndices = new Set()"));
@@ -1047,6 +1050,8 @@ fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
     assert!(NATIVE_GUI_RS.contains("ui.strong(\"Name\")"));
     assert!(NATIVE_GUI_RS.contains("ui.strong(\"Start\")"));
     assert!(NATIVE_GUI_RS.contains("ui.strong(\"End\")"));
+    assert!(NATIVE_GUI_RS.contains("fn parse_native_animation_time(value: &str)"));
+    assert!(NATIVE_GUI_RS.contains("format!(\"{name} ({})\", motion.type_name())"));
 }
 
 #[test]
