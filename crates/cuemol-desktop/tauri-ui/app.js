@@ -5750,8 +5750,28 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       const movingObject = dialogSelect("Moving molecule", objectOptions, objects[1].uid);
       const movingSelection = dialogField("Moving selection", "name CA");
       const autoRecenter = dialogCheckbox("Auto recenter", true);
+      const writeRmsd = dialogCheckbox("Write RMSD info file", false);
       const useProperty = dialogCheckbox("Use xformMat property", false);
+      const syncRmsdEnabled = () => {
+        writeRmsd.disabled = algorithm.value !== "lsq";
+      };
+      algorithm.addEventListener("change", syncRmsdEnabled);
+      syncRmsdEnabled();
       const apply = button("OK", "dialog-primary", async () => {
+        let rmsdPath = null;
+        if (algorithm.value === "lsq" && writeRmsd.checked) {
+          if (!dialog?.save) {
+            showError("The Tauri dialog plugin is unavailable.");
+            return;
+          }
+          const selected = await dialog.save({
+            title: "Save RMSD info file",
+            defaultPath: "rmsd.txt",
+            filters: [{ name: "Text file (*.txt)", extensions: ["txt"] }],
+          });
+          if (!selected) return;
+          rmsdPath = String(selected);
+        }
         await mutate("superpose_objects", {
           algorithm: algorithm.value,
           referenceObjectUid: Number(referenceObject.value),
@@ -5760,6 +5780,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           movingSelection: movingSelection.value,
           autoRecenter: autoRecenter.checked,
           useProperty: useProperty.checked,
+          rmsdPath,
         });
         referenceDialog.close();
       });

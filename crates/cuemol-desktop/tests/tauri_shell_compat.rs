@@ -402,6 +402,13 @@ fn tauri_main_menu_matches_the_reference_inventory() {
     assert!(JS.contains("columnSplitter.setPointerCapture(event.pointerId)"));
     assert!(JS.contains("atom0Cell.append(selected, atom1)"));
     assert!(JS.contains("referenceDialog.show()"));
+    assert!(JS.contains("Write RMSD info file"));
+    assert!(JS.contains("Save RMSD info file"));
+    assert!(JS.contains("rmsdPath"));
+    assert!(TAURI_APP_RS.contains("rmsd_path: Option<String>"));
+    assert!(NATIVE_GUI_RS.contains("superpose_write_rmsd"));
+    assert!(NATIVE_GUI_RS.contains("NativeFileDialog::SaveRmsdReport"));
+    assert!(NATIVE_GUI_RS.contains("write_superposition_rmsd_report"));
     assert!(CSS.contains(".bond-list-row"));
     assert!(CSS.contains(".bond-list-columns"));
     assert!(CSS.contains(".bond-column-splitter"));

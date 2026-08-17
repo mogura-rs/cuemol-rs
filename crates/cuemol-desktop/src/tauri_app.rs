@@ -7966,6 +7966,7 @@ enum ModelRequest {
         moving_selection: String,
         auto_recenter: bool,
         use_property: bool,
+        rmsd_path: Option<String>,
     },
     EditBond {
         object_uid: u64,
@@ -11356,6 +11357,7 @@ fn handle_model_request(
             moving_selection,
             auto_recenter,
             use_property,
+            rmsd_path,
         } => {
             if reference_object_uid == moving_object_uid {
                 return Err("reference and moving objects must differ".to_string());
@@ -11372,6 +11374,18 @@ fn handle_model_request(
                     use_property,
                 )
                 .map_err(|error| error.to_string())?;
+            if let Some(path) = rmsd_path.filter(|path| !path.trim().is_empty()) {
+                if let Err(error) = model.desktop.write_superposition_rmsd_report(
+                    Uid::new(reference_object_uid),
+                    &reference_selection,
+                    Uid::new(moving_object_uid),
+                    &moving_selection,
+                    path,
+                ) {
+                    model.restore_undo(undo)?;
+                    return Err(error.to_string());
+                }
+            }
             model.status = "Molecular superposition applied".to_string();
             model.invalidate_mesh(auto_recenter);
             model.push_undo(undo);
@@ -15028,6 +15042,7 @@ fn superpose_objects(
     moving_selection: String,
     auto_recenter: bool,
     use_property: bool,
+    rmsd_path: Option<String>,
     state: State<'_, ManagedState>,
 ) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(
@@ -15040,6 +15055,7 @@ fn superpose_objects(
             moving_selection,
             auto_recenter,
             use_property,
+            rmsd_path,
         },
     )?)
 }
@@ -22879,6 +22895,10 @@ mod tests {
         let objects = model.desktop.active_object_summaries();
         let first = objects[0].uid.get();
         let second = objects[1].uid.get();
+        let rmsd_path = std::env::temp_dir().join(format!(
+            "cuemol-tauri-superpose-rmsd-{}.txt",
+            std::process::id()
+        ));
         let bond_count = model
             .desktop
             .nonstandard_bond_summaries(Uid::new(first))
@@ -22895,9 +22915,14 @@ mod tests {
                 moving_selection: "name CA".to_string(),
                 auto_recenter: true,
                 use_property: true,
+                rmsd_path: Some(rmsd_path.to_string_lossy().into_owned()),
             },
         )
         .unwrap();
+        assert!(std::fs::read_to_string(&rmsd_path)
+            .unwrap()
+            .contains("Total RMSD"));
+        let _ = std::fs::remove_file(rmsd_path);
         handle_model_request(
             &mut model,
             ModelRequest::EditBond {

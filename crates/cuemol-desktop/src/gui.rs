@@ -1340,6 +1340,7 @@ struct GuiApplication {
     superpose_reference_selection: String,
     superpose_moving_selection: String,
     superpose_auto_recenter: bool,
+    superpose_write_rmsd: bool,
     superpose_use_property: bool,
     bond_object: Option<cuemol_core::Uid>,
     bond_picker_target: Option<usize>,
@@ -2472,6 +2473,7 @@ enum NativeFileDialog {
     SaveCamera,
     SaveStyle,
     SaveRenderedImage,
+    SaveRmsdReport,
     ExportScene,
     OpenScript,
 }
@@ -4935,6 +4937,7 @@ impl GuiApplication {
             superpose_reference_selection: "name CA".to_string(),
             superpose_moving_selection: "name CA".to_string(),
             superpose_auto_recenter: true,
+            superpose_write_rmsd: false,
             superpose_use_property: false,
             bond_object: None,
             bond_picker_target: None,
@@ -18865,6 +18868,15 @@ impl GuiApplication {
             self.set_status("Reference and moving objects must differ");
             return;
         }
+        let rmsd_path = if self.superpose_algorithm == "lsq" && self.superpose_write_rmsd {
+            let Some(path) = native_file_dialog(NativeFileDialog::SaveRmsdReport, "rmsd.txt")
+            else {
+                return;
+            };
+            Some(path)
+        } else {
+            None
+        };
         let undo = self.capture_undo();
         match self.state.superpose_objects_with_algorithm(
             reference,
@@ -18875,6 +18887,19 @@ impl GuiApplication {
             self.superpose_use_property,
         ) {
             Ok(matrix) => {
+                if let Some(path) = rmsd_path.as_ref() {
+                    if let Err(error) = self.state.write_superposition_rmsd_report(
+                        reference,
+                        &self.superpose_reference_selection,
+                        moving,
+                        &self.superpose_moving_selection,
+                        path,
+                    ) {
+                        self.state = undo.state;
+                        self.set_error(error);
+                        return;
+                    }
+                }
                 self.push_undo_snapshot(undo);
                 self.selected_object = Some(moving);
                 self.workspace_aux_selection = None;
@@ -26095,6 +26120,9 @@ impl GuiApplication {
                 .hint_text("moving selection"),
         );
         ui.checkbox(&mut self.superpose_auto_recenter, "Auto recenter");
+        ui.add_enabled_ui(self.superpose_algorithm == "lsq", |ui| {
+            ui.checkbox(&mut self.superpose_write_rmsd, "Write RMSD info file");
+        });
         ui.checkbox(&mut self.superpose_use_property, "Use xformMat property");
         if ui.button("Superpose").clicked() {
             self.apply_superpose(camera);
@@ -32399,6 +32427,10 @@ const RENDERED_IMAGE_SAVE_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
     label: "PNG image",
     extensions: &["png"],
 }];
+const RMSD_REPORT_SAVE_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
+    label: "Text file (*.txt)",
+    extensions: &["txt"],
+}];
 const SCRIPT_OPEN_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
     label: "Internal Javascript (*.js)",
     extensions: &["js"],
@@ -32524,6 +32556,12 @@ fn native_file_dialog_spec(dialog: NativeFileDialog) -> NativeFileDialogSpec {
             title: "Save rendered image",
             filters: RENDERED_IMAGE_SAVE_FILTERS,
             default_extension: Some("png"),
+            save: true,
+        },
+        NativeFileDialog::SaveRmsdReport => NativeFileDialogSpec {
+            title: "Save RMSD info file",
+            filters: RMSD_REPORT_SAVE_FILTERS,
+            default_extension: Some("txt"),
             save: true,
         },
         NativeFileDialog::ExportScene => NativeFileDialogSpec {

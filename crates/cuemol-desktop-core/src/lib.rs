@@ -14660,6 +14660,44 @@ impl DesktopAppState {
         Ok(matrix.to_script_string())
     }
 
+    pub fn write_superposition_rmsd_report(
+        &self,
+        reference_object: Uid,
+        reference_selection: &str,
+        moving_object: Uid,
+        moving_selection: &str,
+        path: impl AsRef<Path>,
+    ) -> Result<f64> {
+        let reference_selector =
+            parse_gui_selector(nonempty_selection(reference_selection))?.unwrap_or(Selector::All);
+        let moving_selector =
+            parse_gui_selector(nonempty_selection(moving_selection))?.unwrap_or(Selector::All);
+        let reference_uid = reference_object;
+        let moving_uid = moving_object;
+        let reference_object = self.scene_manager().object(reference_uid).ok_or_else(|| {
+            CueMolError::NotFound(format!("reference object {}", reference_uid.get()))
+        })?;
+        let moving_object = self
+            .scene_manager()
+            .object(moving_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("moving object {}", moving_uid.get())))?;
+        let mut reference = reference_object.mol().clone();
+        let mut moving = moving_object.mol().clone();
+        if reference_object.xform_matrix() != Matrix4::IDENTITY {
+            reference.xform_by_mat(reference_object.xform_matrix(), None);
+        }
+        if moving_object.xform_matrix() != Matrix4::IDENTITY {
+            moving.xform_by_mat(moving_object.xform_matrix(), None);
+        }
+        MolAnlManager::new().calc_rmsd(
+            &reference,
+            &reference_selector,
+            &moving,
+            &moving_selector,
+            path,
+        )
+    }
+
     pub fn write_surface_obj(
         &self,
         object_uid: Uid,
@@ -65930,6 +65968,16 @@ attribute \"dep\" string \"positions\"
             app.scene_manager().object(second).unwrap().xform_matrix(),
             Matrix4::IDENTITY
         );
+        let report_path =
+            std::env::temp_dir().join(format!("cuemol-superpose-rmsd-{}.txt", std::process::id()));
+        let rmsd = app
+            .write_superposition_rmsd_report(first, "name CA", second, "name CA", &report_path)
+            .unwrap();
+        assert!(rmsd < 1.0e-9);
+        assert!(std::fs::read_to_string(&report_path)
+            .unwrap()
+            .contains("Total RMSD"));
+        let _ = std::fs::remove_file(report_path);
 
         let bonds_before = app.nonstandard_bond_summaries(first).unwrap();
         assert!(app.make_bond_in_object(first, 1, 327).unwrap());
