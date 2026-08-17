@@ -5869,9 +5869,6 @@ impl GuiApplication {
     }
 
     fn workspace_multiple_context_menu(&mut self, ui: &mut egui::Ui) {
-        let count = self.workspace_multiple_selection.len();
-        ui.weak(format!("{count} items"));
-        ui.separator();
         let copy_enabled = self.workspace_multiple_copy_enabled();
         if ui
             .add_enabled(copy_enabled, egui::Button::new("Copy"))

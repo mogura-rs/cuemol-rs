@@ -8903,8 +8903,6 @@ function workspaceMultipleContextItems() {
       visible,
     });
   return [
-    { label: `${targets.length} items`, disabled: true },
-    null,
     {
       label: "Copy",
       disabled: !copyEnabled,
