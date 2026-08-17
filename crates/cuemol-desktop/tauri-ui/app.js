@@ -10332,7 +10332,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
                 : true;
   workspaceZoom.disabled =
     workspaceDelete.disabled ||
-    ["multiple", "rendererGroup", "lwObject", "lwRenderer", "cameraRoot", "camera", "styleRoot", "style"].includes(
+    ["multiple", "rendererGroup", "cameraRoot", "camera", "styleRoot", "style"].includes(
       workspaceSelectionKind,
     );
 }

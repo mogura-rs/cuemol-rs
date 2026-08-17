@@ -5799,12 +5799,7 @@ impl GuiApplication {
         ui.separator();
         ui.horizontal(|ui| {
             let multiple_selected = self.workspace_multiple_selection.len() > 1;
-            let zoom_enabled = !multiple_selected
-                && ((self.selected_object.is_some() && !self.selected_renderer_is_group())
-                    || matches!(
-                        self.workspace_aux_selection,
-                        Some(WorkspaceAuxSelection::DensityMap { .. })
-                    ));
+            let zoom_enabled = self.workspace_selection_can_zoom();
             if ui
                 .add_enabled(zoom_enabled, egui::Button::new("Zoom"))
                 .on_hover_text("Zoom at selected item")
@@ -8030,6 +8025,23 @@ impl GuiApplication {
             .into_iter()
             .find(|renderer| renderer.uid == renderer_uid && renderer.renderer_type == "*group")
             .map(|renderer| renderer.name)
+    }
+
+    fn workspace_selection_can_zoom(&self) -> bool {
+        if self.workspace_multiple_selection.len() > 1 {
+            return false;
+        }
+        if self.selected_object.is_some() {
+            return !self.selected_renderer_is_group();
+        }
+        self.workspace_aux_selection.is_some_and(|selection| {
+            matches!(
+                selection,
+                WorkspaceAuxSelection::DensityMap { .. }
+                    | WorkspaceAuxSelection::Surface { .. }
+                    | WorkspaceAuxSelection::Lightweight { .. }
+            ) && self.workspace_aux_group_summary(selection).is_none()
+        })
     }
 
     fn zoom_workspace_selection(&mut self, camera: &mut CameraController) {
@@ -29168,6 +29180,24 @@ mod tests {
         let tree = native_surface_renderer_tree_nodes(&surface);
         assert_eq!(tree[0].renderer.uid, surface_group);
         assert_eq!(tree[0].children[0].uid, surface_renderer);
+        app.workspace_aux_selection = Some(WorkspaceAuxSelection::Surface {
+            scene_uid,
+            surface_uid,
+            renderer_uid: None,
+        });
+        assert!(app.workspace_selection_can_zoom());
+        app.workspace_aux_selection = Some(WorkspaceAuxSelection::Surface {
+            scene_uid,
+            surface_uid,
+            renderer_uid: Some(surface_group),
+        });
+        assert!(!app.workspace_selection_can_zoom());
+        app.workspace_aux_selection = Some(WorkspaceAuxSelection::Surface {
+            scene_uid,
+            surface_uid,
+            renderer_uid: Some(surface_renderer),
+        });
+        assert!(app.workspace_selection_can_zoom());
 
         let object_uid = app
             .state
@@ -29196,6 +29226,24 @@ mod tests {
         let tree = native_lw_renderer_tree_nodes(&object);
         assert_eq!(tree[0].renderer.uid, lw_group);
         assert_eq!(tree[0].children[0].uid, lw_renderer);
+        app.workspace_aux_selection = Some(WorkspaceAuxSelection::Lightweight {
+            scene_uid,
+            object_uid,
+            renderer_uid: None,
+        });
+        assert!(app.workspace_selection_can_zoom());
+        app.workspace_aux_selection = Some(WorkspaceAuxSelection::Lightweight {
+            scene_uid,
+            object_uid,
+            renderer_uid: Some(lw_group),
+        });
+        assert!(!app.workspace_selection_can_zoom());
+        app.workspace_aux_selection = Some(WorkspaceAuxSelection::Lightweight {
+            scene_uid,
+            object_uid,
+            renderer_uid: Some(lw_renderer),
+        });
+        assert!(app.workspace_selection_can_zoom());
     }
 
     #[test]

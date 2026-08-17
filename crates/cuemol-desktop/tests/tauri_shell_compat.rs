@@ -1156,6 +1156,11 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(HTML.contains("id=\"inspector-add-renderer\""));
     assert!(JS.contains("workspaceAdd.disabled ="));
     assert!(JS.contains("inspectorAddRenderer.disabled ="));
+    assert!(JS.contains(
+        "[\"multiple\", \"rendererGroup\", \"cameraRoot\", \"camera\", \"styleRoot\", \"style\"]"
+    ));
+    assert!(NATIVE_GUI_RS.contains("fn workspace_selection_can_zoom(&self) -> bool"));
+    assert!(NATIVE_GUI_RS.contains("workspace_aux_group_summary(selection).is_none()"));
     assert!(NATIVE_GUI_RS.contains("let add_enabled = !multiple_selected"));
     assert!(JS.contains("function showWorkspaceContextMenu(event, items)"));
     assert!(JS.contains("function workspaceObjectContextItems(scene, object)"));
