@@ -1,5 +1,30 @@
 use cuemol_core::Vector4;
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScalarHistogram {
+    pub min: f64,
+    pub max: f64,
+    pub bin_count: usize,
+    pub maximum: f64,
+    pub sigma: f64,
+    pub values: Vec<f64>,
+}
+
+impl ScalarHistogram {
+    pub fn to_json(&self) -> String {
+        let values = self
+            .values
+            .iter()
+            .map(|value| format!("{value:.6}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "{{\"min\":{:.6},\"max\":{:.6},\"nbin\":{},\"nmax\":{:.6},\"sig\":{:.6},\"histo\":[{}]}}\n",
+            self.min, self.max, self.bin_count, self.maximum, self.sigma, values
+        )
+    }
+}
+
 pub trait ScalarObject {
     fn col_no(&self) -> usize;
     fn row_no(&self) -> usize;
@@ -67,15 +92,16 @@ pub trait ScalarObject {
         self.rmsd_density()
     }
 
-    fn histogram_json(&self, min: f64, max: f64, bins: usize) -> String {
+    fn histogram(&self, min: f64, max: f64, bins: usize) -> ScalarHistogram {
         if bins == 0 || max <= min {
-            return format!(
-                "{{\"min\":{:.6},\"max\":{:.6},\"nbin\":{},\"nmax\":0.000000,\"sig\":{:.6},\"histo\":[]}}\n",
-                self.min_density(),
-                self.max_density(),
-                bins,
-                self.rmsd_density()
-            );
+            return ScalarHistogram {
+                min: self.min_density(),
+                max: self.max_density(),
+                bin_count: bins,
+                maximum: 0.0,
+                sigma: self.rmsd_density(),
+                values: Vec::new(),
+            };
         }
 
         let (hist_min, hist_max, base_width, base_histogram) = self.base_histogram();
@@ -111,17 +137,18 @@ pub trait ScalarObject {
             }
         }
 
-        let maximum = histogram.iter().copied().fold(0.0_f64, f64::max);
-        let values = histogram
-            .iter()
-            .map(|value| format!("{value:.6}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        format!(
-            "{{\"min\":{hist_min:.6},\"max\":{hist_max:.6},\"nbin\":{bins},\"nmax\":{maximum:.6},\"sig\":{:.6},\"histo\":[{}]}}\n",
-            self.rmsd_density(),
-            values
-        )
+        ScalarHistogram {
+            min: hist_min,
+            max: hist_max,
+            bin_count: bins,
+            maximum: histogram.iter().copied().fold(0.0_f64, f64::max),
+            sigma: self.rmsd_density(),
+            values: histogram,
+        }
+    }
+
+    fn histogram_json(&self, min: f64, max: f64, bins: usize) -> String {
+        self.histogram(min, max, bins).to_json()
     }
 
     fn base_histogram(&self) -> (f64, f64, f64, Vec<f64>) {
@@ -273,6 +300,10 @@ mod tests {
         assert!(json.contains("\"nmax\":64.000000"));
         assert!(json.contains("\"sig\":0.100000"));
         assert!(!json.contains("mean"));
+        let histogram = object.histogram(0.5, 1.5, 10);
+        assert_eq!(histogram.bin_count, 10);
+        assert_eq!(histogram.values.len(), 10);
+        assert_eq!(histogram.maximum, 64.0);
         assert_eq!(object.den_sigma(), 0.1);
         assert_eq!(object.den_min(), 0.5);
         assert_eq!(object.den_max(), 1.5);

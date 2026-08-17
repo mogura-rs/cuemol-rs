@@ -1228,6 +1228,8 @@ struct GuiApplication {
     coloring_gradient_keep_ratio: bool,
     coloring_gradient_param_column_width: f32,
     coloring_gradient_param_column_drag_start_width: Option<f32>,
+    coloring_gradient_histogram_key: Option<(cuemol_core::Uid, u64, u64, u64, u64, usize)>,
+    coloring_gradient_histogram: Option<cuemol_qsys::ScalarHistogram>,
     snapshot: RenderSceneSnapshot,
     /// Monotonic generation used to avoid rebuilding immutable GPU scene buffers
     /// during camera-only and egui-only redraws.
@@ -3109,8 +3111,28 @@ fn native_gradient_preview_color(entries: &[(f64, String)], value: f64) -> egui:
         .unwrap_or(first_color)
 }
 
-fn native_gradient_preview_ui(ui: &mut egui::Ui, entries: &[(f64, String)]) {
+fn native_gradient_preview_ui(
+    ui: &mut egui::Ui,
+    entries: &[(f64, String)],
+    histogram: Option<&cuemol_qsys::ScalarHistogram>,
+) {
     ui.label("Preview:");
+    if let Some(histogram) = histogram.filter(|histogram| {
+        !histogram.values.is_empty() && histogram.maximum.is_finite() && histogram.maximum > 0.0
+    }) {
+        let desired_size = egui::vec2(ui.available_width().max(1.0), 32.0);
+        let (rect, _) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
+        let bar_width = rect.width() / histogram.values.len() as f32;
+        for (index, value) in histogram.values.iter().enumerate() {
+            let height = (value / histogram.maximum).clamp(0.0, 1.0) as f32 * rect.height();
+            let left = rect.left() + index as f32 * bar_width;
+            let bar = egui::Rect::from_min_max(
+                egui::pos2(left, rect.bottom() - height),
+                egui::pos2(left + bar_width.max(1.0), rect.bottom()),
+            );
+            ui.painter().rect_filled(bar, 0.0, egui::Color32::BLACK);
+        }
+    }
     let desired_size = egui::vec2(ui.available_width().max(1.0), 18.0);
     let (rect, _) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
     ui.painter()
@@ -4801,6 +4823,8 @@ impl GuiApplication {
             coloring_gradient_keep_ratio: false,
             coloring_gradient_param_column_width,
             coloring_gradient_param_column_drag_start_width: None,
+            coloring_gradient_histogram_key: None,
+            coloring_gradient_histogram: None,
             selected_renderer: None,
             snapshot: RenderSceneSnapshot::empty(),
             snapshot_revision: 0,
@@ -11629,7 +11653,35 @@ impl GuiApplication {
                     }
                 });
         });
-        native_gradient_preview_ui(ui, entries);
+        let histogram_request = maps
+            .iter()
+            .find(|map| map.name == *map_name)
+            .and_then(|map| {
+                let minimum = entries.first()?.0;
+                let maximum = entries.last()?.0;
+                (maximum > minimum).then_some((map, minimum, maximum))
+            });
+        if let Some((map, minimum, maximum)) = histogram_request {
+            let key = (
+                map.uid,
+                minimum.to_bits(),
+                maximum.to_bits(),
+                map.mean_density.to_bits(),
+                map.rmsd_density.to_bits(),
+                128,
+            );
+            if self.coloring_gradient_histogram_key != Some(key) {
+                self.coloring_gradient_histogram = self
+                    .state
+                    .density_histogram(map.uid, minimum, maximum, 128)
+                    .ok();
+                self.coloring_gradient_histogram_key = Some(key);
+            }
+        } else {
+            self.coloring_gradient_histogram_key = None;
+            self.coloring_gradient_histogram = None;
+        }
+        native_gradient_preview_ui(ui, entries, self.coloring_gradient_histogram.as_ref());
 
         if self
             .coloring_gradient_selected

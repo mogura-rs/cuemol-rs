@@ -33,7 +33,7 @@ use cuemol_molvis::{
 };
 #[cfg(test)]
 use cuemol_molvis::{default_style_manager, disorder_lines_snapshot};
-use cuemol_qsys::{Camera, MultiGradient, ScalarObject, StyleManager, View};
+use cuemol_qsys::{Camera, MultiGradient, ScalarHistogram, ScalarObject, StyleManager, View};
 #[cfg(any(feature = "offscreen", feature = "scripting"))]
 use cuemol_render::PngSceneExporter;
 use cuemol_render::{PovSceneExporter, RenderSceneSnapshot, UmbreonFrame, UmbreonSceneExporter};
@@ -4146,6 +4146,42 @@ impl DesktopAppState {
         self.active_scene
             .map(|scene_uid| self.density_map_summaries(scene_uid))
             .unwrap_or_default()
+    }
+
+    pub fn density_histogram(
+        &self,
+        map_uid: Uid,
+        minimum: f64,
+        maximum: f64,
+        bins: usize,
+    ) -> Result<ScalarHistogram> {
+        if !minimum.is_finite() || !maximum.is_finite() || maximum <= minimum {
+            return Err(CueMolError::invalid_argument(
+                "density histogram range must be finite and increasing",
+            ));
+        }
+        if !(1..=1024).contains(&bins) {
+            return Err(CueMolError::invalid_argument(
+                "density histogram bin count must be between 1 and 1024",
+            ));
+        }
+        let object = self
+            .density_maps
+            .get(&map_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("density map {}", map_uid.get())))?;
+        Ok(object.map.get_histogram(minimum, maximum, bins))
+    }
+
+    pub fn density_histogram_json(
+        &self,
+        map_uid: Uid,
+        minimum: f64,
+        maximum: f64,
+        bins: usize,
+    ) -> Result<String> {
+        Ok(self
+            .density_histogram(map_uid, minimum, maximum, bins)?
+            .to_json())
     }
 
     pub fn fit_molecule_view(
@@ -63436,6 +63472,11 @@ attribute \"dep\" string \"positions\"
         assert_eq!(summary.format, "apbs");
         assert_eq!(summary.counts, [1, 1, 2]);
         assert_eq!(summary.value_count, 2);
+        let histogram = app
+            .density_histogram(map_uid, summary.min_density, summary.max_density, 8)
+            .unwrap();
+        assert_eq!(histogram.values.len(), 8);
+        assert!(histogram.maximum > 0.0);
         assert_eq!(app.scene_summaries()[0].map_count, 1);
         assert_eq!(app.scene_summaries()[0].object_count, 0);
 

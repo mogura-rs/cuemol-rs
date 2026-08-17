@@ -7636,6 +7636,12 @@ impl AppModel {
 enum ModelRequest {
     StartRendererWarmup,
     GetSnapshot,
+    GetDensityHistogram {
+        map_uid: u64,
+        minimum: f64,
+        maximum: f64,
+        bins: usize,
+    },
     GetMoleculeDetails {
         structure_key: String,
         structure_object_uid: Option<u64>,
@@ -9728,6 +9734,17 @@ fn handle_model_request(
             ))
         }
         ModelRequest::GetSnapshot => Ok(ModelResponse::Snapshot(Box::new(model.snapshot()))),
+        ModelRequest::GetDensityHistogram {
+            map_uid,
+            minimum,
+            maximum,
+            bins,
+        } => Ok(ModelResponse::Message(
+            model
+                .desktop
+                .density_histogram_json(Uid::new(map_uid), minimum, maximum, bins)
+                .map_err(|error| error.to_string())?,
+        )),
         ModelRequest::GetMoleculeDetails {
             structure_key,
             structure_object_uid,
@@ -13336,6 +13353,25 @@ fn get_snapshot(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
 }
 
 #[tauri::command]
+fn get_density_histogram(
+    map_uid: u64,
+    minimum: f64,
+    maximum: f64,
+    bins: usize,
+    state: State<'_, ManagedState>,
+) -> Result<String, String> {
+    message_response(request_model(
+        &state,
+        ModelRequest::GetDensityHistogram {
+            map_uid,
+            minimum,
+            maximum,
+            bins,
+        },
+    )?)
+}
+
+#[tauri::command]
 fn get_molecule_details(
     structure_key: String,
     structure_object_uid: Option<u64>,
@@ -15979,6 +16015,7 @@ pub fn run() -> Result<(), tauri::Error> {
         .manage(spawn_model(initial_paths))
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
+            get_density_histogram,
             get_molecule_details,
             get_initial_state,
             get_application_info,

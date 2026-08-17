@@ -226,6 +226,9 @@ let viewPanelCamera = null;
 let coloringPaintSelectedIndex = -1;
 let coloringGradientSelectedIndex = -1;
 let coloringGradientKeepRatio = false;
+let coloringGradientHistogramKey = "";
+let coloringGradientHistogram = null;
+let coloringGradientHistogramRequest = 0;
 let coloringPaintSelectionColumnWidth = null;
 let selectionHistoryEntries = loadSelectionHistory();
 let commandHistoryEntries = loadCommandHistory();
@@ -14742,6 +14745,60 @@ function changeGradientEntry(entries, index, newValue, newColor, keepRatio) {
   return entries.indexOf(selected);
 }
 
+function drawGradientHistogram(canvas, histogram) {
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  const values = Array.isArray(histogram?.histo) ? histogram.histo : [];
+  const maximum = Number(histogram?.nmax);
+  if (!values.length || !Number.isFinite(maximum) || maximum <= 0) return;
+  const barWidth = canvas.width / values.length;
+  context.fillStyle = "#111";
+  values.forEach((value, index) => {
+    const height = Math.min(1, Math.max(0, Number(value) / maximum)) * canvas.height;
+    context.fillRect(index * barWidth, canvas.height - height, Math.max(1, barWidth), height);
+  });
+}
+
+function loadGradientHistogram(canvas, map, minimum, maximum) {
+  const key = [
+    map.uid,
+    minimum,
+    maximum,
+    map.meanDensity,
+    map.rmsdDensity,
+    128,
+  ].join("|");
+  canvas.dataset.histogramKey = key;
+  if (coloringGradientHistogramKey === key) {
+    if (coloringGradientHistogram) drawGradientHistogram(canvas, coloringGradientHistogram);
+    return;
+  }
+  coloringGradientHistogramKey = key;
+  coloringGradientHistogram = null;
+  const request = ++coloringGradientHistogramRequest;
+  if (!invoke) return;
+  invoke("get_density_histogram", {
+    mapUid: Number(map.uid),
+    minimum,
+    maximum,
+    bins: 128,
+  }).then((payload) => {
+    if (request !== coloringGradientHistogramRequest) return;
+    const histogram = JSON.parse(payload);
+    coloringGradientHistogram = histogram;
+    const currentCanvas = coloringDeck.querySelector(".coloring-gradient-histogram");
+    if (currentCanvas?.dataset.histogramKey === key) {
+      drawGradientHistogram(currentCanvas, histogram);
+    }
+  }).catch((error) => {
+    if (request !== coloringGradientHistogramRequest) return;
+    coloringGradientHistogramKey = "";
+    coloringGradientHistogram = null;
+    showError(error);
+  });
+}
+
 function renderMultiGradientColoring(target, state) {
   const mapOptions = coloringMapOptions(false);
   coloringControlRow(
@@ -14760,6 +14817,10 @@ function renderMultiGradientColoring(target, state) {
   preview.className = "coloring-gradient-preview";
   const previewLabel = document.createElement("span");
   previewLabel.textContent = "Preview:";
+  const histogramCanvas = document.createElement("canvas");
+  histogramCanvas.className = "coloring-gradient-histogram";
+  histogramCanvas.width = 256;
+  histogramCanvas.height = 32;
   const previewBar = document.createElement("div");
   previewBar.className = "coloring-gradient-preview-bar";
   const previewRange = document.createElement("div");
@@ -14768,6 +14829,12 @@ function renderMultiGradientColoring(target, state) {
   if (previewEntries.length) {
     const minimum = Number(previewEntries[0].value);
     const maximum = Number(previewEntries[previewEntries.length - 1].value);
+    const colorMap = coloringMapByName(state.attrs.color_mapname || "");
+    if (colorMap && maximum > minimum) {
+      loadGradientHistogram(histogramCanvas, colorMap, minimum, maximum);
+    } else {
+      histogramCanvas.hidden = true;
+    }
     const stops = previewEntries.length === 1
       ? [`${previewEntries[0].color} 0%`, `${previewEntries[0].color} 100%`]
       : previewEntries.map((entry) => {
@@ -14784,11 +14851,12 @@ function renderMultiGradientColoring(target, state) {
     maximumLabel.textContent = maximum.toFixed(2);
     previewRange.append(minimumLabel, maximumLabel);
   } else {
+    histogramCanvas.hidden = true;
     const empty = document.createElement("span");
     empty.textContent = "No gradient nodes";
     previewRange.append(empty);
   }
-  preview.append(previewLabel, previewBar, previewRange);
+  preview.append(previewLabel, histogramCanvas, previewBar, previewRange);
   coloringDeck.append(preview);
   if (coloringGradientSelectedIndex >= state.gradientEntries.length) {
     coloringGradientSelectedIndex = state.gradientEntries.length - 1;

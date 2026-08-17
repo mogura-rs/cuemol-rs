@@ -61,7 +61,7 @@ pub use qdf_stream::{
 };
 pub use render_base::{DispCacheRenderer, DispListRenderer, DrawObj, ShaderObjMgr};
 pub use renderer_factory::{RendererFactory, RendererInstance};
-pub use scalar_object::ScalarObject;
+pub use scalar_object::{ScalarHistogram, ScalarObject};
 pub use scene::{AAMethod, AnimMgrHandle, Scene, SceneManager};
 pub use style::{
     AutoStyleContext, AutoStyleCtxt, StyleInfo, StyleManager, StyleNamedColorResolver, StyleSet,

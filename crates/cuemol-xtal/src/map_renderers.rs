@@ -198,6 +198,10 @@ impl DensityMap {
         ScalarObject::get_histogram_json(self, min, max, bins)
     }
 
+    pub fn get_histogram(&self, min: f64, max: f64, bins: usize) -> cuemol_qsys::ScalarHistogram {
+        ScalarObject::histogram(self, min, max, bins)
+    }
+
     pub fn byte_values(&self) -> &[u8] {
         &self.bytes
     }
