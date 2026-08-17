@@ -1263,6 +1263,9 @@ fn tauri_playback_reuses_static_animation_and_trajectory_dom() {
         .and_then(|source| source.split("if (renderedTrajectoryBlocksKey").next())
         .expect("trajectory block render key");
     assert!(!trajectory_blocks_key.contains("currentFrame"));
+    assert!(TAURI_APP_RS.contains(".apply_scene_animation_time("));
+    assert!(TAURI_APP_RS.contains("animation_start_desktop"));
+    assert!(!TAURI_APP_RS.contains("anim_step(&objects"));
 }
 
 #[test]

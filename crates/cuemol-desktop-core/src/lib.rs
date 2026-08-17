@@ -1717,6 +1717,136 @@ impl DesktopAppState {
         scene.set_animation_node(animation.map(AnimMgr::to_ldom2_node))
     }
 
+    pub fn apply_scene_animation_time(
+        &mut self,
+        scene_uid: Uid,
+        elapsed: i64,
+        view_uid: Uid,
+    ) -> Result<Camera> {
+        let mut animation = self.scene_animation(scene_uid)?.unwrap_or_default();
+        let source_scene = self
+            .scene_manager()
+            .scene(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let scene_name = source_scene.name().to_string();
+        let cameras = source_scene.cameras().to_vec();
+        let objects = source_scene.objects().to_vec();
+        let views = self
+            .command_manager
+            .views()
+            .iter()
+            .filter(|view| view.scene_uid() == scene_uid)
+            .cloned()
+            .collect::<Vec<_>>();
+        let view_uids = views.iter().map(View::uid).collect::<Vec<_>>();
+
+        let mut runtime = cuemol_qsys::Scene::new(scene_uid, scene_name);
+        for view in views {
+            runtime.insert_view(view);
+        }
+        for camera in cameras {
+            runtime.set_camera(camera.name(), camera.clone());
+        }
+        for object in &objects {
+            let mut runtime_object = cuemol_qsys::SceneObject::new(object.uid(), ());
+            runtime_object.set_class_name(object.object_type());
+            runtime_object.set_name(object.name());
+            runtime_object.set_visible(object.is_visible());
+            runtime_object.set_xform_matrix(object.xform_matrix());
+            for (name, value) in object.qsc_extra_attrs() {
+                runtime_object.set_property_str(name, value);
+            }
+            for renderer in object.renderers() {
+                let mut runtime_renderer =
+                    cuemol_qsys::Renderer::with_uid(renderer.renderer_type(), renderer.uid());
+                runtime_renderer.set_name(renderer.name());
+                runtime_renderer.set_visible(renderer.is_visible());
+                runtime_renderer.set_xform_matrix(renderer.xform_matrix());
+                if let Some(alpha) = renderer
+                    .qsc_attr("alpha")
+                    .and_then(|value| value.parse::<f64>().ok())
+                {
+                    runtime_renderer.set_alpha(alpha);
+                }
+                for (name, value) in renderer.qsc_attrs() {
+                    runtime_renderer.set_property_str(name, value);
+                }
+                runtime_object.attach_renderer(runtime_renderer);
+            }
+            runtime.insert_object(runtime_object);
+        }
+
+        animation.go_time_in_scene(elapsed, &mut runtime, view_uid)?;
+        let updated_camera = runtime
+            .view(view_uid)
+            .map(View::camera)
+            .ok_or_else(|| CueMolError::NotFound(format!("view {}", view_uid.get())))?;
+        let morph_frames = runtime
+            .get_obj_array()
+            .into_iter()
+            .filter(|object| object.class_name() == "MorphMol")
+            .filter_map(|object| {
+                object
+                    .property_str("frame")
+                    .and_then(|value| value.parse::<f64>().ok())
+                    .map(|frame| (object.uid(), frame))
+            })
+            .collect::<Vec<_>>();
+
+        for uid in view_uids {
+            if let (Some(target), Some(updated)) = (
+                self.command_manager.view_mut(uid),
+                runtime.view(uid).cloned(),
+            ) {
+                *target = updated;
+            }
+        }
+        let scene = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        for source_object in &objects {
+            let Some(updated) = runtime.object(source_object.uid()) else {
+                continue;
+            };
+            let Some(target) = scene.object_mut(source_object.uid()) else {
+                continue;
+            };
+            target.set_visible(updated.visible());
+            target.set_xform_matrix(updated.xform_matrix());
+            for (name, value) in updated.properties() {
+                target.set_qsc_extra_attr(name, value);
+            }
+            for renderer_uid in updated.renderer_uids() {
+                let Some(updated_renderer) = updated.renderer(renderer_uid) else {
+                    continue;
+                };
+                let Some(target_renderer) = target.renderer_mut(renderer_uid) else {
+                    continue;
+                };
+                target_renderer.set_visible(updated_renderer.visible());
+                target_renderer.set_qsc_attr("alpha", updated_renderer.alpha().to_string());
+                target_renderer.set_qsc_attr(
+                    "xformMat",
+                    updated_renderer.xform_matrix().to_script_string(),
+                );
+                for (name, value) in updated_renderer.properties() {
+                    if matches!(
+                        name.as_str(),
+                        "visible" | "alpha" | "default_alpha" | "xformMat"
+                    ) {
+                        continue;
+                    }
+                    target_renderer.set_qsc_attr(name, value);
+                }
+            }
+        }
+        for (object_uid, frame) in morph_frames {
+            self.apply_morph_frame(object_uid, frame)?;
+        }
+        Ok(updated_camera)
+    }
+
     pub fn command_manager(&self) -> &MolCommandManager {
         &self.command_manager
     }
@@ -54324,6 +54454,112 @@ end_header
             .expect("renderer remains available");
         assert_eq!(renderer.qsc_attr("alpha"), Some("0.75"));
         assert_eq!(renderer.xform_matrix().get_at(1, 4).unwrap(), 7.5);
+    }
+
+    #[test]
+    fn apply_scene_animation_time_updates_desktop_scene_state() {
+        use cuemol_anim::{AnimMotion, MolAnim, RealPropAnim, ShowHideAnim, SimpleSpin};
+
+        let mut app = DesktopAppState::new();
+        let created = app.new_scene("typed-animation-playback", true);
+        let scene_uid = created.result_scene;
+        let view_uid = created.result_view.expect("scene has a view");
+        let object_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .expect("scene exists")
+            .add_molecule("mol", MolCoord::new());
+        let fade_uid = app
+            .new_renderer(scene_uid, object_uid, "simple", "fade")
+            .expect("fade renderer is created")
+            .result_renderer;
+        let property_uid = app
+            .new_renderer(scene_uid, object_uid, "simple", "property")
+            .expect("property renderer is created")
+            .result_renderer;
+
+        let duration = cuemol_core::time_from_milliseconds(1_000.0);
+        let set_timing = |base: &mut cuemol_anim::AnimObj| {
+            base.set_rel_start(0);
+            base.set_rel_end(duration);
+        };
+
+        let mut show_hide = ShowHideAnim::new();
+        show_hide.set_rend("mol/fade");
+        show_hide.set_hide(true);
+        show_hide.set_fade(true);
+        show_hide.set_tgt_alpha(0.8);
+        set_timing(show_hide.base_mut());
+
+        let mut property = RealPropAnim::new();
+        property.set_rend("mol/property");
+        property.set_prop("width");
+        property.set_start_value(1.0);
+        property.set_end_value(3.0);
+        set_timing(property.base_mut());
+
+        let mut molecule = MolAnim::new();
+        molecule.set_mol("mol");
+        molecule.set_prop("visible");
+        molecule.set_start_value(1.0);
+        molecule.set_end_value(0.0);
+        set_timing(molecule.base_mut());
+
+        let mut spin = SimpleSpin::new();
+        spin.set_angle(180.0);
+        spin.set_axis(Vector4::new3(0.0, 0.0, 1.0));
+        set_timing(spin.base_mut());
+
+        let mut animation = AnimMgr::new();
+        animation.set_length(duration);
+        animation.append_motion(AnimMotion::ShowHide(show_hide));
+        animation.append_motion(AnimMotion::RealProperty(property));
+        animation.append_motion(AnimMotion::Molecule(molecule));
+        animation.append_motion(AnimMotion::Spin(spin));
+        app.set_scene_animation(scene_uid, Some(&animation))
+            .expect("animation is persisted");
+
+        let initial_rotation = app
+            .command_manager()
+            .view(view_uid)
+            .expect("view exists")
+            .rotation();
+        let camera = app
+            .apply_scene_animation_time(scene_uid, duration / 2, view_uid)
+            .expect("typed animation is applied");
+
+        let view = app
+            .command_manager()
+            .view(view_uid)
+            .expect("view remains available");
+        assert_eq!(camera, view.camera());
+        assert_ne!(view.rotation(), initial_rotation);
+        let object = app
+            .scene_manager()
+            .object(object_uid)
+            .expect("object remains available");
+        assert!(object.is_visible());
+        let fade = object
+            .renderer(fade_uid)
+            .expect("fade renderer remains available");
+        assert_eq!(fade.qsc_attr("alpha"), Some("0.4"));
+        assert!(fade.is_visible());
+        let property = object
+            .renderer(property_uid)
+            .expect("property renderer remains available");
+        assert_eq!(property.qsc_attr("width"), Some("2"));
+
+        app.apply_scene_animation_time(scene_uid, duration + 1, view_uid)
+            .expect("animation end is applied");
+        let object = app
+            .scene_manager()
+            .object(object_uid)
+            .expect("object remains available");
+        assert!(!object.is_visible());
+        assert!(!object
+            .renderer(fade_uid)
+            .expect("fade renderer remains available")
+            .is_visible());
     }
 
     #[cfg(feature = "scripting")]

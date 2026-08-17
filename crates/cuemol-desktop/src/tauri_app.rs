@@ -23,13 +23,13 @@ use tauri::State;
 
 use crate::offscreen::{camera_depth_range, camera_mvp, encode_rgba_png, SceneRenderer};
 use crate::{
-    anim_step, atoms_in_screen_rect, collect_scene_pov_labels, create_apbs_work_dir,
-    create_pov_work_dir, overlay_pov_labels, pick_atom_screen, run_apbs_process, run_pov_process,
-    run_pov_process_with_poll, AnimKind, AnimObject, ApbsProcessOutput, ApbsProcessTask,
-    DesktopAppState, GuiApbsChargeMethod, GuiApbsOptions, GuiApbsPaths, GuiAtomLabel,
-    GuiPovSceneOptions, PovProcessOptions, PovProcessOutput, PovProcessTask,
-    WorkspaceCameraClipboard, WorkspaceObjectClipboard, WorkspaceRendererClipboard,
-    WorkspaceStyleClipboard, MOLECULE_RENDERER_TYPES,
+    atoms_in_screen_rect, collect_scene_pov_labels, create_apbs_work_dir, create_pov_work_dir,
+    overlay_pov_labels, pick_atom_screen, run_apbs_process, run_pov_process,
+    run_pov_process_with_poll, AnimKind, ApbsProcessOutput, ApbsProcessTask, DesktopAppState,
+    GuiApbsChargeMethod, GuiApbsOptions, GuiApbsPaths, GuiAtomLabel, GuiPovSceneOptions,
+    PovProcessOptions, PovProcessOutput, PovProcessTask, WorkspaceCameraClipboard,
+    WorkspaceObjectClipboard, WorkspaceRendererClipboard, WorkspaceStyleClipboard,
+    MOLECULE_RENDERER_TYPES,
 };
 
 const MAX_VIEW_DIM: u32 = 1_600;
@@ -1540,6 +1540,7 @@ struct AppModel {
     animation_elapsed: f64,
     animation_playing: bool,
     animation_start_camera: Option<Camera>,
+    animation_start_desktop: Option<DesktopAppState>,
     view_width: u32,
     view_height: u32,
     trans_mms: bool,
@@ -1729,6 +1730,7 @@ impl AppModel {
             animation_elapsed: 0.0,
             animation_playing: false,
             animation_start_camera: None,
+            animation_start_desktop: None,
             view_width: 100,
             view_height: 100,
             trans_mms: false,
@@ -5974,6 +5976,8 @@ impl AppModel {
 
     fn open_scene(&mut self, path: String) -> Result<(), String> {
         self.start_renderer_warmup();
+        self.restore_animation_playback(false)?;
+        self.animation_elapsed = 0.0;
         let reusable_scene = self
             .active_scene_is_just_created()
             .then(|| self.desktop.active_scene())
@@ -6328,10 +6332,8 @@ impl AppModel {
     ) -> Result<TauriAnimationFrameTask, String> {
         let total = self.animation_duration();
         let target = (f64::from(index) / input.frame_rate).min(total);
-        while self.animation_elapsed + 1.0e-9 < target {
-            self.animation_playing = true;
-            self.tick_animation((target - self.animation_elapsed).min(0.25))?;
-        }
+        self.apply_active_animation_time(target)?;
+        self.animation_elapsed = target;
         let mut snapshot = self
             .desktop
             .active_render_snapshot(&self.selection)
@@ -6971,21 +6973,67 @@ impl AppModel {
         self.animation_elapsed = 0.0;
         self.animation_playing = false;
         self.animation_start_camera = None;
+        self.animation_start_desktop = None;
     }
 
-    fn apply_animation_visibility(&mut self, visible: bool) -> Result<bool, String> {
-        let mut changed = false;
-        for object in self.desktop.active_object_summaries() {
-            for renderer in self.desktop.renderer_summaries(object.uid) {
-                if renderer.visible != visible {
-                    self.desktop
-                        .set_renderer_visible(object.uid, renderer.uid, visible)
-                        .map_err(|error| error.to_string())?;
-                    changed = true;
-                }
+    fn begin_animation_playback(&mut self) -> Result<(), String> {
+        if self.animation_start_desktop.is_none() {
+            self.persist_camera()?;
+            self.animation_start_camera = Some(self.camera.clone());
+            self.animation_start_desktop = Some(self.desktop.clone());
+        }
+        Ok(())
+    }
+
+    fn restore_animation_playback(&mut self, preserve_camera: bool) -> Result<(), String> {
+        let final_camera = self.camera.clone();
+        if let Some(desktop) = self.animation_start_desktop.take() {
+            self.desktop = desktop;
+        }
+        if preserve_camera {
+            self.camera = final_camera;
+            if self.desktop.active_view_summary().is_some() {
+                self.desktop
+                    .set_active_view_camera(&self.camera)
+                    .map_err(|error| error.to_string())?;
+            }
+        } else if let Some(camera) = self.animation_start_camera.take() {
+            self.camera = camera;
+            if self.desktop.active_view_summary().is_some() {
+                self.desktop
+                    .set_active_view_camera(&self.camera)
+                    .map_err(|error| error.to_string())?;
             }
         }
-        Ok(changed)
+        self.animation_playing = false;
+        self.invalidate_mesh(false);
+        Ok(())
+    }
+
+    fn apply_active_animation_time(&mut self, elapsed: f64) -> Result<(), String> {
+        let scene_uid = self
+            .desktop
+            .active_scene()
+            .ok_or_else(|| "no active scene".to_string())?;
+        let view_uid = self
+            .desktop
+            .active_view_summary()
+            .map(|view| view.uid)
+            .ok_or_else(|| "no active view".to_string())?;
+        let animation = self.scene_animation_manager(scene_uid)?;
+        if animation.startcam().is_empty() {
+            if let Some(camera) = self.animation_start_camera.as_ref() {
+                self.desktop
+                    .set_active_view_camera(camera)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        self.camera = self
+            .desktop
+            .apply_scene_animation_time(scene_uid, animation_time(elapsed), view_uid)
+            .map_err(|error| error.to_string())?;
+        self.invalidate_mesh(false);
+        Ok(())
     }
 
     fn tick_animation(&mut self, dt: f64) -> Result<(), String> {
@@ -6999,50 +7047,20 @@ impl AppModel {
             return Ok(());
         }
         let animation = self.active_animation_manager()?;
-        let objects = animation_objects_for_playback(&animation);
-        let reaches_end = !animation.loop_enabled() && self.animation_elapsed + dt >= total;
-        let step = if reaches_end {
-            (total - self.animation_elapsed - 1.0e-6).max(0.0)
+        let step = dt.clamp(0.0, 0.25);
+        let reaches_end = !animation.loop_enabled() && self.animation_elapsed + step >= total;
+        let elapsed = if reaches_end {
+            total
+        } else if animation.loop_enabled() {
+            (self.animation_elapsed + step) % total
         } else {
-            dt.clamp(0.0, 0.25)
+            self.animation_elapsed + step
         };
-        let frame = anim_step(&objects, self.animation_elapsed, step);
-        self.animation_elapsed = if reaches_end { total } else { frame.elapsed };
-        if frame.rotate_dir != 0.0 {
-            let rotation = self
-                .camera
-                .rotation()
-                .rotate_y(frame.rotate_dir * step * 45.0)
-                .map_err(|error| error.to_string())?;
-            self.camera.set_rotation(rotation);
-        }
-        if frame.slide_dir != 0.0 {
-            let factor = (1.0 + frame.slide_dir * step * 0.3).clamp(0.2, 5.0);
-            self.camera
-                .set_zoom((self.camera.zoom() * factor).clamp(0.5, 1.0e6));
-        }
-        let mut rebuild = false;
-        if let Some(visible) = frame.set_visible {
-            rebuild |= self.apply_animation_visibility(visible)?;
-        }
-        if let Some(fraction) = frame.frame_fraction {
-            if let Some(object_uid) = self
-                .desktop
-                .active_object_summaries()
-                .first()
-                .map(|object| object.uid)
-            {
-                if self.desktop.object_has_trajectory(object_uid) {
-                    self.desktop.apply_trajectory_fraction(object_uid, fraction);
-                    rebuild = true;
-                }
-            }
-        }
-        if rebuild {
-            self.invalidate_mesh(false);
-        }
+        self.apply_active_animation_time(elapsed)?;
+        self.animation_elapsed = elapsed;
         if reaches_end {
-            self.animation_playing = false;
+            self.restore_animation_playback(true)?;
+            self.animation_elapsed = total;
             self.status = "Animation finished".to_string();
         }
         Ok(())
@@ -7105,6 +7123,7 @@ impl AppModel {
         self.modified_scenes = snapshot.modified_scenes;
         self.animation_playing = false;
         self.animation_start_camera = None;
+        self.animation_start_desktop = None;
         self.invalidate_mesh(false);
         Ok(())
     }
@@ -8681,39 +8700,6 @@ fn animation_time(seconds: f64) -> i64 {
     (seconds * NANOS_PER_SECOND as f64).round() as i64
 }
 
-fn animation_kind_for_motion(motion: &AnimMotion) -> AnimKind {
-    match motion {
-        AnimMotion::Noop(_) => AnimKind::Pause,
-        AnimMotion::Camera(_) => AnimKind::CameraMotion,
-        AnimMotion::Molecule(_) => AnimKind::MolAnim,
-        AnimMotion::ShowHide(value) if value.hide() => AnimKind::HideAnim,
-        AnimMotion::ShowHide(_) => AnimKind::ShowAnim,
-        AnimMotion::Spin(_) => AnimKind::Spin,
-        AnimMotion::Slide(value) if value.hide() => AnimKind::SlideOut,
-        AnimMotion::Slide(_) => AnimKind::SlideIn,
-        AnimMotion::RealProperty(_)
-        | AnimMotion::RendererTransform(_)
-        | AnimMotion::Unknown { .. } => AnimKind::Pause,
-    }
-}
-
-fn animation_objects_for_playback(animation: &AnimMgr) -> Vec<AnimObject> {
-    animation
-        .motions()
-        .iter()
-        .map(|motion| AnimObject {
-            kind: animation_kind_for_motion(motion),
-            duration: animation_seconds(
-                motion
-                    .base()
-                    .abs_end()
-                    .saturating_sub(motion.base().abs_start()),
-            )
-            .max(0.01),
-        })
-        .collect()
-}
-
 fn animation_name_prefix(kind: AnimKind) -> &'static str {
     match kind {
         AnimKind::Spin => "SimpleSpin",
@@ -9053,6 +9039,8 @@ fn validate_coloring_update(input: &ColoringUpdateInput) -> Result<(), String> {
 
 fn apply_open_paths(model: &mut AppModel, paths: Vec<String>) -> Result<(), String> {
     model.start_renderer_warmup();
+    model.restore_animation_playback(false)?;
+    model.animation_elapsed = 0.0;
     let previous_scene = model.desktop.active_scene();
     let undo = model.capture_undo();
     model.open_paths(paths)?;
@@ -9963,10 +9951,14 @@ fn handle_model_request(
             Ok(ModelResponse::ApplicationInfo(model.application_info()))
         }
         ModelRequest::Undo(depth) => {
+            model.restore_animation_playback(false)?;
+            model.animation_elapsed = 0.0;
             model.undo(depth)?;
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::Redo(depth) => {
+            model.restore_animation_playback(false)?;
+            model.animation_elapsed = 0.0;
             model.redo(depth)?;
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -10121,6 +10113,8 @@ fn handle_model_request(
             )))
         }
         ModelRequest::ReloadScene => {
+            model.restore_animation_playback(false)?;
+            model.animation_elapsed = 0.0;
             let path = model
                 .desktop
                 .active_scene_source_path()
@@ -10287,6 +10281,8 @@ fn handle_model_request(
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::NewScene(name) => {
+            model.restore_animation_playback(false)?;
+            model.animation_elapsed = 0.0;
             let undo = model.capture_undo();
             let name = name
                 .filter(|value| !value.trim().is_empty())
@@ -10306,6 +10302,8 @@ fn handle_model_request(
             name,
             inherit_view_props,
         } => {
+            model.restore_animation_playback(false)?;
+            model.animation_elapsed = 0.0;
             let undo = model.capture_undo();
             let previous_scene = model.desktop.active_scene();
             if model.desktop.active_scene().is_some() {
@@ -10346,6 +10344,8 @@ fn handle_model_request(
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::ActivateScene(scene_uid) => {
+            model.restore_animation_playback(false)?;
+            model.animation_elapsed = 0.0;
             let previous_scene = model.desktop.active_scene();
             if model.desktop.active_scene().is_some() {
                 model.persist_camera()?;
@@ -10367,6 +10367,8 @@ fn handle_model_request(
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::ActivateView(view_uid) => {
+            model.restore_animation_playback(false)?;
+            model.animation_elapsed = 0.0;
             let previous_scene = model.desktop.active_scene();
             model.persist_camera()?;
             model.camera = model
@@ -10384,6 +10386,8 @@ fn handle_model_request(
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::CloseActiveScene => {
+            model.restore_animation_playback(false)?;
+            model.animation_elapsed = 0.0;
             let undo = model.capture_undo();
             let closed_scene = model.desktop.active_scene();
             model
@@ -11374,6 +11378,8 @@ fn handle_model_request(
         ModelRequest::AddAnimationObject(kind) => {
             let kind =
                 animation_kind(&kind).ok_or_else(|| format!("unsupported animation: {kind}"))?;
+            model.restore_animation_playback(false)?;
+            model.animation_elapsed = 0.0;
             let undo = model.capture_undo();
             let mut animation = model.active_animation_manager()?;
             if animation.startcam().is_empty() {
@@ -11396,6 +11402,8 @@ fn handle_model_request(
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::DeleteAnimationObject(index) => {
+            model.restore_animation_playback(false)?;
+            model.animation_elapsed = 0.0;
             let mut animation = model.active_animation_manager()?;
             if index >= animation.size() {
                 return Err(format!("animation object {index} was not found"));
@@ -11409,6 +11417,8 @@ fn handle_model_request(
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::MoveAnimationObject { index, direction } => {
+            model.restore_animation_playback(false)?;
+            model.animation_elapsed = 0.0;
             let mut animation = model.active_animation_manager()?;
             if index >= animation.size() {
                 return Err(format!("animation object {index} was not found"));
@@ -11438,6 +11448,8 @@ fn handle_model_request(
             if !duration.is_finite() {
                 return Err("animation duration must be finite".to_string());
             }
+            model.restore_animation_playback(false)?;
+            model.animation_elapsed = 0.0;
             let mut animation = model.active_animation_manager()?;
             let Some(uid) = animation.get_at(index).map(|object| object.uid()) else {
                 return Err(format!("animation object {index} was not found"));
@@ -11457,6 +11469,8 @@ fn handle_model_request(
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SetAnimationObjectProperties(input) => {
+            model.restore_animation_playback(false)?;
+            model.animation_elapsed = 0.0;
             let undo = model.capture_undo();
             model.set_animation_object_properties(input)?;
             model.status = "Animation object properties changed".to_string();
@@ -11472,9 +11486,7 @@ fn handle_model_request(
                         if model.animation_elapsed >= model.animation_duration() {
                             model.animation_elapsed = 0.0;
                         }
-                        if model.animation_elapsed == 0.0 {
-                            model.animation_start_camera = Some(model.camera.clone());
-                        }
+                        model.begin_animation_playback()?;
                         model.animation_playing = true;
                         model.status = "Animation playing".to_string();
                     }
@@ -11484,11 +11496,8 @@ fn handle_model_request(
                     model.status = "Animation paused".to_string();
                 }
                 "stop" => {
-                    model.animation_playing = false;
+                    model.restore_animation_playback(false)?;
                     model.animation_elapsed = 0.0;
-                    if let Some(camera) = model.animation_start_camera.take() {
-                        model.camera = camera;
-                    }
                     model.status = "Animation stopped".to_string();
                 }
                 _ => return Err(format!("unsupported animation control: {action}")),
@@ -11496,6 +11505,8 @@ fn handle_model_request(
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SetAnimationLoop(value) => {
+            model.restore_animation_playback(false)?;
+            model.animation_elapsed = 0.0;
             let undo = model.capture_undo();
             let mut animation = model.active_animation_manager()?;
             animation.set_loop(value);
@@ -11505,6 +11516,8 @@ fn handle_model_request(
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SetAnimationStartCamera(name) => {
+            model.restore_animation_playback(false)?;
+            model.animation_elapsed = 0.0;
             let scene_uid = model
                 .desktop
                 .active_scene()
@@ -11534,7 +11547,11 @@ fn handle_model_request(
             if !elapsed.is_finite() {
                 return Err("animation time must be finite".to_string());
             }
-            model.animation_elapsed = elapsed.clamp(0.0, model.animation_duration());
+            let elapsed = elapsed.clamp(0.0, model.animation_duration());
+            model.begin_animation_playback()?;
+            model.apply_active_animation_time(elapsed)?;
+            model.animation_elapsed = elapsed;
+            model.animation_playing = false;
             model.status = format!("Animation time: {:.2} s", model.animation_elapsed);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -11836,6 +11853,7 @@ fn handle_model_request(
             if model.animation_render_job.is_some() {
                 return Err("an animation rendering job is already running".to_string());
             }
+            model.restore_animation_playback(false)?;
             let total_frames = model.animation_render_frame_count(&input)?;
             let restore = model.capture_undo();
             if let Err(error) = model.begin_animation_render(&input) {
@@ -11868,6 +11886,7 @@ fn handle_model_request(
             if model.animation_render_job.is_some() {
                 return Err("an animation rendering job is already running".to_string());
             }
+            model.restore_animation_playback(false)?;
             if !input.make_movie {
                 return Err("movie encoding is disabled".to_string());
             }
@@ -15387,6 +15406,7 @@ mod tests {
             animation_elapsed: 0.0,
             animation_playing: false,
             animation_start_camera: None,
+            animation_start_desktop: None,
             view_width: 100,
             view_height: 100,
             trans_mms: false,
@@ -21188,6 +21208,89 @@ mod tests {
         .unwrap();
         assert_eq!(model.snapshot().animation_elapsed, 0.0);
         assert_eq!(model.camera.rotation(), before);
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::AnimationControl("play".to_string()),
+        )
+        .unwrap();
+        for _ in 0..4 {
+            handle_model_request(&mut model, ModelRequest::TickAnimation(0.25)).unwrap();
+        }
+        assert!(!model.animation_playing);
+        assert_eq!(model.animation_elapsed, model.animation_duration());
+        handle_model_request(
+            &mut model,
+            ModelRequest::AnimationControl("stop".to_string()),
+        )
+        .unwrap();
+        assert_eq!(model.camera.rotation(), before);
+        assert_eq!(
+            model
+                .desktop
+                .active_view_camera()
+                .expect("active view camera")
+                .rotation(),
+            before
+        );
+    }
+
+    #[test]
+    fn animation_seek_applies_typed_properties_and_stop_restores_them() {
+        let (mut model, object_uid, renderer_uid) = model_with_renderer();
+        let original = model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .expect("object exists")
+            .renderer(renderer_uid)
+            .expect("renderer exists")
+            .clone();
+        handle_model_request(
+            &mut model,
+            ModelRequest::AddAnimationObject("hide".to_string()),
+        )
+        .unwrap();
+        let mut input = animation_properties_input(&model.snapshot().animation_objects[0]);
+        input.renderer_names = Some("molecule/simple 1".to_string());
+        input.hide = Some(true);
+        input.fade = Some(true);
+        input.target_alpha = Some(0.8);
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetAnimationObjectProperties(input),
+        )
+        .unwrap();
+
+        handle_model_request(&mut model, ModelRequest::SeekAnimation(0.5)).unwrap();
+        let animated = model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .expect("animated object exists")
+            .renderer(renderer_uid)
+            .expect("animated renderer exists");
+        assert!(animated.is_visible());
+        assert_eq!(animated.qsc_attr("alpha"), Some("0.4"));
+        assert!(model.animation_start_desktop.is_some());
+        assert!(!model.animation_playing);
+
+        handle_model_request(
+            &mut model,
+            ModelRequest::AnimationControl("stop".to_string()),
+        )
+        .unwrap();
+        let restored = model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .expect("restored object exists")
+            .renderer(renderer_uid)
+            .expect("restored renderer exists");
+        assert_eq!(restored.is_visible(), original.is_visible());
+        assert_eq!(restored.qsc_attr("alpha"), original.qsc_attr("alpha"));
+        assert!(model.animation_start_desktop.is_none());
+        assert_eq!(model.animation_elapsed, 0.0);
     }
 
     #[test]
