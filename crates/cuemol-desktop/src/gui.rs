@@ -1111,6 +1111,7 @@ struct GuiApplication {
     /// classic N→C blue→red gradient by default (start 240° = blue, end 0° = red).
     coloring_start_hue: f32,
     coloring_end_hue: f32,
+    coloring_target: Option<NativeColoringTarget>,
     coloring_paint_selected: Option<usize>,
     snapshot: RenderSceneSnapshot,
     /// Monotonic generation used to avoid rebuilding immutable GPU scene buffers
@@ -1943,6 +1944,37 @@ enum ColoringMode {
     Rainbow,
     Bfac,
     Script,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeColoringTarget {
+    Object(cuemol_core::Uid),
+    Renderer {
+        object_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+    },
+}
+
+type NativeColoringDetails = (
+    Option<String>,
+    std::collections::BTreeMap<String, String>,
+    Vec<(String, String)>,
+    Option<String>,
+);
+
+impl NativeColoringTarget {
+    fn object_uid(self) -> cuemol_core::Uid {
+        match self {
+            Self::Object(object_uid) | Self::Renderer { object_uid, .. } => object_uid,
+        }
+    }
+}
+
+fn native_renderer_supports_coloring(renderer_type: &str) -> bool {
+    !matches!(
+        renderer_type,
+        "selection" | "sel" | "*selection" | "atomintr" | "*namelabel" | "name_label" | "*group"
+    )
 }
 
 /// Ribbon toolbar tabs mirroring CueMol2's base ribbon plus `anim-ribbon.xul`.
@@ -3937,6 +3969,7 @@ impl GuiApplication {
             force_open_all_panels: false,
             coloring_start_hue: 240.0,
             coloring_end_hue: 0.0,
+            coloring_target: None,
             coloring_paint_selected: None,
             selected_renderer: None,
             snapshot: RenderSceneSnapshot::empty(),
@@ -9546,22 +9579,54 @@ impl GuiApplication {
             return;
         }
 
-        let mut selected = self
-            .molstruct_object
-            .filter(|uid| objects.iter().any(|object| object.uid == *uid))
-            .or_else(|| objects.first().map(|object| object.uid));
-        let name = objects
+        let mut targets = Vec::new();
+        for object in &objects {
+            targets.push((
+                NativeColoringTarget::Object(object.uid),
+                object.name.clone(),
+            ));
+            for renderer in self.state.renderer_summaries(object.uid) {
+                if native_renderer_supports_coloring(&renderer.renderer_type) {
+                    targets.push((
+                        NativeColoringTarget::Renderer {
+                            object_uid: object.uid,
+                            renderer_uid: renderer.uid,
+                        },
+                        format!("  ↳ {}", renderer.name),
+                    ));
+                }
+            }
+        }
+        let preferred = self
+            .selected_object
+            .zip(self.selected_renderer)
+            .map(
+                |(object_uid, renderer_uid)| NativeColoringTarget::Renderer {
+                    object_uid,
+                    renderer_uid,
+                },
+            )
+            .or_else(|| self.selected_object.map(NativeColoringTarget::Object))
+            .or_else(|| self.molstruct_object.map(NativeColoringTarget::Object));
+        let mut selected_target = self
+            .coloring_target
+            .filter(|target| targets.iter().any(|(candidate, _)| candidate == target))
+            .or_else(|| {
+                preferred.filter(|target| targets.iter().any(|(candidate, _)| candidate == target))
+            })
+            .or_else(|| targets.first().map(|(target, _)| *target));
+        let name = targets
             .iter()
-            .find(|object| Some(object.uid) == selected)
-            .map(|object| object.name.clone())
+            .find(|(target, _)| Some(*target) == selected_target)
+            .map(|(_, name)| name.clone())
             .unwrap_or_default();
         let mut requested_mode = None;
         ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("coloring-molecule")
+            egui::ComboBox::from_id_salt("coloring-target")
                 .selected_text(name)
                 .show_ui(ui, |ui| {
-                    for object in &objects {
-                        ui.selectable_value(&mut selected, Some(object.uid), &object.name);
+                    for (target, name) in &targets {
+                        ui.selectable_value(&mut selected_target, Some(*target), name);
                     }
                 });
             ui.menu_button("▾", |ui| {
@@ -9584,27 +9649,68 @@ impl GuiApplication {
                 }
             });
         });
-        self.molstruct_object = selected;
-        let Some(object_uid) = selected else {
+        if self.coloring_target != selected_target {
+            self.coloring_paint_selected = None;
+        }
+        self.coloring_target = selected_target;
+        let Some(target) = selected_target else {
             return;
         };
+        self.molstruct_object = Some(target.object_uid());
 
         if let Some(mode) = requested_mode {
             self.coloring_paint_selected = None;
-            self.apply_object_coloring(object_uid, mode);
+            match target {
+                NativeColoringTarget::Object(object_uid) => {
+                    self.apply_object_coloring(object_uid, mode)
+                }
+                NativeColoringTarget::Renderer {
+                    object_uid,
+                    renderer_uid,
+                } => self.apply_renderer_coloring(object_uid, renderer_uid, mode),
+            }
             return;
         }
 
         let (coloring_type, mut attrs, mut paint_entries, mut default_color) = {
-            let Some(object) = self.state.scene_manager().object(object_uid) else {
-                return;
-            };
-            (
-                object.coloring_type().map(str::to_string),
-                object.coloring_attrs().clone(),
-                object.paint_coloring().to_vec(),
-                object.mol().default_color().script_string(),
-            )
+            match target {
+                NativeColoringTarget::Object(object_uid) => {
+                    let Some(object) = self.state.scene_manager().object(object_uid) else {
+                        return;
+                    };
+                    (
+                        object.coloring_type().map(str::to_string),
+                        object.coloring_attrs().clone(),
+                        object.paint_coloring().to_vec(),
+                        object.mol().default_color().script_string(),
+                    )
+                }
+                NativeColoringTarget::Renderer {
+                    object_uid,
+                    renderer_uid,
+                } => {
+                    let (coloring_type, attrs, paint_entries) = self
+                        .state
+                        .renderer_coloring_state(object_uid, renderer_uid)
+                        .map(|(coloring_type, attrs, paint_entries)| {
+                            (Some(coloring_type), attrs, paint_entries)
+                        })
+                        .unwrap_or_default();
+                    let default_color = self
+                        .state
+                        .scene_manager()
+                        .object(object_uid)
+                        .and_then(|object| {
+                            object
+                                .renderer(renderer_uid)
+                                .and_then(|renderer| renderer.qsc_attr("defaultcolor"))
+                                .map(str::to_string)
+                                .or_else(|| Some(object.mol().default_color().script_string()))
+                        })
+                        .unwrap_or_else(|| "#ffffff".to_string());
+                    (coloring_type, attrs, paint_entries, default_color)
+                }
+            }
         };
         let mode = match coloring_type.as_deref() {
             Some("PaintColoring") => ColoringMode::Paint,
@@ -9739,13 +9845,26 @@ impl GuiApplication {
 
         if changed {
             let default_color = (mode == ColoringMode::Solid).then_some(default_color);
-            self.commit_object_coloring_details(
-                object_uid,
-                coloring_type,
-                attrs,
-                paint_entries,
-                default_color,
-            );
+            match target {
+                NativeColoringTarget::Object(object_uid) => self.commit_object_coloring_details(
+                    object_uid,
+                    coloring_type,
+                    attrs,
+                    paint_entries,
+                    default_color,
+                ),
+                NativeColoringTarget::Renderer {
+                    object_uid,
+                    renderer_uid,
+                } => self.commit_renderer_coloring_details(
+                    object_uid,
+                    renderer_uid,
+                    coloring_type,
+                    attrs,
+                    paint_entries,
+                    default_color,
+                ),
+            }
         }
     }
 
@@ -9871,11 +9990,13 @@ impl GuiApplication {
         changed
     }
 
-    /// Push the chosen object-coloring scheme into the model and re-render. The
-    /// snapshot's object-coloring cascade (`molecule_render_snapshot`) recolours each
-    /// carbon atom (and the ribbon backbone) by the scheme — the C++ `$molcol` path.
-    fn apply_object_coloring(&mut self, object_uid: cuemol_core::Uid, mode: ColoringMode) {
-        let (coloring_type, attrs, paint_entries, default_color) = match mode {
+    /// Build the reference defaults shared by object and renderer coloring targets.
+    fn default_coloring_details(
+        &self,
+        object_uid: cuemol_core::Uid,
+        mode: ColoringMode,
+    ) -> NativeColoringDetails {
+        match mode {
             ColoringMode::Element => (None, Default::default(), Vec::new(), None),
             ColoringMode::Paint => (
                 Some("PaintColoring".to_string()),
@@ -9954,9 +10075,32 @@ impl GuiApplication {
                 Vec::new(),
                 None,
             ),
-        };
+        }
+    }
+
+    fn apply_object_coloring(&mut self, object_uid: cuemol_core::Uid, mode: ColoringMode) {
+        let (coloring_type, attrs, paint_entries, default_color) =
+            self.default_coloring_details(object_uid, mode);
         self.commit_object_coloring_details(
             object_uid,
+            coloring_type,
+            attrs,
+            paint_entries,
+            default_color,
+        );
+    }
+
+    fn apply_renderer_coloring(
+        &mut self,
+        object_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+        mode: ColoringMode,
+    ) {
+        let (coloring_type, attrs, paint_entries, default_color) =
+            self.default_coloring_details(object_uid, mode);
+        self.commit_renderer_coloring_details(
+            object_uid,
+            renderer_uid,
             coloring_type,
             attrs,
             paint_entries,
@@ -9975,6 +10119,32 @@ impl GuiApplication {
         let undo = self.capture_undo();
         if let Err(error) = self.state.set_object_coloring_details(
             object_uid,
+            coloring_type,
+            attrs,
+            paint_entries,
+            default_color,
+        ) {
+            self.set_status(format!("Coloring failed: {error}"));
+            return;
+        }
+        self.push_undo_snapshot(undo);
+        self.rebuild_snapshot();
+        self.set_status("Applied coloring");
+    }
+
+    fn commit_renderer_coloring_details(
+        &mut self,
+        object_uid: cuemol_core::Uid,
+        renderer_uid: cuemol_core::Uid,
+        coloring_type: Option<String>,
+        attrs: std::collections::BTreeMap<String, String>,
+        paint_entries: Vec<(String, String)>,
+        default_color: Option<String>,
+    ) {
+        let undo = self.capture_undo();
+        if let Err(error) = self.state.set_renderer_coloring_details(
+            object_uid,
+            renderer_uid,
             coloring_type,
             attrs,
             paint_entries,
@@ -35099,6 +35269,40 @@ mod tests {
         assert_eq!(
             object.coloring_attrs().get("auto").map(String::as_str),
             Some("rend")
+        );
+    }
+
+    #[test]
+    fn native_renderer_coloring_target_applies_details_and_undoes() {
+        let Some(pdb) = reference_pdb_path() else {
+            return;
+        };
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.open_path = pdb.to_string_lossy().to_string();
+        app.open_current_path(&mut camera);
+        let object_uid = app.state.active_object_summaries()[0].uid;
+        let renderer = app
+            .state
+            .renderer_summaries(object_uid)
+            .into_iter()
+            .find(|renderer| native_renderer_supports_coloring(&renderer.renderer_type))
+            .expect("loaded molecule has a colorable renderer");
+        let before = app.state.renderer_coloring_state(object_uid, renderer.uid);
+
+        app.apply_renderer_coloring(object_uid, renderer.uid, ColoringMode::Bfac);
+        let (coloring_type, attrs, paint_entries) = app
+            .state
+            .renderer_coloring_state(object_uid, renderer.uid)
+            .expect("renderer coloring state");
+        assert_eq!(coloring_type, "BfacColoring");
+        assert_eq!(attrs.get("auto").map(String::as_str), Some("rend"));
+        assert!(paint_entries.is_empty());
+
+        app.undo(&mut camera);
+        assert_eq!(
+            app.state.renderer_coloring_state(object_uid, renderer.uid),
+            before
         );
     }
 
