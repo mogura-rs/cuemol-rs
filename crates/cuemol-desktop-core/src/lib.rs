@@ -1547,6 +1547,7 @@ enum GuiDensityRendererKind {
     Contour,
     IsoSurface,
     Volume,
+    UnitCell,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -4792,6 +4793,7 @@ impl DesktopAppState {
             "contour" => (GuiDensityRendererKind::Contour, "#0000ff", 1.0),
             "isosurf" => (GuiDensityRendererKind::IsoSurface, "#00ff00", 1.2),
             "gpu_mapvol" => (GuiDensityRendererKind::Volume, "#00ff00", 1.2),
+            "*unitcell" | "unitcell" => (GuiDensityRendererKind::UnitCell, "#ffff00", 1.0),
             _ => {
                 return Err(CueMolError::invalid_argument(format!(
                     "unsupported density renderer: {renderer_type}"
@@ -5866,6 +5868,59 @@ impl DesktopAppState {
                             cull_back_faces,
                             edge_style,
                         );
+                    }
+                    GuiDensityRendererKind::UnitCell => {
+                        let counts = [
+                            map_object.map.col_no().saturating_sub(1) as f64,
+                            map_object.map.row_no().saturating_sub(1) as f64,
+                            map_object.map.sec_no().saturating_sub(1) as f64,
+                        ];
+                        let corners = [
+                            [0.0, 0.0, 0.0],
+                            [counts[0], 0.0, 0.0],
+                            [0.0, counts[1], 0.0],
+                            [0.0, 0.0, counts[2]],
+                            [counts[0], counts[1], 0.0],
+                            [counts[0], 0.0, counts[2]],
+                            [0.0, counts[1], counts[2]],
+                            [counts[0], counts[1], counts[2]],
+                        ]
+                        .map(|point| {
+                            map_object
+                                .map
+                                .conv_to_orth(Vector4::new3(point[0], point[1], point[2]))
+                        });
+                        let edges = [
+                            [0, 1],
+                            [0, 2],
+                            [0, 3],
+                            [1, 4],
+                            [1, 5],
+                            [2, 4],
+                            [2, 6],
+                            [3, 5],
+                            [3, 6],
+                            [4, 7],
+                            [5, 7],
+                            [6, 7],
+                        ];
+                        for [from, to] in edges {
+                            rendered.bonds.push(cuemol_render::RenderBond {
+                                from: corners[from],
+                                to: corners[to],
+                                radius: (0.02 * config.width.max(0.1)) as f32,
+                                color: Some(config.color.clone()),
+                                end_color: None,
+                                object_uid: None,
+                                atom_indices: None,
+                                selected: false,
+                                screen_width: Some(config.width.max(0.1) as f32),
+                                screen_stipple: false,
+                                screen_offset: [0.0, 0.0],
+                                screen_point: false,
+                                edge: None,
+                            });
+                        }
                     }
                 }
                 let alpha = config_attr("alpha")
@@ -7049,6 +7104,7 @@ impl DesktopAppState {
                 "contour" => GuiDensityRendererKind::Contour,
                 "isosurf" => GuiDensityRendererKind::IsoSurface,
                 "gpu_mapvol" => GuiDensityRendererKind::Volume,
+                "*unitcell" | "unitcell" => GuiDensityRendererKind::UnitCell,
                 _ => {
                     return Err(CueMolError::invalid_argument(format!(
                         "unsupported density renderer type change target: {renderer_type}"
@@ -11724,7 +11780,7 @@ impl DesktopAppState {
                 raw_data,
                 qsc_node: Some(qsc_node),
             });
-        if format == "qdfpot" {
+        if matches!(format, "apbs" | "qdfpot") {
             self.surface_potential = Some(object.map.clone());
         }
         self.density_maps.insert(uid, object);
@@ -13944,6 +14000,38 @@ impl DesktopAppState {
             input_path: input_path.as_ref().to_string_lossy().to_string(),
             dx_path: dx_path.as_ref().to_string_lossy().to_string(),
         })
+    }
+
+    /// Load an APBS result into the active scene as an embedded `ElePotMap` with
+    /// the same default unit-cell renderer created by CueMol2's APBS tool.
+    pub fn open_apbs_potential_path(
+        &mut self,
+        path: impl AsRef<Path>,
+        name: impl Into<String>,
+    ) -> Result<Uid> {
+        let path = path.as_ref();
+        let name = name.into();
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(CueMolError::invalid_argument(
+                "an electrostatic-potential object name is required",
+            ));
+        }
+        let scene_uid = self.ensure_active_scene();
+        let map_uid = self.load_density_map(scene_uid, path, name.to_string(), "apbs")?;
+        let renderer_uid = self.add_density_renderer(map_uid, "*unitcell")?;
+        let map = self
+            .density_maps
+            .get_mut(&map_uid)
+            .expect("APBS potential and renderer were just inserted");
+        let renderer = map
+            .renderers
+            .iter_mut()
+            .find(|renderer| renderer.uid == renderer_uid)
+            .expect("APBS unit-cell renderer was just inserted");
+        renderer.name = "unitcell".to_string();
+        map.modified = false;
+        Ok(map_uid)
     }
 
     pub fn append_morph_frame_from_object(
@@ -46801,6 +46889,7 @@ fn density_renderer_configs(
                 "contour" | "gpu_mapmesh" => GuiDensityRendererKind::Contour,
                 "isosurf" => GuiDensityRendererKind::IsoSurface,
                 "gpu_mapvol" => GuiDensityRendererKind::Volume,
+                "*unitcell" | "unitcell" => GuiDensityRendererKind::UnitCell,
                 _ => return None,
             };
             let style_list = node.str_attr("style").to_string();
@@ -46840,13 +46929,12 @@ fn density_renderer_configs(
                 "point" | "2" => MapSurfaceDrawMode::Point,
                 _ => MapSurfaceDrawMode::Fill,
             };
-            let color_value = attr("color").unwrap_or_else(|| {
-                if matches!(kind, GuiDensityRendererKind::Contour) && renderer_type != "gpu_mapmesh"
-                {
+            let color_value = attr("color").unwrap_or_else(|| match kind {
+                GuiDensityRendererKind::Contour if renderer_type != "gpu_mapmesh" => {
                     "Blue".to_string()
-                } else {
-                    "Green".to_string()
                 }
+                GuiDensityRendererKind::UnitCell => "Yellow".to_string(),
+                _ => "Green".to_string(),
             });
             let color = styles
                 .get_color(&color_value, DEFAULT_STYLE_SCOPE)
@@ -46883,7 +46971,10 @@ fn density_renderer_configs(
                 use_pbc: attr("use_pbc").as_deref().is_none_or(qsc_bool),
                 width: parse_number(
                     "width",
-                    if kind == GuiDensityRendererKind::Contour {
+                    if matches!(
+                        kind,
+                        GuiDensityRendererKind::Contour | GuiDensityRendererKind::UnitCell
+                    ) {
                         1.0
                     } else {
                         1.2
@@ -48849,6 +48940,7 @@ fn density_renderer_from_script(
         | "GLSLMapMeshRenderer2" => GuiDensityRendererKind::Contour,
         "isosurf" | "MapSurfRenderer" => GuiDensityRendererKind::IsoSurface,
         "gpu_mapvol" | "GLSLMapVolRenderer" => GuiDensityRendererKind::Volume,
+        "*unitcell" | "unitcell" | "UnitCellRenderer" => GuiDensityRendererKind::UnitCell,
         _ => return None,
     };
     let string_attr = |name: &str, default: &str| {
@@ -48894,17 +48986,14 @@ fn density_renderer_from_script(
         })
         .or_else(|| previous.map(|renderer| renderer.color.clone()))
         .unwrap_or_else(|| {
-            let default = if matches!(
-                renderer.rtype.as_str(),
+            let default = match renderer.rtype.as_str() {
                 "gpu_mapmesh"
-                    | "gpu_mapvol"
-                    | "GLSLMapMeshRenderer"
-                    | "GLSLMapMeshRenderer2"
-                    | "GLSLMapVolRenderer"
-            ) {
-                "#00ff00"
-            } else {
-                "#0000ff"
+                | "gpu_mapvol"
+                | "GLSLMapMeshRenderer"
+                | "GLSLMapMeshRenderer2"
+                | "GLSLMapVolRenderer" => "#00ff00",
+                "*unitcell" | "unitcell" | "UnitCellRenderer" => "#ffff00",
+                _ => "#0000ff",
             };
             cuemol_gfx::parse_color(default).unwrap()
         });
@@ -48916,6 +49005,7 @@ fn density_renderer_from_script(
             "GLSLMapMeshRenderer" | "GLSLMapMeshRenderer2" => "gpu_mapmesh".to_string(),
             "GLSLMapVolRenderer" => "gpu_mapvol".to_string(),
             "MapSurfRenderer" => "isosurf".to_string(),
+            "UnitCellRenderer" => "*unitcell".to_string(),
             value => value.to_string(),
         },
         kind,
@@ -48930,7 +49020,10 @@ fn density_renderer_from_script(
         use_pbc: qsc_bool(&string_attr("use_pbc", "true")),
         width: real_attr(
             "width",
-            if kind == GuiDensityRendererKind::Contour {
+            if matches!(
+                kind,
+                GuiDensityRendererKind::Contour | GuiDensityRendererKind::UnitCell
+            ) {
                 1.0
             } else {
                 1.2
@@ -64372,6 +64465,40 @@ attribute \"dep\" string \"positions\"
             let _ = std::fs::remove_file(path);
         }
         let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    fn apbs_result_loads_as_electrostatic_map_with_unit_cell_renderer() {
+        let path =
+            std::env::temp_dir().join(format!("cuemol-apbs-result-test-{}.dx", std::process::id()));
+        std::fs::write(
+            &path,
+            "object 1 class gridpositions counts 2 2 2\n\
+             origin 1 2 3\n\
+             delta 1 0 0\n\
+             delta 0 2 0\n\
+             delta 0 0 3\n\
+             object 2 class gridconnections counts 2 2 2\n\
+             object 3 class array type double rank 0 items 8 data follows\n\
+             -4 -3 -2 -1 1 2 3 4\n",
+        )
+        .unwrap();
+
+        let mut app = DesktopAppState::new();
+        let map_uid = app.open_apbs_potential_path(&path, "pot_molecule").unwrap();
+        let summary = app.density_map_summary(map_uid).unwrap();
+        assert_eq!(summary.name, "pot_molecule");
+        assert_eq!(summary.class_name, "ElePotMap");
+        assert_eq!(summary.format, "apbs");
+        assert_eq!(summary.renderers.len(), 1);
+        assert_eq!(summary.renderers[0].name, "unitcell");
+        assert_eq!(summary.renderers[0].renderer_type, "*unitcell");
+        assert!(app.has_surface_potential());
+
+        let snapshot = app.active_render_snapshot("").unwrap();
+        assert_eq!(snapshot.bond_count(), 12);
+        assert_eq!(snapshot.mesh_triangle_count(), 0);
+        let _ = std::fs::remove_file(path);
     }
 
     fn reference_test_data_root() -> Option<std::path::PathBuf> {
