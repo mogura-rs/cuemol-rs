@@ -55,6 +55,9 @@ const WORKSPACE_COLUMN_SPLITTER_WIDTH: f32 = 5.0;
 const BOND_ATOM0_COLUMN_DEFAULT_WIDTH: f32 = 220.0;
 const BOND_ATOM_COLUMN_MIN_WIDTH: f32 = 120.0;
 const BOND_COLUMN_SPLITTER_WIDTH: f32 = 5.0;
+const ATOM_INTR_COLUMN_DEFAULT_WIDTH: f32 = 105.0;
+const ATOM_INTR_COLUMN_MIN_WIDTH: f32 = 72.0;
+const ATOM_INTR_COLUMN_SPLITTER_WIDTH: f32 = 5.0;
 const RENDER_PRESETS: &[(&str, u32, u32)] = &[
     ("HD 720", 1280, 720),
     ("Full HD", 1920, 1080),
@@ -1020,6 +1023,7 @@ struct NativeAtomIntrEditDraft {
     renderer_name: String,
     original_ids: Vec<usize>,
     rows: Vec<crate::GuiAtomIntrDefSummary>,
+    selected_id: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -1336,6 +1340,8 @@ struct GuiApplication {
     selected_nonstandard_bonds: std::collections::BTreeSet<(i32, i32)>,
     bond_atom0_column_width: f32,
     bond_atom0_column_drag_start_width: Option<f32>,
+    atom_intr_column_widths: [f32; 3],
+    atom_intr_column_drag_start: Option<(usize, f32)>,
     bond_aid1: String,
     bond_aid2: String,
     contact_object: Option<cuemol_core::Uid>,
@@ -4552,6 +4558,18 @@ impl GuiApplication {
             .parse::<f32>()
             .unwrap_or(BOND_ATOM0_COLUMN_DEFAULT_WIDTH)
             .clamp(BOND_ATOM_COLUMN_MIN_WIDTH, 800.0);
+        let atom_intr_column_widths = [
+            "atom_intr_editor:atom0_width",
+            "atom_intr_editor:atom1_width",
+            "atom_intr_editor:atom2_width",
+        ]
+        .map(|key| {
+            state
+                .config_value(key)
+                .parse::<f32>()
+                .unwrap_or(ATOM_INTR_COLUMN_DEFAULT_WIDTH)
+                .clamp(ATOM_INTR_COLUMN_MIN_WIDTH, 400.0)
+        });
         Self {
             state,
             open_path: "../cuemol2/tests/test_data/1CRN.pdb".to_string(),
@@ -4770,6 +4788,8 @@ impl GuiApplication {
             selected_nonstandard_bonds: std::collections::BTreeSet::new(),
             bond_atom0_column_width,
             bond_atom0_column_drag_start_width: None,
+            atom_intr_column_widths,
+            atom_intr_column_drag_start: None,
             bond_aid1: String::new(),
             bond_aid2: String::new(),
             contact_object: None,
@@ -20688,6 +20708,19 @@ impl GuiApplication {
             .unwrap_or(BOND_ATOM0_COLUMN_DEFAULT_WIDTH)
             .clamp(BOND_ATOM_COLUMN_MIN_WIDTH, 800.0);
         self.bond_atom0_column_drag_start_width = None;
+        self.atom_intr_column_widths = [
+            "atom_intr_editor:atom0_width",
+            "atom_intr_editor:atom1_width",
+            "atom_intr_editor:atom2_width",
+        ]
+        .map(|key| {
+            self.state
+                .config_value(key)
+                .parse::<f32>()
+                .unwrap_or(ATOM_INTR_COLUMN_DEFAULT_WIDTH)
+                .clamp(ATOM_INTR_COLUMN_MIN_WIDTH, 400.0)
+        });
+        self.atom_intr_column_drag_start = None;
         for (style_key, config_key) in [
             ("DefaultLabel.font_name", "style:DefaultLabel.font_name"),
             ("DefaultLabel.font_size", "style:DefaultLabel.font_size"),
@@ -21088,6 +21121,7 @@ impl GuiApplication {
                     renderer_name: renderer_name.to_string(),
                     original_ids: rows.iter().map(|row| row.id).collect(),
                     rows,
+                    selected_id: None,
                 });
             }
             Err(error) => self.set_error(error),
@@ -27549,35 +27583,221 @@ impl GuiApplication {
         let mut cancel = false;
         let mut remove_id = None;
         egui::Window::new(format!("Edit interaction list: {}", draft.renderer_name))
-            .default_width(460.0)
+            .default_width(500.0)
             .collapsible(false)
-            .resizable(false)
+            .resizable(true)
             .open(&mut open)
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical()
-                    .max_height(320.0)
+                egui::Frame::new()
+                    .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
                     .show(ui, |ui| {
-                        if draft.rows.is_empty() {
-                            ui.weak("(no interactions)");
+                        let minimum_width = 4.0 * ATOM_INTR_COLUMN_MIN_WIDTH
+                            + 3.0 * ATOM_INTR_COLUMN_SPLITTER_WIDTH;
+                        let available_width = ui.available_width().max(minimum_width);
+                        let usable_width = available_width - 3.0 * ATOM_INTR_COLUMN_SPLITTER_WIDTH;
+                        let mut widths = self
+                            .atom_intr_column_widths
+                            .map(|width| width.clamp(ATOM_INTR_COLUMN_MIN_WIDTH, 400.0));
+                        let maximum_fixed_width = usable_width - ATOM_INTR_COLUMN_MIN_WIDTH;
+                        let fixed_width = widths.iter().sum::<f32>();
+                        if fixed_width > maximum_fixed_width {
+                            let extra = widths
+                                .iter()
+                                .map(|width| width - ATOM_INTR_COLUMN_MIN_WIDTH)
+                                .sum::<f32>();
+                            let allowed_extra =
+                                (maximum_fixed_width - 3.0 * ATOM_INTR_COLUMN_MIN_WIDTH).max(0.0);
+                            let scale = if extra > 0.0 {
+                                (allowed_extra / extra).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
+                            for width in &mut widths {
+                                *width = ATOM_INTR_COLUMN_MIN_WIDTH
+                                    + (*width - ATOM_INTR_COLUMN_MIN_WIDTH) * scale;
+                            }
                         }
-                        for row in &draft.rows {
-                            ui.horizontal(|ui| {
+                        let atom3_width = (usable_width - widths.iter().sum::<f32>())
+                            .max(ATOM_INTR_COLUMN_MIN_WIDTH);
+                        let display_widths = [widths[0], widths[1], widths[2], atom3_width];
+                        let config_keys = [
+                            "atom_intr_editor:atom0_width",
+                            "atom_intr_editor:atom1_width",
+                            "atom_intr_editor:atom2_width",
+                        ];
+                        let header_height = ui.spacing().interact_size.y;
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            for (index, label) in
+                                ["Rend/Atom0", "Atom1", "Atom2", "Atom3"].iter().enumerate()
+                            {
                                 ui.add_sized(
-                                    [64.0, 20.0],
-                                    egui::Label::new(match row.mode {
+                                    [display_widths[index], header_height],
+                                    egui::Label::new(egui::RichText::new(*label).strong()),
+                                );
+                                if index == 3 {
+                                    continue;
+                                }
+                                let (splitter_rect, splitter) = ui.allocate_exact_size(
+                                    egui::vec2(ATOM_INTR_COLUMN_SPLITTER_WIDTH, header_height),
+                                    egui::Sense::drag(),
+                                );
+                                let splitter = splitter
+                                    .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+                                    .on_hover_text(format!(
+                                        "Resize {label} column; double-click to reset"
+                                    ));
+                                ui.painter().line_segment(
+                                    [splitter_rect.center_top(), splitter_rect.center_bottom()],
+                                    egui::Stroke::new(
+                                        1.0,
+                                        if splitter.hovered() || splitter.dragged() {
+                                            ui.visuals().text_color()
+                                        } else {
+                                            ui.visuals().widgets.noninteractive.bg_stroke.color
+                                        },
+                                    ),
+                                );
+                                if splitter.double_clicked() {
+                                    self.atom_intr_column_widths[index] =
+                                        ATOM_INTR_COLUMN_DEFAULT_WIDTH;
+                                    self.atom_intr_column_drag_start = None;
+                                    self.state.put_config_value(
+                                        config_keys[index],
+                                        ATOM_INTR_COLUMN_DEFAULT_WIDTH.to_string(),
+                                    );
+                                } else {
+                                    if splitter.drag_started() {
+                                        self.atom_intr_column_drag_start =
+                                            Some((index, display_widths[index]));
+                                    }
+                                    if splitter.dragged() {
+                                        if let Some((drag_index, initial_width)) =
+                                            self.atom_intr_column_drag_start
+                                        {
+                                            if drag_index == index {
+                                                let other_width = widths
+                                                    .iter()
+                                                    .enumerate()
+                                                    .filter(|(other, _)| *other != index)
+                                                    .map(|(_, width)| *width)
+                                                    .sum::<f32>();
+                                                let maximum = (usable_width
+                                                    - ATOM_INTR_COLUMN_MIN_WIDTH
+                                                    - other_width)
+                                                    .max(ATOM_INTR_COLUMN_MIN_WIDTH);
+                                                self.atom_intr_column_widths[index] =
+                                                    (initial_width + splitter.drag_delta().x)
+                                                        .clamp(ATOM_INTR_COLUMN_MIN_WIDTH, maximum);
+                                                ui.ctx().request_repaint();
+                                            }
+                                        }
+                                    }
+                                    if splitter.drag_stopped() {
+                                        self.atom_intr_column_drag_start = None;
+                                        self.state.put_config_value(
+                                            config_keys[index],
+                                            self.atom_intr_column_widths[index].to_string(),
+                                        );
+                                    }
+                                }
+                            }
+                        });
+                        ui.separator();
+                        egui::ScrollArea::vertical()
+                            .id_salt("native_atom_intr_edit_list")
+                            .min_scrolled_height(160.0)
+                            .max_height(320.0)
+                            .show(ui, |ui| {
+                                let row_height = ui.spacing().interact_size.y;
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 0.0;
+                                    for (index, width) in display_widths.iter().enumerate() {
+                                        let text = if index == 0 {
+                                            format!("▾ {}", draft.renderer_name)
+                                        } else {
+                                            String::new()
+                                        };
+                                        ui.add_sized(
+                                            [*width, row_height],
+                                            egui::Label::new(egui::RichText::new(text).strong()),
+                                        );
+                                        if index < 3 {
+                                            let (separator, _) = ui.allocate_exact_size(
+                                                egui::vec2(
+                                                    ATOM_INTR_COLUMN_SPLITTER_WIDTH,
+                                                    row_height,
+                                                ),
+                                                egui::Sense::hover(),
+                                            );
+                                            ui.painter().line_segment(
+                                                [separator.center_top(), separator.center_bottom()],
+                                                ui.visuals().widgets.noninteractive.bg_stroke,
+                                            );
+                                        }
+                                    }
+                                });
+                                if draft.rows.is_empty() {
+                                    ui.weak("(no interactions)");
+                                }
+                                for row in &draft.rows {
+                                    let selected = draft.selected_id == Some(row.id);
+                                    let mode = match row.mode {
                                         1 => "Distance",
                                         2 => "Angle",
                                         3 => "Torsion",
                                         _ => "?",
-                                    }),
-                                );
-                                ui.monospace(row.atoms.join("  -  "));
-                                if ui.small_button("×").clicked() {
-                                    remove_id = Some(row.id);
+                                    };
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 0.0;
+                                        for (index, width) in display_widths.iter().enumerate() {
+                                            let atom =
+                                                row.atoms.get(index).map_or("", String::as_str);
+                                            let text = if index == 0 {
+                                                format!("  {atom}")
+                                            } else {
+                                                atom.to_string()
+                                            };
+                                            let response = ui
+                                                .add_sized(
+                                                    [*width, row_height],
+                                                    egui::Button::selectable(selected, text),
+                                                )
+                                                .on_hover_text(if atom.is_empty() {
+                                                    mode
+                                                } else {
+                                                    atom
+                                                });
+                                            if response.clicked() {
+                                                draft.selected_id = Some(row.id);
+                                            }
+                                            if index < 3 {
+                                                let (separator, _) = ui.allocate_exact_size(
+                                                    egui::vec2(
+                                                        ATOM_INTR_COLUMN_SPLITTER_WIDTH,
+                                                        row_height,
+                                                    ),
+                                                    egui::Sense::hover(),
+                                                );
+                                                ui.painter().line_segment(
+                                                    [
+                                                        separator.center_top(),
+                                                        separator.center_bottom(),
+                                                    ],
+                                                    ui.visuals().widgets.noninteractive.bg_stroke,
+                                                );
+                                            }
+                                        }
+                                    });
                                 }
                             });
-                        }
                     });
+                if ui
+                    .add_enabled(draft.selected_id.is_some(), egui::Button::new("Delete"))
+                    .clicked()
+                {
+                    remove_id = draft.selected_id;
+                }
                 ui.separator();
                 ui.horizontal(|ui| {
                     if ui.button("Cancel").clicked() {
@@ -27590,6 +27810,7 @@ impl GuiApplication {
             });
         if let Some(id) = remove_id {
             draft.rows.retain(|row| row.id != id);
+            draft.selected_id = None;
         }
         if accept {
             let removed_ids = draft
@@ -34537,7 +34758,7 @@ mod tests {
         let app = GuiApplication::new_with_config_source(NativeConfigSource {
             path: Some(PathBuf::from("preloaded.conf")),
             input: Ok(Some(
-                "view_input:tbrad\t1.25\ncuemol2.ui.ribbon.collapsed\ttrue\nleft_panel:Workspace:visible\tfalse\nleft_panel:Workspace:collapsed\ttrue\nleft_panel:Workspace:height\t185\nleft_panel:order\tAnimation|Workspace|MolStruct|Selection|Coloring|Symmetry|Density map|View\nleft_panel:width\t310\nworkspace_panel:state_width\t58\nbond_editor:atom0_width\t260\nbottom_panel:visible\tfalse\nbottom_panel:tab\tsequence\nbottom_panel:height\t240\nsequence_panel:name_width\t220\nanimation_panel:name_width\t180\nanimation_panel:start_width\t70\ncoloring_paint:selection_width\t165\ncoloring_gradient:param_width\t155\nanimation_render:height\t720\nanimation_render:concurrency\t6\nanimation_render:duplicate_last_frame\ttrue\nanimation_render:backend\tUmbreon\nanimation_render:pov_shadow\ttrue\nanimation_render:make_movie\ttrue\nanimation_render:movie_format\tgifanim\nmru:length\t2\nmru:0:path\t/tmp/recent.qsc\nmru:1:path\t/tmp/recent.pdb\nselection_history:length\t2\nselection_history:0\tchain A\nselection_history:1\tname CA\n"
+                "view_input:tbrad\t1.25\ncuemol2.ui.ribbon.collapsed\ttrue\nleft_panel:Workspace:visible\tfalse\nleft_panel:Workspace:collapsed\ttrue\nleft_panel:Workspace:height\t185\nleft_panel:order\tAnimation|Workspace|MolStruct|Selection|Coloring|Symmetry|Density map|View\nleft_panel:width\t310\nworkspace_panel:state_width\t58\nbond_editor:atom0_width\t260\natom_intr_editor:atom0_width\t100\natom_intr_editor:atom1_width\t110\natom_intr_editor:atom2_width\t120\nbottom_panel:visible\tfalse\nbottom_panel:tab\tsequence\nbottom_panel:height\t240\nsequence_panel:name_width\t220\nanimation_panel:name_width\t180\nanimation_panel:start_width\t70\ncoloring_paint:selection_width\t165\ncoloring_gradient:param_width\t155\nanimation_render:height\t720\nanimation_render:concurrency\t6\nanimation_render:duplicate_last_frame\ttrue\nanimation_render:backend\tUmbreon\nanimation_render:pov_shadow\ttrue\nanimation_render:make_movie\ttrue\nanimation_render:movie_format\tgifanim\nmru:length\t2\nmru:0:path\t/tmp/recent.qsc\nmru:1:path\t/tmp/recent.pdb\nselection_history:length\t2\nselection_history:0\tchain A\nselection_history:1\tname CA\n"
                     .to_string(),
             )),
         });
@@ -34554,6 +34775,7 @@ mod tests {
         assert_eq!(app.left_panel_width, 310.0);
         assert_eq!(app.workspace_state_column_width, 58.0);
         assert_eq!(app.bond_atom0_column_width, 260.0);
+        assert_eq!(app.atom_intr_column_widths, [100.0, 110.0, 120.0]);
         assert!(!app.show_bottom_panel);
         assert_eq!(app.bottom_tab, BottomTab::Sequence);
         assert_eq!(app.bottom_panel_height, 240.0);

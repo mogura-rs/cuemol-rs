@@ -1176,6 +1176,10 @@ fn atom_interaction_context_menu_uses_the_dedicated_list_editor() {
     for label in [
         "Edit interaction list:",
         "Interaction definitions",
+        "Rend/Atom0",
+        "Atom1",
+        "Atom2",
+        "Atom3",
         "(no interactions)",
         "Distance",
         "Angle",
@@ -1189,9 +1193,20 @@ fn atom_interaction_context_menu_uses_the_dedicated_list_editor() {
     assert!(JS.contains("showEditInteractionListDialog(object, renderer)"));
     assert!(JS.contains("get_atom_intr_defs"));
     assert!(JS.contains("remove_atom_intr_defs"));
+    assert!(JS.contains("ATOM_INTR_COLUMN_WIDTHS_STORAGE_KEY"));
+    assert!(JS.contains("setInteractionColumnWidth"));
+    assert!(JS.contains("interaction-column-splitter"));
+    assert!(JS.contains("interaction-renderer-row"));
+    assert!(JS.contains("entry.atoms[index]"));
     assert!(CSS.contains(".reference-dialog.interaction-list-dialog"));
+    assert!(CSS.contains("var(--interaction-atom0-width"));
+    assert!(CSS.contains(".interaction-column-splitter"));
     assert!(NATIVE_GUI_RS.contains("fn atom_intr_edit_dialog"));
     assert!(NATIVE_GUI_RS.contains("remove_atom_intr_defs"));
+    assert!(NATIVE_GUI_RS.contains("atom_intr_editor:atom0_width"));
+    assert!(NATIVE_GUI_RS.contains("atom_intr_editor:atom1_width"));
+    assert!(NATIVE_GUI_RS.contains("atom_intr_editor:atom2_width"));
+    assert!(NATIVE_GUI_RS.contains("ATOM_INTR_COLUMN_SPLITTER_WIDTH"));
     assert!(TAURI_APP_RS.contains("ModelRequest::GetAtomIntrDefs"));
     assert!(TAURI_APP_RS.contains("ModelRequest::RemoveAtomIntrDefs"));
 }

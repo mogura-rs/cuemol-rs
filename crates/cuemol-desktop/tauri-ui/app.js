@@ -133,6 +133,7 @@ const RIBBON_COLLAPSED_STORAGE_KEY = "cuemol2.ribbonCollapsed.v1";
 const WINDOW_GEOMETRY_STORAGE_KEY = "cuemol2.windowGeometry.v1";
 const WORKSPACE_STATE_COLUMN_WIDTH_STORAGE_KEY = "cuemol2.workspaceStateColumnWidth.v1";
 const BOND_ATOM0_COLUMN_WIDTH_STORAGE_KEY = "cuemol2.bondAtom0ColumnWidth.v1";
+const ATOM_INTR_COLUMN_WIDTHS_STORAGE_KEY = "cuemol2.atomIntrColumnWidths.v1";
 const SIDE_PANEL_DEFAULT_ORDER = [
   "Workspace",
   "MolStruct",
@@ -5307,11 +5308,132 @@ async function showEditInteractionListDialog(object, renderer) {
   table.className = "interaction-def-table";
   table.setAttribute("role", "table");
   table.setAttribute("aria-label", "Interaction definitions");
-  dialogContent.append(table);
+  const columnLabels = ["Rend/Atom0", "Atom1", "Atom2", "Atom3"];
+  const columnWidths = [null, null, null];
+  const columns = document.createElement("div");
+  columns.className = "interaction-def-columns";
+  columns.setAttribute("role", "row");
+  const headings = [];
+  const splitters = [];
+  for (const [index, label] of columnLabels.entries()) {
+    const heading = document.createElement("span");
+    heading.textContent = label;
+    heading.setAttribute("role", "columnheader");
+    headings.push(heading);
+    columns.append(heading);
+    if (index === columnLabels.length - 1) continue;
+    const splitter = document.createElement("div");
+    splitter.className = "interaction-column-splitter";
+    splitter.tabIndex = 0;
+    splitter.setAttribute("role", "separator");
+    splitter.setAttribute("aria-orientation", "vertical");
+    splitter.setAttribute("aria-label", `${label} column width`);
+    splitter.setAttribute("aria-valuemin", "80");
+    splitter.setAttribute("aria-valuemax", "400");
+    splitter.title = "Drag to resize; double-click to reset";
+    splitters.push(splitter);
+    columns.append(splitter);
+  }
+  const persistInteractionColumnWidths = () => {
+    try {
+      if (columnWidths.every((width) => width === null)) {
+        localStorage.removeItem(ATOM_INTR_COLUMN_WIDTHS_STORAGE_KEY);
+      } else {
+        localStorage.setItem(
+          ATOM_INTR_COLUMN_WIDTHS_STORAGE_KEY,
+          JSON.stringify(columnWidths),
+        );
+      }
+    } catch {
+      // Storage can be unavailable in restricted webviews.
+    }
+  };
+  const setInteractionColumnWidth = (index, width, persist = false) => {
+    const nextWidth = Math.min(400, Math.max(80, Number(width) || 105));
+    columnWidths[index] = nextWidth;
+    table.style.setProperty(`--interaction-atom${index}-width`, `${nextWidth}px`);
+    splitters[index].setAttribute("aria-valuenow", String(Math.round(nextWidth)));
+    if (persist) persistInteractionColumnWidths();
+  };
+  try {
+    const storedWidths = JSON.parse(
+      localStorage.getItem(ATOM_INTR_COLUMN_WIDTHS_STORAGE_KEY) || "null",
+    );
+    if (Array.isArray(storedWidths)) {
+      storedWidths.slice(0, 3).forEach((width, index) => {
+        if (Number.isFinite(Number(width)) && Number(width) > 0) {
+          setInteractionColumnWidth(index, width);
+        }
+      });
+    }
+  } catch {
+    // Storage can be unavailable or malformed.
+  }
+  for (const [index, splitter] of splitters.entries()) {
+    splitter.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      const startX = event.clientX;
+      const startWidth = headings[index].getBoundingClientRect().width || 105;
+      splitter.setPointerCapture(event.pointerId);
+      splitter.classList.add("dragging");
+      const resize = (moveEvent) => {
+        setInteractionColumnWidth(index, startWidth + moveEvent.clientX - startX);
+      };
+      const finish = (finishEvent) => {
+        if (finishEvent.type !== "pointercancel") resize(finishEvent);
+        setInteractionColumnWidth(
+          index,
+          headings[index].getBoundingClientRect().width || 105,
+          true,
+        );
+        splitter.classList.remove("dragging");
+        splitter.removeEventListener("pointermove", resize);
+        splitter.removeEventListener("pointerup", finish);
+        splitter.removeEventListener("pointercancel", finish);
+      };
+      splitter.addEventListener("pointermove", resize);
+      splitter.addEventListener("pointerup", finish);
+      splitter.addEventListener("pointercancel", finish);
+    });
+    splitter.addEventListener("dblclick", () => {
+      columnWidths[index] = null;
+      table.style.removeProperty(`--interaction-atom${index}-width`);
+      splitter.removeAttribute("aria-valuenow");
+      persistInteractionColumnWidths();
+    });
+    splitter.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+      event.preventDefault();
+      const current = headings[index].getBoundingClientRect().width || 105;
+      setInteractionColumnWidth(
+        index,
+        current + (event.key === "ArrowRight" ? 10 : -10),
+        true,
+      );
+    });
+  }
 
+  const rendererRow = document.createElement("div");
+  rendererRow.className = "interaction-renderer-row";
+  rendererRow.setAttribute("role", "row");
+  for (const index of columnLabels.keys()) {
+    const cell = document.createElement("span");
+    cell.setAttribute("role", "cell");
+    if (index === 0) cell.textContent = `▾ ${renderer.name}`;
+    rendererRow.append(cell);
+  }
   const modeLabel = (mode) => ({ 1: "Distance", 2: "Angle", 3: "Torsion" })[mode] || "?";
+  let selectedId = null;
+  const remove = button("Delete", "interaction-def-delete", () => {
+    if (selectedId === null) return;
+    rows = rows.filter((entry) => entry.id !== selectedId);
+    selectedId = null;
+    renderRows();
+  });
   const renderRows = () => {
-    table.replaceChildren();
+    table.replaceChildren(columns, rendererRow);
+    remove.disabled = selectedId === null;
     if (!rows.length) {
       const empty = document.createElement("div");
       empty.className = "interaction-def-empty";
@@ -5323,21 +5445,30 @@ async function showEditInteractionListDialog(object, renderer) {
       const row = document.createElement("div");
       row.className = "interaction-def-row";
       row.setAttribute("role", "row");
-      const mode = document.createElement("span");
-      mode.className = "interaction-def-mode";
-      mode.textContent = modeLabel(entry.mode);
-      const atoms = document.createElement("span");
-      atoms.className = "interaction-def-atoms";
-      atoms.textContent = entry.atoms.join("  -  ");
-      const remove = button("×", "interaction-def-remove", () => {
-        rows = rows.filter((candidate) => candidate.id !== entry.id);
+      row.tabIndex = 0;
+      row.title = modeLabel(entry.mode);
+      row.setAttribute("aria-selected", String(selectedId === entry.id));
+      for (const index of columnLabels.keys()) {
+        const atom = document.createElement("span");
+        atom.className = "interaction-def-atom";
+        atom.setAttribute("role", "cell");
+        atom.textContent = `${index === 0 ? "  " : ""}${entry.atoms[index] || ""}`;
+        row.append(atom);
+      }
+      const selectRow = () => {
+        selectedId = entry.id;
         renderRows();
+      };
+      row.addEventListener("click", selectRow);
+      row.addEventListener("keydown", (event) => {
+        if (!["Enter", " "].includes(event.key)) return;
+        event.preventDefault();
+        selectRow();
       });
-      remove.setAttribute("aria-label", `Delete interaction ${entry.id}`);
-      row.append(mode, atoms, remove);
       table.append(row);
     }
   };
+  dialogContent.append(table, remove);
   renderRows();
 
   const removeIds = await new Promise((resolve) => {
