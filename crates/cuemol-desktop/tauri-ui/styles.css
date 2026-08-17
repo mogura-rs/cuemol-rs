@@ -2086,6 +2086,15 @@ summary:focus-visible {
   color: var(--selection-text);
 }
 
+.sequence-cell.marked {
+  box-shadow: inset 0 -2px #1d1d1d;
+}
+
+.sequence-cell.range-preview {
+  outline: 1px solid #555;
+  outline-offset: -2px;
+}
+
 .trajectory-panel {
   overflow: hidden;
   padding: 8px 10px;

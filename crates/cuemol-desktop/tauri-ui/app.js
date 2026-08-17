@@ -251,6 +251,8 @@ let moleculeDetailsTimer = null;
 let moleculeDetailsRequest = null;
 let renderedMolstructKey = "";
 let renderedSequenceKey = "";
+let sequenceMarker = null;
+let sequenceDrag = null;
 let renderedSceneTabsKey = "";
 let renderedSceneTreeKey = "";
 let renderedInspectorKey = "";
@@ -14545,6 +14547,126 @@ function renderView() {
   syncViewPanelControls();
 }
 
+function sameSequenceRow(lhs, rhs) {
+  return (
+    lhs &&
+    rhs &&
+    lhs.dataset.objectUid === rhs.dataset.objectUid &&
+    lhs.dataset.chainId === rhs.dataset.chainId
+  );
+}
+
+function setSequenceMarker(cell) {
+  sequenceMarker = cell
+    ? {
+        objectUid: cell.dataset.objectUid,
+        chainId: cell.dataset.chainId,
+        position: Number(cell.dataset.residuePosition),
+      }
+    : null;
+  for (const item of sequenceView.querySelectorAll(".sequence-cell.marked")) {
+    item.classList.remove("marked");
+  }
+  cell?.classList.add("marked");
+}
+
+function clearSequenceDragPreview() {
+  for (const item of sequenceView.querySelectorAll(".sequence-cell.range-preview")) {
+    item.classList.remove("range-preview");
+  }
+}
+
+function sequenceRangeCells(start, end) {
+  if (!sameSequenceRow(start, end)) return [];
+  const cells = [...start.closest(".sequence-residues").querySelectorAll(".sequence-cell")];
+  const startPosition = Number(start.dataset.residuePosition);
+  const endPosition = Number(end.dataset.residuePosition);
+  const [first, last] = [startPosition, endPosition].sort((lhs, rhs) => lhs - rhs);
+  return cells.slice(first, last + 1);
+}
+
+function previewSequenceRange(start, end) {
+  clearSequenceDragPreview();
+  for (const cell of sequenceRangeCells(start, end)) cell.classList.add("range-preview");
+}
+
+async function runSequenceAction(chain, action, targetSelection = "", rangeSelection = "", radius = null) {
+  setBusy(true);
+  const sequence = ++requestSequence;
+  const previousSelection = snapshot.selection;
+  try {
+    const update = await invoke("sequence_action", {
+      input: {
+        objectUid: chain.objectUid,
+        action,
+        targetSelection,
+        rangeSelection,
+        radius,
+      },
+      ...viewportDimensions(),
+    });
+    snapshot = update.snapshot;
+    syncEmptyMoleculeDetails();
+    applyViewport(update.viewport, sequence);
+    renderShell();
+    if (snapshot.selection !== previousSelection) rememberSelection(snapshot.selection);
+    scheduleMoleculeDetailsRefresh();
+    return true;
+  } catch (error) {
+    showError(error);
+    return false;
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function copySequence(chain) {
+  if (!navigator.clipboard?.writeText) {
+    showError("The clipboard API is unavailable.");
+    return;
+  }
+  const sequence = chain.residues
+    .map((residue) => (residue.letter === "X" ? "*" : residue.letter))
+    .join("");
+  try {
+    await navigator.clipboard.writeText(sequence);
+    recordStatus("Sequence copied");
+  } catch (error) {
+    showError(error);
+  }
+}
+
+function showSequenceContextMenu(event, chain, residue) {
+  const rangeActions = (action) =>
+    [3, 5, 7, 10].map((radius) => ({
+      label: `${radius} Å`,
+      action: () => runSequenceAction(chain, action, residue.selection, "", radius),
+    }));
+  showWorkspaceContextMenu(event, [
+    {
+      label: `${chain.objectName} ${chain.chainId || "_"}${residue.residueIndex} ${residue.resName}`,
+      disabled: true,
+      action: () => {},
+    },
+    null,
+    {
+      label: "Center here",
+      action: () => runSequenceAction(chain, "center", residue.selection),
+    },
+    {
+      label: "Toggle sel",
+      action: () => runSequenceAction(chain, "toggle", residue.selection),
+    },
+    { label: "Around Byresid", children: rangeActions("around-byres") },
+    { label: "Around", children: rangeActions("around") },
+    null,
+    { label: "Unselect all", action: () => runSequenceAction(chain, "clear") },
+    { label: "Invert sel", action: () => runSequenceAction(chain, "invert") },
+    null,
+    { label: "Copy sequence", action: () => copySequence(chain) },
+  ]);
+}
+
 function renderSequence() {
   if (!document.querySelector('[data-bottom-panel="sequence"]')?.classList.contains("active")) {
     return;
@@ -14573,11 +14695,86 @@ function renderSequence() {
     title.textContent = `${chain.objectName} : chain ${chain.chainId || "_"}`;
     const residues = document.createElement("div");
     residues.className = "sequence-residues";
-    for (const residue of chain.residues) {
-      const cell = button(residue.letter, `sequence-cell${residue.selected ? " selected" : ""}`, () => {
-        mutate("set_selection", { selection: residue.selection });
+    for (const [position, residue] of chain.residues.entries()) {
+      const cell = document.createElement("button");
+      cell.type = "button";
+      cell.textContent = residue.letter;
+      cell.className = `sequence-cell${residue.selected ? " selected" : ""}`;
+      cell.dataset.objectUid = String(chain.objectUid);
+      cell.dataset.chainId = chain.chainId;
+      cell.dataset.residuePosition = String(position);
+      cell.dataset.selection = residue.selection;
+      cell.title = `${residue.resName} ${residue.residueIndex}`;
+      if (
+        sequenceMarker?.objectUid === cell.dataset.objectUid &&
+        sequenceMarker.chainId === cell.dataset.chainId &&
+        sequenceMarker.position === position
+      ) {
+        cell.classList.add("marked");
+      }
+      cell.addEventListener("mousedown", (event) => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        sequenceDrag = { start: cell, end: cell, moved: false };
+        if (!event.shiftKey) setSequenceMarker(cell);
+        previewSequenceRange(cell, cell);
       });
-      cell.title = `${residue.resName} ${residue.resId}`;
+      cell.addEventListener("mouseenter", (event) => {
+        if (!sequenceDrag || !(event.buttons & 1) || !sameSequenceRow(sequenceDrag.start, cell)) {
+          return;
+        }
+        sequenceDrag.end = cell;
+        sequenceDrag.moved = sequenceDrag.start !== cell;
+        previewSequenceRange(sequenceDrag.start, cell);
+      });
+      cell.addEventListener("mouseup", (event) => {
+        if (event.button !== 0 || !sequenceDrag) return;
+        event.preventDefault();
+        const dragState = sequenceDrag;
+        sequenceDrag = null;
+        clearSequenceDragPreview();
+        if (!sameSequenceRow(dragState.start, cell)) return;
+        if (dragState.moved) {
+          const rangeSelection = sequenceRangeCells(dragState.start, cell)
+            .map((item) => item.dataset.selection)
+            .join("|");
+          setSequenceMarker(cell);
+          void runSequenceAction(
+            chain,
+            "range-toggle",
+            dragState.start.dataset.selection,
+            rangeSelection,
+          );
+          return;
+        }
+        if (event.shiftKey && sequenceMarker) {
+          const markerCell = [...residues.querySelectorAll(".sequence-cell")].find(
+            (item) =>
+              item.dataset.objectUid === sequenceMarker.objectUid &&
+              item.dataset.chainId === sequenceMarker.chainId &&
+              Number(item.dataset.residuePosition) === sequenceMarker.position,
+          );
+          if (!markerCell) return;
+          const rangeSelection = sequenceRangeCells(markerCell, cell)
+            .map((item) => item.dataset.selection)
+            .join("|");
+          setSequenceMarker(cell);
+          void runSequenceAction(
+            chain,
+            "range-select",
+            markerCell.dataset.selection,
+            rangeSelection,
+          );
+          return;
+        }
+        setSequenceMarker(cell);
+        void runSequenceAction(chain, "toggle-center", residue.selection);
+      });
+      cell.addEventListener("dragstart", (event) => event.preventDefault());
+      cell.addEventListener("contextmenu", (event) => {
+        setSequenceMarker(cell);
+        showSequenceContextMenu(event, chain, residue);
+      });
       residues.append(cell);
     }
     row.append(title, residues);
@@ -16502,6 +16699,12 @@ document.addEventListener("pointerdown", (event) => {
     if (!menu.contains(event.target)) menu.removeAttribute("open");
   });
   if (!event.target.closest(".workspace-context-menu")) closeWorkspaceContextMenu();
+});
+
+document.addEventListener("mouseup", (event) => {
+  if (!sequenceDrag || event.target.closest(".sequence-cell")) return;
+  sequenceDrag = null;
+  clearSequenceDragPreview();
 });
 
 referenceDialog.addEventListener("close", () => {

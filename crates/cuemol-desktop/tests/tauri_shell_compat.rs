@@ -76,8 +76,8 @@ fn tauri_reference_panels_are_bound_to_shared_core_data() {
         "redraw_density_renderer",
         "show_unit_cell",
         "set_background",
-        "set_selection",
         "molecule_selection_action",
+        "sequence_action",
         "get_molecule_details",
         "open_initial_paths",
         "open_scene",
@@ -569,6 +569,39 @@ fn tauri_output_prompt_executes_javascript_with_reference_history() {
     assert!(TAURI_APP_RS.contains("ModelRequest::ExecuteScript(script)"));
     assert!(TAURI_APP_RS.contains("model.log_lines.push(format!(\"> {script}\"))"));
     assert!(CSS.contains("grid-template-columns: 24px 1fr"));
+}
+
+#[test]
+fn tauri_sequence_panel_matches_reference_mouse_and_context_operations() {
+    for binding in [
+        "function runSequenceAction(",
+        "sequence_action",
+        "range-toggle",
+        "range-select",
+        "toggle-center",
+        "setSequenceMarker(cell)",
+        "previewSequenceRange(sequenceDrag.start, cell)",
+        "navigator.clipboard.writeText(sequence)",
+    ] {
+        assert!(JS.contains(binding), "missing Sequence binding {binding}");
+    }
+    for label in [
+        "Center here",
+        "Toggle sel",
+        "Around Byresid",
+        "Around",
+        "Unselect all",
+        "Invert sel",
+        "Copy sequence",
+    ] {
+        assert!(JS.contains(label), "missing Sequence action {label}");
+    }
+    assert!(JS.contains("event.shiftKey && sequenceMarker"));
+    assert!(JS.contains("residue.residueIndex"));
+    assert!(CSS.contains(".sequence-cell.marked"));
+    assert!(CSS.contains(".sequence-cell.range-preview"));
+    assert!(TAURI_APP_RS.contains("fn apply_sequence_action("));
+    assert!(TAURI_APP_RS.contains("ResidRangeSet::new()"));
 }
 
 #[test]

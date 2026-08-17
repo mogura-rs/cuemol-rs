@@ -13,6 +13,7 @@ use cuemol_anim::{
     AnimMgr, AnimMotion, CamMotion, MolAnim, NoopAnimObj, ShowHideAnim, SimpleSpin, SlideInOutAnim,
 };
 use cuemol_core::{LDom2Node, Quat, Uid, Vector4, NANOS_PER_SECOND};
+use cuemol_molstr::{parse_selector, ResidRangeSet};
 use cuemol_qsys::{Camera, CenterMark, StereoMode, View};
 use cuemol_render::{
     tessellate_snapshot, PovSceneExporter, RenderBond, RenderMesh, RenderSceneSnapshot,
@@ -654,9 +655,20 @@ fn struct_object_dto(object: crate::GuiStructObject) -> StructObjectDto {
 struct SequenceResidueDto {
     letter: String,
     res_id: i32,
+    residue_index: String,
     res_name: String,
     selection: String,
     selected: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SequenceActionInput {
+    object_uid: u64,
+    action: String,
+    target_selection: String,
+    range_selection: String,
+    radius: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -2513,6 +2525,7 @@ impl AppModel {
                         .map(|residue| SequenceResidueDto {
                             letter: residue.letter,
                             res_id: residue.res_id,
+                            residue_index: residue.residue_index,
                             res_name: residue.res_name,
                             selection: residue.selection,
                             selected: residue.selected,
@@ -4444,6 +4457,175 @@ impl AppModel {
         self.status = "Change mol selection".to_string();
         self.invalidate_mesh(false);
         Ok(())
+    }
+
+    fn molecule_selection_for_sequence(&self, object_uid: Uid) -> Result<String, String> {
+        let selection = self
+            .desktop
+            .molecule_selection_text(object_uid)
+            .map_err(|error| error.to_string())?;
+        Ok(if selection.trim().is_empty() {
+            self.selection.trim().to_string()
+        } else {
+            selection.to_string()
+        })
+    }
+
+    fn sequence_range_selection(
+        &self,
+        object_uid: Uid,
+        anchor_selection: &str,
+        range_selection: &str,
+        toggle: bool,
+    ) -> Result<String, String> {
+        let current_selection = self.molecule_selection_for_sequence(object_uid)?;
+        let object = self
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .ok_or_else(|| format!("object {} not found", object_uid.get()))?;
+        let molecule = object.mol();
+        let mut ranges = ResidRangeSet::new();
+        if !current_selection.is_empty() {
+            let current = parse_selector(&current_selection).map_err(|error| error.to_string())?;
+            ranges.from_sel(molecule, &current);
+        }
+        let anchor = parse_selector(anchor_selection).map_err(|error| error.to_string())?;
+        let mut anchor_ranges = ResidRangeSet::new();
+        anchor_ranges.from_sel(molecule, &anchor);
+        let selected = anchor_ranges
+            .residues()
+            .iter()
+            .any(|residue| ranges.contains_key(residue));
+        let range = parse_selector(range_selection).map_err(|error| error.to_string())?;
+        if toggle && selected {
+            ranges.remove(molecule, &range);
+        } else {
+            ranges.append(molecule, &range);
+        }
+        Ok(ranges.to_string())
+    }
+
+    fn center_sequence_target(
+        &mut self,
+        object_uid: Uid,
+        target_selection: &str,
+    ) -> Result<bool, String> {
+        let selector = parse_selector(target_selection).map_err(|error| error.to_string())?;
+        let center = self
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .ok_or_else(|| format!("object {} not found", object_uid.get()))?
+            .mol()
+            .center_pos(Some(&selector));
+        if let Some(center) = center {
+            self.camera.set_center(center);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn set_sequence_selection(&mut self, object_uid: Uid, selection: String) -> Result<(), String> {
+        self.desktop
+            .set_molecule_selection_text(object_uid, &selection)
+            .map_err(|error| error.to_string())?;
+        self.selection = selection;
+        Ok(())
+    }
+
+    fn apply_sequence_action(&mut self, input: &SequenceActionInput) -> Result<bool, String> {
+        let object_uid = Uid::new(input.object_uid);
+        let (changed, status) = match input.action.as_str() {
+            "toggle" | "toggle-center" => {
+                let selection = self.sequence_range_selection(
+                    object_uid,
+                    &input.target_selection,
+                    &input.target_selection,
+                    true,
+                )?;
+                self.set_sequence_selection(object_uid, selection)?;
+                if input.action == "toggle-center" {
+                    self.center_sequence_target(object_uid, &input.target_selection)?;
+                }
+                (true, "Toggle select atom(s)")
+            }
+            "range-toggle" | "range-select" => {
+                if input.range_selection.trim().is_empty() {
+                    return Err("sequence range selection is required".to_string());
+                }
+                let selection = self.sequence_range_selection(
+                    object_uid,
+                    &input.target_selection,
+                    &input.range_selection,
+                    input.action == "range-toggle",
+                )?;
+                self.set_sequence_selection(object_uid, selection)?;
+                (true, "Toggle select atom(s)")
+            }
+            "center" => {
+                let centered = self.center_sequence_target(object_uid, &input.target_selection)?;
+                (centered, "Center here")
+            }
+            "clear" => {
+                let changed = !self.molecule_selection_for_sequence(object_uid)?.is_empty();
+                self.set_sequence_selection(object_uid, String::new())?;
+                (changed, "Unselect all")
+            }
+            "invert" => {
+                let current = self.molecule_selection_for_sequence(object_uid)?;
+                let selection = if current.is_empty() {
+                    "*".to_string()
+                } else if let Some(inner) = current
+                    .strip_prefix("!(")
+                    .and_then(|value| value.strip_suffix(')'))
+                {
+                    inner.trim().to_string()
+                } else {
+                    format!("!({current})")
+                };
+                self.set_sequence_selection(object_uid, selection)?;
+                (true, "Invert sel")
+            }
+            "around" | "around-byres" => {
+                let current = self.molecule_selection_for_sequence(object_uid)?;
+                if current.is_empty() {
+                    return Ok(false);
+                }
+                let radius = input
+                    .radius
+                    .filter(|radius| [3.0, 5.0, 7.0, 10.0].contains(radius))
+                    .ok_or_else(|| "unsupported sequence selection radius".to_string())?;
+                let mut base = current.trim();
+                if let Some((candidate, distance)) = base.rsplit_once(" around ") {
+                    if distance.trim().parse::<f64>().is_ok() {
+                        base = candidate.trim();
+                        if let Some(without_byres) = base.strip_prefix("byres ") {
+                            base = without_byres.trim();
+                        }
+                        if let Some(inner) = base
+                            .strip_prefix('(')
+                            .and_then(|value| value.strip_suffix(')'))
+                        {
+                            base = inner.trim();
+                        }
+                    }
+                }
+                let selection = if input.action == "around-byres" {
+                    format!("byres {base} around {radius}")
+                } else {
+                    format!("{base} around {radius}")
+                };
+                self.set_sequence_selection(object_uid, selection)?;
+                (true, "Around mol selection")
+            }
+            action => return Err(format!("unsupported Sequence action: {action}")),
+        };
+        if changed {
+            self.status = status.to_string();
+            self.invalidate_mesh(false);
+        }
+        Ok(changed)
     }
 
     fn set_surface_renderer_properties(
@@ -7748,6 +7930,11 @@ enum ModelRequest {
         width: u32,
         height: u32,
     },
+    SequenceAction {
+        input: SequenceActionInput,
+        width: u32,
+        height: u32,
+    },
     SetRendererVisible {
         object_uid: u64,
         renderer_uid: u64,
@@ -10816,6 +11003,23 @@ fn handle_model_request(
             let undo = model.capture_undo();
             model.apply_molecule_selection_action(object_uid, &selection, &mode, width, height)?;
             model.push_undo(undo);
+            let viewport = model.render(width, height);
+            Ok(ModelResponse::MolStructUpdate(Box::new(
+                MolStructUpdateDto {
+                    snapshot: model.snapshot(),
+                    viewport,
+                },
+            )))
+        }
+        ModelRequest::SequenceAction {
+            input,
+            width,
+            height,
+        } => {
+            let undo = model.capture_undo();
+            if model.apply_sequence_action(&input)? {
+                model.push_undo(undo);
+            }
             let viewport = model.render(width, height);
             Ok(ModelResponse::MolStructUpdate(Box::new(
                 MolStructUpdateDto {
@@ -14603,6 +14807,23 @@ fn molecule_selection_action(
 }
 
 #[tauri::command]
+fn sequence_action(
+    input: SequenceActionInput,
+    width: u32,
+    height: u32,
+    state: State<'_, ManagedState>,
+) -> Result<MolStructUpdateDto, String> {
+    molecule_selection_update_response(request_model(
+        &state,
+        ModelRequest::SequenceAction {
+            input,
+            width,
+            height,
+        },
+    )?)
+}
+
+#[tauri::command]
 fn set_renderer_visible(
     object_uid: u64,
     renderer_uid: u64,
@@ -15813,6 +16034,7 @@ pub fn run() -> Result<(), tauri::Error> {
             close_active_scene,
             set_selection,
             molecule_selection_action,
+            sequence_action,
             set_renderer_visible,
             add_renderer,
             set_object_coloring,
@@ -21541,6 +21763,79 @@ mod tests {
             .apply_molecule_selection_action(object_uid.get(), "'B'.1.*", "invalid", 800, 400)
             .is_err());
         assert_eq!(model.selection, selection);
+    }
+
+    #[test]
+    fn sequence_actions_match_reference_toggle_range_and_context_operations() {
+        let mut model = model_without_gpu();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C  \n\
+             ATOM      2  CA  GLY A   2      10.000   0.000   0.000  1.00 10.00           C  \n\
+             ATOM      3  CA  SER A   3      20.000   0.000   0.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        let object_uid = model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule_with_source_type("molecule", molecule, "pdb");
+
+        let input = |action: &str, target: &str, range: &str, radius| SequenceActionInput {
+            object_uid: object_uid.get(),
+            action: action.to_string(),
+            target_selection: target.to_string(),
+            range_selection: range.to_string(),
+            radius,
+        };
+        model
+            .apply_sequence_action(&input("toggle-center", "'A'.1.*", "", None))
+            .unwrap();
+        assert_eq!(model.selection, "'A'.1.*");
+        assert!((model.camera.center().x - 0.0).abs() < 1.0e-6);
+
+        model
+            .apply_sequence_action(&input("range-select", "'A'.1.*", "'A'.1.*|'A'.2.*", None))
+            .unwrap();
+        assert_eq!(model.selection, "'A'.1:2.*");
+
+        model
+            .apply_sequence_action(&input("range-toggle", "'A'.1.*", "'A'.1.*|'A'.2.*", None))
+            .unwrap();
+        assert!(model.selection.is_empty());
+
+        model
+            .apply_sequence_action(&input("invert", "'A'.2.*", "", None))
+            .unwrap();
+        assert_eq!(model.selection, "*");
+        model
+            .apply_sequence_action(&input("invert", "'A'.2.*", "", None))
+            .unwrap();
+        assert_eq!(model.selection, "!(*)");
+        model
+            .apply_sequence_action(&input("clear", "'A'.2.*", "", None))
+            .unwrap();
+        assert!(model.selection.is_empty());
+
+        model
+            .apply_sequence_action(&input("toggle-center", "'A'.2.*", "", None))
+            .unwrap();
+        model
+            .apply_sequence_action(&input("around-byres", "'A'.2.*", "", Some(5.0)))
+            .unwrap();
+        assert_eq!(model.selection, "byres 'A'.2.* around 5");
+
+        let before = model.selection.clone();
+        model
+            .apply_sequence_action(&input("center", "'A'.3.*", "", None))
+            .unwrap();
+        assert_eq!(model.selection, before);
+        assert!((model.camera.center().x - 20.0).abs() < 1.0e-6);
+        model
+            .apply_sequence_action(&input("toggle", "'A'.1.*", "", None))
+            .unwrap();
+        assert!((model.camera.center().x - 20.0).abs() < 1.0e-6);
     }
 
     #[test]

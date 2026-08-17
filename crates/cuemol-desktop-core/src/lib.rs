@@ -983,6 +983,8 @@ pub struct GuiSeqResidue {
     /// One-letter code (20 AA + nucleotides; `X` otherwise).
     pub letter: String,
     pub res_id: i32,
+    /// CueMol residue index including an optional insertion code.
+    pub residue_index: String,
     pub res_name: String,
     /// Selection expression that picks just this residue (for a click handler).
     pub selection: String,
@@ -13234,14 +13236,16 @@ impl DesktopAppState {
                         .atom_indices
                         .iter()
                         .any(|index| selected.contains(index));
+                    let residue_index = key.script_index();
                     let selection = if chain.chain_id.is_empty() {
-                        format!("resid {}", key.res_id)
+                        format!("resid {residue_index}")
                     } else {
-                        format!("chain {} and resid {}", chain.chain_id, key.res_id)
+                        format!("'{}'.{residue_index}.*", chain.chain_id)
                     };
                     chain_residues.push(GuiSeqResidue {
                         letter: residue_one_letter(&residue.res_name).to_string(),
                         res_id: key.res_id,
+                        residue_index,
                         res_name: residue.res_name.clone(),
                         selection,
                         selected: is_selected,
@@ -57870,7 +57874,29 @@ end_header
         assert!(chain.residues[0].selected, "resid 1 is selected");
         assert!(chain.residues[2].selected, "resid 3 is selected");
         assert!(!chain.residues[3].selected, "resid 4 is not selected");
-        assert_eq!(chain.residues[0].selection, "chain A and resid 1");
+        assert_eq!(chain.residues[0].residue_index, "1");
+        assert_eq!(chain.residues[0].selection, "'A'.1.*");
+    }
+
+    #[test]
+    fn active_sequence_view_preserves_residue_insertion_codes() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.ensure_active_scene();
+        let molecule = read_pdb_str(
+            "ATOM      1  CA  ALA A   1A      1.000   2.000   3.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        app.scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule_with_source_type("inserted", molecule, "pdb");
+
+        let chains = app.active_sequence_view("");
+        let residue = &chains[0].residues[0];
+        assert_eq!(residue.res_id, 1);
+        assert_eq!(residue.residue_index, "1A");
+        assert_eq!(residue.selection, "'A'.1A.*");
+        assert!(parse_selector(&residue.selection).is_ok());
     }
 
     #[cfg(feature = "offscreen")]
