@@ -96,6 +96,19 @@ fn tauri_reference_panels_are_bound_to_shared_core_data() {
             "missing native MolStruct action {label}"
         );
     }
+    for label in [
+        "Paint coloring",
+        "Solid coloring",
+        "CPK coloring",
+        "Bfac/Occ coloring",
+        "Rainbow coloring",
+        "Reset to default style",
+    ] {
+        assert!(
+            NATIVE_GUI_RS.contains(label),
+            "missing native Coloring action {label}"
+        );
+    }
     assert!(!NATIVE_GUI_RS.contains(".button(surface_label)"));
     assert!(!NATIVE_GUI_RS.contains(".button(clip_label)"));
     assert!(!CSS.contains("#selection-editor-add-kind"));

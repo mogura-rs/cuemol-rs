@@ -1111,6 +1111,7 @@ struct GuiApplication {
     /// classic N→C blue→red gradient by default (start 240° = blue, end 0° = red).
     coloring_start_hue: f32,
     coloring_end_hue: f32,
+    coloring_paint_selected: Option<usize>,
     snapshot: RenderSceneSnapshot,
     /// Monotonic generation used to avoid rebuilding immutable GPU scene buffers
     /// during camera-only and egui-only redraws.
@@ -1932,14 +1933,16 @@ fn native_selection_terminal_label(command: &str) -> &str {
     }
 }
 
-/// Object-level coloring scheme chosen in the Coloring panel (CueMol2
-/// `coloring-panel.xul` type dropdown). The subset wired into the snapshot's
-/// object-coloring cascade (Element/CPK default, Rainbow, B-factor).
+/// Object-level coloring scheme chosen in the Coloring panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ColoringMode {
     Element,
+    Paint,
+    Solid,
+    Cpk,
     Rainbow,
     Bfac,
+    Script,
 }
 
 /// Ribbon toolbar tabs mirroring CueMol2's base ribbon plus `anim-ribbon.xul`.
@@ -2400,6 +2403,72 @@ fn native_style_color_string(color: egui::Color32) -> String {
     } else {
         format!("#{red:02x}{green:02x}{blue:02x}{alpha:02x}")
     }
+}
+
+fn native_coloring_color_ui(ui: &mut egui::Ui, label: &str, value: &mut String) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        changed |= ui.text_edit_singleline(value).changed();
+        if let Some(mut color) = native_style_color(value) {
+            if ui.color_edit_button_srgba(&mut color).changed() {
+                *value = native_style_color_string(color);
+                changed = true;
+            }
+        }
+    });
+    changed
+}
+
+fn native_coloring_choice_ui(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut String,
+    choices: &[(&str, &str)],
+) -> bool {
+    let before = value.clone();
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let selected = choices
+            .iter()
+            .find(|(choice, _)| *choice == value)
+            .map(|(_, label)| *label)
+            .unwrap_or(value);
+        egui::ComboBox::from_id_salt(("native_coloring_choice", label))
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                for (choice, label) in choices {
+                    ui.selectable_value(value, (*choice).to_string(), *label);
+                }
+            });
+    });
+    *value != before
+}
+
+fn native_coloring_number_ui(
+    ui: &mut egui::Ui,
+    label: &str,
+    attrs: &mut std::collections::BTreeMap<String, String>,
+    name: &str,
+    fallback: f64,
+    speed: f64,
+) -> bool {
+    let mut value = attrs
+        .get(name)
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(fallback);
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        if ui
+            .add(egui::DragValue::new(&mut value).speed(speed))
+            .changed()
+        {
+            attrs.insert(name.to_string(), format!("{value}"));
+            changed = true;
+        }
+    });
+    changed
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3868,6 +3937,7 @@ impl GuiApplication {
             force_open_all_panels: false,
             coloring_start_hue: 240.0,
             coloring_end_hue: 0.0,
+            coloring_paint_selected: None,
             selected_renderer: None,
             snapshot: RenderSceneSnapshot::empty(),
             snapshot_revision: 0,
@@ -9468,7 +9538,7 @@ impl GuiApplication {
         }
     }
 
-    /// Coloring section (deepened in M2 with per-type decks).
+    /// Coloring section: target selector, coloring menu, and per-type editing deck.
     fn coloring_section(&mut self, ui: &mut egui::Ui) {
         let objects = self.state.active_object_summaries();
         if objects.is_empty() {
@@ -9476,7 +9546,6 @@ impl GuiApplication {
             return;
         }
 
-        // Molecule selector (the Coloring panel applies object-level coloring).
         let mut selected = self
             .molstruct_object
             .filter(|uid| objects.iter().any(|object| object.uid == *uid))
@@ -9486,72 +9555,369 @@ impl GuiApplication {
             .find(|object| Some(object.uid) == selected)
             .map(|object| object.name.clone())
             .unwrap_or_default();
-        egui::ComboBox::from_id_salt("coloring-molecule")
-            .selected_text(name)
-            .show_ui(ui, |ui| {
-                for object in &objects {
-                    ui.selectable_value(&mut selected, Some(object.uid), &object.name);
+        let mut requested_mode = None;
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("coloring-molecule")
+                .selected_text(name)
+                .show_ui(ui, |ui| {
+                    for object in &objects {
+                        ui.selectable_value(&mut selected, Some(object.uid), &object.name);
+                    }
+                });
+            ui.menu_button("▾", |ui| {
+                for (label, mode) in [
+                    ("Paint coloring", ColoringMode::Paint),
+                    ("Solid coloring", ColoringMode::Solid),
+                    ("CPK coloring", ColoringMode::Cpk),
+                    ("Bfac/Occ coloring", ColoringMode::Bfac),
+                    ("Rainbow coloring", ColoringMode::Rainbow),
+                ] {
+                    if ui.button(label).clicked() {
+                        requested_mode = Some(mode);
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                if ui.button("Reset to default style").clicked() {
+                    requested_mode = Some(ColoringMode::Element);
+                    ui.close();
                 }
             });
+        });
         self.molstruct_object = selected;
         let Some(object_uid) = selected else {
             return;
         };
 
-        // Reflect the molecule's live object-coloring scheme in the dropdown.
-        let mut mode = match self.state.object_coloring_type(object_uid).as_deref() {
+        if let Some(mode) = requested_mode {
+            self.coloring_paint_selected = None;
+            self.apply_object_coloring(object_uid, mode);
+            return;
+        }
+
+        let (coloring_type, mut attrs, mut paint_entries, mut default_color) = {
+            let Some(object) = self.state.scene_manager().object(object_uid) else {
+                return;
+            };
+            (
+                object.coloring_type().map(str::to_string),
+                object.coloring_attrs().clone(),
+                object.paint_coloring().to_vec(),
+                object.mol().default_color().script_string(),
+            )
+        };
+        let mode = match coloring_type.as_deref() {
+            Some("PaintColoring") => ColoringMode::Paint,
+            Some("SolidColoring") => ColoringMode::Solid,
+            Some("CPKColoring") => ColoringMode::Cpk,
             Some("RainbowColoring") => ColoringMode::Rainbow,
             Some("BfacColoring") => ColoringMode::Bfac,
+            Some("ScriptColoring") => ColoringMode::Script,
             _ => ColoringMode::Element,
         };
-        let before = mode;
-        egui::ComboBox::from_id_salt("coloring-type")
-            .selected_text(match mode {
-                ColoringMode::Element => "Element (CPK)",
-                ColoringMode::Rainbow => "Rainbow",
-                ColoringMode::Bfac => "B-factor",
-            })
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut mode, ColoringMode::Element, "Element (CPK)");
-                ui.selectable_value(&mut mode, ColoringMode::Rainbow, "Rainbow");
-                ui.selectable_value(&mut mode, ColoringMode::Bfac, "B-factor");
-            });
+        let mut changed = false;
 
-        // Rainbow exposes its hue endpoints (the XUL Rainbow deck's Start H / End H).
-        let mut params_changed = false;
-        if mode == ColoringMode::Rainbow {
-            ui.horizontal(|ui| {
-                ui.label("Start H");
-                params_changed |= ui
-                    .add(egui::Slider::new(&mut self.coloring_start_hue, 0.0..=360.0).suffix("°"))
+        match mode {
+            ColoringMode::Element => {
+                ui.weak("The target inherits its default coloring.");
+            }
+            ColoringMode::Paint => {
+                changed |= self.object_paint_coloring_ui(ui, &mut paint_entries);
+            }
+            ColoringMode::Solid => {
+                changed |= native_coloring_color_ui(ui, "Default color", &mut default_color);
+            }
+            ColoringMode::Cpk => {
+                for (name, label, fallback) in [
+                    ("col_H", "Hydrogen", "#ffffff"),
+                    ("col_C", "Carbon", "$molcol"),
+                    ("col_N", "Nitrogen", "#0000ff"),
+                    ("col_O", "Oxygen", "#ff0000"),
+                    ("col_P", "Phosphorus", "#ffff00"),
+                    ("col_S", "Sulfur", "#00ff00"),
+                    ("col_X", "Other", "#808080"),
+                ] {
+                    let value = attrs
+                        .entry(name.to_string())
+                        .or_insert_with(|| fallback.to_string());
+                    changed |= native_coloring_color_ui(ui, label, value);
+                }
+            }
+            ColoringMode::Rainbow => {
+                changed |= native_coloring_choice_ui(
+                    ui,
+                    "Mode",
+                    attrs
+                        .entry("mode".to_string())
+                        .or_insert_with(|| "mol".to_string()),
+                    &[("mol", "Molecule"), ("chain", "Chain")],
+                );
+                changed |= native_coloring_choice_ui(
+                    ui,
+                    "Increment",
+                    attrs
+                        .entry("incr_mode".to_string())
+                        .or_insert_with(|| "resid".to_string()),
+                    &[
+                        ("chain", "Chain"),
+                        ("resid", "Residue"),
+                        ("protss", "Secondary structure"),
+                    ],
+                );
+                changed |=
+                    native_coloring_number_ui(ui, "Start hue", &mut attrs, "start_hue", 240.0, 1.0);
+                changed |=
+                    native_coloring_number_ui(ui, "End hue", &mut attrs, "end_hue", 0.0, 1.0);
+                for (name, label) in [("sat", "Saturation %"), ("bri", "Brightness %")] {
+                    let mut percent = attrs
+                        .get(name)
+                        .and_then(|value| value.parse::<f64>().ok())
+                        .unwrap_or(1.0)
+                        * 100.0;
+                    ui.horizontal(|ui| {
+                        ui.label(label);
+                        if ui
+                            .add(egui::DragValue::new(&mut percent).range(0.0..=100.0))
+                            .changed()
+                        {
+                            attrs.insert(name.to_string(), format!("{}", percent / 100.0));
+                            changed = true;
+                        }
+                    });
+                }
+            }
+            ColoringMode::Bfac => {
+                changed |= native_coloring_choice_ui(
+                    ui,
+                    "Source",
+                    attrs
+                        .entry("mode".to_string())
+                        .or_insert_with(|| "bfac".to_string()),
+                    &[
+                        ("bfac", "B-factor"),
+                        ("occ", "Occupancy"),
+                        ("center", "Distance from center"),
+                    ],
+                );
+                changed |= native_coloring_choice_ui(
+                    ui,
+                    "Auto range",
+                    attrs
+                        .entry("auto".to_string())
+                        .or_insert_with(|| "rend".to_string()),
+                    &[("none", "None"), ("mol", "Molecule"), ("rend", "Renderer")],
+                );
+                for (name, label, fallback) in [
+                    ("lowcol", "Low color", "#0000ff"),
+                    ("highcol", "High color", "#ff0000"),
+                ] {
+                    let value = attrs
+                        .entry(name.to_string())
+                        .or_insert_with(|| fallback.to_string());
+                    changed |= native_coloring_color_ui(ui, label, value);
+                }
+                changed |=
+                    native_coloring_number_ui(ui, "Low value", &mut attrs, "lowpar", -2.0, 0.1);
+                changed |=
+                    native_coloring_number_ui(ui, "High value", &mut attrs, "highpar", 2.0, 0.1);
+            }
+            ColoringMode::Script => {
+                ui.label("Script coloring");
+                changed |= ui
+                    .add_sized(
+                        [ui.available_width(), 160.0],
+                        egui::TextEdit::multiline(
+                            attrs
+                                .entry("script".to_string())
+                                .or_insert_with(String::new),
+                        )
+                        .font(egui::TextStyle::Monospace),
+                    )
                     .changed();
-            });
-            ui.horizontal(|ui| {
-                ui.label("End H");
-                params_changed |= ui
-                    .add(egui::Slider::new(&mut self.coloring_end_hue, 0.0..=360.0).suffix("°"))
-                    .changed();
-            });
-        } else if mode == ColoringMode::Bfac {
-            ui.weak("Blue (low) → red (high), auto-scaled to the molecule.");
-        } else {
-            ui.weak("Per-element CPK colours (carbon = molecule colour).");
+            }
         }
 
-        if mode != before || params_changed {
-            self.apply_object_coloring(object_uid, mode);
+        if changed {
+            let default_color = (mode == ColoringMode::Solid).then_some(default_color);
+            self.commit_object_coloring_details(
+                object_uid,
+                coloring_type,
+                attrs,
+                paint_entries,
+                default_color,
+            );
         }
+    }
+
+    fn object_paint_coloring_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        paint_entries: &mut Vec<(String, String)>,
+    ) -> bool {
+        if self
+            .coloring_paint_selected
+            .is_some_and(|index| index >= paint_entries.len())
+        {
+            self.coloring_paint_selected = paint_entries.len().checked_sub(1);
+        }
+        egui::ScrollArea::vertical()
+            .id_salt("native_coloring_paint_list")
+            .max_height(140.0)
+            .show(ui, |ui| {
+                for (index, (selection, color)) in paint_entries.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if let Some(swatch) = native_style_color(color) {
+                            ui.colored_label(swatch, "■");
+                        }
+                        if ui
+                            .selectable_label(
+                                self.coloring_paint_selected == Some(index),
+                                selection,
+                            )
+                            .clicked()
+                        {
+                            self.coloring_paint_selected = Some(index);
+                        }
+                    });
+                }
+            });
+
+        let mut changed = false;
+        if let Some(index) = self.coloring_paint_selected {
+            if let Some((selection, color)) = paint_entries.get_mut(index) {
+                ui.horizontal(|ui| {
+                    ui.label("Selection");
+                    changed |= ui.text_edit_singleline(selection).changed();
+                });
+                changed |= native_coloring_color_ui(ui, "Color", color);
+            }
+        }
+
+        let mut add = false;
+        let mut delete = false;
+        let mut clear = false;
+        let mut move_up = false;
+        let mut move_down = false;
+        ui.horizontal(|ui| {
+            add = ui
+                .button("＋")
+                .on_hover_text("Add before selected")
+                .clicked();
+            delete = ui
+                .add_enabled(
+                    self.coloring_paint_selected.is_some(),
+                    egui::Button::new("−"),
+                )
+                .on_hover_text("Delete selected")
+                .clicked();
+            clear = ui
+                .add_enabled(!paint_entries.is_empty(), egui::Button::new("×"))
+                .on_hover_text("Delete all")
+                .clicked();
+            move_up = ui
+                .add_enabled(
+                    self.coloring_paint_selected.is_some_and(|index| index > 0),
+                    egui::Button::new("↑"),
+                )
+                .on_hover_text("Move up")
+                .clicked();
+            move_down = ui
+                .add_enabled(
+                    self.coloring_paint_selected
+                        .is_some_and(|index| index + 1 < paint_entries.len()),
+                    egui::Button::new("↓"),
+                )
+                .on_hover_text("Move down")
+                .clicked();
+        });
+        if add {
+            let index = self.coloring_paint_selected.unwrap_or(paint_entries.len());
+            let selection = self.selection_text.trim();
+            paint_entries.insert(
+                index,
+                (
+                    if selection.is_empty() { "*" } else { selection }.to_string(),
+                    "#ffffff".to_string(),
+                ),
+            );
+            self.coloring_paint_selected = Some(index);
+            changed = true;
+        } else if delete {
+            if let Some(index) = self.coloring_paint_selected {
+                paint_entries.remove(index);
+                self.coloring_paint_selected = paint_entries
+                    .len()
+                    .checked_sub(1)
+                    .map(|last| index.min(last));
+                changed = true;
+            }
+        } else if clear {
+            paint_entries.clear();
+            self.coloring_paint_selected = None;
+            changed = true;
+        } else if move_up {
+            if let Some(index) = self.coloring_paint_selected {
+                paint_entries.swap(index - 1, index);
+                self.coloring_paint_selected = Some(index - 1);
+                changed = true;
+            }
+        } else if move_down {
+            if let Some(index) = self.coloring_paint_selected {
+                paint_entries.swap(index, index + 1);
+                self.coloring_paint_selected = Some(index + 1);
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Push the chosen object-coloring scheme into the model and re-render. The
     /// snapshot's object-coloring cascade (`molecule_render_snapshot`) recolours each
     /// carbon atom (and the ribbon backbone) by the scheme — the C++ `$molcol` path.
     fn apply_object_coloring(&mut self, object_uid: cuemol_core::Uid, mode: ColoringMode) {
-        let (coloring_type, attrs) = match mode {
-            ColoringMode::Element => (None, std::collections::BTreeMap::new()),
+        let (coloring_type, attrs, paint_entries, default_color) = match mode {
+            ColoringMode::Element => (None, Default::default(), Vec::new(), None),
+            ColoringMode::Paint => (
+                Some("PaintColoring".to_string()),
+                Default::default(),
+                vec![
+                    ("sheet".to_string(), "#4682b4".to_string()),
+                    ("helix".to_string(), "#f0e68c".to_string()),
+                    ("nucleic".to_string(), "#ffff00".to_string()),
+                    ("*".to_string(), "#fffaf0".to_string()),
+                ],
+                None,
+            ),
+            ColoringMode::Solid => (
+                Some("SolidColoring".to_string()),
+                Default::default(),
+                Vec::new(),
+                self.state
+                    .scene_manager()
+                    .object(object_uid)
+                    .map(|object| object.mol().default_color().script_string()),
+            ),
+            ColoringMode::Cpk => (
+                Some("CPKColoring".to_string()),
+                [
+                    ("col_H", "#ffffff"),
+                    ("col_C", "$molcol"),
+                    ("col_N", "#0000ff"),
+                    ("col_O", "#ff0000"),
+                    ("col_P", "#ffff00"),
+                    ("col_S", "#00ff00"),
+                    ("col_X", "#808080"),
+                ]
+                .into_iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect(),
+                Vec::new(),
+                None,
+            ),
             ColoringMode::Rainbow => {
                 let mut attrs = std::collections::BTreeMap::new();
                 attrs.insert("mode".to_string(), "mol".to_string());
+                attrs.insert("incr_mode".to_string(), "resid".to_string());
                 attrs.insert(
                     "start_hue".to_string(),
                     format!("{:.0}", self.coloring_start_hue),
@@ -9562,20 +9928,62 @@ impl GuiApplication {
                 );
                 attrs.insert("sat".to_string(), "1".to_string());
                 attrs.insert("bri".to_string(), "1".to_string());
-                (Some("RainbowColoring".to_string()), attrs)
+                (Some("RainbowColoring".to_string()), attrs, Vec::new(), None)
             }
             ColoringMode::Bfac => (
                 Some("BfacColoring".to_string()),
-                std::collections::BTreeMap::new(),
+                [
+                    ("mode", "bfac"),
+                    ("auto", "rend"),
+                    ("lowcol", "#0000ff"),
+                    ("highcol", "#ff0000"),
+                    ("lowpar", "-2"),
+                    ("highpar", "2"),
+                ]
+                .into_iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect(),
+                Vec::new(),
+                None,
+            ),
+            ColoringMode::Script => (
+                Some("ScriptColoring".to_string()),
+                [("script".to_string(), String::new())]
+                    .into_iter()
+                    .collect(),
+                Vec::new(),
+                None,
             ),
         };
-        if let Err(error) = self
-            .state
-            .set_object_coloring(object_uid, coloring_type, attrs)
-        {
+        self.commit_object_coloring_details(
+            object_uid,
+            coloring_type,
+            attrs,
+            paint_entries,
+            default_color,
+        );
+    }
+
+    fn commit_object_coloring_details(
+        &mut self,
+        object_uid: cuemol_core::Uid,
+        coloring_type: Option<String>,
+        attrs: std::collections::BTreeMap<String, String>,
+        paint_entries: Vec<(String, String)>,
+        default_color: Option<String>,
+    ) {
+        let undo = self.capture_undo();
+        if let Err(error) = self.state.set_object_coloring_details(
+            object_uid,
+            coloring_type,
+            attrs,
+            paint_entries,
+            default_color,
+        ) {
             self.set_status(format!("Coloring failed: {error}"));
             return;
         }
+        self.push_undo_snapshot(undo);
         self.rebuild_snapshot();
         self.set_status("Applied coloring");
     }
@@ -34636,6 +35044,61 @@ mod tests {
             rainbow_colors > element_colors + 10,
             "rainbow must spread carbon colours into a gradient: \
              element={element_colors} rainbow={rainbow_colors}"
+        );
+    }
+
+    #[test]
+    fn native_object_coloring_modes_use_reference_defaults_and_undo() {
+        let Some(pdb) = reference_pdb_path() else {
+            return;
+        };
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.open_path = pdb.to_string_lossy().to_string();
+        app.open_current_path(&mut camera);
+        let object_uid = app.state.active_object_summaries()[0].uid;
+
+        app.apply_object_coloring(object_uid, ColoringMode::Paint);
+        {
+            let object = app.state.scene_manager().object(object_uid).unwrap();
+            assert_eq!(object.coloring_type(), Some("PaintColoring"));
+            assert_eq!(
+                object.paint_coloring(),
+                &[
+                    ("sheet".to_string(), "#4682b4".to_string()),
+                    ("helix".to_string(), "#f0e68c".to_string()),
+                    ("nucleic".to_string(), "#ffff00".to_string()),
+                    ("*".to_string(), "#fffaf0".to_string()),
+                ]
+            );
+        }
+
+        app.apply_object_coloring(object_uid, ColoringMode::Cpk);
+        {
+            let object = app.state.scene_manager().object(object_uid).unwrap();
+            assert_eq!(object.coloring_type(), Some("CPKColoring"));
+            assert_eq!(
+                object.coloring_attrs().get("col_C").map(String::as_str),
+                Some("$molcol")
+            );
+            assert!(object.paint_coloring().is_empty());
+        }
+        app.undo(&mut camera);
+        assert_eq!(
+            app.state
+                .scene_manager()
+                .object(object_uid)
+                .unwrap()
+                .coloring_type(),
+            Some("PaintColoring")
+        );
+
+        app.apply_object_coloring(object_uid, ColoringMode::Bfac);
+        let object = app.state.scene_manager().object(object_uid).unwrap();
+        assert_eq!(object.coloring_type(), Some("BfacColoring"));
+        assert_eq!(
+            object.coloring_attrs().get("auto").map(String::as_str),
+            Some("rend")
         );
     }
 
