@@ -15556,54 +15556,56 @@ impl GuiApplication {
             .resizable(true)
             .default_width(460.0)
             .show(ctx, |ui| {
-                ui.strong(&draft.type_name);
+                let _ = ui.selectable_label(true, "Common");
                 ui.separator();
+                ui.strong("Common settings");
                 egui::Grid::new("animation_properties_general")
                     .num_columns(2)
                     .spacing([12.0, 6.0])
                     .show(ui, |ui| {
                         ui.label("Name:");
-                        ui.text_edit_singleline(&mut draft.name);
-                        ui.end_row();
-                        ui.label("Disabled:");
-                        ui.checkbox(&mut draft.disabled, "");
+                        ui.horizontal(|ui| {
+                            ui.text_edit_singleline(&mut draft.name);
+                            ui.checkbox(&mut draft.disabled, "Disabled");
+                        });
                         ui.end_row();
                         ui.label("Start time:");
-                        ui.add(
-                            egui::DragValue::new(&mut draft.start)
-                                .range(-86_400.0..=86_400.0)
-                                .speed(0.1)
-                                .custom_formatter(|value, _| {
-                                    format_native_animation_time(time_from_seconds(value))
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut draft.start)
+                                    .range(-86_400.0..=86_400.0)
+                                    .speed(0.1)
+                                    .custom_formatter(|value, _| {
+                                        format_native_animation_time(time_from_seconds(value))
+                                    })
+                                    .custom_parser(parse_native_animation_time),
+                            );
+                            ui.label("Relative to:");
+                            egui::ComboBox::from_id_salt("animation_property_time_reference")
+                                .selected_text(if draft.time_ref_name.is_empty() {
+                                    "(absolute)"
+                                } else {
+                                    reference_options
+                                        .iter()
+                                        .find(|(name, _)| name == &draft.time_ref_name)
+                                        .map(|(_, label)| label.as_str())
+                                        .unwrap_or(&draft.time_ref_name)
                                 })
-                                .custom_parser(parse_native_animation_time),
-                        );
-                        ui.end_row();
-                        ui.label("Relative to:");
-                        egui::ComboBox::from_id_salt("animation_property_time_reference")
-                            .selected_text(if draft.time_ref_name.is_empty() {
-                                "(absolute)"
-                            } else {
-                                reference_options
-                                    .iter()
-                                    .find(|(name, _)| name == &draft.time_ref_name)
-                                    .map(|(_, label)| label.as_str())
-                                    .unwrap_or(&draft.time_ref_name)
-                            })
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut draft.time_ref_name,
-                                    String::new(),
-                                    "(absolute)",
-                                );
-                                for (name, label) in &reference_options {
+                                .show_ui(ui, |ui| {
                                     ui.selectable_value(
                                         &mut draft.time_ref_name,
-                                        name.clone(),
-                                        label,
+                                        String::new(),
+                                        "(absolute)",
                                     );
-                                }
-                            });
+                                    for (name, label) in &reference_options {
+                                        ui.selectable_value(
+                                            &mut draft.time_ref_name,
+                                            name.clone(),
+                                            label,
+                                        );
+                                    }
+                                });
+                        });
                         ui.end_row();
                         ui.label("Duration:");
                         ui.add(
@@ -15630,7 +15632,7 @@ impl GuiApplication {
                 ui.separator();
                 match draft.type_name.as_str() {
                     "SimpleSpin" => {
-                        ui.heading("SimpleSpin");
+                        ui.strong("SimpleSpin settings");
                         if let Some(angle) = &mut draft.angle {
                             ui.horizontal(|ui| {
                                 ui.label("Rotation angle:");
@@ -15675,7 +15677,7 @@ impl GuiApplication {
                         }
                     }
                     "CamMotion" => {
-                        ui.heading("CamMotion");
+                        ui.strong("CamMotion settings");
                         if let Some(target) = &mut draft.target_camera {
                             ui.horizontal(|ui| {
                                 ui.label("Target camera:");
@@ -15693,19 +15695,27 @@ impl GuiApplication {
                                     });
                             });
                         }
-                        for (label, value) in [
-                            ("Ignore center", &mut draft.ignore_center),
-                            ("Ignore rotation", &mut draft.ignore_rotate),
-                            ("Ignore zoom", &mut draft.ignore_zoom),
-                            ("Ignore slab", &mut draft.ignore_slab),
-                        ] {
-                            if let Some(value) = value {
-                                ui.checkbox(value, label);
-                            }
-                        }
+                        egui::Grid::new("animation_camera_ignore_flags")
+                            .num_columns(2)
+                            .show(ui, |ui| {
+                                if let Some(value) = &mut draft.ignore_rotate {
+                                    ui.checkbox(value, "Ignore rotation");
+                                }
+                                if let Some(value) = &mut draft.ignore_center {
+                                    ui.checkbox(value, "Ignore center");
+                                }
+                                ui.end_row();
+                                if let Some(value) = &mut draft.ignore_zoom {
+                                    ui.checkbox(value, "Ignore zoom");
+                                }
+                                if let Some(value) = &mut draft.ignore_slab {
+                                    ui.checkbox(value, "Ignore slab");
+                                }
+                                ui.end_row();
+                            });
                     }
                     "ShowHideAnim" => {
-                        ui.heading("Show / Hide");
+                        ui.strong("Show/Hide settings");
                         animation_renderer_names_ui(ui, &mut draft.renderer_names);
                         if let Some(value) = &mut draft.hide {
                             ui.horizontal(|ui| {
@@ -15724,12 +15734,12 @@ impl GuiApplication {
                         if let Some(value) = &mut draft.target_alpha {
                             ui.horizontal(|ui| {
                                 ui.label("Target opacity:");
-                                ui.add(egui::DragValue::new(value).range(0.0..=1.0).speed(0.05));
+                                ui.add(egui::DragValue::new(value).range(0.0..=1.0).speed(0.1));
                             });
                         }
                     }
                     "SlideInOutAnim" => {
-                        ui.heading("SlideIn / SlideOut");
+                        ui.strong("Slide in/out settings");
                         animation_renderer_names_ui(ui, &mut draft.renderer_names);
                         if let Some(value) = &mut draft.direction {
                             ui.horizontal(|ui| {
@@ -15791,7 +15801,7 @@ impl GuiApplication {
                         }
                     }
                     "MolAnim" => {
-                        ui.heading("MolAnim");
+                        ui.strong("MolAnim settings");
                         if let Some(target) = &mut draft.molecule_name {
                             ui.horizontal(|ui| {
                                 ui.label("Target MorphMol:");
@@ -15817,7 +15827,7 @@ impl GuiApplication {
                         );
                     }
                     "RealPropAnim" => {
-                        ui.heading("RealPropAnim");
+                        ui.strong("RealPropAnim settings");
                         animation_renderer_names_ui(ui, &mut draft.renderer_names);
                         animation_optional_text_ui(ui, "Property:", &mut draft.property_name);
                         animation_value_range_ui(
@@ -15828,14 +15838,12 @@ impl GuiApplication {
                         );
                     }
                     "RendXformAnim" => {
-                        ui.heading("RendXformAnim");
+                        ui.strong("RendXformAnim settings");
                         animation_renderer_names_ui(ui, &mut draft.renderer_names);
                         animation_position_ui(ui, "Start position:", &mut draft.start_position);
                         animation_position_ui(ui, "End position:", &mut draft.end_position);
                     }
-                    _ => {
-                        ui.weak("This animation type has no additional properties.");
-                    }
+                    _ => {}
                 }
                 ui.separator();
                 ui.horizontal(|ui| {

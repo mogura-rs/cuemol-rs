@@ -7349,6 +7349,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       dialogContent.append(pages.editor);
       const [commonPage] = pages.panes;
       const commonGroup = dialogGroup("Common settings", commonPage);
+      commonGroup.classList.add("animation-common-settings");
       const typeGroupTitles = {
         SimpleSpin: "SimpleSpin settings",
         CamMotion: "CamMotion settings",
@@ -7363,6 +7364,8 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         : commonPage;
       const name = dialogField("Name", object.name, "text", commonGroup);
       const disabled = dialogCheckbox("Disabled", object.disabled, commonGroup);
+      name.parentElement.classList.add("animation-name-field");
+      disabled.parentElement.classList.add("animation-disabled-field");
       const referenceOptions = snapshot.animationObjects
         .filter((item) => (pending || item.index !== object.index) && item.name)
         .map((item) => [item.name, `${item.name} (${item.typeName})`]);
@@ -7384,6 +7387,8 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         object.timeRefName || "",
         commonGroup,
       );
+      start.parentElement.classList.add("animation-start-field");
+      timeReference.parentElement.classList.add("animation-reference-field");
       const duration = dialogField(
         "Duration",
         formatAnimationObjectTime(object.duration),
@@ -7445,6 +7450,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
 
       const optional = {};
       if (object.typeName === "SimpleSpin") {
+        typePage.classList.add("animation-spin-settings");
         const angle = dialogField("Rotation angle", String(object.angle), "number", typePage);
         angle.min = "0";
         angle.max = "360";
@@ -7471,6 +7477,11 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         const axisX = dialogField("Spin axis X", String(axis[0]), "number", typePage);
         const axisY = dialogField("Spin axis Y", String(axis[1]), "number", typePage);
         const axisZ = dialogField("Spin axis Z", String(axis[2]), "number", typePage);
+        angle.parentElement.classList.add("animation-angle-field");
+        axisMode.parentElement.classList.add("animation-axis-mode-field");
+        for (const axisField of [axisX, axisY, axisZ]) {
+          axisField.parentElement.classList.add("animation-axis-component-field");
+        }
         const applyAxisMode = () => {
           const presets = {
             xaxis: [1, 0, 0],
@@ -7498,6 +7509,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           applyAxisMode();
         };
       } else if (object.typeName === "CamMotion") {
+        typePage.classList.add("animation-camera-settings");
         const cameras = snapshot.cameras
           .filter((camera) => camera.sceneUid === snapshot.activeSceneUid)
           .map((camera) => [camera.name, camera.name]);
@@ -7550,7 +7562,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         );
         targetAlpha.min = "0";
         targetAlpha.max = "1";
-        targetAlpha.step = "0.05";
+        targetAlpha.step = "0.1";
         optional.read = () => ({
           rendererNames: readTargets(),
           hide: showHide.value === "hide",
@@ -7563,6 +7575,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           targetAlpha.value = String(defaults.targetAlpha);
         };
       } else if (object.typeName === "SlideInOutAnim") {
+        typePage.classList.add("animation-slide-settings");
         const readTargets = rendererTargets(object.rendererNames);
         const direction = dialogField(
           "Direction angle",
@@ -7586,6 +7599,9 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
             : "0",
           typePage,
         );
+        direction.parentElement.classList.add("animation-direction-field");
+        directionPreset.parentElement.classList.add("animation-direction-preset-field");
+        directionPreset.setAttribute("aria-label", "Direction preset");
         directionPreset.addEventListener("change", () => {
           direction.value = directionPreset.value;
         });

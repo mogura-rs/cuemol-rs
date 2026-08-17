@@ -3001,6 +3001,86 @@ summary:focus-visible {
   font-weight: 600;
 }
 
+.animation-common-settings {
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.2fr);
+}
+
+.animation-common-settings > .dialog-field,
+.animation-common-settings > .dialog-check {
+  margin: 0;
+}
+
+.animation-common-settings > .dialog-field {
+  grid-column: 1 / -1;
+  grid-template-columns: 90px minmax(0, 1fr);
+}
+
+.animation-common-settings > .animation-name-field,
+.animation-common-settings > .animation-start-field {
+  grid-column: 1;
+}
+
+.animation-common-settings > .animation-disabled-field,
+.animation-common-settings > .animation-reference-field {
+  grid-column: 2;
+}
+
+.animation-common-settings > .animation-disabled-field {
+  align-self: center;
+}
+
+.animation-spin-settings {
+  grid-template-columns: minmax(0, 2fr) repeat(3, minmax(45px, 0.6fr));
+}
+
+.animation-spin-settings > .dialog-field {
+  margin: 0;
+}
+
+.animation-spin-settings > .animation-angle-field {
+  grid-column: 1 / -1;
+}
+
+.animation-spin-settings > .animation-axis-component-field {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.animation-spin-settings > .animation-axis-component-field > span,
+.animation-slide-settings > .animation-direction-preset-field > span {
+  display: none;
+}
+
+.animation-camera-settings {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.animation-camera-settings > .dialog-field {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.animation-camera-settings > .dialog-check {
+  margin: 0;
+}
+
+.animation-slide-settings {
+  grid-template-columns: minmax(0, 1fr) minmax(100px, 0.45fr);
+}
+
+.animation-slide-settings > .dialog-field {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.animation-slide-settings > .animation-direction-field {
+  grid-column: 1;
+}
+
+.animation-slide-settings > .animation-direction-preset-field {
+  grid-column: 2;
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .property-common-field {
   display: grid;
   grid-template-columns: 76px minmax(0, 1fr);

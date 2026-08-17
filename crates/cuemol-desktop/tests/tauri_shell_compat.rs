@@ -977,6 +977,12 @@ fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
     assert!(!TAURI_APP_RS.contains("animation_objects: Vec<AnimObject>"));
     assert!(JS.contains("workspacePropertyPage([\"Common\"])"));
     assert!(JS.contains("dialogGroup(\"Common settings\", commonPage)"));
+    assert!(JS.contains("commonGroup.classList.add(\"animation-common-settings\")"));
+    assert!(CSS.contains(".animation-camera-settings"));
+    assert!(CSS.contains("grid-template-columns: repeat(2, minmax(0, 1fr))"));
+    assert!(JS.contains("targetAlpha.step = \"0.1\""));
+    assert!(NATIVE_GUI_RS.contains("ui.selectable_label(true, \"Common\")"));
+    assert!(NATIVE_GUI_RS.contains("animation_camera_ignore_flags"));
     assert!(!JS.contains("workspacePropertyPage([\"Common settings\", object.typeName])"));
     for label in [
         "Relative to",
