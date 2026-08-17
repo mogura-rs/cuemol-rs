@@ -7422,6 +7422,27 @@ async function openNewStyleFlow() {
   return true;
 }
 
+async function deleteWorkspaceStyle(scene, style) {
+  if (!scene.active && !(await mutate("activate_scene", { sceneUid: scene.uid }))) {
+    return false;
+  }
+  const confirmed = await showConfirmationDialog({
+    title: "Delete Style",
+    message: `Delete style: ${style.name}`,
+    confirmLabel: "Delete",
+  });
+  if (!confirmed) return false;
+  const changed = await mutateWithoutViewport("destroy_style", {
+    sceneUid: style.sceneUid,
+    localIndex: style.localIndex,
+  });
+  if (!changed) return false;
+  selectedStyleIndex = null;
+  workspaceSelectionKind = "styleRoot";
+  renderShell();
+  return true;
+}
+
 function workspaceStyleContextItems(scene, style = null) {
   const activate = async () => {
     if (scene.active) return true;
@@ -7456,11 +7477,7 @@ function workspaceStyleContextItems(scene, style = null) {
     {
       label: "Delete",
       disabled: !style || style.localIndex === null,
-      action: () =>
-        mutateWithoutViewport("destroy_style", {
-          sceneUid: style.sceneUid,
-          localIndex: style.localIndex,
-        }),
+      action: () => deleteWorkspaceStyle(scene, style),
     },
     null,
     {
@@ -13065,13 +13082,8 @@ async function handleAction(action, depth = 0) {
         selectedStyle().localIndex !== null
       ) {
         const style = selectedStyle();
-        await mutate("destroy_style", {
-          sceneUid: style.sceneUid,
-          localIndex: style.localIndex,
-        });
-        selectedStyleIndex = null;
-        workspaceSelectionKind = "styleRoot";
-        renderShell();
+        const scene = snapshot.scenes.find((candidate) => candidate.active);
+        if (scene) await deleteWorkspaceStyle(scene, style);
         break;
       }
       if (workspaceSelectionKind === "camera" && selectedCamera()) {

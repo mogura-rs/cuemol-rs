@@ -1656,7 +1656,9 @@ fn tauri_workspace_exposes_reference_style_nodes_and_actions() {
     assert!(JS.contains("workspaceSelectionKind === \"styleRoot\""));
     assert!(JS.contains("workspaceSelectionKind === \"style\""));
     assert!(JS.contains("mutateWithoutViewport(\"create_style\""));
-    assert!(JS.contains("mutate(\"destroy_style\""));
+    assert!(JS.contains("async function deleteWorkspaceStyle(scene, style)"));
+    assert!(JS.contains("message: `Delete style: ${style.name}`"));
+    assert!(JS.contains("mutateWithoutViewport(\"destroy_style\""));
     assert!(JS.contains("invoke(\"get_style_properties\""));
     assert!(JS.contains("invoke(\"set_style_properties\""));
     assert!(JS.contains("async function rendererStyleCreateEditor(object, renderer)"));
@@ -1704,6 +1706,8 @@ fn tauri_workspace_exposes_reference_style_nodes_and_actions() {
     assert!(tauri_style_menu.contains("disabled: !style || style.localIndex === null"));
     assert!(tauri_style_menu.contains("disabled: !workspaceStyleClipboardName"));
     assert!(!tauri_style_menu.contains("globalThis.prompt"));
+    assert!(NATIVE_GUI_RS.contains("fn style_delete_dialog("));
+    assert!(NATIVE_GUI_RS.contains("Delete style: {}"));
 
     let native_style_menu = NATIVE_GUI_RS
         .split("let root_selection = WorkspaceAuxSelection::StyleRoot")

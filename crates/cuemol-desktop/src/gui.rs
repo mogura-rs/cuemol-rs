@@ -795,6 +795,13 @@ struct NativeCameraDeleteDraft {
 }
 
 #[derive(Debug, Clone)]
+struct NativeStyleDeleteDraft {
+    scene_uid: cuemol_core::Uid,
+    local_index: usize,
+    name: String,
+}
+
+#[derive(Debug, Clone)]
 struct NativeCloseTabDraft {
     scene_name: String,
 }
@@ -900,6 +907,7 @@ struct GuiApplication {
     new_camera_draft: Option<NativeNewCameraDraft>,
     camera_rename_draft: Option<NativeCameraRenameDraft>,
     camera_delete_draft: Option<NativeCameraDeleteDraft>,
+    style_delete_draft: Option<NativeStyleDeleteDraft>,
     close_tab_draft: Option<NativeCloseTabDraft>,
     close_after_scene_save: bool,
     reload_scene_draft: Option<NativeReloadSceneDraft>,
@@ -3234,6 +3242,7 @@ impl GuiApplication {
             new_camera_draft: None,
             camera_rename_draft: None,
             camera_delete_draft: None,
+            style_delete_draft: None,
             close_tab_draft: None,
             close_after_scene_save: false,
             reload_scene_draft: None,
@@ -13035,6 +13044,7 @@ impl GuiApplication {
         self.new_camera_dialog(ctx, camera);
         self.camera_rename_dialog(ctx);
         self.camera_delete_dialog(ctx);
+        self.style_delete_dialog(ctx);
         self.close_tab_dialog(ctx, camera);
         self.reload_scene_dialog(ctx, camera);
         self.atom_intr_edit_dialog(ctx);
@@ -19670,6 +19680,49 @@ impl GuiApplication {
         }
     }
 
+    fn style_delete_dialog(&mut self, ctx: &egui::Context) {
+        let Some(draft) = self.style_delete_draft.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Window::new("Delete Style")
+            .default_width(360.0)
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(format!("Delete style: {}", draft.name));
+                ui.separator();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Delete").clicked() {
+                        confirm = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if confirm {
+            let style_index = self
+                .state
+                .style_summaries(draft.scene_uid)
+                .iter()
+                .position(|style| style.local_index == Some(draft.local_index));
+            if let Some(style_index) = style_index {
+                self.delete_aux_selection(WorkspaceAuxSelection::Style {
+                    scene_uid: draft.scene_uid,
+                    style_index,
+                });
+            } else {
+                self.set_status("Style not found");
+            }
+        } else if open && !cancel {
+            self.style_delete_draft = Some(draft);
+        }
+    }
+
     fn close_tab_dialog(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         let Some(draft) = self.close_tab_draft.take() else {
             return;
@@ -21350,16 +21403,35 @@ impl GuiApplication {
     }
 
     fn request_delete_aux_selection(&mut self, selection: WorkspaceAuxSelection) {
-        if let WorkspaceAuxSelection::Camera { .. } = selection {
-            let Some(summary) = self.camera_summary_for_selection(selection) else {
-                self.set_status("Camera not found");
+        match selection {
+            WorkspaceAuxSelection::Camera { .. } => {
+                let Some(summary) = self.camera_summary_for_selection(selection) else {
+                    self.set_status("Camera not found");
+                    return;
+                };
+                self.camera_delete_draft = Some(NativeCameraDeleteDraft {
+                    scene_uid: summary.scene_uid,
+                    name: summary.name,
+                });
                 return;
-            };
-            self.camera_delete_draft = Some(NativeCameraDeleteDraft {
-                scene_uid: summary.scene_uid,
-                name: summary.name,
-            });
-            return;
+            }
+            WorkspaceAuxSelection::Style { .. } => {
+                let Some(summary) = self.style_summary_for_selection(selection) else {
+                    self.set_status("Style not found");
+                    return;
+                };
+                let Some(local_index) = summary.local_index else {
+                    self.set_status("Global styles cannot be deleted");
+                    return;
+                };
+                self.style_delete_draft = Some(NativeStyleDeleteDraft {
+                    scene_uid: summary.scene_uid,
+                    local_index,
+                    name: summary.name,
+                });
+                return;
+            }
+            _ => {}
         }
         self.delete_aux_selection(selection);
     }
@@ -28287,6 +28359,11 @@ mod tests {
             .data
             .contains("Narrow"));
 
+        app.request_delete_aux_selection(selection);
+        let delete = app.style_delete_draft.take().unwrap();
+        assert_eq!(delete.scene_uid, scene_uid);
+        assert_eq!(delete.local_index, local_index);
+        assert_eq!(delete.name, "style_0");
         app.delete_aux_selection(selection);
         assert!(app
             .state
