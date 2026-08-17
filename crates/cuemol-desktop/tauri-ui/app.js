@@ -7747,11 +7747,64 @@ function workspaceAuxObjectContextItems(scene, kind, object) {
     if (snapshot.activeSceneUid === scene.uid) return true;
     return mutate("activate_scene", { sceneUid: scene.uid });
   };
-  const items = [
-    { label: object.name, disabled: true },
+  const noOp = () => {};
+  const around = [3, 5, 7, 10].map((radius) => ({
+    label: `${radius} Å`,
+    action: noOp,
+  }));
+  const items = [];
+  if (kind === "surface" && object.originalMolecule) {
+    items.push({
+      label: "Regenerate surface...",
+      action: async () => {
+        if (!(await activate())) return;
+        await mutate("regenerate_surface", { surfaceUid: object.uid });
+      },
+    });
+  }
+  items.push(
+    {
+      label: "Selection",
+      children: [
+        { label: "Select All", action: noOp },
+        { label: "Unselect", action: noOp },
+        { label: "Invert", action: noOp },
+        { label: "Toggle Sidechain", action: noOp },
+        { label: "Around Byresid", children: around },
+        { label: "Around", children: around },
+        null,
+        { label: "Protein", action: noOp },
+        { label: "Nucleic acid", action: noOp },
+        { label: "Water", action: noOp },
+        { label: "Ligand", action: noOp },
+        { label: "Sugar", action: noOp },
+        { label: "Hydrogen", action: noOp },
+      ],
+    },
     null,
     {
-      label: "New Renderer…",
+      label: "Paint",
+      children: workspacePaintMenuChildren(() => noOp),
+    },
+    null,
+    {
+      label: "Copy Object",
+      action: async () => {
+        if (!(await activate())) return;
+        await copyWorkspaceObject(object.uid);
+      },
+    },
+    {
+      label: "Paste Renderer",
+      disabled: !workspaceRendererClipboardAvailable,
+      action: async () => {
+        if (!(await activate())) return;
+        await pasteWorkspaceRenderers(object.uid);
+      },
+    },
+    null,
+    {
+      label: "New Renderer...",
       action: async () => {
         if (!(await activate())) return;
         if (isLightweight) {
@@ -7767,7 +7820,7 @@ function workspaceAuxObjectContextItems(scene, kind, object) {
       },
     },
     {
-      label: "New Group…",
+      label: "New Group...",
       action: async () => {
         if (!(await activate())) return;
         const used = new Set((object.renderers || []).map((renderer) => renderer.name));
@@ -7785,35 +7838,8 @@ function workspaceAuxObjectContextItems(scene, kind, object) {
         });
       },
     },
-    null,
     {
-      label: "Rename…",
-      action: async () => {
-        if (!(await activate())) return;
-        selectWorkspaceAuxItem(kind, object.uid);
-        beginWorkspaceInlineRename(kind, object.uid);
-      },
-    },
-    {
-      label: "Copy Object",
-      action: async () => {
-        if (!(await activate())) return;
-        await copyWorkspaceObject(object.uid);
-      },
-    },
-    ...(workspaceRendererClipboardAvailable
-      ? [
-          {
-            label: "Paste Renderer",
-            action: async () => {
-              if (!(await activate())) return;
-              await pasteWorkspaceRenderers(object.uid);
-            },
-          },
-        ]
-      : []),
-    {
-      label: "Save As…",
+      label: "Save As ...",
       action: async () => {
         if (!(await activate())) return;
         selectWorkspaceAuxItem(kind, object.uid);
@@ -7821,7 +7847,7 @@ function workspaceAuxObjectContextItems(scene, kind, object) {
       },
     },
     {
-      label: "Delete",
+      label: "Delete Object",
       action: () =>
         mutate("delete_workspace_item", {
           target: { kind, objectUid: object.uid, rendererUid: null },
@@ -7829,23 +7855,14 @@ function workspaceAuxObjectContextItems(scene, kind, object) {
     },
     null,
     {
-      label: "Properties…",
+      label: "Properties...",
       action: async () => {
         if (!(await activate())) return;
         selectWorkspaceAuxItem(kind, object.uid);
         showReferenceDialog("Object Properties");
       },
     },
-  ];
-  if (!isDensityMap && object.originalMolecule) {
-    items.splice(3, 0, {
-      label: "Regenerate surface…",
-      action: async () => {
-        if (!(await activate())) return;
-        await mutate("regenerate_surface", { surfaceUid: object.uid });
-      },
-    });
-  }
+  );
   return items;
 }
 

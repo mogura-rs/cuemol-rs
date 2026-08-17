@@ -6069,16 +6069,6 @@ impl GuiApplication {
         selection: WorkspaceAuxSelection,
         owner: NativePropertyObject,
     ) {
-        if ui.button("New Group...").clicked() {
-            self.activate_workspace_scene(scene_uid, camera);
-            self.open_renderer_group_dialog(owner);
-            ui.close();
-        }
-        if ui.button("New Renderer...").clicked() {
-            self.activate_workspace_scene(scene_uid, camera);
-            self.open_aux_renderer_dialog(selection);
-            ui.close();
-        }
         let can_regenerate = match selection {
             WorkspaceAuxSelection::Surface { surface_uid, .. } => self
                 .state
@@ -6091,6 +6081,38 @@ impl GuiApplication {
             self.regenerate_workspace_surface(selection);
             ui.close();
         }
+        ui.menu_button("Selection", |ui| {
+            for label in ["Select All", "Unselect", "Invert", "Toggle Sidechain"] {
+                if ui.button(label).clicked() {
+                    ui.close();
+                }
+            }
+            for label in ["Around Byresid", "Around"] {
+                ui.menu_button(label, |ui| {
+                    for radius in [3, 5, 7, 10] {
+                        if ui.button(format!("{radius} Å")).clicked() {
+                            ui.close();
+                        }
+                    }
+                });
+            }
+            ui.separator();
+            for label in [
+                "Protein",
+                "Nucleic acid",
+                "Water",
+                "Ligand",
+                "Sugar",
+                "Hydrogen",
+            ] {
+                if ui.button(label).clicked() {
+                    ui.close();
+                }
+            }
+        });
+        ui.separator();
+        workspace_paint_menu(ui, true, |_| {});
+        ui.separator();
         if ui.button("Copy Object").clicked() {
             self.copy_workspace_object_to_clipboard(owner.uid());
             ui.close();
@@ -6105,7 +6127,18 @@ impl GuiApplication {
             self.paste_workspace_renderer_clipboard(scene_uid, owner.uid(), None);
             ui.close();
         }
-        if ui.button("Save As...").clicked() {
+        ui.separator();
+        if ui.button("New Renderer...").clicked() {
+            self.activate_workspace_scene(scene_uid, camera);
+            self.open_aux_renderer_dialog(selection);
+            ui.close();
+        }
+        if ui.button("New Group...").clicked() {
+            self.activate_workspace_scene(scene_uid, camera);
+            self.open_renderer_group_dialog(owner);
+            ui.close();
+        }
+        if ui.button("Save As ...").clicked() {
             self.activate_workspace_scene(scene_uid, camera);
             self.selected_object = None;
             self.selected_renderer = None;

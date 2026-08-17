@@ -1204,7 +1204,7 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(NATIVE_GUI_RS.contains("ui.button(\"New Style...\")"));
     assert!(NATIVE_GUI_RS.contains("egui::Window::new(\"New Style\")"));
     assert!(NATIVE_GUI_RS.contains("ui.label(\"Name for new style:\")"));
-    assert!(JS.contains("label: \"New Group…\""));
+    assert!(JS.contains("label: \"New Group...\""));
     assert!(JS.contains("title: \"New Renderer Group\""));
     assert!(JS.contains("label: \"Name for new group:\""));
     assert!(JS.contains("defaultValue: `group${serial}`"));
@@ -1219,11 +1219,11 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("role\", \"menuitemcheckbox"));
     assert!(JS.contains("workspaceRendererClipboardAvailable"));
     assert!(JS.contains("Paste Renderer"));
-    assert!(JS.contains("label: \"Save As…\""));
+    assert!(JS.contains("label: \"Save As ...\""));
     assert!(JS.contains("label: \"Delete\""));
     assert!(JS.contains("label: \"Generate surface obj\""));
     assert!(JS.contains("generate_density_surface"));
-    assert!(JS.contains("label: \"Regenerate surface…\""));
+    assert!(JS.contains("label: \"Regenerate surface...\""));
     assert!(JS.contains("regenerate_surface"));
     assert!(CSS.contains(".workspace-context-menu.has-submenu"));
     assert!(JS.contains("WORKSPACE_PAINT_MONOCHROME"));
@@ -1312,6 +1312,37 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(!tauri_object_menu.contains("Selection ·"));
     assert!(tauri_object_menu.contains("disabled: !workspaceRendererClipboardAvailable"));
     assert!(NATIVE_GUI_RS.contains("workspace_paint_menu(ui, true"));
+    let tauri_aux_object_menu = JS
+        .split("function workspaceAuxObjectContextItems(scene, kind, object)")
+        .nth(1)
+        .and_then(|source| {
+            source
+                .split("async function workspaceAuxRendererContextItems")
+                .next()
+        })
+        .expect("Tauri auxiliary object context menu");
+    let mut cursor = 0;
+    for item in [
+        "label: \"Selection\"",
+        "label: \"Paint\"",
+        "label: \"Copy Object\"",
+        "label: \"Paste Renderer\"",
+        "label: \"New Renderer...\"",
+        "label: \"New Group...\"",
+        "label: \"Save As ...\"",
+        "label: \"Delete Object\"",
+        "label: \"Properties...\"",
+    ] {
+        let relative = tauri_aux_object_menu[cursor..]
+            .find(item)
+            .unwrap_or_else(|| panic!("missing auxiliary object menu item {item}"));
+        cursor += relative + item.len();
+    }
+    assert!(tauri_aux_object_menu.contains("kind === \"surface\" && object.originalMolecule"));
+    assert!(tauri_aux_object_menu.contains("label: \"Regenerate surface...\""));
+    assert!(!tauri_aux_object_menu.contains("label: object.name"));
+    assert!(!tauri_aux_object_menu.contains("label: \"Rename…\""));
+    assert!(tauri_aux_object_menu.contains("disabled: !workspaceRendererClipboardAvailable"));
     let tauri_renderer_group_menu = JS
         .split("async function workspaceRendererContextItems(scene, object, renderer)")
         .nth(1)
