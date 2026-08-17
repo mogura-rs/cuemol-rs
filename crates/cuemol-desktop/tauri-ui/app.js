@@ -6553,14 +6553,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       await mutate("initialize_morph_object", {
         objectUid: Number(initialTargetUid),
       }, () => {}, false);
-      const objectOptions = objects.map((object) => [object.uid, object.name]);
-      const target = dialogSelect(
-        "Target",
-        objectOptions,
-        initialTargetUid,
-      );
-      const source = dialogSelect("Source frame", objectOptions, objects[0].uid);
-      const frameName = dialogField("Frame name", "frame");
+      const targetObjectUid = Number(initialTargetUid);
       const frameList = document.createElement("div");
       frameList.className = "morph-frame-list";
       const frameColumns = document.createElement("div");
@@ -6642,10 +6635,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       });
       dialogContent.append(frameList);
       const selectedMorph = () =>
-        snapshot.morphs?.find((item) => item.objectUid === Number(target.value));
-      const frame = dialogField("Frame", String(selectedMorph()?.frame ?? 0), "number");
-      frame.min = "0";
-      frame.step = "0.05";
+        snapshot.morphs?.find((item) => item.objectUid === targetObjectUid);
       const insertionPosition = () => {
         const frames = selectedMorph()?.frames || [];
         const insertBefore = selectedMorphFrameIndex === null
@@ -6656,20 +6646,6 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           insertedIndex: insertBefore ?? frames.length,
         };
       };
-      const addMolCoord = button("Add MolCoord...", "dialog-primary", async () => {
-        addMenu.open = false;
-        const { insertBefore, insertedIndex } = insertionPosition();
-        const changed = await mutate("append_morph_frame", {
-          targetObjectUid: Number(target.value),
-          sourceObjectUid: Number(source.value),
-          frameName: frameName.value,
-          insertBefore,
-        }, () => {});
-        if (changed) {
-          selectedMorphFrameIndex = insertedIndex;
-          renderMorphFrames();
-        }
-      });
       const addPdb = button("Add PDB file...", "", async () => {
         addMenu.open = false;
         const path = await dialog.open({
@@ -6685,7 +6661,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         const selectedPath = String(path);
         const selectedName = selectedPath.split(/[\\/]/).pop() || "frame";
         const changed = await mutate("insert_morph_frame_from_file", {
-          targetObjectUid: Number(target.value),
+          targetObjectUid,
           path: selectedPath,
           frameName: selectedName,
           insertBefore,
@@ -6702,7 +6678,41 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       addMenuSummary.setAttribute("aria-label", "Add morph frame");
       const addMenuPopup = document.createElement("div");
       addMenuPopup.className = "morph-add-menu-popup";
-      addMenuPopup.append(addPdb, addMolCoord);
+      const addMolCoordMenu = document.createElement("details");
+      addMolCoordMenu.className = "morph-source-menu";
+      const addMolCoordSummary = document.createElement("summary");
+      addMolCoordSummary.textContent = "Add MolCoord...";
+      const sourceMenuPopup = document.createElement("div");
+      sourceMenuPopup.className = "morph-source-menu-popup";
+      const sourceObjects = objects.filter((object) => Number(object.uid) !== targetObjectUid);
+      for (const sourceObject of sourceObjects) {
+        sourceMenuPopup.append(button(
+          `${sourceObject.name} (MolCoord, id=${sourceObject.uid})`,
+          "",
+          async () => {
+            addMolCoordMenu.open = false;
+            addMenu.open = false;
+            const { insertBefore, insertedIndex } = insertionPosition();
+            const changed = await mutate("append_morph_frame", {
+              targetObjectUid,
+              sourceObjectUid: Number(sourceObject.uid),
+              frameName: sourceObject.name,
+              insertBefore,
+            }, () => {});
+            if (changed) {
+              selectedMorphFrameIndex = insertedIndex;
+              renderMorphFrames();
+            }
+          },
+        ));
+      }
+      if (!sourceObjects.length) {
+        addMolCoordMenu.classList.add("disabled");
+        addMolCoordSummary.setAttribute("aria-disabled", "true");
+        addMolCoordSummary.addEventListener("click", (event) => event.preventDefault());
+      }
+      addMolCoordMenu.append(addMolCoordSummary, sourceMenuPopup);
+      addMenuPopup.append(addPdb, addMolCoordMenu);
       addMenu.append(addMenuSummary, addMenuPopup);
       const remove = button("Delete", "", async () => {
         if (selectedMorphFrameIndex === null) {
@@ -6710,19 +6720,13 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           return;
         }
         const changed = await mutate("remove_morph_frame", {
-          objectUid: Number(target.value),
+          objectUid: targetObjectUid,
           index: selectedMorphFrameIndex,
         }, () => {});
         if (changed) {
           selectedMorphFrameIndex = null;
           renderMorphFrames();
         }
-      });
-      const apply = button("Apply frame", "", async () => {
-        await mutate("apply_morph_frame", {
-          objectUid: Number(target.value),
-          frame: Number(frame.value),
-        });
       });
       const renderMorphFrames = () => {
         const morph = selectedMorph();
@@ -6756,22 +6760,14 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           frameList.append(dialogParagraph("No morph frames."));
         }
         remove.disabled = selectedMorphFrameIndex === null;
-        frame.max = String(Math.max(0, frames.length - 1));
-        if (!Number.isFinite(Number(frame.value)) || Number(frame.value) > Number(frame.max)) {
-          frame.value = String(morph?.frame ?? 0);
-        }
       };
-      target.addEventListener("change", async () => {
-        selectedMorphFrameIndex = null;
-        const initialized = await mutate("initialize_morph_object", {
-          objectUid: Number(target.value),
-        }, () => {}, false);
-        if (!initialized) return;
-        frame.value = String(selectedMorph()?.frame ?? 0);
-        renderMorphFrames();
-      });
       renderMorphFrames();
-      dialogActions(remove, apply, addMenu);
+      const toolbar = document.createElement("div");
+      toolbar.className = "morph-toolbar";
+      toolbar.append(remove, addMenu);
+      dialogContent.append(toolbar);
+      const close = button("OK", "dialog-primary", () => referenceDialog.close());
+      dialogActions(close);
     }
   } else if (title === "POV-Ray rendering") {
     const renderTargets = (snapshot?.views || []).flatMap((view) => {

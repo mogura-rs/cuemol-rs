@@ -1392,7 +1392,6 @@ struct GuiApplication {
     morph_name_column_width: f32,
     morph_name_column_drag_start_width: Option<f32>,
     morph_frame_name: String,
-    morph_frame_value: f64,
     config_path: String,
     config_key: String,
     config_value: String,
@@ -4966,7 +4965,6 @@ impl GuiApplication {
             morph_name_column_width,
             morph_name_column_drag_start_width: None,
             morph_frame_name: "frame".to_string(),
-            morph_frame_value: 0.0,
             config_path: "cuemol-desktop.conf".to_string(),
             config_key: "gui:background".to_string(),
             config_value: "black".to_string(),
@@ -5667,6 +5665,12 @@ impl GuiApplication {
                                 "Execute script..." => self.choose_execute_script(),
                                 "Mol surface generation..." => self.open_surface_generation_tool(),
                                 "APBS elepot calculation..." => self.open_apbs_tool(),
+                                "Mol morphing animation..." => {
+                                    self.morph_target = self.selected_object;
+                                    self.morph_selected_frame = None;
+                                    self.tool_dialog =
+                                        Some(label.trim_end_matches("...").to_string());
+                                }
                                 "Performance measure" => {
                                     self.perf_measure = !self.perf_measure;
                                     self.set_status(format!(
@@ -19464,34 +19468,6 @@ impl GuiApplication {
         }
     }
 
-    fn apply_morph_frame(&mut self) {
-        let Some(target) = self.morph_target else {
-            self.set_status("No morph target selected");
-            return;
-        };
-        let scene_uid = self.state.scene_manager().scene_uid_for_object(target);
-        let undo = self.capture_undo();
-        match self.state.apply_morph_frame(target, self.morph_frame_value) {
-            Ok(summary) => {
-                self.push_undo_snapshot(undo);
-                if let Some(scene_uid) = scene_uid {
-                    self.modified_scenes.insert(scene_uid);
-                }
-                self.selected_object = Some(target);
-                self.workspace_aux_selection = None;
-                self.rebuild_snapshot();
-                self.set_status(format!(
-                    "Morph frame applied: {} frames / {} atoms",
-                    summary.frame_count, summary.atom_count
-                ));
-            }
-            Err(error) => {
-                self.state = undo.state;
-                self.set_error(error);
-            }
-        }
-    }
-
     fn rebuild_snapshot(&mut self) {
         match self.state.active_render_snapshot(&self.selection_text) {
             Ok(snapshot) => self.snapshot = snapshot,
@@ -26673,28 +26649,6 @@ impl GuiApplication {
         if let Some(target) = self.morph_target {
             self.initialize_morph_target(target);
         }
-        let previous_target = self.morph_target;
-        egui::ComboBox::from_label("Target")
-            .selected_text(object_combo_label(&objects, self.morph_target))
-            .show_ui(ui, |ui| {
-                for object in &objects {
-                    ui.selectable_value(
-                        &mut self.morph_target,
-                        Some(object.uid),
-                        object.name.as_str(),
-                    );
-                }
-            });
-        if self.morph_target != previous_target {
-            self.morph_selected_frame = None;
-            if let Some(target) = self.morph_target {
-                self.initialize_morph_target(target);
-            }
-            self.morph_frame_value = self
-                .morph_target
-                .and_then(|uid| self.state.morph_frame_value(uid))
-                .unwrap_or(0.0);
-        }
         let frames = self
             .morph_target
             .map(|uid| self.state.morph_frame_summaries(uid))
@@ -26824,50 +26778,49 @@ impl GuiApplication {
                         }
                     });
             });
-        if ui
-            .add_enabled(
-                self.morph_selected_frame.is_some(),
-                egui::Button::new("Delete"),
-            )
-            .clicked()
-        {
-            self.remove_selected_morph_frame();
-        }
-        ui.separator();
-        egui::ComboBox::from_label("Source frame")
-            .selected_text(object_combo_label(&objects, self.morph_source))
-            .show_ui(ui, |ui| {
-                for object in &objects {
-                    ui.selectable_value(
-                        &mut self.morph_source,
-                        Some(object.uid),
-                        object.name.as_str(),
-                    );
-                }
-            });
-        ui.label("Frame name");
-        ui.add_sized(
-            [ui.available_width(), 22.0],
-            egui::TextEdit::singleline(&mut self.morph_frame_name),
-        );
-        ui.menu_button("Add ▾", |ui| {
-            if ui.button("Add PDB file...").clicked() {
-                if let Some(path) = native_file_dialog(NativeFileDialog::OpenMorphPdb, "") {
-                    self.insert_morph_frame_from_pdb_path(&path);
-                }
-                ui.close();
-            }
-            if ui.button("Add MolCoord...").clicked() {
-                self.append_morph_frame();
-                ui.close();
-            }
-        });
         ui.horizontal(|ui| {
-            ui.label("Frame");
-            ui.add(egui::DragValue::new(&mut self.morph_frame_value).speed(0.05));
-            if ui.button("Apply").clicked() {
-                self.apply_morph_frame();
+            if ui
+                .add_enabled(
+                    self.morph_selected_frame.is_some(),
+                    egui::Button::new("Delete"),
+                )
+                .clicked()
+            {
+                self.remove_selected_morph_frame();
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.menu_button("Add ▾", |ui| {
+                    if ui.button("Add PDB file...").clicked() {
+                        if let Some(path) = native_file_dialog(NativeFileDialog::OpenMorphPdb, "") {
+                            self.insert_morph_frame_from_pdb_path(&path);
+                        }
+                        ui.close();
+                    }
+                    ui.menu_button("Add MolCoord...", |ui| {
+                        let target = self.morph_target;
+                        let mut found = false;
+                        for object in objects.iter().filter(|object| Some(object.uid) != target) {
+                            found = true;
+                            if ui
+                                .button(format!(
+                                    "{} (MolCoord, id={})",
+                                    object.name,
+                                    object.uid.get()
+                                ))
+                                .clicked()
+                            {
+                                self.morph_source = Some(object.uid);
+                                self.morph_frame_name.clone_from(&object.name);
+                                self.append_morph_frame();
+                                ui.close();
+                            }
+                        }
+                        if !found {
+                            ui.add_enabled(false, egui::Button::new("No MolCoord object"));
+                        }
+                    });
+                });
+            });
         });
     }
 

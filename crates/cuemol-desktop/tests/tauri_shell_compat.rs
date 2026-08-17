@@ -363,7 +363,6 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "append_morph_frame",
         "insert_morph_frame_from_file",
         "remove_morph_frame",
-        "apply_morph_frame",
         "clear_log",
         "execute_script",
         "execute_script_file",
@@ -1223,6 +1222,15 @@ fn atom_interaction_context_menu_uses_the_dedicated_list_editor() {
 
 #[test]
 fn morph_animation_tool_uses_the_reference_frame_columns() {
+    let morph_dialog = JS
+        .split("} else if (title === \"Mol morphing animation\") {")
+        .nth(1)
+        .and_then(|source| {
+            source
+                .split("} else if (title === \"POV-Ray rendering\") {")
+                .next()
+        })
+        .expect("morph animation dialog");
     for label in [
         "Morph animation tool",
         "Name",
@@ -1239,6 +1247,8 @@ fn morph_animation_tool_uses_the_reference_frame_columns() {
     assert!(JS.contains("morph-column-splitter"));
     assert!(JS.contains("morph-add-menu"));
     assert!(JS.contains("morph-add-menu-popup"));
+    assert!(JS.contains("morph-source-menu"));
+    assert!(JS.contains("morph-toolbar"));
     assert!(JS.contains("morphFrame.source || morphFrame.sourceType"));
     assert!(JS.contains("initialize_morph_object"));
     assert!(JS.contains("insert_morph_frame_from_file"));
@@ -1246,6 +1256,8 @@ fn morph_animation_tool_uses_the_reference_frame_columns() {
     assert!(CSS.contains("var(--morph-name-width"));
     assert!(CSS.contains(".morph-frame-row > :nth-child(2)"));
     assert!(CSS.contains(".morph-add-menu > summary::after"));
+    assert!(CSS.contains(".morph-source-menu > summary::after"));
+    assert!(CSS.contains(".morph-toolbar"));
     assert!(NATIVE_GUI_RS.contains("fn remove_selected_morph_frame"));
     assert!(NATIVE_GUI_RS.contains("morph_editor:name_width"));
     assert!(NATIVE_GUI_RS.contains("MORPH_COLUMN_SPLITTER_WIDTH"));
@@ -1255,6 +1267,12 @@ fn morph_animation_tool_uses_the_reference_frame_columns() {
     assert!(NATIVE_GUI_RS.contains("insert_morph_frame_from_pdb_path"));
     assert!(TAURI_APP_RS.contains("InsertMorphFrameFromFile"));
     assert!(TAURI_APP_RS.contains("InitializeMorphObject"));
+    for obsolete_control in ["Source frame", "Frame name", "Apply frame"] {
+        assert!(
+            !morph_dialog.contains(obsolete_control),
+            "unexpected morph control {obsolete_control}"
+        );
+    }
 }
 
 #[test]

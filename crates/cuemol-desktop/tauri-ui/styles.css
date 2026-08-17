@@ -3428,6 +3428,13 @@ body.resizing-bottom-panel {
   position: relative;
 }
 
+.morph-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 6px;
+}
+
 .morph-add-menu > summary {
   display: flex;
   min-width: 68px;
@@ -3482,6 +3489,71 @@ body.resizing-bottom-panel {
 
 .morph-add-menu-popup button:hover,
 .morph-add-menu-popup button:focus-visible {
+  background: #dcecff;
+}
+
+.morph-source-menu {
+  position: relative;
+}
+
+.morph-source-menu > summary {
+  padding: 3px 8px;
+  color: #222;
+  cursor: default;
+  list-style: none;
+  white-space: nowrap;
+}
+
+.morph-source-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.morph-source-menu > summary::after {
+  float: right;
+  margin-left: 10px;
+  content: "▸";
+}
+
+.morph-source-menu > summary:hover,
+.morph-source-menu > summary:focus-visible {
+  background: #dcecff;
+}
+
+.morph-source-menu.disabled > summary {
+  opacity: 0.5;
+}
+
+.morph-source-menu-popup {
+  position: absolute;
+  z-index: 51;
+  right: calc(100% + 2px);
+  bottom: 0;
+  display: grid;
+  min-width: 220px;
+  max-height: 240px;
+  padding: 2px;
+  overflow-y: auto;
+  border: 1px solid #999;
+  background: #f7f7f7;
+  box-shadow: 0 3px 8px #0003;
+}
+
+.morph-source-menu:not([open]) .morph-source-menu-popup,
+.morph-source-menu.disabled .morph-source-menu-popup {
+  display: none;
+}
+
+.morph-source-menu-popup button {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: #222;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.morph-source-menu-popup button:hover,
+.morph-source-menu-popup button:focus-visible {
   background: #dcecff;
 }
 
