@@ -6290,7 +6290,9 @@ impl GuiApplication {
                 }
                 ui.separator();
                 if ui.button("New Renderer...").clicked() {
+                    let group = self.workspace_aux_renderer_group_name(selection);
                     self.open_aux_renderer_dialog(selection);
+                    self.new_renderer_group = group;
                     ui.close();
                 }
                 if ui.button("Delete").clicked() {
@@ -6344,6 +6346,51 @@ impl GuiApplication {
                 .into_iter()
                 .find(|group| group.uid == renderer_uid)
                 .map(|group| (NativePropertyObject::Lightweight(object_uid), group)),
+            _ => None,
+        }
+    }
+
+    fn workspace_aux_renderer_group_name(
+        &self,
+        selection: WorkspaceAuxSelection,
+    ) -> Option<String> {
+        match selection {
+            WorkspaceAuxSelection::DensityMap {
+                map_uid,
+                renderer_uid: Some(renderer_uid),
+                ..
+            } => {
+                self.state
+                    .density_map_summary(map_uid)?
+                    .renderers
+                    .into_iter()
+                    .find(|renderer| renderer.uid == renderer_uid)?
+                    .group
+            }
+            WorkspaceAuxSelection::Surface {
+                surface_uid,
+                renderer_uid: Some(renderer_uid),
+                ..
+            } => {
+                self.state
+                    .surface_summary(surface_uid)?
+                    .renderers
+                    .into_iter()
+                    .find(|renderer| renderer.uid == renderer_uid)?
+                    .group
+            }
+            WorkspaceAuxSelection::Lightweight {
+                object_uid,
+                renderer_uid: Some(renderer_uid),
+                ..
+            } => {
+                self.state
+                    .lw_object_summary(object_uid)?
+                    .renderers
+                    .into_iter()
+                    .find(|renderer| renderer.uid == renderer_uid)?
+                    .group
+            }
             _ => None,
         }
     }
@@ -6852,7 +6899,10 @@ impl GuiApplication {
                             }
                             ui.separator();
                             if ui.button("New Renderer...").clicked() {
-                                self.open_renderer_dialog(object_uid);
+                                self.open_renderer_dialog_in_group(
+                                    object_uid,
+                                    renderer.group.clone(),
+                                );
                                 ui.close();
                             }
                             if ui.button("Delete").clicked() {
@@ -28196,6 +28246,15 @@ mod tests {
         assert_eq!(tree[0].children.len(), 1);
         assert_eq!(tree[0].children[0].group.as_deref(), Some("maps"));
         let member_uid = tree[0].children[0].uid;
+        let member_selection = WorkspaceAuxSelection::DensityMap {
+            scene_uid,
+            map_uid,
+            renderer_uid: Some(member_uid),
+        };
+        let member_group = app.workspace_aux_renderer_group_name(member_selection);
+        app.open_aux_renderer_dialog(member_selection);
+        app.new_renderer_group = member_group;
+        assert_eq!(app.new_renderer_group.as_deref(), Some("maps"));
         app.set_workspace_renderer_group_collapsed(
             scene_uid,
             NativePropertyObject::DensityMap(map_uid),

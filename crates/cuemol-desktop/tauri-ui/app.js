@@ -8036,7 +8036,7 @@ async function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
     null,
     {
       label: "New Renderer...",
-      action: () => showNewWorkspaceRendererDialog(scene, kind, object),
+      action: () => showNewWorkspaceRendererDialog(scene, kind, object, renderer.group),
     },
     {
       label: "Delete",
@@ -8437,7 +8437,8 @@ async function workspaceRendererContextItems(scene, object, renderer) {
     null,
     {
       label: "New Renderer...",
-      action: () => showNewWorkspaceRendererDialog(scene, "renderer", object),
+      action: () =>
+        showNewWorkspaceRendererDialog(scene, "renderer", object, renderer.group),
     },
     {
       label: "Delete",
