@@ -569,6 +569,19 @@ fn tauri_output_prompt_executes_javascript_with_reference_history() {
     assert!(TAURI_APP_RS.contains("ModelRequest::ExecuteScript(script)"));
     assert!(TAURI_APP_RS.contains("model.log_lines.push(format!(\"> {script}\"))"));
     assert!(CSS.contains("grid-template-columns: 24px 1fr"));
+    for binding in [
+        "ui.monospace(\"Js>\")",
+        "fn execute_console_input(",
+        "fn recall_command_history(",
+        "cmd_prompt_history:length",
+        "egui::Key::ArrowUp",
+        "egui::Key::ArrowDown",
+    ] {
+        assert!(
+            NATIVE_GUI_RS.contains(binding),
+            "missing native Output prompt binding {binding}"
+        );
+    }
 }
 
 #[test]

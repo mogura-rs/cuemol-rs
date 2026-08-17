@@ -1033,6 +1033,8 @@ struct GuiApplication {
     url_download_receiver: Option<mpsc::Receiver<std::result::Result<PathBuf, String>>>,
     script_path: String,
     console_input: String,
+    command_history: Vec<String>,
+    command_history_position: usize,
     selection_text: String,
     selected_object: Option<cuemol_core::Uid>,
     selected_renderer: Option<cuemol_core::Uid>,
@@ -4111,6 +4113,8 @@ impl GuiApplication {
             url_download_receiver: None,
             script_path: "script.js".to_string(),
             console_input: String::new(),
+            command_history: Vec::new(),
+            command_history_position: 0,
             selection_text: String::new(),
             selected_object: None,
             workspace_aux_selection: None,
@@ -4339,6 +4343,7 @@ impl GuiApplication {
             Ok(None) => {}
             Err(error) => app.status = format!("Config load failed: {error}"),
         }
+        app.load_command_history();
         app
     }
 
@@ -13677,13 +13682,138 @@ impl GuiApplication {
                 self.choose_save_log();
             }
         });
+        let log_height = (ui.available_height() - 26.0).max(20.0);
         egui::ScrollArea::vertical()
             .stick_to_bottom(true)
+            .max_height(log_height)
             .show(ui, |ui| {
                 for line in &self.log_lines {
                     ui.monospace(line);
                 }
             });
+        let mut execute = false;
+        ui.horizontal(|ui| {
+            ui.monospace("Js>");
+            let response = ui.add_sized(
+                [ui.available_width(), 20.0],
+                egui::TextEdit::singleline(&mut self.console_input)
+                    .font(egui::TextStyle::Monospace),
+            );
+            if response.has_focus()
+                && ui
+                    .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp))
+            {
+                self.recall_command_history(-1);
+            } else if response.has_focus()
+                && ui.input_mut(|input| {
+                    input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)
+                })
+            {
+                self.recall_command_history(1);
+            }
+            if (response.has_focus() || response.lost_focus())
+                && ui.input(|input| input.key_pressed(egui::Key::Enter))
+            {
+                execute = true;
+                response.request_focus();
+            }
+        });
+        if execute {
+            self.execute_console_input();
+        }
+    }
+
+    fn load_command_history(&mut self) {
+        let length = self
+            .state
+            .config_value("cmd_prompt_history:length")
+            .parse::<usize>()
+            .unwrap_or(0)
+            .min(100);
+        self.command_history = (0..length)
+            .filter_map(|index| {
+                let command = self
+                    .state
+                    .config_value(&format!("cmd_prompt_history:{index}"));
+                (!command.is_empty()).then_some(command)
+            })
+            .collect();
+        self.command_history_position = self.command_history.len();
+    }
+
+    fn remember_command(&mut self, command: &str) {
+        self.command_history.push(command.to_string());
+        if self.command_history.len() > 100 {
+            self.command_history.remove(0);
+        }
+        self.command_history_position = self.command_history.len();
+        self.state.put_config_value(
+            "cmd_prompt_history:length",
+            self.command_history.len().to_string(),
+        );
+        for (index, entry) in self.command_history.iter().enumerate() {
+            self.state
+                .put_config_value(&format!("cmd_prompt_history:{index}"), entry.clone());
+        }
+        let config_path = PathBuf::from(self.config_path.trim());
+        if config_path.is_absolute() {
+            let _ = self.state.save_config_file(config_path);
+        }
+    }
+
+    fn recall_command_history(&mut self, offset: isize) {
+        self.command_history_position = self
+            .command_history_position
+            .saturating_add_signed(offset)
+            .min(self.command_history.len());
+        self.console_input = self
+            .command_history
+            .get(self.command_history_position)
+            .cloned()
+            .unwrap_or_default();
+    }
+
+    fn execute_console_input(&mut self) {
+        let command = self.console_input.trim().to_string();
+        if command.is_empty() {
+            return;
+        }
+        self.log_lines.push(format!("> {command}"));
+        self.remember_command(&command);
+        self.console_input.clear();
+        let undo = self.capture_undo();
+        match self.state.run_script_js(&command) {
+            Ok((log, selection)) => {
+                self.log_lines.extend(log.lines().map(str::to_string));
+                if let Some(selection) = selection {
+                    self.selection_text = selection.clone();
+                    if let Some(object_uid) = self.selection_target_object() {
+                        if let Err(error) = self
+                            .state
+                            .set_molecule_selection_text(object_uid, &selection)
+                        {
+                            self.log_lines.push(error.to_string());
+                        } else {
+                            self.selected_object = Some(object_uid);
+                            self.molstruct_object = Some(object_uid);
+                            self.selected_renderer = None;
+                            self.workspace_aux_selection = None;
+                        }
+                    }
+                    self.remember_selection_history(&selection);
+                }
+                self.set_status("Script executed");
+            }
+            Err(error) => {
+                self.log_lines.push(error.to_string());
+                self.set_status("Script error");
+            }
+        }
+        if let Some(scene_uid) = self.state.active_scene() {
+            self.modified_scenes.insert(scene_uid);
+        }
+        self.push_undo_snapshot(undo);
+        self.rebuild_snapshot();
     }
 
     fn sequence_current_selection(&self, object_uid: cuemol_core::Uid) -> String {
@@ -26289,12 +26419,8 @@ impl GuiApplication {
                     egui::TextEdit::multiline(&mut self.console_input)
                         .font(egui::TextStyle::Monospace),
                 );
-                if ui.button("Append To Log").clicked() {
-                    let input = self.console_input.trim().to_string();
-                    if !input.is_empty() {
-                        self.set_status(format!("Console: {input}"));
-                        self.console_input.clear();
-                    }
+                if ui.button("Execute").clicked() {
+                    self.execute_console_input();
                 }
             });
         self.show_console = open;
@@ -37319,6 +37445,50 @@ mod tests {
         );
         assert_eq!(app.selection_text, "chain A", "script applied a selection");
         let _ = std::fs::remove_file(&script);
+    }
+
+    #[test]
+    fn native_output_prompt_executes_javascript_and_recalls_history() {
+        let Some(pdb) = reference_pdb_path() else {
+            return;
+        };
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.open_path = pdb.to_string_lossy().to_string();
+        app.open_current_path(&mut camera);
+        app.console_input = "cuemol.print('native-prompt'); cuemol.select('resid 2');".to_string();
+        app.execute_console_input();
+
+        assert!(app
+            .log_lines
+            .iter()
+            .any(|line| line.contains("> cuemol.print('native-prompt')")));
+        assert!(app.log_lines.iter().any(|line| line == "native-prompt"));
+        assert_eq!(app.selection_text, "resid 2");
+        assert_eq!(app.command_history.len(), 1);
+        assert_eq!(app.command_history_position, 1);
+        assert_eq!(app.status, "Script executed");
+        assert!(!app.undo_stack.is_empty());
+
+        app.console_input = "function (".to_string();
+        app.execute_console_input();
+        assert_eq!(app.status, "Script error");
+        assert!(app.log_lines.last().is_some_and(|line| !line.is_empty()));
+        assert_eq!(app.command_history.len(), 2);
+        app.recall_command_history(-1);
+        assert_eq!(app.console_input, "function (");
+        app.recall_command_history(-1);
+        assert!(app.console_input.contains("native-prompt"));
+        app.recall_command_history(1);
+        app.recall_command_history(1);
+        assert!(app.console_input.is_empty());
+
+        for index in 0..101 {
+            app.remember_command(&format!("command {index}"));
+        }
+        assert_eq!(app.command_history.len(), 100);
+        assert_eq!(app.command_history.first().unwrap(), "command 1");
+        assert_eq!(app.state.config_value("cmd_prompt_history:length"), "100");
     }
 
     #[test]
