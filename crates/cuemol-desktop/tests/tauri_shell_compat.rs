@@ -964,6 +964,18 @@ fn animation_render_uses_cancellable_progress_and_reference_frame_controls() {
 }
 
 #[test]
+fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
+    assert!(HTML.contains("id=\"animation-start-camera\""));
+    assert!(JS.contains("snapshot.animationStartCamera || \"__current\""));
+    assert!(JS.contains("mutate(\"set_animation_start_camera\""));
+    assert!(TAURI_APP_RS.contains("fn set_animation_start_camera("));
+    assert!(TAURI_APP_RS.contains("scene_animation(scene_uid)"));
+    assert!(TAURI_APP_RS.contains("set_scene_animation(scene_uid, Some(animation))"));
+    assert!(TAURI_APP_RS.contains("animation.motions()"));
+    assert!(!TAURI_APP_RS.contains("animation_objects: Vec<AnimObject>"));
+}
+
+#[test]
 fn pov_render_matches_the_reference_options_and_cancellable_flow() {
     for label in [
         "Main options",

@@ -68,6 +68,7 @@ const animationLoop = document.getElementById("animation-loop");
 const animationSlider = document.getElementById("animation-slider");
 const animationTime = document.getElementById("animation-time");
 const animationDuration = document.getElementById("animation-duration");
+const animationStartCamera = document.getElementById("animation-start-camera");
 const animationList = document.getElementById("animation-list");
 const animationKind = document.getElementById("animation-kind");
 const animationAdd = document.getElementById("animation-add");
@@ -13527,6 +13528,29 @@ function renderAnimation() {
   }
   const total = snapshot.animationDuration;
   animationDuration.textContent = formatAnimationTime(total);
+  const cameraNames = [
+    "__current",
+    ...snapshot.cameras
+      .filter((camera) => camera.sceneUid === snapshot.activeSceneUid)
+      .map((camera) => camera.name)
+      .filter((name) => name !== "__current"),
+  ];
+  const selectedCamera = snapshot.animationStartCamera || "__current";
+  if (!cameraNames.includes(selectedCamera)) cameraNames.push(selectedCamera);
+  const cameraKey = JSON.stringify(cameraNames);
+  if (animationStartCamera.dataset.optionsKey !== cameraKey) {
+    animationStartCamera.dataset.optionsKey = cameraKey;
+    animationStartCamera.replaceChildren(
+      ...cameraNames.map((cameraName) => {
+        const option = document.createElement("option");
+        option.value = cameraName;
+        option.textContent = cameraName;
+        return option;
+      }),
+    );
+  }
+  animationStartCamera.value = selectedCamera;
+  animationStartCamera.disabled = snapshot.activeSceneUid === null;
   animationSlider.max = String(Math.max(total, 0));
   animationSlider.value = String(Math.min(snapshot.animationElapsed, total));
   animationSlider.disabled = total <= 0;
@@ -14846,6 +14870,10 @@ animationStop.addEventListener("click", () => {
 
 animationLoop.addEventListener("change", () => {
   mutate("set_animation_loop", { value: animationLoop.checked });
+});
+
+animationStartCamera.addEventListener("change", () => {
+  mutate("set_animation_start_camera", { name: animationStartCamera.value });
 });
 
 animationSlider.addEventListener("input", () => {
