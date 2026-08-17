@@ -132,6 +132,7 @@ const SIDE_PANEL_STATE_STORAGE_KEY = "cuemol2.sidePanelState.v1";
 const RIBBON_COLLAPSED_STORAGE_KEY = "cuemol2.ribbonCollapsed.v1";
 const WINDOW_GEOMETRY_STORAGE_KEY = "cuemol2.windowGeometry.v1";
 const WORKSPACE_STATE_COLUMN_WIDTH_STORAGE_KEY = "cuemol2.workspaceStateColumnWidth.v1";
+const BOND_ATOM0_COLUMN_WIDTH_STORAGE_KEY = "cuemol2.bondAtom0ColumnWidth.v1";
 const SIDE_PANEL_DEFAULT_ORDER = [
   "Workspace",
   "MolStruct",
@@ -5644,6 +5645,83 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       let bonds = [];
       const bondList = document.createElement("div");
       bondList.className = "bond-list";
+      const bondColumns = document.createElement("div");
+      bondColumns.className = "bond-list-columns";
+      const atom0Heading = document.createElement("span");
+      atom0Heading.textContent = "Atom0";
+      const columnSplitter = document.createElement("div");
+      columnSplitter.className = "bond-column-splitter";
+      columnSplitter.tabIndex = 0;
+      columnSplitter.setAttribute("role", "separator");
+      columnSplitter.setAttribute("aria-orientation", "vertical");
+      columnSplitter.setAttribute("aria-label", "Atom0 column width");
+      columnSplitter.setAttribute("aria-valuemin", "120");
+      columnSplitter.setAttribute("aria-valuemax", "800");
+      columnSplitter.title = "Drag to resize; double-click to reset";
+      const atom1Heading = document.createElement("span");
+      atom1Heading.textContent = "Atom1";
+      bondColumns.append(atom0Heading, columnSplitter, atom1Heading);
+      const setBondAtom0ColumnWidth = (width, persist = false) => {
+        let nextWidth = Math.min(800, Math.max(120, Number(width) || 220));
+        const availableWidth = bondList.clientWidth || 0;
+        if (availableWidth >= 245) nextWidth = Math.min(nextWidth, availableWidth - 125);
+        bondList.style.setProperty("--bond-atom0-width", `${nextWidth}px`);
+        columnSplitter.setAttribute("aria-valuenow", String(Math.round(nextWidth)));
+        if (!persist) return;
+        try {
+          localStorage.setItem(BOND_ATOM0_COLUMN_WIDTH_STORAGE_KEY, String(nextWidth));
+        } catch {
+          // Storage can be unavailable in restricted webviews.
+        }
+      };
+      try {
+        const storedWidth = Number(localStorage.getItem(BOND_ATOM0_COLUMN_WIDTH_STORAGE_KEY));
+        if (Number.isFinite(storedWidth) && storedWidth > 0) {
+          setBondAtom0ColumnWidth(storedWidth);
+        }
+      } catch {
+        // Storage can be unavailable in restricted webviews.
+      }
+      columnSplitter.addEventListener("pointerdown", (event) => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        const startX = event.clientX;
+        const startWidth = atom0Heading.getBoundingClientRect().width || 220;
+        columnSplitter.setPointerCapture(event.pointerId);
+        columnSplitter.classList.add("dragging");
+        const resize = (moveEvent) => {
+          setBondAtom0ColumnWidth(startWidth + moveEvent.clientX - startX);
+        };
+        const finish = (finishEvent) => {
+          if (finishEvent.type !== "pointercancel") resize(finishEvent);
+          setBondAtom0ColumnWidth(atom0Heading.getBoundingClientRect().width || 220, true);
+          columnSplitter.classList.remove("dragging");
+          columnSplitter.removeEventListener("pointermove", resize);
+          columnSplitter.removeEventListener("pointerup", finish);
+          columnSplitter.removeEventListener("pointercancel", finish);
+        };
+        columnSplitter.addEventListener("pointermove", resize);
+        columnSplitter.addEventListener("pointerup", finish);
+        columnSplitter.addEventListener("pointercancel", finish);
+      });
+      columnSplitter.addEventListener("dblclick", () => {
+        bondList.style.removeProperty("--bond-atom0-width");
+        columnSplitter.removeAttribute("aria-valuenow");
+        try {
+          localStorage.removeItem(BOND_ATOM0_COLUMN_WIDTH_STORAGE_KEY);
+        } catch {
+          // Storage can be unavailable in restricted webviews.
+        }
+      });
+      columnSplitter.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+        event.preventDefault();
+        const current = atom0Heading.getBoundingClientRect().width || 220;
+        setBondAtom0ColumnWidth(
+          current + (event.key === "ArrowRight" ? 10 : -10),
+          true,
+        );
+      });
       const remove = button("Delete selected", "", async () => {
         const pairs = bonds
           .filter((bond) => selectedBonds.has(`${bond[0].aid}:${bond[1].aid}`))
@@ -5659,7 +5737,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       const formatAtom = (atom) =>
         `${atom.chain || "_"} ${atom.resn} ${atom.resid} ${atom.aname} (#${atom.aid})`;
       const renderBonds = () => {
-        bondList.replaceChildren();
+        bondList.replaceChildren(bondColumns);
         if (bonds.length === 0) {
           bondList.append(dialogParagraph("No non-standard bonds."));
         }
@@ -5679,7 +5757,13 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           atom1.textContent = formatAtom(bond[0]);
           const atom2 = document.createElement("span");
           atom2.textContent = formatAtom(bond[1]);
-          row.append(selected, atom1, atom2);
+          const atom0Cell = document.createElement("span");
+          atom0Cell.className = "bond-atom-cell";
+          atom0Cell.append(selected, atom1);
+          const atom1Cell = document.createElement("span");
+          atom1Cell.className = "bond-atom-cell";
+          atom1Cell.append(atom2);
+          row.append(atom0Cell, atom1Cell);
           bondList.append(row);
         }
       };

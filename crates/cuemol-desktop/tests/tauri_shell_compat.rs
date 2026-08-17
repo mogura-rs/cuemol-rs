@@ -394,9 +394,26 @@ fn tauri_main_menu_matches_the_reference_inventory() {
     assert!(JS.contains("button(\"Delete selected\""));
     assert!(JS.contains("JSON.parse(json)"));
     assert!(JS.contains("atomPickerTarget = { input, object }"));
+    assert!(JS.contains("BOND_ATOM0_COLUMN_WIDTH_STORAGE_KEY"));
+    assert!(JS.contains("bondColumns.className = \"bond-list-columns\""));
+    assert!(JS.contains("setBondAtom0ColumnWidth("));
+    assert!(JS.contains("columnSplitter.setPointerCapture(event.pointerId)"));
+    assert!(JS.contains("atom0Cell.append(selected, atom1)"));
     assert!(JS.contains("referenceDialog.show()"));
     assert!(CSS.contains(".bond-list-row"));
+    assert!(CSS.contains(".bond-list-columns"));
+    assert!(CSS.contains(".bond-column-splitter"));
+    assert!(CSS.contains("var(--bond-atom0-width, minmax(120px, 1fr))"));
     assert!(CSS.contains(".viewport.atom-picking"));
+    let native_bond = NATIVE_GUI_RS
+        .split("fn bond_editor_tool_ui(")
+        .nth(1)
+        .and_then(|source| source.split("fn interaction_tool_ui(").next())
+        .expect("native bond editor");
+    assert!(native_bond.contains("RichText::new(\"Atom0\").strong()"));
+    assert!(native_bond.contains("RichText::new(\"Atom1\").strong()"));
+    assert!(native_bond.contains("bond_editor:atom0_width"));
+    assert!(native_bond.contains("splitter.drag_delta().x"));
 }
 
 #[test]

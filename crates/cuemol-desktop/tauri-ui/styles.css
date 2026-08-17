@@ -3139,22 +3139,73 @@ body.resizing-bottom-panel {
   color: #666;
 }
 
+.bond-list-columns,
 .bond-list-row {
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns:
+    var(--bond-atom0-width, minmax(120px, 1fr))
+    5px
+    minmax(120px, 1fr);
   align-items: center;
+}
+
+.bond-list-columns {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  min-height: 23px;
+  border-bottom: 1px solid #999;
+  background: linear-gradient(#fff, #dedede);
+  font-weight: 600;
+}
+
+.bond-list-columns > span {
+  align-self: stretch;
+  padding: 4px 6px;
+  border-right: 1px solid #bbb;
+}
+
+.bond-column-splitter {
+  align-self: stretch;
+  min-width: 5px;
+  border-right: 1px solid #999;
+  border-left: 1px solid #eee;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.bond-column-splitter:hover,
+.bond-column-splitter:focus-visible,
+.bond-column-splitter.dragging {
+  background: #9fc7ec;
+  outline: 0;
+}
+
+.bond-list-row {
   min-height: 28px;
   border-bottom: 1px solid #ddd;
   font-family: var(--font-mono);
   font-size: 11px;
 }
 
-.bond-list-row > * {
+.bond-list-row > :nth-child(2) {
+  grid-column: 3;
+}
+
+.bond-atom-cell {
+  display: flex;
+  gap: 4px;
+  align-items: center;
   min-width: 0;
-  margin: 0 6px;
+  padding: 0 6px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.bond-atom-cell > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .morph-frame-list {

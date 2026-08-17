@@ -52,6 +52,9 @@ const COLORING_GRADIENT_PARAM_COLUMN_DEFAULT_WIDTH: f32 = 105.0;
 const WORKSPACE_STATE_COLUMN_DEFAULT_WIDTH: f32 = 44.0;
 const WORKSPACE_STATE_COLUMN_MIN_WIDTH: f32 = 36.0;
 const WORKSPACE_COLUMN_SPLITTER_WIDTH: f32 = 5.0;
+const BOND_ATOM0_COLUMN_DEFAULT_WIDTH: f32 = 220.0;
+const BOND_ATOM_COLUMN_MIN_WIDTH: f32 = 120.0;
+const BOND_COLUMN_SPLITTER_WIDTH: f32 = 5.0;
 const RENDER_PRESETS: &[(&str, u32, u32)] = &[
     ("HD 720", 1280, 720),
     ("Full HD", 1920, 1080),
@@ -1331,6 +1334,8 @@ struct GuiApplication {
     bond_object: Option<cuemol_core::Uid>,
     bond_picker_target: Option<usize>,
     selected_nonstandard_bonds: std::collections::BTreeSet<(i32, i32)>,
+    bond_atom0_column_width: f32,
+    bond_atom0_column_drag_start_width: Option<f32>,
     bond_aid1: String,
     bond_aid2: String,
     contact_object: Option<cuemol_core::Uid>,
@@ -4542,6 +4547,11 @@ impl GuiApplication {
             .parse::<f32>()
             .unwrap_or(WORKSPACE_STATE_COLUMN_DEFAULT_WIDTH)
             .clamp(WORKSPACE_STATE_COLUMN_MIN_WIDTH, 100.0);
+        let bond_atom0_column_width = state
+            .config_value("bond_editor:atom0_width")
+            .parse::<f32>()
+            .unwrap_or(BOND_ATOM0_COLUMN_DEFAULT_WIDTH)
+            .clamp(BOND_ATOM_COLUMN_MIN_WIDTH, 800.0);
         Self {
             state,
             open_path: "../cuemol2/tests/test_data/1CRN.pdb".to_string(),
@@ -4758,6 +4768,8 @@ impl GuiApplication {
             bond_object: None,
             bond_picker_target: None,
             selected_nonstandard_bonds: std::collections::BTreeSet::new(),
+            bond_atom0_column_width,
+            bond_atom0_column_drag_start_width: None,
             bond_aid1: String::new(),
             bond_aid2: String::new(),
             contact_object: None,
@@ -20669,6 +20681,13 @@ impl GuiApplication {
             .unwrap_or(WORKSPACE_STATE_COLUMN_DEFAULT_WIDTH)
             .clamp(WORKSPACE_STATE_COLUMN_MIN_WIDTH, 100.0);
         self.workspace_state_column_drag_start_width = None;
+        self.bond_atom0_column_width = self
+            .state
+            .config_value("bond_editor:atom0_width")
+            .parse::<f32>()
+            .unwrap_or(BOND_ATOM0_COLUMN_DEFAULT_WIDTH)
+            .clamp(BOND_ATOM_COLUMN_MIN_WIDTH, 800.0);
+        self.bond_atom0_column_drag_start_width = None;
         for (style_key, config_key) in [
             ("DefaultLabel.font_name", "style:DefaultLabel.font_name"),
             ("DefaultLabel.font_size", "style:DefaultLabel.font_size"),
@@ -25764,6 +25783,77 @@ impl GuiApplication {
         egui::Frame::new()
             .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
             .show(ui, |ui| {
+                let minimum_width = 2.0 * BOND_ATOM_COLUMN_MIN_WIDTH + BOND_COLUMN_SPLITTER_WIDTH;
+                let available_width = ui.available_width().max(minimum_width);
+                let atom0_width = self.bond_atom0_column_width.clamp(
+                    BOND_ATOM_COLUMN_MIN_WIDTH,
+                    (available_width - BOND_ATOM_COLUMN_MIN_WIDTH - BOND_COLUMN_SPLITTER_WIDTH)
+                        .max(BOND_ATOM_COLUMN_MIN_WIDTH),
+                );
+                let atom1_width = (available_width - atom0_width - BOND_COLUMN_SPLITTER_WIDTH)
+                    .max(BOND_ATOM_COLUMN_MIN_WIDTH);
+                let header_height = ui.spacing().interact_size.y;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    ui.add_sized(
+                        [atom0_width, header_height],
+                        egui::Label::new(egui::RichText::new("Atom0").strong()),
+                    );
+                    let (splitter_rect, splitter) = ui.allocate_exact_size(
+                        egui::vec2(BOND_COLUMN_SPLITTER_WIDTH, header_height),
+                        egui::Sense::drag(),
+                    );
+                    let splitter = splitter
+                        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+                        .on_hover_text("Resize Atom0 column; double-click to reset");
+                    ui.painter().line_segment(
+                        [splitter_rect.center_top(), splitter_rect.center_bottom()],
+                        egui::Stroke::new(
+                            1.0,
+                            if splitter.hovered() || splitter.dragged() {
+                                ui.visuals().text_color()
+                            } else {
+                                ui.visuals().widgets.noninteractive.bg_stroke.color
+                            },
+                        ),
+                    );
+                    if splitter.double_clicked() {
+                        self.bond_atom0_column_width = BOND_ATOM0_COLUMN_DEFAULT_WIDTH;
+                        self.bond_atom0_column_drag_start_width = None;
+                        self.state.put_config_value(
+                            "bond_editor:atom0_width",
+                            self.bond_atom0_column_width.to_string(),
+                        );
+                    } else {
+                        if splitter.drag_started() {
+                            self.bond_atom0_column_drag_start_width = Some(atom0_width);
+                        }
+                        if splitter.dragged() {
+                            if let Some(initial_width) = self.bond_atom0_column_drag_start_width {
+                                let maximum = (available_width
+                                    - BOND_ATOM_COLUMN_MIN_WIDTH
+                                    - BOND_COLUMN_SPLITTER_WIDTH)
+                                    .max(BOND_ATOM_COLUMN_MIN_WIDTH);
+                                self.bond_atom0_column_width = (initial_width
+                                    + splitter.drag_delta().x)
+                                    .clamp(BOND_ATOM_COLUMN_MIN_WIDTH, maximum);
+                                ui.ctx().request_repaint();
+                            }
+                        }
+                        if splitter.drag_stopped() {
+                            self.bond_atom0_column_drag_start_width = None;
+                            self.state.put_config_value(
+                                "bond_editor:atom0_width",
+                                self.bond_atom0_column_width.to_string(),
+                            );
+                        }
+                    }
+                    ui.add_sized(
+                        [atom1_width, header_height],
+                        egui::Label::new(egui::RichText::new("Atom1").strong()),
+                    );
+                });
+                ui.separator();
                 egui::ScrollArea::vertical()
                     .min_scrolled_height(96.0)
                     .max_height(220.0)
@@ -25777,17 +25867,37 @@ impl GuiApplication {
                                 bond.atom1.serial.max(bond.atom2.serial),
                             );
                             let mut selected = self.selected_nonstandard_bonds.contains(&pair);
+                            let row_height = ui.spacing().interact_size.y;
                             ui.horizontal(|ui| {
-                                if ui.checkbox(&mut selected, "").changed() {
-                                    if selected {
-                                        self.selected_nonstandard_bonds.insert(pair);
-                                    } else {
-                                        self.selected_nonstandard_bonds.remove(&pair);
-                                    }
-                                }
-                                ui.monospace(format_nonstandard_bond_atom(&bond.atom1));
-                                ui.label("—");
-                                ui.monospace(format_nonstandard_bond_atom(&bond.atom2));
+                                ui.spacing_mut().item_spacing.x = 0.0;
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(atom0_width, row_height),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        if ui.checkbox(&mut selected, "").changed() {
+                                            if selected {
+                                                self.selected_nonstandard_bonds.insert(pair);
+                                            } else {
+                                                self.selected_nonstandard_bonds.remove(&pair);
+                                            }
+                                        }
+                                        ui.monospace(format_nonstandard_bond_atom(&bond.atom1));
+                                    },
+                                );
+                                let (separator, _) = ui.allocate_exact_size(
+                                    egui::vec2(BOND_COLUMN_SPLITTER_WIDTH, row_height),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().line_segment(
+                                    [separator.center_top(), separator.center_bottom()],
+                                    ui.visuals().widgets.noninteractive.bg_stroke,
+                                );
+                                ui.add_sized(
+                                    [atom1_width, row_height],
+                                    egui::Label::new(format_nonstandard_bond_atom(&bond.atom2))
+                                        .sense(egui::Sense::hover()),
+                                )
+                                .on_hover_text(format_nonstandard_bond_atom(&bond.atom2));
                             });
                         }
                     });
@@ -34427,7 +34537,7 @@ mod tests {
         let app = GuiApplication::new_with_config_source(NativeConfigSource {
             path: Some(PathBuf::from("preloaded.conf")),
             input: Ok(Some(
-                "view_input:tbrad\t1.25\ncuemol2.ui.ribbon.collapsed\ttrue\nleft_panel:Workspace:visible\tfalse\nleft_panel:Workspace:collapsed\ttrue\nleft_panel:Workspace:height\t185\nleft_panel:order\tAnimation|Workspace|MolStruct|Selection|Coloring|Symmetry|Density map|View\nleft_panel:width\t310\nworkspace_panel:state_width\t58\nbottom_panel:visible\tfalse\nbottom_panel:tab\tsequence\nbottom_panel:height\t240\nsequence_panel:name_width\t220\nanimation_panel:name_width\t180\nanimation_panel:start_width\t70\ncoloring_paint:selection_width\t165\ncoloring_gradient:param_width\t155\nanimation_render:height\t720\nanimation_render:concurrency\t6\nanimation_render:duplicate_last_frame\ttrue\nanimation_render:backend\tUmbreon\nanimation_render:pov_shadow\ttrue\nanimation_render:make_movie\ttrue\nanimation_render:movie_format\tgifanim\nmru:length\t2\nmru:0:path\t/tmp/recent.qsc\nmru:1:path\t/tmp/recent.pdb\nselection_history:length\t2\nselection_history:0\tchain A\nselection_history:1\tname CA\n"
+                "view_input:tbrad\t1.25\ncuemol2.ui.ribbon.collapsed\ttrue\nleft_panel:Workspace:visible\tfalse\nleft_panel:Workspace:collapsed\ttrue\nleft_panel:Workspace:height\t185\nleft_panel:order\tAnimation|Workspace|MolStruct|Selection|Coloring|Symmetry|Density map|View\nleft_panel:width\t310\nworkspace_panel:state_width\t58\nbond_editor:atom0_width\t260\nbottom_panel:visible\tfalse\nbottom_panel:tab\tsequence\nbottom_panel:height\t240\nsequence_panel:name_width\t220\nanimation_panel:name_width\t180\nanimation_panel:start_width\t70\ncoloring_paint:selection_width\t165\ncoloring_gradient:param_width\t155\nanimation_render:height\t720\nanimation_render:concurrency\t6\nanimation_render:duplicate_last_frame\ttrue\nanimation_render:backend\tUmbreon\nanimation_render:pov_shadow\ttrue\nanimation_render:make_movie\ttrue\nanimation_render:movie_format\tgifanim\nmru:length\t2\nmru:0:path\t/tmp/recent.qsc\nmru:1:path\t/tmp/recent.pdb\nselection_history:length\t2\nselection_history:0\tchain A\nselection_history:1\tname CA\n"
                     .to_string(),
             )),
         });
@@ -34443,6 +34553,7 @@ mod tests {
         assert_eq!(app.left_panel_order[0], LeftPanel::Animation);
         assert_eq!(app.left_panel_width, 310.0);
         assert_eq!(app.workspace_state_column_width, 58.0);
+        assert_eq!(app.bond_atom0_column_width, 260.0);
         assert!(!app.show_bottom_panel);
         assert_eq!(app.bottom_tab, BottomTab::Sequence);
         assert_eq!(app.bottom_panel_height, 240.0);
