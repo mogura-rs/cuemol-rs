@@ -986,6 +986,7 @@ fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
         "Show-Hide",
         "Target opacity",
         "Direction angle",
+        "Direction preset",
         "Distance (W/2)",
         "Target MorphMol",
         "Start value",
@@ -1009,6 +1010,11 @@ fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
         assert!(JS.contains(label));
         assert!(NATIVE_GUI_RS.contains(label));
     }
+    for label in ["Left", "Up", "Right", "Down"] {
+        assert!(JS.contains(&format!("\"{label}\"")));
+        assert!(NATIVE_GUI_RS.contains(&format!("\"{label}\"")));
+    }
+    assert!(NATIVE_GUI_RS.contains("animation_slide_direction"));
     assert!(JS.contains("keepQuaternionPositive: true"));
     assert!(JS.contains("fade: true"));
     assert!(JS.contains("distance: 1"));

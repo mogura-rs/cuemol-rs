@@ -15714,6 +15714,31 @@ impl GuiApplication {
                                         .speed(5.0)
                                         .suffix("°"),
                                 );
+                                let selected = match *value {
+                                    0.0 => "Left",
+                                    90.0 => "Up",
+                                    180.0 => "Right",
+                                    270.0 => "Down",
+                                    _ => "Preset",
+                                };
+                                let mut preset = None;
+                                egui::ComboBox::from_id_salt("animation_slide_direction")
+                                    .selected_text(selected)
+                                    .show_ui(ui, |ui| {
+                                        for (label, angle) in [
+                                            ("Left", 0.0),
+                                            ("Up", 90.0),
+                                            ("Right", 180.0),
+                                            ("Down", 270.0),
+                                        ] {
+                                            if ui.selectable_label(false, label).clicked() {
+                                                preset = Some(angle);
+                                            }
+                                        }
+                                    });
+                                if let Some(angle) = preset {
+                                    *value = angle;
+                                }
                             });
                         }
                         if let Some(value) = &mut draft.distance {

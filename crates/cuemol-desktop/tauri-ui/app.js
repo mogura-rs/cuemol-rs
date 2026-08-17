@@ -7564,6 +7564,22 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         direction.min = "0";
         direction.max = "360";
         direction.step = "5";
+        const directionPreset = dialogSelect(
+          "Direction preset",
+          [
+            ["0", "Left"],
+            ["90", "Up"],
+            ["180", "Right"],
+            ["270", "Down"],
+          ],
+          [0, 90, 180, 270].includes(Number(object.direction))
+            ? String(object.direction)
+            : "0",
+          typePage,
+        );
+        directionPreset.addEventListener("change", () => {
+          direction.value = directionPreset.value;
+        });
         const distance = dialogField(
           "Distance (W/2)",
           String(object.distance),
@@ -7582,6 +7598,9 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         optional.reset = (defaults) => {
           showHide.value = defaults.hide ? "hide" : "show";
           direction.value = String(defaults.direction);
+          directionPreset.value = [0, 90, 180, 270].includes(defaults.direction)
+            ? String(defaults.direction)
+            : "0";
           distance.value = String(defaults.distance);
         };
       } else if (object.typeName === "MolAnim") {
