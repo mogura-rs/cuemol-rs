@@ -7889,28 +7889,6 @@ async function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
   };
   if (renderer.rendererType === "*group") {
     return [
-      { label: renderer.name, disabled: true },
-      null,
-      {
-        label: renderer.visible ? "Hide" : "Show",
-        action: () =>
-          mutate("set_workspace_visible", {
-            target: {
-              kind: "rendererGroup",
-              objectUid: object.uid,
-              rendererUid: renderer.uid,
-            },
-            visible: !renderer.visible,
-          }),
-      },
-      {
-        label: "Rename…",
-        action: async () => {
-          if (!(await activate())) return;
-          selectWorkspaceAuxItem(kind, object.uid, renderer.uid);
-          beginWorkspaceInlineRename(kind, object.uid, renderer.uid);
-        },
-      },
       {
         label: "Copy",
         action: async () => {
@@ -7918,19 +7896,24 @@ async function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
           await copyWorkspaceRenderer(object.uid, renderer.uid);
         },
       },
-      ...(workspaceRendererClipboardAvailable
-        ? [
-            {
-              label: "Paste Renderer",
-              action: async () => {
-                if (!(await activate())) return;
-                await pasteWorkspaceRenderers(object.uid, renderer.uid);
-              },
-            },
-          ]
-        : []),
       {
-        label: "New Renderer…",
+        label: "Paste Renderer",
+        disabled: !workspaceRendererClipboardAvailable,
+        action: async () => {
+          if (!(await activate())) return;
+          await pasteWorkspaceRenderers(object.uid, renderer.uid);
+        },
+      },
+      {
+        label: "Change Name",
+        action: async () => {
+          if (!(await activate())) return;
+          selectWorkspaceAuxItem(kind, object.uid, renderer.uid);
+          beginWorkspaceInlineRename(kind, object.uid, renderer.uid);
+        },
+      },
+      {
+        label: "New Renderer...",
         action: async () => {
           if (!(await activate())) return;
           if (kind === "lwRenderer") {
@@ -7962,15 +7945,6 @@ async function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
               rendererUid: renderer.uid,
             },
           }),
-      },
-      null,
-      {
-        label: "Properties…",
-        action: async () => {
-          if (!(await activate())) return;
-          selectWorkspaceAuxItem(kind, object.uid, renderer.uid);
-          showReferenceDialog("Renderer Properties");
-        },
       },
     ];
   }
@@ -8133,38 +8107,21 @@ async function workspaceRendererContextItems(scene, object, renderer) {
   const items = [];
   if (renderer.rendererType === "*group") {
     items.push(
-      { label: renderer.name, disabled: true },
-      null,
-      {
-        label: renderer.visible ? "Hide" : "Show",
-        action: () =>
-          mutate("set_workspace_visible", {
-            target: {
-              kind: "rendererGroup",
-              objectUid: object.uid,
-              rendererUid: renderer.uid,
-            },
-            visible: !renderer.visible,
-          }),
-      },
-      {
-        label: "Rename…",
-        action: () => beginWorkspaceInlineRename("rendererGroup", object.uid, renderer.uid),
-      },
       {
         label: "Copy",
         action: () => copyWorkspaceRenderer(object.uid, renderer.uid),
       },
-    );
-    if (workspaceRendererClipboardAvailable) {
-      items.push({
-        label: "Paste Renderer",
-        action: () => pasteWorkspaceRenderers(object.uid, renderer.uid),
-      });
-    }
-    items.push(
       {
-        label: "New Renderer…",
+        label: "Paste Renderer",
+        disabled: !workspaceRendererClipboardAvailable,
+        action: () => pasteWorkspaceRenderers(object.uid, renderer.uid),
+      },
+      {
+        label: "Change Name",
+        action: () => beginWorkspaceInlineRename("rendererGroup", object.uid, renderer.uid),
+      },
+      {
+        label: "New Renderer...",
         action: () =>
           mutate("add_renderer", {
             objectUid: object.uid,
@@ -8182,11 +8139,6 @@ async function workspaceRendererContextItems(scene, object, renderer) {
               rendererUid: renderer.uid,
             },
           }),
-      },
-      null,
-      {
-        label: "Properties…",
-        action: () => showReferenceDialog("Renderer Properties"),
       },
     );
     return items;

@@ -1287,11 +1287,29 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
         })
         .and_then(|source| source.split("return items;").next())
         .expect("Tauri renderer-group context menu");
-    assert!(tauri_renderer_group_menu.contains("{ label: renderer.name, disabled: true }"));
-    assert!(tauri_renderer_group_menu.contains("renderer.visible ? \"Hide\" : \"Show\""));
-    assert!(tauri_renderer_group_menu.contains("label: \"Paste Renderer\""));
-    assert!(tauri_renderer_group_menu.contains("label: \"New Renderer…\""));
-    assert!(tauri_renderer_group_menu.contains("label: \"Properties…\""));
+    let mut cursor = 0;
+    for item in [
+        "label: \"Copy\"",
+        "label: \"Paste Renderer\"",
+        "label: \"Change Name\"",
+        "label: \"New Renderer...\"",
+        "label: \"Delete\"",
+    ] {
+        let relative = tauri_renderer_group_menu[cursor..]
+            .find(item)
+            .unwrap_or_else(|| panic!("missing renderer-group menu item {item}"));
+        cursor += relative + item.len();
+    }
+    for omitted in [
+        "{ label: renderer.name, disabled: true }",
+        "renderer.visible ? \"Hide\" : \"Show\"",
+        "label: \"Properties…\"",
+    ] {
+        assert!(
+            !tauri_renderer_group_menu.contains(omitted),
+            "unexpected renderer-group menu item {omitted}"
+        );
+    }
     let tauri_renderer_menu = JS
         .split("async function workspaceRendererContextItems(scene, object, renderer)")
         .nth(1)
@@ -1328,7 +1346,8 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(!tauri_renderer_menu.contains("Style ·"));
     assert!(!tauri_renderer_menu.contains("label: \"Paint\", disabled: true"));
     assert!(NATIVE_GUI_RS.contains("ui.button(\"Rename…\")"));
-    assert!(NATIVE_GUI_RS.contains("ui.button(\"New Renderer…\")"));
+    assert!(NATIVE_GUI_RS.contains("ui.button(\"Change Name\")"));
+    assert!(NATIVE_GUI_RS.contains("ui.button(\"New Renderer...\")"));
     assert!(CSS.contains(".workspace-context-menu button.checked::before"));
 }
 

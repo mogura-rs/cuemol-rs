@@ -6095,24 +6095,16 @@ impl GuiApplication {
         selection: WorkspaceAuxSelection,
     ) {
         if let Some((owner, group)) = self.workspace_aux_group_summary(selection) {
-            ui.weak(&group.name);
-            ui.separator();
-            if ui
-                .button(if group.visible { "Hide" } else { "Show" })
-                .clicked()
-            {
-                self.set_workspace_aux_renderer_visibility(owner, group.uid, true, !group.visible);
-                ui.close();
-            }
-            if ui.button("Rename…").clicked() {
-                self.open_aux_properties(selection);
-                ui.close();
-            }
             if ui.button("Copy").clicked() {
                 self.copy_workspace_renderer_to_clipboard(owner.uid(), group.uid);
                 ui.close();
             }
-            if self.workspace_renderer_clipboard.is_some() && ui.button("Paste Renderer").clicked()
+            if ui
+                .add_enabled(
+                    self.workspace_renderer_clipboard.is_some(),
+                    egui::Button::new("Paste Renderer"),
+                )
+                .clicked()
             {
                 if let Some(scene_uid) = self.workspace_owner_scene_uid(owner) {
                     self.paste_workspace_renderer_clipboard(
@@ -6123,18 +6115,17 @@ impl GuiApplication {
                 }
                 ui.close();
             }
-            if ui.button("New Renderer…").clicked() {
+            if ui.button("Change Name").clicked() {
+                self.open_aux_properties(selection);
+                ui.close();
+            }
+            if ui.button("New Renderer...").clicked() {
                 self.open_aux_renderer_dialog(selection);
                 self.new_renderer_group = Some(group.name);
                 ui.close();
             }
             if ui.button("Delete").clicked() {
                 self.delete_aux_selection(selection);
-                ui.close();
-            }
-            ui.separator();
-            if ui.button("Properties...").clicked() {
-                self.open_aux_properties(selection);
                 ui.close();
             }
             return;
@@ -6579,29 +6570,16 @@ impl GuiApplication {
                         }
                         self.workspace_multiple_selection.clear();
                         if is_group {
-                            ui.weak(&renderer.name);
-                            ui.separator();
-                            if ui
-                                .button(if renderer.visible { "Hide" } else { "Show" })
-                                .clicked()
-                            {
-                                self.set_renderer_group_visibility(
-                                    object_uid,
-                                    renderer.uid,
-                                    !renderer.visible,
-                                );
-                                ui.close();
-                            }
-                            if ui.button("Rename…").clicked() {
-                                self.open_renderer_properties(object_uid, renderer.uid);
-                                ui.close();
-                            }
                             if ui.button("Copy").clicked() {
                                 self.copy_workspace_renderer_to_clipboard(object_uid, renderer.uid);
                                 ui.close();
                             }
-                            if self.workspace_renderer_clipboard.is_some()
-                                && ui.button("Paste Renderer").clicked()
+                            if ui
+                                .add_enabled(
+                                    self.workspace_renderer_clipboard.is_some(),
+                                    egui::Button::new("Paste Renderer"),
+                                )
+                                .clicked()
                             {
                                 self.paste_workspace_renderer_clipboard(
                                     scene_uid,
@@ -6610,7 +6588,11 @@ impl GuiApplication {
                                 );
                                 ui.close();
                             }
-                            if ui.button("New Renderer…").clicked() {
+                            if ui.button("Change Name").clicked() {
+                                self.open_renderer_properties(object_uid, renderer.uid);
+                                ui.close();
+                            }
+                            if ui.button("New Renderer...").clicked() {
                                 self.open_renderer_dialog_in_group(
                                     object_uid,
                                     Some(renderer.name.clone()),
@@ -6619,11 +6601,6 @@ impl GuiApplication {
                             }
                             if ui.button("Delete").clicked() {
                                 self.delete_renderer(object_uid, renderer.uid);
-                                ui.close();
-                            }
-                            ui.separator();
-                            if ui.button("Properties…").clicked() {
-                                self.open_renderer_properties(object_uid, renderer.uid);
                                 ui.close();
                             }
                         } else {
