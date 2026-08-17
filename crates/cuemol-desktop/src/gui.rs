@@ -1225,6 +1225,7 @@ struct GuiApplication {
     coloring_paint_selection_column_width: f32,
     coloring_paint_selection_column_drag_start_width: Option<f32>,
     coloring_gradient_selected: Option<usize>,
+    coloring_gradient_keep_ratio: bool,
     coloring_gradient_param_column_width: f32,
     coloring_gradient_param_column_drag_start_width: Option<f32>,
     snapshot: RenderSceneSnapshot,
@@ -3025,6 +3026,122 @@ fn native_gradient_preset(name: &str, minimum: f64, maximum: f64) -> Vec<(f64, S
     }
 }
 
+fn adjust_native_gradient_value(
+    entries: &mut [(f64, String)],
+    index: usize,
+    new_value: f64,
+    keep_ratio: bool,
+) -> bool {
+    if index >= entries.len() || !new_value.is_finite() {
+        return false;
+    }
+    let old_value = entries[index].0;
+    if !keep_ratio || entries.len() < 2 {
+        entries[index].0 = new_value;
+        return true;
+    }
+    let minimum = entries[0].0;
+    let maximum = entries[entries.len() - 1].0;
+    if index > 0
+        && index + 1 < entries.len()
+        && (new_value - minimum < 0.001
+            || maximum - new_value < 0.001
+            || old_value - minimum < 0.001
+            || maximum - old_value < 0.001)
+    {
+        return false;
+    }
+    let lower_span = old_value - minimum;
+    if index > 0 && lower_span.abs() >= 0.001 {
+        let new_span = new_value - minimum;
+        for entry in &mut entries[1..index] {
+            entry.0 = (entry.0 - minimum) / lower_span * new_span + minimum;
+        }
+    }
+    let upper_span = maximum - old_value;
+    if index + 1 < entries.len() && upper_span.abs() >= 0.001 {
+        let new_span = maximum - new_value;
+        let last = entries.len() - 1;
+        for entry in &mut entries[index + 1..last] {
+            entry.0 = (entry.0 - old_value) / upper_span * new_span + new_value;
+        }
+    }
+    entries[index].0 = new_value;
+    true
+}
+
+fn native_gradient_preview_color(entries: &[(f64, String)], value: f64) -> egui::Color32 {
+    let fallback = egui::Color32::GRAY;
+    let Some((first_value, first_color)) = entries.first() else {
+        return fallback;
+    };
+    let first_color = native_style_color(first_color).unwrap_or(fallback);
+    if value <= *first_value {
+        return first_color;
+    }
+    for pair in entries.windows(2) {
+        let [(left_value, left_color), (right_value, right_color)] = pair else {
+            continue;
+        };
+        if value > *right_value {
+            continue;
+        }
+        let left_color = native_style_color(left_color).unwrap_or(fallback);
+        let right_color = native_style_color(right_color).unwrap_or(fallback);
+        let span = right_value - left_value;
+        let ratio = if span.abs() < f64::EPSILON {
+            0.0
+        } else {
+            ((value - left_value) / span).clamp(0.0, 1.0)
+        };
+        let left = left_color.to_array();
+        let right = right_color.to_array();
+        let blend = |channel: usize| {
+            (f64::from(left[channel])
+                + (f64::from(right[channel]) - f64::from(left[channel])) * ratio)
+                .round() as u8
+        };
+        return egui::Color32::from_rgba_unmultiplied(blend(0), blend(1), blend(2), blend(3));
+    }
+    entries
+        .last()
+        .and_then(|(_, color)| native_style_color(color))
+        .unwrap_or(first_color)
+}
+
+fn native_gradient_preview_ui(ui: &mut egui::Ui, entries: &[(f64, String)]) {
+    ui.label("Preview:");
+    let desired_size = egui::vec2(ui.available_width().max(1.0), 18.0);
+    let (rect, _) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
+    ui.painter()
+        .rect_filled(rect, 0.0, egui::Color32::DARK_GRAY);
+    if let (Some((minimum, _)), Some((maximum, _))) = (entries.first(), entries.last()) {
+        let samples = rect.width().ceil().clamp(1.0, 256.0) as usize;
+        for sample in 0..samples {
+            let left = sample as f32 / samples as f32;
+            let right = (sample + 1) as f32 / samples as f32;
+            let value = *minimum + (*maximum - *minimum) * f64::from((left + right) * 0.5);
+            let sample_rect = egui::Rect::from_min_max(
+                egui::pos2(rect.left() + rect.width() * left, rect.top()),
+                egui::pos2(rect.left() + rect.width() * right, rect.bottom()),
+            );
+            ui.painter().rect_filled(
+                sample_rect,
+                0.0,
+                native_gradient_preview_color(entries, value),
+            );
+        }
+        ui.horizontal(|ui| {
+            ui.monospace(format!("{minimum:.2}"));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.monospace(format!("{maximum:.2}"));
+            });
+        });
+    } else {
+        ui.weak("No gradient nodes");
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NativeCameraVisibilityDraft {
     scene_uid: cuemol_core::Uid,
@@ -4681,6 +4798,7 @@ impl GuiApplication {
             coloring_paint_selection_column_width,
             coloring_paint_selection_column_drag_start_width: None,
             coloring_gradient_selected: None,
+            coloring_gradient_keep_ratio: false,
             coloring_gradient_param_column_width,
             coloring_gradient_param_column_drag_start_width: None,
             selected_renderer: None,
@@ -11506,6 +11624,7 @@ impl GuiApplication {
                     }
                 });
         });
+        native_gradient_preview_ui(ui, entries);
 
         if self
             .coloring_gradient_selected
@@ -11635,11 +11754,33 @@ impl GuiApplication {
             });
 
         if let Some(index) = self.coloring_gradient_selected {
-            if let Some((value, color)) = entries.get_mut(index) {
-                ui.horizontal(|ui| {
-                    ui.label("Value");
-                    changed |= ui.add(egui::DragValue::new(value).speed(0.1)).changed();
-                });
+            if let Some((old_value, selected_color)) = entries.get(index).cloned() {
+                let mut new_value = old_value;
+                let value_changed = ui
+                    .horizontal(|ui| {
+                        ui.label("Value");
+                        ui.add(egui::DragValue::new(&mut new_value).speed(0.1))
+                            .changed()
+                    })
+                    .inner;
+                if value_changed
+                    && adjust_native_gradient_value(
+                        entries,
+                        index,
+                        new_value,
+                        self.coloring_gradient_keep_ratio,
+                    )
+                {
+                    entries.sort_by(|left, right| left.0.total_cmp(&right.0));
+                    self.coloring_gradient_selected = entries.iter().position(|(value, color)| {
+                        value.to_bits() == new_value.to_bits() && color == &selected_color
+                    });
+                    changed = true;
+                }
+            }
+        }
+        if let Some(index) = self.coloring_gradient_selected {
+            if let Some((_, color)) = entries.get_mut(index) {
                 changed |= native_coloring_color_ui(ui, "Color", color);
             }
         }
@@ -11660,6 +11801,7 @@ impl GuiApplication {
                 .add_enabled(!entries.is_empty(), egui::Button::new("×"))
                 .on_hover_text("Delete all gradient nodes")
                 .clicked();
+            ui.checkbox(&mut self.coloring_gradient_keep_ratio, "Keep ratio");
         });
         if add {
             entries.push((0.0, "#ffffff".to_string()));
@@ -34976,6 +35118,17 @@ mod tests {
         assert!(app.snapshot.atoms.is_empty());
         assert!(app.snapshot.bonds.is_empty());
         assert!(app.snapshot.meshes.is_empty());
+    }
+
+    #[test]
+    fn native_gradient_keep_ratio_rescales_neighboring_nodes() {
+        let mut entries = [0.0, 0.25, 0.5, 0.75, 1.0].map(|value| (value, "#ffffff".to_string()));
+        assert!(adjust_native_gradient_value(&mut entries, 2, 0.6, true));
+        for ((value, _), expected) in entries.iter().zip([0.0, 0.3, 0.6, 0.8, 1.0]) {
+            assert!((value - expected).abs() < 1.0e-12);
+        }
+        assert!(!adjust_native_gradient_value(&mut entries, 2, 0.0, true));
+        assert_eq!(entries[2].0, 0.6);
     }
 
     #[test]

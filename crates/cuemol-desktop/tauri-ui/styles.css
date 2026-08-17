@@ -1258,6 +1258,25 @@ body.resizing-side-panel-height {
   color: var(--muted);
 }
 
+.coloring-gradient-preview {
+  display: grid;
+  gap: 3px;
+}
+
+.coloring-gradient-preview-bar {
+  height: 16px;
+  border: 1px solid #777;
+  background: #666;
+}
+
+.coloring-gradient-preview-range {
+  display: flex;
+  justify-content: space-between;
+  min-height: 14px;
+  color: var(--muted);
+  font: 10px/1.2 var(--font-mono);
+}
+
 .coloring-paint-list {
   overflow: auto;
   max-height: 132px;
@@ -1374,6 +1393,19 @@ body.resizing-side-panel-height {
 .coloring-paint-toolbar button {
   min-width: 27px;
   padding-inline: 5px;
+}
+
+.coloring-gradient-keep-ratio {
+  display: flex;
+  gap: 3px;
+  align-items: center;
+  margin-inline: 2px;
+  white-space: nowrap;
+}
+
+.coloring-gradient-keep-ratio input {
+  min-height: auto;
+  margin: 0;
 }
 
 .check-row {

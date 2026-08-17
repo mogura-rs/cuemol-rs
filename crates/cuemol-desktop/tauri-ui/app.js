@@ -225,6 +225,7 @@ let densityPanelTargetKey = null;
 let viewPanelCamera = null;
 let coloringPaintSelectedIndex = -1;
 let coloringGradientSelectedIndex = -1;
+let coloringGradientKeepRatio = false;
 let coloringPaintSelectionColumnWidth = null;
 let selectionHistoryEntries = loadSelectionHistory();
 let commandHistoryEntries = loadCommandHistory();
@@ -14643,6 +14644,48 @@ function gradientPreset(name, mapName) {
   return rainbowGradientForMap(mapName);
 }
 
+function changeGradientEntry(entries, index, newValue, newColor, keepRatio) {
+  if (index < 0 || index >= entries.length || !Number.isFinite(newValue)) return null;
+  const selected = entries[index];
+  const oldValue = Number(selected.value);
+  if (keepRatio && entries.length > 1) {
+    const minimum = Number(entries[0].value);
+    const maximum = Number(entries[entries.length - 1].value);
+    if (
+      index > 0
+      && index + 1 < entries.length
+      && (
+        newValue - minimum < 0.001
+        || maximum - newValue < 0.001
+        || oldValue - minimum < 0.001
+        || maximum - oldValue < 0.001
+      )
+    ) {
+      return null;
+    }
+    const lowerSpan = oldValue - minimum;
+    if (index > 0 && Math.abs(lowerSpan) >= 0.001) {
+      const newSpan = newValue - minimum;
+      for (let current = 1; current < index; current += 1) {
+        entries[current].value =
+          ((Number(entries[current].value) - minimum) / lowerSpan) * newSpan + minimum;
+      }
+    }
+    const upperSpan = maximum - oldValue;
+    if (index + 1 < entries.length && Math.abs(upperSpan) >= 0.001) {
+      const newSpan = maximum - newValue;
+      for (let current = index + 1; current < entries.length - 1; current += 1) {
+        entries[current].value =
+          ((Number(entries[current].value) - oldValue) / upperSpan) * newSpan + newValue;
+      }
+    }
+  }
+  selected.value = newValue;
+  selected.color = newColor || "#ffffff";
+  entries.sort((left, right) => left.value - right.value);
+  return entries.indexOf(selected);
+}
+
 function renderMultiGradientColoring(target, state) {
   const mapOptions = coloringMapOptions(false);
   coloringControlRow(
@@ -14657,6 +14700,40 @@ function renderMultiGradientColoring(target, state) {
       },
     ),
   );
+  const preview = document.createElement("div");
+  preview.className = "coloring-gradient-preview";
+  const previewLabel = document.createElement("span");
+  previewLabel.textContent = "Preview:";
+  const previewBar = document.createElement("div");
+  previewBar.className = "coloring-gradient-preview-bar";
+  const previewRange = document.createElement("div");
+  previewRange.className = "coloring-gradient-preview-range";
+  const previewEntries = [...state.gradientEntries].sort((left, right) => left.value - right.value);
+  if (previewEntries.length) {
+    const minimum = Number(previewEntries[0].value);
+    const maximum = Number(previewEntries[previewEntries.length - 1].value);
+    const stops = previewEntries.length === 1
+      ? [`${previewEntries[0].color} 0%`, `${previewEntries[0].color} 100%`]
+      : previewEntries.map((entry) => {
+        const span = maximum - minimum;
+        const offset = Math.abs(span) < Number.EPSILON
+          ? 0
+          : ((Number(entry.value) - minimum) / span) * 100;
+        return `${entry.color} ${Math.min(100, Math.max(0, offset))}%`;
+      });
+    previewBar.style.background = `linear-gradient(90deg, ${stops.join(", ")})`;
+    const minimumLabel = document.createElement("span");
+    minimumLabel.textContent = minimum.toFixed(2);
+    const maximumLabel = document.createElement("span");
+    maximumLabel.textContent = maximum.toFixed(2);
+    previewRange.append(minimumLabel, maximumLabel);
+  } else {
+    const empty = document.createElement("span");
+    empty.textContent = "No gradient nodes";
+    previewRange.append(empty);
+  }
+  preview.append(previewLabel, previewBar, previewRange);
+  coloringDeck.append(preview);
   if (coloringGradientSelectedIndex >= state.gradientEntries.length) {
     coloringGradientSelectedIndex = state.gradientEntries.length - 1;
   }
@@ -14722,13 +14799,29 @@ function renderMultiGradientColoring(target, state) {
     coloringGradientSelectedIndex = -1;
     commitColoring(target, state.type, state);
   }, state.gradientEntries.length === 0);
+  const keepRatio = document.createElement("label");
+  keepRatio.className = "coloring-gradient-keep-ratio";
+  const keepRatioInput = document.createElement("input");
+  keepRatioInput.type = "checkbox";
+  keepRatioInput.checked = coloringGradientKeepRatio;
+  keepRatioInput.addEventListener("change", () => {
+    coloringGradientKeepRatio = keepRatioInput.checked;
+  });
+  keepRatio.append(keepRatioInput, "Keep ratio");
+  toolbar.append(keepRatio);
   action("Change", "Change gradient node", () => {
-    state.gradientEntries[coloringGradientSelectedIndex] = {
-      value: Number(value.value),
-      color: color.value || "#ffffff",
-    };
-    sortedEntries();
-    coloringGradientSelectedIndex = state.gradientEntries.findIndex((entry) => entry.value === Number(value.value));
+    const selectedIndex = changeGradientEntry(
+      state.gradientEntries,
+      coloringGradientSelectedIndex,
+      Number(value.value),
+      color.value,
+      coloringGradientKeepRatio,
+    );
+    if (selectedIndex === null) {
+      showError("Gradient node value is outside the keep-ratio range.");
+      return;
+    }
+    coloringGradientSelectedIndex = selectedIndex;
     commitColoring(target, state.type, state);
   }, coloringGradientSelectedIndex < 0);
   coloringDeck.append(toolbar);

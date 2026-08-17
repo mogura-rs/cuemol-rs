@@ -783,6 +783,11 @@ fn paint_coloring_columns_are_resizable_and_persistent() {
     assert!(CSS.contains(".coloring-paint-color-cell"));
     assert!(JS.contains("list.append(coloringPaintColumnHeader(\"Param\"))"));
     assert_eq!(JS.matches("colorCell.append(swatch, color)").count(), 2);
+    assert!(JS.contains("function changeGradientEntry("));
+    assert!(JS.contains("coloring-gradient-preview-bar"));
+    assert!(JS.contains("coloringGradientKeepRatio"));
+    assert!(CSS.contains(".coloring-gradient-preview-range"));
+    assert!(CSS.contains(".coloring-gradient-keep-ratio"));
     let native_paint = NATIVE_GUI_RS
         .split("fn object_paint_coloring_ui(")
         .nth(1)
@@ -803,6 +808,9 @@ fn paint_coloring_columns_are_resizable_and_persistent() {
     assert!(native_gradient.contains("coloring_gradient:param_width"));
     assert!(native_gradient.contains("splitter.drag_delta().x"));
     assert!(native_gradient.contains("ui.monospace(color)"));
+    assert!(native_gradient.contains("native_gradient_preview_ui(ui, entries)"));
+    assert!(native_gradient.contains("coloring_gradient_keep_ratio"));
+    assert!(NATIVE_GUI_RS.contains("fn adjust_native_gradient_value("));
 }
 
 #[test]
