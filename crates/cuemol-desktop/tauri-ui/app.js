@@ -5614,30 +5614,70 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         objectOptions,
         selectedObjectUid ?? objects[0].uid,
       );
-      const useSelection = dialogCheckbox("Selection", Boolean(snapshot.selection));
-      const selection = dialogField("Selection code", snapshot.selection);
+      const initialObject =
+        objects.find((candidate) => candidate.uid === Number(object.value)) || objects[0];
+      const useSelection = dialogCheckbox("Selection", Boolean(initialObject.selection));
+      const selection = dialogField("Selection code", initialObject.selection || "");
       selection.disabled = !useSelection.checked;
       useSelection.addEventListener("change", () => {
         selection.disabled = !useSelection.checked;
       });
-      const outputName = dialogField("Surface name", "surface");
-      const density = dialogField("Density (/Å)", "1.0", "number");
-      density.min = "0.1";
-      density.step = "0.1";
+      const usedNames = new Set([
+        ...snapshot.objects,
+        ...snapshot.densityMaps,
+        ...(snapshot.surfaces || []),
+        ...(snapshot.lwObjects || []),
+      ].map((item) => item.name));
+      const suggestedName = (moleculeName) => {
+        const base = `sf_${moleculeName}`;
+        if (!usedNames.has(base)) return base;
+        let serial = 1;
+        while (usedNames.has(`${base}(${serial})`)) serial += 1;
+        return `${base}(${serial})`;
+      };
+      const outputName = dialogField("Surface name", suggestedName(initialObject.name));
+      let outputNameEdited = false;
+      outputName.addEventListener("input", () => {
+        outputNameEdited = true;
+      });
+      object.addEventListener("change", () => {
+        const selected = objects.find(
+          (candidate) => candidate.uid === Number(object.value),
+        );
+        if (!selected) return;
+        selection.value = selected.selection || "";
+        useSelection.checked = Boolean(selection.value);
+        selection.disabled = !useSelection.checked;
+        if (!outputNameEdited) outputName.value = suggestedName(selected.name);
+      });
+      const density = dialogField("Density (/Å)", "1", "number");
+      density.min = "1";
+      density.step = "1";
       const probeRadius = dialogField("Probe radius (Å)", "1.4", "number");
       probeRadius.min = "0.1";
       probeRadius.step = "0.1";
       const generate = button("OK", "dialog-primary", async () => {
-        const name = outputName.value.trim() || "surface";
-        const path = await chooseOutputPath(`${name}.obj`, "Wavefront OBJ", ["obj"]);
-        if (!path) return;
-        await mutate("write_surface", {
+        const name = outputName.value.trim();
+        if (!name) return;
+        const previous = new Set((snapshot.surfaces || []).map((item) => item.uid));
+        const changed = await mutate("create_molecular_surface", {
           objectUid: Number(object.value),
           selection: useSelection.checked ? selection.value : "",
-          density: Number(density.value),
+          name,
+          density: Math.trunc(Number(density.value)),
           probeRadius: Number(probeRadius.value),
-          path,
         });
+        if (!changed) return;
+        const created = (snapshot.surfaces || []).find(
+          (item) => !previous.has(item.uid),
+        );
+        if (created) {
+          selectedObjectUid = null;
+          selectedRendererUid = null;
+          selectedSurfaceUid = created.uid;
+          selectedSurfaceRendererUid = null;
+          workspaceSelectionKind = "surface";
+        }
         referenceDialog.close();
       });
       dialogActions(generate);

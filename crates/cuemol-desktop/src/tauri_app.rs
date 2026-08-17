@@ -6981,6 +6981,13 @@ enum ModelRequest {
         ignore_bulge: bool,
         angle: f64,
     },
+    CreateMolecularSurface {
+        object_uid: u64,
+        selection: String,
+        name: String,
+        density: f64,
+        probe_radius: f64,
+    },
     WriteSurface {
         object_uid: u64,
         selection: String,
@@ -9900,6 +9907,29 @@ fn handle_model_request(
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
+        ModelRequest::CreateMolecularSurface {
+            object_uid,
+            selection,
+            name,
+            density,
+            probe_radius,
+        } => {
+            let undo = model.capture_undo();
+            let _surface_uid = model
+                .desktop
+                .create_molecular_surface_object(
+                    Uid::new(object_uid),
+                    &selection,
+                    &name,
+                    density,
+                    probe_radius,
+                )
+                .map_err(|error| error.to_string())?;
+            model.status = format!("Created molecular surface {name}");
+            model.invalidate_mesh(false);
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
         ModelRequest::WriteSurface {
             object_uid,
             selection,
@@ -12597,6 +12627,27 @@ fn assign_secondary_structure(
 }
 
 #[tauri::command]
+fn create_molecular_surface(
+    object_uid: u64,
+    selection: String,
+    name: String,
+    density: f64,
+    probe_radius: f64,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::CreateMolecularSurface {
+            object_uid,
+            selection,
+            name,
+            density,
+            probe_radius,
+        },
+    )?)
+}
+
+#[tauri::command]
 fn write_surface(
     object_uid: u64,
     selection: String,
@@ -13330,6 +13381,7 @@ pub fn run() -> Result<(), tauri::Error> {
             get_space_groups,
             change_crystal_info,
             assign_secondary_structure,
+            create_molecular_surface,
             write_surface,
             write_cut_surface,
             cut_surface,
@@ -19417,37 +19469,24 @@ mod tests {
         let first = objects[0].uid.get();
         let second = objects[1].uid.get();
 
-        let molecule = model
-            .desktop
-            .scene_manager()
-            .object(Uid::new(first))
-            .unwrap()
-            .mol()
-            .clone();
-        let mut surface = cuemol_surface::MolSurfObj::new();
-        surface.create_ses_from_mol(&molecule, cuemol_molstr::Selector::All, 1.0, 1.4);
-        let raw_data = cuemol_surface::qdf::write_qdf_surface_bytes(&surface);
-        let mut node = cuemol_core::LDom2Node::new();
-        node.set_tag_name("object");
-        node.set_type_name("MolSurfObj");
-        node.set_str_attr("name", "surface");
-        node.set_str_attr("src", "datachunk:");
-        node.set_str_attr("srctype", "qdfsurf");
-        let scene_uid = model.desktop.active_scene().unwrap();
-        let surface_uid = model
-            .desktop
-            .scene_manager_mut()
-            .scene_mut(scene_uid)
-            .unwrap()
-            .add_loaded_surface(cuemol_molstr::LoadedSurface {
-                uid: Uid::new(0),
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::CreateMolecularSurface {
+                object_uid: first,
+                selection: "aid 1".to_string(),
                 name: "surface".to_string(),
-                object_type: "MolSurfObj".to_string(),
-                srctype: "qdfsurf".to_string(),
-                data: String::from_utf8_lossy(&raw_data).into_owned(),
-                raw_data,
-                qsc_node: Some(node),
-            });
+                density: 1.0,
+                probe_radius: 1.4,
+            },
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected molecular-surface snapshot");
+        };
+        assert_eq!(snapshot.status, "Created molecular surface surface");
+        assert_eq!(snapshot.surfaces.len(), 1);
+        assert_eq!(snapshot.surfaces[0].original_molecule, objects[0].name);
+        let surface_uid = Uid::new(snapshot.surfaces[0].uid);
         model.camera.set_center(Vector4::new3(0.0, 0.0, -120.0));
         model.camera.set_slab_depth(240.0);
         let response = handle_model_request(

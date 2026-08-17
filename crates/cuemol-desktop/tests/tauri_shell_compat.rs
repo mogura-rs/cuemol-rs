@@ -155,7 +155,7 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "remove_nonstandard_bonds",
         "calculate_contacts",
         "assign_secondary_structure",
-        "write_surface",
+        "create_molecular_surface",
         "cut_surface",
         "write_apbs_files",
         "append_morph_frame",
@@ -1281,6 +1281,12 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("surfaceUid: object.uid, density"));
     assert!(TAURI_APP_RS.contains("regenerate_surface_object_with_density"));
     assert!(NATIVE_GUI_RS.contains("fn surface_regenerate_dialog("));
+    assert!(JS.contains("mutate(\"create_molecular_surface\""));
+    assert!(!JS.contains("chooseOutputPath(`${name}.obj`"));
+    assert!(TAURI_APP_RS.contains("ModelRequest::CreateMolecularSurface"));
+    assert!(TAURI_APP_RS.contains("fn create_molecular_surface("));
+    assert!(NATIVE_GUI_RS.contains("fn open_surface_generation_tool(&mut self)"));
+    assert!(NATIVE_GUI_RS.contains("create_molecular_surface_object("));
     assert!(CSS.contains(".workspace-context-menu.has-submenu"));
     assert!(JS.contains("WORKSPACE_PAINT_MONOCHROME"));
     assert!(JS.contains("function workspacePaintMenuChildren(action)"));

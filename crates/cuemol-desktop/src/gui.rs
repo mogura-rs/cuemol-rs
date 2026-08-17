@@ -1121,7 +1121,10 @@ struct GuiApplication {
     secondary_ignore_breaks: bool,
     secondary_gap_fill: bool,
     secondary_angle: f64,
-    surface_path: String,
+    surface_target: Option<cuemol_core::Uid>,
+    surface_use_selection: bool,
+    surface_selection: String,
+    surface_name: String,
     surface_density: f64,
     surface_probe_radius: f64,
     cut_surface_target: Option<cuemol_core::Uid>,
@@ -3425,7 +3428,10 @@ impl GuiApplication {
             secondary_ignore_breaks: false,
             secondary_gap_fill: false,
             secondary_angle: 120.0,
-            surface_path: "surface.obj".to_string(),
+            surface_target: None,
+            surface_use_selection: false,
+            surface_selection: String::new(),
+            surface_name: "surface".to_string(),
             surface_density: 1.0,
             surface_probe_radius: 1.4,
             cut_surface_target: None,
@@ -4093,6 +4099,7 @@ impl GuiApplication {
                         if ui.button(label).clicked() {
                             match label {
                                 "Execute script..." => self.choose_execute_script(),
+                                "Mol surface generation..." => self.open_surface_generation_tool(),
                                 "Performance measure" => {
                                     self.perf_measure = !self.perf_measure;
                                     self.set_status(format!(
@@ -12603,22 +12610,98 @@ impl GuiApplication {
         }
     }
 
+    fn suggested_surface_name(&self, molecule_name: &str) -> String {
+        let used = self
+            .state
+            .active_object_summaries()
+            .into_iter()
+            .map(|object| object.name)
+            .chain(
+                self.state
+                    .active_density_map_summaries()
+                    .into_iter()
+                    .map(|object| object.name),
+            )
+            .chain(
+                self.state
+                    .active_surface_summaries()
+                    .into_iter()
+                    .map(|object| object.name),
+            )
+            .chain(
+                self.state
+                    .active_lw_object_summaries()
+                    .into_iter()
+                    .map(|object| object.name),
+            )
+            .collect::<Vec<_>>();
+        let base = format!("sf_{molecule_name}");
+        if !used.contains(&base) {
+            return base;
+        }
+        (1_u64..)
+            .map(|serial| format!("{base}({serial})"))
+            .find(|name| !used.contains(name))
+            .expect("the surface object name space cannot be exhausted")
+    }
+
+    fn open_surface_generation_tool(&mut self) {
+        let objects = self.state.active_object_summaries();
+        let target = self
+            .selected_object
+            .filter(|uid| objects.iter().any(|object| object.uid == *uid))
+            .or_else(|| objects.first().map(|object| object.uid));
+        self.surface_target = target;
+        if let Some(object_uid) = target {
+            self.surface_selection = self
+                .state
+                .molecule_selection_text(object_uid)
+                .unwrap_or_default()
+                .to_string();
+            self.surface_use_selection = !self.surface_selection.is_empty();
+            if let Some(object) = objects.iter().find(|object| object.uid == object_uid) {
+                self.surface_name = self.suggested_surface_name(&object.name);
+            }
+        }
+        self.tool_dialog = Some("Mol surface generation".to_string());
+    }
+
     fn generate_surface_obj(&mut self) {
-        let Some(object_uid) = self.target_object_uid() else {
+        let Some(object_uid) = self.surface_target else {
             self.set_status("No object selected");
             return;
         };
-        match self.state.write_surface_obj(
+        let Some(scene_uid) = self.state.scene_manager().scene_uid_for_object(object_uid) else {
+            self.set_status("No object selected");
+            return;
+        };
+        let undo = self.capture_undo();
+        let selection = if self.surface_use_selection {
+            self.surface_selection.as_str()
+        } else {
+            ""
+        };
+        match self.state.create_molecular_surface_object(
             object_uid,
-            &self.selection_text,
-            self.surface_density,
+            selection,
+            self.surface_name.trim(),
+            self.surface_density.trunc(),
             self.surface_probe_radius,
-            self.surface_path.trim(),
         ) {
-            Ok(summary) => self.set_status(format!(
-                "Surface OBJ written: {} vertices / {} triangles",
-                summary.vertex_count, summary.triangle_count
-            )),
+            Ok(surface_uid) => {
+                self.push_undo_snapshot(undo);
+                self.modified_scenes.insert(scene_uid);
+                self.selected_object = None;
+                self.selected_renderer = None;
+                self.workspace_aux_selection = Some(WorkspaceAuxSelection::Surface {
+                    scene_uid,
+                    surface_uid,
+                    renderer_uid: None,
+                });
+                self.rebuild_snapshot();
+                self.set_status(format!("Created molecular surface {}", self.surface_name));
+                self.tool_dialog = None;
+            }
             Err(error) => self.set_error(error),
         }
     }
@@ -18838,17 +18921,82 @@ impl GuiApplication {
     }
 
     fn surface_tool_ui(&mut self, ui: &mut egui::Ui) {
-        ui.add_sized(
-            [ui.available_width(), 22.0],
-            egui::TextEdit::singleline(&mut self.surface_path),
-        );
+        ui.label("Create solvent-excluded surface:");
+        let objects = self.state.active_object_summaries();
+        if objects.is_empty() {
+            ui.weak("No molecular object is loaded.");
+            return;
+        }
+        if !objects
+            .iter()
+            .any(|object| Some(object.uid) == self.surface_target)
+        {
+            self.surface_target = objects.first().map(|object| object.uid);
+        }
+        let previous_target = self.surface_target;
+        let selected_name = objects
+            .iter()
+            .find(|object| Some(object.uid) == self.surface_target)
+            .map_or("(none)", |object| object.name.as_str());
+        egui::ComboBox::from_label("Target molecule:")
+            .selected_text(selected_name)
+            .show_ui(ui, |ui| {
+                for object in &objects {
+                    ui.selectable_value(&mut self.surface_target, Some(object.uid), &object.name);
+                }
+            });
+        if self.surface_target != previous_target {
+            if let Some(object_uid) = self.surface_target {
+                self.surface_selection = self
+                    .state
+                    .molecule_selection_text(object_uid)
+                    .unwrap_or_default()
+                    .to_string();
+                self.surface_use_selection = !self.surface_selection.is_empty();
+                if let Some(object) = objects.iter().find(|object| object.uid == object_uid) {
+                    self.surface_name = self.suggested_surface_name(&object.name);
+                }
+            }
+        }
         ui.horizontal(|ui| {
-            ui.label("Density");
-            ui.add(egui::DragValue::new(&mut self.surface_density).speed(0.1));
-            ui.label("Probe");
-            ui.add(egui::DragValue::new(&mut self.surface_probe_radius).speed(0.1));
+            ui.checkbox(&mut self.surface_use_selection, "Selection:");
+            ui.add_enabled(
+                self.surface_use_selection,
+                egui::TextEdit::singleline(&mut self.surface_selection)
+                    .desired_width(ui.available_width()),
+            );
         });
-        if ui.button("Generate OBJ").clicked() {
+        ui.horizontal(|ui| {
+            ui.label("Surface name:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.surface_name)
+                    .desired_width(ui.available_width()),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("Density (/Å):");
+            ui.add(
+                egui::DragValue::new(&mut self.surface_density)
+                    .range(1.0..=100.0)
+                    .speed(1.0)
+                    .max_decimals(0),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("Probe radius (Å):");
+            ui.add(
+                egui::DragValue::new(&mut self.surface_probe_radius)
+                    .range(0.1..=100.0)
+                    .speed(0.1),
+            );
+        });
+        if ui
+            .add_enabled(
+                !self.surface_name.trim().is_empty(),
+                egui::Button::new("OK"),
+            )
+            .clicked()
+        {
             self.generate_surface_obj();
         }
     }
@@ -29121,6 +29269,50 @@ mod tests {
         assert!(qsc.contains("name=\"surface mesh\""));
         assert!(qsc.contains("colormode=\"multigrad\""));
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn native_molecular_surface_tool_creates_workspace_surface() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        let object_uid = app
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("source", molecule);
+        app.selected_object = Some(object_uid);
+        app.state
+            .set_molecule_selection_text(object_uid, "chain A")
+            .unwrap();
+
+        app.open_surface_generation_tool();
+        assert_eq!(app.surface_target, Some(object_uid));
+        assert!(app.surface_use_selection);
+        assert_eq!(app.surface_selection, "chain A");
+        assert_eq!(app.surface_name, "sf_source");
+        app.surface_density = 2.0;
+        app.generate_surface_obj();
+
+        let surface = app.state.active_surface_summaries().remove(0);
+        assert_eq!(surface.name, "sf_source");
+        assert_eq!(surface.original_molecule, "source");
+        assert_eq!(surface.original_selection, "chain A");
+        assert_eq!(surface.original_density, 2.0);
+        assert_eq!(surface.renderers.len(), 1);
+        assert!(matches!(
+            app.workspace_aux_selection,
+            Some(WorkspaceAuxSelection::Surface {
+                surface_uid,
+                renderer_uid: None,
+                ..
+            }) if surface_uid == surface.uid
+        ));
+        assert!(app.tool_dialog.is_none());
     }
 
     #[test]

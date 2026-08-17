@@ -5062,6 +5062,140 @@ impl DesktopAppState {
         }))
     }
 
+    pub fn create_molecular_surface_object(
+        &mut self,
+        object_uid: Uid,
+        selection: &str,
+        name: &str,
+        density: f64,
+        probe_radius: f64,
+    ) -> Result<Uid> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(CueMolError::invalid_argument(
+                "surface name must not be empty",
+            ));
+        }
+        if !density.is_finite() || density < 1.0 {
+            return Err(CueMolError::invalid_argument(
+                "surface density must be at least 1",
+            ));
+        }
+        if !probe_radius.is_finite() || probe_radius < 0.1 {
+            return Err(CueMolError::invalid_argument(
+                "probe radius must be at least 0.1 Å",
+            ));
+        }
+        let scene_uid = self
+            .scene_manager()
+            .scene_uid_for_object(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        let (molecule_name, molecule) = {
+            let object = self
+                .scene_manager()
+                .object(object_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+            (object.name().to_string(), object.mol().clone())
+        };
+        let selection_text = selection.trim();
+        let selector = if selection_text.is_empty() {
+            Selector::All
+        } else {
+            parse_selector(selection_text)?
+        };
+        let mut surface = MolSurfObj::new();
+        surface.create_ses_from_mol(&molecule, &selector, density, probe_radius);
+        surface.set_orig_mol(&molecule_name);
+        surface.set_orig_sel(selection_text);
+        let raw_data = cuemol_surface::qdf::write_qdf_surface_bytes(&surface);
+
+        let ui_order = self
+            .object_summaries(scene_uid)
+            .into_iter()
+            .map(|object| object.ui_order)
+            .chain(
+                self.density_map_summaries(scene_uid)
+                    .into_iter()
+                    .map(|object| object.ui_order),
+            )
+            .chain(
+                self.surface_summaries(scene_uid)
+                    .into_iter()
+                    .map(|object| object.ui_order),
+            )
+            .chain(
+                self.lw_object_summaries(scene_uid)
+                    .into_iter()
+                    .map(|object| object.ui_order),
+            )
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let renderer_names = self
+            .scene_manager()
+            .scene(scene_uid)
+            .into_iter()
+            .flat_map(|scene| scene.objects())
+            .flat_map(|object| object.renderers())
+            .map(|renderer| renderer.name().to_string())
+            .chain(
+                self.density_map_summaries(scene_uid)
+                    .into_iter()
+                    .flat_map(|object| object.renderers.into_iter().map(|renderer| renderer.name)),
+            )
+            .chain(
+                self.surface_summaries(scene_uid)
+                    .into_iter()
+                    .flat_map(|object| object.renderers.into_iter().map(|renderer| renderer.name)),
+            )
+            .chain(
+                self.lw_object_summaries(scene_uid)
+                    .into_iter()
+                    .flat_map(|object| object.renderers.into_iter().map(|renderer| renderer.name)),
+            )
+            .collect::<BTreeSet<_>>();
+        let renderer_name = (1_u64..)
+            .map(|index| format!("molsurf{index}"))
+            .find(|candidate| !renderer_names.contains(candidate))
+            .expect("the surface renderer name space cannot be exhausted");
+
+        let mut object_node = LDom2Node::new();
+        object_node.set_tag_name("object");
+        object_node.set_type_name("MolSurfObj");
+        object_node.set_str_attr("name", name);
+        object_node.set_str_attr("src", "datachunk:00000");
+        object_node.set_str_attr("srctype", "qdfsurf");
+        object_node.set_str_attr("ui_order", ui_order.to_string());
+        object_node.set_str_attr("orig_mol", &molecule_name);
+        object_node.set_str_attr("orig_sel", selection_text);
+        object_node.set_str_attr("orig_den", density.to_string());
+        object_node.set_str_attr("orig_prad", probe_radius.to_string());
+        let mut renderer_node = LDom2Node::new();
+        renderer_node.set_tag_name("renderer");
+        renderer_node.set_type_name("molsurf");
+        renderer_node.set_str_attr("name", renderer_name);
+        renderer_node.set_str_attr("target", &molecule_name);
+        if !selection_text.is_empty() {
+            renderer_node.set_str_attr("sel", selection_text);
+        }
+        renderer_node.set_str_attr("colormode", "molecule");
+        object_node.append_child_node(renderer_node);
+
+        let scene = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        Ok(scene.add_loaded_surface(LoadedSurface {
+            uid: Uid::new(0),
+            name: name.to_string(),
+            object_type: "MolSurfObj".to_string(),
+            srctype: "qdfsurf".to_string(),
+            data: String::from_utf8_lossy(&raw_data).into_owned(),
+            raw_data,
+            qsc_node: Some(object_node),
+        }))
+    }
+
     pub fn regenerate_surface_object(&mut self, surface_uid: Uid) -> Result<usize> {
         let density = self
             .surface_summary(surface_uid)
@@ -62367,6 +62501,40 @@ attribute \"dep\" string \"positions\"
         );
 
         let _ = std::fs::remove_file(qsc_path);
+    }
+
+    #[test]
+    fn molecular_surface_generation_creates_scene_object_and_renderer() {
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.ensure_active_scene();
+        let molecule = read_pdb_str(
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        let object_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("source", molecule);
+
+        let surface_uid = app
+            .create_molecular_surface_object(object_uid, "chain A", "sf_source", 2.0, 1.4)
+            .unwrap();
+        let surface = app.surface_summary(surface_uid).unwrap();
+        assert_eq!(surface.name, "sf_source");
+        assert_eq!(surface.original_molecule, "source");
+        assert_eq!(surface.original_selection, "chain A");
+        assert_eq!(surface.original_density, 2.0);
+        assert_eq!(surface.original_probe_radius, 1.4);
+        assert_eq!(surface.renderers.len(), 1);
+        assert_eq!(surface.renderers[0].renderer_type, "molsurf");
+        assert_eq!(surface.renderers[0].selection, "chain A");
+        assert!(
+            app.active_render_snapshot("")
+                .unwrap()
+                .mesh_triangle_count()
+                > 0
+        );
     }
 
     #[test]
