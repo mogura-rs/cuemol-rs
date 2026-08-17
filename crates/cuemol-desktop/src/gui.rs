@@ -1179,6 +1179,7 @@ struct GuiApplication {
     animation_playing: bool,
     animation_elapsed: f32,
     animation_selected: Option<usize>,
+    animation_properties_draft: Option<NativeAnimationProperties>,
     animation_start_camera: Option<CameraController>,
     animation_start_state: Option<DesktopAppState>,
     animation_render_settings: AnimationRenderSettings,
@@ -1370,6 +1371,123 @@ struct AnimationRenderRestore {
     state: DesktopAppState,
     camera: CameraController,
     elapsed: f32,
+}
+
+#[derive(Debug, Clone)]
+struct NativeAnimationProperties {
+    index: usize,
+    type_name: String,
+    name: String,
+    disabled: bool,
+    time_ref_name: String,
+    start: f64,
+    duration: f64,
+    quadric: f64,
+    angle: Option<f64>,
+    axis: Option<[f64; 3]>,
+    target_camera: Option<String>,
+    ignore_center: Option<bool>,
+    ignore_rotate: Option<bool>,
+    ignore_zoom: Option<bool>,
+    ignore_slab: Option<bool>,
+    keep_quaternion_positive: Option<bool>,
+    renderer_names: Option<String>,
+    hide: Option<bool>,
+    fade: Option<bool>,
+    target_alpha: Option<f64>,
+    direction: Option<f64>,
+    distance: Option<f64>,
+    molecule_name: Option<String>,
+    property_name: Option<String>,
+    start_value: Option<f64>,
+    end_value: Option<f64>,
+    start_position: Option<[f64; 3]>,
+    end_position: Option<[f64; 3]>,
+}
+
+impl NativeAnimationProperties {
+    fn from_motion(index: usize, motion: &AnimMotion) -> Self {
+        let object = motion.base();
+        let mut draft = Self {
+            index,
+            type_name: motion.type_name().to_string(),
+            name: object.name().to_string(),
+            disabled: object.disabled(),
+            time_ref_name: object.time_ref_name().to_string(),
+            start: time_to_seconds(object.rel_start()),
+            duration: time_to_seconds(object.rel_end() - object.rel_start()).max(0.0),
+            quadric: object.quadric(),
+            angle: None,
+            axis: None,
+            target_camera: None,
+            ignore_center: None,
+            ignore_rotate: None,
+            ignore_zoom: None,
+            ignore_slab: None,
+            keep_quaternion_positive: None,
+            renderer_names: None,
+            hide: None,
+            fade: None,
+            target_alpha: None,
+            direction: None,
+            distance: None,
+            molecule_name: None,
+            property_name: None,
+            start_value: None,
+            end_value: None,
+            start_position: None,
+            end_position: None,
+        };
+        match motion {
+            AnimMotion::Camera(value) => {
+                draft.target_camera = Some(value.endcam().to_string());
+                draft.ignore_center = Some(value.ignorecenter());
+                draft.ignore_rotate = Some(value.ignorerotate());
+                draft.ignore_zoom = Some(value.ignorezoom());
+                draft.ignore_slab = Some(value.ignoreslab());
+                draft.keep_quaternion_positive = Some(value.keepquatpositive());
+            }
+            AnimMotion::RealProperty(value) => {
+                draft.renderer_names = Some(value.rend().to_string());
+                draft.property_name = Some(value.prop().to_string());
+                draft.start_value = Some(value.start_value());
+                draft.end_value = Some(value.end_value());
+            }
+            AnimMotion::Molecule(value) => {
+                draft.molecule_name = Some(value.mol().to_string());
+                draft.property_name = Some(value.prop().to_string());
+                draft.start_value = Some(value.start_value());
+                draft.end_value = Some(value.end_value());
+            }
+            AnimMotion::RendererTransform(value) => {
+                let start = value.start_tran();
+                let end = value.end_tran();
+                draft.renderer_names = Some(value.rend().to_string());
+                draft.property_name = Some(value.prop().to_string());
+                draft.start_position = Some([start.x, start.y, start.z]);
+                draft.end_position = Some([end.x, end.y, end.z]);
+            }
+            AnimMotion::ShowHide(value) => {
+                draft.renderer_names = Some(value.rend().to_string());
+                draft.hide = Some(value.hide());
+                draft.fade = Some(value.fade());
+                draft.target_alpha = Some(value.tgt_alpha());
+            }
+            AnimMotion::Spin(value) => {
+                let axis = value.axis();
+                draft.angle = Some(value.angle());
+                draft.axis = Some([axis.x, axis.y, axis.z]);
+            }
+            AnimMotion::Slide(value) => {
+                draft.renderer_names = Some(value.rend().to_string());
+                draft.hide = Some(value.hide());
+                draft.direction = Some(value.direction());
+                draft.distance = Some(value.distance());
+            }
+            AnimMotion::Noop(_) | AnimMotion::Unknown { .. } => {}
+        }
+        draft
+    }
 }
 
 struct AnimationFrameTask {
@@ -3528,6 +3646,7 @@ impl GuiApplication {
             animation_playing: false,
             animation_elapsed: 0.0,
             animation_selected: None,
+            animation_properties_draft: None,
             animation_start_camera: None,
             animation_start_state: None,
             animation_render_settings: AnimationRenderSettings::default(),
@@ -9938,6 +10057,246 @@ impl GuiApplication {
         Ok(())
     }
 
+    fn open_animation_properties(&mut self, index: usize) -> std::result::Result<(), String> {
+        let animation = self.active_animation_manager()?;
+        let motion = animation
+            .motions()
+            .get(index)
+            .ok_or_else(|| format!("animation object {index} was not found"))?;
+        self.animation_selected = Some(index);
+        self.animation_properties_draft =
+            Some(NativeAnimationProperties::from_motion(index, motion));
+        Ok(())
+    }
+
+    fn apply_animation_properties(
+        &mut self,
+        draft: &NativeAnimationProperties,
+        camera: &mut CameraController,
+    ) -> std::result::Result<(), String> {
+        let name = draft.name.trim().to_string();
+        let time_ref_name = draft.time_ref_name.trim().to_string();
+        if name.is_empty() {
+            return Err("animation object name is required".to_string());
+        }
+        if !draft.start.is_finite() || !(-86_400.0..=86_400.0).contains(&draft.start) {
+            return Err(
+                "animation start time must be between -86400 and 86400 seconds".to_string(),
+            );
+        }
+        if !draft.duration.is_finite() || !(0.001..=86_400.0).contains(&draft.duration) {
+            return Err("animation duration must be between 0.001 and 86400 seconds".to_string());
+        }
+        if !draft.quadric.is_finite() || !(0.0..=0.5).contains(&draft.quadric) {
+            return Err("animation quadric must be between 0 and 0.5".to_string());
+        }
+        if draft.angle.is_some_and(|value| !value.is_finite()) {
+            return Err("rotation angle must be finite".to_string());
+        }
+        if draft.axis.is_some_and(|axis| {
+            axis.iter().any(|value| !value.is_finite())
+                || axis.iter().map(|value| value * value).sum::<f64>() < 1.0e-12
+        }) {
+            return Err("spin axis must be a non-zero finite vector".to_string());
+        }
+        for (label, value) in [
+            ("target opacity", draft.target_alpha),
+            ("direction angle", draft.direction),
+            ("distance", draft.distance),
+            ("start value", draft.start_value),
+            ("end value", draft.end_value),
+        ] {
+            if value.is_some_and(|value| !value.is_finite()) {
+                return Err(format!("{label} must be finite"));
+            }
+        }
+        if draft
+            .target_alpha
+            .is_some_and(|value| !(0.0..=1.0).contains(&value))
+        {
+            return Err("target opacity must be between 0 and 1".to_string());
+        }
+        for (label, value) in [
+            ("start position", draft.start_position),
+            ("end position", draft.end_position),
+        ] {
+            if value.is_some_and(|value| value.iter().any(|component| !component.is_finite())) {
+                return Err(format!("{label} must be finite"));
+            }
+        }
+
+        self.restore_animation_playback(camera, false)?;
+        let mut animation = self.active_animation_manager()?;
+        let current = animation
+            .motions()
+            .get(draft.index)
+            .ok_or_else(|| format!("animation object {} was not found", draft.index))?;
+        let uid = current.base().uid();
+        let old_name = current.base().name().to_string();
+        if animation
+            .motions()
+            .iter()
+            .any(|motion| motion.base().uid() != uid && motion.base().name() == name)
+        {
+            return Err(format!("animation object name {name} is already used"));
+        }
+        if !time_ref_name.is_empty() {
+            let reference = animation
+                .motions()
+                .iter()
+                .find(|motion| motion.base().name() == time_ref_name)
+                .ok_or_else(|| format!("animation reference {time_ref_name} was not found"))?;
+            if reference.base().uid() == uid {
+                return Err("animation object cannot reference itself".to_string());
+            }
+        }
+        if let Some(target_camera) = draft.target_camera.as_deref() {
+            let target_camera = target_camera.trim();
+            let scene_uid = self.state.active_scene().unwrap();
+            if !target_camera.is_empty()
+                && !self
+                    .state
+                    .camera_summaries(scene_uid)
+                    .iter()
+                    .any(|summary| summary.name == target_camera)
+            {
+                return Err(format!("camera {target_camera} was not found"));
+            }
+        }
+
+        let undo = self.capture_undo();
+        let start = time_from_seconds(draft.start);
+        let duration = time_from_seconds(draft.duration);
+        animation.edit_motion_by_uid(uid, "properties", "", |motion| {
+            let object = motion.base_mut();
+            object.set_name(name.clone());
+            object.set_disabled(draft.disabled);
+            object.set_time_ref_name(time_ref_name.clone());
+            object.set_rel_start(start);
+            object.set_rel_end(start.saturating_add(duration));
+            object.set_quadric(draft.quadric);
+            match motion {
+                AnimMotion::Camera(value) => {
+                    if let Some(target) = draft.target_camera.as_deref() {
+                        value.set_endcam(target.trim());
+                    }
+                    if let Some(input) = draft.ignore_center {
+                        value.set_ignorecenter(input);
+                    }
+                    if let Some(input) = draft.ignore_rotate {
+                        value.set_ignorerotate(input);
+                    }
+                    if let Some(input) = draft.ignore_zoom {
+                        value.set_ignorezoom(input);
+                    }
+                    if let Some(input) = draft.ignore_slab {
+                        value.set_ignoreslab(input);
+                    }
+                    if let Some(input) = draft.keep_quaternion_positive {
+                        value.set_keepquatpositive(input);
+                    }
+                }
+                AnimMotion::RealProperty(value) => {
+                    if let Some(targets) = draft.renderer_names.as_deref() {
+                        value.set_rend(targets.trim());
+                    }
+                    if let Some(property) = draft.property_name.as_deref() {
+                        value.set_prop(property.trim());
+                    }
+                    if let Some(input) = draft.start_value {
+                        value.set_start_value(input);
+                    }
+                    if let Some(input) = draft.end_value {
+                        value.set_end_value(input);
+                    }
+                }
+                AnimMotion::Molecule(value) => {
+                    if let Some(target) = draft.molecule_name.as_deref() {
+                        value.set_mol(target.trim());
+                    }
+                    if let Some(property) = draft.property_name.as_deref() {
+                        value.set_prop(property.trim());
+                    }
+                    if let Some(input) = draft.start_value {
+                        value.set_start_value(input);
+                    }
+                    if let Some(input) = draft.end_value {
+                        value.set_end_value(input);
+                    }
+                }
+                AnimMotion::RendererTransform(value) => {
+                    if let Some(targets) = draft.renderer_names.as_deref() {
+                        value.set_rend(targets.trim());
+                    }
+                    if let Some(position) = draft.start_position {
+                        value.set_start_tran(Vector4::new3(position[0], position[1], position[2]));
+                    }
+                    if let Some(position) = draft.end_position {
+                        value.set_end_tran(Vector4::new3(position[0], position[1], position[2]));
+                    }
+                }
+                AnimMotion::ShowHide(value) => {
+                    if let Some(targets) = draft.renderer_names.as_deref() {
+                        value.set_rend(targets.trim());
+                    }
+                    if let Some(input) = draft.hide {
+                        value.set_hide(input);
+                    }
+                    if let Some(input) = draft.fade {
+                        value.set_fade(input);
+                    }
+                    if let Some(input) = draft.target_alpha {
+                        value.set_tgt_alpha(input);
+                    }
+                }
+                AnimMotion::Spin(value) => {
+                    if let Some(input) = draft.angle {
+                        value.set_angle(input);
+                    }
+                    if let Some(axis) = draft.axis {
+                        value.set_axis(Vector4::new3(axis[0], axis[1], axis[2]));
+                    }
+                }
+                AnimMotion::Slide(value) => {
+                    if let Some(targets) = draft.renderer_names.as_deref() {
+                        value.set_rend(targets.trim());
+                    }
+                    if let Some(input) = draft.hide {
+                        value.set_hide(input);
+                    }
+                    if let Some(input) = draft.direction {
+                        value.set_direction(input);
+                    }
+                    if let Some(input) = draft.distance {
+                        value.set_distance(input);
+                    }
+                }
+                AnimMotion::Noop(_) | AnimMotion::Unknown { .. } => {}
+            }
+        });
+        if old_name != name {
+            let referencing = animation
+                .motions()
+                .iter()
+                .filter(|motion| motion.base().time_ref_name() == old_name)
+                .map(|motion| motion.base().uid())
+                .collect::<Vec<_>>();
+            for sibling_uid in referencing {
+                animation.edit_motion_by_uid(sibling_uid, "timeRefName", "", |motion| {
+                    motion.base_mut().set_time_ref_name(name.clone());
+                });
+            }
+        }
+        animation
+            .try_resolve_rel_time()
+            .map_err(|error| error.to_string())?;
+        self.set_active_animation_manager(&animation)?;
+        self.animation_elapsed = 0.0;
+        self.push_undo_snapshot(undo);
+        self.set_status("Animation object properties changed");
+        Ok(())
+    }
+
     fn set_animation_motion_duration(
         &mut self,
         index: usize,
@@ -9981,6 +10340,7 @@ impl GuiApplication {
             self.animation_selected = None;
         }
         let mut add = None;
+        let mut edit = None;
         let mut delete = None;
         let mut move_by = None;
         let mut duration_edit = None;
@@ -10008,6 +10368,15 @@ impl GuiApplication {
                     }
                 }
             });
+            if ui
+                .add_enabled(
+                    self.animation_selected.is_some(),
+                    egui::Button::new("Change"),
+                )
+                .clicked()
+            {
+                edit = self.animation_selected;
+            }
             let play = if self.animation_playing {
                 "⏸ Pause"
             } else {
@@ -10054,14 +10423,15 @@ impl GuiApplication {
             let base = motion.base();
             let mut duration = time_to_seconds(base.rel_end() - base.rel_start()).max(0.0);
             ui.horizontal(|ui| {
-                if ui
-                    .selectable_label(
-                        self.animation_selected == Some(index),
-                        format!("{}. {} ({})", index + 1, base.name(), motion.type_name()),
-                    )
-                    .clicked()
-                {
+                let response = ui.selectable_label(
+                    self.animation_selected == Some(index),
+                    format!("{}. {} ({})", index + 1, base.name(), motion.type_name()),
+                );
+                if response.clicked() {
                     self.animation_selected = Some(index);
+                }
+                if response.double_clicked() {
+                    edit = Some(index);
                 }
                 if ui
                     .add(
@@ -10087,6 +10457,11 @@ impl GuiApplication {
         }
         if let Some(kind) = add {
             if let Err(error) = self.add_animation_motion(kind, camera) {
+                self.set_status(format!("Error: {error}"));
+            }
+        }
+        if let Some(index) = edit {
+            if let Err(error) = self.open_animation_properties(index) {
                 self.set_status(format!("Error: {error}"));
             }
         }
@@ -14783,9 +15158,243 @@ impl GuiApplication {
         self.reload_scene_dialog(ctx, camera);
         self.atom_intr_edit_dialog(ctx);
         self.renderer_setup_dialog(ctx, camera);
+        self.animation_properties_dialog(ctx, camera);
         self.console_dialog(ctx);
         self.tool_dialog(ctx, camera);
         self.error_alert_dialog(ctx);
+    }
+
+    fn animation_properties_dialog(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
+        let Some(mut draft) = self.animation_properties_draft.take() else {
+            return;
+        };
+        let reference_names = self
+            .active_animation_manager()
+            .map(|animation| {
+                animation
+                    .motions()
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| *index != draft.index)
+                    .map(|(_, motion)| motion.base().name().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let camera_names = self
+            .state
+            .active_scene()
+            .map(|scene_uid| {
+                self.state
+                    .camera_summaries(scene_uid)
+                    .into_iter()
+                    .map(|summary| summary.name)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut open = true;
+        let mut apply = false;
+        let mut accept = false;
+        let mut cancel = false;
+        egui::Window::new("Animation object properties")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(460.0)
+            .show(ctx, |ui| {
+                ui.strong(&draft.type_name);
+                ui.separator();
+                egui::Grid::new("animation_properties_general")
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Name:");
+                        ui.text_edit_singleline(&mut draft.name);
+                        ui.end_row();
+                        ui.label("Disabled:");
+                        ui.checkbox(&mut draft.disabled, "");
+                        ui.end_row();
+                        ui.label("Time reference:");
+                        egui::ComboBox::from_id_salt("animation_property_time_reference")
+                            .selected_text(if draft.time_ref_name.is_empty() {
+                                "None"
+                            } else {
+                                &draft.time_ref_name
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut draft.time_ref_name,
+                                    String::new(),
+                                    "None",
+                                );
+                                for name in &reference_names {
+                                    ui.selectable_value(
+                                        &mut draft.time_ref_name,
+                                        name.clone(),
+                                        name,
+                                    );
+                                }
+                            });
+                        ui.end_row();
+                        ui.label("Start (seconds):");
+                        ui.add(
+                            egui::DragValue::new(&mut draft.start)
+                                .range(-86_400.0..=86_400.0)
+                                .speed(0.1),
+                        );
+                        ui.end_row();
+                        ui.label("Duration (seconds):");
+                        ui.add(
+                            egui::DragValue::new(&mut draft.duration)
+                                .range(0.001..=86_400.0)
+                                .speed(0.1),
+                        );
+                        ui.end_row();
+                        ui.label("Quadric:");
+                        ui.add(
+                            egui::DragValue::new(&mut draft.quadric)
+                                .range(0.0..=0.5)
+                                .speed(0.01),
+                        );
+                        ui.end_row();
+                    });
+                ui.separator();
+                match draft.type_name.as_str() {
+                    "SimpleSpin" => {
+                        ui.heading("SimpleSpin");
+                        if let Some(angle) = &mut draft.angle {
+                            ui.horizontal(|ui| {
+                                ui.label("Rotation angle:");
+                                ui.add(egui::DragValue::new(angle).speed(1.0));
+                            });
+                        }
+                        if let Some(axis) = &mut draft.axis {
+                            ui.horizontal(|ui| {
+                                ui.label("Spin axis:");
+                                for component in axis {
+                                    ui.add(egui::DragValue::new(component).speed(0.1));
+                                }
+                            });
+                        }
+                    }
+                    "CamMotion" => {
+                        ui.heading("CamMotion");
+                        if let Some(target) = &mut draft.target_camera {
+                            ui.horizontal(|ui| {
+                                ui.label("Target camera:");
+                                egui::ComboBox::from_id_salt("animation_target_camera")
+                                    .selected_text(if target.is_empty() {
+                                        "None"
+                                    } else {
+                                        target.as_str()
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(target, String::new(), "None");
+                                        for name in &camera_names {
+                                            ui.selectable_value(target, name.clone(), name);
+                                        }
+                                    });
+                            });
+                        }
+                        for (label, value) in [
+                            ("Ignore center", &mut draft.ignore_center),
+                            ("Ignore rotation", &mut draft.ignore_rotate),
+                            ("Ignore zoom", &mut draft.ignore_zoom),
+                            ("Ignore slab", &mut draft.ignore_slab),
+                            (
+                                "Keep quaternion positive",
+                                &mut draft.keep_quaternion_positive,
+                            ),
+                        ] {
+                            if let Some(value) = value {
+                                ui.checkbox(value, label);
+                            }
+                        }
+                    }
+                    "ShowHideAnim" => {
+                        ui.heading("Show / Hide");
+                        animation_renderer_names_ui(ui, &mut draft.renderer_names);
+                        if let Some(value) = &mut draft.hide {
+                            ui.checkbox(value, "Hide");
+                        }
+                        if let Some(value) = &mut draft.fade {
+                            ui.checkbox(value, "Fade");
+                        }
+                        if let Some(value) = &mut draft.target_alpha {
+                            ui.horizontal(|ui| {
+                                ui.label("Target opacity:");
+                                ui.add(egui::DragValue::new(value).range(0.0..=1.0).speed(0.05));
+                            });
+                        }
+                    }
+                    "SlideInOutAnim" => {
+                        ui.heading("SlideIn / SlideOut");
+                        animation_renderer_names_ui(ui, &mut draft.renderer_names);
+                        if let Some(value) = &mut draft.hide {
+                            ui.checkbox(value, "Hide after animation");
+                        }
+                        if let Some(value) = &mut draft.direction {
+                            ui.horizontal(|ui| {
+                                ui.label("Direction angle:");
+                                ui.add(egui::DragValue::new(value).speed(1.0));
+                            });
+                        }
+                        if let Some(value) = &mut draft.distance {
+                            ui.horizontal(|ui| {
+                                ui.label("Distance:");
+                                ui.add(egui::DragValue::new(value).speed(0.1));
+                            });
+                        }
+                    }
+                    "MolAnim" => {
+                        ui.heading("MolAnim");
+                        animation_optional_text_ui(ui, "Molecule:", &mut draft.molecule_name);
+                        animation_optional_text_ui(ui, "Property:", &mut draft.property_name);
+                        animation_value_range_ui(ui, &mut draft.start_value, &mut draft.end_value);
+                    }
+                    "RealPropAnim" => {
+                        ui.heading("RealPropAnim");
+                        animation_renderer_names_ui(ui, &mut draft.renderer_names);
+                        animation_optional_text_ui(ui, "Property:", &mut draft.property_name);
+                        animation_value_range_ui(ui, &mut draft.start_value, &mut draft.end_value);
+                    }
+                    "RendXformAnim" => {
+                        ui.heading("RendXformAnim");
+                        animation_renderer_names_ui(ui, &mut draft.renderer_names);
+                        animation_position_ui(ui, "Start position:", &mut draft.start_position);
+                        animation_position_ui(ui, "End position:", &mut draft.end_position);
+                    }
+                    _ => {
+                        ui.weak("This animation type has no additional properties.");
+                    }
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("OK").clicked() {
+                        accept = true;
+                    }
+                    if ui.button("Apply").clicked() {
+                        apply = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if apply || accept {
+            match self.apply_animation_properties(&draft, camera) {
+                Ok(()) if apply && !accept => {
+                    self.animation_properties_draft = Some(draft);
+                }
+                Ok(()) => {}
+                Err(error) => {
+                    self.animation_properties_draft = Some(draft);
+                    self.set_status(format!("Error: {error}"));
+                }
+            }
+        } else if open && !cancel {
+            self.animation_properties_draft = Some(draft);
+        }
     }
 
     fn error_alert_dialog(&mut self, ctx: &egui::Context) {
@@ -26351,6 +26960,45 @@ fn default_animation_render_concurrency() -> u32 {
         .unwrap_or(2)
 }
 
+fn animation_optional_text_ui(ui: &mut egui::Ui, label: &str, value: &mut Option<String>) {
+    if let Some(value) = value {
+        ui.horizontal(|ui| {
+            ui.label(label);
+            ui.text_edit_singleline(value);
+        });
+    }
+}
+
+fn animation_renderer_names_ui(ui: &mut egui::Ui, value: &mut Option<String>) {
+    animation_optional_text_ui(ui, "Renderer names:", value);
+}
+
+fn animation_value_range_ui(ui: &mut egui::Ui, start: &mut Option<f64>, end: &mut Option<f64>) {
+    if let Some(start) = start {
+        ui.horizontal(|ui| {
+            ui.label("Start value:");
+            ui.add(egui::DragValue::new(start).speed(0.1));
+        });
+    }
+    if let Some(end) = end {
+        ui.horizontal(|ui| {
+            ui.label("End value:");
+            ui.add(egui::DragValue::new(end).speed(0.1));
+        });
+    }
+}
+
+fn animation_position_ui(ui: &mut egui::Ui, label: &str, value: &mut Option<[f64; 3]>) {
+    if let Some(value) = value {
+        ui.horizontal(|ui| {
+            ui.label(label);
+            for component in value {
+                ui.add(egui::DragValue::new(component).speed(0.1));
+            }
+        });
+    }
+}
+
 fn native_animation_name_prefix(kind: AnimKind) -> &'static str {
     match kind {
         AnimKind::Spin => "SimpleSpin",
@@ -33499,6 +34147,58 @@ mod tests {
             .unwrap();
         assert_eq!(restored.is_visible(), original.is_visible());
         assert_eq!(restored.qsc_attr("alpha"), original.qsc_attr("alpha"));
+    }
+
+    #[test]
+    fn native_animation_properties_edit_typed_values_and_references() {
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.add_animation_motion(AnimKind::Spin, &mut camera)
+            .unwrap();
+        app.add_animation_motion(AnimKind::Pause, &mut camera)
+            .unwrap();
+        app.open_animation_properties(0).unwrap();
+        let mut draft = app.animation_properties_draft.take().unwrap();
+        draft.name = "turn".to_string();
+        draft.disabled = true;
+        draft.start = 0.25;
+        draft.duration = 2.5;
+        draft.quadric = 0.2;
+        draft.angle = Some(180.0);
+        draft.axis = Some([1.0, 2.0, 3.0]);
+        app.apply_animation_properties(&draft, &mut camera).unwrap();
+
+        let scene_uid = app.state.active_scene().unwrap();
+        let animation = app.state.scene_animation(scene_uid).unwrap().unwrap();
+        let AnimMotion::Spin(spin) = &animation.motions()[0] else {
+            panic!("expected SimpleSpin");
+        };
+        assert_eq!(spin.base().name(), "turn");
+        assert!(spin.base().disabled());
+        assert_eq!(spin.base().rel_start(), time_from_seconds(0.25));
+        assert_eq!(spin.base().rel_end(), time_from_seconds(2.75));
+        assert_eq!(spin.base().quadric(), 0.2);
+        assert_eq!(spin.angle(), 180.0);
+        let expected_axis = Vector4::new3(1.0, 2.0, 3.0).normalize().unwrap();
+        assert!((spin.axis().x - expected_axis.x).abs() < 1.0e-9);
+        assert!((spin.axis().y - expected_axis.y).abs() < 1.0e-9);
+        assert!((spin.axis().z - expected_axis.z).abs() < 1.0e-9);
+        assert_eq!(animation.motions()[1].base().time_ref_name(), "turn");
+
+        let mut invalid = draft.clone();
+        invalid.time_ref_name = "turn".to_string();
+        assert_eq!(
+            app.apply_animation_properties(&invalid, &mut camera)
+                .unwrap_err(),
+            "animation object cannot reference itself"
+        );
+
+        app.open_animation_properties(0).unwrap();
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            app.animation_properties_dialog(ctx, &mut camera);
+        });
+        assert!(app.animation_properties_draft.is_some());
     }
 
     #[test]
