@@ -1171,6 +1171,7 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("copy_workspace_style"));
     assert!(JS.contains("paste_workspace_style"));
     assert!(JS.contains("workspaceSceneContextItems"));
+    assert!(JS.contains("function workspaceRendererNames(sceneUid)"));
     let tauri_scene_menu = JS
         .split("function workspaceSceneContextItems(scene)")
         .nth(1)
@@ -1192,6 +1193,7 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(!tauri_scene_menu.contains("label: \"Paste Object\""));
     assert!(tauri_scene_menu.contains("disabled: !workspaceObjectClipboardAvailable"));
     assert!(NATIVE_GUI_RS.contains("egui::Button::new(\"Paste\")"));
+    assert!(NATIVE_GUI_RS.contains("ui.label(\"Name for new group:\")"));
     assert!(NATIVE_GUI_RS.contains("scene_attribute(\"icc_filename\")"));
     assert!(JS.contains("workspaceCameraContextItems"));
     assert!(JS.contains("label: \"New Camera...\""));

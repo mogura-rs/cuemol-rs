@@ -17986,6 +17986,26 @@ impl GuiApplication {
             .open(&mut open)
             .collapsible(false)
             .show(ctx, |ui| {
+                if is_group {
+                    ui.horizontal(|ui| {
+                        ui.label("Name for new group:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_renderer_name)
+                                .desired_width(ui.available_width()),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        let valid = !self.new_renderer_name.trim().is_empty()
+                            && !self.new_renderer_name.contains(':');
+                        if ui.add_enabled(valid, egui::Button::new("Create")).clicked() {
+                            create = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+                    return;
+                }
                 if let Some(group) = self.new_renderer_group.as_deref() {
                     ui.label(format!("Group: {group}"));
                 }
@@ -17997,29 +18017,25 @@ impl GuiApplication {
                             .desired_width(ui.available_width()),
                     );
                 });
-                if is_group {
-                    ui.label("Type: Renderer group");
-                } else {
-                    let previous_type = self.new_renderer_type.clone();
-                    egui::ComboBox::from_label("Renderer type:")
-                        .selected_text(renderer_type_label(&self.new_renderer_type))
-                        .show_ui(ui, |ui| {
-                            for (renderer_type, description) in &renderer_options {
-                                ui.selectable_value(
-                                    &mut self.new_renderer_type,
-                                    renderer_type.clone(),
-                                    description,
-                                );
-                            }
+                let previous_type = self.new_renderer_type.clone();
+                egui::ComboBox::from_label("Renderer type:")
+                    .selected_text(renderer_type_label(&self.new_renderer_type))
+                    .show_ui(ui, |ui| {
+                        for (renderer_type, description) in &renderer_options {
+                            ui.selectable_value(
+                                &mut self.new_renderer_type,
+                                renderer_type.clone(),
+                                description,
+                            );
+                        }
+                    });
+                if self.new_renderer_type != previous_type && self.new_renderer_name_default {
+                    self.new_renderer_name = self
+                        .state
+                        .suggest_renderer_name_in_active_scene(&self.new_renderer_type)
+                        .unwrap_or_else(|_| {
+                            format!("{}1", self.new_renderer_type.trim_start_matches('*'))
                         });
-                    if self.new_renderer_type != previous_type && self.new_renderer_name_default {
-                        self.new_renderer_name = self
-                            .state
-                            .suggest_renderer_name_in_active_scene(&self.new_renderer_type)
-                            .unwrap_or_else(|_| {
-                                format!("{}1", self.new_renderer_type.trim_start_matches('*'))
-                            });
-                    }
                 }
                 ui.horizontal(|ui| {
                     ui.label("Renderer name:");
@@ -18041,37 +18057,35 @@ impl GuiApplication {
                         }
                     }
                 });
-                if !is_group {
-                    match self.new_renderer_owner {
-                        Some(NativePropertyObject::Molecule(_)) => {
-                            ui.horizontal(|ui| {
-                                ui.checkbox(&mut self.new_renderer_use_selection, "Selection:");
-                                ui.add_enabled(
-                                    self.new_renderer_use_selection,
-                                    egui::TextEdit::singleline(&mut self.new_renderer_selection)
-                                        .desired_width(ui.available_width()),
-                                );
-                            });
-                            ui.checkbox(&mut self.new_renderer_recenter, "Recenter view");
-                        }
-                        Some(NativePropertyObject::DensityMap(_)) => {
-                            ui.radio_value(
-                                &mut self.new_renderer_density_move_view,
-                                false,
-                                "Set map center",
+                match self.new_renderer_owner {
+                    Some(NativePropertyObject::Molecule(_)) => {
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut self.new_renderer_use_selection, "Selection:");
+                            ui.add_enabled(
+                                self.new_renderer_use_selection,
+                                egui::TextEdit::singleline(&mut self.new_renderer_selection)
+                                    .desired_width(ui.available_width()),
                             );
-                            ui.radio_value(
-                                &mut self.new_renderer_density_move_view,
-                                true,
-                                "Move view center",
-                            );
-                        }
-                        Some(
-                            NativePropertyObject::Surface(_) | NativePropertyObject::Lightweight(_),
-                        )
-                        | None => {
-                            ui.checkbox(&mut self.new_renderer_recenter, "Recenter view");
-                        }
+                        });
+                        ui.checkbox(&mut self.new_renderer_recenter, "Recenter view");
+                    }
+                    Some(NativePropertyObject::DensityMap(_)) => {
+                        ui.radio_value(
+                            &mut self.new_renderer_density_move_view,
+                            false,
+                            "Set map center",
+                        );
+                        ui.radio_value(
+                            &mut self.new_renderer_density_move_view,
+                            true,
+                            "Move view center",
+                        );
+                    }
+                    Some(
+                        NativePropertyObject::Surface(_) | NativePropertyObject::Lightweight(_),
+                    )
+                    | None => {
+                        ui.checkbox(&mut self.new_renderer_recenter, "Recenter view");
                     }
                 }
                 ui.horizontal(|ui| {
@@ -20290,55 +20304,13 @@ impl GuiApplication {
     }
 
     fn open_renderer_group_dialog(&mut self, owner: NativePropertyObject) {
-        let used: std::collections::BTreeSet<String> = match owner {
-            NativePropertyObject::Molecule(object_uid) => self
-                .state
-                .renderer_summaries(object_uid)
-                .into_iter()
-                .filter(|renderer| renderer.renderer_type == "*group")
-                .map(|renderer| renderer.name)
-                .collect(),
-            NativePropertyObject::DensityMap(map_uid) => self
-                .state
-                .density_map_summary(map_uid)
-                .map(|map| {
-                    map.renderer_groups
-                        .into_iter()
-                        .map(|group| group.name)
-                        .collect()
-                })
-                .unwrap_or_default(),
-            NativePropertyObject::Surface(surface_uid) => self
-                .state
-                .surface_summary(surface_uid)
-                .map(|surface| {
-                    surface
-                        .renderer_groups
-                        .into_iter()
-                        .map(|group| group.name)
-                        .collect()
-                })
-                .unwrap_or_default(),
-            NativePropertyObject::Lightweight(object_uid) => self
-                .state
-                .lw_object_summary(object_uid)
-                .map(|object| {
-                    object
-                        .renderer_groups
-                        .into_iter()
-                        .map(|group| group.name)
-                        .collect()
-                })
-                .unwrap_or_default(),
-        };
-        let mut serial = 1;
-        while used.contains(&format!("group{serial}")) {
-            serial += 1;
-        }
+        let scene_uid = self.workspace_owner_scene_uid(owner);
         self.new_renderer_owner = Some(owner);
         self.new_renderer_group = None;
         self.new_renderer_type = "*group".to_string();
-        self.new_renderer_name = format!("group{serial}");
+        self.new_renderer_name = scene_uid
+            .and_then(|scene_uid| self.state.suggest_renderer_name(scene_uid, "group").ok())
+            .unwrap_or_else(|| "group1".to_string());
         self.new_renderer_name_default = true;
         self.new_renderer_use_selection = false;
         self.new_renderer_selection.clear();

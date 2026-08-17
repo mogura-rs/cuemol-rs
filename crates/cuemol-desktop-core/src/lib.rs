@@ -6732,12 +6732,32 @@ impl DesktopAppState {
                     .renderers()
                     .iter()
                     .any(|renderer| renderer.name() == candidate)
-            }) || self.density_maps.values().any(|map| {
-                map.scene_uid == target_scene
-                    && map
-                        .renderers
+            }) || self.density_map_summaries(target_scene).iter().any(|map| {
+                map.renderers
+                    .iter()
+                    .any(|renderer| renderer.name == candidate)
+                    || map
+                        .renderer_groups
                         .iter()
-                        .any(|renderer| renderer.name == candidate)
+                        .any(|group| group.name == candidate)
+            }) || self.surface_summaries(target_scene).iter().any(|surface| {
+                surface
+                    .renderers
+                    .iter()
+                    .any(|renderer| renderer.name == candidate)
+                    || surface
+                        .renderer_groups
+                        .iter()
+                        .any(|group| group.name == candidate)
+            }) || self.lw_object_summaries(target_scene).iter().any(|object| {
+                object
+                    .renderers
+                    .iter()
+                    .any(|renderer| renderer.name == candidate)
+                    || object
+                        .renderer_groups
+                        .iter()
+                        .any(|group| group.name == candidate)
             });
             if !exists {
                 return Ok(candidate);
@@ -59254,6 +59274,12 @@ end_header
         assert_eq!(
             app.suggest_renderer_name(scene_uid, "simple").unwrap(),
             "simple2"
+        );
+        let map_uid = app.add_density_map(scene_uid, "map", DensityMap::new());
+        app.create_renderer_group(map_uid, "group1").unwrap();
+        assert_eq!(
+            app.suggest_renderer_name(scene_uid, "group").unwrap(),
+            "group2"
         );
     }
 

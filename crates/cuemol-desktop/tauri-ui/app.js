@@ -6472,6 +6472,14 @@ function activeLwObjects() {
   );
 }
 
+function workspaceRendererNames(sceneUid) {
+  if (!snapshot) return [];
+  return [snapshot.objects, snapshot.densityMaps, snapshot.surfaces, snapshot.lwObjects]
+    .flat()
+    .filter((object) => object.sceneUid === sceneUid)
+    .flatMap((object) => (object.renderers || []).map((renderer) => renderer.name));
+}
+
 function activeCameras() {
   if (!snapshot) return [];
   return (snapshot.cameras || []).filter(
@@ -7497,11 +7505,7 @@ function workspaceObjectContextItems(scene, object) {
       label: "New Group...",
       action: async () => {
         if (!scene.active && !(await mutate("activate_scene", { sceneUid: scene.uid }))) return;
-        const used = new Set(
-          activeObjects()
-            .flatMap((candidate) => candidate.renderers || [])
-            .map((renderer) => renderer.name),
-        );
+        const used = new Set(workspaceRendererNames(scene.uid));
         let serial = 1;
         while (used.has(`group${serial}`)) serial += 1;
         const name = await showTextPromptDialog({
@@ -7812,7 +7816,7 @@ function workspaceAuxObjectContextItems(scene, kind, object) {
       label: "New Group...",
       action: async () => {
         if (!(await activate())) return;
-        const used = new Set((object.renderers || []).map((renderer) => renderer.name));
+        const used = new Set(workspaceRendererNames(scene.uid));
         let serial = 1;
         while (used.has(`group${serial}`)) serial += 1;
         const name = await showTextPromptDialog({
