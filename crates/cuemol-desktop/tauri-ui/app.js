@@ -6110,6 +6110,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         ) || objects.find((candidate) => candidate.uid === selectedObjectUid) || objects[0];
       const crystal = snapshot.crystals.find((item) => item.objectUid === object.uid);
       dialogContent.append(dialogParagraph(`Molecule: ${object.name}`));
+      const symmetry = dialogGroup("Symmetry");
       const lattice = dialogSelect(
         "Crystal system",
         [
@@ -6122,21 +6123,26 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           ["CUBIC", "Cubic"],
         ],
         crystal?.lattice || "TRICLINIC",
+        symmetry,
       );
-      const spaceGroup = dialogSelect("Space Group", [], "");
+      const spaceGroup = dialogSelect("Space Group", [], "", symmetry);
+      const biomoleculesOnly = dialogCheckbox("Biomolecules only", false, symmetry);
+      biomoleculesOnly.disabled = true;
       const spaceGroupNumber = dialogField(
         "Space Group Number",
         String(crystal?.spaceGroupNumber || 1),
         "number",
+        symmetry,
       );
       spaceGroupNumber.disabled = true;
-      const restrict = dialogCheckbox("Restrict by symmetry", false);
-      const cellA = dialogField("a (Å)", String(crystal?.a || 100), "number");
-      const cellB = dialogField("b (Å)", String(crystal?.b || 100), "number");
-      const cellC = dialogField("c (Å)", String(crystal?.c || 100), "number");
-      const alpha = dialogField("α (°)", String(crystal?.alpha || 90), "number");
-      const beta = dialogField("β (°)", String(crystal?.beta || 90), "number");
-      const gamma = dialogField("γ (°)", String(crystal?.gamma || 90), "number");
+      const cell = dialogGroup("Cell dimension");
+      const restrict = dialogCheckbox("Restrict by symmetry", false, cell);
+      const cellA = dialogField("a (Å)", String(crystal?.a || 100), "number", cell);
+      const cellB = dialogField("b (Å)", String(crystal?.b || 100), "number", cell);
+      const cellC = dialogField("c (Å)", String(crystal?.c || 100), "number", cell);
+      const alpha = dialogField("α (°)", String(crystal?.alpha || 90), "number", cell);
+      const beta = dialogField("β (°)", String(crystal?.beta || 90), "number", cell);
+      const gamma = dialogField("γ (°)", String(crystal?.gamma || 90), "number", cell);
       for (const input of [cellA, cellB, cellC, alpha, beta, gamma]) {
         input.step = "0.1";
       }
@@ -8247,6 +8253,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           value,
           renumber: renumber.checked,
         });
+        rememberSelection(selection.value);
         referenceDialog.close();
       });
       dialogActions(apply);

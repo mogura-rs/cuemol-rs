@@ -1838,6 +1838,15 @@ fn tauri_symmetry_editor_is_lazy_and_matches_reference_fields() {
     ] {
         assert!(JS.contains(label), "missing symmetry editor field {label}");
     }
+    for label in ["Symmetry", "Biomolecules only", "Cell dimension"] {
+        assert!(JS.contains(label), "missing symmetry dialog label {label}");
+        assert!(
+            NATIVE_GUI_RS.contains(label),
+            "missing native symmetry dialog label {label}"
+        );
+    }
+    assert!(JS.contains("dialogGroup(\"Symmetry\")"));
+    assert!(JS.contains("dialogGroup(\"Cell dimension\")"));
     assert!(JS.contains("const spaceGroupOptionsCache = new Map()"));
     assert!(JS.contains("await invoke(\"get_space_groups\""));
     assert!(JS.contains("spaceGroupOptionsCache.set(lattice.value, groups)"));

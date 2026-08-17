@@ -12348,6 +12348,7 @@ impl GuiApplication {
         ui.label(egui::RichText::new(object_name).strong());
         ui.separator();
 
+        ui.label(egui::RichText::new("Symmetry").strong());
         egui::ComboBox::from_label("Crystal system")
             .selected_text(lattice_label(&draft.lattice))
             .show_ui(ui, |ui| {
@@ -12378,6 +12379,13 @@ impl GuiApplication {
                 }
             });
         ui.label(format!("Space Group Number: {}", draft.space_group_number));
+        let mut biomolecules_only = false;
+        ui.add_enabled(
+            false,
+            egui::Checkbox::new(&mut biomolecules_only, "Biomolecules only"),
+        );
+        ui.separator();
+        ui.label(egui::RichText::new("Cell dimension").strong());
         ui.checkbox(&mut draft.restrict_by_symmetry, "Restrict by symmetry");
 
         let selected_space_group = space_groups
