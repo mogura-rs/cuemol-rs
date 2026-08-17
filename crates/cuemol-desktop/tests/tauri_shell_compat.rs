@@ -90,6 +90,15 @@ fn tauri_reference_panels_are_bound_to_shared_core_data() {
     ] {
         assert!(HTML.contains(&format!("id=\"{id}\"")), "missing {id}");
     }
+    for label in ["Select atoms", "Center at", "Zoom at", "Properties ..."] {
+        assert!(
+            NATIVE_GUI_RS.contains(label),
+            "missing native MolStruct action {label}"
+        );
+    }
+    assert!(!NATIVE_GUI_RS.contains(".button(surface_label)"));
+    assert!(!NATIVE_GUI_RS.contains(".button(clip_label)"));
+    assert!(!CSS.contains("#selection-editor-add-kind"));
     assert!(JS.contains("selectedMolstructExpression()"));
     assert!(JS.contains("event.shiftKey"));
     assert!(JS.contains("composeSelectionEditorExpression()"));

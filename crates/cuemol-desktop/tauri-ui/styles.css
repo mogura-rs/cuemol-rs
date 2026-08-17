@@ -1046,11 +1046,6 @@ summary:focus-visible {
   flex: 0 0 76px;
 }
 
-#selection-editor-add-kind {
-  min-width: 0;
-  flex: 1;
-}
-
 .measure-readout {
   align-self: center;
   min-width: 160px;

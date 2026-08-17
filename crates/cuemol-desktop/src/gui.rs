@@ -1080,16 +1080,20 @@ struct GuiApplication {
     /// expensive, so it is computed once on enable, not every rebuild).
     show_surface: bool,
     surface_mesh: Option<cuemol_render::RenderMesh>,
+    // Retained for headless surface parity tests while renderer-backed tools replace previews.
     /// Live in-viewport surface clipping: display the surface as the plane cross-section.
+    #[allow(dead_code)]
     clip_surface: bool,
     /// Clip-plane offset along +Z from the bbox centre (Å).
+    #[allow(dead_code)]
     clip_offset: f64,
     /// Colour the surface by the loaded electrostatic potential (SCAPOT) instead of by
-    /// nearest atom, and the APBS/OpenDX `.dx` path to load the potential from.
+    /// nearest atom.
+    #[allow(dead_code)]
     potential_surface: bool,
-    potential_path: String,
     /// Path of an external surface mesh (Wavefront OBJ / Stanford PLY) to import
     /// into the surface-display slot (CueMol2 `ObjReader`/`PLYFileReader`).
+    #[allow(dead_code)]
     mesh_import_path: String,
     /// Atom/residue labels overlaid on the selected atoms in the 3D view.
     show_labels: bool,
@@ -3740,7 +3744,6 @@ impl GuiApplication {
             clip_surface: false,
             clip_offset: 0.0,
             potential_surface: false,
-            potential_path: String::new(),
             mesh_import_path: String::new(),
             show_labels: false,
             show_hbonds: false,
@@ -8727,165 +8730,20 @@ impl GuiApplication {
         let mut center = false;
         let mut zoom = false;
         ui.horizontal(|ui| {
-            if ui
-                .button("Select")
-                .on_hover_text("Select all atoms")
-                .clicked()
-            {
+            if ui.button("↖").on_hover_text("Select atoms").clicked() {
                 apply = Some("*".to_string());
             }
-            if ui
-                .button("Center")
-                .on_hover_text("Center view on selection")
-                .clicked()
-            {
+            if ui.button("⌖").on_hover_text("Center at").clicked() {
                 center = true;
             }
-            if ui
-                .button("Zoom")
-                .on_hover_text("Zoom to fit molecule")
-                .clicked()
-            {
+            if ui.button("⌕").on_hover_text("Zoom at").clicked() {
                 zoom = true;
             }
-            if ui.button("Property").clicked() {
+            if ui.button("⚙").on_hover_text("Properties ...").clicked() {
                 self.selected_object = Some(object.object_uid);
                 self.selected_renderer = None;
                 self.workspace_aux_selection = None;
                 self.open_object_properties(object.object_uid);
-            }
-            let toggle = if self.molstruct_expand_all {
-                "Collapse"
-            } else {
-                "Expand"
-            };
-            if ui
-                .button(toggle)
-                .on_hover_text("Expand / collapse all")
-                .clicked()
-            {
-                self.molstruct_expand_all = !self.molstruct_expand_all;
-            }
-            let surface_label = if self.show_surface {
-                "Surface ✓"
-            } else {
-                "Surface"
-            };
-            if ui
-                .button(surface_label)
-                .on_hover_text("Show / hide the molecular surface (SES)")
-                .clicked()
-            {
-                self.toggle_surface();
-            }
-            let clip_label = if self.clip_surface {
-                "Clip ✓"
-            } else {
-                "Clip"
-            };
-            if ui
-                .button(clip_label)
-                .on_hover_text("Live in-viewport surface clipping at the cut plane")
-                .clicked()
-            {
-                self.toggle_clip_surface();
-            }
-            if self.clip_surface {
-                let mut offset = self.clip_offset;
-                if ui
-                    .add(egui::Slider::new(&mut offset, -20.0..=20.0).text("Clip Z"))
-                    .changed()
-                {
-                    self.set_clip_offset(offset);
-                }
-            }
-            // Electrostatic-potential surface (SCAPOT): load an APBS/OpenDX .dx map, then
-            // colour the surface by it (red −, white 0, blue +) instead of by atom.
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.potential_path)
-                        .hint_text("APBS .dx path")
-                        .desired_width(120.0),
-                );
-                if ui
-                    .button("Load .dx")
-                    .on_hover_text("Load an electrostatic potential map")
-                    .clicked()
-                {
-                    self.load_potential();
-                }
-                let potential_label = if self.potential_surface {
-                    "Potential ✓"
-                } else {
-                    "Potential"
-                };
-                if ui
-                    .add_enabled(
-                        self.state.has_surface_potential(),
-                        egui::Button::new(potential_label),
-                    )
-                    .on_hover_text("Colour the surface by electrostatic potential (SCAPOT)")
-                    .clicked()
-                {
-                    self.toggle_potential_surface();
-                }
-                if self.state.has_surface_potential() {
-                    // SCAPOT colour ± scale (potential units); 0 = robust auto (2·rmsd).
-                    let mut scale = self.state.potential_scale().unwrap_or(0.0);
-                    if ui
-                        .add(egui::DragValue::new(&mut scale).speed(0.5).prefix("±"))
-                        .on_hover_text("Potential colour ± scale (0 = auto, robust to spikes)")
-                        .changed()
-                    {
-                        self.state
-                            .set_potential_scale((scale > 0.0).then_some(scale));
-                        if self.potential_surface {
-                            self.rebuild_surface_mesh();
-                            self.rebuild_snapshot();
-                        }
-                    }
-                }
-            });
-            // Import an external surface mesh (Wavefront OBJ / Stanford PLY) into the
-            // surface slot, shown via the same toggle as the computed SES.
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.mesh_import_path)
-                        .hint_text("mesh .obj/.ply path")
-                        .desired_width(120.0),
-                );
-                if ui
-                    .button("Import mesh")
-                    .on_hover_text("Load an OBJ/PLY surface mesh and show it as the surface")
-                    .clicked()
-                {
-                    self.import_mesh_surface(camera);
-                }
-            });
-            let labels_label = if self.show_labels {
-                "Labels ✓"
-            } else {
-                "Labels"
-            };
-            if ui
-                .button(labels_label)
-                .on_hover_text("Label the selected atoms in the 3D view")
-                .clicked()
-            {
-                self.show_labels = !self.show_labels;
-            }
-            let hbond_label = if self.show_hbonds {
-                "H-bonds ✓"
-            } else {
-                "H-bonds"
-            };
-            if ui
-                .button(hbond_label)
-                .on_hover_text("Show hydrogen bonds as dashed lines (N···O heuristic)")
-                .clicked()
-            {
-                self.show_hbonds = !self.show_hbonds;
-                self.rebuild_snapshot();
             }
         });
 
@@ -15317,6 +15175,7 @@ impl GuiApplication {
     /// Toggle the molecular-surface (SES) display. On enable, compute the SES mesh once
     /// (it is expensive) for the active molecule at the current selection and cache it;
     /// the cached mesh is added to every subsequent snapshot until toggled off.
+    #[allow(dead_code)]
     fn toggle_surface(&mut self) {
         self.show_surface = !self.show_surface;
         if self.show_surface && self.surface_mesh.is_none() {
@@ -15325,23 +15184,11 @@ impl GuiApplication {
         self.rebuild_snapshot();
     }
 
-    /// Load an APBS/OpenDX `.dx` electrostatic-potential map from `potential_path`.
-    fn load_potential(&mut self) {
-        let path = self.potential_path.trim().to_string();
-        if path.is_empty() {
-            self.set_status("Enter an APBS .dx path first");
-            return;
-        }
-        match self.state.load_surface_potential(&path) {
-            Ok((lo, hi)) => self.set_status(format!("Potential loaded (range {lo:.2}..{hi:.2})")),
-            Err(error) => self.set_status(format!("Potential load failed: {error}")),
-        }
-    }
-
     /// Import an external OBJ/PLY surface mesh from `mesh_import_path` into the
     /// surface slot and show it via the existing surface toggle (CueMol2
     /// `ObjReader`/`PLYFileReader`). The mesh replaces any computed SES; potential
     /// colouring is turned off since an imported mesh carries no molecule to sample.
+    #[allow(dead_code)]
     fn import_mesh_surface(&mut self, camera: &mut CameraController) {
         let path = self.mesh_import_path.trim().to_string();
         if path.is_empty() {
@@ -15366,6 +15213,7 @@ impl GuiApplication {
 
     /// Toggle colouring the surface by electrostatic potential (SCAPOT) vs by nearest
     /// atom. Rebuilds the cached surface mesh so the new colouring takes effect.
+    #[allow(dead_code)]
     fn toggle_potential_surface(&mut self) {
         self.potential_surface = !self.potential_surface;
         if !self.show_surface {
@@ -15377,6 +15225,7 @@ impl GuiApplication {
 
     /// (Re)build the cached surface mesh — clipped by the plane when `clip_surface` is
     /// set (live cross-section), else the full surface.
+    #[allow(dead_code)]
     fn rebuild_surface_mesh(&mut self) {
         let Some(object_uid) = self
             .molstruct_object
@@ -15436,6 +15285,7 @@ impl GuiApplication {
     }
 
     /// Toggle live in-viewport surface clipping (CueMol2 surface cutter, live mode).
+    #[allow(dead_code)]
     fn toggle_clip_surface(&mut self) {
         self.clip_surface = !self.clip_surface;
         if self.show_surface {
@@ -15445,6 +15295,7 @@ impl GuiApplication {
     }
 
     /// Set the clip-plane offset and re-clip live if the surface is shown.
+    #[allow(dead_code)]
     fn set_clip_offset(&mut self, value: f64) {
         self.clip_offset = value;
         if self.clip_surface && self.show_surface {
