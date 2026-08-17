@@ -1212,6 +1212,24 @@ fn atom_interaction_context_menu_uses_the_dedicated_list_editor() {
 }
 
 #[test]
+fn morph_animation_tool_uses_the_reference_frame_columns() {
+    for label in ["Morph animation tool", "Name", "Source", "No morph frames."] {
+        assert!(JS.contains(label), "missing morph-frame behavior {label}");
+    }
+    assert!(JS.contains("MORPH_NAME_COLUMN_WIDTH_STORAGE_KEY"));
+    assert!(JS.contains("setMorphNameColumnWidth"));
+    assert!(JS.contains("morph-frame-columns"));
+    assert!(JS.contains("morph-column-splitter"));
+    assert!(JS.contains("morphFrame.source || morphFrame.sourceType"));
+    assert!(CSS.contains("var(--morph-name-width"));
+    assert!(CSS.contains(".morph-frame-row > :nth-child(2)"));
+    assert!(NATIVE_GUI_RS.contains("fn remove_selected_morph_frame"));
+    assert!(NATIVE_GUI_RS.contains("morph_editor:name_width"));
+    assert!(NATIVE_GUI_RS.contains("MORPH_COLUMN_SPLITTER_WIDTH"));
+    assert!(NATIVE_GUI_RS.contains("morph_frame_summaries"));
+}
+
+#[test]
 fn renderer_edit_style_uses_the_ordered_style_list_dialog() {
     for label in [
         "Apply Renderer Style",

@@ -58,6 +58,9 @@ const BOND_COLUMN_SPLITTER_WIDTH: f32 = 5.0;
 const ATOM_INTR_COLUMN_DEFAULT_WIDTH: f32 = 105.0;
 const ATOM_INTR_COLUMN_MIN_WIDTH: f32 = 72.0;
 const ATOM_INTR_COLUMN_SPLITTER_WIDTH: f32 = 5.0;
+const MORPH_NAME_COLUMN_DEFAULT_WIDTH: f32 = 180.0;
+const MORPH_COLUMN_MIN_WIDTH: f32 = 100.0;
+const MORPH_COLUMN_SPLITTER_WIDTH: f32 = 5.0;
 const RENDER_PRESETS: &[(&str, u32, u32)] = &[
     ("HD 720", 1280, 720),
     ("Full HD", 1920, 1080),
@@ -1384,6 +1387,9 @@ struct GuiApplication {
     apbs_job: Option<NativeApbsJob>,
     morph_target: Option<cuemol_core::Uid>,
     morph_source: Option<cuemol_core::Uid>,
+    morph_selected_frame: Option<usize>,
+    morph_name_column_width: f32,
+    morph_name_column_drag_start_width: Option<f32>,
     morph_frame_name: String,
     morph_frame_value: f64,
     config_path: String,
@@ -4570,6 +4576,11 @@ impl GuiApplication {
                 .unwrap_or(ATOM_INTR_COLUMN_DEFAULT_WIDTH)
                 .clamp(ATOM_INTR_COLUMN_MIN_WIDTH, 400.0)
         });
+        let morph_name_column_width = state
+            .config_value("morph_editor:name_width")
+            .parse::<f32>()
+            .unwrap_or(MORPH_NAME_COLUMN_DEFAULT_WIDTH)
+            .clamp(MORPH_COLUMN_MIN_WIDTH, 600.0);
         Self {
             state,
             open_path: "../cuemol2/tests/test_data/1CRN.pdb".to_string(),
@@ -4832,6 +4843,9 @@ impl GuiApplication {
             apbs_job: None,
             morph_target: None,
             morph_source: None,
+            morph_selected_frame: None,
+            morph_name_column_width,
+            morph_name_column_drag_start_width: None,
             morph_frame_name: "frame".to_string(),
             morph_frame_value: 0.0,
             config_path: "cuemol-desktop.conf".to_string(),
@@ -19174,16 +19188,64 @@ impl GuiApplication {
             self.set_status("No morph source selected");
             return;
         };
+        let scene_uid = self.state.scene_manager().scene_uid_for_object(target);
+        let undo = self.capture_undo();
         match self.state.append_morph_frame_from_object(
             target,
             source,
             self.morph_frame_name.trim(),
         ) {
-            Ok(summary) => self.set_status(format!(
-                "Morph frame appended: {} frames / {} atoms",
-                summary.frame_count, summary.atom_count
-            )),
-            Err(error) => self.set_error(error),
+            Ok(summary) => {
+                self.push_undo_snapshot(undo);
+                if let Some(scene_uid) = scene_uid {
+                    self.modified_scenes.insert(scene_uid);
+                }
+                self.morph_selected_frame = summary.frame_count.checked_sub(1);
+                self.rebuild_snapshot();
+                self.set_status(format!(
+                    "Morph frame appended: {} frames / {} atoms",
+                    summary.frame_count, summary.atom_count
+                ));
+            }
+            Err(error) => {
+                self.state = undo.state;
+                self.set_error(error);
+            }
+        }
+    }
+
+    fn remove_selected_morph_frame(&mut self) {
+        let Some(target) = self.morph_target else {
+            self.set_status("No morph target selected");
+            return;
+        };
+        let Some(index) = self.morph_selected_frame else {
+            self.set_status("No morph frame selected");
+            return;
+        };
+        let scene_uid = self.state.scene_manager().scene_uid_for_object(target);
+        let undo = self.capture_undo();
+        match self.state.remove_morph_frame(target, index) {
+            Ok(summary) => {
+                self.push_undo_snapshot(undo);
+                if let Some(scene_uid) = scene_uid {
+                    self.modified_scenes.insert(scene_uid);
+                }
+                self.morph_selected_frame = if summary.frame_count == 0 {
+                    None
+                } else {
+                    Some(index.min(summary.frame_count - 1))
+                };
+                self.rebuild_snapshot();
+                self.set_status(format!(
+                    "Morph frame removed: {} frames / {} atoms",
+                    summary.frame_count, summary.atom_count
+                ));
+            }
+            Err(error) => {
+                self.state = undo.state;
+                self.set_error(error);
+            }
         }
     }
 
@@ -19192,10 +19254,14 @@ impl GuiApplication {
             self.set_status("No morph target selected");
             return;
         };
+        let scene_uid = self.state.scene_manager().scene_uid_for_object(target);
         let undo = self.capture_undo();
         match self.state.apply_morph_frame(target, self.morph_frame_value) {
             Ok(summary) => {
                 self.push_undo_snapshot(undo);
+                if let Some(scene_uid) = scene_uid {
+                    self.modified_scenes.insert(scene_uid);
+                }
                 self.selected_object = Some(target);
                 self.workspace_aux_selection = None;
                 self.rebuild_snapshot();
@@ -19204,7 +19270,10 @@ impl GuiApplication {
                     summary.frame_count, summary.atom_count
                 ));
             }
-            Err(error) => self.set_error(error),
+            Err(error) => {
+                self.state = undo.state;
+                self.set_error(error);
+            }
         }
     }
 
@@ -20721,6 +20790,13 @@ impl GuiApplication {
                 .clamp(ATOM_INTR_COLUMN_MIN_WIDTH, 400.0)
         });
         self.atom_intr_column_drag_start = None;
+        self.morph_name_column_width = self
+            .state
+            .config_value("morph_editor:name_width")
+            .parse::<f32>()
+            .unwrap_or(MORPH_NAME_COLUMN_DEFAULT_WIDTH)
+            .clamp(MORPH_COLUMN_MIN_WIDTH, 600.0);
+        self.morph_name_column_drag_start_width = None;
         for (style_key, config_key) in [
             ("DefaultLabel.font_name", "style:DefaultLabel.font_name"),
             ("DefaultLabel.font_size", "style:DefaultLabel.font_size"),
@@ -26366,6 +26442,7 @@ impl GuiApplication {
             ui.label("No molecule object loaded.");
             return;
         }
+        ui.set_min_width(460.0);
         if self
             .morph_target
             .is_none_or(|uid| !objects.iter().any(|object| object.uid == uid))
@@ -26378,6 +26455,7 @@ impl GuiApplication {
         {
             self.morph_source = Some(objects[0].uid);
         }
+        let previous_target = self.morph_target;
         egui::ComboBox::from_label("Target")
             .selected_text(object_combo_label(&objects, self.morph_target))
             .show_ui(ui, |ui| {
@@ -26389,6 +26467,152 @@ impl GuiApplication {
                     );
                 }
             });
+        if self.morph_target != previous_target {
+            self.morph_selected_frame = None;
+            self.morph_frame_value = self
+                .morph_target
+                .and_then(|uid| self.state.morph_frame_value(uid))
+                .unwrap_or(0.0);
+        }
+        let frames = self
+            .morph_target
+            .map(|uid| self.state.morph_frame_summaries(uid))
+            .unwrap_or_default();
+        if self
+            .morph_selected_frame
+            .is_some_and(|index| index >= frames.len())
+        {
+            self.morph_selected_frame = None;
+        }
+        egui::Frame::new()
+            .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+            .show(ui, |ui| {
+                let minimum_width = 2.0 * MORPH_COLUMN_MIN_WIDTH + MORPH_COLUMN_SPLITTER_WIDTH;
+                let available_width = ui.available_width().max(minimum_width);
+                let name_width = self.morph_name_column_width.clamp(
+                    MORPH_COLUMN_MIN_WIDTH,
+                    (available_width - MORPH_COLUMN_MIN_WIDTH - MORPH_COLUMN_SPLITTER_WIDTH)
+                        .max(MORPH_COLUMN_MIN_WIDTH),
+                );
+                let source_width = (available_width - name_width - MORPH_COLUMN_SPLITTER_WIDTH)
+                    .max(MORPH_COLUMN_MIN_WIDTH);
+                let header_height = ui.spacing().interact_size.y;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    ui.add_sized(
+                        [name_width, header_height],
+                        egui::Label::new(egui::RichText::new("Name").strong()),
+                    );
+                    let (splitter_rect, splitter) = ui.allocate_exact_size(
+                        egui::vec2(MORPH_COLUMN_SPLITTER_WIDTH, header_height),
+                        egui::Sense::drag(),
+                    );
+                    let splitter = splitter
+                        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+                        .on_hover_text("Resize Name column; double-click to reset");
+                    ui.painter().line_segment(
+                        [splitter_rect.center_top(), splitter_rect.center_bottom()],
+                        egui::Stroke::new(
+                            1.0,
+                            if splitter.hovered() || splitter.dragged() {
+                                ui.visuals().text_color()
+                            } else {
+                                ui.visuals().widgets.noninteractive.bg_stroke.color
+                            },
+                        ),
+                    );
+                    if splitter.double_clicked() {
+                        self.morph_name_column_width = MORPH_NAME_COLUMN_DEFAULT_WIDTH;
+                        self.morph_name_column_drag_start_width = None;
+                        self.state.put_config_value(
+                            "morph_editor:name_width",
+                            MORPH_NAME_COLUMN_DEFAULT_WIDTH.to_string(),
+                        );
+                    } else {
+                        if splitter.drag_started() {
+                            self.morph_name_column_drag_start_width = Some(name_width);
+                        }
+                        if splitter.dragged() {
+                            if let Some(initial_width) = self.morph_name_column_drag_start_width {
+                                let maximum = (available_width
+                                    - MORPH_COLUMN_MIN_WIDTH
+                                    - MORPH_COLUMN_SPLITTER_WIDTH)
+                                    .max(MORPH_COLUMN_MIN_WIDTH);
+                                self.morph_name_column_width = (initial_width
+                                    + splitter.drag_delta().x)
+                                    .clamp(MORPH_COLUMN_MIN_WIDTH, maximum);
+                                ui.ctx().request_repaint();
+                            }
+                        }
+                        if splitter.drag_stopped() {
+                            self.morph_name_column_drag_start_width = None;
+                            self.state.put_config_value(
+                                "morph_editor:name_width",
+                                self.morph_name_column_width.to_string(),
+                            );
+                        }
+                    }
+                    ui.add_sized(
+                        [source_width, header_height],
+                        egui::Label::new(egui::RichText::new("Source").strong()),
+                    );
+                });
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .id_salt("native_morph_frame_list")
+                    .min_scrolled_height(120.0)
+                    .max_height(220.0)
+                    .show(ui, |ui| {
+                        if frames.is_empty() {
+                            ui.weak("No morph frames.");
+                        }
+                        for frame in &frames {
+                            let selected = self.morph_selected_frame == Some(frame.index);
+                            let row_height = ui.spacing().interact_size.y;
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 0.0;
+                                let name = ui
+                                    .add_sized(
+                                        [name_width, row_height],
+                                        egui::Button::selectable(selected, frame.name.as_str()),
+                                    )
+                                    .on_hover_text(frame.name.as_str());
+                                let (separator, _) = ui.allocate_exact_size(
+                                    egui::vec2(MORPH_COLUMN_SPLITTER_WIDTH, row_height),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().line_segment(
+                                    [separator.center_top(), separator.center_bottom()],
+                                    ui.visuals().widgets.noninteractive.bg_stroke,
+                                );
+                                let source = if frame.source.is_empty() {
+                                    frame.source_type.as_str()
+                                } else {
+                                    frame.source.as_str()
+                                };
+                                let source_response = ui
+                                    .add_sized(
+                                        [source_width, row_height],
+                                        egui::Button::selectable(selected, source),
+                                    )
+                                    .on_hover_text(source);
+                                if name.clicked() || source_response.clicked() {
+                                    self.morph_selected_frame = Some(frame.index);
+                                }
+                            });
+                        }
+                    });
+            });
+        if ui
+            .add_enabled(
+                self.morph_selected_frame.is_some(),
+                egui::Button::new("Delete"),
+            )
+            .clicked()
+        {
+            self.remove_selected_morph_frame();
+        }
+        ui.separator();
         egui::ComboBox::from_label("Source frame")
             .selected_text(object_combo_label(&objects, self.morph_source))
             .show_ui(ui, |ui| {
@@ -26400,6 +26624,7 @@ impl GuiApplication {
                     );
                 }
             });
+        ui.label("Frame name");
         ui.add_sized(
             [ui.available_width(), 22.0],
             egui::TextEdit::singleline(&mut self.morph_frame_name),
@@ -34758,7 +34983,7 @@ mod tests {
         let app = GuiApplication::new_with_config_source(NativeConfigSource {
             path: Some(PathBuf::from("preloaded.conf")),
             input: Ok(Some(
-                "view_input:tbrad\t1.25\ncuemol2.ui.ribbon.collapsed\ttrue\nleft_panel:Workspace:visible\tfalse\nleft_panel:Workspace:collapsed\ttrue\nleft_panel:Workspace:height\t185\nleft_panel:order\tAnimation|Workspace|MolStruct|Selection|Coloring|Symmetry|Density map|View\nleft_panel:width\t310\nworkspace_panel:state_width\t58\nbond_editor:atom0_width\t260\natom_intr_editor:atom0_width\t100\natom_intr_editor:atom1_width\t110\natom_intr_editor:atom2_width\t120\nbottom_panel:visible\tfalse\nbottom_panel:tab\tsequence\nbottom_panel:height\t240\nsequence_panel:name_width\t220\nanimation_panel:name_width\t180\nanimation_panel:start_width\t70\ncoloring_paint:selection_width\t165\ncoloring_gradient:param_width\t155\nanimation_render:height\t720\nanimation_render:concurrency\t6\nanimation_render:duplicate_last_frame\ttrue\nanimation_render:backend\tUmbreon\nanimation_render:pov_shadow\ttrue\nanimation_render:make_movie\ttrue\nanimation_render:movie_format\tgifanim\nmru:length\t2\nmru:0:path\t/tmp/recent.qsc\nmru:1:path\t/tmp/recent.pdb\nselection_history:length\t2\nselection_history:0\tchain A\nselection_history:1\tname CA\n"
+                "view_input:tbrad\t1.25\ncuemol2.ui.ribbon.collapsed\ttrue\nleft_panel:Workspace:visible\tfalse\nleft_panel:Workspace:collapsed\ttrue\nleft_panel:Workspace:height\t185\nleft_panel:order\tAnimation|Workspace|MolStruct|Selection|Coloring|Symmetry|Density map|View\nleft_panel:width\t310\nworkspace_panel:state_width\t58\nbond_editor:atom0_width\t260\natom_intr_editor:atom0_width\t100\natom_intr_editor:atom1_width\t110\natom_intr_editor:atom2_width\t120\nmorph_editor:name_width\t210\nbottom_panel:visible\tfalse\nbottom_panel:tab\tsequence\nbottom_panel:height\t240\nsequence_panel:name_width\t220\nanimation_panel:name_width\t180\nanimation_panel:start_width\t70\ncoloring_paint:selection_width\t165\ncoloring_gradient:param_width\t155\nanimation_render:height\t720\nanimation_render:concurrency\t6\nanimation_render:duplicate_last_frame\ttrue\nanimation_render:backend\tUmbreon\nanimation_render:pov_shadow\ttrue\nanimation_render:make_movie\ttrue\nanimation_render:movie_format\tgifanim\nmru:length\t2\nmru:0:path\t/tmp/recent.qsc\nmru:1:path\t/tmp/recent.pdb\nselection_history:length\t2\nselection_history:0\tchain A\nselection_history:1\tname CA\n"
                     .to_string(),
             )),
         });
@@ -34776,6 +35001,7 @@ mod tests {
         assert_eq!(app.workspace_state_column_width, 58.0);
         assert_eq!(app.bond_atom0_column_width, 260.0);
         assert_eq!(app.atom_intr_column_widths, [100.0, 110.0, 120.0]);
+        assert_eq!(app.morph_name_column_width, 210.0);
         assert!(!app.show_bottom_panel);
         assert_eq!(app.bottom_tab, BottomTab::Sequence);
         assert_eq!(app.bottom_panel_height, 240.0);

@@ -134,6 +134,7 @@ const WINDOW_GEOMETRY_STORAGE_KEY = "cuemol2.windowGeometry.v1";
 const WORKSPACE_STATE_COLUMN_WIDTH_STORAGE_KEY = "cuemol2.workspaceStateColumnWidth.v1";
 const BOND_ATOM0_COLUMN_WIDTH_STORAGE_KEY = "cuemol2.bondAtom0ColumnWidth.v1";
 const ATOM_INTR_COLUMN_WIDTHS_STORAGE_KEY = "cuemol2.atomIntrColumnWidths.v1";
+const MORPH_NAME_COLUMN_WIDTH_STORAGE_KEY = "cuemol2.morphNameColumnWidth.v1";
 const SIDE_PANEL_DEFAULT_ORDER = [
   "Workspace",
   "MolStruct",
@@ -6542,6 +6543,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     }
   } else if (title === "Mol morphing animation") {
     dialogTitle.textContent = "Morph animation tool";
+    selectedMorphFrameIndex = null;
     const objects = activeObjects();
     if (objects.length === 0) {
       dialogContent.append(dialogParagraph("No molecular object is loaded."));
@@ -6554,31 +6556,90 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       );
       const source = dialogSelect("Source frame", objectOptions, objects[0].uid);
       const frameName = dialogField("Frame name", "frame");
-      const morph = snapshot.morphs?.find(
-        (item) => item.objectUid === Number(target.value),
-      );
       const frameList = document.createElement("div");
       frameList.className = "morph-frame-list";
-      for (const frame of morph?.frames || []) {
-        const row = button(
-          `${frame.name}  ${frame.source || frame.sourceType}`,
-          frame.index === selectedMorphFrameIndex ? "active" : "",
-          () => {
-            selectedMorphFrameIndex = frame.index;
-            frameList.querySelectorAll("button").forEach((item, index) => {
-              item.classList.toggle("active", index === frame.index);
-            });
-          },
+      const frameColumns = document.createElement("div");
+      frameColumns.className = "morph-frame-columns";
+      const nameHeading = document.createElement("span");
+      nameHeading.textContent = "Name";
+      const columnSplitter = document.createElement("div");
+      columnSplitter.className = "morph-column-splitter";
+      columnSplitter.tabIndex = 0;
+      columnSplitter.setAttribute("role", "separator");
+      columnSplitter.setAttribute("aria-orientation", "vertical");
+      columnSplitter.setAttribute("aria-label", "Name column width");
+      columnSplitter.setAttribute("aria-valuemin", "100");
+      columnSplitter.setAttribute("aria-valuemax", "600");
+      columnSplitter.title = "Drag to resize; double-click to reset";
+      const sourceHeading = document.createElement("span");
+      sourceHeading.textContent = "Source";
+      frameColumns.append(nameHeading, columnSplitter, sourceHeading);
+      const setMorphNameColumnWidth = (width, persist = false) => {
+        let nextWidth = Math.min(600, Math.max(100, Number(width) || 180));
+        const availableWidth = frameList.clientWidth || 0;
+        if (availableWidth >= 205) nextWidth = Math.min(nextWidth, availableWidth - 105);
+        frameList.style.setProperty("--morph-name-width", `${nextWidth}px`);
+        columnSplitter.setAttribute("aria-valuenow", String(Math.round(nextWidth)));
+        if (!persist) return;
+        try {
+          localStorage.setItem(MORPH_NAME_COLUMN_WIDTH_STORAGE_KEY, String(nextWidth));
+        } catch {
+          // Storage can be unavailable in restricted webviews.
+        }
+      };
+      try {
+        const storedWidth = Number(localStorage.getItem(MORPH_NAME_COLUMN_WIDTH_STORAGE_KEY));
+        if (Number.isFinite(storedWidth) && storedWidth > 0) {
+          setMorphNameColumnWidth(storedWidth);
+        }
+      } catch {
+        // Storage can be unavailable in restricted webviews.
+      }
+      columnSplitter.addEventListener("pointerdown", (event) => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        const startX = event.clientX;
+        const startWidth = nameHeading.getBoundingClientRect().width || 180;
+        columnSplitter.setPointerCapture(event.pointerId);
+        columnSplitter.classList.add("dragging");
+        const resize = (moveEvent) => {
+          setMorphNameColumnWidth(startWidth + moveEvent.clientX - startX);
+        };
+        const finish = (finishEvent) => {
+          if (finishEvent.type !== "pointercancel") resize(finishEvent);
+          setMorphNameColumnWidth(nameHeading.getBoundingClientRect().width || 180, true);
+          columnSplitter.classList.remove("dragging");
+          columnSplitter.removeEventListener("pointermove", resize);
+          columnSplitter.removeEventListener("pointerup", finish);
+          columnSplitter.removeEventListener("pointercancel", finish);
+        };
+        columnSplitter.addEventListener("pointermove", resize);
+        columnSplitter.addEventListener("pointerup", finish);
+        columnSplitter.addEventListener("pointercancel", finish);
+      });
+      columnSplitter.addEventListener("dblclick", () => {
+        frameList.style.removeProperty("--morph-name-width");
+        columnSplitter.removeAttribute("aria-valuenow");
+        try {
+          localStorage.removeItem(MORPH_NAME_COLUMN_WIDTH_STORAGE_KEY);
+        } catch {
+          // Storage can be unavailable in restricted webviews.
+        }
+      });
+      columnSplitter.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+        event.preventDefault();
+        const current = nameHeading.getBoundingClientRect().width || 180;
+        setMorphNameColumnWidth(
+          current + (event.key === "ArrowRight" ? 10 : -10),
+          true,
         );
-        frameList.append(row);
-      }
-      if (!morph?.frames?.length) {
-        frameList.append(dialogParagraph("No morph frames."));
-      }
+      });
       dialogContent.append(frameList);
-      const frame = dialogField("Frame", String(morph?.frame ?? 0), "number");
+      const selectedMorph = () =>
+        snapshot.morphs?.find((item) => item.objectUid === Number(target.value));
+      const frame = dialogField("Frame", String(selectedMorph()?.frame ?? 0), "number");
       frame.min = "0";
-      frame.max = String(Math.max(0, (morph?.frames?.length || 1) - 1));
       frame.step = "0.05";
       const add = button("Add", "dialog-primary", async () => {
         await mutate("append_morph_frame", {
@@ -6606,6 +6667,49 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           frame: Number(frame.value),
         });
       });
+      const renderMorphFrames = () => {
+        const morph = selectedMorph();
+        const frames = morph?.frames || [];
+        if (
+          selectedMorphFrameIndex !== null
+          && !frames.some((item) => item.index === selectedMorphFrameIndex)
+        ) {
+          selectedMorphFrameIndex = null;
+        }
+        frameList.replaceChildren(frameColumns);
+        for (const morphFrame of frames) {
+          const row = button(
+            "",
+            `morph-frame-row${
+              morphFrame.index === selectedMorphFrameIndex ? " active" : ""
+            }`,
+            () => {
+              selectedMorphFrameIndex = morphFrame.index;
+              renderMorphFrames();
+            },
+          );
+          const name = document.createElement("span");
+          name.textContent = morphFrame.name;
+          const frameSource = document.createElement("span");
+          frameSource.textContent = morphFrame.source || morphFrame.sourceType;
+          row.append(name, frameSource);
+          frameList.append(row);
+        }
+        if (!frames.length) {
+          frameList.append(dialogParagraph("No morph frames."));
+        }
+        remove.disabled = selectedMorphFrameIndex === null;
+        frame.max = String(Math.max(0, frames.length - 1));
+        if (!Number.isFinite(Number(frame.value)) || Number(frame.value) > Number(frame.max)) {
+          frame.value = String(morph?.frame ?? 0);
+        }
+      };
+      target.addEventListener("change", () => {
+        selectedMorphFrameIndex = null;
+        frame.value = String(selectedMorph()?.frame ?? 0);
+        renderMorphFrames();
+      });
+      renderMorphFrames();
       dialogActions(remove, apply, add);
     }
   } else if (title === "POV-Ray rendering") {

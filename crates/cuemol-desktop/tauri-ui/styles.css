@@ -3304,26 +3304,92 @@ body.resizing-bottom-panel {
 
 .morph-frame-list {
   min-height: 72px;
-  max-height: 150px;
+  max-height: 220px;
   margin: 8px 0;
   overflow: auto;
   border: 1px solid #aaa;
   background: #fff;
 }
 
-.morph-frame-list button {
-  display: block;
+.morph-frame-columns,
+.morph-frame-row {
+  display: grid;
+  grid-template-columns:
+    var(--morph-name-width, minmax(100px, 1fr))
+    5px
+    minmax(100px, 1fr);
+  align-items: center;
+  min-width: 205px;
+}
+
+.morph-frame-columns {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  min-height: 23px;
+  border-bottom: 1px solid #999;
+  background: linear-gradient(#fff, #dedede);
+  font-weight: 600;
+}
+
+.morph-frame-columns > span {
+  align-self: stretch;
+  min-width: 0;
+  padding: 4px 6px;
+  overflow: hidden;
+  border-right: 1px solid #bbb;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.morph-column-splitter {
+  align-self: stretch;
+  min-width: 5px;
+  border-right: 1px solid #999;
+  border-left: 1px solid #eee;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.morph-column-splitter:hover,
+.morph-column-splitter:focus-visible,
+.morph-column-splitter.dragging {
+  background: #9fc7ec;
+  outline: 0;
+}
+
+.morph-frame-list .morph-frame-row {
   width: 100%;
-  min-height: 22px;
+  min-height: 28px;
+  padding: 0;
   border: 0;
   border-bottom: 1px solid #ddd;
   border-radius: 0;
   text-align: left;
 }
 
-.morph-frame-list button.active {
+.morph-frame-row > span {
+  min-width: 0;
+  align-self: stretch;
+  padding: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.morph-frame-row > :nth-child(2) {
+  grid-column: 3;
+  border-left: 1px solid #ddd;
+}
+
+.morph-frame-list .morph-frame-row.active {
   background: var(--selection);
   color: #fff;
+}
+
+.morph-frame-list > p {
+  margin: 8px;
+  color: #666;
 }
 
 .dialog-primary {
