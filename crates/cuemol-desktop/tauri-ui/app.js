@@ -7048,49 +7048,38 @@ function workspaceCameraContextItems(scene, camera = null) {
     return mutate("activate_scene", { sceneUid: scene.uid });
   };
   const newCamera = {
-    label: "New Camera…",
+    label: "New Camera...",
     action: async () => {
       if (!(await activate())) return;
       await openNewCameraFlow();
     },
   };
   const loadCamera = {
-    label: "Load…",
+    label: "Load ...",
     action: async () => {
       if (!(await activate())) return;
       await loadWorkspaceCameraFile(scene);
     },
   };
   const items = [
-    { label: camera?.name || "Cameras", disabled: true },
-    null,
     newCamera,
-  ];
-  if (!camera) {
-    if (workspaceCameraClipboardAvailable) {
-      items.push({ label: "Paste Camera", action: () => pasteWorkspaceCamera(scene) });
-    }
-    items.push(null, { label: "Camera file", children: [loadCamera] });
-    return items;
-  }
-
-  items.push(
-    null,
-    {
-      label: "Copy",
-      action: () => copyWorkspaceCamera(scene.uid, camera.name),
-    },
-  );
-  if (workspaceCameraClipboardAvailable) {
-    items.push({ label: "Paste Camera", action: () => pasteWorkspaceCamera(scene) });
-  }
-  items.push(
     {
       label: "Delete",
+      disabled: !camera,
       action: async () => {
         if (!(await activate())) return;
         await mutate("destroy_camera", { name: camera.name });
       },
+    },
+    {
+      label: "Copy",
+      disabled: !camera,
+      action: () => copyWorkspaceCamera(scene.uid, camera.name),
+    },
+    {
+      label: "Paste",
+      disabled: !workspaceCameraClipboardAvailable,
+      action: () => pasteWorkspaceCamera(scene),
     },
     null,
     {
@@ -7099,7 +7088,7 @@ function workspaceCameraContextItems(scene, camera = null) {
         loadCamera,
         {
           label: "Reload",
-          disabled: !camera.source,
+          disabled: !camera?.source,
           action: async () => {
             if (!(await activate())) return;
             await mutateWithoutViewport("reload_camera_file", {
@@ -7110,13 +7099,15 @@ function workspaceCameraContextItems(scene, camera = null) {
         },
         {
           label: "Save",
+          disabled: !camera,
           action: async () => {
             if (!(await activate())) return;
             await saveWorkspaceCameraFile(scene, camera, false);
           },
         },
         {
-          label: "Save As…",
+          label: "Save as...",
+          disabled: !camera,
           action: async () => {
             if (!(await activate())) return;
             await saveWorkspaceCameraFile(scene, camera, true);
@@ -7127,6 +7118,7 @@ function workspaceCameraContextItems(scene, camera = null) {
     null,
     {
       label: "Save from view",
+      disabled: !camera,
       action: async () => {
         if (!(await activate())) return;
         await mutateWithoutViewport("save_camera_view", { name: camera.name });
@@ -7134,6 +7126,7 @@ function workspaceCameraContextItems(scene, camera = null) {
     },
     {
       label: "Apply to view",
+      disabled: !camera,
       action: async () => {
         if (!(await activate())) return;
         await mutate("load_camera_view", { name: camera.name });
@@ -7142,6 +7135,7 @@ function workspaceCameraContextItems(scene, camera = null) {
     null,
     {
       label: "Save from scene (with vis flags)",
+      disabled: !camera,
       action: async () => {
         if (!(await activate())) return;
         await mutate("save_camera", { name: camera.name });
@@ -7149,13 +7143,15 @@ function workspaceCameraContextItems(scene, camera = null) {
     },
     {
       label: "Apply to scene (with vis flags)",
+      disabled: !camera,
       action: async () => {
         if (!(await activate())) return;
         await mutate("load_camera", { name: camera.name });
       },
     },
     {
-      label: "Edit vis flags…",
+      label: "Edit vis flags...",
+      disabled: !camera,
       action: async () => {
         if (!(await activate())) return;
         await showCameraVisibilityEditor(scene, camera);
@@ -7163,7 +7159,7 @@ function workspaceCameraContextItems(scene, camera = null) {
     },
     {
       label: "Clear vis flags",
-      disabled: camera.visibilityCount === 0,
+      disabled: !camera || camera.visibilityCount === 0,
       action: async () => {
         if (!(await activate())) return;
         await mutateWithoutViewport("clear_camera_visibility", {
@@ -7174,7 +7170,8 @@ function workspaceCameraContextItems(scene, camera = null) {
     },
     null,
     {
-      label: "Rename…",
+      label: "Rename...",
+      disabled: !camera,
       action: async () => {
         if (!(await activate())) return;
         selectedCameraName = camera.name;
@@ -7182,16 +7179,16 @@ function workspaceCameraContextItems(scene, camera = null) {
         beginWorkspaceInlineRename("camera", scene.uid, camera.name);
       },
     },
-    null,
     {
-      label: "Properties…",
+      label: "Properties...",
+      disabled: !camera,
       action: async () => {
         if (!(await activate())) return;
         selectedCameraName = camera.name;
         await showReferenceDialog("Camera Properties");
       },
     },
-  );
+  ];
   return items;
 }
 

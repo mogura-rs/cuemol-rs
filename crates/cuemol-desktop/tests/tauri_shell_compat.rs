@@ -1179,7 +1179,7 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(NATIVE_GUI_RS.contains("egui::Button::new(\"Paste\")"));
     assert!(NATIVE_GUI_RS.contains("scene_attribute(\"icc_filename\")"));
     assert!(JS.contains("workspaceCameraContextItems"));
-    assert!(JS.contains("label: \"New Camera…\""));
+    assert!(JS.contains("label: \"New Camera...\""));
     assert!(JS.contains("label: \"Camera file\""));
     assert!(JS.contains("function loadWorkspaceCameraFile(scene)"));
     assert!(JS.contains("function saveWorkspaceCameraFile(scene, camera, saveAs)"));
@@ -1391,7 +1391,7 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(!tauri_renderer_menu.contains("label: \"Paint\", disabled: true"));
     assert!(tauri_renderer_menu.contains("disabled: renderer.coloringType !== \"PaintColoring\""));
     assert!(tauri_renderer_menu.contains("disabled: selectionHidden"));
-    assert!(NATIVE_GUI_RS.contains("ui.button(\"Rename…\")"));
+    assert!(NATIVE_GUI_RS.contains("ui.button(\"Rename...\")"));
     assert!(NATIVE_GUI_RS.contains("ui.button(\"Change Name\")"));
     assert!(NATIVE_GUI_RS.contains("ui.button(\"New Renderer...\")"));
     assert!(NATIVE_GUI_RS.contains("ui.menu_button(\"Change sel\""));
@@ -1415,11 +1415,11 @@ fn tauri_workspace_exposes_reference_camera_nodes_and_actions() {
     assert!(JS.contains("\"set_camera_visibility\""));
     assert!(JS.contains("\"clear_camera_visibility\""));
     assert!(JS.contains("Edit visibility flags"));
-    assert!(JS.contains("label: \"Edit vis flags…\""));
+    assert!(JS.contains("label: \"Edit vis flags...\""));
     assert!(JS.contains("label: \"Clear vis flags\""));
     assert!(JS.contains("label: \"Save from view\""));
     assert!(JS.contains("label: \"Apply to view\""));
-    assert!(JS.contains("camera.visibilityCount > 0"));
+    assert!(JS.contains("camera.visibilityCount === 0"));
     assert!(CSS.contains(".visibility-flag-editor"));
     assert!(CSS.contains("width: min(420px, calc(100vw - 48px))"));
     assert!(JS.contains("function showTextPromptDialog({"));
@@ -1473,21 +1473,46 @@ fn tauri_workspace_exposes_reference_camera_nodes_and_actions() {
         .nth(1)
         .and_then(|source| source.split("function workspaceStyleContextItems").next())
         .expect("Tauri camera context menu");
-    assert!(tauri_camera_menu.contains("camera?.name || \"Cameras\""));
-    assert!(tauri_camera_menu.contains("label: \"Paste Camera\""));
-    assert!(tauri_camera_menu.contains("label: \"Load…\""));
-    assert!(tauri_camera_menu.contains("label: \"Save As…\""));
-    let tauri_camera_root = tauri_camera_menu
-        .split("if (!camera) {")
-        .nth(1)
-        .and_then(|source| source.split("return items;").next())
-        .expect("Tauri camera-root context menu");
-    assert!(tauri_camera_root.contains("children: [loadCamera]"));
-    assert!(!tauri_camera_root.contains("label: \"Reload\""));
+    let mut cursor = 0;
+    for item in [
+        "label: \"New Camera...\"",
+        "label: \"Delete\"",
+        "label: \"Copy\"",
+        "label: \"Paste\"",
+        "label: \"Camera file\"",
+        "label: \"Save from view\"",
+        "label: \"Apply to view\"",
+        "label: \"Save from scene (with vis flags)\"",
+        "label: \"Apply to scene (with vis flags)\"",
+        "label: \"Edit vis flags...\"",
+        "label: \"Clear vis flags\"",
+        "label: \"Rename...\"",
+        "label: \"Properties...\"",
+    ] {
+        let relative = tauri_camera_menu[cursor..]
+            .find(item)
+            .unwrap_or_else(|| panic!("missing camera menu item {item}"));
+        cursor += relative + item.len();
+    }
+    for item in [
+        "label: \"Load ...\"",
+        "label: \"Reload\"",
+        "label: \"Save\"",
+        "label: \"Save as...\"",
+    ] {
+        assert!(
+            tauri_camera_menu.contains(item),
+            "missing camera file item {item}"
+        );
+    }
+    assert!(!tauri_camera_menu.contains("camera?.name || \"Cameras\""));
+    assert!(!tauri_camera_menu.contains("label: \"Paste Camera\""));
+    assert!(tauri_camera_menu.contains("disabled: !camera"));
+    assert!(tauri_camera_menu.contains("disabled: !workspaceCameraClipboardAvailable"));
     let clear_action = tauri_camera_menu
         .split("label: \"Clear vis flags\"")
         .nth(1)
-        .and_then(|source| source.split("label: \"Rename…\"").next())
+        .and_then(|source| source.split("label: \"Rename...\"").next())
         .expect("Tauri clear camera visibility action");
     assert!(clear_action.contains("mutateWithoutViewport(\"clear_camera_visibility\""));
     assert!(!clear_action.contains("globalThis.confirm"));
@@ -1499,10 +1524,25 @@ fn tauri_workspace_exposes_reference_camera_nodes_and_actions() {
         .nth(1)
         .and_then(|source| source.split("ui.indent(format!(\"camera-root-").next())
         .expect("native camera-root context menu");
-    assert!(native_camera_root.contains("ui.weak(\"Cameras\")"));
-    assert!(native_camera_root.contains("ui.button(\"Paste Camera\")"));
-    assert!(native_camera_root.contains("ui.button(\"Load…\")"));
-    assert!(!native_camera_root.contains("Button::new(\"Reload\")"));
+    assert!(!native_camera_root.contains("ui.weak(\"Cameras\")"));
+    assert!(!native_camera_root.contains("Paste Camera"));
+    for item in [
+        "ui.button(\"New Camera...\")",
+        "egui::Button::new(\"Delete\")",
+        "egui::Button::new(\"Copy\")",
+        "egui::Button::new(\"Paste\")",
+        "ui.button(\"Load ...\")",
+        "egui::Button::new(\"Reload\")",
+        "egui::Button::new(\"Save\")",
+        "egui::Button::new(\"Save as...\")",
+        "egui::Button::new(\"Rename...\")",
+        "egui::Button::new(\"Properties...\")",
+    ] {
+        assert!(
+            native_camera_root.contains(item),
+            "missing native camera-root item {item}"
+        );
+    }
 }
 
 #[test]

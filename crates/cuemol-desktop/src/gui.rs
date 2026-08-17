@@ -5338,25 +5338,48 @@ impl GuiApplication {
                 }
                 root_response.context_menu(|ui| {
                     self.workspace_multiple_selection.clear();
-                    ui.weak("Cameras");
-                    ui.separator();
-                    if ui.button("New Camera…").clicked() {
+                    if ui.button("New Camera...").clicked() {
                         self.open_new_camera_dialog(scene.uid, camera);
                         ui.close();
                     }
-                    if self.workspace_camera_clipboard.is_some()
-                        && ui.button("Paste Camera").clicked()
+                    ui.add_enabled(false, egui::Button::new("Delete"));
+                    ui.add_enabled(false, egui::Button::new("Copy"));
+                    if ui
+                        .add_enabled(
+                            self.workspace_camera_clipboard.is_some(),
+                            egui::Button::new("Paste"),
+                        )
+                        .clicked()
                     {
                         self.paste_workspace_camera_clipboard(scene.uid);
                         ui.close();
                     }
                     ui.separator();
                     ui.menu_button("Camera file", |ui| {
-                        if ui.button("Load…").clicked() {
+                        if ui.button("Load ...").clicked() {
                             self.choose_load_workspace_camera_file(scene.uid, camera);
                             ui.close();
                         }
+                        ui.add_enabled(false, egui::Button::new("Reload"));
+                        ui.add_enabled(false, egui::Button::new("Save"));
+                        ui.add_enabled(false, egui::Button::new("Save as..."));
                     });
+                    ui.separator();
+                    for label in ["Save from view", "Apply to view"] {
+                        ui.add_enabled(false, egui::Button::new(label));
+                    }
+                    ui.separator();
+                    for label in [
+                        "Save from scene (with vis flags)",
+                        "Apply to scene (with vis flags)",
+                        "Edit vis flags...",
+                        "Clear vis flags",
+                    ] {
+                        ui.add_enabled(false, egui::Button::new(label));
+                    }
+                    ui.separator();
+                    ui.add_enabled(false, egui::Button::new("Rename..."));
+                    ui.add_enabled(false, egui::Button::new("Properties..."));
                 });
                 ui.indent(format!("camera-root-{}", scene.uid.get()), |ui| {
                     for (camera_index, summary) in cameras.iter().enumerate() {
@@ -5401,30 +5424,31 @@ impl GuiApplication {
                                 return;
                             }
                             self.workspace_multiple_selection.clear();
-                            ui.weak(&summary.name);
-                            ui.separator();
-                            if ui.button("New Camera…").clicked() {
+                            if ui.button("New Camera...").clicked() {
                                 self.open_new_camera_dialog(scene.uid, camera);
-                                ui.close();
-                            }
-                            ui.separator();
-                            if ui.button("Copy").clicked() {
-                                self.copy_workspace_camera_to_clipboard(scene.uid, &summary.name);
-                                ui.close();
-                            }
-                            if self.workspace_camera_clipboard.is_some()
-                                && ui.button("Paste Camera").clicked()
-                            {
-                                self.paste_workspace_camera_clipboard(scene.uid);
                                 ui.close();
                             }
                             if ui.button("Delete").clicked() {
                                 self.delete_aux_selection(selection);
                                 ui.close();
                             }
+                            if ui.button("Copy").clicked() {
+                                self.copy_workspace_camera_to_clipboard(scene.uid, &summary.name);
+                                ui.close();
+                            }
+                            if ui
+                                .add_enabled(
+                                    self.workspace_camera_clipboard.is_some(),
+                                    egui::Button::new("Paste"),
+                                )
+                                .clicked()
+                            {
+                                self.paste_workspace_camera_clipboard(scene.uid);
+                                ui.close();
+                            }
                             ui.separator();
                             ui.menu_button("Camera file", |ui| {
-                                if ui.button("Load…").clicked() {
+                                if ui.button("Load ...").clicked() {
                                     self.choose_load_workspace_camera_file(scene.uid, camera);
                                     ui.close();
                                 }
@@ -5442,7 +5466,7 @@ impl GuiApplication {
                                     self.choose_save_workspace_camera_file(selection, false);
                                     ui.close();
                                 }
-                                if ui.button("Save As…").clicked() {
+                                if ui.button("Save as...").clicked() {
                                     self.choose_save_workspace_camera_file(selection, true);
                                     ui.close();
                                 }
@@ -5465,7 +5489,7 @@ impl GuiApplication {
                                 self.load_workspace_camera(selection, camera);
                                 ui.close();
                             }
-                            if ui.button("Edit vis flags…").clicked() {
+                            if ui.button("Edit vis flags...").clicked() {
                                 self.open_camera_visibility_editor(selection);
                                 ui.close();
                             }
@@ -5480,12 +5504,11 @@ impl GuiApplication {
                                 ui.close();
                             }
                             ui.separator();
-                            if ui.button("Rename…").clicked() {
+                            if ui.button("Rename...").clicked() {
                                 self.open_camera_properties(selection);
                                 ui.close();
                             }
-                            ui.separator();
-                            if ui.button("Properties…").clicked() {
+                            if ui.button("Properties...").clicked() {
                                 self.open_camera_properties(selection);
                                 ui.close();
                             }
