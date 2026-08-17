@@ -1163,6 +1163,8 @@ struct GuiApplication {
     show_toolbar: bool,
     show_workspace: bool,
     left_panel_visible: [bool; LeftPanel::ALL.len()],
+    left_panel_open: [bool; LeftPanel::ALL.len()],
+    left_panel_width: f32,
     reset_left_panel_layout: bool,
     show_inspector: bool,
     object_properties_draft: Option<NativeObjectProperties>,
@@ -4113,6 +4115,18 @@ impl GuiApplication {
                 "false" | "0" | "no" | "off"
             )
         });
+        let left_panel_open = LeftPanel::ALL.map(|panel| {
+            !config_bool(
+                &state,
+                &format!("left_panel:{}:collapsed", panel.title()),
+                !panel.default_open(),
+            )
+        });
+        let left_panel_width = state
+            .config_value("left_panel:width")
+            .parse::<f32>()
+            .unwrap_or(250.0)
+            .clamp(220.0, 360.0);
         let sequence_name_width = state
             .config_value("sequence_panel:name_width")
             .parse::<f32>()
@@ -4246,6 +4260,8 @@ impl GuiApplication {
             show_toolbar,
             show_workspace: true,
             left_panel_visible,
+            left_panel_open,
+            left_panel_width,
             reset_left_panel_layout: false,
             // CueMol2 opens properties on demand (no docked inspector); start closed.
             show_inspector: false,
@@ -5319,15 +5335,16 @@ impl GuiApplication {
     /// (`cuemol2-panels.js` / `sidepanelholder`). Each is an independently
     /// collapsible `CollapsingHeader`.
     fn left_panel(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
-        egui::SidePanel::left("left_dock")
+        let response = egui::SidePanel::left("left_dock")
             .resizable(true)
-            .default_width(250.0)
+            .default_width(self.left_panel_width)
             .width_range(220.0..=360.0)
             .show(ctx, |ui| {
                 egui::ScrollArea::both().show(ui, |ui| {
                     let reset_layout = self.reset_left_panel_layout;
                     for panel in LeftPanel::ALL {
-                        if !self.left_panel_visible[panel.index()] {
+                        let index = panel.index();
+                        if !self.left_panel_visible[index] {
                             continue;
                         }
                         let id = ui.make_persistent_id(("left-panel", panel.title()));
@@ -5335,7 +5352,7 @@ impl GuiApplication {
                             egui::collapsing_header::CollapsingState::load_with_default_open(
                                 ui.ctx(),
                                 id,
-                                panel.default_open(),
+                                self.left_panel_open[index],
                             );
                         if self.force_open_all_panels {
                             state.set_open(true);
@@ -5343,26 +5360,33 @@ impl GuiApplication {
                             state.set_open(panel.default_open());
                         }
                         let mut close_panel = false;
-                        state
-                            .show_header(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.label(panel.title());
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            close_panel = ui
-                                                .small_button("×")
-                                                .on_hover_text("Close panel")
-                                                .clicked();
-                                        },
-                                    );
-                                });
-                            })
-                            .body(|ui| {
-                                self.left_panel_body(ui, camera, panel);
+                        let header = state.show_header(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(panel.title());
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        close_panel = ui
+                                            .small_button("×")
+                                            .on_hover_text("Close panel")
+                                            .clicked();
+                                    },
+                                );
                             });
+                        });
+                        let open = header.is_open();
+                        header.body(|ui| {
+                            self.left_panel_body(ui, camera, panel);
+                        });
+                        if self.left_panel_open[index] != open {
+                            self.left_panel_open[index] = open;
+                            self.state.put_config_value(
+                                &format!("left_panel:{}:collapsed", panel.title()),
+                                (!open).to_string(),
+                            );
+                        }
                         if close_panel {
-                            self.left_panel_visible[panel.index()] = false;
+                            self.left_panel_visible[index] = false;
                             self.state.put_config_value(
                                 &format!("left_panel:{}:visible", panel.title()),
                                 "false".to_string(),
@@ -5372,6 +5396,12 @@ impl GuiApplication {
                     self.reset_left_panel_layout = false;
                 });
             });
+        let width = response.response.rect.width().clamp(220.0, 360.0);
+        if (self.left_panel_width - width).abs() >= 0.5 {
+            self.left_panel_width = width;
+            self.state
+                .put_config_value("left_panel:width", width.to_string());
+        }
     }
 
     fn left_panel_body(
@@ -19317,6 +19347,19 @@ impl GuiApplication {
                 "false" | "0" | "no" | "off"
             )
         });
+        self.left_panel_open = LeftPanel::ALL.map(|panel| {
+            !config_bool(
+                &self.state,
+                &format!("left_panel:{}:collapsed", panel.title()),
+                !panel.default_open(),
+            )
+        });
+        self.left_panel_width = self
+            .state
+            .config_value("left_panel:width")
+            .parse::<f32>()
+            .unwrap_or(250.0)
+            .clamp(220.0, 360.0);
         self.sequence_name_width = self
             .state
             .config_value("sequence_panel:name_width")
@@ -26825,9 +26868,15 @@ impl GuiApplication {
         self.show_workspace = true;
         self.left_panel_visible.fill(true);
         for panel in LeftPanel::ALL {
+            let index = panel.index();
+            self.left_panel_open[index] = panel.default_open();
             self.state.put_config_value(
                 &format!("left_panel:{}:visible", panel.title()),
                 "true".to_string(),
+            );
+            self.state.put_config_value(
+                &format!("left_panel:{}:collapsed", panel.title()),
+                (!panel.default_open()).to_string(),
             );
         }
         self.reset_left_panel_layout = true;
@@ -32822,7 +32871,7 @@ mod tests {
         let app = GuiApplication::new_with_config_source(NativeConfigSource {
             path: Some(PathBuf::from("preloaded.conf")),
             input: Ok(Some(
-                "view_input:tbrad\t1.25\ncuemol2.ui.ribbon.collapsed\ttrue\nleft_panel:Workspace:visible\tfalse\nsequence_panel:name_width\t220\n"
+                "view_input:tbrad\t1.25\ncuemol2.ui.ribbon.collapsed\ttrue\nleft_panel:Workspace:visible\tfalse\nleft_panel:Workspace:collapsed\ttrue\nleft_panel:width\t310\nsequence_panel:name_width\t220\n"
                     .to_string(),
             )),
         });
@@ -32830,6 +32879,8 @@ mod tests {
         assert_eq!(app.state.view_input_config().tbrad(), 1.25);
         assert!(!app.show_toolbar);
         assert!(!app.left_panel_visible[LeftPanel::Workspace.index()]);
+        assert!(!app.left_panel_open[LeftPanel::Workspace.index()]);
+        assert_eq!(app.left_panel_width, 310.0);
         assert_eq!(app.sequence_name_width, 220.0);
         assert_eq!(app.status, "Loaded config preloaded.conf");
     }
@@ -32958,8 +33009,14 @@ mod tests {
         );
         assert!(app.left_panel_visible.iter().all(|visible| *visible));
         app.left_panel_visible[LeftPanel::Workspace.index()] = false;
+        app.left_panel_open[LeftPanel::Workspace.index()] = false;
+        app.left_panel_width = 315.0;
         app.state
             .put_config_value("left_panel:Workspace:visible", "false".to_string());
+        app.state
+            .put_config_value("left_panel:Workspace:collapsed", "true".to_string());
+        app.state
+            .put_config_value("left_panel:width", "315".to_string());
         app.persist_config_state().expect("save native session");
         let input = fs::read_to_string(&path).expect("read native session");
         let mut app = GuiApplication::new_with_config_source(NativeConfigSource {
@@ -32967,6 +33024,8 @@ mod tests {
             input: Ok(Some(input)),
         });
         assert!(!app.left_panel_visible[LeftPanel::Workspace.index()]);
+        assert!(!app.left_panel_open[LeftPanel::Workspace.index()]);
+        assert_eq!(app.left_panel_width, 315.0);
         app.reset_left_panel_layout = false;
         app.show_workspace = false;
 
@@ -32975,10 +33034,16 @@ mod tests {
         assert!(app.show_workspace);
         assert!(app.left_panel_visible.iter().all(|visible| *visible));
         for panel in LeftPanel::ALL {
+            assert_eq!(app.left_panel_open[panel.index()], panel.default_open());
             assert_eq!(
                 app.state
                     .config_value(&format!("left_panel:{}:visible", panel.title())),
                 "true"
+            );
+            assert_eq!(
+                app.state
+                    .config_value(&format!("left_panel:{}:collapsed", panel.title())),
+                (!panel.default_open()).to_string()
             );
         }
         assert!(app.reset_left_panel_layout);
@@ -32986,6 +33051,7 @@ mod tests {
         app.persist_config_state().expect("save restored session");
         let input = fs::read_to_string(&path).expect("read restored session");
         assert!(input.contains("left_panel:Workspace:visible\ttrue"));
+        assert!(input.contains("left_panel:Workspace:collapsed\tfalse"));
         fs::remove_file(path).expect("remove native session");
     }
 
