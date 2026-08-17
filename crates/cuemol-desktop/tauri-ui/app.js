@@ -7424,9 +7424,43 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         const angle = dialogField("Rotation angle", String(object.angle), "number", typePage);
         angle.step = "1";
         const axis = object.axis || [0, 1, 0];
+        const axisModeValue = axis[0] === 1 && axis[1] === 0 && axis[2] === 0
+          ? "xaxis"
+          : axis[0] === 0 && axis[1] === 1 && axis[2] === 0
+            ? "yaxis"
+            : axis[0] === 0 && axis[1] === 0 && axis[2] === 1
+              ? "zaxis"
+              : "cart";
+        const axisMode = dialogSelect(
+          "Spin axis",
+          [
+            ["xaxis", "X axis"],
+            ["yaxis", "Y axis"],
+            ["zaxis", "Z axis"],
+            ["cart", "Cartesian"],
+          ],
+          axisModeValue,
+          typePage,
+        );
         const axisX = dialogField("Spin axis X", String(axis[0]), "number", typePage);
         const axisY = dialogField("Spin axis Y", String(axis[1]), "number", typePage);
         const axisZ = dialogField("Spin axis Z", String(axis[2]), "number", typePage);
+        const applyAxisMode = () => {
+          const presets = {
+            xaxis: [1, 0, 0],
+            yaxis: [0, 1, 0],
+            zaxis: [0, 0, 1],
+          };
+          if (presets[axisMode.value]) {
+            [axisX.value, axisY.value, axisZ.value] = presets[axisMode.value].map(String);
+          }
+          const locked = axisMode.value !== "cart";
+          axisX.disabled = locked;
+          axisY.disabled = locked;
+          axisZ.disabled = locked;
+        };
+        axisMode.addEventListener("change", applyAxisMode);
+        applyAxisMode();
         optional.read = () => ({
           angle: Number(angle.value),
           axis: [Number(axisX.value), Number(axisY.value), Number(axisZ.value)],
@@ -7434,6 +7468,8 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         optional.reset = (defaults) => {
           angle.value = String(defaults.angle);
           [axisX.value, axisY.value, axisZ.value] = defaults.axis.map(String);
+          axisMode.value = "yaxis";
+          applyAxisMode();
         };
       } else if (object.typeName === "CamMotion") {
         const cameras = snapshot.cameras

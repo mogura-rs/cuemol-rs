@@ -1001,6 +1001,10 @@ fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
     assert!(JS.contains("await showReferenceDialog(\"Animation object properties\")"));
     assert!(JS.contains("optional.reset(defaults)"));
     assert!(JS.contains("Object.assign(input, { angle: 0, axis: [0, 1, 0] })"));
+    for label in ["X axis", "Y axis", "Z axis", "Cartesian"] {
+        assert!(JS.contains(label));
+        assert!(NATIVE_GUI_RS.contains(label));
+    }
     assert!(JS.contains("keepQuaternionPositive: true"));
     assert!(JS.contains("fade: true"));
     assert!(JS.contains("distance: 1"));

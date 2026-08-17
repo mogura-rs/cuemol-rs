@@ -10064,11 +10064,22 @@ impl GuiApplication {
             .unwrap_or_default();
         let name = unique_native_animation_name(&animation, native_animation_name_prefix(kind));
         let motion = new_native_animation_motion(kind, name, reference);
+        let mut draft = NativeAnimationProperties::from_motion(insertion_index, &motion);
+        if kind == AnimKind::MolAnim {
+            draft.molecule_name = self
+                .state
+                .active_object_summaries()
+                .into_iter()
+                .find(|summary| {
+                    self.state
+                        .scene_manager()
+                        .object(summary.uid)
+                        .is_some_and(|object| object.object_type() == "MorphMol")
+                })
+                .map(|summary| summary.name);
+        }
         self.animation_pending_add = Some((kind, insertion_index));
-        self.animation_properties_draft = Some(NativeAnimationProperties::from_motion(
-            insertion_index,
-            &motion,
-        ));
+        self.animation_properties_draft = Some(draft);
         Ok(())
     }
 
@@ -15511,6 +15522,18 @@ impl GuiApplication {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let morph_names = self
+            .state
+            .active_object_summaries()
+            .into_iter()
+            .filter(|summary| {
+                self.state
+                    .scene_manager()
+                    .object(summary.uid)
+                    .is_some_and(|object| object.object_type() == "MorphMol")
+            })
+            .map(|summary| summary.name)
+            .collect::<Vec<_>>();
         let mut open = true;
         let mut accept = false;
         let mut cancel = false;
@@ -15589,8 +15612,31 @@ impl GuiApplication {
                         if let Some(axis) = &mut draft.axis {
                             ui.horizontal(|ui| {
                                 ui.label("Spin axis:");
+                                let mut mode = match *axis {
+                                    [1.0, 0.0, 0.0] => "X axis",
+                                    [0.0, 1.0, 0.0] => "Y axis",
+                                    [0.0, 0.0, 1.0] => "Z axis",
+                                    _ => "Cartesian",
+                                };
+                                egui::ComboBox::from_id_salt("animation_spin_axis_mode")
+                                    .selected_text(mode)
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut mode, "X axis", "X axis");
+                                        ui.selectable_value(&mut mode, "Y axis", "Y axis");
+                                        ui.selectable_value(&mut mode, "Z axis", "Z axis");
+                                        ui.selectable_value(&mut mode, "Cartesian", "Cartesian");
+                                    });
+                                match mode {
+                                    "X axis" => *axis = [1.0, 0.0, 0.0],
+                                    "Y axis" => *axis = [0.0, 1.0, 0.0],
+                                    "Z axis" => *axis = [0.0, 0.0, 1.0],
+                                    _ => {}
+                                }
                                 for component in axis {
-                                    ui.add(egui::DragValue::new(component).speed(0.1));
+                                    ui.add_enabled(
+                                        mode == "Cartesian",
+                                        egui::DragValue::new(component).speed(0.1),
+                                    );
                                 }
                             });
                         }
@@ -15666,7 +15712,23 @@ impl GuiApplication {
                     }
                     "MolAnim" => {
                         ui.heading("MolAnim");
-                        animation_optional_text_ui(ui, "Molecule:", &mut draft.molecule_name);
+                        if let Some(target) = &mut draft.molecule_name {
+                            ui.horizontal(|ui| {
+                                ui.label("Target MorphMol:");
+                                egui::ComboBox::from_id_salt("animation_target_morph")
+                                    .selected_text(if target.is_empty() {
+                                        "None"
+                                    } else {
+                                        target.as_str()
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(target, String::new(), "None");
+                                        for name in &morph_names {
+                                            ui.selectable_value(target, name.clone(), name);
+                                        }
+                                    });
+                            });
+                        }
                         animation_optional_text_ui(ui, "Property:", &mut draft.property_name);
                         animation_value_range_ui(ui, &mut draft.start_value, &mut draft.end_value);
                     }
@@ -34489,6 +34551,21 @@ mod tests {
                 .unwrap_or_default()
                 .size(),
             0
+        );
+
+        let scene = app.state.scene_manager_mut().scene_mut(scene_uid).unwrap();
+        let morph_uid = scene.add_molecule("morph", cuemol_molstr::MolCoord::new());
+        scene
+            .object_mut(morph_uid)
+            .unwrap()
+            .set_object_type("MorphMol");
+        app.open_new_animation_properties(AnimKind::MolAnim, &mut camera)
+            .unwrap();
+        assert_eq!(
+            app.animation_properties_draft
+                .as_ref()
+                .and_then(|draft| draft.molecule_name.as_deref()),
+            Some("morph")
         );
     }
 
