@@ -1133,6 +1133,8 @@ struct GuiApplication {
     sequence_drag_start: Option<NativeSequencePosition>,
     sequence_drag_end: Option<NativeSequencePosition>,
     sequence_scroll_offset: egui::Vec2,
+    sequence_name_width: f32,
+    sequence_name_drag_start_width: Option<f32>,
     trajectory_target: Option<cuemol_core::Uid>,
     trajectory_playing: bool,
     trajectory_loop: bool,
@@ -4095,6 +4097,11 @@ impl GuiApplication {
     fn new() -> Self {
         let mut state = DesktopAppState::new();
         state.new_scene("Untitled 1", true);
+        let sequence_name_width = state
+            .config_value("sequence_panel:name_width")
+            .parse::<f32>()
+            .unwrap_or(140.0)
+            .clamp(50.0, 400.0);
         Self {
             state,
             open_path: "../cuemol2/tests/test_data/1CRN.pdb".to_string(),
@@ -4198,6 +4205,8 @@ impl GuiApplication {
             sequence_drag_start: None,
             sequence_drag_end: None,
             sequence_scroll_offset: egui::Vec2::ZERO,
+            sequence_name_width,
+            sequence_name_drag_start_width: None,
             trajectory_target: None,
             trajectory_playing: false,
             trajectory_loop: false,
@@ -13940,9 +13949,13 @@ impl GuiApplication {
         let shift = ui.input(|input| input.modifiers.shift);
         let column_count = native_sequence_column_count(&chains);
         let sequence_width = column_count as f32 * NATIVE_SEQUENCE_CELL_WIDTH;
+        let name_width = self.sequence_name_width;
         let mut scroll_offset = self.sequence_scroll_offset;
         ui.horizontal(|ui| {
-            ui.add_sized([140.0, NATIVE_SEQUENCE_RULER_HEIGHT], egui::Label::new(""));
+            ui.add_sized(
+                [name_width, NATIVE_SEQUENCE_RULER_HEIGHT],
+                egui::Label::new(""),
+            );
             ui.separator();
             let ruler_width = ui.available_width();
             let ruler_output = ui
@@ -13991,7 +14004,7 @@ impl GuiApplication {
         let content_height = ui.available_height();
         let updated_offset = ui
             .horizontal(|ui| {
-                ui.allocate_ui(egui::vec2(140.0, content_height), |ui| {
+                ui.allocate_ui(egui::vec2(name_width, content_height), |ui| {
                     egui::ScrollArea::vertical()
                         .id_salt("native_sequence_names")
                         .scroll_offset(egui::vec2(0.0, scroll_offset.y))
@@ -14005,7 +14018,7 @@ impl GuiApplication {
                                 };
                                 let title = format!("{}:{}", chain_disp, chain.object_name);
                                 let (rect, response) = ui.allocate_exact_size(
-                                    egui::vec2(140.0, NATIVE_SEQUENCE_ROW_HEIGHT),
+                                    egui::vec2(name_width, NATIVE_SEQUENCE_ROW_HEIGHT),
                                     egui::Sense::hover(),
                                 );
                                 if row_index % 2 == 1 {
@@ -14027,7 +14040,34 @@ impl GuiApplication {
                             }
                         });
                 });
-                ui.separator();
+                let (splitter_rect, splitter) =
+                    ui.allocate_exact_size(egui::vec2(5.0, content_height), egui::Sense::drag());
+                let splitter_color = if splitter.hovered() || splitter.dragged() {
+                    ui.visuals().text_color()
+                } else {
+                    ui.visuals().widgets.noninteractive.bg_stroke.color
+                };
+                ui.painter().line_segment(
+                    [splitter_rect.center_top(), splitter_rect.center_bottom()],
+                    egui::Stroke::new(1.0, splitter_color),
+                );
+                if splitter.drag_started() {
+                    self.sequence_name_drag_start_width = Some(name_width);
+                }
+                if splitter.dragged() {
+                    if let Some(start_width) = self.sequence_name_drag_start_width {
+                        self.sequence_name_width =
+                            (start_width + splitter.drag_delta().x).clamp(50.0, 400.0);
+                        ui.ctx().request_repaint();
+                    }
+                }
+                if splitter.drag_stopped() {
+                    self.sequence_name_drag_start_width = None;
+                    self.state.put_config_value(
+                        "sequence_panel:name_width",
+                        self.sequence_name_width.to_string(),
+                    );
+                }
                 let grid_width = ui.available_width();
                 ui.allocate_ui(egui::vec2(grid_width, content_height), |ui| {
                     egui::ScrollArea::both()

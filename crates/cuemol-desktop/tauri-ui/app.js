@@ -14551,6 +14551,28 @@ const SEQUENCE_CELL_WIDTH = 10;
 const SEQUENCE_ROW_HEIGHT = 19;
 const SEQUENCE_RULER_HEIGHT = 16;
 const SEQUENCE_MAX_CANVAS_WIDTH = 30_000;
+const SEQUENCE_NAME_WIDTH_STORAGE_KEY = "cuemol.sequenceNameWidth";
+let sequenceNameWidth = 140;
+
+try {
+  const storedSequenceNameWidth = Number(localStorage.getItem(SEQUENCE_NAME_WIDTH_STORAGE_KEY));
+  if (Number.isFinite(storedSequenceNameWidth)) {
+    sequenceNameWidth = Math.min(400, Math.max(50, storedSequenceNameWidth));
+  }
+} catch {
+  // Storage can be unavailable in restricted webviews.
+}
+
+function setSequenceNameWidth(width, persist = false) {
+  sequenceNameWidth = Math.min(400, Math.max(50, width));
+  sequenceView.style.setProperty("--sequence-name-width", `${sequenceNameWidth}px`);
+  if (!persist) return;
+  try {
+    localStorage.setItem(SEQUENCE_NAME_WIDTH_STORAGE_KEY, String(sequenceNameWidth));
+  } catch {
+    // Storage can be unavailable in restricted webviews.
+  }
+}
 
 function sequenceResidueColumn(value) {
   const column = Number.parseInt(String(value), 10);
@@ -14576,6 +14598,32 @@ function createSequenceRuler(columnCount) {
   row.className = "sequence-ruler";
   const corner = document.createElement("div");
   corner.className = "sequence-ruler-corner";
+  const splitter = document.createElement("div");
+  splitter.className = "sequence-name-splitter";
+  splitter.setAttribute("role", "separator");
+  splitter.setAttribute("aria-orientation", "vertical");
+  splitter.title = "Resize chain-name column";
+  splitter.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = sequenceNameWidth;
+    splitter.setPointerCapture(event.pointerId);
+    const resize = (moveEvent) => {
+      setSequenceNameWidth(startWidth + moveEvent.clientX - startX);
+    };
+    const finish = (finishEvent) => {
+      if (finishEvent.type !== "pointercancel") resize(finishEvent);
+      setSequenceNameWidth(sequenceNameWidth, true);
+      splitter.removeEventListener("pointermove", resize);
+      splitter.removeEventListener("pointerup", finish);
+      splitter.removeEventListener("pointercancel", finish);
+    };
+    splitter.addEventListener("pointermove", resize);
+    splitter.addEventListener("pointerup", finish);
+    splitter.addEventListener("pointercancel", finish);
+  });
+  corner.append(splitter);
   const canvas = document.createElement("canvas");
   canvas.className = "sequence-ruler-canvas";
   const width = Math.min(
@@ -14646,7 +14694,10 @@ function sequenceRangeCells(start, end) {
   const startPosition = Number(start.dataset.residuePosition);
   const endPosition = Number(end.dataset.residuePosition);
   const [first, last] = [startPosition, endPosition].sort((lhs, rhs) => lhs - rhs);
-  return cells.slice(first, last + 1);
+  return cells.filter((cell) => {
+    const position = Number(cell.dataset.residuePosition);
+    return position >= first && position <= last;
+  });
 }
 
 function previewSequenceRange(start, end) {
@@ -14744,6 +14795,7 @@ function renderSequence() {
     return;
   }
   if (renderedSequenceKey === moleculeDetails.sequenceKey) return;
+  setSequenceNameWidth(sequenceNameWidth);
   renderedSequenceKey = moleculeDetails.sequenceKey;
   sequenceView.replaceChildren();
   if (moleculeDetails.sequence.length === 0) {
@@ -14780,6 +14832,7 @@ function renderSequence() {
       cell.dataset.residuePosition = String(position);
       cell.dataset.selection = residue.selection;
       cell.style.left = `${column * SEQUENCE_CELL_WIDTH}px`;
+      cell.style.zIndex = String(chain.residues.length - position);
       cell.title = `${residue.resName} ${residue.residueIndex}`;
       if (
         sequenceMarker?.objectUid === cell.dataset.objectUid &&

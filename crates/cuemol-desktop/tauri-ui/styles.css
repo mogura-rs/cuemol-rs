@@ -2059,7 +2059,7 @@ summary:focus-visible {
   top: 0;
   z-index: 3;
   display: grid;
-  grid-template-columns: 140px max-content;
+  grid-template-columns: var(--sequence-name-width, 140px) max-content;
   height: 16px;
   border-bottom: 1px solid #aaa;
   background: #fff;
@@ -2073,13 +2073,35 @@ summary:focus-visible {
   background: #fff;
 }
 
+.sequence-name-splitter {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  z-index: 5;
+  width: 6px;
+  height: 100dvh;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.sequence-name-splitter::after {
+  position: absolute;
+  inset: 0 2px;
+  background: #aaa;
+  content: "";
+}
+
+.sequence-name-splitter:hover::after {
+  background: #666;
+}
+
 .sequence-ruler-canvas {
   display: block;
 }
 
 .sequence-chain {
   display: grid;
-  grid-template-columns: 140px max-content;
+  grid-template-columns: var(--sequence-name-width, 140px) max-content;
   min-height: 19px;
 }
 

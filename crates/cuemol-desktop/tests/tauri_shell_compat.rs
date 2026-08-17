@@ -615,6 +615,9 @@ fn tauri_sequence_panel_matches_reference_mouse_and_context_operations() {
         "function createSequenceRuler(columnCount)",
         "function sequenceColumnCount(chains)",
         "sequenceResidueColumn(residue.residueIndex)",
+        "SEQUENCE_NAME_WIDTH_STORAGE_KEY",
+        "setSequenceNameWidth(sequenceNameWidth, true)",
+        "splitter.setPointerCapture(event.pointerId)",
     ] {
         assert!(JS.contains(binding), "missing Sequence binding {binding}");
     }
@@ -634,7 +637,8 @@ fn tauri_sequence_panel_matches_reference_mouse_and_context_operations() {
     assert!(CSS.contains(".sequence-cell.marked"));
     assert!(CSS.contains(".sequence-cell.range-preview"));
     assert!(CSS.contains(".sequence-ruler"));
-    assert!(CSS.contains("grid-template-columns: 140px max-content;"));
+    assert!(CSS.contains("var(--sequence-name-width, 140px) max-content"));
+    assert!(CSS.contains(".sequence-name-splitter"));
     assert!(CSS.contains("width: 10px;"));
     assert!(CSS.contains("position: sticky;"));
     assert!(TAURI_APP_RS.contains("fn apply_sequence_action("));
@@ -657,12 +661,14 @@ fn tauri_sequence_panel_matches_reference_mouse_and_context_operations() {
         .expect("native Sequence panel");
     assert!(native_sequence.contains("egui::ScrollArea::both()"));
     assert!(native_sequence.contains("NATIVE_SEQUENCE_RULER_HEIGHT"));
-    assert!(native_sequence.contains("egui::vec2(140.0, NATIVE_SEQUENCE_ROW_HEIGHT)"));
+    assert!(native_sequence.contains("egui::vec2(name_width, NATIVE_SEQUENCE_ROW_HEIGHT)"));
     assert!(native_sequence.contains("sequence_residue_column"));
     assert!(native_sequence.contains("native_sequence_ruler"));
     assert!(native_sequence.contains("native_sequence_names"));
     assert!(native_sequence.contains("native_sequence_grid"));
     assert!(native_sequence.contains("scroll_offset(scroll_offset)"));
+    assert!(native_sequence.contains("splitter.drag_delta().x"));
+    assert!(native_sequence.contains("sequence_panel:name_width"));
     assert!(!native_sequence.contains("horizontal_wrapped"));
 }
 
