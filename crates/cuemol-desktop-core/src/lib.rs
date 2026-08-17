@@ -20,7 +20,7 @@ use cuemol_molstr::{
     AtomIntrKind, AtomIntrLine, LoadObjectResult, LoadedDensityMap, LoadedLWObject,
     LoadedLWRenderer, LoadedStyle, LoadedSurface, MolCommandManager, MolCoord, MolObject,
     MolRenderer, MolSceneManager, NewRendererResult, NewSceneResult, QdfMolFileReader,
-    QdfMolFileWriter, QscLoadStatus, ResidRangeSet, Selector, StreamManager,
+    QdfMolFileWriter, QscLoadStatus, ResidRangeSet, ResidueKey, Selector, StreamManager,
 };
 use cuemol_molvis::{
     anisou_mesh_snapshot_with_options, apply_object_coloring, apply_renderer_styles,
@@ -14230,7 +14230,7 @@ impl DesktopAppState {
             .scene_manager_mut()
             .object_mut(object_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
-        let count = object.mol().atom_sel_count(&selector);
+        let count = selected_residue_atom_count(object.mol(), &selector);
         let changed =
             MolAnlManager::new().change_chain_name(object.mol_mut(), &selector, chain_name.trim());
         Ok(if changed { count } else { 0 })
@@ -14258,7 +14258,7 @@ impl DesktopAppState {
             .scene_manager_mut()
             .object_mut(object_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
-        let count = object.mol().atom_sel_count(&selector);
+        let count = selected_residue_atom_count(object.mol(), &selector);
         let manager = MolAnlManager::new();
         let changed = if renumber {
             manager.renum_res_index(object.mol_mut(), &selector, shift_mode, value)
@@ -49122,6 +49122,26 @@ fn pse_atom_label_node(atom_index: usize, text: &str) -> LDom2Node {
     node
 }
 
+fn selected_residue_atom_count(molecule: &MolCoord, selector: &Selector) -> usize {
+    let selected = molecule
+        .atoms()
+        .iter()
+        .filter(|atom| selector.matches(atom))
+        .map(|atom| ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code))
+        .collect::<BTreeSet<_>>();
+    molecule
+        .atoms()
+        .iter()
+        .filter(|atom| {
+            selected.contains(&ResidueKey::new(
+                atom.chain_id.clone(),
+                atom.res_id,
+                atom.ins_code,
+            ))
+        })
+        .count()
+}
+
 fn parse_gui_selector(selection_text: &str) -> Result<Option<cuemol_molstr::Selector>> {
     let trimmed = selection_text.trim();
     if trimmed.is_empty() {
@@ -65986,15 +66006,15 @@ attribute \"dep\" string \"positions\"
         let changed = app
             .change_chain_in_object(object_uid, "name CA", "Z")
             .unwrap();
-        assert_eq!(changed, 46);
+        assert_eq!(changed, 327);
         let renumbered = app
             .renumber_residues_in_object(object_uid, "chain Z", 10)
             .unwrap();
-        assert_eq!(renumbered, 46);
+        assert_eq!(renumbered, 327);
         let deleted = app.delete_atoms_in_object(object_uid, "chain Z").unwrap();
-        assert_eq!(deleted, 46);
+        assert_eq!(deleted, 327);
 
-        assert_eq!(app.active_pick_atoms("").unwrap().len(), 281);
+        assert!(app.active_pick_atoms("").unwrap().is_empty());
     }
 
     #[test]
@@ -66013,12 +66033,12 @@ attribute \"dep\" string \"positions\"
         };
         assert_eq!(
             app.change_chain_in_object(source, "name CA", "B").unwrap(),
-            46
+            327
         );
         assert_eq!(
             app.merge_molecules(source, "chain B", target, false)
                 .unwrap(),
-            46
+            327
         );
         assert_eq!(
             app.scene_manager()
@@ -66026,7 +66046,7 @@ attribute \"dep\" string \"positions\"
                 .unwrap()
                 .mol()
                 .atom_count(),
-            281
+            0
         );
         assert_eq!(
             app.scene_manager()
@@ -66034,7 +66054,7 @@ attribute \"dep\" string \"positions\"
                 .unwrap()
                 .mol()
                 .atom_count(),
-            373
+            654
         );
     }
 

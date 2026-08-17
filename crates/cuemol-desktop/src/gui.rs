@@ -35237,7 +35237,7 @@ mod tests {
                 .unwrap()
                 .mol()
                 .atom_count(),
-            target_atom_count + 46
+            target_atom_count + source_atom_count
         );
         app.undo(&mut camera);
         assert_eq!(

@@ -381,11 +381,19 @@ impl MolAnlManager {
         selector: &Selector,
         name: &str,
     ) -> bool {
-        // Move every selected atom's residue to chain `name`; the collision guard
-        // in `relabel_residue_keys` rejects a merge into an existing residue.
+        let selected = molecule
+            .atoms()
+            .iter()
+            .filter(|atom| selector.matches(atom))
+            .map(|atom| ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code))
+            .collect::<BTreeSet<_>>();
+        if selected.is_empty() {
+            return false;
+        }
         molecule.relabel_residue_keys(|atom| {
-            selector
-                .matches(atom)
+            let key = ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code);
+            selected
+                .contains(&key)
                 .then(|| ResidueKey::new(name, atom.res_id, atom.ins_code))
         })
     }
@@ -1277,6 +1285,20 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![11, 11, 12]
         );
+    }
+
+    #[test]
+    fn change_chain_name_moves_complete_selected_residues() {
+        let manager = MolAnlManager::new();
+        let mut molecule = MolCoord::new();
+        molecule.push_atom(atom(1, "N", "A", 1, "N", 0.0));
+        molecule.push_atom(atom(2, "CA", "A", 1, "C", 1.0));
+        molecule.push_atom(atom(3, "N", "A", 2, "N", 2.0));
+
+        assert!(manager.change_chain_name(&mut molecule, &parse_selector("name CA").unwrap(), "Z"));
+        assert_eq!(molecule.atoms()[0].chain_id, "Z");
+        assert_eq!(molecule.atoms()[1].chain_id, "Z");
+        assert_eq!(molecule.atoms()[2].chain_id, "A");
     }
 
     #[test]
