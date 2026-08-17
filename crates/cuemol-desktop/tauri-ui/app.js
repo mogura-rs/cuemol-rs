@@ -9099,17 +9099,55 @@ function workspaceMultipleContextItems() {
     },
     {
       label: "Delete",
-      action: async () => {
-        clearWorkspaceMultipleSelection();
-        workspaceSelectionKind = "scene";
-        await mutate("delete_workspace_items", {
-          targets: targets.map(workspaceCommandTarget),
-        });
-      },
+      action: () => deleteWorkspaceMultipleItems(targets),
     },
     { label: "Show", action: setVisible(true) },
     { label: "Hide", action: setVisible(false) },
   ];
+}
+
+async function deleteWorkspaceMultipleItems(targets) {
+  const approved = [];
+  for (const target of targets) {
+    let confirmation = null;
+    if (target.kind === "camera") {
+      const camera = (snapshot.cameras || []).find(
+        (candidate) =>
+          candidate.sceneUid === target.objectUid && candidate.name === target.rendererUid,
+      );
+      if (camera) {
+        confirmation = {
+          title: "Delete Camera",
+          message: `Delete camera: ${camera.name}`,
+        };
+      }
+    } else if (target.kind === "style") {
+      const style = (snapshot.styles || []).find(
+        (candidate) =>
+          candidate.ownerSceneUid === target.objectUid &&
+          candidate.localIndex === target.rendererUid,
+      );
+      if (style) {
+        confirmation = {
+          title: "Delete Style",
+          message: `Delete style: ${style.name}`,
+        };
+      }
+    }
+    if (
+      confirmation &&
+      !(await showConfirmationDialog({ ...confirmation, confirmLabel: "Delete" }))
+    ) {
+      continue;
+    }
+    approved.push(target);
+  }
+  if (approved.length === 0) return false;
+  clearWorkspaceMultipleSelection();
+  workspaceSelectionKind = "scene";
+  return mutate("delete_workspace_items", {
+    targets: approved.map(workspaceCommandTarget),
+  });
 }
 
 function showWorkspaceMultipleContextMenu(event, target) {
@@ -13070,10 +13108,7 @@ async function handleAction(action, depth = 0) {
     }
     case "delete-workspace-item": {
       if (workspaceSelectionKind === "multiple" && workspaceMultipleSelection.length > 1) {
-        const targets = workspaceMultipleSelection.map(workspaceCommandTarget);
-        clearWorkspaceMultipleSelection();
-        workspaceSelectionKind = "scene";
-        await mutate("delete_workspace_items", { targets });
+        await deleteWorkspaceMultipleItems([...workspaceMultipleSelection]);
         break;
       }
       if (

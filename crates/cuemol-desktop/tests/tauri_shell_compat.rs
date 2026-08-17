@@ -1620,6 +1620,8 @@ fn tauri_workspace_multiple_selection_matches_reference_actions() {
     assert!(JS.contains("if (event.shiftKey)"));
     assert!(JS.contains("row.workspaceSelectionTarget"));
     assert!(JS.contains("function workspaceMultipleContextItems()"));
+    assert!(JS.contains("async function deleteWorkspaceMultipleItems(targets)"));
+    assert!(JS.contains("approved.push(target)"));
     assert!(JS.contains("function showWorkspaceMultipleContextMenu(event, target)"));
     assert!(JS.contains("function workspaceRendererTargetClipboardKind(target)"));
     assert!(!JS.contains("workspaceRendererClipboardKind"));
@@ -1647,6 +1649,9 @@ fn tauri_workspace_multiple_selection_matches_reference_actions() {
     assert!(NATIVE_GUI_RS.contains("NativeWorkspaceTarget::Camera"));
     assert!(NATIVE_GUI_RS.contains("NativeWorkspaceTarget::Style"));
     assert!(NATIVE_GUI_RS.contains("fn set_workspace_targets_visible"));
+    assert!(NATIVE_GUI_RS.contains("fn request_delete_workspace_targets"));
+    assert!(NATIVE_GUI_RS.contains("fn multiple_delete_dialog"));
+    assert!(NATIVE_GUI_RS.contains("fn advance_multiple_delete_confirmation"));
     assert!(NATIVE_GUI_RS.contains("fn delete_workspace_targets"));
 }
 

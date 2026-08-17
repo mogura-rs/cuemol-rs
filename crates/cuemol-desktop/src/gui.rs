@@ -802,6 +802,20 @@ struct NativeStyleDeleteDraft {
 }
 
 #[derive(Debug, Clone)]
+struct NativeWorkspaceDeleteConfirmation {
+    target: NativeWorkspaceTarget,
+    title: &'static str,
+    message: String,
+}
+
+#[derive(Debug, Clone)]
+struct NativeMultipleDeleteDraft {
+    targets: Vec<NativeWorkspaceTarget>,
+    confirmations: Vec<NativeWorkspaceDeleteConfirmation>,
+    index: usize,
+}
+
+#[derive(Debug, Clone)]
 struct NativeCloseTabDraft {
     scene_name: String,
 }
@@ -908,6 +922,7 @@ struct GuiApplication {
     camera_rename_draft: Option<NativeCameraRenameDraft>,
     camera_delete_draft: Option<NativeCameraDeleteDraft>,
     style_delete_draft: Option<NativeStyleDeleteDraft>,
+    multiple_delete_draft: Option<NativeMultipleDeleteDraft>,
     close_tab_draft: Option<NativeCloseTabDraft>,
     close_after_scene_save: bool,
     reload_scene_draft: Option<NativeReloadSceneDraft>,
@@ -3243,6 +3258,7 @@ impl GuiApplication {
             camera_rename_draft: None,
             camera_delete_draft: None,
             style_delete_draft: None,
+            multiple_delete_draft: None,
             close_tab_draft: None,
             close_after_scene_save: false,
             reload_scene_draft: None,
@@ -5837,7 +5853,7 @@ impl GuiApplication {
                 .clicked()
             {
                 if multiple_selected {
-                    self.delete_workspace_targets();
+                    self.request_delete_workspace_targets();
                 } else if let Some(object_uid) = self.selected_object {
                     if let Some(renderer_uid) = self.selected_renderer {
                         self.delete_renderer(object_uid, renderer_uid);
@@ -5964,7 +5980,7 @@ impl GuiApplication {
             ui.close();
         }
         if ui.button("Delete").clicked() {
-            self.delete_workspace_targets();
+            self.request_delete_workspace_targets();
             ui.close();
         }
         if ui.button("Show").clicked() {
@@ -7460,10 +7476,82 @@ impl GuiApplication {
         }
     }
 
-    fn delete_workspace_targets(&mut self) {
-        let mut targets = self.workspace_multiple_selection.clone();
+    fn request_delete_workspace_targets(&mut self) {
+        let targets = self.workspace_multiple_selection.clone();
         if targets.len() < 2 {
             self.set_status("Select multiple Workspace items");
+            return;
+        }
+        let confirmations = targets
+            .iter()
+            .copied()
+            .filter_map(|target| match target {
+                NativeWorkspaceTarget::Camera {
+                    scene_uid,
+                    camera_index,
+                } => self
+                    .state
+                    .camera_summaries(scene_uid)
+                    .get(camera_index)
+                    .map(|camera| NativeWorkspaceDeleteConfirmation {
+                        target,
+                        title: "Delete Camera",
+                        message: format!("Delete camera: {}", camera.name),
+                    }),
+                NativeWorkspaceTarget::Style {
+                    scene_uid,
+                    style_index,
+                } => self
+                    .state
+                    .style_summaries(scene_uid)
+                    .get(style_index)
+                    .filter(|style| style.local_index.is_some())
+                    .map(|style| NativeWorkspaceDeleteConfirmation {
+                        target,
+                        title: "Delete Style",
+                        message: format!("Delete style: {}", style.name),
+                    }),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if confirmations.is_empty() {
+            self.delete_workspace_targets();
+            return;
+        }
+        self.multiple_delete_draft = Some(NativeMultipleDeleteDraft {
+            targets,
+            confirmations,
+            index: 0,
+        });
+    }
+
+    fn advance_multiple_delete_confirmation(&mut self, confirm: bool) {
+        let Some(mut draft) = self.multiple_delete_draft.take() else {
+            return;
+        };
+        let Some(current) = draft.confirmations.get(draft.index) else {
+            return;
+        };
+        if !confirm {
+            draft.targets.retain(|target| *target != current.target);
+        }
+        draft.index += 1;
+        if draft.index < draft.confirmations.len() {
+            self.multiple_delete_draft = Some(draft);
+            return;
+        }
+        if draft.targets.is_empty() {
+            self.set_status("Delete canceled");
+            return;
+        }
+        self.workspace_multiple_selection = draft.targets;
+        self.delete_workspace_targets();
+    }
+
+    fn delete_workspace_targets(&mut self) {
+        let mut targets = self.workspace_multiple_selection.clone();
+        if targets.is_empty() {
+            self.set_status("No Workspace items to delete");
             return;
         }
         targets.sort_by(|left, right| match (left, right) {
@@ -13045,6 +13133,7 @@ impl GuiApplication {
         self.camera_rename_dialog(ctx);
         self.camera_delete_dialog(ctx);
         self.style_delete_dialog(ctx);
+        self.multiple_delete_dialog(ctx);
         self.close_tab_dialog(ctx, camera);
         self.reload_scene_dialog(ctx, camera);
         self.atom_intr_edit_dialog(ctx);
@@ -19720,6 +19809,45 @@ impl GuiApplication {
             }
         } else if open && !cancel {
             self.style_delete_draft = Some(draft);
+        }
+    }
+
+    fn multiple_delete_dialog(&mut self, ctx: &egui::Context) {
+        let Some(draft) = self.multiple_delete_draft.as_ref() else {
+            return;
+        };
+        let Some(current) = draft.confirmations.get(draft.index) else {
+            self.multiple_delete_draft = None;
+            return;
+        };
+        let title = current.title;
+        let message = current.message.clone();
+        let mut open = true;
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Window::new(title)
+            .default_width(360.0)
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(message);
+                ui.separator();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Delete").clicked() {
+                        confirm = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if confirm {
+            self.advance_multiple_delete_confirmation(true);
+        } else if cancel {
+            self.advance_multiple_delete_confirmation(false);
+        } else if !open {
+            self.multiple_delete_draft = None;
         }
     }
 
@@ -28219,7 +28347,18 @@ mod tests {
         assert!(app.select_workspace_target(style_1, true));
         assert_eq!(app.workspace_multiple_selection.len(), 4);
 
-        app.delete_workspace_targets();
+        app.request_delete_workspace_targets();
+        let confirmations = &app.multiple_delete_draft.as_ref().unwrap().confirmations;
+        assert_eq!(confirmations.len(), 4);
+        assert!(confirmations
+            .iter()
+            .any(|confirmation| confirmation.message == "Delete camera: camera_0"));
+        assert!(confirmations
+            .iter()
+            .any(|confirmation| confirmation.message == "Delete style: style_0"));
+        for _ in 0..4 {
+            app.advance_multiple_delete_confirmation(true);
+        }
         assert!(app.state.camera_summaries(scene_uid).is_empty());
         assert!(app
             .state
@@ -28241,6 +28380,20 @@ mod tests {
             2
         );
         assert_eq!(app.workspace_multiple_selection.len(), 4);
+
+        app.request_delete_workspace_targets();
+        for _ in 0..4 {
+            app.advance_multiple_delete_confirmation(false);
+        }
+        assert_eq!(app.state.camera_summaries(scene_uid).len(), 2);
+        assert_eq!(
+            app.state
+                .style_summaries(scene_uid)
+                .iter()
+                .filter(|style| style.local_index.is_some())
+                .count(),
+            2
+        );
 
         app.set_workspace_targets_visible(false);
         assert_eq!(app.state.camera_summaries(scene_uid).len(), 2);
