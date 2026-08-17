@@ -7690,6 +7690,19 @@ function workspaceInlineRenameInput(kind, object, renderer = null) {
   return input;
 }
 
+async function renameWorkspaceRendererGroup(scene, kind, object, renderer) {
+  if (!scene.active && !(await mutate("activate_scene", { sceneUid: scene.uid }))) return;
+  const name = await showTextPromptDialog({
+    title: "Change Name",
+    label: "Change rend group name:",
+    defaultValue: renderer.name,
+  });
+  if (name === null || name === renderer.name) return;
+  await mutateWithoutViewport("rename_workspace_node", {
+    input: { kind, objectUid: object.uid, rendererUid: renderer.uid, name },
+  });
+}
+
 function workspaceCameraInlineRenameInput(scene, camera) {
   const input = document.createElement("input");
   input.className = "workspace-inline-rename";
@@ -7883,11 +7896,7 @@ async function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
       },
       {
         label: "Change Name",
-        action: async () => {
-          if (!(await activate())) return;
-          selectWorkspaceAuxItem(kind, object.uid, renderer.uid);
-          beginWorkspaceInlineRename(kind, object.uid, renderer.uid);
-        },
+        action: () => renameWorkspaceRendererGroup(scene, kind, object, renderer),
       },
       {
         label: "New Renderer...",
@@ -8282,7 +8291,8 @@ async function workspaceRendererContextItems(scene, object, renderer) {
       },
       {
         label: "Change Name",
-        action: () => beginWorkspaceInlineRename("rendererGroup", object.uid, renderer.uid),
+        action: () =>
+          renameWorkspaceRendererGroup(scene, "rendererGroup", object, renderer),
       },
       {
         label: "New Renderer...",

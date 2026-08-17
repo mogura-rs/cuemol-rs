@@ -996,6 +996,7 @@ struct GuiApplication {
     show_inspector: bool,
     object_properties_draft: Option<NativeObjectProperties>,
     renderer_properties_draft: Option<NativeRendererProperties>,
+    renderer_group_rename_draft: Option<NativeRendererGroupRenameDraft>,
     show_bottom_panel: bool,
     show_about: bool,
     show_options: bool,
@@ -1520,6 +1521,14 @@ enum NativePropertyObject {
     DensityMap(cuemol_core::Uid),
     Surface(cuemol_core::Uid),
     Lightweight(cuemol_core::Uid),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeRendererGroupRenameDraft {
+    owner: NativePropertyObject,
+    renderer_uid: cuemol_core::Uid,
+    original_name: String,
+    name: String,
 }
 
 impl NativePropertyObject {
@@ -3288,6 +3297,7 @@ impl GuiApplication {
             show_inspector: false,
             object_properties_draft: None,
             renderer_properties_draft: None,
+            renderer_group_rename_draft: None,
             show_bottom_panel: true,
             show_about: false,
             show_options: false,
@@ -6194,7 +6204,7 @@ impl GuiApplication {
                 ui.close();
             }
             if ui.button("Change Name").clicked() {
-                self.open_aux_properties(selection);
+                self.open_renderer_group_rename(owner, group.uid, &group.name);
                 ui.close();
             }
             if ui.button("New Renderer...").clicked() {
@@ -6822,7 +6832,11 @@ impl GuiApplication {
                                 ui.close();
                             }
                             if ui.button("Change Name").clicked() {
-                                self.open_renderer_properties(object_uid, renderer.uid);
+                                self.open_renderer_group_rename(
+                                    NativePropertyObject::Molecule(object_uid),
+                                    renderer.uid,
+                                    &renderer.name,
+                                );
                                 ui.close();
                             }
                             if ui.button("New Renderer...").clicked() {
@@ -12983,6 +12997,7 @@ impl GuiApplication {
         self.options_dialog(ctx);
         self.object_props_dialog(ctx);
         self.renderer_props_dialog(ctx);
+        self.renderer_group_rename_dialog(ctx);
         self.scene_props_dialog(ctx);
         self.view_props_dialog(ctx, camera);
         self.camera_visibility_dialog(ctx);
@@ -13750,6 +13765,46 @@ impl GuiApplication {
             return;
         };
         self.renderer_properties_draft = Some(properties);
+    }
+
+    fn open_renderer_group_rename(
+        &mut self,
+        owner: NativePropertyObject,
+        renderer_uid: cuemol_core::Uid,
+        name: &str,
+    ) {
+        self.renderer_group_rename_draft = Some(NativeRendererGroupRenameDraft {
+            owner,
+            renderer_uid,
+            original_name: name.to_string(),
+            name: name.to_string(),
+        });
+    }
+
+    fn apply_renderer_group_rename(&mut self, draft: NativeRendererGroupRenameDraft) {
+        let name = draft.name.trim();
+        if name.is_empty() || name == draft.original_name {
+            return;
+        }
+        let scene_uid = self.workspace_owner_scene_uid(draft.owner);
+        let undo = self.capture_undo();
+        match self
+            .state
+            .rename_renderer_group(draft.owner.uid(), draft.renderer_uid, name)
+        {
+            Ok(()) => {
+                self.push_undo_snapshot(undo);
+                if let Some(scene_uid) = scene_uid {
+                    self.modified_scenes.insert(scene_uid);
+                }
+                self.rebuild_snapshot();
+                self.set_status(format!("Change rend group name: {name}"));
+            }
+            Err(error) => {
+                self.state = undo.state;
+                self.set_error(error);
+            }
+        }
     }
 
     fn open_atom_intr_edit(
@@ -15736,6 +15791,43 @@ impl GuiApplication {
         self.scene_properties_draft = Some(properties);
         self.scene_property_selected = 0;
         self.show_scene_props = true;
+    }
+
+    fn renderer_group_rename_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut draft) = self.renderer_group_rename_draft.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut accept = false;
+        let mut cancel = false;
+        egui::Window::new("Change Name")
+            .open(&mut open)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Change rend group name:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut draft.name)
+                            .desired_width(ui.available_width()),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!draft.name.trim().is_empty(), egui::Button::new("OK"))
+                        .clicked()
+                    {
+                        accept = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if accept {
+            self.apply_renderer_group_rename(draft);
+        } else if open && !cancel {
+            self.renderer_group_rename_draft = Some(draft);
+        }
     }
 
     fn scene_props_dialog(&mut self, ctx: &egui::Context) {
@@ -28411,6 +28503,31 @@ mod tests {
             } => renderer_uid,
             _ => panic!("new density renderer group must be selected"),
         };
+        app.open_renderer_group_rename(
+            NativePropertyObject::DensityMap(map_uid),
+            group_uid,
+            "maps",
+        );
+        let mut rename = app.renderer_group_rename_draft.take().unwrap();
+        rename.name = "maps2".to_string();
+        app.apply_renderer_group_rename(rename);
+        assert_eq!(
+            app.state
+                .density_map_summary(map_uid)
+                .unwrap()
+                .renderer_groups[0]
+                .name,
+            "maps2"
+        );
+        app.undo(&mut CameraController::default());
+        assert_eq!(
+            app.state
+                .density_map_summary(map_uid)
+                .unwrap()
+                .renderer_groups[0]
+                .name,
+            "maps"
+        );
         let group_selection = WorkspaceAuxSelection::DensityMap {
             scene_uid,
             map_uid,
