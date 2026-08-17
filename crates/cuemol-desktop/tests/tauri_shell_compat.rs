@@ -2562,6 +2562,14 @@ fn tauri_workspace_exposes_reference_visibility_and_lock_columns() {
     assert!(native_workspace.contains("workspace_panel:state_width"));
     assert!(native_workspace.contains("splitter.drag_delta().x"));
     assert!(native_workspace.contains("egui::vec2(state_width, ui.spacing().interact_size.y)"));
+    assert!(NATIVE_GUI_RS.contains("fn workspace_align_state_column("));
+    assert!(NATIVE_GUI_RS.contains("fn workspace_name_column<R>("));
+    assert!(NATIVE_GUI_RS.contains("ui.add_space(-indent)"));
+    assert!(native_workspace.contains("self.workspace_column_left = ui.cursor().left()"));
+    assert_eq!(
+        native_workspace.matches("workspace_name_column(").count(),
+        4
+    );
 }
 
 #[test]

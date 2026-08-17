@@ -1130,6 +1130,7 @@ struct GuiApplication {
     workspace_selection_order: Vec<NativeWorkspaceTarget>,
     workspace_state_column_width: f32,
     workspace_state_column_drag_start_width: Option<f32>,
+    workspace_column_left: f32,
     editing_saved_camera: Option<(cuemol_core::Uid, String)>,
     camera_visibility_draft: Option<NativeCameraVisibilityDraft>,
     style_properties_draft: Option<NativeStyleProperties>,
@@ -3579,6 +3580,27 @@ fn workspace_collapse_toggle(
         .then_some(!collapsed)
 }
 
+fn workspace_align_state_column(ui: &mut egui::Ui, column_left: f32) -> f32 {
+    let indent = (ui.cursor().left() - column_left).max(0.0);
+    ui.add_space(-indent);
+    indent
+}
+
+fn workspace_name_column<R>(
+    ui: &mut egui::Ui,
+    column_left: f32,
+    state_width: f32,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let name_indent = workspace_align_state_column(ui, column_left);
+        ui.add_space(state_width + WORKSPACE_COLUMN_SPLITTER_WIDTH + name_indent);
+        add(ui)
+    })
+    .inner
+}
+
 fn workspace_paint_menu(ui: &mut egui::Ui, enabled: bool, mut insert: impl FnMut(&str)) {
     ui.add_enabled_ui(enabled, |ui| {
         ui.menu_button("Paint", |ui| {
@@ -4574,6 +4596,7 @@ impl GuiApplication {
             workspace_selection_order: Vec::new(),
             workspace_state_column_width,
             workspace_state_column_drag_start_width: None,
+            workspace_column_left: 0.0,
             editing_saved_camera: None,
             camera_visibility_draft: None,
             style_properties_draft: None,
@@ -6413,6 +6436,7 @@ impl GuiApplication {
     /// Workspace section — the scene/object/renderer tree (CueMol2 `objectTree`).
     fn workspace_section(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
         self.workspace_selection_order = self.workspace_targets_in_tree_order();
+        self.workspace_column_left = ui.cursor().left();
         let available_width = ui
             .available_width()
             .max(WORKSPACE_STATE_COLUMN_MIN_WIDTH + WORKSPACE_COLUMN_SPLITTER_WIDTH + 80.0);
@@ -6514,7 +6538,13 @@ impl GuiApplication {
             workspace_objects.sort_by_key(NativeWorkspaceObjectSummary::sort_key);
             let scene_label = format!("{}  [{} objects]", scene.name, object_count);
             let selected_scene = Some(scene.uid) == self.state.active_scene();
-            let scene_response = ui.selectable_label(selected_scene, scene_label);
+            let scene_response = ui
+                .horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    ui.add_space(state_width + WORKSPACE_COLUMN_SPLITTER_WIDTH);
+                    ui.selectable_label(selected_scene, scene_label)
+                })
+                .inner;
             if scene_response.clicked() {
                 self.activate_workspace_scene(scene.uid, camera);
                 self.workspace_multiple_selection.clear();
@@ -6614,6 +6644,10 @@ impl GuiApplication {
                                 self.workspace_object_drag_payload(scene.uid, owner),
                                 |ui| {
                                     ui.horizontal(|ui| {
+                                        let name_indent = workspace_align_state_column(
+                                            ui,
+                                            self.workspace_column_left,
+                                        );
                                         ui.allocate_ui_with_layout(
                                             egui::vec2(state_width, ui.spacing().interact_size.y),
                                             egui::Layout::left_to_right(egui::Align::Center),
@@ -6639,6 +6673,7 @@ impl GuiApplication {
                                                 }
                                             },
                                         );
+                                        ui.add_space(name_indent + WORKSPACE_COLUMN_SPLITTER_WIDTH);
                                         if let Some(collapsed) = workspace_collapse_toggle(
                                             ui,
                                             object.ui_collapsed,
@@ -6741,6 +6776,10 @@ impl GuiApplication {
                                 self.workspace_object_drag_payload(scene.uid, owner),
                                 |ui| {
                                     ui.horizontal(|ui| {
+                                        let name_indent = workspace_align_state_column(
+                                            ui,
+                                            self.workspace_column_left,
+                                        );
                                         ui.allocate_ui_with_layout(
                                             egui::vec2(state_width, ui.spacing().interact_size.y),
                                             egui::Layout::left_to_right(egui::Align::Center),
@@ -6765,6 +6804,7 @@ impl GuiApplication {
                                                 }
                                             },
                                         );
+                                        ui.add_space(name_indent + WORKSPACE_COLUMN_SPLITTER_WIDTH);
                                         if let Some(collapsed) = workspace_collapse_toggle(
                                             ui,
                                             map.ui_collapsed,
@@ -6869,6 +6909,10 @@ impl GuiApplication {
                                 self.workspace_object_drag_payload(scene.uid, owner),
                                 |ui| {
                                     ui.horizontal(|ui| {
+                                        let name_indent = workspace_align_state_column(
+                                            ui,
+                                            self.workspace_column_left,
+                                        );
                                         ui.allocate_ui_with_layout(
                                             egui::vec2(state_width, ui.spacing().interact_size.y),
                                             egui::Layout::left_to_right(egui::Align::Center),
@@ -6894,6 +6938,7 @@ impl GuiApplication {
                                                 }
                                             },
                                         );
+                                        ui.add_space(name_indent + WORKSPACE_COLUMN_SPLITTER_WIDTH);
                                         if let Some(collapsed) = workspace_collapse_toggle(
                                             ui,
                                             surface.ui_collapsed,
@@ -6999,6 +7044,10 @@ impl GuiApplication {
                                 self.workspace_object_drag_payload(scene.uid, owner),
                                 |ui| {
                                     ui.horizontal(|ui| {
+                                        let name_indent = workspace_align_state_column(
+                                            ui,
+                                            self.workspace_column_left,
+                                        );
                                         ui.allocate_ui_with_layout(
                                             egui::vec2(state_width, ui.spacing().interact_size.y),
                                             egui::Layout::left_to_right(egui::Align::Center),
@@ -7020,6 +7069,7 @@ impl GuiApplication {
                                                 }
                                             },
                                         );
+                                        ui.add_space(name_indent + WORKSPACE_COLUMN_SPLITTER_WIDTH);
                                         if let Some(collapsed) = workspace_collapse_toggle(
                                             ui,
                                             object.ui_collapsed,
@@ -7110,7 +7160,10 @@ impl GuiApplication {
                 };
                 let root_selected = self.selected_object.is_none()
                     && self.workspace_aux_selection == Some(root_selection);
-                let root_response = ui.selectable_label(root_selected, "Camera");
+                let root_response =
+                    workspace_name_column(ui, self.workspace_column_left, state_width, |ui| {
+                        ui.selectable_label(root_selected, "Camera")
+                    });
                 if root_response.clicked() {
                     self.activate_workspace_scene(scene.uid, camera);
                     self.workspace_multiple_selection.clear();
@@ -7185,7 +7238,12 @@ impl GuiApplication {
                         if summary.visibility_count > 0 {
                             label.push_str("  ◉");
                         }
-                        let response = ui.selectable_label(selected, label);
+                        let response = workspace_name_column(
+                            ui,
+                            self.workspace_column_left,
+                            state_width,
+                            |ui| ui.selectable_label(selected, label),
+                        );
                         if response.clicked() {
                             self.activate_workspace_scene(scene.uid, camera);
                             let (multiple, range) =
@@ -7302,7 +7360,10 @@ impl GuiApplication {
                 };
                 let root_selected = self.selected_object.is_none()
                     && self.workspace_aux_selection == Some(root_selection);
-                let root_response = ui.selectable_label(root_selected, "Styles");
+                let root_response =
+                    workspace_name_column(ui, self.workspace_column_left, state_width, |ui| {
+                        ui.selectable_label(root_selected, "Styles")
+                    });
                 if root_response.clicked() {
                     self.activate_workspace_scene(scene.uid, camera);
                     self.workspace_multiple_selection.clear();
@@ -7366,7 +7427,12 @@ impl GuiApplication {
                         if !summary.source.is_empty() {
                             label.push_str("  ↗");
                         }
-                        let response = ui.selectable_label(selected, label);
+                        let response = workspace_name_column(
+                            ui,
+                            self.workspace_column_left,
+                            state_width,
+                            |ui| ui.selectable_label(selected, label),
+                        );
                         if response.clicked() {
                             self.activate_workspace_scene(scene.uid, camera);
                             let (multiple, range) =
@@ -8367,6 +8433,7 @@ impl GuiApplication {
             |ui| {
                 let mut visible = renderer.visible;
                 ui.horizontal(|ui| {
+                    let name_indent = workspace_align_state_column(ui, self.workspace_column_left);
                     ui.allocate_ui_with_layout(
                         egui::vec2(state_width, ui.spacing().interact_size.y),
                         egui::Layout::left_to_right(egui::Align::Center),
@@ -8395,6 +8462,7 @@ impl GuiApplication {
                             }
                         },
                     );
+                    ui.add_space(name_indent + WORKSPACE_COLUMN_SPLITTER_WIDTH);
                     if is_group
                         && ui
                             .small_button(if renderer.ui_collapsed { "▶" } else { "▼" })
@@ -8542,6 +8610,7 @@ impl GuiApplication {
             |ui| {
                 let mut visible = renderer.visible;
                 ui.horizontal(|ui| {
+                    let name_indent = workspace_align_state_column(ui, self.workspace_column_left);
                     ui.allocate_ui_with_layout(
                         egui::vec2(state_width, ui.spacing().interact_size.y),
                         egui::Layout::left_to_right(egui::Align::Center),
@@ -8573,6 +8642,7 @@ impl GuiApplication {
                             }
                         },
                     );
+                    ui.add_space(name_indent + WORKSPACE_COLUMN_SPLITTER_WIDTH);
                     if is_group
                         && ui
                             .small_button(if renderer.ui_collapsed { "▶" } else { "▼" })
