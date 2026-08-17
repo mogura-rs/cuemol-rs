@@ -2538,12 +2538,20 @@ fn tauri_workspace_exposes_reference_style_nodes_and_actions() {
 
 #[test]
 fn tauri_workspace_exposes_reference_visibility_and_lock_columns() {
+    assert!(HTML.contains("id=\"workspace-tree-columns\""));
+    assert!(HTML.contains("class=\"workspace-column-splitter\""));
     assert!(JS.contains("function workspaceStateControls("));
     assert!(JS.contains("mutate(\"set_workspace_visible\""));
     assert!(JS.contains("mutateWithoutViewport(\"set_workspace_locked\""));
+    assert!(JS.contains("WORKSPACE_STATE_COLUMN_WIDTH_STORAGE_KEY"));
+    assert!(JS.contains("function setupWorkspaceColumnSplitter()"));
+    assert!(JS.contains("setWorkspaceStateColumnWidth(width, true)"));
     assert!(JS.contains("aria-checked"));
     assert!(CSS.contains(".workspace-state-controls"));
     assert!(CSS.contains(".workspace-state-toggle"));
+    assert!(CSS.contains("var(--workspace-state-column-width, 34px)"));
+    assert!(CSS.contains(".workspace-column-splitter"));
+    assert!(CSS.contains("position: absolute;"));
 }
 
 #[test]

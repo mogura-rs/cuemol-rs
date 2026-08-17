@@ -648,7 +648,7 @@ body.resizing-side-panel-height {
 
 .tree-columns {
   display: grid;
-  grid-template-columns: 27px 1fr;
+  grid-template-columns: var(--workspace-state-column-width, 34px) 5px minmax(0, 1fr);
   height: 21px;
   border-bottom: 1px solid #aaa;
   background: linear-gradient(#fff, #dedede);
@@ -660,6 +660,22 @@ body.resizing-side-panel-height {
   padding: 0 5px;
   border-right: 1px solid #bbb;
   font-weight: 600;
+}
+
+.workspace-column-splitter {
+  align-self: stretch;
+  min-width: 5px;
+  border-right: 1px solid #aaa;
+  border-left: 1px solid #eee;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.workspace-column-splitter:hover,
+.workspace-column-splitter:focus-visible,
+.workspace-column-splitter.dragging {
+  background: #9fc7ec;
+  outline: 0;
 }
 
 .scene-tree {
@@ -702,7 +718,7 @@ body.resizing-side-panel-height {
 }
 
 .tree-scene {
-  padding-left: 5px;
+  padding-left: calc(var(--workspace-state-column-width, 34px) + 5px);
   font-weight: 600;
 }
 
@@ -713,7 +729,7 @@ body.resizing-side-panel-height {
 }
 
 .tree-object {
-  padding-left: 20px;
+  padding-left: calc(var(--workspace-state-column-width, 34px) + 20px);
 }
 
 .tree-object::before {
@@ -752,13 +768,13 @@ body.resizing-side-panel-height {
 }
 
 .tree-renderer {
-  padding-left: 42px;
+  padding-left: calc(var(--workspace-state-column-width, 34px) + 42px);
   color: #444;
   font-size: 11px;
 }
 
 .tree-renderer.renderer-group {
-  padding-left: 38px;
+  padding-left: calc(var(--workspace-state-column-width, 34px) + 38px);
   font-weight: 600;
 }
 
@@ -776,7 +792,7 @@ body.resizing-side-panel-height {
 }
 
 .tree-renderer.group-child {
-  padding-left: 58px;
+  padding-left: calc(var(--workspace-state-column-width, 34px) + 58px);
 }
 
 .tree-renderer.dragging {
@@ -867,10 +883,13 @@ body.resizing-side-panel-height {
 }
 
 .workspace-state-controls {
+  position: absolute;
+  left: 0;
   display: inline-flex;
-  flex: 0 0 auto;
+  width: var(--workspace-state-column-width, 34px);
+  height: 100%;
   align-items: center;
-  margin-right: 4px;
+  justify-content: center;
 }
 
 .workspace-state-toggle {

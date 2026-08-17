@@ -292,7 +292,11 @@
               <span class="disclosure">▾</span><span>Workspace</span><span class="panel-close">×</span>
             </button>
             <div class="side-body workspace-body">
-              <div class="tree-columns"><span>V</span><span>Name</span></div>
+              <div id="workspace-tree-columns" class="tree-columns">
+                <span>V</span>
+                <div class="workspace-column-splitter" role="separator" aria-orientation="vertical" aria-label="Visibility column width" tabindex="0"></div>
+                <span>Name</span>
+              </div>
               <div id="scene-tree" class="scene-tree"></div>
               <div class="workspace-tools">
                 <button id="workspace-zoom" type="button" data-action="fit-workspace-item" title="Zoom at" disabled>⌕</button>

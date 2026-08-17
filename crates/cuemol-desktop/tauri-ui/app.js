@@ -13,6 +13,8 @@ const viewportImage = document.getElementById("viewport-image");
 const viewportLines = document.getElementById("viewport-lines");
 const viewportLabels = document.getElementById("viewport-labels");
 const sceneTabs = document.getElementById("scene-tabs");
+const workspaceBody = document.querySelector(".workspace-body");
+const workspaceTreeColumns = document.getElementById("workspace-tree-columns");
 const sceneTree = document.getElementById("scene-tree");
 const rendererList = document.getElementById("renderer-list");
 const selectionInput = document.getElementById("selection-input");
@@ -129,6 +131,7 @@ const SIDE_PANEL_WIDTH_STORAGE_KEY = "cuemol2.sidePanelWidth.v1";
 const SIDE_PANEL_STATE_STORAGE_KEY = "cuemol2.sidePanelState.v1";
 const RIBBON_COLLAPSED_STORAGE_KEY = "cuemol2.ribbonCollapsed.v1";
 const WINDOW_GEOMETRY_STORAGE_KEY = "cuemol2.windowGeometry.v1";
+const WORKSPACE_STATE_COLUMN_WIDTH_STORAGE_KEY = "cuemol2.workspaceStateColumnWidth.v1";
 const SIDE_PANEL_DEFAULT_ORDER = [
   "Workspace",
   "MolStruct",
@@ -8854,6 +8857,84 @@ function button(label, className, onClick) {
   if (className) element.className = className;
   element.addEventListener("click", onClick);
   return element;
+}
+
+function setWorkspaceStateColumnWidth(width, persist = false) {
+  let nextWidth = Math.min(80, Math.max(30, Number(width) || 34));
+  const availableWidth = workspaceTreeColumns?.clientWidth || 0;
+  if (availableWidth >= 115) nextWidth = Math.min(nextWidth, availableWidth - 85);
+  workspaceBody?.style.setProperty("--workspace-state-column-width", `${nextWidth}px`);
+  workspaceTreeColumns
+    ?.querySelector(".workspace-column-splitter")
+    ?.setAttribute("aria-valuenow", String(Math.round(nextWidth)));
+  if (!persist) return;
+  try {
+    localStorage.setItem(WORKSPACE_STATE_COLUMN_WIDTH_STORAGE_KEY, String(nextWidth));
+  } catch {
+    // Storage can be unavailable in restricted webviews.
+  }
+}
+
+function resetWorkspaceStateColumnWidth() {
+  workspaceBody?.style.removeProperty("--workspace-state-column-width");
+  workspaceTreeColumns
+    ?.querySelector(".workspace-column-splitter")
+    ?.removeAttribute("aria-valuenow");
+  try {
+    localStorage.removeItem(WORKSPACE_STATE_COLUMN_WIDTH_STORAGE_KEY);
+  } catch {
+    // Storage can be unavailable in restricted webviews.
+  }
+}
+
+function setupWorkspaceColumnSplitter() {
+  const splitter = workspaceTreeColumns?.querySelector(".workspace-column-splitter");
+  const visibilityHeading = workspaceTreeColumns?.querySelector("span");
+  if (!splitter || !visibilityHeading) return;
+  splitter.setAttribute("aria-valuemin", "30");
+  splitter.setAttribute("aria-valuemax", "80");
+  splitter.title = "Drag to resize; double-click to reset";
+  try {
+    const storedWidth = Number(localStorage.getItem(WORKSPACE_STATE_COLUMN_WIDTH_STORAGE_KEY));
+    if (Number.isFinite(storedWidth) && storedWidth > 0) {
+      setWorkspaceStateColumnWidth(storedWidth);
+    }
+  } catch {
+    // Storage can be unavailable in restricted webviews.
+  }
+  splitter.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = visibilityHeading.getBoundingClientRect().width || 34;
+    splitter.setPointerCapture(event.pointerId);
+    splitter.classList.add("dragging");
+    const resize = (moveEvent) => {
+      setWorkspaceStateColumnWidth(startWidth + moveEvent.clientX - startX);
+    };
+    const finish = (finishEvent) => {
+      if (finishEvent.type !== "pointercancel") resize(finishEvent);
+      const width = visibilityHeading.getBoundingClientRect().width || 34;
+      setWorkspaceStateColumnWidth(width, true);
+      splitter.classList.remove("dragging");
+      splitter.removeEventListener("pointermove", resize);
+      splitter.removeEventListener("pointerup", finish);
+      splitter.removeEventListener("pointercancel", finish);
+    };
+    splitter.addEventListener("pointermove", resize);
+    splitter.addEventListener("pointerup", finish);
+    splitter.addEventListener("pointercancel", finish);
+  });
+  splitter.addEventListener("dblclick", resetWorkspaceStateColumnWidth);
+  splitter.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+    event.preventDefault();
+    const width = visibilityHeading.getBoundingClientRect().width || 34;
+    setWorkspaceStateColumnWidth(
+      width + (event.key === "ArrowRight" ? 5 : -5),
+      true,
+    );
+  });
 }
 
 function workspaceStateControls(target, visible, locked, lockEnabled = true) {
@@ -17903,6 +17984,7 @@ window.addEventListener("drop", (event) => {
 restoreSidePanelState();
 setupAnimationColumnSplitters();
 restoreColoringPaintSelectionColumnWidth();
+setupWorkspaceColumnSplitter();
 setupSidePanelReordering();
 setupSidePanelHeightSplitters();
 setupSidePanelSplitter();
