@@ -702,6 +702,7 @@ struct DensityMapDto {
     max_density: f64,
     mean_density: f64,
     rmsd_density: f64,
+    crystal: CrystalDto,
     renderers: Vec<RendererDto>,
 }
 
@@ -2054,6 +2055,10 @@ impl AppModel {
             .active_density_map_summaries()
             .into_iter()
             .map(|map| {
+                let crystal = self
+                    .desktop
+                    .density_crystal_summary(map.uid)
+                    .expect("an active density map carries CrystalInfo");
                 let mut renderers: Vec<_> = map
                     .renderers
                     .into_iter()
@@ -2129,6 +2134,19 @@ impl AppModel {
                     max_density: map.max_density,
                     mean_density: map.mean_density,
                     rmsd_density: map.rmsd_density,
+                    crystal: CrystalDto {
+                        object_uid: crystal.object_uid.get(),
+                        object_name: crystal.object_name,
+                        a: crystal.a,
+                        b: crystal.b,
+                        c: crystal.c,
+                        alpha: crystal.alpha,
+                        beta: crystal.beta,
+                        gamma: crystal.gamma,
+                        space_group_name: crystal.space_group_name,
+                        space_group_number: crystal.space_group_number,
+                        lattice: crystal.lattice,
+                    },
                     renderers,
                 }
             })
@@ -5877,6 +5895,11 @@ impl AppModel {
     }
 
     fn rebuild_mesh(&mut self, refit: bool) -> Result<(), String> {
+        if self.desktop.sync_auto_symmetry_center(self.camera.center()) {
+            if let Some(scene_uid) = self.desktop.active_scene() {
+                self.modified_scenes.insert(scene_uid);
+            }
+        }
         let mut snapshot = self
             .desktop
             .active_render_snapshot(&self.selection)
@@ -7708,6 +7731,14 @@ enum ModelRequest {
         beta: f64,
         gamma: f64,
         space_group_number: i32,
+    },
+    ShowSymmetryMolecules {
+        object_uid: u64,
+        extent: Option<f64>,
+    },
+    ShowUnitCell {
+        target_kind: String,
+        object_uid: u64,
     },
     AssignSecondaryStructure {
         object_uid: u64,
@@ -11103,6 +11134,11 @@ fn handle_model_request(
             gamma,
             space_group_number,
         } => {
+            let scene_uid = model
+                .desktop
+                .scene_manager()
+                .scene_uid_for_object(Uid::new(object_uid))
+                .ok_or_else(|| format!("object {object_uid} was not found"))?;
             let undo = model.capture_undo();
             model
                 .desktop
@@ -11117,7 +11153,83 @@ fn handle_model_request(
                     space_group_number,
                 )
                 .map_err(|error| error.to_string())?;
+            model.modified_scenes.insert(scene_uid);
             model.status = "Changed symmetry information".to_string();
+            model.invalidate_mesh(false);
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::ShowSymmetryMolecules { object_uid, extent } => {
+            let object_uid = Uid::new(object_uid);
+            let scene_uid = model
+                .desktop
+                .scene_manager()
+                .scene_uid_for_object(object_uid)
+                .ok_or_else(|| format!("object {} was not found", object_uid.get()))?;
+            let undo = model.capture_undo();
+            model
+                .desktop
+                .show_molecule_symmetry(object_uid, extent, model.camera.center())
+                .map_err(|error| error.to_string())?;
+            model.modified_scenes.insert(scene_uid);
+            model.status = "Symmetry molecules shown".to_string();
+            model.invalidate_mesh(false);
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::ShowUnitCell {
+            target_kind,
+            object_uid,
+        } => {
+            let object_uid = Uid::new(object_uid);
+            let (scene_uid, exists) = match target_kind.as_str() {
+                "molecule" => {
+                    let scene_uid = model
+                        .desktop
+                        .scene_manager()
+                        .scene_uid_for_object(object_uid)
+                        .ok_or_else(|| format!("object {} was not found", object_uid.get()))?;
+                    let exists =
+                        model
+                            .desktop
+                            .renderer_summaries(object_uid)
+                            .iter()
+                            .any(|renderer| {
+                                matches!(renderer.renderer_type.as_str(), "*unitcell" | "unitcell")
+                            });
+                    (scene_uid, exists)
+                }
+                "density" => {
+                    let map = model
+                        .desktop
+                        .density_map_summary(object_uid)
+                        .ok_or_else(|| format!("density map {} was not found", object_uid.get()))?;
+                    let exists = map.renderers.iter().any(|renderer| {
+                        matches!(renderer.renderer_type.as_str(), "*unitcell" | "unitcell")
+                    });
+                    (map.scene_uid, exists)
+                }
+                _ => return Err(format!("unsupported symmetry target: {target_kind}")),
+            };
+            if exists {
+                return Ok(ModelResponse::Snapshot(Box::new(model.snapshot())));
+            }
+            let undo = model.capture_undo();
+            match target_kind.as_str() {
+                "molecule" => model
+                    .desktop
+                    .show_molecule_unit_cell(object_uid)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())?,
+                "density" => model
+                    .desktop
+                    .add_density_renderer(object_uid, "*unitcell")
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())?,
+                _ => unreachable!("the target kind was validated above"),
+            }
+            model.modified_scenes.insert(scene_uid);
+            model.status = "Unit cell shown".to_string();
             model.invalidate_mesh(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
@@ -14554,6 +14666,33 @@ fn change_crystal_info(
 }
 
 #[tauri::command]
+fn show_symmetry_molecules(
+    object_uid: u64,
+    extent: Option<f64>,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::ShowSymmetryMolecules { object_uid, extent },
+    )?)
+}
+
+#[tauri::command]
+fn show_unit_cell(
+    target_kind: String,
+    object_uid: u64,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::ShowUnitCell {
+            target_kind,
+            object_uid,
+        },
+    )?)
+}
+
+#[tauri::command]
 fn assign_secondary_structure(
     object_uid: u64,
     ignore_bulge: bool,
@@ -15478,6 +15617,8 @@ pub fn run() -> Result<(), tauri::Error> {
             calculate_contacts,
             get_space_groups,
             change_crystal_info,
+            show_symmetry_molecules,
+            show_unit_cell,
             assign_secondary_structure,
             create_molecular_surface,
             write_surface,
@@ -19681,6 +19822,26 @@ mod tests {
         assert!(model.snapshot().surfaces.is_empty());
         handle_model_request(&mut model, ModelRequest::Redo(0)).unwrap();
         assert_eq!(model.snapshot().surfaces.len(), 1);
+
+        let snapshot = model.snapshot();
+        assert_eq!(snapshot.density_maps[0].crystal.a, 2.0);
+        assert_eq!(snapshot.density_maps[0].crystal.space_group_number, Some(1));
+        handle_model_request(
+            &mut model,
+            ModelRequest::ShowUnitCell {
+                target_kind: "density".to_string(),
+                object_uid: map_uid.get(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            model.snapshot().density_maps[0]
+                .renderers
+                .iter()
+                .filter(|renderer| renderer.renderer_type == "*unitcell")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -22180,6 +22341,79 @@ mod tests {
         assert_eq!(snapshot.status, "Changed symmetry information");
         assert_eq!(snapshot.crystals[0].space_group_number, Some(195));
         assert_eq!(snapshot.crystals[0].lattice, "CUBIC");
+        assert!(model.modified_scenes.contains(
+            &model
+                .desktop
+                .scene_manager()
+                .scene_uid_for_object(Uid::new(first))
+                .unwrap()
+        ));
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::ShowSymmetryMolecules {
+                object_uid: first,
+                extent: Some(50.0),
+            },
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!(snapshot.status, "Symmetry molecules shown");
+        let symmetry = model
+            .desktop
+            .renderer_summaries(Uid::new(first))
+            .into_iter()
+            .find(|renderer| renderer.renderer_type == "*symm")
+            .expect("the symmetry action creates *symm");
+        assert_eq!(
+            model
+                .desktop
+                .renderer_property(Uid::new(first), symmetry.uid, "extent")
+                .as_deref(),
+            Some("50")
+        );
+        assert_eq!(
+            model
+                .desktop
+                .renderer_property(Uid::new(first), symmetry.uid, "autoupdate")
+                .as_deref(),
+            Some("true")
+        );
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::ShowUnitCell {
+                target_kind: "molecule".to_string(),
+                object_uid: first,
+            },
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!(snapshot.status, "Unit cell shown");
+        assert_eq!(
+            model
+                .desktop
+                .renderer_summaries(Uid::new(first))
+                .iter()
+                .filter(|renderer| renderer.renderer_type == "*unitcell")
+                .count(),
+            1
+        );
+        let undo_count = snapshot.undo_descriptions.len();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::ShowUnitCell {
+                target_kind: "molecule".to_string(),
+                object_uid: first,
+            },
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!(snapshot.undo_descriptions.len(), undo_count);
         let response = handle_model_request(
             &mut model,
             ModelRequest::AssignSecondaryStructure {

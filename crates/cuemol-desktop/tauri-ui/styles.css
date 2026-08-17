@@ -1287,6 +1287,117 @@ summary:focus-visible {
   white-space: nowrap;
 }
 
+.symmetry-target {
+  width: 100%;
+}
+
+.symmetry-heading {
+  overflow: hidden;
+  color: #343434;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.symmetry-cell {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 2px 3px;
+  align-items: baseline;
+}
+
+.symmetry-axis {
+  color: #555;
+  text-align: right;
+}
+
+.symmetry-value {
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.symmetry-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.symmetry-actions > button,
+.symmetry-menu {
+  min-width: 0;
+  flex: 1 1 0;
+}
+
+.symmetry-actions > button,
+.symmetry-menu > summary {
+  width: 100%;
+  min-height: 22px;
+  padding: 2px 5px;
+  border: 1px solid #aaa;
+  border-radius: 2px;
+  background: linear-gradient(#fff, #e7e7e7);
+  color: #222;
+  font: inherit;
+  text-align: center;
+}
+
+.symmetry-menu {
+  position: relative;
+}
+
+.symmetry-menu > summary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  cursor: default;
+  list-style: none;
+}
+
+.symmetry-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.symmetry-menu > summary::after {
+  margin-left: 4px;
+  content: "▾";
+  font-size: 8px;
+}
+
+.symmetry-menu.disabled > summary {
+  opacity: 0.5;
+}
+
+.symmetry-menu-popup {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 2px);
+  left: 0;
+  display: grid;
+  min-width: 92px;
+  padding: 2px;
+  border: 1px solid #999;
+  background: #f7f7f7;
+  box-shadow: 0 3px 8px #0003;
+}
+
+.symmetry-menu:not([open]) .symmetry-menu-popup {
+  display: none;
+}
+
+.symmetry-menu-popup button {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.symmetry-menu-popup button:hover {
+  background: #dcecff;
+}
+
 .density-summary {
   display: grid;
   gap: 1px;

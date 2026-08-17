@@ -55,8 +55,6 @@ const coloringTarget = document.getElementById("coloring-target");
 const coloringType = document.getElementById("coloring-type");
 const coloringDeck = document.getElementById("coloring-deck");
 const symmetryContent = document.getElementById("symmetry-content");
-const showUnitCell = document.getElementById("show-unit-cell");
-const showSymmetryMates = document.getElementById("show-symmetry-mates");
 const densityContent = document.getElementById("density-content");
 const showDensityContour = document.getElementById("show-density-contour");
 const densityLevel = document.getElementById("density-level");
@@ -190,6 +188,7 @@ let selectionActiveTab = "command";
 let selectionEditorItems = [];
 let selectionEditorSelectedIndex = -1;
 let coloringTargetKey = null;
+let symmetryTargetKey = null;
 let coloringPaintSelectedIndex = -1;
 let coloringGradientSelectedIndex = -1;
 let selectionHistoryEntries = loadSelectionHistory();
@@ -5555,8 +5554,12 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     if (objects.length === 0) {
       dialogContent.append(dialogParagraph("No molecular object is loaded."));
     } else {
+      const symmetryTarget = selectedSymmetryTarget();
       const object =
-        objects.find((candidate) => candidate.uid === selectedObjectUid) || objects[0];
+        objects.find(
+          (candidate) =>
+            symmetryTarget?.kind === "molecule" && candidate.uid === symmetryTarget.uid,
+        ) || objects.find((candidate) => candidate.uid === selectedObjectUid) || objects[0];
       const crystal = snapshot.crystals.find((item) => item.objectUid === object.uid);
       dialogContent.append(dialogParagraph(`Molecule: ${object.name}`));
       const lattice = dialogSelect(
@@ -13898,40 +13901,141 @@ function renderColoring() {
   else coloringDeck.replaceChildren();
 }
 
+function symmetryTargets() {
+  const crystalByObject = new Map(
+    snapshot.crystals.map((crystal) => [crystal.objectUid, crystal]),
+  );
+  return [
+    ...activeObjects().map((object) => ({
+      key: `molecule:${object.uid}`,
+      kind: "molecule",
+      uid: object.uid,
+      name: object.name,
+      crystal: crystalByObject.get(object.uid) || null,
+    })),
+    ...snapshot.densityMaps.map((map) => ({
+      key: `density:${map.uid}`,
+      kind: "density",
+      uid: map.uid,
+      name: map.name,
+      crystal: map.crystal,
+    })),
+  ];
+}
+
+function selectedSymmetryTarget() {
+  const targets = symmetryTargets();
+  let target = targets.find((candidate) => candidate.key === symmetryTargetKey) || null;
+  if (!target && workspaceSelectionKind.startsWith("density") && selectedDensityMapUid) {
+    target = targets.find((candidate) => candidate.key === `density:${selectedDensityMapUid}`) || null;
+  }
+  if (!target && selectedObjectUid) {
+    target = targets.find((candidate) => candidate.key === `molecule:${selectedObjectUid}`) || null;
+  }
+  target ||= targets[0] || null;
+  symmetryTargetKey = target?.key || null;
+  return target;
+}
+
+function symmetryLatticeLabel(value) {
+  if (!value) return "Unknown";
+  return value.slice(0, 1).toUpperCase() + value.slice(1).toLowerCase();
+}
+
 function renderSymmetry() {
   symmetryContent.replaceChildren();
-  if (snapshot.crystals.length === 0) {
-    const empty = document.createElement("p");
-    empty.textContent = "No crystal cell (non-crystallographic).";
-    symmetryContent.append(empty);
-  }
-  for (const crystal of snapshot.crystals) {
-    const card = document.createElement("dl");
-    card.className = "summary-grid";
-    const values = [
-      ["Molecule", crystal.objectName],
-      ["Space group", crystal.spaceGroupName || "(none)"],
-      ["a, b, c (Å)", `${crystal.a.toFixed(3)}, ${crystal.b.toFixed(3)}, ${crystal.c.toFixed(3)}`],
-      ["α, β, γ (°)", `${crystal.alpha.toFixed(2)}, ${crystal.beta.toFixed(2)}, ${crystal.gamma.toFixed(2)}`],
-    ];
-    for (const [term, description] of values) {
-      const dt = document.createElement("dt");
-      dt.textContent = term;
-      const dd = document.createElement("dd");
-      dd.textContent = description;
-      card.append(dt, dd);
+  const targets = symmetryTargets();
+  const target = selectedSymmetryTarget();
+  const crystal = target?.crystal || null;
+  const validCell = Boolean(crystal && crystal.a >= 0.1 && crystal.b >= 0.1 && crystal.c >= 0.1);
+
+  const selector = document.createElement("select");
+  selector.className = "symmetry-target";
+  selector.disabled = targets.length === 0;
+  if (targets.length === 0) {
+    selector.append(new Option("(none)", ""));
+  } else {
+    for (const candidate of targets) {
+      selector.append(new Option(candidate.name, candidate.key));
     }
-    symmetryContent.append(card);
+    selector.value = target.key;
   }
-  const changeSymmetry = button("Change symmetry…", "", () =>
-    showReferenceDialog("Change symmetry"),
+  selector.addEventListener("change", () => {
+    symmetryTargetKey = selector.value || null;
+    renderSymmetry();
+  });
+
+  const heading = document.createElement("div");
+  heading.className = "symmetry-heading";
+  heading.textContent = `${symmetryLatticeLabel(crystal?.lattice)}, Space group: ${crystal?.spaceGroupName || "Unknown"}`;
+
+  const cell = document.createElement("div");
+  cell.className = "symmetry-cell";
+  for (const [axis, value, unit] of [
+    ["a=", crystal?.a, "Å"],
+    ["b=", crystal?.b, "Å"],
+    ["c=", crystal?.c, "Å"],
+    ["α=", crystal?.alpha, "°"],
+    ["β=", crystal?.beta, "°"],
+    ["γ=", crystal?.gamma, "°"],
+  ]) {
+    const label = document.createElement("span");
+    label.className = "symmetry-axis";
+    label.textContent = axis;
+    const readout = document.createElement("span");
+    readout.className = "symmetry-value";
+    readout.textContent = Number.isFinite(value) ? `${value.toFixed(2)} ${unit}` : `- ${unit}`;
+    cell.append(label, readout);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "symmetry-actions";
+  const change = button("Change ...", "", async () => {
+    if (!target.crystal) {
+      const create = await showConfirmationDialog({
+        title: "Create crystal information",
+        message: "The selected molecule has no crystal information. Create it?",
+      });
+      if (!create) return;
+    }
+    showReferenceDialog("Change symmetry");
+  });
+  change.disabled = target?.kind !== "molecule";
+
+  const symmetryMenu = document.createElement("details");
+  symmetryMenu.className = "symmetry-menu";
+  const symmetrySummary = document.createElement("summary");
+  symmetrySummary.textContent = "Symm mol";
+  const symmetryPopup = document.createElement("div");
+  symmetryPopup.className = "symmetry-menu-popup";
+  for (const [label, extent] of [
+    ["20 Å", 20],
+    ["50 Å", 50],
+    ["100 Å", 100],
+    ["200 Å", 200],
+    ["Unit cell", null],
+  ]) {
+    symmetryPopup.append(
+      button(label, "", async () => {
+        symmetryMenu.open = false;
+        await mutate("show_symmetry_molecules", { objectUid: target.uid, extent });
+      }),
+    );
+  }
+  const symmetryEnabled = target?.kind === "molecule" && validCell;
+  symmetryMenu.classList.toggle("disabled", !symmetryEnabled);
+  symmetrySummary.setAttribute("aria-disabled", String(!symmetryEnabled));
+  if (!symmetryEnabled) {
+    symmetrySummary.addEventListener("click", (event) => event.preventDefault());
+  }
+  symmetryMenu.append(symmetrySummary, symmetryPopup);
+
+  const unitCell = button("Unit cell", "", () =>
+    mutate("show_unit_cell", { targetKind: target.kind, objectUid: target.uid }),
   );
-  changeSymmetry.disabled = activeObjects().length === 0;
-  symmetryContent.append(changeSymmetry);
-  showUnitCell.checked = snapshot.showUnitCell;
-  showSymmetryMates.checked = snapshot.showSymmetryMates;
-  showUnitCell.disabled = snapshot.crystals.length === 0;
-  showSymmetryMates.disabled = snapshot.crystals.length === 0;
+  unitCell.disabled = !validCell;
+  actions.append(change, symmetryMenu, unitCell);
+  symmetryContent.append(selector, heading, cell, actions);
 }
 
 function renderDensity() {
@@ -15685,14 +15789,6 @@ coloringType.addEventListener("change", () => {
   coloringPaintSelectedIndex = -1;
   coloringGradientSelectedIndex = -1;
   commitColoring(target, coloringType.value, defaultColoringState(coloringType.value, target));
-});
-
-showUnitCell.addEventListener("change", () => {
-  mutate("set_display_option", { option: "unit-cell", value: showUnitCell.checked });
-});
-
-showSymmetryMates.addEventListener("change", () => {
-  mutate("set_display_option", { option: "symmetry-mates", value: showSymmetryMates.checked });
 });
 
 showDensityContour.addEventListener("change", () => {

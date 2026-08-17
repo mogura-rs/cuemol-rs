@@ -1293,7 +1293,13 @@ fn tauri_interaction_dialog_matches_reference_modes() {
 #[test]
 fn tauri_symmetry_editor_is_lazy_and_matches_reference_fields() {
     for label in [
-        "Change symmetry…",
+        "Change ...",
+        "Symm mol",
+        "20 Å",
+        "50 Å",
+        "100 Å",
+        "200 Å",
+        "Unit cell",
         "Crystal system",
         "Space Group",
         "Space Group Number",
@@ -1308,6 +1314,17 @@ fn tauri_symmetry_editor_is_lazy_and_matches_reference_fields() {
     assert!(JS.contains("spaceGroupOptionsCache.set(lattice.value, groups)"));
     assert!(JS.contains("mutate(\"change_crystal_info\""));
     assert!(JS.contains("spaceGroupNumber: Number(spaceGroup.value)"));
+    assert!(JS.contains("function symmetryTargets()"));
+    assert!(JS.contains("target?.kind !== \"molecule\""));
+    assert!(JS.contains("mutate(\"show_symmetry_molecules\""));
+    assert!(JS.contains("mutate(\"show_unit_cell\""));
+    assert!(JS.contains("The selected molecule has no crystal information. Create it?"));
+    assert!(TAURI_APP_RS.contains("ModelRequest::ShowSymmetryMolecules"));
+    assert!(TAURI_APP_RS.contains("ModelRequest::ShowUnitCell"));
+    assert!(!HTML.contains("id=\"show-unit-cell\""));
+    assert!(!HTML.contains("id=\"show-symmetry-mates\""));
+    assert!(CSS.contains(".symmetry-cell"));
+    assert!(CSS.contains(".symmetry-menu-popup"));
 }
 
 #[test]
