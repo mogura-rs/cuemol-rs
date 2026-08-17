@@ -4806,11 +4806,16 @@ impl GuiApplication {
                 .and_then(|value| value.scene_attribute("bgcolor"))
                 .and_then(|value| SceneBackground::parse(value).ok())
                 .unwrap_or(SceneBackground::Black);
-            let scene_color_proofing = self
-                .state
-                .scene_manager()
-                .scene(scene.uid)
-                .is_some_and(|value| scene_attr_bool(value.scene_attribute("use_colproof"), false));
+            let scene_color_proofing =
+                self.state
+                    .scene_manager()
+                    .scene(scene.uid)
+                    .is_some_and(|value| {
+                        scene_attr_bool(value.scene_attribute("use_colproof"), false)
+                            && value
+                                .scene_attribute("icc_filename")
+                                .is_some_and(|filename| !filename.is_empty())
+                    });
             scene_response.context_menu(|ui| {
                 self.workspace_multiple_selection.clear();
                 ui.menu_button("Background color", |ui| {
@@ -4840,7 +4845,7 @@ impl GuiApplication {
                 if ui
                     .add_enabled(
                         self.workspace_object_clipboard.is_some(),
-                        egui::Button::new("Paste Object"),
+                        egui::Button::new("Paste"),
                     )
                     .clicked()
                 {

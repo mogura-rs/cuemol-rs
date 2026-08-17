@@ -1156,6 +1156,28 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("copy_workspace_style"));
     assert!(JS.contains("paste_workspace_style"));
     assert!(JS.contains("workspaceSceneContextItems"));
+    let tauri_scene_menu = JS
+        .split("function workspaceSceneContextItems(scene)")
+        .nth(1)
+        .and_then(|source| source.split("async function copyWorkspaceCamera").next())
+        .expect("Tauri scene context menu");
+    let mut cursor = 0;
+    for item in [
+        "label: \"Background color\"",
+        "label: \"Use color proofing\"",
+        "label: \"Paste\"",
+        "label: \"Properties...\"",
+    ] {
+        let relative = tauri_scene_menu[cursor..]
+            .find(item)
+            .unwrap_or_else(|| panic!("missing scene menu item {item}"));
+        cursor += relative + item.len();
+    }
+    assert!(!tauri_scene_menu.contains("label: currentScene.name"));
+    assert!(!tauri_scene_menu.contains("label: \"Paste Object\""));
+    assert!(tauri_scene_menu.contains("disabled: !workspaceObjectClipboardAvailable"));
+    assert!(NATIVE_GUI_RS.contains("egui::Button::new(\"Paste\")"));
+    assert!(NATIVE_GUI_RS.contains("scene_attribute(\"icc_filename\")"));
     assert!(JS.contains("workspaceCameraContextItems"));
     assert!(JS.contains("label: \"New Camera…\""));
     assert!(JS.contains("label: \"Camera file\""));
@@ -1197,7 +1219,6 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("role\", \"menuitemcheckbox"));
     assert!(JS.contains("workspaceRendererClipboardAvailable"));
     assert!(JS.contains("Paste Renderer"));
-    assert!(JS.contains("Paste Object"));
     assert!(JS.contains("label: \"Save As…\""));
     assert!(JS.contains("label: \"Delete\""));
     assert!(JS.contains("label: \"Generate surface obj\""));

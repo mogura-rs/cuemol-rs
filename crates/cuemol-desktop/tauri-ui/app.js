@@ -6848,8 +6848,6 @@ function workspaceSceneContextItems(scene) {
     await mutate("set_background", { background });
   };
   const items = [
-    { label: currentScene.name || "Untitled", disabled: true },
-    null,
     {
       label: "Background color",
       children: [
@@ -6874,20 +6872,19 @@ function workspaceSceneContextItems(scene) {
         await mutate("set_display_option", { option: "color-proof", value });
       },
     },
-    null,
-  ];
-  if (workspaceObjectClipboardAvailable) {
-    items.push({ label: "Paste Object", action: () => pasteWorkspaceObject(scene) }, null);
-  }
-  items.push(
     {
-      label: "Properties…",
+      label: "Paste",
+      disabled: !workspaceObjectClipboardAvailable,
+      action: () => pasteWorkspaceObject(scene),
+    },
+    {
+      label: "Properties...",
       action: async () => {
         if (!(await activate())) return;
         showReferenceDialog("Scene Properties");
       },
     },
-  );
+  ];
   return items;
 }
 
