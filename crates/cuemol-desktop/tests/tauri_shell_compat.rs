@@ -1237,12 +1237,15 @@ fn morph_animation_tool_uses_the_reference_frame_columns() {
     assert!(JS.contains("setMorphNameColumnWidth"));
     assert!(JS.contains("morph-frame-columns"));
     assert!(JS.contains("morph-column-splitter"));
+    assert!(JS.contains("morph-add-menu"));
+    assert!(JS.contains("morph-add-menu-popup"));
     assert!(JS.contains("morphFrame.source || morphFrame.sourceType"));
     assert!(JS.contains("initialize_morph_object"));
     assert!(JS.contains("insert_morph_frame_from_file"));
     assert!(JS.contains("insertBefore"));
     assert!(CSS.contains("var(--morph-name-width"));
     assert!(CSS.contains(".morph-frame-row > :nth-child(2)"));
+    assert!(CSS.contains(".morph-add-menu > summary::after"));
     assert!(NATIVE_GUI_RS.contains("fn remove_selected_morph_frame"));
     assert!(NATIVE_GUI_RS.contains("morph_editor:name_width"));
     assert!(NATIVE_GUI_RS.contains("MORPH_COLUMN_SPLITTER_WIDTH"));

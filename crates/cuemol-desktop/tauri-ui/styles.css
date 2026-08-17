@@ -3424,6 +3424,67 @@ body.resizing-bottom-panel {
   color: #666;
 }
 
+.morph-add-menu {
+  position: relative;
+}
+
+.morph-add-menu > summary {
+  display: flex;
+  min-width: 68px;
+  min-height: 24px;
+  box-sizing: border-box;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 10px;
+  border: 1px solid #aaa;
+  border-radius: 3px;
+  background: linear-gradient(#fff, #e7e7e7);
+  color: #222;
+  cursor: default;
+  list-style: none;
+}
+
+.morph-add-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.morph-add-menu > summary::after {
+  margin-left: 6px;
+  content: "▾";
+  font-size: 8px;
+}
+
+.morph-add-menu-popup {
+  position: absolute;
+  z-index: 50;
+  right: 0;
+  bottom: calc(100% + 2px);
+  display: grid;
+  min-width: 150px;
+  padding: 2px;
+  border: 1px solid #999;
+  background: #f7f7f7;
+  box-shadow: 0 3px 8px #0003;
+}
+
+.morph-add-menu:not([open]) .morph-add-menu-popup {
+  display: none;
+}
+
+.morph-add-menu-popup button {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: #222;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.morph-add-menu-popup button:hover,
+.morph-add-menu-popup button:focus-visible {
+  background: #dcecff;
+}
+
 .dialog-primary {
   min-width: 78px;
 }

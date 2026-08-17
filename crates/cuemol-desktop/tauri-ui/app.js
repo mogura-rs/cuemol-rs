@@ -6657,6 +6657,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         };
       };
       const addMolCoord = button("Add MolCoord...", "dialog-primary", async () => {
+        addMenu.open = false;
         const { insertBefore, insertedIndex } = insertionPosition();
         const changed = await mutate("append_morph_frame", {
           targetObjectUid: Number(target.value),
@@ -6670,6 +6671,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         }
       });
       const addPdb = button("Add PDB file...", "", async () => {
+        addMenu.open = false;
         const path = await dialog.open({
           directory: false,
           multiple: false,
@@ -6693,6 +6695,15 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           renderMorphFrames();
         }
       });
+      const addMenu = document.createElement("details");
+      addMenu.className = "morph-add-menu";
+      const addMenuSummary = document.createElement("summary");
+      addMenuSummary.textContent = "Add";
+      addMenuSummary.setAttribute("aria-label", "Add morph frame");
+      const addMenuPopup = document.createElement("div");
+      addMenuPopup.className = "morph-add-menu-popup";
+      addMenuPopup.append(addPdb, addMolCoord);
+      addMenu.append(addMenuSummary, addMenuPopup);
       const remove = button("Delete", "", async () => {
         if (selectedMorphFrameIndex === null) {
           showError("Select a morph frame first.");
@@ -6760,7 +6771,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         renderMorphFrames();
       });
       renderMorphFrames();
-      dialogActions(remove, apply, addPdb, addMolCoord);
+      dialogActions(remove, apply, addMenu);
     }
   } else if (title === "POV-Ray rendering") {
     const renderTargets = (snapshot?.views || []).flatMap((view) => {
