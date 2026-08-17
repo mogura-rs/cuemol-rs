@@ -497,6 +497,7 @@ struct RendererDto {
     supports_electrostatic_coloring: bool,
     supports_multi_gradient: bool,
     coloring_type: Option<String>,
+    scheme_coloring_type: Option<String>,
     coloring_attrs: BTreeMap<String, String>,
     paint_entries: Vec<PaintEntryDto>,
     gradient_entries: Vec<GradientEntryDto>,
@@ -1758,6 +1759,7 @@ impl AppModel {
                             supports_solid_coloring: false,
                             supports_electrostatic_coloring: direct_surface,
                             supports_multi_gradient: false,
+                            scheme_coloring_type: coloring_type.clone(),
                             coloring_type,
                             coloring_attrs,
                             paint_entries,
@@ -1855,6 +1857,7 @@ impl AppModel {
                             supports_solid_coloring: true,
                             supports_electrostatic_coloring: false,
                             supports_multi_gradient: true,
+                            scheme_coloring_type: None,
                             coloring_type,
                             coloring_attrs,
                             paint_entries: Vec::new(),
@@ -1912,6 +1915,9 @@ impl AppModel {
                         let uid = renderer.uid.get();
                         let coloring_type = scalar_coloring_type(&renderer.specific);
                         let coloring_attrs = scalar_coloring_attrs(&renderer.specific);
+                        let scheme_coloring = self
+                            .desktop
+                            .renderer_coloring_state(surface.uid, renderer.uid);
                         let dto = RendererDto {
                             uid,
                             name: renderer.name,
@@ -1934,13 +1940,26 @@ impl AppModel {
                             show_ring: false,
                             ring_thickness: 0.2,
                             ring_color: "#ffffbf".to_string(),
-                            supports_coloring: false,
+                            supports_coloring: true,
                             supports_solid_coloring: true,
                             supports_electrostatic_coloring: true,
                             supports_multi_gradient: true,
+                            scheme_coloring_type: scheme_coloring
+                                .as_ref()
+                                .map(|(coloring_type, _, _)| coloring_type.clone()),
                             coloring_type,
                             coloring_attrs,
-                            paint_entries: Vec::new(),
+                            paint_entries: scheme_coloring
+                                .map(|(_, _, entries)| {
+                                    entries
+                                        .into_iter()
+                                        .map(|(selection, color)| PaintEntryDto {
+                                            selection,
+                                            color,
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
                             gradient_entries: renderer
                                 .multi_gradient
                                 .into_iter()
@@ -7656,6 +7675,7 @@ fn aux_renderer_group_dto(group: crate::GuiAuxRendererGroupSummary) -> RendererD
         supports_electrostatic_coloring: false,
         supports_multi_gradient: false,
         coloring_type: None,
+        scheme_coloring_type: None,
         coloring_attrs: BTreeMap::new(),
         paint_entries: Vec::new(),
         gradient_entries: Vec::new(),
@@ -17333,6 +17353,29 @@ mod tests {
         assert_eq!(snapshot.surfaces[0].class_name, "MolSurfObj");
         assert_eq!(snapshot.surfaces[0].renderers.len(), 1);
         let renderer_uid = snapshot.surfaces[0].renderers[0].uid;
+        assert!(snapshot.surfaces[0].renderers[0].supports_coloring);
+        assert_eq!(
+            snapshot.surfaces[0].renderers[0]
+                .scheme_coloring_type
+                .as_deref(),
+            Some("PaintColoring")
+        );
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetWorkspaceRendererColoring(WorkspaceRendererColoringInput {
+                object_uid: surface_uid.get(),
+                renderer_uid,
+                preset: "rainbow".to_string(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            model.snapshot().surfaces[0].renderers[0]
+                .scheme_coloring_type
+                .as_deref(),
+            Some("RainbowColoring")
+        );
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
 
         let mut properties =
             default_renderer_properties_input(surface_uid, Uid::new(renderer_uid), "surface wire");

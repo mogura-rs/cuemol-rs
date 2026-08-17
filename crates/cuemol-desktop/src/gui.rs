@@ -6222,6 +6222,7 @@ impl GuiApplication {
             WorkspaceAuxSelection::Lightweight { .. } => LIGHTWEIGHT_RENDERER_TYPES,
             _ => &[],
         };
+        let supports_coloring = matches!(selection, WorkspaceAuxSelection::Surface { .. });
         let can_generate_surface = match selection {
             WorkspaceAuxSelection::DensityMap {
                 map_uid,
@@ -6271,16 +6272,13 @@ impl GuiApplication {
                         }
                     }
                 });
-                ui.add_enabled_ui(false, |ui| {
-                    ui.menu_button("Coloring", |_| {});
-                    ui.menu_button("Paint", |_| {});
-                });
                 self.workspace_aux_renderer_style_menus(
                     ui,
                     scene_uid,
                     object_uid,
                     renderer_uid,
                     &current_renderer_type,
+                    supports_coloring,
                 );
                 if can_generate_surface && ui.button("Generate surface obj").clicked() {
                     self.generate_workspace_surface(selection);
@@ -6357,6 +6355,7 @@ impl GuiApplication {
         object_uid: cuemol_core::Uid,
         renderer_uid: cuemol_core::Uid,
         renderer_type: &str,
+        supports_coloring: bool,
     ) {
         let options = self.state.renderer_style_options(scene_uid, renderer_type);
         let renderer_type = renderer_type.trim_start_matches('*').to_ascii_lowercase();
@@ -6373,6 +6372,71 @@ impl GuiApplication {
             .iter()
             .filter(|style| style.name.to_ascii_lowercase().starts_with("egline"))
             .collect::<Vec<_>>();
+        let paint = options
+            .iter()
+            .filter(|style| style.name.to_ascii_lowercase().ends_with("paint"))
+            .collect::<Vec<_>>();
+        ui.add_enabled_ui(supports_coloring, |ui| {
+            ui.menu_button("Coloring", |ui| {
+                for (label, style_name) in [
+                    ("CPK molcol", "DefaultCPKColoring"),
+                    ("CPK dark gray", "DarkCPKColoring"),
+                    ("CPK light gray", "LightCPKColoring"),
+                ] {
+                    if options
+                        .iter()
+                        .any(|style| style.name.eq_ignore_ascii_case(style_name))
+                        && ui.button(label).clicked()
+                    {
+                        self.apply_workspace_renderer_style(
+                            scene_uid,
+                            object_uid,
+                            renderer_uid,
+                            style_name,
+                            "coloring",
+                        );
+                        ui.close();
+                    }
+                }
+                for style in &paint {
+                    let label = if style.description.is_empty() {
+                        style.name.as_str()
+                    } else {
+                        style.description.as_str()
+                    };
+                    if ui.button(label).clicked() {
+                        self.apply_workspace_renderer_style(
+                            scene_uid,
+                            object_uid,
+                            renderer_uid,
+                            &style.name,
+                            "coloring",
+                        );
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                for (label, preset) in [("B-factor", "bfactor"), ("Rainbow", "rainbow")] {
+                    if ui.button(label).clicked() {
+                        self.set_workspace_renderer_coloring_preset(
+                            scene_uid,
+                            object_uid,
+                            renderer_uid,
+                            preset,
+                        );
+                        ui.close();
+                    }
+                }
+            });
+        });
+        let paint_enabled = supports_coloring
+            && self
+                .state
+                .renderer_coloring_type(object_uid, renderer_uid)
+                .is_some_and(|coloring| coloring == "PaintColoring");
+        workspace_paint_menu(ui, paint_enabled, |color| {
+            self.insert_workspace_renderer_paint(scene_uid, object_uid, renderer_uid, color);
+        });
         ui.menu_button("Style", |ui| {
             for style in &shape {
                 let label = if style.description.is_empty() {

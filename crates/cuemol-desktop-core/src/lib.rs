@@ -1411,6 +1411,8 @@ pub struct GuiDensityRendererSummary {
     pub specific: BTreeMap<String, String>,
 }
 
+pub type GuiRendererColoringState = (String, BTreeMap<String, String>, Vec<(String, String)>);
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct GuiLoadedSurfaceSummary {
     pub uid: Uid,
@@ -7243,11 +7245,16 @@ impl DesktopAppState {
             .scene_manager()
             .scene_uid_for_object(object_uid)
             .is_some();
+        let supports_coloring = is_molecule
+            || self
+                .scene_manager()
+                .scene_uid_for_surface(object_uid)
+                .is_some();
         let (scene_uid, _, renderer_type, current_styles) =
             self.workspace_renderer_style_state(object_uid, renderer_uid)?;
-        if component == "coloring" && !is_molecule {
+        if component == "coloring" && !supports_coloring {
             return Err(CueMolError::invalid_argument(
-                "coloring styles require a molecule renderer",
+                "coloring styles require a molecule or surface renderer",
             ));
         }
         if !self
@@ -7341,30 +7348,82 @@ impl DesktopAppState {
         )
     }
 
-    pub fn renderer_coloring_type(&self, object_uid: Uid, renderer_uid: Uid) -> Option<String> {
-        let scene_uid = self.scene_manager().scene_uid_for_object(object_uid)?;
+    pub fn renderer_coloring_state(
+        &self,
+        object_uid: Uid,
+        renderer_uid: Uid,
+    ) -> Option<GuiRendererColoringState> {
+        if let Some(scene_uid) = self.scene_manager().scene_uid_for_object(object_uid) {
+            let scene = self.scene_manager().scene(scene_uid)?;
+            let styles = scene_style_manager(scene);
+            let renderer = scene.object(object_uid)?.renderer(renderer_uid)?;
+            let node = renderer
+                .qsc_children()
+                .iter()
+                .find(|node| node.tag_name() == "coloring")
+                .cloned()
+                .or_else(|| {
+                    renderer
+                        .style()
+                        .and_then(|style| {
+                            styles.resolve_style_child_node(scene_uid.get(), style, "coloring")
+                        })
+                        .cloned()
+                })?;
+            return qsc_coloring_state(&node);
+        }
+
+        let scene_uid = self.scene_manager().scene_uid_for_surface(object_uid)?;
         let scene = self.scene_manager().scene(scene_uid)?;
         let styles = scene_style_manager(scene);
-        let renderer = scene.object(object_uid)?.renderer(renderer_uid)?;
-        let node = renderer
-            .qsc_children()
+        let surface = scene.loaded_surface(object_uid)?;
+        let renderer_exists = self
+            .surface_summary(object_uid)?
+            .renderers
             .iter()
-            .find(|node| node.tag_name() == "coloring")
-            .cloned()
-            .or_else(|| {
+            .any(|renderer| renderer.uid == renderer_uid);
+        if !renderer_exists {
+            return None;
+        }
+        let renderer = surface.qsc_node.as_ref().and_then(|object_node| {
+            surface_renderer_nodes(object_node)
+                .enumerate()
+                .find(|(index, _)| {
+                    surface_renderer_uid(scene_uid, object_uid, *index) == renderer_uid
+                })
+                .map(|(_, renderer)| renderer)
+        });
+        let node = renderer
+            .and_then(|renderer| {
                 renderer
-                    .style()
-                    .and_then(|style| {
-                        styles.resolve_style_child_node(scene_uid.get(), style, "coloring")
-                    })
+                    .children()
+                    .iter()
+                    .find(|child| child.tag_name() == "coloring" && !child.is_attr())
                     .cloned()
-            })?;
-        let coloring_type = if node.type_name().is_empty() {
-            node.str_attr("type").to_string()
-        } else {
-            node.type_name().to_string()
-        };
-        (!coloring_type.is_empty()).then_some(coloring_type)
+            })
+            .or_else(|| {
+                renderer.and_then(|renderer| {
+                    let style = renderer.str_attr("style");
+                    (!style.is_empty())
+                        .then(|| {
+                            styles.resolve_style_child_node(
+                                scene_uid.get(),
+                                style.as_str(),
+                                "coloring",
+                            )
+                        })
+                        .flatten()
+                        .cloned()
+                })
+            });
+        node.as_ref()
+            .and_then(qsc_coloring_state)
+            .or_else(|| Some(("PaintColoring".to_string(), BTreeMap::new(), Vec::new())))
+    }
+
+    pub fn renderer_coloring_type(&self, object_uid: Uid, renderer_uid: Uid) -> Option<String> {
+        self.renderer_coloring_state(object_uid, renderer_uid)
+            .map(|(coloring_type, _, _)| coloring_type)
     }
 
     pub fn insert_renderer_paint_entry(
@@ -7375,6 +7434,13 @@ impl DesktopAppState {
     ) -> Result<()> {
         let color = color.trim();
         cuemol_gfx::parse_color(color)?;
+        if self
+            .scene_manager()
+            .scene_uid_for_surface(object_uid)
+            .is_some()
+        {
+            return Err(CueMolError::invalid_argument("selection is empty"));
+        }
         let scene_uid = self
             .scene_manager()
             .scene_uid_for_object(object_uid)
@@ -9297,6 +9363,53 @@ impl DesktopAppState {
         paint_entries: Vec<(String, String)>,
         default_color: Option<String>,
     ) -> Result<()> {
+        if let Some(scene_uid) = self.scene_manager().scene_uid_for_surface(object_uid) {
+            let styles = self
+                .scene_manager()
+                .scene(scene_uid)
+                .map(scene_style_manager)
+                .unwrap_or_else(cuemol_molvis::default_style_manager);
+            for (selection, color) in &paint_entries {
+                parse_selector_with_styles(selection, &styles, scene_uid.get())?;
+                cuemol_gfx::parse_color(color)?;
+            }
+            if let Some(color) = default_color.as_deref() {
+                cuemol_gfx::parse_color(color)?;
+            }
+            let surface = self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .and_then(|scene| scene.loaded_surface_mut(object_uid))
+                .expect("surface was checked above");
+            let renderer = ensure_surface_renderer_node(surface, scene_uid, renderer_uid)?;
+            renderer.retain_children(|child| child.tag_name() != "coloring");
+            if let Some(coloring_type) = coloring_type {
+                let mut node = LDom2Node::new();
+                node.set_tag_name("coloring");
+                node.set_type_name(coloring_type.clone());
+                for (name, value) in attrs.iter().filter(|(name, _)| {
+                    coloring_type != "ScriptColoring" || name.as_str() != "script"
+                }) {
+                    node.set_str_attr(name.as_str(), value.as_str());
+                }
+                if coloring_type == "ScriptColoring" {
+                    if let Some(script) = attrs.get("script") {
+                        node.append_child("script").set_contents(script.as_str());
+                    }
+                }
+                for (selection, color) in paint_entries {
+                    let paint = node.append_child("paint");
+                    paint.set_str_attr("sel", selection);
+                    paint.set_str_attr("color", color);
+                }
+                renderer.append_child_node(node);
+            }
+            renderer.set_str_attr("colormode", "molecule");
+            if let Some(default_color) = default_color {
+                renderer.set_str_attr("defaultcolor", default_color);
+            }
+            return Ok(());
+        }
         let object = self
             .scene_manager_mut()
             .object_mut(object_uid)
@@ -47180,6 +47293,39 @@ fn qsc_bool(value: &str) -> bool {
     )
 }
 
+fn qsc_coloring_state(node: &LDom2Node) -> Option<GuiRendererColoringState> {
+    let coloring_type = if node.type_name().is_empty() {
+        node.str_attr("type").to_string()
+    } else {
+        node.type_name().to_string()
+    };
+    if coloring_type.is_empty() {
+        return None;
+    }
+    let mut attrs = node
+        .children()
+        .iter()
+        .filter(|child| child.is_attr() && child.tag_name() != "type")
+        .map(|child| (child.tag_name().to_string(), child.value().to_string()))
+        .collect::<BTreeMap<_, _>>();
+    if coloring_type == "ScriptColoring" {
+        if let Some(script) = node.find_child("script").filter(|child| !child.is_attr()) {
+            attrs.insert("script".to_string(), script.contents().to_string());
+        }
+    }
+    let paint_entries = node
+        .children()
+        .iter()
+        .filter(|child| !child.is_attr() && child.tag_name() == "paint")
+        .filter_map(|child| {
+            let selection = child.str_attr("sel").to_string();
+            let color = child.str_attr("color").to_string();
+            (!selection.is_empty() && !color.is_empty()).then_some((selection, color))
+        })
+        .collect();
+    Some((coloring_type, attrs, paint_entries))
+}
+
 fn renderer_style_matches(style_name: &str, renderer_type: &str) -> bool {
     let renderer_type = renderer_type.trim_start_matches('*').to_ascii_lowercase();
     if renderer_type == "group" {
@@ -59675,6 +59821,36 @@ end_header
             "Glossymolsurf"
         );
         assert_eq!(
+            app.renderer_coloring_type(surface_uid, surface_renderer_uid)
+                .as_deref(),
+            Some("PaintColoring")
+        );
+        assert_eq!(
+            app.apply_renderer_style_option(
+                surface_uid,
+                surface_renderer_uid,
+                "DefaultCPKColoring",
+                "coloring",
+            )
+            .unwrap(),
+            "Glossymolsurf,DefaultCPKColoring"
+        );
+        assert_eq!(
+            app.renderer_coloring_type(surface_uid, surface_renderer_uid)
+                .as_deref(),
+            Some("CPKColoring")
+        );
+        app.set_workspace_renderer_coloring_preset(surface_uid, surface_renderer_uid, "rainbow")
+            .unwrap();
+        assert_eq!(
+            app.renderer_coloring_type(surface_uid, surface_renderer_uid)
+                .as_deref(),
+            Some("RainbowColoring")
+        );
+        assert!(app
+            .insert_renderer_paint_entry(surface_uid, surface_renderer_uid, "#ff0000")
+            .is_err());
+        assert_eq!(
             app.apply_renderer_style_option(lw_uid, lw_renderer_uid, "Wirelwrend", "shape")
                 .unwrap(),
             "Wirelwrend"
@@ -59702,7 +59878,7 @@ end_header
             app.workspace_renderer_style_state(surface_uid, surface_renderer_uid)
                 .unwrap()
                 .3,
-            "Glossymolsurf"
+            "Glossymolsurf,DefaultCPKColoring"
         );
         assert_eq!(
             app.workspace_renderer_style_state(lw_uid, lw_renderer_uid)

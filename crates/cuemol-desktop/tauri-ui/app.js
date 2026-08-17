@@ -7949,6 +7949,9 @@ async function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
   const edgeStyles = styleOptions.filter((style) =>
     style.name.toLowerCase().startsWith("egline"),
   );
+  const paintStyles = styleOptions.filter((style) =>
+    style.name.toLowerCase().endsWith("paint"),
+  );
   const applyStyle = (styleName, component) => () =>
     mutate("apply_workspace_renderer_style", {
       input: {
@@ -7968,6 +7971,40 @@ async function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
       label: style.description || style.name,
       action: applyStyle(style.name, "edge"),
     })),
+  );
+  const supportsColoring = kind === "surfaceRenderer";
+  const coloringChildren = [];
+  if (paintStyles.length > 0) {
+    coloringChildren.push(
+      {
+        label: "Paint (Secondary str.)",
+        children: paintStyles.map((style) => ({
+          label: style.description || style.name,
+          action: applyStyle(style.name, "coloring"),
+        })),
+      },
+      null,
+    );
+  }
+  coloringChildren.push(
+    { label: "CPK molcol", action: applyStyle("DefaultCPKColoring", "coloring") },
+    { label: "CPK dark gray", action: applyStyle("DarkCPKColoring", "coloring") },
+    { label: "CPK light gray", action: applyStyle("LightCPKColoring", "coloring") },
+    null,
+    {
+      label: "B-factor",
+      action: () =>
+        mutate("set_workspace_renderer_coloring", {
+          input: { objectUid: object.uid, rendererUid: renderer.uid, preset: "bfactor" },
+        }),
+    },
+    {
+      label: "Rainbow",
+      action: () =>
+        mutate("set_workspace_renderer_coloring", {
+          input: { objectUid: object.uid, rendererUid: renderer.uid, preset: "rainbow" },
+        }),
+    },
   );
   const compatibleRendererTypes =
     kind === "densityRenderer"
@@ -7998,8 +8035,15 @@ async function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
           action: () => changeWorkspaceAuxRendererType(kind, object, renderer, targetType),
         })),
     },
-    { label: "Coloring", disabled: true, children: [] },
-    { label: "Paint", disabled: true, children: [] },
+    { label: "Coloring", disabled: !supportsColoring, children: coloringChildren },
+    {
+      label: "Paint",
+      disabled: !supportsColoring || renderer.schemeColoringType !== "PaintColoring",
+      children: workspacePaintMenuChildren((color) => () =>
+        mutate("insert_workspace_renderer_paint", {
+          input: { objectUid: object.uid, rendererUid: renderer.uid, color },
+        })),
+    },
     { label: "Style", children: styleChildren },
     {
       label: "Edit style...",
