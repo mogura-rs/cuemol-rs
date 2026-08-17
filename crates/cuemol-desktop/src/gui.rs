@@ -11,7 +11,7 @@ use cuemol_anim::{
 };
 use cuemol_core::{
     parse_ldom2_xml, time_from_seconds, time_to_seconds, write_ldom2_xml, CueMolError, LDom2Node,
-    LScrTime, Result, Vector4, NANOS_PER_SECOND,
+    Result, Vector4, NANOS_PER_SECOND,
 };
 use cuemol_gfx::Rgba8;
 use cuemol_qsys::{StereoMode, View};
@@ -15571,14 +15571,13 @@ impl GuiApplication {
                         ui.end_row();
                         ui.label("Start time:");
                         ui.horizontal(|ui| {
-                            ui.add(
-                                egui::DragValue::new(&mut draft.start)
-                                    .range(-86_400.0..=86_400.0)
-                                    .speed(0.1)
-                                    .custom_formatter(|value, _| {
-                                        format_native_animation_time(time_from_seconds(value))
-                                    })
-                                    .custom_parser(parse_native_animation_time),
+                            native_animation_time_ui(
+                                ui,
+                                "animation_property_start_time",
+                                &mut draft.start,
+                                -86_400.0,
+                                86_400.0,
+                                true,
                             );
                             ui.label("Relative to:");
                             egui::ComboBox::from_id_salt("animation_property_time_reference")
@@ -15608,14 +15607,13 @@ impl GuiApplication {
                         });
                         ui.end_row();
                         ui.label("Duration:");
-                        ui.add(
-                            egui::DragValue::new(&mut draft.duration)
-                                .range(0.001..=86_400.0)
-                                .speed(0.1)
-                                .custom_formatter(|value, _| {
-                                    format_native_animation_time(time_from_seconds(value))
-                                })
-                                .custom_parser(parse_native_animation_time),
+                        native_animation_time_ui(
+                            ui,
+                            "animation_property_duration",
+                            &mut draft.duration,
+                            0.001,
+                            86_400.0,
+                            false,
                         );
                         ui.end_row();
                         ui.label("Quadric:");
@@ -27486,6 +27484,84 @@ fn default_animation_render_concurrency() -> u32 {
         .unwrap_or(2)
 }
 
+fn native_animation_time_parts(seconds: f64) -> (bool, u64, u64, u64, u64) {
+    let total_millis = (seconds.abs() * 1_000.0).round() as u64;
+    (
+        seconds.is_sign_negative(),
+        total_millis / 3_600_000,
+        (total_millis / 60_000) % 60,
+        (total_millis / 1_000) % 60,
+        total_millis % 1_000,
+    )
+}
+
+fn native_animation_time_from_parts(
+    negative: bool,
+    hours: u64,
+    minutes: u64,
+    seconds: u64,
+    milliseconds: u64,
+) -> f64 {
+    let value = hours as f64 * 3_600.0
+        + minutes as f64 * 60.0
+        + seconds as f64
+        + milliseconds as f64 / 1_000.0;
+    if negative {
+        -value
+    } else {
+        value
+    }
+}
+
+fn native_animation_time_ui(
+    ui: &mut egui::Ui,
+    id: &str,
+    value: &mut f64,
+    minimum: f64,
+    maximum: f64,
+    allow_negative: bool,
+) {
+    let (mut negative, mut hours, mut minutes, mut seconds, mut milliseconds) =
+        native_animation_time_parts(*value);
+    ui.push_id(id, |ui| {
+        if allow_negative && ui.selectable_label(negative, "−").clicked() {
+            negative = !negative;
+        }
+        ui.add(
+            egui::DragValue::new(&mut hours)
+                .range(0..=99)
+                .speed(1.0)
+                .prefix(if negative { "−" } else { "" }),
+        );
+        ui.label(":");
+        ui.add(
+            egui::DragValue::new(&mut minutes)
+                .range(0..=59)
+                .speed(1.0)
+                .custom_formatter(|value, _| format!("{value:02.0}"))
+                .custom_parser(|value| value.trim().parse().ok()),
+        );
+        ui.label(":");
+        ui.add(
+            egui::DragValue::new(&mut seconds)
+                .range(0..=59)
+                .speed(1.0)
+                .custom_formatter(|value, _| format!("{value:02.0}"))
+                .custom_parser(|value| value.trim().parse().ok()),
+        );
+        ui.label(".");
+        ui.add(
+            egui::DragValue::new(&mut milliseconds)
+                .range(0..=999)
+                .speed(100.0)
+                .custom_formatter(|value, _| format!("{value:03.0}"))
+                .custom_parser(|value| value.trim().parse().ok()),
+        );
+    });
+    *value = native_animation_time_from_parts(negative, hours, minutes, seconds, milliseconds)
+        .clamp(minimum, maximum);
+}
+
 fn animation_optional_text_ui(ui: &mut egui::Ui, label: &str, value: &mut Option<String>) {
     if let Some(value) = value {
         ui.horizontal(|ui| {
@@ -27576,12 +27652,6 @@ fn format_native_animation_time(value: i64) -> String {
     } else {
         format!("{sign}{seconds}{fraction}")
     }
-}
-
-fn parse_native_animation_time(value: &str) -> Option<f64> {
-    let mut time = LScrTime::new();
-    time.set_str_value(value.trim()).ok()?;
-    Some(time.sec_real())
 }
 
 fn unique_native_animation_name(animation: &AnimMgr, prefix: &str) -> String {
@@ -34793,9 +34863,12 @@ mod tests {
             format_native_animation_time(time_from_seconds(-1.25)),
             "-1.25"
         );
-        assert_eq!(parse_native_animation_time("1:2:3.456"), Some(3_723.456));
-        assert_eq!(parse_native_animation_time("2:3"), Some(123.0));
-        assert_eq!(parse_native_animation_time("invalid"), None);
+        assert_eq!(
+            native_animation_time_parts(3_723.456),
+            (false, 1, 2, 3, 456)
+        );
+        assert_eq!(native_animation_time_parts(-1.25), (true, 0, 0, 1, 250));
+        assert!((native_animation_time_from_parts(true, 0, 0, 1, 250) + 1.25).abs() < f64::EPSILON);
     }
 
     #[test]

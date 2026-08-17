@@ -568,6 +568,101 @@ function dialogField(label, value, type = "text", parent = dialogContent) {
   return input;
 }
 
+function dialogTimeField(label, seconds, parent = dialogContent) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "dialog-field";
+  const caption = document.createElement("span");
+  caption.textContent = label;
+  const editor = document.createElement("span");
+  editor.className = "animation-time-editor";
+  const inputs = [
+    ["hours", 3],
+    ["minutes", 2],
+    ["seconds", 2],
+    ["milliseconds", 3],
+  ].map(([part, length]) => {
+    const input = document.createElement("input");
+    input.type = "text";
+    input.inputMode = "numeric";
+    input.maxLength = length;
+    input.setAttribute("aria-label", `${label} ${part}`);
+    return input;
+  });
+  const separators = [":", ":", "."];
+  inputs.forEach((input, index) => {
+    editor.append(input);
+    if (index < separators.length) {
+      const separator = document.createElement("span");
+      separator.className = "animation-time-separator";
+      separator.textContent = separators[index];
+      editor.append(separator);
+    }
+  });
+  const spinner = document.createElement("span");
+  spinner.className = "animation-time-spinner";
+  const up = button("▲", "", () => adjust(1));
+  const down = button("▼", "", () => adjust(-1));
+  up.type = "button";
+  down.type = "button";
+  up.tabIndex = -1;
+  down.tabIndex = -1;
+  spinner.append(up, down);
+  editor.append(spinner);
+  wrapper.append(caption, editor);
+  parent.append(wrapper);
+
+  let activeIndex = 2;
+  const readSeconds = () => {
+    const hourText = inputs[0].value.trim();
+    const sign = hourText.startsWith("-") ? -1 : 1;
+    const hours = Math.min(99, Math.abs(Number(hourText) || 0));
+    const minutes = Math.min(59, Math.max(0, Number(inputs[1].value) || 0));
+    const wholeSeconds = Math.min(59, Math.max(0, Number(inputs[2].value) || 0));
+    const milliseconds = Math.min(999, Math.max(0, Number(inputs[3].value) || 0));
+    return sign * (hours * 3600 + minutes * 60 + wholeSeconds + milliseconds / 1000);
+  };
+  const writeSeconds = (value) => {
+    const totalMilliseconds = Math.round(Math.abs(Number(value) || 0) * 1000);
+    const sign = Number(value) < 0 ? "-" : "";
+    const hours = Math.floor(totalMilliseconds / 3_600_000);
+    const minutes = Math.floor(totalMilliseconds / 60_000) % 60;
+    const wholeSeconds = Math.floor(totalMilliseconds / 1000) % 60;
+    const milliseconds = totalMilliseconds % 1000;
+    inputs[0].value = `${sign}${hours}`;
+    inputs[1].value = String(minutes).padStart(2, "0");
+    inputs[2].value = String(wholeSeconds).padStart(2, "0");
+    inputs[3].value = String(milliseconds).padStart(3, "0");
+  };
+  function adjust(direction) {
+    const increments = [3600, 60, 1, 0.1];
+    writeSeconds(readSeconds() + increments[activeIndex] * direction);
+    inputs[activeIndex].focus();
+    inputs[activeIndex].select();
+  }
+  inputs.forEach((input, index) => {
+    input.addEventListener("focus", () => {
+      activeIndex = index;
+    });
+    input.addEventListener("blur", () => writeSeconds(readSeconds()));
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+      event.preventDefault();
+      adjust(event.key === "ArrowUp" ? 1 : -1);
+    });
+  });
+  writeSeconds(seconds);
+  return {
+    element: editor,
+    inputs,
+    get value() {
+      return formatAnimationObjectTime(readSeconds());
+    },
+    set value(value) {
+      writeSeconds(parseAnimationObjectTime(value) ?? 0);
+    },
+  };
+}
+
 function dialogTextArea(label, value) {
   const wrapper = document.createElement("label");
   wrapper.className = "dialog-field dialog-textarea";
@@ -7375,10 +7470,9 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       ) {
         referenceOptions.push([object.timeRefName, object.timeRefName]);
       }
-      const start = dialogField(
+      const start = dialogTimeField(
         "Start time",
-        formatAnimationObjectTime(object.relativeStart),
-        "text",
+        object.relativeStart,
         commonGroup,
       );
       const timeReference = dialogSelect(
@@ -7387,12 +7481,11 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         object.timeRefName || "",
         commonGroup,
       );
-      start.parentElement.classList.add("animation-start-field");
+      start.element.parentElement.classList.add("animation-start-field");
       timeReference.parentElement.classList.add("animation-reference-field");
-      const duration = dialogField(
+      const duration = dialogTimeField(
         "Duration",
-        formatAnimationObjectTime(object.duration),
-        "text",
+        object.duration,
         commonGroup,
       );
       const quadric = dialogField(

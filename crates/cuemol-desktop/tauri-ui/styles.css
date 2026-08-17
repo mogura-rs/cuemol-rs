@@ -3029,6 +3029,57 @@ summary:focus-visible {
   align-self: center;
 }
 
+.animation-time-editor {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  min-height: 23px;
+  border: 1px solid #9c9c9c;
+  border-radius: 2px;
+  background: #fff;
+}
+
+.animation-time-editor > input {
+  box-sizing: content-box;
+  width: 2ch;
+  min-width: 0;
+  min-height: 19px;
+  padding: 1px 2px;
+  border: 0;
+  border-radius: 0;
+  text-align: right;
+}
+
+.animation-time-editor > input:nth-of-type(4) {
+  width: 3ch;
+}
+
+.animation-time-editor > input:focus {
+  outline: 1px solid #4c84c2;
+  outline-offset: -1px;
+}
+
+.animation-time-separator {
+  flex: 0 0 auto;
+}
+
+.animation-time-spinner {
+  display: grid;
+  align-self: stretch;
+  margin-left: auto;
+  border-left: 1px solid #aaa;
+}
+
+.animation-time-spinner > button {
+  min-width: 16px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  font-size: 7px;
+  line-height: 8px;
+}
+
 .animation-spin-settings {
   grid-template-columns: minmax(0, 2fr) repeat(3, minmax(45px, 0.6fr));
 }

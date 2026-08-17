@@ -983,6 +983,11 @@ fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
     assert!(JS.contains("targetAlpha.step = \"0.1\""));
     assert!(NATIVE_GUI_RS.contains("ui.selectable_label(true, \"Common\")"));
     assert!(NATIVE_GUI_RS.contains("animation_camera_ignore_flags"));
+    assert!(JS.contains("function dialogTimeField(label, seconds"));
+    assert!(JS.contains("const increments = [3600, 60, 1, 0.1]"));
+    assert!(CSS.contains(".animation-time-editor"));
+    assert!(NATIVE_GUI_RS.contains("fn native_animation_time_ui("));
+    assert!(NATIVE_GUI_RS.contains("native_animation_time_parts(*value)"));
     assert!(!JS.contains("workspacePropertyPage([\"Common settings\", object.typeName])"));
     for label in [
         "Relative to",
