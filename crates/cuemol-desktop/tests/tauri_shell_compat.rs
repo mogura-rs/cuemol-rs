@@ -906,6 +906,7 @@ fn pov_render_matches_the_reference_options_and_cancellable_flow() {
     assert!(NATIVE_GUI_RS.contains("fn poll_pov_render"));
     assert!(NATIVE_GUI_RS.contains("fn persist_pov_render_settings"));
     assert!(DESKTOP_LIB_RS.contains("run_pov_process"));
+    assert!(TAURI_APP_RS.contains("overlay_pov_labels(&output.output_path, &job.labels)"));
     assert!(CSS.contains(".pov-preview-scroll"));
 }
 

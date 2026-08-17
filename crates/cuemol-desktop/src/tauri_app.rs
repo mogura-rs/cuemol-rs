@@ -16,12 +16,12 @@ use tauri::State;
 
 use crate::offscreen::{camera_depth_range, camera_mvp, encode_rgba_png, SceneRenderer};
 use crate::{
-    anim_step, atoms_in_screen_rect, create_apbs_work_dir, create_pov_work_dir, pick_atom_screen,
-    run_apbs_process, run_pov_process, AnimKind, AnimObject, ApbsProcessOutput, ApbsProcessTask,
-    DesktopAppState, GuiApbsChargeMethod, GuiApbsOptions, GuiApbsPaths, GuiPovSceneOptions,
-    PovProcessOptions, PovProcessOutput, PovProcessTask, WorkspaceCameraClipboard,
-    WorkspaceObjectClipboard, WorkspaceRendererClipboard, WorkspaceStyleClipboard,
-    MOLECULE_RENDERER_TYPES,
+    anim_step, atoms_in_screen_rect, collect_pov_labels, create_apbs_work_dir, create_pov_work_dir,
+    overlay_pov_labels, pick_atom_screen, run_apbs_process, run_pov_process, AnimKind, AnimObject,
+    ApbsProcessOutput, ApbsProcessTask, DesktopAppState, GuiApbsChargeMethod, GuiApbsOptions,
+    GuiApbsPaths, GuiAtomLabel, GuiPovSceneOptions, PovProcessOptions, PovProcessOutput,
+    PovProcessTask, WorkspaceCameraClipboard, WorkspaceObjectClipboard, WorkspaceRendererClipboard,
+    WorkspaceStyleClipboard, MOLECULE_RENDERER_TYPES,
 };
 
 const MAX_VIEW_DIM: u32 = 1_600;
@@ -1478,6 +1478,7 @@ struct TauriPovRenderJob {
     receiver: mpsc::Receiver<Result<PovProcessOutput, String>>,
     cancel: Arc<AtomicBool>,
     work_dir: PathBuf,
+    labels: Vec<GuiAtomLabel>,
 }
 
 struct TauriPovRenderResult {
@@ -10655,6 +10656,13 @@ fn handle_model_request(
                     verbose: true,
                 },
             };
+            let labels = collect_pov_labels(
+                &model.desktop,
+                &model.camera,
+                input.width,
+                input.height,
+                input.pixel_labels,
+            );
             let cancel = Arc::new(AtomicBool::new(false));
             let worker_cancel = Arc::clone(&cancel);
             let (sender, receiver) = mpsc::channel();
@@ -10683,6 +10691,7 @@ fn handle_model_request(
                 receiver,
                 cancel,
                 work_dir,
+                labels,
             });
             model.status = format!(
                 "POV-Ray rendering started: {}x{}",
@@ -10712,6 +10721,13 @@ fn handle_model_request(
                     Ok(ModelResponse::Message(format!("error:{error}")))
                 }
                 Ok(Ok(output)) => {
+                    if !job.labels.is_empty() {
+                        if let Err(error) = overlay_pov_labels(&output.output_path, &job.labels) {
+                            let _ = fs::remove_dir_all(job.work_dir);
+                            model.status = error.clone();
+                            return Ok(ModelResponse::Message(format!("error:{error}")));
+                        }
+                    }
                     let image = match fs::read(&output.output_path) {
                         Ok(image) => image,
                         Err(error) => {
@@ -20204,6 +20220,47 @@ mod tests {
         }
         fs::remove_file(saved).unwrap();
         fs::remove_file(script).unwrap();
+    }
+
+    #[test]
+    fn pov_render_poll_composites_pixel_labels_before_preview() {
+        let mut model = model_without_gpu();
+        let work_dir = create_pov_work_dir().unwrap();
+        let image_path = work_dir.join("render.png");
+        image::RgbaImage::from_pixel(96, 48, image::Rgba([255, 255, 255, 255]))
+            .save(&image_path)
+            .unwrap();
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok(PovProcessOutput {
+                output_path: image_path.clone(),
+                log: String::new(),
+            }))
+            .unwrap();
+        model.pov_render_job = Some(TauriPovRenderJob {
+            receiver,
+            cancel: Arc::new(AtomicBool::new(false)),
+            work_dir: work_dir.clone(),
+            labels: vec![GuiAtomLabel {
+                x: 8.0,
+                y: 24.0,
+                text: "CA".to_string(),
+                color: "#0000ff".to_string(),
+                font_size: 18.0,
+                font_name: "sans-serif".to_string(),
+                font_style: "normal".to_string(),
+                font_weight: "normal".to_string(),
+            }],
+        });
+        let response = handle_model_request(&mut model, ModelRequest::PollPovRender).unwrap();
+        assert!(matches!(
+            response,
+            ModelResponse::Message(ref value) if value.starts_with("complete:data:image/png;base64,")
+        ));
+        let frame = image::open(&image_path).unwrap().to_rgba8();
+        assert!(frame.pixels().any(|pixel| pixel.0 != [255, 255, 255, 255]));
+        model.pov_render_result.take();
+        fs::remove_dir_all(work_dir).unwrap();
     }
 
     #[test]

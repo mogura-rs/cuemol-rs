@@ -64,6 +64,9 @@ egui-gui = [
 tauri-gui = [
   "cuemol-desktop-core/offscreen",
   "cuemol-desktop-core/scripting",
+  "dep:ab_glyph",
+  "dep:epaint_default_fonts",
+  "dep:image",
   "dep:serde",
   "dep:tauri",
   "dep:tauri-build",

@@ -1,14 +1,13 @@
 // AnimKind/AnimObject + the `anim_spin_direction` timeline stepper are shared via core
 // so both desktop front ends drive the animation timeline identically.
 use crate::{
-    anim_step, create_apbs_work_dir, create_pov_work_dir, run_apbs_process, run_pov_process,
-    run_pov_process_with_poll, AnimKind, AnimObject, ApbsProcessOutput, ApbsProcessTask,
-    DesktopAppState, GuiApbsChargeMethod, GuiApbsOptions, GuiApbsPaths, GuiAtomLabel,
-    GuiLoadedPath, GuiPovSceneOptions, GuiSequenceSummary, GuiStructObject, PovProcessOptions,
-    PovProcessOutput, PovProcessTask, WorkspaceCameraClipboard, WorkspaceObjectClipboard,
-    WorkspaceRendererClipboard, WorkspaceStyleClipboard,
+    anim_step, collect_pov_labels, create_apbs_work_dir, create_pov_work_dir, overlay_pov_labels,
+    run_apbs_process, run_pov_process, run_pov_process_with_poll, AnimKind, AnimObject,
+    ApbsProcessOutput, ApbsProcessTask, DesktopAppState, GuiApbsChargeMethod, GuiApbsOptions,
+    GuiApbsPaths, GuiAtomLabel, GuiLoadedPath, GuiPovSceneOptions, GuiSequenceSummary,
+    GuiStructObject, PovProcessOptions, PovProcessOutput, PovProcessTask, WorkspaceCameraClipboard,
+    WorkspaceObjectClipboard, WorkspaceRendererClipboard, WorkspaceStyleClipboard,
 };
-use ab_glyph::{point, Font, FontRef, ScaleFont};
 use cuemol_core::{parse_ldom2_xml, write_ldom2_xml, CueMolError, LDom2Node, Result, Vector4};
 use cuemol_gfx::Rgba8;
 use cuemol_qsys::{StereoMode, View};
@@ -25911,137 +25910,20 @@ fn animation_frame_labels(
     settings: &AnimationRenderSettings,
     camera: &cuemol_qsys::Camera,
 ) -> Vec<GuiAtomLabel> {
-    if settings.backend != "POV-Ray"
-        || !settings.pov_labels
-        || settings.width == 0
-        || settings.height == 0
-    {
-        return Vec::new();
-    }
-    const MAX_LABELS: usize = 10_000;
-    let aspect = f64::from(settings.width) / f64::from(settings.height);
-    let mvp = crate::offscreen::camera_mvp(camera, aspect);
-    let mut labels = state.active_name_labels(
-        mvp,
-        settings.width as f32,
-        settings.height as f32,
-        MAX_LABELS,
-    );
-    if labels.len() < MAX_LABELS {
-        labels.extend(state.active_atom_intr_labels(
-            mvp,
-            settings.width as f32,
-            settings.height as f32,
-            MAX_LABELS - labels.len(),
-        ));
-    }
-    labels
+    collect_pov_labels(
+        state,
+        camera,
+        settings.width,
+        settings.height,
+        settings.backend == "POV-Ray" && settings.pov_labels,
+    )
 }
 
 fn overlay_animation_labels(
     path: &Path,
     labels: &[GuiAtomLabel],
 ) -> std::result::Result<(), String> {
-    let mut frame = image::open(path)
-        .map_err(|error| format!("failed to read label target {}: {error}", path.display()))?
-        .to_rgba8();
-    for label in labels {
-        draw_animation_label(&mut frame, label);
-    }
-    frame
-        .save(path)
-        .map_err(|error| format!("failed to write labelled frame {}: {error}", path.display()))
-}
-
-fn draw_animation_label(frame: &mut image::RgbaImage, label: &GuiAtomLabel) {
-    let monospace = label.font_name.to_ascii_lowercase().contains("mono");
-    let font_data = if monospace {
-        epaint_default_fonts::HACK_REGULAR
-    } else {
-        epaint_default_fonts::UBUNTU_LIGHT
-    };
-    let font = FontRef::try_from_slice(font_data).expect("embedded label font is valid");
-    let scale = label.font_size.clamp(1.0, 512.0) as f32;
-    let scaled = font.as_scaled(scale);
-    let line_height = (scaled.height() + scaled.line_gap()).max(1.0);
-    let color = cuemol_gfx::parse_color(&label.color)
-        .ok()
-        .and_then(|color| color.rgba8())
-        .unwrap_or(Rgba8 {
-            r: 255,
-            g: 255,
-            b: 0,
-            a: 255,
-        });
-    let style = label.font_style.to_ascii_lowercase();
-    let italic = style.contains("italic") || style.contains("oblique");
-    let weight = label.font_weight.trim().to_ascii_lowercase();
-    let bold = weight.contains("bold")
-        || weight
-            .parse::<u16>()
-            .is_ok_and(|numeric_weight| numeric_weight >= 600);
-    let mut caret_x = label.x;
-    let mut baseline_y = label.y + scaled.descent();
-    let mut previous = None;
-    for character in label.text.chars() {
-        if character == '\n' {
-            caret_x = label.x;
-            baseline_y += line_height;
-            previous = None;
-            continue;
-        }
-        let glyph_id = font.glyph_id(character);
-        if let Some(previous) = previous {
-            caret_x += scaled.kern(previous, glyph_id);
-        }
-        let glyph = glyph_id.with_scale_and_position(scale, point(caret_x, baseline_y));
-        if let Some(outlined) = font.outline_glyph(glyph) {
-            let bounds = outlined.px_bounds();
-            outlined.draw(|x, y, coverage| {
-                let italic_offset = if italic {
-                    ((bounds.height() - y as f32) * 0.18).round() as i32
-                } else {
-                    0
-                };
-                let pixel_x = bounds.min.x as i32 + x as i32 + italic_offset;
-                let pixel_y = bounds.min.y as i32 + y as i32;
-                blend_animation_label_pixel(frame, pixel_x, pixel_y, color, coverage);
-                if bold {
-                    blend_animation_label_pixel(frame, pixel_x + 1, pixel_y, color, coverage);
-                }
-            });
-        }
-        caret_x += scaled.h_advance(glyph_id);
-        previous = Some(glyph_id);
-    }
-}
-
-fn blend_animation_label_pixel(
-    frame: &mut image::RgbaImage,
-    x: i32,
-    y: i32,
-    color: Rgba8,
-    coverage: f32,
-) {
-    if x < 0 || y < 0 || x >= frame.width() as i32 || y >= frame.height() as i32 {
-        return;
-    }
-    let pixel = frame.get_pixel_mut(x as u32, y as u32);
-    let source_alpha = coverage.clamp(0.0, 1.0) * f32::from(color.a) / 255.0;
-    let target_alpha = f32::from(pixel[3]) / 255.0;
-    let output_alpha = source_alpha + target_alpha * (1.0 - source_alpha);
-    if output_alpha <= f32::EPSILON {
-        return;
-    }
-    for (target, source) in pixel.0[..3].iter_mut().zip([color.r, color.g, color.b]) {
-        let target_value = f32::from(*target) / 255.0;
-        let source_value = f32::from(source) / 255.0;
-        let output = (source_value * source_alpha
-            + target_value * target_alpha * (1.0 - source_alpha))
-            / output_alpha;
-        *target = (output * 255.0).round().clamp(0.0, 255.0) as u8;
-    }
-    pixel[3] = (output_alpha * 255.0).round().clamp(0.0, 255.0) as u8;
+    overlay_pov_labels(path, labels)
 }
 
 fn update_animation_render_progress(task: &AnimationFrameTask, frame_progress: f64) {
