@@ -5929,6 +5929,162 @@ impl DesktopAppState {
         })
     }
 
+    /// Crystal cell / space group for a density-map object. Density maps always
+    /// carry a `CrystalInfo`; maps without crystallographic metadata expose its
+    /// zero-sized default cell so the Symmetry panel can disable cell rendering.
+    pub fn density_crystal_summary(&self, map_uid: Uid) -> Option<GuiCrystalSummary> {
+        let object = self.density_maps.get(&map_uid)?;
+        let cell = object.map.cell();
+        Some(GuiCrystalSummary {
+            object_uid: map_uid,
+            object_name: object.name.clone(),
+            a: cell.a(),
+            b: cell.b(),
+            c: cell.c(),
+            alpha: cell.alpha(),
+            beta: cell.beta(),
+            gamma: cell.gamma(),
+            space_group_name: cell.hm_space_group_name(),
+            space_group_number: Some(cell.space_group()),
+            lattice: cell.lattice_name(),
+        })
+    }
+
+    /// Find or create CueMol2's internal unit-cell renderer for a molecule.
+    pub fn show_molecule_unit_cell(&mut self, object_uid: Uid) -> Result<Uid> {
+        let cell = self.crystal_summary(object_uid).ok_or_else(|| {
+            CueMolError::invalid_argument("the molecule has no crystal information")
+        })?;
+        if cell.a < 0.1 || cell.b < 0.1 || cell.c < 0.1 {
+            return Err(CueMolError::invalid_argument(
+                "the crystal cell dimensions are too small",
+            ));
+        }
+        let object = self
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        if let Some(uid) = object
+            .renderers()
+            .iter()
+            .find(|renderer| matches!(renderer.renderer_type(), "*unitcell" | "unitcell"))
+            .map(MolRenderer::uid)
+        {
+            return Ok(uid);
+        }
+        let uid = object.add_renderer("*unitcell", "unitcell");
+        object.set_modified(true);
+        Ok(uid)
+    }
+
+    /// Find or create CueMol2's internal symmetry-mate renderer and apply one of
+    /// the Symmetry panel modes. `None` selects home-unit-cell packing; an extent
+    /// selects view-centred packing with automatic updates.
+    pub fn show_molecule_symmetry(
+        &mut self,
+        object_uid: Uid,
+        extent: Option<f64>,
+        center: Vector4,
+    ) -> Result<Uid> {
+        let cell = self.crystal_summary(object_uid).ok_or_else(|| {
+            CueMolError::invalid_argument("the molecule has no crystal information")
+        })?;
+        if cell.a < 0.1 || cell.b < 0.1 || cell.c < 0.1 {
+            return Err(CueMolError::invalid_argument(
+                "the crystal cell dimensions are too small",
+            ));
+        }
+        if extent.is_some_and(|value| !value.is_finite() || value <= 0.0) {
+            return Err(CueMolError::invalid_argument(
+                "the symmetry extent must be positive and finite",
+            ));
+        }
+        let object = self
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        let renderer_uid = object
+            .renderers()
+            .iter()
+            .find(|renderer| matches!(renderer.renderer_type(), "*symm" | "symm"))
+            .map(MolRenderer::uid)
+            .unwrap_or_else(|| object.add_renderer("*symm", "symm"));
+        let renderer = object
+            .renderer_mut(renderer_uid)
+            .expect("the symmetry renderer was found or created");
+        if let Some(extent) = extent {
+            renderer.set_qsc_attr("extent", extent.to_string());
+            renderer.set_qsc_attr("unitcell", "false");
+            renderer.set_qsc_attr("autoupdate", "true");
+            renderer.set_qsc_attr("center", center.to_string());
+        } else {
+            renderer.set_qsc_attr("unitcell", "true");
+            renderer.set_qsc_attr("autoupdate", "false");
+        }
+        object.set_modified(true);
+        Ok(renderer_uid)
+    }
+
+    /// Apply CueMol2 `SymmRenderer::viewChanged`: view-centred symmetry renderers
+    /// with `autoupdate=true` follow the active view centre without an undo entry.
+    pub fn sync_auto_symmetry_center(&mut self, center: Vector4) -> bool {
+        if ![center.x, center.y, center.z]
+            .into_iter()
+            .all(f64::is_finite)
+        {
+            return false;
+        }
+        let Some(scene_uid) = self.active_scene else {
+            return false;
+        };
+        let object_uids = self
+            .scene_manager()
+            .scene(scene_uid)
+            .map(|scene| {
+                scene
+                    .objects()
+                    .iter()
+                    .map(MolObject::uid)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut changed = false;
+        for object_uid in object_uids {
+            let Some(object) = self.scene_manager_mut().object_mut(object_uid) else {
+                continue;
+            };
+            let renderer_uids = object
+                .renderers()
+                .iter()
+                .filter(|renderer| {
+                    matches!(renderer.renderer_type(), "*symm" | "symm")
+                        && renderer.qsc_attr("autoupdate").is_some_and(qsc_bool)
+                        && !renderer.qsc_attr("unitcell").is_none_or(qsc_bool)
+                        && renderer
+                            .qsc_attr("center")
+                            .and_then(parse_qsc_vector3)
+                            .is_none_or(|current| {
+                                let delta = current - center;
+                                delta.x * delta.x + delta.y * delta.y + delta.z * delta.z > 1.0e-8
+                            })
+                })
+                .map(MolRenderer::uid)
+                .collect::<Vec<_>>();
+            if renderer_uids.is_empty() {
+                continue;
+            }
+            for renderer_uid in renderer_uids {
+                object
+                    .renderer_mut(renderer_uid)
+                    .expect("the auto-update renderer was collected from this object")
+                    .set_qsc_attr("center", center.to_string());
+            }
+            object.set_modified(true);
+            changed = true;
+        }
+        changed
+    }
+
     pub fn space_group_summaries(&self, lattice: &str) -> Vec<GuiSpaceGroupSummary> {
         let Some(lattice) = cuemol_symm::LatticeSystem::from_name(lattice) else {
             return Vec::new();
@@ -6329,44 +6485,10 @@ impl DesktopAppState {
                         );
                     }
                     GuiDensityRendererKind::UnitCell => {
-                        let counts = [
-                            map_object.map.col_no().saturating_sub(1) as f64,
-                            map_object.map.row_no().saturating_sub(1) as f64,
-                            map_object.map.sec_no().saturating_sub(1) as f64,
-                        ];
-                        let corners = [
-                            [0.0, 0.0, 0.0],
-                            [counts[0], 0.0, 0.0],
-                            [0.0, counts[1], 0.0],
-                            [0.0, 0.0, counts[2]],
-                            [counts[0], counts[1], 0.0],
-                            [counts[0], 0.0, counts[2]],
-                            [0.0, counts[1], counts[2]],
-                            [counts[0], counts[1], counts[2]],
-                        ]
-                        .map(|point| {
-                            map_object
-                                .map
-                                .conv_to_orth(Vector4::new3(point[0], point[1], point[2]))
-                        });
-                        let edges = [
-                            [0, 1],
-                            [0, 2],
-                            [0, 3],
-                            [1, 4],
-                            [1, 5],
-                            [2, 4],
-                            [2, 6],
-                            [3, 5],
-                            [3, 6],
-                            [4, 7],
-                            [5, 7],
-                            [6, 7],
-                        ];
-                        for [from, to] in edges {
+                        for (from, to) in cuemol_symm::unit_cell_edges(&map_object.map.cell()) {
                             rendered.bonds.push(cuemol_render::RenderBond {
-                                from: corners[from],
-                                to: corners[to],
+                                from,
+                                to,
                                 radius: (0.02 * config.width.max(0.1)) as f32,
                                 color: Some(config.color.clone()),
                                 end_color: None,
@@ -13706,6 +13828,14 @@ impl DesktopAppState {
                 continue;
             }
             append_object_snapshot(
+                &mut snapshot,
+                object,
+                selector.as_ref(),
+                &styles,
+                scene_uid.get(),
+                self.surface_potential.as_ref(),
+            );
+            append_object_crystal_renderer_snapshot(
                 &mut snapshot,
                 object,
                 selector.as_ref(),
@@ -46449,7 +46579,11 @@ fn append_object_snapshot(
     let visible_renderers = object
         .renderers()
         .iter()
-        .filter(|renderer| renderer.is_visible() && !renderer.renderer_type().starts_with('*'))
+        .filter(|renderer| {
+            renderer.is_visible()
+                && !renderer.renderer_type().starts_with('*')
+                && !matches!(renderer.renderer_type(), "symm" | "unitcell")
+        })
         .filter(|renderer| renderer.renderer_type() != "selection")
         .collect::<Vec<_>>();
     if visible_renderers.is_empty() && object.renderers().is_empty() {
@@ -46490,6 +46624,167 @@ fn append_object_snapshot(
             style_scope_id,
         );
     }
+}
+
+fn append_object_crystal_renderer_snapshot(
+    target: &mut RenderSceneSnapshot,
+    object: &MolObject,
+    selector: Option<&cuemol_molstr::Selector>,
+    styles: &StyleManager,
+    style_scope_id: u64,
+    surface_potential: Option<&DensityMap>,
+) {
+    let Some(cell) = object.mol().cell_params() else {
+        return;
+    };
+    let Some(crystal) = cuemol_symm::CrystalInfo::from_cell_params(cell) else {
+        return;
+    };
+    if crystal.a() < 0.1 || crystal.b() < 0.1 || crystal.c() < 0.1 {
+        return;
+    }
+    let renderers = object.renderers().iter().filter(|renderer| {
+        renderer.is_visible()
+            && matches!(
+                renderer.renderer_type(),
+                "*symm" | "symm" | "*unitcell" | "unitcell"
+            )
+    });
+    let mut base = None;
+    let molecule_center = molecule_centroid(object.mol());
+    let symmetry = cuemol_symm::SymmOpManager::new();
+
+    for renderer in renderers {
+        let renderer_type = renderer.renderer_type();
+        if matches!(renderer_type, "*unitcell" | "unitcell") {
+            let resolved = |name: &str| renderer.resolved_attr(name, styles, style_scope_id);
+            let width = resolved("width")
+                .and_then(|value| value.trim().parse::<f64>().ok())
+                .unwrap_or(1.0)
+                .max(0.1);
+            let color = resolved("color")
+                .and_then(|value| resolve_qsc_color(&value, styles))
+                .map(rgba8_render_color)
+                .map(render_color_spec)
+                .unwrap_or_else(|| {
+                    cuemol_gfx::parse_color("#ffff00")
+                        .expect("the built-in unit-cell color must parse")
+                });
+            let mut rendered = RenderSceneSnapshot::empty();
+            for (from, to) in cuemol_symm::unit_cell_edges(&crystal) {
+                rendered.bonds.push(cuemol_render::RenderBond {
+                    from,
+                    to,
+                    radius: (0.02 * width) as f32,
+                    color: Some(color.clone()),
+                    end_color: None,
+                    object_uid: None,
+                    atom_indices: None,
+                    selected: false,
+                    screen_width: Some(width as f32),
+                    screen_stipple: false,
+                    screen_offset: [0.0, 0.0],
+                    screen_point: false,
+                    edge: None,
+                });
+            }
+            let xform = renderer.xform_matrix().mul_mat(object.xform_matrix());
+            if xform != Matrix4::IDENTITY {
+                rendered.apply_xform(&xform);
+            } else {
+                rendered.recompute_bounds();
+            }
+            append_snapshot(target, rendered);
+            continue;
+        }
+
+        let Some(center) = molecule_center else {
+            continue;
+        };
+        let Some(operators) = symmetry.symmetry_operators(crystal.space_group()) else {
+            continue;
+        };
+        let unitcell = renderer.qsc_attr("unitcell").map(qsc_bool).unwrap_or(true);
+        let transforms = if unitcell {
+            cuemol_symm::symm_mates_by_cell(center, &crystal, operators)
+        } else {
+            let view_center = renderer
+                .qsc_attr("center")
+                .and_then(parse_qsc_vector3)
+                .unwrap_or(Vector4::ZERO);
+            let extent = renderer
+                .qsc_attr("extent")
+                .and_then(|value| value.trim().parse::<f64>().ok())
+                .unwrap_or(50.0)
+                .max(0.1);
+            let max_ops = renderer
+                .qsc_attr("maxop")
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(1000);
+            cuemol_symm::symm_mates_by_extent(
+                center,
+                view_center,
+                extent,
+                max_ops,
+                &crystal,
+                operators,
+            )
+        };
+        if base.is_none() {
+            let mut rendered = RenderSceneSnapshot::empty();
+            append_object_snapshot(
+                &mut rendered,
+                object,
+                selector,
+                styles,
+                style_scope_id,
+                surface_potential,
+            );
+            base = Some(rendered);
+        }
+        let Some(base) = base.as_ref() else {
+            continue;
+        };
+        for transform in transforms {
+            if unitcell && transform_leaves_point_fixed(transform.matrix, center) {
+                continue;
+            }
+            let mut mate = base.clone();
+            let xform = renderer.xform_matrix().mul_mat(transform.matrix);
+            mate.apply_xform(&xform);
+            append_snapshot(target, mate);
+        }
+    }
+}
+
+fn molecule_centroid(molecule: &MolCoord) -> Option<Vector4> {
+    let atoms = molecule.atoms();
+    if atoms.is_empty() {
+        return None;
+    }
+    let (sx, sy, sz) = atoms.iter().fold((0.0, 0.0, 0.0), |sum, atom| {
+        (
+            sum.0 + atom.position.x,
+            sum.1 + atom.position.y,
+            sum.2 + atom.position.z,
+        )
+    });
+    let count = atoms.len() as f64;
+    Some(Vector4::new3(sx / count, sy / count, sz / count))
+}
+
+fn transform_leaves_point_fixed(matrix: Matrix4, point: Vector4) -> bool {
+    let mut moved = point;
+    matrix.xform3d(&mut moved);
+    let delta = moved - point;
+    delta.x * delta.x + delta.y * delta.y + delta.z * delta.z <= 1.0e-6
+}
+
+fn append_snapshot(target: &mut RenderSceneSnapshot, source: RenderSceneSnapshot) {
+    merge_bounds(&mut target.bounds, source.bounds);
+    target.atoms.extend(source.atoms);
+    target.bonds.extend(source.bonds);
+    target.meshes.extend(source.meshes);
 }
 
 fn append_selection_overlay_snapshot(

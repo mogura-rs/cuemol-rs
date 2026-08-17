@@ -1066,11 +1066,14 @@ struct GuiApplication {
     sequence_summary_cache: Option<(MoleculePanelCacheKey, Arc<Vec<GuiSequenceSummary>>)>,
     /// Active tab of the Selection side panel (Command vs Editor).
     selection_tab: SelectionTab,
+    /// Molecule or density-map object chosen in the Symmetry panel selector.
+    symmetry_target: Option<NativeSymmetryTarget>,
     /// Whether the crystallographic unit-cell box is drawn (Symmetry panel "Unit cell").
     show_unit_cell: bool,
     /// Whether the home-cell symmetry-mate copies are drawn (Symmetry panel "Symm mol").
     show_symm_mates: bool,
     crystal_draft: Option<NativeCrystalDraft>,
+    crystal_create_confirmation: Option<cuemol_core::Uid>,
     /// Density-map "chickenwire" contour display + its sigma contour level
     /// (CueMol2 Density map panel level slider).
     show_density_contour: bool,
@@ -2285,6 +2288,12 @@ enum WorkspaceAuxSelection {
         object_uid: cuemol_core::Uid,
         renderer_uid: Option<cuemol_core::Uid>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeSymmetryTarget {
+    Molecule(cuemol_core::Uid),
+    DensityMap(cuemol_core::Uid),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4029,9 +4038,11 @@ impl GuiApplication {
             molstruct_tree_cache: None,
             sequence_summary_cache: None,
             selection_tab: SelectionTab::Command,
+            symmetry_target: None,
             show_unit_cell: false,
             show_symm_mates: false,
             crystal_draft: None,
+            crystal_create_confirmation: None,
             show_density_contour: false,
             density_level: 1.5,
             show_density_solid: false,
@@ -4257,6 +4268,17 @@ impl GuiApplication {
             let dt = ctx.input(|input| input.stable_dt).clamp(0.0, 0.1);
             self.advance_trajectory_playback(dt);
             ctx.request_repaint();
+        }
+        let view_center = Vector4::new3(
+            camera.target.x as f64,
+            camera.target.y as f64,
+            camera.target.z as f64,
+        );
+        if self.state.sync_auto_symmetry_center(view_center) {
+            if let Some(scene_uid) = self.state.active_scene() {
+                self.modified_scenes.insert(scene_uid);
+            }
+            self.rebuild_snapshot();
         }
         // CueMol2 window order (uxp_gui `cuemol2.xul`):
         // menu bar (top) -> ribbon (top) -> [ left dock | tabbed view | bottom dock ]
@@ -5178,7 +5200,7 @@ impl GuiApplication {
             LeftPanel::MolStruct => self.molstruct_section(ui, camera),
             LeftPanel::Selection => self.selection_section(ui),
             LeftPanel::Coloring => self.coloring_section(ui),
-            LeftPanel::Symmetry => self.symmetry_section(ui),
+            LeftPanel::Symmetry => self.symmetry_section(ui, camera),
             LeftPanel::DensityMap => self.densitymap_section(ui, camera),
             LeftPanel::View => self.view_section(ui, camera),
             LeftPanel::Animation => self.animation_section(ui, camera),
@@ -10919,6 +10941,13 @@ impl GuiApplication {
             ) {
                 Ok(()) => {
                     self.push_undo_snapshot(undo);
+                    if let Some(scene_uid) = self
+                        .state
+                        .scene_manager()
+                        .scene_uid_for_object(draft.object_uid)
+                    {
+                        self.modified_scenes.insert(scene_uid);
+                    }
                     self.rebuild_snapshot();
                     self.set_status("Changed symmetry information");
                     self.tool_dialog = None;
@@ -10930,57 +10959,208 @@ impl GuiApplication {
         self.crystal_draft = (!applied).then_some(draft);
     }
 
-    /// Symmetry section — crystal cell / space group table (CueMol2 `symmetry-panel.xul`).
-    fn symmetry_section(&mut self, ui: &mut egui::Ui) {
-        let crystals = self.state.active_crystal_summaries();
-        if crystals.is_empty() {
-            ui.weak("No crystal cell (non-crystallographic).");
-        }
-        for cell in &crystals {
-            ui.label(egui::RichText::new(&cell.object_name).strong());
-            egui::Grid::new(("symm-grid", cell.object_uid.get()))
-                .num_columns(2)
-                .striped(true)
-                .show(ui, |ui| {
-                    ui.label("Space group");
-                    let sg = cell.space_group_name.trim();
-                    ui.label(if sg.is_empty() { "(none)" } else { sg });
-                    ui.end_row();
-                    ui.label("a, b, c (Å)");
-                    ui.label(format!("{:.3}, {:.3}, {:.3}", cell.a, cell.b, cell.c));
-                    ui.end_row();
-                    ui.label("α, β, γ (°)");
-                    ui.label(format!(
-                        "{:.2}, {:.2}, {:.2}",
-                        cell.alpha, cell.beta, cell.gamma
-                    ));
-                    ui.end_row();
-                });
-        }
+    /// Symmetry section — object selector, crystal readout, and persistent
+    /// `*symm` / `*unitcell` renderer actions (`symmetry-panel.xul`).
+    fn symmetry_section(&mut self, ui: &mut egui::Ui, camera: &CameraController) {
         let objects = self.state.active_object_summaries();
-        let target = self
-            .selected_object
-            .filter(|uid| objects.iter().any(|object| object.uid == *uid))
-            .or_else(|| objects.first().map(|object| object.uid));
-        if ui
-            .add_enabled(target.is_some(), egui::Button::new("Change symmetry…"))
-            .clicked()
-        {
-            self.open_crystal_editor(target.expect("enabled symmetry target"));
-        }
-        ui.separator();
-        // CueMol2 Symmetry panel "Unit cell" / "Symm mol" toggles: draw the cell box
-        // and the home-cell symmetry-mate copies.
-        let mut changed = false;
-        ui.add_enabled_ui(!crystals.is_empty(), |ui| {
-            changed |= ui.checkbox(&mut self.show_unit_cell, "Unit cell").changed();
-            changed |= ui
-                .checkbox(&mut self.show_symm_mates, "Symm mol")
-                .on_hover_text("Show symmetry-related molecules in the unit cell")
-                .changed();
+        let maps = self.state.active_density_map_summaries();
+        let targets = objects
+            .iter()
+            .map(|object| {
+                (
+                    NativeSymmetryTarget::Molecule(object.uid),
+                    object.name.clone(),
+                )
+            })
+            .chain(
+                maps.iter()
+                    .map(|map| (NativeSymmetryTarget::DensityMap(map.uid), map.name.clone())),
+            )
+            .collect::<Vec<_>>();
+        let workspace_target = match self.workspace_aux_selection {
+            Some(WorkspaceAuxSelection::DensityMap { map_uid, .. }) => {
+                Some(NativeSymmetryTarget::DensityMap(map_uid))
+            }
+            _ => self.selected_object.map(NativeSymmetryTarget::Molecule),
+        };
+        let mut selected = self
+            .symmetry_target
+            .filter(|target| targets.iter().any(|(candidate, _)| candidate == target))
+            .or_else(|| {
+                workspace_target
+                    .filter(|target| targets.iter().any(|(candidate, _)| candidate == target))
+            })
+            .or_else(|| targets.first().map(|(target, _)| *target));
+        let selected_name = targets
+            .iter()
+            .find(|(target, _)| Some(*target) == selected)
+            .map(|(_, name)| name.as_str())
+            .unwrap_or("(none)");
+        ui.add_enabled_ui(!targets.is_empty(), |ui| {
+            egui::ComboBox::from_id_salt("symmetry-object-target")
+                .selected_text(selected_name)
+                .show_ui(ui, |ui| {
+                    for (target, name) in &targets {
+                        ui.selectable_value(&mut selected, Some(*target), name);
+                    }
+                });
         });
-        if changed {
-            self.rebuild_snapshot();
+        self.symmetry_target = selected;
+
+        let crystal = selected.and_then(|target| match target {
+            NativeSymmetryTarget::Molecule(uid) => self.state.crystal_summary(uid),
+            NativeSymmetryTarget::DensityMap(uid) => self.state.density_crystal_summary(uid),
+        });
+        let has_crystal_info = crystal.is_some();
+        let valid_cell = crystal
+            .as_ref()
+            .is_some_and(|cell| cell.a >= 0.1 && cell.b >= 0.1 && cell.c >= 0.1);
+        let molecule_target = match selected {
+            Some(NativeSymmetryTarget::Molecule(uid)) => Some(uid),
+            _ => None,
+        };
+        let (lattice, space_group) = crystal.as_ref().map_or(("Unknown", "Unknown"), |cell| {
+            let space_group = cell.space_group_name.trim();
+            (
+                if cell.lattice.trim().is_empty() {
+                    "Unknown"
+                } else {
+                    lattice_label(&cell.lattice)
+                },
+                if space_group.is_empty() {
+                    "Unknown"
+                } else {
+                    space_group
+                },
+            )
+        });
+        ui.label(format!("{lattice}, Space group: {space_group}"));
+        egui::Grid::new("native-symmetry-cell-grid")
+            .num_columns(6)
+            .spacing([4.0, 2.0])
+            .show(ui, |ui| {
+                for (axis, value) in [
+                    ("a=", crystal.as_ref().map(|cell| cell.a)),
+                    ("b=", crystal.as_ref().map(|cell| cell.b)),
+                    ("c=", crystal.as_ref().map(|cell| cell.c)),
+                ] {
+                    ui.label(axis);
+                    ui.label(
+                        value.map_or_else(|| "- Å".to_string(), |value| format!("{value:.2} Å")),
+                    );
+                }
+                ui.end_row();
+                for (axis, value) in [
+                    ("α=", crystal.as_ref().map(|cell| cell.alpha)),
+                    ("β=", crystal.as_ref().map(|cell| cell.beta)),
+                    ("γ=", crystal.as_ref().map(|cell| cell.gamma)),
+                ] {
+                    ui.label(axis);
+                    ui.label(
+                        value.map_or_else(|| "-°".to_string(), |value| format!("{value:.2}°")),
+                    );
+                }
+                ui.end_row();
+            });
+
+        let mut change = false;
+        let mut show_symmetry = None;
+        let mut show_cell = false;
+        ui.horizontal(|ui| {
+            change = ui
+                .add_enabled(molecule_target.is_some(), egui::Button::new("Change ..."))
+                .clicked();
+            ui.add_enabled_ui(molecule_target.is_some() && valid_cell, |ui| {
+                ui.menu_button("Symm mol", |ui| {
+                    for (label, extent) in [
+                        ("20 Å", Some(20.0)),
+                        ("50 Å", Some(50.0)),
+                        ("100 Å", Some(100.0)),
+                        ("200 Å", Some(200.0)),
+                        ("Unit cell", None),
+                    ] {
+                        if ui.button(label).clicked() {
+                            show_symmetry = Some(extent);
+                            ui.close();
+                        }
+                    }
+                });
+            });
+            show_cell = ui
+                .add_enabled(valid_cell, egui::Button::new("Unit cell"))
+                .clicked();
+        });
+
+        if change {
+            let object_uid = molecule_target.expect("the Change button was enabled");
+            if has_crystal_info {
+                self.open_crystal_editor(object_uid);
+            } else {
+                self.crystal_create_confirmation = Some(object_uid);
+            }
+        }
+        if let (Some(object_uid), Some(extent)) = (molecule_target, show_symmetry) {
+            self.show_symmetry_molecules(object_uid, extent, camera.target);
+        }
+        if show_cell {
+            self.show_symmetry_unit_cell(selected.expect("the Unit cell button was enabled"));
+        }
+    }
+
+    fn show_symmetry_molecules(
+        &mut self,
+        object_uid: cuemol_core::Uid,
+        extent: Option<f64>,
+        center: Vec3,
+    ) {
+        let undo = self.capture_undo();
+        match self.state.show_molecule_symmetry(
+            object_uid,
+            extent,
+            Vector4::new3(center.x as f64, center.y as f64, center.z as f64),
+        ) {
+            Ok(_) => {
+                self.push_undo_snapshot(undo);
+                if let Some(scene_uid) = self.state.scene_manager().scene_uid_for_object(object_uid)
+                {
+                    self.modified_scenes.insert(scene_uid);
+                }
+                self.rebuild_snapshot();
+                self.set_status("Symmetry molecules shown");
+            }
+            Err(error) => self.set_status(format!("Symmetry molecule error: {error}")),
+        }
+    }
+
+    fn show_symmetry_unit_cell(&mut self, target: NativeSymmetryTarget) {
+        match target {
+            NativeSymmetryTarget::DensityMap(map_uid) => self.show_densitymap_cell(map_uid),
+            NativeSymmetryTarget::Molecule(object_uid) => {
+                if self
+                    .state
+                    .renderer_summaries(object_uid)
+                    .iter()
+                    .any(|renderer| {
+                        matches!(renderer.renderer_type.as_str(), "*unitcell" | "unitcell")
+                    })
+                {
+                    return;
+                }
+                let undo = self.capture_undo();
+                match self.state.show_molecule_unit_cell(object_uid) {
+                    Ok(_) => {
+                        self.push_undo_snapshot(undo);
+                        if let Some(scene_uid) =
+                            self.state.scene_manager().scene_uid_for_object(object_uid)
+                        {
+                            self.modified_scenes.insert(scene_uid);
+                        }
+                        self.rebuild_snapshot();
+                        self.set_status("Unit cell shown");
+                    }
+                    Err(error) => self.set_status(format!("Unit cell error: {error}")),
+                }
+            }
         }
     }
 
@@ -17419,6 +17599,7 @@ impl GuiApplication {
         self.renderer_style_create_dialog(ctx);
         self.renderer_style_edit_dialog(ctx);
         self.style_paste_confirmation_dialog(ctx);
+        self.crystal_create_confirmation_dialog(ctx);
         self.chain_dialog(ctx);
         self.residue_dialog(ctx);
         self.renderer_dialog(ctx, camera);
@@ -17442,6 +17623,32 @@ impl GuiApplication {
         self.console_dialog(ctx);
         self.tool_dialog(ctx, camera);
         self.error_alert_dialog(ctx);
+    }
+
+    fn crystal_create_confirmation_dialog(&mut self, ctx: &egui::Context) {
+        let Some(object_uid) = self.crystal_create_confirmation else {
+            return;
+        };
+        let mut open = true;
+        let mut create = false;
+        let mut cancel = false;
+        egui::Window::new("Create crystal information")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("The selected molecule has no crystal information. Create it?");
+                ui.horizontal(|ui| {
+                    create = ui.button("OK").clicked();
+                    cancel = ui.button("Cancel").clicked();
+                });
+            });
+        if create {
+            self.crystal_create_confirmation = None;
+            self.open_crystal_editor(object_uid);
+        } else if cancel || !open {
+            self.crystal_create_confirmation = None;
+        }
     }
 
     fn animation_properties_dialog(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
@@ -36160,7 +36367,7 @@ mod tests {
                     app.molstruct_section(ui, &mut camera);
                     app.selection_section(ui);
                     app.coloring_section(ui);
-                    app.symmetry_section(ui);
+                    app.symmetry_section(ui, &camera);
                     app.densitymap_section(ui, &mut camera);
                     app.view_section(ui, &mut camera);
                     app.animation_section(ui, &mut camera);
@@ -37006,6 +37213,155 @@ mod tests {
             base_atoms,
             "toggling off removes copies"
         );
+    }
+
+    #[test]
+    fn native_symmetry_actions_create_persistent_renderers_and_undo() {
+        let Some(pdb) = reference_pdb_path() else {
+            return;
+        };
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.open_path = pdb.to_string_lossy().to_string();
+        app.open_current_path(&mut camera);
+        let object_uid = app.state.active_object_summaries()[0].uid;
+        let base_atoms = app.snapshot.atoms.len();
+        let base_bonds = app.snapshot.bonds.len();
+
+        app.show_symmetry_unit_cell(NativeSymmetryTarget::Molecule(object_uid));
+        let cell_renderers = app
+            .state
+            .renderer_summaries(object_uid)
+            .into_iter()
+            .filter(|renderer| renderer.renderer_type == "*unitcell")
+            .collect::<Vec<_>>();
+        assert_eq!(cell_renderers.len(), 1);
+        assert_eq!(cell_renderers[0].name, "unitcell");
+        assert_eq!(app.snapshot.bonds.len(), base_bonds + 12);
+
+        app.show_symmetry_unit_cell(NativeSymmetryTarget::Molecule(object_uid));
+        assert_eq!(
+            app.state
+                .renderer_summaries(object_uid)
+                .iter()
+                .filter(|renderer| renderer.renderer_type == "*unitcell")
+                .count(),
+            1
+        );
+        app.undo(&mut camera);
+        assert!(app
+            .state
+            .renderer_summaries(object_uid)
+            .iter()
+            .all(|renderer| renderer.renderer_type != "*unitcell"));
+        assert_eq!(app.snapshot.bonds.len(), base_bonds);
+
+        app.show_symmetry_molecules(object_uid, None, Vec3::ZERO);
+        let symm = app
+            .state
+            .renderer_summaries(object_uid)
+            .into_iter()
+            .find(|renderer| renderer.renderer_type == "*symm")
+            .expect("the Symm mol action creates *symm");
+        assert_eq!(symm.name, "symm");
+        assert_eq!(
+            app.state
+                .renderer_property(object_uid, symm.uid, "unitcell")
+                .as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            app.state
+                .renderer_property(object_uid, symm.uid, "autoupdate")
+                .as_deref(),
+            Some("false")
+        );
+        let mate_count = app.state.active_symmetry_mate_transforms().len();
+        assert_eq!(app.snapshot.atoms.len(), base_atoms * (mate_count + 1));
+
+        app.show_symmetry_molecules(object_uid, Some(50.0), Vec3::new(1.0, 2.0, 3.0));
+        assert_eq!(
+            app.state
+                .renderer_summaries(object_uid)
+                .iter()
+                .filter(|renderer| renderer.renderer_type == "*symm")
+                .count(),
+            1
+        );
+        assert_eq!(
+            app.state
+                .renderer_property(object_uid, symm.uid, "extent")
+                .as_deref(),
+            Some("50")
+        );
+        assert_eq!(
+            app.state
+                .renderer_property(object_uid, symm.uid, "unitcell")
+                .as_deref(),
+            Some("false")
+        );
+        assert_eq!(
+            app.state
+                .renderer_property(object_uid, symm.uid, "autoupdate")
+                .as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            app.state
+                .renderer_property(object_uid, symm.uid, "center")
+                .as_deref(),
+            Some("(1,2,3)")
+        );
+        assert!(app
+            .state
+            .sync_auto_symmetry_center(Vector4::new3(4.0, 5.0, 6.0)));
+        assert_eq!(
+            app.state
+                .renderer_property(object_uid, symm.uid, "center")
+                .as_deref(),
+            Some("(4,5,6)")
+        );
+        assert!(!app
+            .state
+            .sync_auto_symmetry_center(Vector4::new3(4.0, 5.0, 6.0)));
+        app.undo(&mut camera);
+        assert_eq!(
+            app.state
+                .renderer_property(object_uid, symm.uid, "unitcell")
+                .as_deref(),
+            Some("true")
+        );
+    }
+
+    #[test]
+    fn native_symmetry_density_target_exposes_cell_only() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().expect("default scene exists");
+        let mut map = synthetic_gaussian_map();
+        map.set_xtal_params(20.0, 30.0, 40.0, 90.0, 90.0, 90.0);
+        map.set_space_group(19);
+        let map_uid = app.state.add_density_map(scene_uid, "density", map);
+
+        let crystal = app
+            .state
+            .density_crystal_summary(map_uid)
+            .expect("a density map exposes CrystalInfo");
+        assert_eq!((crystal.a, crystal.b, crystal.c), (20.0, 30.0, 40.0));
+        assert_eq!(crystal.space_group_number, Some(19));
+
+        app.show_symmetry_unit_cell(NativeSymmetryTarget::DensityMap(map_uid));
+        let map = app
+            .state
+            .density_map_summary(map_uid)
+            .expect("density map remains available");
+        assert_eq!(
+            map.renderers
+                .iter()
+                .filter(|renderer| renderer.renderer_type == "*unitcell")
+                .count(),
+            1
+        );
+        assert_eq!(app.snapshot.bonds.len(), 12);
     }
 
     #[test]
@@ -38008,7 +38364,7 @@ mod tests {
                             app.coloring_section(ui);
                             ui.separator();
                             ui.heading("Symmetry");
-                            app.symmetry_section(ui);
+                            app.symmetry_section(ui, &camera);
                             ui.separator();
                             ui.heading("Density map");
                             app.densitymap_section(ui, &mut camera);
