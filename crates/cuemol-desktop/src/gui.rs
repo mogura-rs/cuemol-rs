@@ -1516,7 +1516,7 @@ enum AnimationRenderTab {
     Preview,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct AnimationRenderSettings {
     tab: AnimationRenderTab,
     output_dir: String,
@@ -1568,6 +1568,175 @@ impl Default for AnimationRenderSettings {
             movie_format: "mov_h264".to_string(),
             bitrate_kbps: 10_240,
         }
+    }
+}
+
+fn load_animation_render_settings(state: &DesktopAppState) -> AnimationRenderSettings {
+    let defaults = AnimationRenderSettings::default();
+    let backend = state.config_value("animation_render:backend");
+    let movie_format = state.config_value("animation_render:movie_format");
+    AnimationRenderSettings {
+        tab: AnimationRenderTab::Main,
+        output_dir: nonempty_or(
+            state.config_value("animation_render:output_dir"),
+            &defaults.output_dir,
+        ),
+        base_name: nonempty_or(
+            state.config_value("animation_render:base_name"),
+            &defaults.base_name,
+        ),
+        width: state
+            .config_value("animation_render:width")
+            .parse::<u32>()
+            .unwrap_or(defaults.width)
+            .clamp(100, 16_384),
+        height: state
+            .config_value("animation_render:height")
+            .parse::<u32>()
+            .unwrap_or(defaults.height)
+            .clamp(100, 16_384),
+        perspective: config_bool(state, "animation_render:perspective", defaults.perspective),
+        fps: state
+            .config_value("animation_render:fps")
+            .parse::<u32>()
+            .unwrap_or(defaults.fps)
+            .clamp(1, 240),
+        concurrency: state
+            .config_value("animation_render:concurrency")
+            .parse::<u32>()
+            .unwrap_or(defaults.concurrency)
+            .clamp(1, 32),
+        duplicate_last_frame: config_bool(
+            state,
+            "animation_render:duplicate_last_frame",
+            defaults.duplicate_last_frame,
+        ),
+        backend: match backend.as_str() {
+            "Umbreon" => backend,
+            _ => defaults.backend,
+        },
+        povray_executable: nonempty_or(
+            state.config_value("animation_render:povray_executable"),
+            &defaults.povray_executable,
+        ),
+        povray_include_dir: state.config_value("animation_render:povray_include_dir"),
+        pov_clip_plane: config_bool(
+            state,
+            "animation_render:pov_clip_plane",
+            defaults.pov_clip_plane,
+        ),
+        pov_post_blend: config_bool(
+            state,
+            "animation_render:pov_post_blend",
+            defaults.pov_post_blend,
+        ),
+        pov_shadow: config_bool(state, "animation_render:pov_shadow", defaults.pov_shadow),
+        pov_edge_lines: config_bool(
+            state,
+            "animation_render:pov_edge_lines",
+            defaults.pov_edge_lines,
+        ),
+        pov_labels: config_bool(state, "animation_render:pov_labels", defaults.pov_labels),
+        pov_radiosity: state
+            .config_value("animation_render:pov_radiosity")
+            .parse::<i32>()
+            .ok()
+            .filter(|value| (-1..=10).contains(value))
+            .unwrap_or(defaults.pov_radiosity),
+        make_movie: config_bool(state, "animation_render:make_movie", defaults.make_movie),
+        ffmpeg_executable: nonempty_or(
+            state.config_value("animation_render:ffmpeg_executable"),
+            &defaults.ffmpeg_executable,
+        ),
+        movie_format: if ANIMATION_MOVIE_FORMATS
+            .iter()
+            .any(|(value, _)| *value == movie_format)
+        {
+            movie_format
+        } else {
+            defaults.movie_format
+        },
+        bitrate_kbps: state
+            .config_value("animation_render:bitrate_kbps")
+            .parse::<u32>()
+            .unwrap_or(defaults.bitrate_kbps)
+            .clamp(1, 200_000),
+    }
+}
+
+fn persist_animation_render_settings(
+    state: &mut DesktopAppState,
+    settings: &AnimationRenderSettings,
+) {
+    for (key, value) in [
+        ("animation_render:output_dir", settings.output_dir.clone()),
+        ("animation_render:base_name", settings.base_name.clone()),
+        ("animation_render:width", settings.width.to_string()),
+        ("animation_render:height", settings.height.to_string()),
+        (
+            "animation_render:perspective",
+            settings.perspective.to_string(),
+        ),
+        ("animation_render:fps", settings.fps.to_string()),
+        (
+            "animation_render:concurrency",
+            settings.concurrency.to_string(),
+        ),
+        (
+            "animation_render:duplicate_last_frame",
+            settings.duplicate_last_frame.to_string(),
+        ),
+        ("animation_render:backend", settings.backend.clone()),
+        (
+            "animation_render:povray_executable",
+            settings.povray_executable.clone(),
+        ),
+        (
+            "animation_render:povray_include_dir",
+            settings.povray_include_dir.clone(),
+        ),
+        (
+            "animation_render:pov_clip_plane",
+            settings.pov_clip_plane.to_string(),
+        ),
+        (
+            "animation_render:pov_post_blend",
+            settings.pov_post_blend.to_string(),
+        ),
+        (
+            "animation_render:pov_shadow",
+            settings.pov_shadow.to_string(),
+        ),
+        (
+            "animation_render:pov_edge_lines",
+            settings.pov_edge_lines.to_string(),
+        ),
+        (
+            "animation_render:pov_labels",
+            settings.pov_labels.to_string(),
+        ),
+        (
+            "animation_render:pov_radiosity",
+            settings.pov_radiosity.to_string(),
+        ),
+        (
+            "animation_render:make_movie",
+            settings.make_movie.to_string(),
+        ),
+        (
+            "animation_render:ffmpeg_executable",
+            settings.ffmpeg_executable.clone(),
+        ),
+        (
+            "animation_render:movie_format",
+            settings.movie_format.clone(),
+        ),
+        (
+            "animation_render:bitrate_kbps",
+            settings.bitrate_kbps.to_string(),
+        ),
+    ] {
+        state.put_config_value(key, value);
     }
 }
 
@@ -4322,6 +4491,7 @@ impl GuiApplication {
             .parse::<f32>()
             .unwrap_or(ANIMATION_TIME_COLUMN_DEFAULT_WIDTH)
             .clamp(ANIMATION_TIME_COLUMN_MIN_WIDTH, 200.0);
+        let animation_render_settings = load_animation_render_settings(&state);
         Self {
             state,
             open_path: "../cuemol2/tests/test_data/1CRN.pdb".to_string(),
@@ -4515,7 +4685,7 @@ impl GuiApplication {
             animation_reset_confirmation: false,
             animation_start_camera: None,
             animation_start_state: None,
-            animation_render_settings: AnimationRenderSettings::default(),
+            animation_render_settings,
             animation_render_job: None,
             animation_render_log: Vec::new(),
             animation_render_total_frames: 0,
@@ -15483,6 +15653,7 @@ impl GuiApplication {
     }
 
     fn animation_render_tool_ui(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
+        let previous_settings = self.animation_render_settings.clone();
         ui.horizontal(|ui| {
             ui.selectable_value(
                 &mut self.animation_render_settings.tab,
@@ -15550,6 +15721,9 @@ impl GuiApplication {
                 job.cancel.store(true, Ordering::Relaxed);
                 self.set_status("Cancelling animation render");
             }
+        }
+        if self.animation_render_settings != previous_settings {
+            persist_animation_render_settings(&mut self.state, &self.animation_render_settings);
         }
     }
 
@@ -20043,6 +20217,7 @@ impl GuiApplication {
             .unwrap_or(ANIMATION_TIME_COLUMN_DEFAULT_WIDTH)
             .clamp(ANIMATION_TIME_COLUMN_MIN_WIDTH, 200.0);
         self.animation_start_column_drag_start_width = None;
+        self.animation_render_settings = load_animation_render_settings(&self.state);
         for (style_key, config_key) in [
             ("DefaultLabel.font_name", "style:DefaultLabel.font_name"),
             ("DefaultLabel.font_size", "style:DefaultLabel.font_size"),
@@ -33561,6 +33736,37 @@ mod tests {
     }
 
     #[test]
+    fn native_animation_render_settings_round_trip_config() {
+        let mut app = GuiApplication::new();
+        let settings = AnimationRenderSettings {
+            output_dir: "/tmp/render frames".to_string(),
+            base_name: "movie".to_string(),
+            width: 1920,
+            height: 1080,
+            perspective: false,
+            fps: 60,
+            concurrency: 8,
+            duplicate_last_frame: true,
+            backend: "Umbreon".to_string(),
+            povray_executable: "/opt/povray".to_string(),
+            povray_include_dir: "/opt/pov/include".to_string(),
+            pov_clip_plane: false,
+            pov_post_blend: false,
+            pov_shadow: true,
+            pov_edge_lines: false,
+            pov_labels: true,
+            pov_radiosity: 9,
+            make_movie: true,
+            ffmpeg_executable: "/opt/ffmpeg".to_string(),
+            movie_format: "gifanim".to_string(),
+            bitrate_kbps: 24_000,
+            ..Default::default()
+        };
+        persist_animation_render_settings(&mut app.state, &settings);
+        assert_eq!(load_animation_render_settings(&app.state), settings);
+    }
+
+    #[test]
     fn animation_render_cancel_and_restore_are_scoped_to_animation_state() {
         let mut app = GuiApplication::new();
         let initial_camera = CameraController {
@@ -33770,7 +33976,7 @@ mod tests {
         let app = GuiApplication::new_with_config_source(NativeConfigSource {
             path: Some(PathBuf::from("preloaded.conf")),
             input: Ok(Some(
-                "view_input:tbrad\t1.25\ncuemol2.ui.ribbon.collapsed\ttrue\nleft_panel:Workspace:visible\tfalse\nleft_panel:Workspace:collapsed\ttrue\nleft_panel:Workspace:height\t185\nleft_panel:order\tAnimation|Workspace|MolStruct|Selection|Coloring|Symmetry|Density map|View\nleft_panel:width\t310\nbottom_panel:visible\tfalse\nbottom_panel:tab\tsequence\nbottom_panel:height\t240\nsequence_panel:name_width\t220\nanimation_panel:name_width\t180\nanimation_panel:start_width\t70\nmru:length\t2\nmru:0:path\t/tmp/recent.qsc\nmru:1:path\t/tmp/recent.pdb\nselection_history:length\t2\nselection_history:0\tchain A\nselection_history:1\tname CA\n"
+                "view_input:tbrad\t1.25\ncuemol2.ui.ribbon.collapsed\ttrue\nleft_panel:Workspace:visible\tfalse\nleft_panel:Workspace:collapsed\ttrue\nleft_panel:Workspace:height\t185\nleft_panel:order\tAnimation|Workspace|MolStruct|Selection|Coloring|Symmetry|Density map|View\nleft_panel:width\t310\nbottom_panel:visible\tfalse\nbottom_panel:tab\tsequence\nbottom_panel:height\t240\nsequence_panel:name_width\t220\nanimation_panel:name_width\t180\nanimation_panel:start_width\t70\nanimation_render:height\t720\nanimation_render:concurrency\t6\nanimation_render:duplicate_last_frame\ttrue\nanimation_render:backend\tUmbreon\nanimation_render:pov_shadow\ttrue\nanimation_render:make_movie\ttrue\nanimation_render:movie_format\tgifanim\nmru:length\t2\nmru:0:path\t/tmp/recent.qsc\nmru:1:path\t/tmp/recent.pdb\nselection_history:length\t2\nselection_history:0\tchain A\nselection_history:1\tname CA\n"
                     .to_string(),
             )),
         });
@@ -33791,6 +33997,13 @@ mod tests {
         assert_eq!(app.sequence_name_width, 220.0);
         assert_eq!(app.animation_name_column_width, 180.0);
         assert_eq!(app.animation_start_column_width, 70.0);
+        assert_eq!(app.animation_render_settings.height, 720);
+        assert_eq!(app.animation_render_settings.concurrency, 6);
+        assert!(app.animation_render_settings.duplicate_last_frame);
+        assert_eq!(app.animation_render_settings.backend, "Umbreon");
+        assert!(app.animation_render_settings.pov_shadow);
+        assert!(app.animation_render_settings.make_movie);
+        assert_eq!(app.animation_render_settings.movie_format, "gifanim");
         assert_eq!(
             app.recent_paths,
             ["/tmp/recent.qsc", "/tmp/recent.pdb"].map(PathBuf::from)

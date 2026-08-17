@@ -1332,6 +1332,21 @@ fn animation_render_uses_cancellable_progress_and_reference_frame_controls() {
     assert!(TAURI_APP_RS.contains("spawn_tauri_animation_movie(task)"));
     assert!(TAURI_APP_RS.contains("run_pov_process_with_poll"));
     assert!(TAURI_APP_RS.contains("_frm_%04d.png"));
+    assert!(NATIVE_GUI_RS.contains("fn load_animation_render_settings("));
+    assert!(NATIVE_GUI_RS.contains("fn persist_animation_render_settings("));
+    for key in [
+        "animation_render:height",
+        "animation_render:concurrency",
+        "animation_render:duplicate_last_frame",
+        "animation_render:pov_clip_plane",
+        "animation_render:pov_post_blend",
+        "animation_render:pov_shadow",
+        "animation_render:pov_edge_lines",
+        "animation_render:pov_labels",
+        "animation_render:make_movie",
+    ] {
+        assert!(NATIVE_GUI_RS.contains(key), "missing native setting {key}");
+    }
 }
 
 #[test]
