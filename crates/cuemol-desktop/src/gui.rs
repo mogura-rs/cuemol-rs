@@ -4057,7 +4057,7 @@ impl GuiApplication {
                         ui.close();
                     }
                     if ui.button("Export scene...").clicked() {
-                        self.choose_export_scene();
+                        self.choose_export_scene(camera);
                         ui.close();
                     }
                 });
@@ -10213,7 +10213,7 @@ impl GuiApplication {
                     egui::TextEdit::singleline(&mut self.export_path),
                 );
                 if ui.button("Export POV").clicked() {
-                    self.export_current_scene();
+                    self.export_current_scene(camera);
                 }
             });
         self.show_inspector = open;
@@ -11140,7 +11140,7 @@ impl GuiApplication {
         Ok(())
     }
 
-    fn render_tab(&mut self, ui: &mut egui::Ui) {
+    fn render_tab(&mut self, ui: &mut egui::Ui, camera: &CameraController) {
         ui.horizontal(|ui| {
             egui::ComboBox::from_label("Backend")
                 .selected_text(&self.render_backend)
@@ -11163,7 +11163,7 @@ impl GuiApplication {
                 self.open_options_dialog();
             }
             if ui.button("Render").clicked() {
-                self.export_current_scene();
+                self.export_current_scene(camera);
             }
             if ui.button("Cancel").clicked() {
                 self.set_status("No render job is running");
@@ -11296,13 +11296,16 @@ impl GuiApplication {
         }
     }
 
-    fn choose_export_scene(&mut self) {
+    fn choose_export_scene(&mut self, camera: &CameraController) {
         if let Some(path) = native_file_dialog(NativeFileDialog::ExportScene, &self.export_path) {
             self.export_path = path.to_string_lossy().into_owned();
             if crate::DesktopAppState::path_has_extension(&self.export_path, "png") {
+                if !self.persist_export_camera(camera) {
+                    return;
+                }
                 self.open_png_export_dialog(path);
             } else {
-                self.export_current_scene();
+                self.export_current_scene(camera);
             }
         }
     }
@@ -12104,7 +12107,30 @@ impl GuiApplication {
             .unwrap_or((1920, 1080))
     }
 
-    fn export_current_scene(&mut self) {
+    fn persist_export_camera(&mut self, camera: &CameraController) -> bool {
+        let camera = camera.to_qsys_camera("__current");
+        if self.state.active_view_summary().is_some()
+            && self
+                .state
+                .set_active_view_camera(&camera)
+                .inspect_err(|error| self.set_error(error.clone()))
+                .is_err()
+        {
+            return false;
+        }
+        match self.state.set_active_scene_camera(camera) {
+            Ok(()) => true,
+            Err(error) => {
+                self.set_error(error);
+                false
+            }
+        }
+    }
+
+    fn export_current_scene(&mut self, camera: &CameraController) {
+        if !self.persist_export_camera(camera) {
+            return;
+        }
         let path = self.export_path.trim().to_string();
         if self.render_backend == "Umbreon" {
             if !crate::DesktopAppState::path_has_extension(&path, "png") {
@@ -18833,7 +18859,7 @@ impl GuiApplication {
                     "About plugins" => self.plugin_tool_ui(ui),
                     "About config" => self.config_tool_ui(ui),
                     "Addon manager" => self.addon_tool_ui(ui),
-                    "POV-Ray rendering" => self.render_tab(ui),
+                    "POV-Ray rendering" => self.render_tab(ui, camera),
                     "Animation rendering" => self.animation_render_tool_ui(ui, camera),
                     _ => {
                         ui.label(tool_status_text(&title));

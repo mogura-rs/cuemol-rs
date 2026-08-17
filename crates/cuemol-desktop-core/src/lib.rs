@@ -12539,12 +12539,7 @@ impl DesktopAppState {
         exporter
             .handler_mut()
             .set_path(path.as_ref().to_string_lossy().into_owned());
-        exporter.write_scene_file(
-            &mesh,
-            camera.center(),
-            (camera.zoom() / 1.2).max(1.0),
-            camera.is_perspective(),
-        )?;
+        exporter.write_scene_file_with_camera(&mesh, &camera)?;
         Ok(snapshot.atom_count())
     }
 
@@ -64095,11 +64090,19 @@ attribute \"dep\" string \"positions\"
         app.save_object_as(object_uid, &pdb_path).unwrap();
         assert!(std::fs::read_to_string(&pdb_path).unwrap().contains("ATOM"));
 
+        let mut camera = cuemol_qsys::Camera::new();
+        camera.set_center(cuemol_core::Vector4::new3(1.0, 2.0, 3.0));
+        camera.set_cam_dist(10.0);
+        camera.set_zoom(20.0);
+        camera.set_perspective(false);
+        app.set_active_scene_camera(camera).unwrap();
         let exported_atoms = app.export_active_scene_pov(&pov_path, "name CA").unwrap();
         assert_eq!(exported_atoms, 0);
         let pov = std::fs::read_to_string(&pov_path).unwrap();
         assert!(pov.contains("camera {"));
         assert!(pov.contains("mesh2 {"));
+        assert!(pov.contains("#declare _camera_pos = <1.000000,2.000000,13.000000>"));
+        assert!(pov.contains("orthographic"));
 
         let rows = app.active_sequence_summaries();
         assert_eq!(rows.len(), 1);
