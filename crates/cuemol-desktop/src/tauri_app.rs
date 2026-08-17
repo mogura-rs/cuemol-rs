@@ -766,9 +766,34 @@ struct LwRendererDto {
 struct AnimationObjectDto {
     index: usize,
     name: String,
+    type_name: String,
+    disabled: bool,
+    time_ref_name: String,
+    relative_start: f64,
     start: f64,
     end: f64,
     duration: f64,
+    quadric: f64,
+    angle: Option<f64>,
+    axis: Option<[f64; 3]>,
+    target_camera: Option<String>,
+    ignore_center: Option<bool>,
+    ignore_rotate: Option<bool>,
+    ignore_zoom: Option<bool>,
+    ignore_slab: Option<bool>,
+    keep_quaternion_positive: Option<bool>,
+    renderer_names: Option<String>,
+    hide: Option<bool>,
+    fade: Option<bool>,
+    target_alpha: Option<f64>,
+    direction: Option<f64>,
+    distance: Option<f64>,
+    molecule_name: Option<String>,
+    property_name: Option<String>,
+    start_value: Option<f64>,
+    end_value: Option<f64>,
+    start_position: Option<[f64; 3]>,
+    end_position: Option<[f64; 3]>,
 }
 
 #[derive(Serialize)]
@@ -1461,6 +1486,38 @@ struct AnimationRenderInput {
     ffmpeg_executable: String,
     movie_format: String,
     bitrate_kbps: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AnimationObjectPropertiesInput {
+    index: usize,
+    name: String,
+    disabled: bool,
+    time_ref_name: String,
+    start: f64,
+    duration: f64,
+    quadric: f64,
+    angle: Option<f64>,
+    axis: Option<[f64; 3]>,
+    target_camera: Option<String>,
+    ignore_center: Option<bool>,
+    ignore_rotate: Option<bool>,
+    ignore_zoom: Option<bool>,
+    ignore_slab: Option<bool>,
+    keep_quaternion_positive: Option<bool>,
+    renderer_names: Option<String>,
+    hide: Option<bool>,
+    fade: Option<bool>,
+    target_alpha: Option<f64>,
+    direction: Option<f64>,
+    distance: Option<f64>,
+    molecule_name: Option<String>,
+    property_name: Option<String>,
+    start_value: Option<f64>,
+    end_value: Option<f64>,
+    start_position: Option<[f64; 3]>,
+    end_position: Option<[f64; 3]>,
 }
 
 struct AppModel {
@@ -2235,23 +2292,7 @@ impl AppModel {
             .motions()
             .iter()
             .enumerate()
-            .map(|(index, motion)| {
-                let object = motion.base();
-                let start = animation_seconds(object.abs_start());
-                let end = animation_seconds(object.abs_end());
-                let name = if object.name().is_empty() {
-                    motion.type_name().to_string()
-                } else {
-                    format!("{} ({})", object.name(), motion.type_name())
-                };
-                AnimationObjectDto {
-                    index,
-                    name,
-                    start,
-                    end,
-                    duration: (end - start).max(0.0),
-                }
-            })
+            .map(|(index, motion)| animation_object_dto(index, motion))
             .collect();
         let morphs = objects
             .iter()
@@ -6696,6 +6737,230 @@ impl AppModel {
             .map_err(|error| error.to_string())
     }
 
+    fn set_animation_object_properties(
+        &mut self,
+        input: AnimationObjectPropertiesInput,
+    ) -> Result<(), String> {
+        let name = input.name.trim().to_string();
+        let time_ref_name = input.time_ref_name.trim().to_string();
+        if name.is_empty() {
+            return Err("animation object name is required".to_string());
+        }
+        if !input.start.is_finite() || !(-86_400.0..=86_400.0).contains(&input.start) {
+            return Err(
+                "animation start time must be between -86400 and 86400 seconds".to_string(),
+            );
+        }
+        if !input.duration.is_finite() || !(0.001..=86_400.0).contains(&input.duration) {
+            return Err("animation duration must be between 0.001 and 86400 seconds".to_string());
+        }
+        if !input.quadric.is_finite() || !(0.0..=0.5).contains(&input.quadric) {
+            return Err("animation quadric must be between 0 and 0.5".to_string());
+        }
+        let mut animation = self.active_animation_manager()?;
+        let current = animation
+            .motions()
+            .get(input.index)
+            .ok_or_else(|| format!("animation object {} was not found", input.index))?;
+        let uid = current.base().uid();
+        let old_name = current.base().name().to_string();
+        if animation
+            .motions()
+            .iter()
+            .any(|motion| motion.base().uid() != uid && motion.base().name() == name)
+        {
+            return Err(format!("animation object name {name} is already used"));
+        }
+        if !time_ref_name.is_empty() {
+            let reference = animation
+                .motions()
+                .iter()
+                .find(|motion| motion.base().name() == time_ref_name)
+                .ok_or_else(|| format!("animation reference {time_ref_name} was not found"))?;
+            if reference.base().uid() == uid {
+                return Err("animation object cannot reference itself".to_string());
+            }
+        }
+        if let Some(value) = input.angle {
+            if !value.is_finite() {
+                return Err("rotation angle must be finite".to_string());
+            }
+        }
+        if let Some(axis) = input.axis {
+            if axis.iter().any(|value| !value.is_finite())
+                || axis.iter().map(|value| value * value).sum::<f64>() < 1.0e-12
+            {
+                return Err("spin axis must be a non-zero finite vector".to_string());
+            }
+        }
+        for (label, value) in [
+            ("target opacity", input.target_alpha),
+            ("direction angle", input.direction),
+            ("distance", input.distance),
+            ("start value", input.start_value),
+            ("end value", input.end_value),
+        ] {
+            if value.is_some_and(|value| !value.is_finite()) {
+                return Err(format!("{label} must be finite"));
+            }
+        }
+        if input
+            .target_alpha
+            .is_some_and(|value| !(0.0..=1.0).contains(&value))
+        {
+            return Err("target opacity must be between 0 and 1".to_string());
+        }
+        for (label, value) in [
+            ("start position", input.start_position),
+            ("end position", input.end_position),
+        ] {
+            if value.is_some_and(|value| value.iter().any(|component| !component.is_finite())) {
+                return Err(format!("{label} must be finite"));
+            }
+        }
+        if let Some(target_camera) = input.target_camera.as_deref() {
+            let target_camera = target_camera.trim();
+            let scene_uid = self.desktop.active_scene().unwrap();
+            if !target_camera.is_empty()
+                && !self
+                    .desktop
+                    .camera_summaries(scene_uid)
+                    .iter()
+                    .any(|camera| camera.name == target_camera)
+            {
+                return Err(format!("camera {target_camera} was not found"));
+            }
+        }
+        let start = animation_time(input.start);
+        let duration = animation_time(input.duration);
+        animation.edit_motion_by_uid(uid, "properties", "", |motion| {
+            let object = motion.base_mut();
+            object.set_name(name.clone());
+            object.set_disabled(input.disabled);
+            object.set_time_ref_name(time_ref_name.clone());
+            object.set_rel_start(start);
+            object.set_rel_end(start.saturating_add(duration));
+            object.set_quadric(input.quadric);
+            match motion {
+                AnimMotion::Camera(value) => {
+                    if let Some(target) = input.target_camera.as_deref() {
+                        value.set_endcam(target.trim());
+                    }
+                    if let Some(value_input) = input.ignore_center {
+                        value.set_ignorecenter(value_input);
+                    }
+                    if let Some(value_input) = input.ignore_rotate {
+                        value.set_ignorerotate(value_input);
+                    }
+                    if let Some(value_input) = input.ignore_zoom {
+                        value.set_ignorezoom(value_input);
+                    }
+                    if let Some(value_input) = input.ignore_slab {
+                        value.set_ignoreslab(value_input);
+                    }
+                    if let Some(value_input) = input.keep_quaternion_positive {
+                        value.set_keepquatpositive(value_input);
+                    }
+                }
+                AnimMotion::RealProperty(value) => {
+                    if let Some(targets) = input.renderer_names.as_deref() {
+                        value.set_rend(targets.trim());
+                    }
+                    if let Some(property) = input.property_name.as_deref() {
+                        value.set_prop(property.trim());
+                    }
+                    if let Some(value_input) = input.start_value {
+                        value.set_start_value(value_input);
+                    }
+                    if let Some(value_input) = input.end_value {
+                        value.set_end_value(value_input);
+                    }
+                }
+                AnimMotion::Molecule(value) => {
+                    if let Some(target) = input.molecule_name.as_deref() {
+                        value.set_mol(target.trim());
+                    }
+                    if let Some(property) = input.property_name.as_deref() {
+                        value.set_prop(property.trim());
+                    }
+                    if let Some(value_input) = input.start_value {
+                        value.set_start_value(value_input);
+                    }
+                    if let Some(value_input) = input.end_value {
+                        value.set_end_value(value_input);
+                    }
+                }
+                AnimMotion::RendererTransform(value) => {
+                    if let Some(targets) = input.renderer_names.as_deref() {
+                        value.set_rend(targets.trim());
+                    }
+                    if let Some(position) = input.start_position {
+                        value.set_start_tran(Vector4::new3(position[0], position[1], position[2]));
+                    }
+                    if let Some(position) = input.end_position {
+                        value.set_end_tran(Vector4::new3(position[0], position[1], position[2]));
+                    }
+                }
+                AnimMotion::ShowHide(value) => {
+                    if let Some(targets) = input.renderer_names.as_deref() {
+                        value.set_rend(targets.trim());
+                    }
+                    if let Some(value_input) = input.hide {
+                        value.set_hide(value_input);
+                    }
+                    if let Some(value_input) = input.fade {
+                        value.set_fade(value_input);
+                    }
+                    if let Some(value_input) = input.target_alpha {
+                        value.set_tgt_alpha(value_input);
+                    }
+                }
+                AnimMotion::Spin(value) => {
+                    if let Some(value_input) = input.angle {
+                        value.set_angle(value_input);
+                    }
+                    if let Some(axis) = input.axis {
+                        value.set_axis(Vector4::new3(axis[0], axis[1], axis[2]));
+                    }
+                }
+                AnimMotion::Slide(value) => {
+                    if let Some(targets) = input.renderer_names.as_deref() {
+                        value.set_rend(targets.trim());
+                    }
+                    if let Some(value_input) = input.hide {
+                        value.set_hide(value_input);
+                    }
+                    if let Some(value_input) = input.direction {
+                        value.set_direction(value_input);
+                    }
+                    if let Some(value_input) = input.distance {
+                        value.set_distance(value_input);
+                    }
+                }
+                AnimMotion::Noop(_) | AnimMotion::Unknown { .. } => {}
+            }
+        });
+        if old_name != name {
+            let referencing = animation
+                .motions()
+                .iter()
+                .filter(|motion| motion.base().time_ref_name() == old_name)
+                .map(|motion| motion.base().uid())
+                .collect::<Vec<_>>();
+            for sibling_uid in referencing {
+                animation.edit_motion_by_uid(sibling_uid, "timeRefName", "", |motion| {
+                    motion.base_mut().set_time_ref_name(name.clone());
+                });
+            }
+        }
+        animation
+            .try_resolve_rel_time()
+            .map_err(|error| error.to_string())?;
+        self.set_active_animation_manager(&animation)?;
+        self.reset_animation_playback();
+        Ok(())
+    }
+
     fn animation_duration(&self) -> f64 {
         self.active_animation_manager()
             .map(|animation| animation_seconds(animation.length()))
@@ -7341,6 +7606,7 @@ enum ModelRequest {
         index: usize,
         duration: f64,
     },
+    SetAnimationObjectProperties(AnimationObjectPropertiesInput),
     AnimationControl(String),
     SetAnimationLoop(bool),
     SetAnimationStartCamera(String),
@@ -8318,6 +8584,93 @@ fn encode_tauri_animation_movie(
         path: output_path,
         log: format!("FFmpeg exited with {status}"),
     })
+}
+
+fn animation_object_dto(index: usize, motion: &AnimMotion) -> AnimationObjectDto {
+    let object = motion.base();
+    let start = animation_seconds(object.abs_start());
+    let end = animation_seconds(object.abs_end());
+    let mut dto = AnimationObjectDto {
+        index,
+        name: object.name().to_string(),
+        type_name: motion.type_name().to_string(),
+        disabled: object.disabled(),
+        time_ref_name: object.time_ref_name().to_string(),
+        relative_start: animation_seconds(object.rel_start()),
+        start,
+        end,
+        duration: (end - start).max(0.0),
+        quadric: object.quadric(),
+        angle: None,
+        axis: None,
+        target_camera: None,
+        ignore_center: None,
+        ignore_rotate: None,
+        ignore_zoom: None,
+        ignore_slab: None,
+        keep_quaternion_positive: None,
+        renderer_names: None,
+        hide: None,
+        fade: None,
+        target_alpha: None,
+        direction: None,
+        distance: None,
+        molecule_name: None,
+        property_name: None,
+        start_value: None,
+        end_value: None,
+        start_position: None,
+        end_position: None,
+    };
+    match motion {
+        AnimMotion::Camera(value) => {
+            dto.target_camera = Some(value.endcam().to_string());
+            dto.ignore_center = Some(value.ignorecenter());
+            dto.ignore_rotate = Some(value.ignorerotate());
+            dto.ignore_zoom = Some(value.ignorezoom());
+            dto.ignore_slab = Some(value.ignoreslab());
+            dto.keep_quaternion_positive = Some(value.keepquatpositive());
+        }
+        AnimMotion::RealProperty(value) => {
+            dto.renderer_names = Some(value.rend().to_string());
+            dto.property_name = Some(value.prop().to_string());
+            dto.start_value = Some(value.start_value());
+            dto.end_value = Some(value.end_value());
+        }
+        AnimMotion::Molecule(value) => {
+            dto.molecule_name = Some(value.mol().to_string());
+            dto.property_name = Some(value.prop().to_string());
+            dto.start_value = Some(value.start_value());
+            dto.end_value = Some(value.end_value());
+        }
+        AnimMotion::RendererTransform(value) => {
+            let start_position = value.start_tran();
+            let end_position = value.end_tran();
+            dto.renderer_names = Some(value.rend().to_string());
+            dto.property_name = Some(value.prop().to_string());
+            dto.start_position = Some([start_position.x, start_position.y, start_position.z]);
+            dto.end_position = Some([end_position.x, end_position.y, end_position.z]);
+        }
+        AnimMotion::ShowHide(value) => {
+            dto.renderer_names = Some(value.rend().to_string());
+            dto.hide = Some(value.hide());
+            dto.fade = Some(value.fade());
+            dto.target_alpha = Some(value.tgt_alpha());
+        }
+        AnimMotion::Spin(value) => {
+            let axis = value.axis();
+            dto.angle = Some(value.angle());
+            dto.axis = Some([axis.x, axis.y, axis.z]);
+        }
+        AnimMotion::Slide(value) => {
+            dto.renderer_names = Some(value.rend().to_string());
+            dto.hide = Some(value.hide());
+            dto.direction = Some(value.direction());
+            dto.distance = Some(value.distance());
+        }
+        AnimMotion::Noop(_) | AnimMotion::Unknown { .. } => {}
+    }
+    dto
 }
 
 fn animation_seconds(value: i64) -> f64 {
@@ -11100,6 +11453,13 @@ fn handle_model_request(
             model.set_active_animation_manager(&animation)?;
             model.animation_elapsed = model.animation_elapsed.min(model.animation_duration());
             model.status = "Animation duration changed".to_string();
+            model.push_undo(undo);
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::SetAnimationObjectProperties(input) => {
+            let undo = model.capture_undo();
+            model.set_animation_object_properties(input)?;
+            model.status = "Animation object properties changed".to_string();
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -14339,6 +14699,17 @@ fn set_animation_duration(
 }
 
 #[tauri::command]
+fn set_animation_object_properties(
+    input: AnimationObjectPropertiesInput,
+    state: State<'_, ManagedState>,
+) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(
+        &state,
+        ModelRequest::SetAnimationObjectProperties(input),
+    )?)
+}
+
+#[tauri::command]
 fn animation_control(
     action: String,
     state: State<'_, ManagedState>,
@@ -14912,6 +15283,7 @@ pub fn run() -> Result<(), tauri::Error> {
             delete_animation_object,
             move_animation_object,
             set_animation_duration,
+            set_animation_object_properties,
             animation_control,
             set_animation_loop,
             set_animation_start_camera,
@@ -15048,6 +15420,38 @@ mod tests {
         motion.base_mut().set_rel_end(animation_time(duration));
         animation.append_motion(motion);
         model.set_active_animation_manager(&animation).unwrap();
+    }
+
+    fn animation_properties_input(object: &AnimationObjectDto) -> AnimationObjectPropertiesInput {
+        AnimationObjectPropertiesInput {
+            index: object.index,
+            name: object.name.clone(),
+            disabled: object.disabled,
+            time_ref_name: object.time_ref_name.clone(),
+            start: object.relative_start,
+            duration: object.duration,
+            quadric: object.quadric,
+            angle: object.angle,
+            axis: object.axis,
+            target_camera: object.target_camera.clone(),
+            ignore_center: object.ignore_center,
+            ignore_rotate: object.ignore_rotate,
+            ignore_zoom: object.ignore_zoom,
+            ignore_slab: object.ignore_slab,
+            keep_quaternion_positive: object.keep_quaternion_positive,
+            renderer_names: object.renderer_names.clone(),
+            hide: object.hide,
+            fade: object.fade,
+            target_alpha: object.target_alpha,
+            direction: object.direction,
+            distance: object.distance,
+            molecule_name: object.molecule_name.clone(),
+            property_name: object.property_name.clone(),
+            start_value: object.start_value,
+            end_value: object.end_value,
+            start_position: object.start_position,
+            end_position: object.end_position,
+        }
     }
 
     fn model_with_renderer() -> (AppModel, Uid, Uid) {
@@ -20901,6 +21305,65 @@ mod tests {
         assert_eq!(model.snapshot().animation_start_camera, "__current");
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert!(model.snapshot().animation_objects.is_empty());
+    }
+
+    #[test]
+    fn animation_object_properties_update_typed_values_and_reference_names() {
+        let mut model = model_without_gpu();
+        handle_model_request(
+            &mut model,
+            ModelRequest::AddAnimationObject("simple-spin".to_string()),
+        )
+        .unwrap();
+        handle_model_request(
+            &mut model,
+            ModelRequest::AddAnimationObject("noop".to_string()),
+        )
+        .unwrap();
+        let snapshot = model.snapshot();
+        let mut input = animation_properties_input(&snapshot.animation_objects[0]);
+        input.name = "turn".to_string();
+        input.disabled = true;
+        input.start = 0.25;
+        input.duration = 2.5;
+        input.quadric = 0.2;
+        input.angle = Some(180.0);
+        input.axis = Some([1.0, 2.0, 3.0]);
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetAnimationObjectProperties(input),
+        )
+        .unwrap();
+
+        let snapshot = model.snapshot();
+        let spin = &snapshot.animation_objects[0];
+        assert_eq!(spin.name, "turn");
+        assert_eq!(spin.type_name, "SimpleSpin");
+        assert!(spin.disabled);
+        assert_eq!(spin.relative_start, 0.25);
+        assert_eq!(spin.duration, 2.5);
+        assert_eq!(spin.quadric, 0.2);
+        assert_eq!(spin.angle, Some(180.0));
+        assert_eq!(snapshot.animation_objects[1].time_ref_name, "turn");
+        assert_eq!(snapshot.animation_duration, 3.75);
+        let axis = spin.axis.unwrap();
+        assert!((axis[0] - 1.0 / 14.0_f64.sqrt()).abs() < 1.0e-9);
+
+        let undo_count = model.undo_stack.len();
+        let mut cyclic = animation_properties_input(&snapshot.animation_objects[0]);
+        cyclic.time_ref_name = snapshot.animation_objects[1].name.clone();
+        assert!(handle_model_request(
+            &mut model,
+            ModelRequest::SetAnimationObjectProperties(cyclic),
+        )
+        .is_err());
+        assert_eq!(model.undo_stack.len(), undo_count);
+        assert_eq!(model.snapshot().animation_objects[0].time_ref_name, "");
+
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        let restored = model.snapshot();
+        assert_eq!(restored.animation_objects[0].name, "SimpleSpin1");
+        assert_eq!(restored.animation_objects[1].time_ref_name, "SimpleSpin1");
     }
 
     #[test]

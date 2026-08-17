@@ -2144,6 +2144,21 @@ summary:focus-visible {
   display: none;
 }
 
+.animation-renderer-targets {
+  display: grid;
+  max-height: 180px;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid var(--line);
+  background: #fff;
+}
+
+.animation-renderer-targets label {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
 .pov-render-dialog progress {
   width: 100%;
 }

@@ -7331,18 +7331,290 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     if (!object) {
       dialogContent.append(dialogParagraph("Select an animation object first."));
     } else {
-      dialogContent.append(dialogParagraph(object.name));
-      const duration = dialogField("Duration (seconds)", String(object.duration), "number");
+      referenceDialog.classList.add("wide-dialog");
+      const pages = workspacePropertyPage(["Common settings", object.typeName]);
+      dialogContent.append(pages.editor);
+      const [commonPage, typePage] = pages.panes;
+      const name = dialogField("Name", object.name, "text", commonPage);
+      const disabled = dialogCheckbox("Disabled", object.disabled, commonPage);
+      const referenceOptions = snapshot.animationObjects
+        .filter((item) => item.index !== object.index && item.name)
+        .map((item) => [item.name, item.name]);
+      if (
+        object.timeRefName
+        && !referenceOptions.some(([value]) => value === object.timeRefName)
+      ) {
+        referenceOptions.push([object.timeRefName, object.timeRefName]);
+      }
+      const timeReference = dialogSelect(
+        "Relative to",
+        [["", "Absolute"], ...referenceOptions],
+        object.timeRefName || "",
+        commonPage,
+      );
+      const start = dialogField(
+        "Start (seconds)",
+        String(object.relativeStart),
+        "number",
+        commonPage,
+      );
+      start.step = "0.001";
+      const duration = dialogField(
+        "Duration (seconds)",
+        String(object.duration),
+        "number",
+        commonPage,
+      );
       duration.min = "0.1";
-      duration.step = "0.1";
+      duration.step = "0.001";
+      const quadric = dialogField("Quadric", String(object.quadric), "number", commonPage);
+      quadric.min = "0";
+      quadric.max = "0.5";
+      quadric.step = "0.01";
+
+      const rendererNames = [
+        ...snapshot.objects,
+        ...snapshot.densityMaps,
+        ...snapshot.surfaces,
+        ...snapshot.lwObjects,
+      ]
+        .filter((item) => item.sceneUid === snapshot.activeSceneUid)
+        .flatMap((item) => item.renderers.map((renderer) => renderer.name))
+        .filter((value, index, values) => value && values.indexOf(value) === index);
+      const rendererTargets = (selectedNames) => {
+        const selected = new Set(
+          (selectedNames || "").split(",").map((name) => name.trim()).filter(Boolean),
+        );
+        const availableNames = [
+          ...rendererNames,
+          ...[...selected].filter((name) => !rendererNames.includes(name)),
+        ];
+        const field = document.createElement("label");
+        field.className = "dialog-field";
+        const caption = document.createElement("span");
+        caption.textContent = "Target renderers";
+        const list = document.createElement("span");
+        list.className = "animation-renderer-targets";
+        const checkboxes = availableNames.map((rendererName) => {
+          const row = document.createElement("label");
+          const checkbox = document.createElement("input");
+          checkbox.type = "checkbox";
+          checkbox.checked = selected.has(rendererName);
+          const label = document.createElement("span");
+          label.textContent = rendererName;
+          row.append(checkbox, label);
+          list.append(row);
+          return [rendererName, checkbox];
+        });
+        if (checkboxes.length === 0) list.textContent = "No renderers in this scene.";
+        field.append(caption, list);
+        typePage.append(field);
+        return () => checkboxes
+          .filter(([, checkbox]) => checkbox.checked)
+          .map(([rendererName]) => rendererName)
+          .join(",");
+      };
+
+      const optional = {};
+      if (object.typeName === "SimpleSpin") {
+        const angle = dialogField("Rotation angle", String(object.angle), "number", typePage);
+        angle.step = "1";
+        const axis = object.axis || [0, 1, 0];
+        const axisX = dialogField("Spin axis X", String(axis[0]), "number", typePage);
+        const axisY = dialogField("Spin axis Y", String(axis[1]), "number", typePage);
+        const axisZ = dialogField("Spin axis Z", String(axis[2]), "number", typePage);
+        optional.read = () => ({
+          angle: Number(angle.value),
+          axis: [Number(axisX.value), Number(axisY.value), Number(axisZ.value)],
+        });
+      } else if (object.typeName === "CamMotion") {
+        const cameras = snapshot.cameras
+          .filter((camera) => camera.sceneUid === snapshot.activeSceneUid)
+          .map((camera) => [camera.name, camera.name]);
+        if (
+          object.targetCamera
+          && !cameras.some(([value]) => value === object.targetCamera)
+        ) {
+          cameras.push([object.targetCamera, object.targetCamera]);
+        }
+        const targetCamera = dialogSelect(
+          "Target camera",
+          [["", "None"], ...cameras],
+          object.targetCamera || "",
+          typePage,
+        );
+        const ignoreRotate = dialogCheckbox("Ignore rotate", object.ignoreRotate, typePage);
+        const ignoreCenter = dialogCheckbox("Ignore center", object.ignoreCenter, typePage);
+        const ignoreZoom = dialogCheckbox("Ignore zoom", object.ignoreZoom, typePage);
+        const ignoreSlab = dialogCheckbox("Ignore slab", object.ignoreSlab, typePage);
+        const keepQuaternion = dialogCheckbox(
+          "Keep quaternion positive",
+          object.keepQuaternionPositive,
+          typePage,
+        );
+        optional.read = () => ({
+          targetCamera: targetCamera.value,
+          ignoreRotate: ignoreRotate.checked,
+          ignoreCenter: ignoreCenter.checked,
+          ignoreZoom: ignoreZoom.checked,
+          ignoreSlab: ignoreSlab.checked,
+          keepQuaternionPositive: keepQuaternion.checked,
+        });
+      } else if (object.typeName === "ShowHideAnim") {
+        const readTargets = rendererTargets(object.rendererNames);
+        const showHide = dialogSelect(
+          "Show-Hide",
+          [["show", "Show"], ["hide", "Hide"]],
+          object.hide ? "hide" : "show",
+          typePage,
+        );
+        const fade = dialogCheckbox("Fade", object.fade, typePage);
+        const targetAlpha = dialogField(
+          "Target opacity",
+          String(object.targetAlpha),
+          "number",
+          typePage,
+        );
+        targetAlpha.min = "0";
+        targetAlpha.max = "1";
+        targetAlpha.step = "0.05";
+        optional.read = () => ({
+          rendererNames: readTargets(),
+          hide: showHide.value === "hide",
+          fade: fade.checked,
+          targetAlpha: Number(targetAlpha.value),
+        });
+      } else if (object.typeName === "SlideInOutAnim") {
+        const readTargets = rendererTargets(object.rendererNames);
+        const showHide = dialogSelect(
+          "Show-Hide",
+          [["show", "Show"], ["hide", "Hide"]],
+          object.hide ? "hide" : "show",
+          typePage,
+        );
+        const direction = dialogField(
+          "Direction angle",
+          String(object.direction),
+          "number",
+          typePage,
+        );
+        const distance = dialogField(
+          "Distance (W/2)",
+          String(object.distance),
+          "number",
+          typePage,
+        );
+        optional.read = () => ({
+          rendererNames: readTargets(),
+          hide: showHide.value === "hide",
+          direction: Number(direction.value),
+          distance: Number(distance.value),
+        });
+      } else if (object.typeName === "MolAnim") {
+        const morphs = snapshot.morphs.map((morph) => {
+          const target = snapshot.objects.find((item) => item.uid === morph.objectUid);
+          return [target?.name || String(morph.objectUid), target?.name || String(morph.objectUid)];
+        });
+        if (
+          object.moleculeName
+          && !morphs.some(([value]) => value === object.moleculeName)
+        ) {
+          morphs.push([object.moleculeName, object.moleculeName]);
+        }
+        const molecule = dialogSelect(
+          "Target MorphMol",
+          [["", "None"], ...morphs],
+          object.moleculeName || "",
+          typePage,
+        );
+        const property = dialogField(
+          "Property",
+          object.propertyName || "frame",
+          "text",
+          typePage,
+        );
+        const startValue = dialogField(
+          "Start value",
+          String(object.startValue),
+          "number",
+          typePage,
+        );
+        const endValue = dialogField(
+          "End value",
+          String(object.endValue),
+          "number",
+          typePage,
+        );
+        optional.read = () => ({
+          moleculeName: molecule.value,
+          propertyName: property.value,
+          startValue: Number(startValue.value),
+          endValue: Number(endValue.value),
+        });
+      } else if (object.typeName === "RealPropAnim") {
+        const readTargets = rendererTargets(object.rendererNames);
+        const property = dialogField(
+          "Property",
+          object.propertyName || "",
+          "text",
+          typePage,
+        );
+        const startValue = dialogField(
+          "Start value",
+          String(object.startValue),
+          "number",
+          typePage,
+        );
+        const endValue = dialogField(
+          "End value",
+          String(object.endValue),
+          "number",
+          typePage,
+        );
+        optional.read = () => ({
+          rendererNames: readTargets(),
+          propertyName: property.value,
+          startValue: Number(startValue.value),
+          endValue: Number(endValue.value),
+        });
+      } else if (object.typeName === "RendXformAnim") {
+        const readTargets = rendererTargets(object.rendererNames);
+        const startPosition = object.startPosition || [0, 0, 0];
+        const endPosition = object.endPosition || [0, 0, 0];
+        const fields = [
+          dialogField("Start X", String(startPosition[0]), "number", typePage),
+          dialogField("Start Y", String(startPosition[1]), "number", typePage),
+          dialogField("Start Z", String(startPosition[2]), "number", typePage),
+          dialogField("End X", String(endPosition[0]), "number", typePage),
+          dialogField("End Y", String(endPosition[1]), "number", typePage),
+          dialogField("End Z", String(endPosition[2]), "number", typePage),
+        ];
+        optional.read = () => ({
+          rendererNames: readTargets(),
+          startPosition: fields.slice(0, 3).map((field) => Number(field.value)),
+          endPosition: fields.slice(3).map((field) => Number(field.value)),
+        });
+      } else {
+        typePage.append(dialogParagraph("This animation type has no dedicated settings."));
+        optional.read = () => ({});
+      }
+
       const apply = button("Apply", "dialog-primary", async () => {
-        await mutate("set_animation_duration", {
-          index: object.index,
-          duration: Number(duration.value),
+        await mutate("set_animation_object_properties", {
+          input: {
+            index: object.index,
+            name: name.value,
+            disabled: disabled.checked,
+            timeRefName: timeReference.value,
+            start: Number(start.value),
+            duration: Number(duration.value),
+            quadric: Number(quadric.value),
+            ...optional.read(),
+          },
         });
         referenceDialog.close();
       });
-      dialogActions(apply);
+      dialogActions(apply, button("Cancel", "", () => referenceDialog.close()));
     }
   } else if (title === "Open MD Trajectory") {
     const topologyPath = dialogField("Topology file (.gro)", "");
@@ -13517,7 +13789,9 @@ function renderAnimation() {
         },
       );
       const name = document.createElement("span");
-      name.textContent = object.name;
+      name.textContent = object.name
+        ? `${object.name} (${object.typeName})`
+        : object.typeName;
       const start = document.createElement("span");
       start.textContent = object.start.toFixed(1);
       const end = document.createElement("span");

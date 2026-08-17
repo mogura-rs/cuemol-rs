@@ -973,6 +973,30 @@ fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
     assert!(TAURI_APP_RS.contains("set_scene_animation(scene_uid, Some(animation))"));
     assert!(TAURI_APP_RS.contains("animation.motions()"));
     assert!(!TAURI_APP_RS.contains("animation_objects: Vec<AnimObject>"));
+    for label in [
+        "Common settings",
+        "Relative to",
+        "Start (seconds)",
+        "Duration (seconds)",
+        "Quadric",
+        "Rotation angle",
+        "Spin axis X",
+        "Target camera",
+        "Target renderers",
+        "Show-Hide",
+        "Target opacity",
+        "Direction angle",
+        "Distance (W/2)",
+        "Target MorphMol",
+        "Start value",
+        "End value",
+    ] {
+        assert!(JS.contains(label), "missing animation property {label}");
+    }
+    assert!(JS.contains("mutate(\"set_animation_object_properties\""));
+    assert!(TAURI_APP_RS.contains("fn set_animation_object_properties("));
+    assert!(TAURI_APP_RS.contains("animation.edit_motion_by_uid"));
+    assert!(TAURI_APP_RS.contains("motion.base_mut().set_time_ref_name(name.clone())"));
 }
 
 #[test]
