@@ -438,7 +438,13 @@
             <div class="side-body animation-body">
               <label class="animation-summary">Duration: <output id="animation-duration"></output></label>
               <label class="animation-summary">Start cam: <select id="animation-start-camera"><option value="">(none)</option></select></label>
-              <div class="animation-columns"><span>Name</span><span>Start</span><span>End</span></div>
+              <div id="animation-columns" class="animation-columns">
+                <span>Name</span>
+                <div class="animation-column-splitter" data-animation-column-splitter="name" role="separator" aria-orientation="vertical" aria-label="Name column width" tabindex="0"></div>
+                <span>Start</span>
+                <div class="animation-column-splitter" data-animation-column-splitter="start" role="separator" aria-orientation="vertical" aria-label="Start column width" tabindex="0"></div>
+                <span>End</span>
+              </div>
               <div id="animation-list" class="animation-list"></div>
               <div class="animation-tools">
                 <button id="animation-add" type="button" title="Add" aria-label="Add" aria-haspopup="menu">＋⌄</button>

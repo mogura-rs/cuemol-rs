@@ -1723,7 +1723,12 @@ body.resizing-side-panel-height {
 .animation-columns,
 .animation-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 45px 45px;
+  grid-template-columns:
+    var(--animation-name-width, minmax(45px, 2fr))
+    5px
+    var(--animation-start-width, minmax(40px, 1fr))
+    5px
+    minmax(40px, 1fr);
   align-items: center;
 }
 
@@ -1737,6 +1742,22 @@ body.resizing-side-panel-height {
 .animation-columns span {
   padding: 2px 4px;
   border-right: 1px solid #bbb;
+}
+
+.animation-column-splitter {
+  align-self: stretch;
+  min-width: 5px;
+  border-right: 1px solid #aaa;
+  border-left: 1px solid #eee;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.animation-column-splitter:hover,
+.animation-column-splitter:focus-visible,
+.animation-column-splitter.dragging {
+  background: #9fc7ec;
+  outline: 0;
 }
 
 .animation-list {
@@ -1778,6 +1799,14 @@ body.resizing-side-panel-height {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.animation-row span:nth-child(2) {
+  grid-column: 3;
+}
+
+.animation-row span:nth-child(3) {
+  grid-column: 5;
 }
 
 .animation-row.selected {

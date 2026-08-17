@@ -1450,9 +1450,20 @@ fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
     assert!(NATIVE_GUI_RS.contains("ui.label(\"Reset all to default?\")"));
     assert!(NATIVE_GUI_RS.contains("ui.button(\"Reset all to default\")"));
     assert!(NATIVE_GUI_RS.contains("response.context_menu(|ui|"));
-    assert!(NATIVE_GUI_RS.contains("ui.strong(\"Name\")"));
-    assert!(NATIVE_GUI_RS.contains("ui.strong(\"Start\")"));
-    assert!(NATIVE_GUI_RS.contains("ui.strong(\"End\")"));
+    assert!(NATIVE_GUI_RS.contains("RichText::new(\"Name\").strong()"));
+    assert!(NATIVE_GUI_RS.contains("RichText::new(\"Start\").strong()"));
+    assert!(NATIVE_GUI_RS.contains("RichText::new(\"End\").strong()"));
+    assert!(HTML.contains("data-animation-column-splitter=\"name\""));
+    assert!(HTML.contains("data-animation-column-splitter=\"start\""));
+    assert!(JS.contains("ANIMATION_COLUMN_WIDTHS_STORAGE_KEY"));
+    assert!(JS.contains("function setupAnimationColumnSplitters()"));
+    assert!(JS.contains("setAnimationColumnWidths(current.nameWidth"));
+    assert!(CSS.contains("var(--animation-name-width, minmax(45px, 2fr))"));
+    assert!(CSS.contains(".animation-column-splitter"));
+    assert!(NATIVE_GUI_RS.contains("animation_panel:name_width"));
+    assert!(NATIVE_GUI_RS.contains("animation_panel:start_width"));
+    assert!(NATIVE_GUI_RS.contains("name_splitter.drag_delta().x"));
+    assert!(NATIVE_GUI_RS.contains("start_splitter.drag_delta().x"));
     assert!(NATIVE_GUI_RS.contains("ui.label(\"Duration:\")"));
     assert!(NATIVE_GUI_RS.contains("ui.label(\"Start cam:\")"));
     assert!(

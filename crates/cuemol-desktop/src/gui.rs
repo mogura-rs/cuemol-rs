@@ -40,6 +40,11 @@ use winit::window::{Window, WindowId};
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 const MAX_RECENT_PATHS: usize = 10;
 const MAX_SELECTION_HISTORY: usize = 10;
+const ANIMATION_NAME_COLUMN_DEFAULT_WIDTH: f32 = 110.0;
+const ANIMATION_TIME_COLUMN_DEFAULT_WIDTH: f32 = 52.0;
+const ANIMATION_NAME_COLUMN_MIN_WIDTH: f32 = 60.0;
+const ANIMATION_TIME_COLUMN_MIN_WIDTH: f32 = 44.0;
+const ANIMATION_COLUMN_SPLITTER_WIDTH: f32 = 5.0;
 const RENDER_PRESETS: &[(&str, u32, u32)] = &[
     ("HD 720", 1280, 720),
     ("Full HD", 1920, 1080),
@@ -1287,6 +1292,10 @@ struct GuiApplication {
     animation_selected: Option<usize>,
     animation_selection: std::collections::BTreeSet<usize>,
     animation_selection_anchor: Option<usize>,
+    animation_name_column_width: f32,
+    animation_name_column_drag_start_width: Option<f32>,
+    animation_start_column_width: f32,
+    animation_start_column_drag_start_width: Option<f32>,
     animation_properties_draft: Option<NativeAnimationProperties>,
     animation_pending_add: Option<(AnimKind, usize)>,
     animation_reset_confirmation: bool,
@@ -4303,6 +4312,16 @@ impl GuiApplication {
             .parse::<f32>()
             .unwrap_or(140.0)
             .clamp(50.0, 400.0);
+        let animation_name_column_width = state
+            .config_value("animation_panel:name_width")
+            .parse::<f32>()
+            .unwrap_or(ANIMATION_NAME_COLUMN_DEFAULT_WIDTH)
+            .clamp(ANIMATION_NAME_COLUMN_MIN_WIDTH, 400.0);
+        let animation_start_column_width = state
+            .config_value("animation_panel:start_width")
+            .parse::<f32>()
+            .unwrap_or(ANIMATION_TIME_COLUMN_DEFAULT_WIDTH)
+            .clamp(ANIMATION_TIME_COLUMN_MIN_WIDTH, 200.0);
         Self {
             state,
             open_path: "../cuemol2/tests/test_data/1CRN.pdb".to_string(),
@@ -4487,6 +4506,10 @@ impl GuiApplication {
             animation_selected: None,
             animation_selection: std::collections::BTreeSet::new(),
             animation_selection_anchor: None,
+            animation_name_column_width,
+            animation_name_column_drag_start_width: None,
+            animation_start_column_width,
+            animation_start_column_drag_start_width: None,
             animation_properties_draft: None,
             animation_pending_add: None,
             animation_reset_confirmation: false,
@@ -13334,94 +13357,260 @@ impl GuiApplication {
         if animation.size() == 0 {
             ui.weak("No animation objects");
         }
-        egui::Grid::new("native_animation_list")
-            .num_columns(3)
-            .striped(true)
-            .min_col_width(64.0)
-            .show(ui, |ui| {
-                ui.strong("Name");
-                ui.strong("Start");
-                ui.strong("End");
-                ui.end_row();
-                for (index, motion) in animation.motions().iter().enumerate() {
-                    let base = motion.base();
-                    let response = ui.selectable_label(
-                        self.animation_selection.contains(&index),
-                        format!("{} ({})", base.name(), motion.type_name()),
+        let minimum_width = ANIMATION_NAME_COLUMN_MIN_WIDTH
+            + 2.0 * ANIMATION_TIME_COLUMN_MIN_WIDTH
+            + 2.0 * ANIMATION_COLUMN_SPLITTER_WIDTH;
+        let available_width = ui.available_width().max(minimum_width);
+        let name_width = self.animation_name_column_width.clamp(
+            ANIMATION_NAME_COLUMN_MIN_WIDTH,
+            (available_width
+                - 2.0 * ANIMATION_TIME_COLUMN_MIN_WIDTH
+                - 2.0 * ANIMATION_COLUMN_SPLITTER_WIDTH)
+                .max(ANIMATION_NAME_COLUMN_MIN_WIDTH),
+        );
+        let start_width = self.animation_start_column_width.clamp(
+            ANIMATION_TIME_COLUMN_MIN_WIDTH,
+            (available_width
+                - name_width
+                - ANIMATION_TIME_COLUMN_MIN_WIDTH
+                - 2.0 * ANIMATION_COLUMN_SPLITTER_WIDTH)
+                .max(ANIMATION_TIME_COLUMN_MIN_WIDTH),
+        );
+        let end_width =
+            (available_width - name_width - start_width - 2.0 * ANIMATION_COLUMN_SPLITTER_WIDTH)
+                .max(ANIMATION_TIME_COLUMN_MIN_WIDTH);
+        let header_height = ui.spacing().interact_size.y;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.add_sized(
+                [name_width, header_height],
+                egui::Label::new(egui::RichText::new("Name").strong()),
+            );
+            let (name_splitter_rect, name_splitter) = ui.allocate_exact_size(
+                egui::vec2(ANIMATION_COLUMN_SPLITTER_WIDTH, header_height),
+                egui::Sense::drag(),
+            );
+            let name_splitter = name_splitter
+                .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+                .on_hover_text("Resize Name column; double-click to reset");
+            ui.painter().line_segment(
+                [
+                    name_splitter_rect.center_top(),
+                    name_splitter_rect.center_bottom(),
+                ],
+                egui::Stroke::new(
+                    1.0,
+                    if name_splitter.hovered() || name_splitter.dragged() {
+                        ui.visuals().text_color()
+                    } else {
+                        ui.visuals().widgets.noninteractive.bg_stroke.color
+                    },
+                ),
+            );
+            if name_splitter.double_clicked() {
+                self.animation_name_column_width = ANIMATION_NAME_COLUMN_DEFAULT_WIDTH;
+                self.animation_name_column_drag_start_width = None;
+                self.state.put_config_value(
+                    "animation_panel:name_width",
+                    self.animation_name_column_width.to_string(),
+                );
+            } else {
+                if name_splitter.drag_started() {
+                    self.animation_name_column_drag_start_width = Some(name_width);
+                }
+                if name_splitter.dragged() {
+                    if let Some(initial_width) = self.animation_name_column_drag_start_width {
+                        let maximum = (available_width
+                            - start_width
+                            - ANIMATION_TIME_COLUMN_MIN_WIDTH
+                            - 2.0 * ANIMATION_COLUMN_SPLITTER_WIDTH)
+                            .max(ANIMATION_NAME_COLUMN_MIN_WIDTH);
+                        self.animation_name_column_width = (initial_width
+                            + name_splitter.drag_delta().x)
+                            .clamp(ANIMATION_NAME_COLUMN_MIN_WIDTH, maximum);
+                        ui.ctx().request_repaint();
+                    }
+                }
+                if name_splitter.drag_stopped() {
+                    self.animation_name_column_drag_start_width = None;
+                    self.state.put_config_value(
+                        "animation_panel:name_width",
+                        self.animation_name_column_width.to_string(),
                     );
-                    if response.clicked() {
-                        let modifiers = ui.input(|input| input.modifiers);
-                        self.update_animation_selection(
-                            index,
-                            modifiers.shift,
-                            modifiers.command || modifiers.ctrl,
-                        );
+                }
+            }
+            ui.add_sized(
+                [start_width, header_height],
+                egui::Label::new(egui::RichText::new("Start").strong()),
+            );
+            let (start_splitter_rect, start_splitter) = ui.allocate_exact_size(
+                egui::vec2(ANIMATION_COLUMN_SPLITTER_WIDTH, header_height),
+                egui::Sense::drag(),
+            );
+            let start_splitter = start_splitter
+                .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
+                .on_hover_text("Resize Start column; double-click to reset");
+            ui.painter().line_segment(
+                [
+                    start_splitter_rect.center_top(),
+                    start_splitter_rect.center_bottom(),
+                ],
+                egui::Stroke::new(
+                    1.0,
+                    if start_splitter.hovered() || start_splitter.dragged() {
+                        ui.visuals().text_color()
+                    } else {
+                        ui.visuals().widgets.noninteractive.bg_stroke.color
+                    },
+                ),
+            );
+            if start_splitter.double_clicked() {
+                self.animation_start_column_width = ANIMATION_TIME_COLUMN_DEFAULT_WIDTH;
+                self.animation_start_column_drag_start_width = None;
+                self.state.put_config_value(
+                    "animation_panel:start_width",
+                    self.animation_start_column_width.to_string(),
+                );
+            } else {
+                if start_splitter.drag_started() {
+                    self.animation_start_column_drag_start_width = Some(start_width);
+                }
+                if start_splitter.dragged() {
+                    if let Some(initial_width) = self.animation_start_column_drag_start_width {
+                        let maximum = (available_width
+                            - name_width
+                            - ANIMATION_TIME_COLUMN_MIN_WIDTH
+                            - 2.0 * ANIMATION_COLUMN_SPLITTER_WIDTH)
+                            .max(ANIMATION_TIME_COLUMN_MIN_WIDTH);
+                        self.animation_start_column_width = (initial_width
+                            + start_splitter.drag_delta().x)
+                            .clamp(ANIMATION_TIME_COLUMN_MIN_WIDTH, maximum);
+                        ui.ctx().request_repaint();
                     }
-                    if response.double_clicked() {
-                        edit = Some(index);
+                }
+                if start_splitter.drag_stopped() {
+                    self.animation_start_column_drag_start_width = None;
+                    self.state.put_config_value(
+                        "animation_panel:start_width",
+                        self.animation_start_column_width.to_string(),
+                    );
+                }
+            }
+            ui.add_sized(
+                [end_width, header_height],
+                egui::Label::new(egui::RichText::new("End").strong()),
+            );
+        });
+        ui.separator();
+        for (index, motion) in animation.motions().iter().enumerate() {
+            let base = motion.base();
+            let row_height = ui.spacing().interact_size.y;
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                let title = format!("{} ({})", base.name(), motion.type_name());
+                let response = ui
+                    .add_sized(
+                        [name_width, row_height],
+                        egui::Button::selectable(self.animation_selection.contains(&index), &title),
+                    )
+                    .on_hover_text(&title);
+                if response.clicked() {
+                    let modifiers = ui.input(|input| input.modifiers);
+                    self.update_animation_selection(
+                        index,
+                        modifiers.shift,
+                        modifiers.command || modifiers.ctrl,
+                    );
+                }
+                if response.double_clicked() {
+                    edit = Some(index);
+                }
+                response.context_menu(|ui| {
+                    if !self.animation_selection.contains(&index) {
+                        self.set_animation_selection(index);
                     }
-                    response.context_menu(|ui| {
-                        if !self.animation_selection.contains(&index) {
-                            self.set_animation_selection(index);
-                        }
-                        let context_indices =
-                            self.animation_selection.iter().copied().collect::<Vec<_>>();
-                        if ui
-                            .add_enabled(context_indices.len() == 1, egui::Button::new("Change..."))
-                            .clicked()
-                        {
-                            edit = self.animation_selected;
-                            ui.close();
-                        }
-                        if ui.button("Delete").clicked() {
-                            delete = Some(context_indices.clone());
-                            ui.close();
-                        }
-                        ui.menu_button("Add...", |ui| {
-                            for kind in [
-                                AnimKind::Spin,
-                                AnimKind::CameraMotion,
-                                AnimKind::ShowAnim,
-                                AnimKind::HideAnim,
-                                AnimKind::SlideIn,
-                                AnimKind::SlideOut,
-                                AnimKind::MolAnim,
-                                AnimKind::Pause,
-                            ] {
-                                if ui.button(kind.label()).clicked() {
-                                    add = Some(kind);
-                                    ui.close();
-                                }
+                    let context_indices =
+                        self.animation_selection.iter().copied().collect::<Vec<_>>();
+                    if ui
+                        .add_enabled(context_indices.len() == 1, egui::Button::new("Change..."))
+                        .clicked()
+                    {
+                        edit = self.animation_selected;
+                        ui.close();
+                    }
+                    if ui.button("Delete").clicked() {
+                        delete = Some(context_indices.clone());
+                        ui.close();
+                    }
+                    ui.menu_button("Add...", |ui| {
+                        for kind in [
+                            AnimKind::Spin,
+                            AnimKind::CameraMotion,
+                            AnimKind::ShowAnim,
+                            AnimKind::HideAnim,
+                            AnimKind::SlideIn,
+                            AnimKind::SlideOut,
+                            AnimKind::MolAnim,
+                            AnimKind::Pause,
+                        ] {
+                            if ui.button(kind.label()).clicked() {
+                                add = Some(kind);
+                                ui.close();
                             }
-                        });
-                        if ui
-                            .add_enabled(
-                                context_indices.first().is_some_and(|value| *value > 0),
-                                egui::Button::new("Move up"),
-                            )
-                            .clicked()
-                        {
-                            move_by = Some((context_indices.clone(), -1));
-                            ui.close();
-                        }
-                        if ui
-                            .add_enabled(
-                                context_indices
-                                    .last()
-                                    .is_some_and(|value| value + 1 < animation.size()),
-                                egui::Button::new("Move down"),
-                            )
-                            .clicked()
-                        {
-                            move_by = Some((context_indices, 1));
-                            ui.close();
                         }
                     });
-                    ui.label(format_native_animation_time(base.abs_start()));
-                    ui.label(format_native_animation_time(base.abs_end()));
-                    ui.end_row();
-                }
+                    if ui
+                        .add_enabled(
+                            context_indices.first().is_some_and(|value| *value > 0),
+                            egui::Button::new("Move up"),
+                        )
+                        .clicked()
+                    {
+                        move_by = Some((context_indices.clone(), -1));
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(
+                            context_indices
+                                .last()
+                                .is_some_and(|value| value + 1 < animation.size()),
+                            egui::Button::new("Move down"),
+                        )
+                        .clicked()
+                    {
+                        move_by = Some((context_indices, 1));
+                        ui.close();
+                    }
+                });
+                let (name_separator, _) = ui.allocate_exact_size(
+                    egui::vec2(ANIMATION_COLUMN_SPLITTER_WIDTH, row_height),
+                    egui::Sense::hover(),
+                );
+                ui.painter().line_segment(
+                    [name_separator.center_top(), name_separator.center_bottom()],
+                    ui.visuals().widgets.noninteractive.bg_stroke,
+                );
+                ui.add_sized(
+                    [start_width, row_height],
+                    egui::Label::new(format_native_animation_time(base.abs_start())),
+                );
+                let (start_separator, _) = ui.allocate_exact_size(
+                    egui::vec2(ANIMATION_COLUMN_SPLITTER_WIDTH, row_height),
+                    egui::Sense::hover(),
+                );
+                ui.painter().line_segment(
+                    [
+                        start_separator.center_top(),
+                        start_separator.center_bottom(),
+                    ],
+                    ui.visuals().widgets.noninteractive.bg_stroke,
+                );
+                ui.add_sized(
+                    [end_width, row_height],
+                    egui::Label::new(format_native_animation_time(base.abs_end())),
+                );
             });
+        }
         ui.horizontal(|ui| {
             ui.menu_button("＋", |ui| {
                 for kind in [
@@ -19840,6 +20029,20 @@ impl GuiApplication {
             .parse::<f32>()
             .unwrap_or(140.0)
             .clamp(50.0, 400.0);
+        self.animation_name_column_width = self
+            .state
+            .config_value("animation_panel:name_width")
+            .parse::<f32>()
+            .unwrap_or(ANIMATION_NAME_COLUMN_DEFAULT_WIDTH)
+            .clamp(ANIMATION_NAME_COLUMN_MIN_WIDTH, 400.0);
+        self.animation_name_column_drag_start_width = None;
+        self.animation_start_column_width = self
+            .state
+            .config_value("animation_panel:start_width")
+            .parse::<f32>()
+            .unwrap_or(ANIMATION_TIME_COLUMN_DEFAULT_WIDTH)
+            .clamp(ANIMATION_TIME_COLUMN_MIN_WIDTH, 200.0);
+        self.animation_start_column_drag_start_width = None;
         for (style_key, config_key) in [
             ("DefaultLabel.font_name", "style:DefaultLabel.font_name"),
             ("DefaultLabel.font_size", "style:DefaultLabel.font_size"),
@@ -33567,7 +33770,7 @@ mod tests {
         let app = GuiApplication::new_with_config_source(NativeConfigSource {
             path: Some(PathBuf::from("preloaded.conf")),
             input: Ok(Some(
-                "view_input:tbrad\t1.25\ncuemol2.ui.ribbon.collapsed\ttrue\nleft_panel:Workspace:visible\tfalse\nleft_panel:Workspace:collapsed\ttrue\nleft_panel:Workspace:height\t185\nleft_panel:order\tAnimation|Workspace|MolStruct|Selection|Coloring|Symmetry|Density map|View\nleft_panel:width\t310\nbottom_panel:visible\tfalse\nbottom_panel:tab\tsequence\nbottom_panel:height\t240\nsequence_panel:name_width\t220\nmru:length\t2\nmru:0:path\t/tmp/recent.qsc\nmru:1:path\t/tmp/recent.pdb\nselection_history:length\t2\nselection_history:0\tchain A\nselection_history:1\tname CA\n"
+                "view_input:tbrad\t1.25\ncuemol2.ui.ribbon.collapsed\ttrue\nleft_panel:Workspace:visible\tfalse\nleft_panel:Workspace:collapsed\ttrue\nleft_panel:Workspace:height\t185\nleft_panel:order\tAnimation|Workspace|MolStruct|Selection|Coloring|Symmetry|Density map|View\nleft_panel:width\t310\nbottom_panel:visible\tfalse\nbottom_panel:tab\tsequence\nbottom_panel:height\t240\nsequence_panel:name_width\t220\nanimation_panel:name_width\t180\nanimation_panel:start_width\t70\nmru:length\t2\nmru:0:path\t/tmp/recent.qsc\nmru:1:path\t/tmp/recent.pdb\nselection_history:length\t2\nselection_history:0\tchain A\nselection_history:1\tname CA\n"
                     .to_string(),
             )),
         });
@@ -33586,6 +33789,8 @@ mod tests {
         assert_eq!(app.bottom_tab, BottomTab::Sequence);
         assert_eq!(app.bottom_panel_height, 240.0);
         assert_eq!(app.sequence_name_width, 220.0);
+        assert_eq!(app.animation_name_column_width, 180.0);
+        assert_eq!(app.animation_start_column_width, 70.0);
         assert_eq!(
             app.recent_paths,
             ["/tmp/recent.qsc", "/tmp/recent.pdb"].map(PathBuf::from)

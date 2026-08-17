@@ -78,6 +78,8 @@ const animationSlider = document.getElementById("animation-slider");
 const animationTime = document.getElementById("animation-time");
 const animationDuration = document.getElementById("animation-duration");
 const animationStartCamera = document.getElementById("animation-start-camera");
+const animationBody = document.querySelector(".animation-body");
+const animationColumns = document.getElementById("animation-columns");
 const animationList = document.getElementById("animation-list");
 const animationAdd = document.getElementById("animation-add");
 const animationDelete = document.getElementById("animation-delete");
@@ -119,6 +121,7 @@ const dialog = tauri?.dialog;
 const RECENT_STORAGE_KEY = "cuemol2.recentFiles.v1";
 const SELECTION_HISTORY_STORAGE_KEY = "cuemol2.selectionHistory.v1";
 const ANIMATION_RENDER_STORAGE_KEY = "cuemol2.animationRender.v1";
+const ANIMATION_COLUMN_WIDTHS_STORAGE_KEY = "cuemol2.animationColumnWidths.v1";
 const COMMAND_HISTORY_STORAGE_KEY = "cuemol2.commandHistory.v1";
 const BOTTOM_PANEL_HEIGHT_STORAGE_KEY = "cuemol2.bottomPanelHeight.v1";
 const SIDE_PANEL_WIDTH_STORAGE_KEY = "cuemol2.sidePanelWidth.v1";
@@ -15571,6 +15574,124 @@ function animationContextItems() {
   ];
 }
 
+function animationColumnRenderedWidths() {
+  const headings = animationColumns?.querySelectorAll(":scope > span");
+  return {
+    nameWidth: headings?.[0]?.getBoundingClientRect().width || 110,
+    startWidth: headings?.[1]?.getBoundingClientRect().width || 52,
+  };
+}
+
+function setAnimationColumnWidths(nameWidth, startWidth, persist = false) {
+  let nextNameWidth = Math.min(400, Math.max(60, Number(nameWidth) || 110));
+  let nextStartWidth = Math.min(200, Math.max(44, Number(startWidth) || 52));
+  const availableWidth = animationColumns?.clientWidth || 0;
+  if (availableWidth >= 158) {
+    nextNameWidth = Math.min(nextNameWidth, availableWidth - nextStartWidth - 54);
+    nextNameWidth = Math.max(60, nextNameWidth);
+    nextStartWidth = Math.min(nextStartWidth, availableWidth - nextNameWidth - 54);
+    nextStartWidth = Math.max(44, nextStartWidth);
+  }
+  animationBody?.style.setProperty("--animation-name-width", `${nextNameWidth}px`);
+  animationBody?.style.setProperty("--animation-start-width", `${nextStartWidth}px`);
+  const splitters = animationColumns?.querySelectorAll("[data-animation-column-splitter]");
+  splitters?.[0]?.setAttribute("aria-valuenow", String(Math.round(nextNameWidth)));
+  splitters?.[1]?.setAttribute("aria-valuenow", String(Math.round(nextStartWidth)));
+  if (!persist) return;
+  try {
+    localStorage.setItem(
+      ANIMATION_COLUMN_WIDTHS_STORAGE_KEY,
+      JSON.stringify({ nameWidth: nextNameWidth, startWidth: nextStartWidth }),
+    );
+  } catch {
+    // Storage can be unavailable in restricted webviews.
+  }
+}
+
+function restoreAnimationColumnWidths() {
+  let widths;
+  try {
+    widths = JSON.parse(localStorage.getItem(ANIMATION_COLUMN_WIDTHS_STORAGE_KEY) || "null");
+  } catch {
+    return;
+  }
+  if (
+    widths &&
+    Number.isFinite(Number(widths.nameWidth)) &&
+    Number.isFinite(Number(widths.startWidth))
+  ) {
+    setAnimationColumnWidths(widths.nameWidth, widths.startWidth);
+  }
+}
+
+function resetAnimationColumnWidths() {
+  animationBody?.style.removeProperty("--animation-name-width");
+  animationBody?.style.removeProperty("--animation-start-width");
+  try {
+    localStorage.removeItem(ANIMATION_COLUMN_WIDTHS_STORAGE_KEY);
+  } catch {
+    // Storage can be unavailable in restricted webviews.
+  }
+  for (const splitter of animationColumns?.querySelectorAll(
+    "[data-animation-column-splitter]",
+  ) || []) {
+    splitter.removeAttribute("aria-valuenow");
+  }
+}
+
+function setupAnimationColumnSplitters() {
+  restoreAnimationColumnWidths();
+  for (const splitter of animationColumns?.querySelectorAll(
+    "[data-animation-column-splitter]",
+  ) || []) {
+    const nameColumn = splitter.dataset.animationColumnSplitter === "name";
+    splitter.setAttribute("aria-valuemin", nameColumn ? "60" : "44");
+    splitter.setAttribute("aria-valuemax", nameColumn ? "400" : "200");
+    splitter.title = "Drag to resize columns; double-click to reset";
+    splitter.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      const column = splitter.dataset.animationColumnSplitter;
+      const initial = animationColumnRenderedWidths();
+      const startX = event.clientX;
+      splitter.setPointerCapture(event.pointerId);
+      splitter.classList.add("dragging");
+      const resize = (moveEvent) => {
+        const delta = moveEvent.clientX - startX;
+        setAnimationColumnWidths(
+          column === "name" ? initial.nameWidth + delta : initial.nameWidth,
+          column === "start" ? initial.startWidth + delta : initial.startWidth,
+        );
+      };
+      const finish = (finishEvent) => {
+        if (finishEvent.type !== "pointercancel") resize(finishEvent);
+        const current = animationColumnRenderedWidths();
+        setAnimationColumnWidths(current.nameWidth, current.startWidth, true);
+        splitter.classList.remove("dragging");
+        splitter.removeEventListener("pointermove", resize);
+        splitter.removeEventListener("pointerup", finish);
+        splitter.removeEventListener("pointercancel", finish);
+      };
+      splitter.addEventListener("pointermove", resize);
+      splitter.addEventListener("pointerup", finish);
+      splitter.addEventListener("pointercancel", finish);
+    });
+    splitter.addEventListener("dblclick", resetAnimationColumnWidths);
+    splitter.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+      event.preventDefault();
+      const column = splitter.dataset.animationColumnSplitter;
+      const current = animationColumnRenderedWidths();
+      const delta = event.key === "ArrowRight" ? 10 : -10;
+      setAnimationColumnWidths(
+        column === "name" ? current.nameWidth + delta : current.nameWidth,
+        column === "start" ? current.startWidth + delta : current.startWidth,
+        true,
+      );
+    });
+  }
+}
+
 function syncAnimationTimer() {
   if (snapshot?.animationPlaying && invoke) {
     if (animationTimer) return;
@@ -17666,6 +17787,7 @@ window.addEventListener("drop", (event) => {
 });
 
 restoreSidePanelState();
+setupAnimationColumnSplitters();
 setupSidePanelReordering();
 setupSidePanelHeightSplitters();
 setupSidePanelSplitter();
