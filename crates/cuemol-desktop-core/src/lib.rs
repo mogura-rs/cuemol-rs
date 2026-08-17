@@ -6793,9 +6793,9 @@ impl DesktopAppState {
         self.new_renderer(scene_uid, target_object, renderer_type, renderer_name)
     }
 
-    /// Change a Workspace molecular renderer to another compatible type.
-    /// Normal renderers are replaced with a new UID, while `*selection` is kept
-    /// and converted into an additional renderer, matching CueMol2's workflow.
+    /// Change a Workspace renderer to another compatible type.
+    /// Molecular renderers are replaced with a new UID, while density renderer
+    /// properties and identity are retained across compatible map types.
     pub fn change_renderer_type_in_object(
         &mut self,
         object_uid: Uid,
@@ -6803,6 +6803,31 @@ impl DesktopAppState {
         renderer_type: &str,
     ) -> Result<Uid> {
         let renderer_type = renderer_type.trim();
+        if let Some(map) = self.density_maps.get_mut(&object_uid) {
+            let kind = match renderer_type {
+                "contour" => GuiDensityRendererKind::Contour,
+                "isosurf" => GuiDensityRendererKind::IsoSurface,
+                "gpu_mapvol" => GuiDensityRendererKind::Volume,
+                _ => {
+                    return Err(CueMolError::invalid_argument(format!(
+                        "unsupported density renderer type change target: {renderer_type}"
+                    )));
+                }
+            };
+            let renderer = map
+                .renderers
+                .iter_mut()
+                .find(|renderer| renderer.uid == renderer_uid)
+                .ok_or_else(|| {
+                    CueMolError::NotFound(format!("density renderer {}", renderer_uid.get()))
+                })?;
+            if renderer.renderer_type != renderer_type {
+                renderer.renderer_type = renderer_type.to_string();
+                renderer.kind = kind;
+                map.modified = true;
+            }
+            return Ok(renderer_uid);
+        }
         if !MOLECULE_RENDERER_TYPES.contains(&renderer_type)
             || matches!(renderer_type, "atomintr" | "disorder")
         {
@@ -59483,6 +59508,20 @@ end_header
             converted.qsc_attr("style"),
             Some("DefaultCPK,DefaultCPKColoring")
         );
+
+        let mut map = DensityMap::new();
+        map.set_map_byte_array(&[0, 255], [2, 1, 1], -1.0, 1.0, 0.0, 1.0);
+        let map_uid = app.add_density_map(scene_uid, "map", map);
+        let density_renderer_uid = app.add_density_renderer(map_uid, "contour").unwrap();
+        let changed_uid = app
+            .change_renderer_type_in_object(map_uid, density_renderer_uid, "isosurf")
+            .unwrap();
+        assert_eq!(changed_uid, density_renderer_uid);
+        let density = app.density_map_summary(map_uid).unwrap();
+        assert_eq!(density.renderers[0].renderer_type, "isosurf");
+        assert!(app
+            .change_renderer_type_in_object(map_uid, density_renderer_uid, "cartoon")
+            .is_err());
     }
 
     #[test]

@@ -15206,6 +15206,38 @@ mod tests {
             .unwrap()
             .renderer(renderer_uid)
             .is_some());
+
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let map_uid =
+            model
+                .desktop
+                .add_density_map(scene_uid, "map", cuemol_xtal::DensityMap::new());
+        let map_renderer_uid = model
+            .desktop
+            .add_density_renderer(map_uid, "contour")
+            .unwrap();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::ChangeWorkspaceRendererType(WorkspaceRendererTypeInput {
+                object_uid: map_uid.get(),
+                renderer_uid: map_renderer_uid.get(),
+                renderer_type: "isosurf".to_string(),
+            }),
+        )
+        .unwrap();
+        let ModelResponse::Snapshot(snapshot) = response else {
+            panic!("expected workspace snapshot");
+        };
+        assert_eq!(
+            snapshot.density_maps[0].renderers[0].renderer_type,
+            "isosurf"
+        );
+
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(
+            model.snapshot().density_maps[0].renderers[0].renderer_type,
+            "contour"
+        );
     }
 
     #[test]

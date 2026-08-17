@@ -6216,6 +6216,12 @@ impl GuiApplication {
             } => Some((scene_uid, object_uid, renderer_uid)),
             _ => None,
         };
+        let compatible_renderer_types = match selection {
+            WorkspaceAuxSelection::DensityMap { .. } => DENSITY_RENDERER_TYPES,
+            WorkspaceAuxSelection::Surface { .. } => SURFACE_RENDERER_TYPES,
+            WorkspaceAuxSelection::Lightweight { .. } => LIGHTWEIGHT_RENDERER_TYPES,
+            _ => &[],
+        };
         let can_generate_surface = match selection {
             WorkspaceAuxSelection::DensityMap {
                 map_uid,
@@ -6228,39 +6234,77 @@ impl GuiApplication {
             }),
             _ => false,
         };
-        if can_generate_surface && ui.button("Generate surface obj").clicked() {
-            self.generate_workspace_surface(selection);
-            ui.close();
-        }
-        if can_generate_surface {
-            ui.separator();
-        }
         if let Some((scene_uid, object_uid, renderer_uid)) = renderer {
-            if let Ok((_, _, renderer_type, _)) = self
+            if let Ok((_, _, current_renderer_type, _)) = self
                 .state
                 .workspace_renderer_style_state(object_uid, renderer_uid)
             {
+                ui.menu_button("Change sel", |ui| {
+                    for label in [
+                        "Current",
+                        "All",
+                        "Protein",
+                        "Nucleic acid",
+                        "Water",
+                        "Ligand",
+                        "Sugar",
+                    ] {
+                        if ui.button(label).clicked() {
+                            ui.close();
+                        }
+                    }
+                });
+                ui.menu_button("Change type", |ui| {
+                    for renderer_type in compatible_renderer_types
+                        .iter()
+                        .copied()
+                        .filter(|renderer_type| *renderer_type != current_renderer_type)
+                    {
+                        if ui.button(renderer_type).clicked() {
+                            self.change_workspace_renderer_type(
+                                scene_uid,
+                                object_uid,
+                                renderer_uid,
+                                renderer_type,
+                            );
+                            ui.close();
+                        }
+                    }
+                });
+                ui.add_enabled_ui(false, |ui| {
+                    ui.menu_button("Coloring", |_| {});
+                    ui.menu_button("Paint", |_| {});
+                });
                 self.workspace_aux_renderer_style_menus(
                     ui,
                     scene_uid,
                     object_uid,
                     renderer_uid,
-                    &renderer_type,
+                    &current_renderer_type,
                 );
+                if can_generate_surface && ui.button("Generate surface obj").clicked() {
+                    self.generate_workspace_surface(selection);
+                    ui.close();
+                }
+                if ui.button("Copy").clicked() {
+                    self.copy_workspace_renderer_to_clipboard(object_uid, renderer_uid);
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("New Renderer...").clicked() {
+                    self.open_aux_renderer_dialog(selection);
+                    ui.close();
+                }
+                if ui.button("Delete").clicked() {
+                    self.delete_aux_selection(selection);
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Properties...").clicked() {
+                    self.open_aux_properties(selection);
+                    ui.close();
+                }
             }
-            if ui.button("Copy").clicked() {
-                self.copy_workspace_renderer_to_clipboard(object_uid, renderer_uid);
-                ui.close();
-            }
-        }
-        if ui.button("Delete").clicked() {
-            self.delete_aux_selection(selection);
-            ui.close();
-        }
-        ui.separator();
-        if ui.button("Properties...").clicked() {
-            self.open_aux_properties(selection);
-            ui.close();
         }
     }
 
@@ -7461,11 +7505,32 @@ impl GuiApplication {
             .change_renderer_type_in_object(object_uid, renderer_uid, renderer_type)
         {
             Ok(new_uid) => {
+                let auxiliary_selection = if self.state.density_map_summary(object_uid).is_some() {
+                    Some(WorkspaceAuxSelection::DensityMap {
+                        scene_uid,
+                        map_uid: object_uid,
+                        renderer_uid: Some(new_uid),
+                    })
+                } else if self.state.surface_summary(object_uid).is_some() {
+                    Some(WorkspaceAuxSelection::Surface {
+                        scene_uid,
+                        surface_uid: object_uid,
+                        renderer_uid: Some(new_uid),
+                    })
+                } else if self.state.lw_object_summary(object_uid).is_some() {
+                    Some(WorkspaceAuxSelection::Lightweight {
+                        scene_uid,
+                        object_uid,
+                        renderer_uid: Some(new_uid),
+                    })
+                } else {
+                    None
+                };
                 self.push_undo_snapshot(undo);
                 self.modified_scenes.insert(scene_uid);
-                self.selected_object = Some(object_uid);
-                self.selected_renderer = Some(new_uid);
-                self.workspace_aux_selection = None;
+                self.selected_object = auxiliary_selection.is_none().then_some(object_uid);
+                self.selected_renderer = auxiliary_selection.is_none().then_some(new_uid);
+                self.workspace_aux_selection = auxiliary_selection;
                 self.rebuild_snapshot();
                 self.set_status(format!("Change renderer type to {renderer_type}"));
             }
@@ -28550,6 +28615,24 @@ mod tests {
         let object = app.state.scene_manager().object(object_uid).unwrap();
         assert!(object.renderer(renderer_uid).is_some());
         assert!(object.renderer(replacement_uid).is_none());
+
+        let mut map = cuemol_xtal::DensityMap::new();
+        map.set_map_byte_array(&[0, 255], [2, 1, 1], -1.0, 1.0, 0.0, 1.0);
+        let map_uid = app.state.add_density_map(scene_uid, "map", map);
+        let map_renderer_uid = app.state.add_density_renderer(map_uid, "contour").unwrap();
+        app.change_workspace_renderer_type(scene_uid, map_uid, map_renderer_uid, "isosurf");
+        assert_eq!(
+            app.workspace_aux_selection,
+            Some(WorkspaceAuxSelection::DensityMap {
+                scene_uid,
+                map_uid,
+                renderer_uid: Some(map_renderer_uid),
+            })
+        );
+        assert_eq!(
+            app.state.density_map_summary(map_uid).unwrap().renderers[0].renderer_type,
+            "isosurf"
+        );
     }
 
     #[test]

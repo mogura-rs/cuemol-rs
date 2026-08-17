@@ -1237,16 +1237,23 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
         .and_then(|source| source.split("function workspaceStyleSignature").next())
         .expect("Tauri auxiliary renderer context menu");
     for item in [
+        "label: \"Change sel\"",
+        "label: \"Change type\"",
+        "label: \"Coloring\"",
+        "label: \"Paint\"",
         "label: \"Style\"",
-        "label: \"Edit style…\"",
-        "label: \"Create style…\"",
+        "label: \"Edit style...\"",
+        "label: \"Create style...\"",
+        "label: \"New Renderer...\"",
+        "label: \"Properties...\"",
     ] {
         assert!(aux_renderer_menu.contains(item), "missing {item}");
     }
+    assert!(JS.contains("function changeWorkspaceAuxRendererType("));
     assert!(JS.contains("kind: \"renderer\""));
     assert!(JS.contains("create_workspace_renderer_group"));
     assert!(JS.contains("rename_workspace_node"));
-    assert!(JS.contains("label: \"Rename…\""));
+    assert!(JS.contains("label: \"Rename...\""));
     assert!(!JS.contains("globalThis.prompt"));
     assert!(JS.contains("function beginWorkspaceInlineRename(kind, objectUid, rendererUid = null)"));
     assert!(

@@ -127,6 +127,9 @@ const MOLECULE_RENDERER_TYPES = [
   "trace",
   "tube",
 ];
+const DENSITY_RENDERER_TYPES = ["contour", "isosurf", "gpu_mapvol"];
+const SURFACE_RENDERER_TYPES = ["molsurf"];
+const LIGHTWEIGHT_RENDERER_TYPES = ["lwrend"];
 const WORKSPACE_PAINT_MONOCHROME = [
   ["White", "#FFF"],
   ["75% Gray", "rgb(0.75,0.75,0.75)"],
@@ -7871,6 +7874,26 @@ async function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
     if (snapshot.activeSceneUid === scene.uid) return true;
     return mutate("activate_scene", { sceneUid: scene.uid });
   };
+  const addRenderer = async (groupName = null) => {
+    if (!(await activate())) return;
+    if (kind === "lwRenderer") {
+      await mutate("add_lw_renderer", {
+        objectUid: object.uid,
+        groupName,
+      });
+    } else if (kind === "densityRenderer") {
+      await mutate("add_density_renderer", {
+        mapUid: object.uid,
+        rendererType: rendererType.value,
+        groupName,
+      });
+    } else {
+      await mutate("add_surface_renderer", {
+        surfaceUid: object.uid,
+        groupName,
+      });
+    }
+  };
   if (renderer.rendererType === "*group") {
     return [
       {
@@ -7898,26 +7921,7 @@ async function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
       },
       {
         label: "New Renderer...",
-        action: async () => {
-          if (!(await activate())) return;
-          if (kind === "lwRenderer") {
-            await mutate("add_lw_renderer", {
-              objectUid: object.uid,
-              groupName: renderer.name,
-            });
-          } else if (kind === "densityRenderer") {
-            await mutate("add_density_renderer", {
-              mapUid: object.uid,
-              rendererType: rendererType.value,
-              groupName: renderer.name,
-            });
-          } else {
-            await mutate("add_surface_renderer", {
-              surfaceUid: object.uid,
-              groupName: renderer.name,
-            });
-          }
-        },
+        action: () => addRenderer(renderer.name),
       },
       {
         label: "Delete",
@@ -7965,38 +7969,64 @@ async function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
       action: applyStyle(style.name, "edge"),
     })),
   );
+  const compatibleRendererTypes =
+    kind === "densityRenderer"
+      ? DENSITY_RENDERER_TYPES
+      : kind === "surfaceRenderer"
+        ? SURFACE_RENDERER_TYPES
+        : LIGHTWEIGHT_RENDERER_TYPES;
+  const noOp = () => {};
   const items = [
-    { label: renderer.name, disabled: true },
-    null,
     {
-      label: "Rename…",
-      action: async () => {
-        if (!(await activate())) return;
-        selectWorkspaceAuxItem(kind, object.uid, renderer.uid);
-        beginWorkspaceInlineRename(kind, object.uid, renderer.uid);
-      },
+      label: "Change sel",
+      children: [
+        "Current",
+        "All",
+        "Protein",
+        "Nucleic acid",
+        "Water",
+        "Ligand",
+        "Sugar",
+      ].map((label) => ({ label, action: noOp })),
     },
-    ...(styleChildren.length > 0 ? [{ label: "Style", children: styleChildren }] : []),
     {
-      label: "Edit style…",
+      label: "Change type",
+      children: compatibleRendererTypes
+        .filter((targetType) => targetType !== renderer.rendererType)
+        .map((targetType) => ({
+          label: targetType,
+          action: () => changeWorkspaceAuxRendererType(kind, object, renderer, targetType),
+        })),
+    },
+    { label: "Coloring", disabled: true, children: [] },
+    { label: "Paint", disabled: true, children: [] },
+    { label: "Style", children: styleChildren },
+    {
+      label: "Edit style...",
       action: async () => {
         if (!(await activate())) return;
         await showApplyRendererStyleDialog(object, renderer, styleOptions);
       },
     },
     {
-      label: "Create style…",
+      label: "Create style...",
       action: async () => {
         if (!(await activate())) return;
         await rendererStyleCreateEditor(object, renderer);
       },
     },
+    null,
     {
       label: "Copy",
       action: async () => {
         if (!(await activate())) return;
         await copyWorkspaceRenderer(object.uid, renderer.uid);
       },
+    },
+    null,
+    {
+      label: "New Renderer...",
+      action: () => addRenderer(),
     },
     {
       label: "Delete",
@@ -8007,7 +8037,7 @@ async function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
     },
     null,
     {
-      label: "Properties…",
+      label: "Properties...",
       action: async () => {
         if (!(await activate())) return;
         selectWorkspaceAuxItem(kind, object.uid, renderer.uid);
@@ -8017,7 +8047,7 @@ async function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
   ];
   if (kind === "densityRenderer" && renderer.rendererType === "isosurf") {
     items.splice(
-      2,
+      8,
       0,
       {
         label: "Generate surface obj",
@@ -8029,7 +8059,6 @@ async function workspaceAuxRendererContextItems(scene, kind, object, renderer) {
           });
         },
       },
-      null,
     );
   }
   return items;
@@ -12374,6 +12403,23 @@ async function changeWorkspaceRendererType(object, renderer, targetType) {
   selectedObjectUid = object.uid;
   selectedRendererUid = target?.uid ?? null;
   workspaceSelectionKind = target ? "renderer" : "object";
+  renderShell();
+}
+
+async function changeWorkspaceAuxRendererType(kind, object, renderer, targetType) {
+  const changed = await mutate(
+    "change_workspace_renderer_type",
+    {
+      input: {
+        objectUid: object.uid,
+        rendererUid: renderer.uid,
+        rendererType: targetType,
+      },
+    },
+    () => {},
+  );
+  if (!changed) return;
+  selectWorkspaceAuxItem(kind, object.uid, renderer.uid);
   renderShell();
 }
 
