@@ -966,7 +966,9 @@ fn animation_render_uses_cancellable_progress_and_reference_frame_controls() {
 #[test]
 fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
     assert!(HTML.contains("id=\"animation-start-camera\""));
-    assert!(JS.contains("snapshot.animationStartCamera || \"__current\""));
+    assert!(JS.contains("snapshot.animationStartCamera || \"\""));
+    assert!(JS.contains("animationDuration.textContent = formatAnimationObjectTime(total)"));
+    assert!(HTML.contains("<option value=\"\">(none)</option>"));
     assert!(JS.contains("mutate(\"set_animation_start_camera\""));
     assert!(TAURI_APP_RS.contains("fn set_animation_start_camera("));
     assert!(TAURI_APP_RS.contains("scene_animation(scene_uid)"));
@@ -1055,6 +1057,11 @@ fn animation_panel_uses_scene_backed_timeline_and_start_camera() {
     assert!(NATIVE_GUI_RS.contains("ui.strong(\"Name\")"));
     assert!(NATIVE_GUI_RS.contains("ui.strong(\"Start\")"));
     assert!(NATIVE_GUI_RS.contains("ui.strong(\"End\")"));
+    assert!(NATIVE_GUI_RS.contains("ui.label(\"Duration:\")"));
+    assert!(NATIVE_GUI_RS.contains("ui.label(\"Start cam:\")"));
+    assert!(
+        NATIVE_GUI_RS.contains("ui.selectable_value(&mut start_camera, String::new(), \"(none)\")")
+    );
     assert!(NATIVE_GUI_RS.contains("fn parse_native_animation_time(value: &str)"));
     assert!(NATIVE_GUI_RS.contains("format!(\"{name} ({})\", motion.type_name())"));
 }

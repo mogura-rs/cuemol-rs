@@ -10148,7 +10148,7 @@ impl GuiApplication {
             .state
             .active_scene()
             .ok_or_else(|| "no active scene".to_string())?;
-        if name != "__current"
+        if !name.is_empty()
             && !self
                 .state
                 .camera_summaries(scene_uid)
@@ -10163,7 +10163,8 @@ impl GuiApplication {
         self.set_active_animation_manager(&animation)?;
         self.animation_elapsed = 0.0;
         self.push_undo_snapshot(undo);
-        self.set_status(format!("Animation start camera: {name}"));
+        let label = if name.is_empty() { "(none)" } else { name };
+        self.set_status(format!("Animation start camera: {label}"));
         Ok(())
     }
 
@@ -10596,9 +10597,6 @@ impl GuiApplication {
         let mut delete = None::<Vec<usize>>;
         let mut move_by = None::<(Vec<usize>, i32)>;
         let mut start_camera = animation.startcam().to_string();
-        if start_camera.is_empty() {
-            start_camera = "__current".to_string();
-        }
         let original_start_camera = start_camera.clone();
         let selected_indices = self.animation_selection.iter().copied().collect::<Vec<_>>();
         let selection_count = selected_indices.len();
@@ -10607,79 +10605,19 @@ impl GuiApplication {
             .last()
             .is_some_and(|index| index + 1 < animation.size());
         ui.horizontal(|ui| {
-            ui.menu_button("Add", |ui| {
-                for kind in [
-                    AnimKind::Spin,
-                    AnimKind::CameraMotion,
-                    AnimKind::ShowAnim,
-                    AnimKind::HideAnim,
-                    AnimKind::SlideIn,
-                    AnimKind::SlideOut,
-                    AnimKind::MolAnim,
-                    AnimKind::Pause,
-                ] {
-                    if ui.button(kind.label()).clicked() {
-                        add = Some(kind);
-                        ui.close();
-                    }
-                }
-            });
-            if ui
-                .add_enabled(selection_count > 0, egui::Button::new("Delete"))
-                .clicked()
-            {
-                delete = Some(selected_indices.clone());
-            }
-            if ui
-                .add_enabled(selection_count == 1, egui::Button::new("Change"))
-                .clicked()
-            {
-                edit = self.animation_selected;
-            }
-            if ui
-                .add_enabled(can_move_up, egui::Button::new("Move up"))
-                .clicked()
-            {
-                move_by = Some((selected_indices.clone(), -1));
-            }
-            if ui
-                .add_enabled(can_move_down, egui::Button::new("Move down"))
-                .clicked()
-            {
-                move_by = Some((selected_indices.clone(), 1));
-            }
+            ui.label("Duration:");
+            ui.label(format_native_animation_time(animation.length()));
         });
         ui.horizontal(|ui| {
-            let play = if self.animation_playing {
-                "⏸ Pause"
-            } else {
-                "▶ Play"
-            };
-            if ui.button(play).clicked() {
-                if self.animation_playing {
-                    self.animation_playing = false;
-                } else if let Err(error) = self.begin_animation_playback(camera) {
-                    self.set_status(format!("Error: {error}"));
-                }
-            }
-            if ui.button("⏹ Stop").clicked() {
-                if let Err(error) = self.restore_animation_playback(camera, false) {
-                    self.set_status(format!("Error: {error}"));
-                } else {
-                    self.animation_elapsed = 0.0;
-                }
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label("Start camera:");
+            ui.label("Start cam:");
             egui::ComboBox::from_id_salt("native_animation_start_camera")
-                .selected_text(if start_camera == "__current" {
-                    "Current view"
+                .selected_text(if start_camera.is_empty() {
+                    "(none)"
                 } else {
                     &start_camera
                 })
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut start_camera, "__current".to_string(), "Current view");
+                    ui.selectable_value(&mut start_camera, String::new(), "(none)");
                     if let Some(scene_uid) = self.state.active_scene() {
                         for summary in self.state.camera_summaries(scene_uid) {
                             let name = summary.name;
@@ -10780,6 +10718,55 @@ impl GuiApplication {
                     ui.end_row();
                 }
             });
+        ui.horizontal(|ui| {
+            ui.menu_button("＋", |ui| {
+                for kind in [
+                    AnimKind::Spin,
+                    AnimKind::CameraMotion,
+                    AnimKind::ShowAnim,
+                    AnimKind::HideAnim,
+                    AnimKind::SlideIn,
+                    AnimKind::SlideOut,
+                    AnimKind::MolAnim,
+                    AnimKind::Pause,
+                ] {
+                    if ui.button(kind.label()).clicked() {
+                        add = Some(kind);
+                        ui.close();
+                    }
+                }
+            })
+            .response
+            .on_hover_text("Add");
+            if ui
+                .add_enabled(selection_count > 0, egui::Button::new("−"))
+                .on_hover_text("Delete")
+                .clicked()
+            {
+                delete = Some(selected_indices.clone());
+            }
+            if ui
+                .add_enabled(selection_count == 1, egui::Button::new("⚙"))
+                .on_hover_text("Change")
+                .clicked()
+            {
+                edit = self.animation_selected;
+            }
+            if ui
+                .add_enabled(can_move_up, egui::Button::new("↑"))
+                .on_hover_text("Move up")
+                .clicked()
+            {
+                move_by = Some((selected_indices.clone(), -1));
+            }
+            if ui
+                .add_enabled(can_move_down, egui::Button::new("↓"))
+                .on_hover_text("Move down")
+                .clicked()
+            {
+                move_by = Some((selected_indices.clone(), 1));
+            }
+        });
         if let Some(kind) = add {
             if let Err(error) = self.open_new_animation_properties(kind, camera) {
                 self.set_status(format!("Error: {error}"));

@@ -11671,14 +11671,12 @@ fn handle_model_request(
                 .active_scene()
                 .ok_or_else(|| "no active scene".to_string())?;
             let name = name.trim();
-            if name.is_empty() {
-                return Err("animation start camera is required".to_string());
-            }
-            if !model
-                .desktop
-                .camera_summaries(scene_uid)
-                .iter()
-                .any(|camera| camera.name == name)
+            if !name.is_empty()
+                && !model
+                    .desktop
+                    .camera_summaries(scene_uid)
+                    .iter()
+                    .any(|camera| camera.name == name)
             {
                 return Err(format!("camera {name} was not found"));
             }
@@ -11687,7 +11685,8 @@ fn handle_model_request(
             animation.set_startcam(name);
             model.set_active_animation_manager(&animation)?;
             model.reset_animation_playback();
-            model.status = format!("Animation start camera: {name}");
+            let label = if name.is_empty() { "(none)" } else { name };
+            model.status = format!("Animation start camera: {label}");
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -21656,6 +21655,14 @@ mod tests {
             ModelRequest::SetAnimationStartCamera("overview".to_string()),
         )
         .unwrap();
+        assert_eq!(model.snapshot().animation_start_camera, "overview");
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetAnimationStartCamera(String::new()),
+        )
+        .unwrap();
+        assert_eq!(model.snapshot().animation_start_camera, "");
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert_eq!(model.snapshot().animation_start_camera, "overview");
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert_eq!(model.snapshot().animation_start_camera, "__current");

@@ -14214,24 +14214,26 @@ function renderAnimation() {
     }
   }
   const total = snapshot.animationDuration;
-  animationDuration.textContent = formatAnimationTime(total);
-  const cameraNames = [
-    "__current",
+  animationDuration.textContent = formatAnimationObjectTime(total);
+  const cameraOptions = [
+    ["", "(none)"],
     ...snapshot.cameras
       .filter((camera) => camera.sceneUid === snapshot.activeSceneUid)
       .map((camera) => camera.name)
-      .filter((name) => name !== "__current"),
+      .map((name) => [name, name]),
   ];
-  const selectedCamera = snapshot.animationStartCamera || "__current";
-  if (!cameraNames.includes(selectedCamera)) cameraNames.push(selectedCamera);
-  const cameraKey = JSON.stringify(cameraNames);
+  const selectedCamera = snapshot.animationStartCamera || "";
+  if (!cameraOptions.some(([value]) => value === selectedCamera)) {
+    cameraOptions.push([selectedCamera, selectedCamera]);
+  }
+  const cameraKey = JSON.stringify(cameraOptions);
   if (animationStartCamera.dataset.optionsKey !== cameraKey) {
     animationStartCamera.dataset.optionsKey = cameraKey;
     animationStartCamera.replaceChildren(
-      ...cameraNames.map((cameraName) => {
+      ...cameraOptions.map(([cameraName, cameraLabel]) => {
         const option = document.createElement("option");
         option.value = cameraName;
-        option.textContent = cameraName;
+        option.textContent = cameraLabel;
         return option;
       }),
     );
