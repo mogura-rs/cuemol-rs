@@ -2753,4 +2753,8 @@ fn tauri_global_shortcuts_match_the_reference_keyset() {
     assert!(shortcuts.contains("event.key === \"F2\""));
     assert!(shortcuts.contains("handleLocalAction(\"performance-measure\")"));
     assert!(shortcuts.contains("!editing && primary"));
+    assert!(NATIVE_GUI_RS.contains("fn native_window_command("));
+    assert!(NATIVE_GUI_RS.contains("std::env::current_exe()"));
+    assert!(NATIVE_GUI_RS.contains("Opened new window (PID {})"));
+    assert!(!NATIVE_GUI_RS.contains("New window mapped to a new scene"));
 }

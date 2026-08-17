@@ -512,6 +512,12 @@ fn exit_after_from_env() -> Option<Duration> {
     Some(Duration::from_millis(millis))
 }
 
+fn native_window_command(executable: &Path) -> Command {
+    let mut command = Command::new(executable);
+    command.env_remove("CUEMOL_DESKTOP_EXIT_AFTER_MS");
+    command
+}
+
 fn spawn_process_exit_timer_from_env() {
     let Some(duration) = exit_after_from_env() else {
         return;
@@ -4934,7 +4940,7 @@ impl GuiApplication {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("New Window").clicked() {
-                        self.new_window(camera);
+                        self.new_window();
                         ui.close();
                     }
                     if ui.button("New Tab").clicked() {
@@ -16471,7 +16477,7 @@ impl GuiApplication {
         match command {
             Some(MainShortcutCommand::OpenScene) => self.choose_open_scene(camera),
             Some(MainShortcutCommand::NewTab) => self.open_new_tab_dialog(),
-            Some(MainShortcutCommand::NewWindow) => self.new_window(camera),
+            Some(MainShortcutCommand::NewWindow) => self.new_window(),
             Some(MainShortcutCommand::OpenFile) => self.choose_open_file(camera),
             Some(MainShortcutCommand::ReloadScene) => self.reload_current_path(camera),
             Some(MainShortcutCommand::SaveScene) => self.save_current_scene(camera),
@@ -16897,11 +16903,6 @@ impl GuiApplication {
         }
     }
 
-    fn new_scene(&mut self, camera: &mut CameraController) {
-        let (scene_name, _) = self.proposed_new_tab_names();
-        self.create_new_scene(&scene_name, camera);
-    }
-
     fn create_new_scene(&mut self, name: &str, camera: &mut CameraController) {
         let undo = self.capture_undo();
         let current = camera.to_qsys_camera("__current");
@@ -17005,9 +17006,18 @@ impl GuiApplication {
         }
     }
 
-    fn new_window(&mut self, camera: &mut CameraController) {
-        self.new_scene(camera);
-        self.set_status("New window mapped to a new scene in this native runner");
+    fn new_window(&mut self) {
+        let executable = match std::env::current_exe() {
+            Ok(executable) => executable,
+            Err(error) => {
+                self.set_status(format!("Failed to locate native executable: {error}"));
+                return;
+            }
+        };
+        match native_window_command(&executable).spawn() {
+            Ok(child) => self.set_status(format!("Opened new window (PID {})", child.id())),
+            Err(error) => self.set_status(format!("Failed to open new window: {error}")),
+        }
     }
 
     fn request_application_exit(&mut self) {
@@ -32687,6 +32697,18 @@ fn default_config_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_new_window_command_relaunches_without_test_exit_timer() {
+        let executable = Path::new("/tmp/cuemol-desktop");
+        let command = native_window_command(executable);
+
+        assert_eq!(command.get_program(), executable.as_os_str());
+        assert_eq!(command.get_args().count(), 0);
+        assert!(command.get_envs().any(|(key, value)| {
+            key == std::ffi::OsStr::new("CUEMOL_DESKTOP_EXIT_AFTER_MS") && value.is_none()
+        }));
+    }
 
     #[test]
     fn molstruct_tree_selection_matches_reference_ranges_and_modifiers() {
