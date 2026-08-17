@@ -39,6 +39,7 @@ use winit::window::{Window, WindowId};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 const MAX_RECENT_PATHS: usize = 10;
+const MAX_SELECTION_HISTORY: usize = 10;
 const RENDER_PRESETS: &[(&str, u32, u32)] = &[
     ("HD 720", 1280, 720),
     ("Full HD", 1920, 1080),
@@ -4245,6 +4246,20 @@ fn load_recent_paths(state: &DesktopAppState) -> Vec<PathBuf> {
         .collect()
 }
 
+fn load_selection_history(state: &DesktopAppState) -> Vec<String> {
+    let length = state
+        .config_value("selection_history:length")
+        .parse::<usize>()
+        .unwrap_or(0)
+        .min(MAX_SELECTION_HISTORY);
+    (0..length)
+        .filter_map(|index| {
+            let selection = state.config_value(&format!("selection_history:{index}"));
+            (!selection.trim().is_empty()).then_some(selection)
+        })
+        .collect()
+}
+
 impl GuiApplication {
     fn new() -> Self {
         let mut state = DesktopAppState::new();
@@ -4270,6 +4285,7 @@ impl GuiApplication {
         let left_panel_order = parse_left_panel_order(&state.config_value("left_panel:order"));
         let left_panel_heights = load_left_panel_heights(&state);
         let recent_paths = load_recent_paths(&state);
+        let selection_history = load_selection_history(&state);
         let left_panel_width = state
             .config_value("left_panel:width")
             .parse::<f32>()
@@ -4548,7 +4564,7 @@ impl GuiApplication {
             modified_scenes: std::collections::BTreeSet::new(),
             status: "Ready".to_string(),
             log_lines: Vec::new(),
-            selection_history: Vec::new(),
+            selection_history,
             selection_editor_items: Vec::new(),
             selection_editor_selected: None,
         }
@@ -9960,7 +9976,7 @@ impl GuiApplication {
                 if self.selection_history.is_empty() {
                     ui.add_enabled(false, egui::Button::new("(no history)"));
                 } else {
-                    for past in self.selection_history.iter().rev() {
+                    for past in &self.selection_history {
                         if ui.selectable_label(false, past).clicked() {
                             history_pick = Some(past.clone());
                             ui.close();
@@ -10193,9 +10209,24 @@ impl GuiApplication {
             return;
         }
         self.selection_history.retain(|entry| entry != selection);
-        self.selection_history.push(selection.to_string());
-        if self.selection_history.len() > 20 {
-            self.selection_history.remove(0);
+        self.selection_history.insert(0, selection.to_string());
+        self.selection_history.truncate(MAX_SELECTION_HISTORY);
+        self.persist_selection_history();
+    }
+
+    fn persist_selection_history(&mut self) {
+        self.state.put_config_value(
+            "selection_history:length",
+            self.selection_history.len().to_string(),
+        );
+        for index in 0..MAX_SELECTION_HISTORY {
+            self.state.put_config_value(
+                &format!("selection_history:{index}"),
+                self.selection_history
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_default(),
+            );
         }
     }
 
@@ -18162,9 +18193,9 @@ impl GuiApplication {
             dx_path: work_dir.join("apbs_pot.dx"),
         };
         let selection = if self.apbs_use_selection {
-            self.apbs_selection.trim()
+            self.apbs_selection.trim().to_string()
         } else {
-            ""
+            String::new()
         };
         let options = GuiApbsOptions {
             charge_method: self.apbs_charge_method,
@@ -18177,7 +18208,7 @@ impl GuiApplication {
         };
         let summary = match self
             .state
-            .prepare_apbs_files(object_uid, selection, &options, &paths)
+            .prepare_apbs_files(object_uid, &selection, &options, &paths)
         {
             Ok(summary) => summary,
             Err(error) => {
@@ -18209,8 +18240,7 @@ impl GuiApplication {
             return;
         }
         if self.apbs_use_selection && !selection.is_empty() {
-            self.selection_history.retain(|entry| entry != selection);
-            self.selection_history.insert(0, selection.to_string());
+            self.remember_selection_history(&selection);
         }
         self.apbs_job = Some(NativeApbsJob {
             receiver,
@@ -19789,6 +19819,7 @@ impl GuiApplication {
         self.left_panel_heights = load_left_panel_heights(&self.state);
         self.left_panel_drag_start_heights.fill(None);
         self.recent_paths = load_recent_paths(&self.state);
+        self.selection_history = load_selection_history(&self.state);
         self.left_panel_width = self
             .state
             .config_value("left_panel:width")
@@ -26908,7 +26939,7 @@ impl GuiApplication {
                                 );
                                 ui.add_enabled_ui(!selection_history.is_empty(), |ui| {
                                     ui.menu_button("History", |ui| {
-                                        for entry in selection_history.iter().rev() {
+                                        for entry in &selection_history {
                                             if ui.button(entry).clicked() {
                                                 draft.selection = entry.clone();
                                                 ui.close();
@@ -32979,6 +33010,21 @@ mod tests {
     }
 
     #[test]
+    fn native_selection_history_persists_the_reference_order_and_limit() {
+        let mut app = GuiApplication::new();
+        for index in 0..12 {
+            app.remember_selection_history(&format!("chain {index}"));
+        }
+        app.remember_selection_history("chain 5");
+
+        assert_eq!(app.selection_history.len(), MAX_SELECTION_HISTORY);
+        assert_eq!(app.selection_history[0], "chain 5");
+        assert_eq!(app.selection_history[1], "chain 11");
+        assert_eq!(app.state.config_value("selection_history:length"), "10");
+        assert_eq!(load_selection_history(&app.state), app.selection_history);
+    }
+
+    #[test]
     fn molstruct_tree_selection_matches_reference_ranges_and_modifiers() {
         let object_uid = cuemol_core::Uid::new(7);
         let chain = MolstructTreeRow::Chain {
@@ -33521,7 +33567,7 @@ mod tests {
         let app = GuiApplication::new_with_config_source(NativeConfigSource {
             path: Some(PathBuf::from("preloaded.conf")),
             input: Ok(Some(
-                "view_input:tbrad\t1.25\ncuemol2.ui.ribbon.collapsed\ttrue\nleft_panel:Workspace:visible\tfalse\nleft_panel:Workspace:collapsed\ttrue\nleft_panel:Workspace:height\t185\nleft_panel:order\tAnimation|Workspace|MolStruct|Selection|Coloring|Symmetry|Density map|View\nleft_panel:width\t310\nbottom_panel:visible\tfalse\nbottom_panel:tab\tsequence\nbottom_panel:height\t240\nsequence_panel:name_width\t220\n"
+                "view_input:tbrad\t1.25\ncuemol2.ui.ribbon.collapsed\ttrue\nleft_panel:Workspace:visible\tfalse\nleft_panel:Workspace:collapsed\ttrue\nleft_panel:Workspace:height\t185\nleft_panel:order\tAnimation|Workspace|MolStruct|Selection|Coloring|Symmetry|Density map|View\nleft_panel:width\t310\nbottom_panel:visible\tfalse\nbottom_panel:tab\tsequence\nbottom_panel:height\t240\nsequence_panel:name_width\t220\nmru:length\t2\nmru:0:path\t/tmp/recent.qsc\nmru:1:path\t/tmp/recent.pdb\nselection_history:length\t2\nselection_history:0\tchain A\nselection_history:1\tname CA\n"
                     .to_string(),
             )),
         });
@@ -33540,6 +33586,11 @@ mod tests {
         assert_eq!(app.bottom_tab, BottomTab::Sequence);
         assert_eq!(app.bottom_panel_height, 240.0);
         assert_eq!(app.sequence_name_width, 220.0);
+        assert_eq!(
+            app.recent_paths,
+            ["/tmp/recent.qsc", "/tmp/recent.pdb"].map(PathBuf::from)
+        );
+        assert_eq!(app.selection_history, ["chain A", "name CA"]);
         assert_eq!(app.status, "Loaded config preloaded.conf");
     }
 
