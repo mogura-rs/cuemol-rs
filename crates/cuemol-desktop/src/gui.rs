@@ -25660,11 +25660,11 @@ const SCENE_SAVE_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
     extensions: &["qsc"],
 }];
 const VIEW_SAVE_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
-    label: "Camera setting",
+    label: "Camera setting (*.cam)",
     extensions: &["cam"],
 }];
 const STYLE_FILE_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
-    label: "Style file",
+    label: "Style file (*.xml)",
     extensions: &["xml"],
 }];
 const EXPORT_FILTERS: &[NativeFileFilter] = &[
@@ -25682,7 +25682,7 @@ const RENDERED_IMAGE_SAVE_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
     extensions: &["png"],
 }];
 const SCRIPT_OPEN_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
-    label: "Internal JavaScript",
+    label: "Internal Javascript (*.js)",
     extensions: &["js"],
 }];
 const LOG_SAVE_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {

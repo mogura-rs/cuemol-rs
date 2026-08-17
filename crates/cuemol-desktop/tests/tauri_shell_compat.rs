@@ -187,7 +187,7 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         assert!(JS.contains(command), "missing menu binding {command}");
     }
     assert!(JS.contains("title: \"Select a File\""));
-    assert!(JS.contains("name: \"Internal Javascript\""));
+    assert!(JS.contains("name: \"Internal Javascript (*.js)\""));
     assert!(!JS.contains("dialogTextArea(\n      \"JavaScript\""));
     assert!(HTML.contains("data-interaction=\"rotate\""));
     assert!(HTML.contains("data-interaction=\"rect-select\""));
@@ -326,6 +326,23 @@ fn tauri_file_save_uses_reference_workspace_writer_filters() {
     assert!(dialog.contains("\"save_object\""));
     assert!(TAURI_APP_RS.contains("save_workspace_object_as(kind"));
     assert!(TAURI_APP_RS.contains("GuiWorkspaceObjectKind::Lightweight"));
+}
+
+#[test]
+fn tauri_save_current_view_uses_reference_camera_filter() {
+    let start = JS
+        .find("} else if (title === \"Save Current View\")")
+        .unwrap();
+    let end = JS[start + 1..]
+        .find("} else if (title === \"Merge molecule\")")
+        .map(|offset| start + 1 + offset)
+        .unwrap();
+    let dialog = &JS[start..end];
+
+    assert!(dialog.contains("\"current_view.cam\""));
+    assert!(dialog.contains("\"Camera setting (*.cam)\""));
+    assert!(dialog.contains("[\"cam\"]"));
+    assert!(!dialog.contains("\"view\""));
 }
 
 #[test]
@@ -1296,6 +1313,7 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("label: \"Camera file\""));
     assert!(JS.contains("function loadWorkspaceCameraFile(scene)"));
     assert!(JS.contains("function saveWorkspaceCameraFile(scene, camera, saveAs)"));
+    assert!(JS.contains("name: \"Camera setting (*.cam)\""));
     assert!(JS.contains("mutate(\"load_camera_file\""));
     assert!(JS.contains("mutateWithoutViewport(\"reload_camera_file\""));
     assert!(JS.contains("mutateWithoutViewport(\"save_camera_file\""));
@@ -1306,10 +1324,14 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("function loadWorkspaceStyleFile(scene)"));
     assert!(JS.contains("function saveWorkspaceStyleFile(scene, style, saveAs)"));
     assert!(JS.contains("function reloadWorkspaceStyleFile(scene, style)"));
+    assert!(JS.contains("name: \"Style file (*.xml)\""));
     assert!(JS.contains("mutate(\"load_style_file\""));
     assert!(JS.contains("mutateWithoutViewport(\"reload_style_file\""));
     assert!(JS.contains("mutateWithoutViewport(\"save_style_file\""));
     assert!(!JS.contains("Not implemented!!"));
+    assert!(NATIVE_GUI_RS.contains("label: \"Camera setting (*.cam)\""));
+    assert!(NATIVE_GUI_RS.contains("label: \"Style file (*.xml)\""));
+    assert!(NATIVE_GUI_RS.contains("label: \"Internal Javascript (*.js)\""));
     assert!(JS.contains("function updateWorkspaceStyle(style, update)"));
     assert!(JS.contains("label: \"New Style...\""));
     assert!(JS.contains("async function openNewStyleFlow()"));

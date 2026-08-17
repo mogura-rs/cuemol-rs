@@ -6708,7 +6708,11 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     }
   } else if (title === "Save Current View") {
     const save = button("Save…", "dialog-primary", async () => {
-      const path = await chooseOutputPath("current.view", "CueMol view", ["view", "cam"]);
+      const path = await chooseOutputPath(
+        "current_view.cam",
+        "Camera setting (*.cam)",
+        ["cam"],
+      );
       if (!path) return;
       await mutateWithoutViewport("save_view", { path }, renderStatusAndLog);
       referenceDialog.close();
@@ -7167,7 +7171,7 @@ async function chooseExecuteScriptFile() {
     title: "Select a File",
     multiple: false,
     directory: false,
-    filters: [{ name: "Internal Javascript", extensions: ["js"] }],
+    filters: [{ name: "Internal Javascript (*.js)", extensions: ["js"] }],
   });
   if (!path) return;
   if (await mutate("execute_script_file", { path })) {
@@ -7619,7 +7623,7 @@ async function loadWorkspaceCameraFile(scene) {
   const path = await dialog.open({
     multiple: false,
     directory: false,
-    filters: [{ name: "Camera setting", extensions: ["cam"] }],
+    filters: [{ name: "Camera setting (*.cam)", extensions: ["cam"] }],
   });
   if (!path) return;
   const previous = new Set(
@@ -7639,7 +7643,7 @@ async function loadWorkspaceCameraFile(scene) {
 async function saveWorkspaceCameraFile(scene, camera, saveAs) {
   let path = !saveAs ? camera.source : "";
   if (!path) {
-    path = await chooseOutputPath(`${camera.name}.cam`, "Camera setting", ["cam"]);
+    path = await chooseOutputPath(`${camera.name}.cam`, "Camera setting (*.cam)", ["cam"]);
   }
   if (!path) return;
   if (
@@ -8236,7 +8240,7 @@ async function loadWorkspaceStyleFile(scene) {
   const path = await dialog.open({
     multiple: false,
     directory: false,
-    filters: [{ name: "Style file", extensions: ["xml"] }],
+    filters: [{ name: "Style file (*.xml)", extensions: ["xml"] }],
   });
   if (!path) return;
   const previous = new Set(
@@ -8257,7 +8261,7 @@ async function saveWorkspaceStyleFile(scene, style, saveAs) {
   let path = !saveAs ? style.source : "";
   if (!path) {
     const baseName = style.name === "(anonymous)" ? "style" : style.name;
-    path = await chooseOutputPath(`${baseName}.xml`, "Style file", ["xml"]);
+    path = await chooseOutputPath(`${baseName}.xml`, "Style file (*.xml)", ["xml"]);
   }
   if (!path) return;
   if (
