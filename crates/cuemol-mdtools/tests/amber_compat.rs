@@ -2,7 +2,8 @@ use cuemol_core::Vector4;
 use cuemol_mdtools::{
     apply_amber_mdcrd_frame, apply_amber_restart_str, read_amber_mdcrd_str, read_amber_prmtop_file,
     read_amber_prmtop_str, read_amber_prmtop_with_restart_files,
-    read_amber_prmtop_with_restart_str, read_amber_restart_str,
+    read_amber_prmtop_with_restart_str, read_amber_prmtop_with_restart_str_and_bond_mode,
+    read_amber_restart_str, AmberPrmtopReader,
 };
 use cuemol_molstr::{Atom, MolCoord};
 use std::fs;
@@ -133,6 +134,53 @@ fn amber_prmtop_builds_molecule_bonds_and_coordinates() {
     assert_eq!(molecule.atoms()[1].element, "H");
     assert_eq!(molecule.atoms()[0].res_name, "WAT");
     assert_eq!(molecule.atoms()[0].position, Vector4::new3(1.0, 2.0, 3.0));
+    assert!(molecule.bonds().iter().all(|bond| bond.persist));
+    assert_eq!(
+        molecule
+            .get_residue_prop_str("A", "1", "noautogen")
+            .unwrap(),
+        Some("true")
+    );
+}
+
+#[test]
+fn amber_prmtop_bond_modes_match_qif_behavior() {
+    let hybrid = read_amber_prmtop_with_restart_str_and_bond_mode(
+        PRMTOP_WATER,
+        Some(INPCRD_WATER),
+        AmberPrmtopReader::BONDMODE_HYBRID,
+    )
+    .unwrap()
+    .molecule;
+    assert!(hybrid.bonds().iter().any(|bond| bond.persist));
+    assert_eq!(
+        hybrid.get_residue_prop_str("A", "1", "noautogen").unwrap(),
+        None
+    );
+
+    let autogen = read_amber_prmtop_with_restart_str_and_bond_mode(
+        PRMTOP_WATER,
+        Some(INPCRD_WATER),
+        AmberPrmtopReader::BONDMODE_AUTOGEN,
+    )
+    .unwrap()
+    .molecule;
+    assert!(autogen.bonds().iter().all(|bond| !bond.persist));
+
+    let mut reader = AmberPrmtopReader::new();
+    assert_eq!(reader.bondmode(), AmberPrmtopReader::BONDMODE_FILE);
+    reader.set_bondmode(AmberPrmtopReader::BONDMODE_AUTOGEN);
+    assert_eq!(reader.get_bond_mode(), AmberPrmtopReader::BONDMODE_AUTOGEN);
+    assert!(reader
+        .read_str(PRMTOP_WATER)
+        .unwrap()
+        .bonds()
+        .iter()
+        .all(|bond| !bond.persist));
+
+    let error =
+        read_amber_prmtop_with_restart_str_and_bond_mode(PRMTOP_WATER, None, 99).unwrap_err();
+    assert!(error.to_string().contains("bond mode"));
 }
 
 #[test]

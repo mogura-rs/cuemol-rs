@@ -59,9 +59,14 @@ impl AmberCrdReader {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AmberPrmtopReader {
     reader: ObjReader,
+    bond_mode: i32,
 }
 
 impl AmberPrmtopReader {
+    pub const BONDMODE_FILE: i32 = 0;
+    pub const BONDMODE_HYBRID: i32 = 1;
+    pub const BONDMODE_AUTOGEN: i32 = 2;
+
     pub fn new() -> Self {
         Self {
             reader: ObjReader::new(
@@ -69,6 +74,7 @@ impl AmberPrmtopReader {
                 "AMBER topology (*.prmtop;*.parm7;*.top)",
                 "*.prmtop;*.parm7;*.top",
             ),
+            bond_mode: Self::BONDMODE_FILE,
         }
     }
 
@@ -84,12 +90,32 @@ impl AmberPrmtopReader {
         self.reader.handler()
     }
 
-    pub fn read_str(input: &str) -> Result<MolCoord> {
-        read_amber_prmtop_str(input)
+    pub fn bond_mode(&self) -> i32 {
+        self.bond_mode
     }
 
-    pub fn read_file(path: impl AsRef<Path>) -> Result<MolCoord> {
-        read_amber_prmtop_file(path)
+    pub fn bondmode(&self) -> i32 {
+        self.bond_mode()
+    }
+
+    pub fn get_bond_mode(&self) -> i32 {
+        self.bond_mode()
+    }
+
+    pub fn set_bond_mode(&mut self, value: i32) {
+        self.bond_mode = value;
+    }
+
+    pub fn set_bondmode(&mut self, value: i32) {
+        self.set_bond_mode(value);
+    }
+
+    pub fn read_str(&self, input: &str) -> Result<MolCoord> {
+        read_amber_prmtop_str_with_bond_mode(input, self.bond_mode)
+    }
+
+    pub fn read_file(&self, path: impl AsRef<Path>) -> Result<MolCoord> {
+        read_amber_prmtop_file_with_bond_mode(path, self.bond_mode)
     }
 }
 
@@ -255,27 +281,63 @@ pub fn apply_amber_mdcrd_frame(molecule: &mut MolCoord, frame: &AmberMdcrdFrame)
 }
 
 pub fn read_amber_prmtop_file(path: impl AsRef<Path>) -> Result<MolCoord> {
+    read_amber_prmtop_file_with_bond_mode(path, AmberPrmtopReader::BONDMODE_FILE)
+}
+
+pub fn read_amber_prmtop_file_with_bond_mode(
+    path: impl AsRef<Path>,
+    bond_mode: i32,
+) -> Result<MolCoord> {
     let input = crate::fileio::read_text_maybe_compressed(path)?;
-    read_amber_prmtop_str(&input)
+    read_amber_prmtop_str_with_bond_mode(&input, bond_mode)
 }
 
 pub fn read_amber_prmtop_with_restart_files(
     prmtop_path: impl AsRef<Path>,
     restart_path: impl AsRef<Path>,
 ) -> Result<AmberPrmtopLoad> {
+    read_amber_prmtop_with_restart_files_and_bond_mode(
+        prmtop_path,
+        restart_path,
+        AmberPrmtopReader::BONDMODE_FILE,
+    )
+}
+
+pub fn read_amber_prmtop_with_restart_files_and_bond_mode(
+    prmtop_path: impl AsRef<Path>,
+    restart_path: impl AsRef<Path>,
+    bond_mode: i32,
+) -> Result<AmberPrmtopLoad> {
     let prmtop = crate::fileio::read_text_maybe_compressed(prmtop_path)?;
     let restart = crate::fileio::read_text_maybe_compressed(restart_path)?;
-    read_amber_prmtop_with_restart_str(&prmtop, Some(&restart))
+    read_amber_prmtop_with_restart_str_and_bond_mode(&prmtop, Some(&restart), bond_mode)
 }
 
 pub fn read_amber_prmtop_str(input: &str) -> Result<MolCoord> {
-    Ok(read_amber_prmtop_with_restart_str(input, None)?.molecule)
+    read_amber_prmtop_str_with_bond_mode(input, AmberPrmtopReader::BONDMODE_FILE)
+}
+
+pub fn read_amber_prmtop_str_with_bond_mode(input: &str, bond_mode: i32) -> Result<MolCoord> {
+    Ok(read_amber_prmtop_with_restart_str_and_bond_mode(input, None, bond_mode)?.molecule)
 }
 
 pub fn read_amber_prmtop_with_restart_str(
     prmtop_input: &str,
     restart_input: Option<&str>,
 ) -> Result<AmberPrmtopLoad> {
+    read_amber_prmtop_with_restart_str_and_bond_mode(
+        prmtop_input,
+        restart_input,
+        AmberPrmtopReader::BONDMODE_FILE,
+    )
+}
+
+pub fn read_amber_prmtop_with_restart_str_and_bond_mode(
+    prmtop_input: &str,
+    restart_input: Option<&str>,
+    bond_mode: i32,
+) -> Result<AmberPrmtopLoad> {
+    validate_amber_bond_mode(bond_mode)?;
     let sections = parse_prmtop_sections(prmtop_input)?;
     let pointers = parse_required_ints(&sections, "POINTERS", 31)?;
     if pointers.len() < 12 {
@@ -330,8 +392,13 @@ pub fn read_amber_prmtop_with_restart_str(
         });
     }
 
-    add_amber_bonds(&sections, "BONDS_INC_HYDROGEN", nbonh, &mut molecule)?;
-    add_amber_bonds(&sections, "BONDS_WITHOUT_HYDROGEN", mbona, &mut molecule)?;
+    if bond_mode != AmberPrmtopReader::BONDMODE_AUTOGEN {
+        add_amber_bonds(&sections, "BONDS_INC_HYDROGEN", nbonh, &mut molecule)?;
+        add_amber_bonds(&sections, "BONDS_WITHOUT_HYDROGEN", mbona, &mut molecule)?;
+    }
+    if bond_mode == AmberPrmtopReader::BONDMODE_FILE {
+        set_amber_noautogen(&mut molecule)?;
+    }
 
     let cell = if let Some(restart_input) = restart_input {
         let restart = apply_amber_restart_str(&mut molecule, restart_input)?;
@@ -339,6 +406,8 @@ pub fn read_amber_prmtop_with_restart_str(
     } else {
         None
     };
+
+    molecule.apply_topology();
 
     Ok(AmberPrmtopLoad { molecule, cell })
 }
@@ -644,6 +713,36 @@ fn build_atom_residue_map(natom: usize, residue_pointers: &[i32]) -> Result<Vec<
     Ok(atom_to_res)
 }
 
+fn validate_amber_bond_mode(value: i32) -> Result<()> {
+    if matches!(
+        value,
+        AmberPrmtopReader::BONDMODE_FILE
+            | AmberPrmtopReader::BONDMODE_HYBRID
+            | AmberPrmtopReader::BONDMODE_AUTOGEN
+    ) {
+        Ok(())
+    } else {
+        Err(CueMolError::invalid_argument(format!(
+            "invalid AMBER bond mode {value}"
+        )))
+    }
+}
+
+fn set_amber_noautogen(molecule: &mut MolCoord) -> Result<()> {
+    let residues = molecule
+        .residue_summaries()
+        .into_iter()
+        .map(|summary| {
+            let index = summary.key.script_index();
+            (summary.key.chain_id, index)
+        })
+        .collect::<Vec<_>>();
+    for (chain, index) in residues {
+        molecule.set_residue_prop_str(&chain, &index, "noautogen", "true")?;
+    }
+    Ok(())
+}
+
 fn add_amber_bonds(
     sections: &BTreeMap<String, PrmtopSection>,
     flag: &str,
@@ -658,7 +757,10 @@ fn add_amber_bonds(
         let atom1 = ints[bond_index * 3] / 3;
         let atom2 = ints[bond_index * 3 + 1] / 3;
         if atom1 >= 0 && atom2 >= 0 {
-            molecule.add_bond(atom1 as usize, atom2 as usize, BondOrder::Single);
+            let atom1 = atom1 as usize;
+            let atom2 = atom2 as usize;
+            molecule.add_bond(atom1, atom2, BondOrder::Single);
+            molecule.mark_bond_persistent(atom1, atom2);
         }
     }
     Ok(())

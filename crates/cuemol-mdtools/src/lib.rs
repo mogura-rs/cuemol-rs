@@ -11,8 +11,10 @@ pub mod xtc;
 
 pub use amber::{
     apply_amber_mdcrd_frame, apply_amber_restart, apply_amber_restart_str, read_amber_mdcrd_file,
-    read_amber_mdcrd_str, read_amber_prmtop_file, read_amber_prmtop_str,
-    read_amber_prmtop_with_restart_files, read_amber_prmtop_with_restart_str,
+    read_amber_mdcrd_str, read_amber_prmtop_file, read_amber_prmtop_file_with_bond_mode,
+    read_amber_prmtop_str, read_amber_prmtop_str_with_bond_mode,
+    read_amber_prmtop_with_restart_files, read_amber_prmtop_with_restart_files_and_bond_mode,
+    read_amber_prmtop_with_restart_str, read_amber_prmtop_with_restart_str_and_bond_mode,
     read_amber_restart_file, read_amber_restart_str, AmberCrdReader, AmberMdcrdFrame,
     AmberMdcrdTrajectory, AmberPrmtopLoad, AmberPrmtopReader, AmberRestart,
 };
@@ -32,7 +34,7 @@ pub use netcdf::{
 pub use psf::{read_psf_file, read_psf_str, sniff_psf_content, PsfReader};
 pub use trajectory::{
     read_dcd_bytes, read_dcd_bytes_with_options, read_dcd_file, read_dcd_file_with_options,
-    sniff_dcd_content, DcdReadOptions, DcdTrajReader, TrajBlock, Trajectory,
+    sniff_dcd_content, DcdReadOptions, DcdTrajReader, TrajBlock, TrajBlockReader, Trajectory,
 };
 pub use trr::{
     read_trr_bytes, read_trr_bytes_with_options, read_trr_file, read_trr_file_with_options,
@@ -67,6 +69,7 @@ pub enum MdCoordinateFormat {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cuemol_molstr::MolCoord;
     use cuemol_qsys::InOutHandler;
 
     #[test]
@@ -127,5 +130,50 @@ mod tests {
         );
         assert_eq!(netcdf.handler().file_ext(), "*.nc");
         assert_eq!(netcdf.handler().category(), InOutHandler::IOH_CAT_OBJREADER);
+    }
+
+    #[test]
+    fn trajectory_qif_properties_match_reference_names() {
+        let mut trajectory = Trajectory::new(MolCoord::new());
+        trajectory.append(TrajBlock::allocate(0, 2)).unwrap();
+        assert_eq!(trajectory.nframe(), 2);
+        assert_eq!(trajectory.nblock(), 1);
+        assert_eq!(trajectory.dynframe(), 0);
+        assert_eq!(trajectory.get_block(0).unwrap().nframe(), 2);
+        assert_eq!(trajectory.get_block(0).unwrap().get_start_index(), 0);
+        trajectory.set_frm_aver_size(3);
+        assert_eq!(trajectory.frame_aver_size(), 3);
+        assert_eq!(trajectory.get_frm_aver_size(), 3);
+        trajectory.set_frame_aver_size(4);
+        assert_eq!(trajectory.frame_average_size(), 4);
+    }
+
+    #[test]
+    fn trajectory_reader_qif_properties_round_trip() {
+        let mut dcd = DcdTrajReader::new();
+        assert!(!dcd.is_lazy_load());
+        assert_eq!(dcd.nevery(), 1);
+        assert_eq!(dcd.get_targ_traj_uid(), 0);
+        dcd.set_lazy_load(true);
+        dcd.set_nevery(2);
+        dcd.set_targ_traj_uid(41);
+        assert!(dcd.lazy_load());
+        assert_eq!(dcd.get_skip_no(), 2);
+        assert_eq!(dcd.target_trajectory_uid(), 41);
+
+        let mut trr = TrrTrajReader::new();
+        trr.set_nevery(3);
+        trr.set_targ_traj_uid(42);
+        assert_eq!((trr.nevery(), trr.get_targ_traj_uid()), (3, 42));
+
+        let mut xtc = XtcTrajReader::new();
+        xtc.set_nevery(4);
+        xtc.set_targ_traj_uid(43);
+        assert_eq!((xtc.nevery(), xtc.get_targ_traj_uid()), (4, 43));
+
+        let mut netcdf = AmberNetCDFReader::new();
+        netcdf.set_nevery(5);
+        netcdf.set_targ_traj_uid(44);
+        assert_eq!((netcdf.nevery(), netcdf.get_targ_traj_uid()), (5, 44));
     }
 }

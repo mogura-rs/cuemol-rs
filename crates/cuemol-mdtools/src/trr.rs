@@ -1,6 +1,6 @@
 //! GROMACS TRR trajectory reader.
 
-use crate::trajectory::TrajBlock;
+use crate::trajectory::{TrajBlock, TrajBlockReader};
 use crate::xdr::XdrInStream;
 use cuemol_core::{CueMolError, Result};
 use cuemol_qsys::{InOutHandler, ObjReader};
@@ -30,6 +30,7 @@ impl Default for TrrReadOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrrTrajReader {
     reader: ObjReader,
+    block_reader: TrajBlockReader,
     options: TrrReadOptions,
 }
 
@@ -37,6 +38,7 @@ impl TrrTrajReader {
     pub fn new() -> Self {
         Self {
             reader: ObjReader::new("trrtraj", "GROMACS TRR trajectory (*.trr)", "*.trr"),
+            block_reader: TrajBlockReader::new(),
             options: TrrReadOptions::default(),
         }
     }
@@ -51,6 +53,46 @@ impl TrrTrajReader {
 
     pub fn handler(&self) -> &InOutHandler {
         self.reader.handler()
+    }
+
+    pub fn block_reader(&self) -> &TrajBlockReader {
+        &self.block_reader
+    }
+
+    pub fn block_reader_mut(&mut self) -> &mut TrajBlockReader {
+        &mut self.block_reader
+    }
+
+    pub fn lazy_load(&self) -> bool {
+        self.block_reader.lazy_load()
+    }
+
+    pub fn is_lazy_load(&self) -> bool {
+        self.lazy_load()
+    }
+
+    pub fn set_lazy_load(&mut self, value: bool) {
+        self.block_reader.set_lazy_load(value);
+    }
+
+    pub fn target_trajectory_uid(&self) -> u64 {
+        self.block_reader.target_trajectory_uid()
+    }
+
+    pub fn targ_traj_uid(&self) -> u64 {
+        self.target_trajectory_uid()
+    }
+
+    pub fn get_targ_traj_uid(&self) -> u64 {
+        self.target_trajectory_uid()
+    }
+
+    pub fn set_targ_traj_uid(&mut self, value: u64) {
+        self.block_reader.set_targ_traj_uid(value);
+    }
+
+    pub fn set_target_trajectory_uid(&mut self, value: u64) {
+        self.set_targ_traj_uid(value);
     }
 
     pub fn options(&self) -> &TrrReadOptions {
@@ -69,8 +111,16 @@ impl TrrTrajReader {
         self.skip_no()
     }
 
+    pub fn nevery(&self) -> usize {
+        self.skip_no()
+    }
+
     pub fn set_skip_no(&mut self, value: usize) {
         self.options.skip_no = value;
+    }
+
+    pub fn set_nevery(&mut self, value: usize) {
+        self.set_skip_no(value);
     }
 
     pub fn create_default_obj(&self) -> TrajBlock {

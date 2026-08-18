@@ -9,6 +9,51 @@ use cuemol_molstr::MolCoord;
 use cuemol_qsys::{InOutHandler, ObjReader};
 use std::path::Path;
 
+/// Shared trajectory-reader properties exposed by the C++ `TrajBlockReader`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrajBlockReader {
+    lazy_load: bool,
+    target_trajectory_uid: u64,
+}
+
+impl TrajBlockReader {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn lazy_load(&self) -> bool {
+        self.lazy_load
+    }
+
+    pub fn is_lazy_load(&self) -> bool {
+        self.lazy_load()
+    }
+
+    pub fn set_lazy_load(&mut self, value: bool) {
+        self.lazy_load = value;
+    }
+
+    pub fn target_trajectory_uid(&self) -> u64 {
+        self.target_trajectory_uid
+    }
+
+    pub fn targ_traj_uid(&self) -> u64 {
+        self.target_trajectory_uid()
+    }
+
+    pub fn get_targ_traj_uid(&self) -> u64 {
+        self.target_trajectory_uid()
+    }
+
+    pub fn set_targ_traj_uid(&mut self, value: u64) {
+        self.target_trajectory_uid = value;
+    }
+
+    pub fn set_target_trajectory_uid(&mut self, value: u64) {
+        self.set_targ_traj_uid(value);
+    }
+}
+
 /// One contiguous group of trajectory coordinate frames.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TrajBlock {
@@ -59,6 +104,10 @@ impl TrajBlock {
         self.start_index
     }
 
+    pub fn get_start_index(&self) -> usize {
+        self.start_index()
+    }
+
     pub fn set_start_index(&mut self, value: usize) {
         self.start_index = value;
     }
@@ -68,6 +117,10 @@ impl TrajBlock {
     }
 
     pub fn get_size(&self) -> usize {
+        self.frame_count()
+    }
+
+    pub fn nframe(&self) -> usize {
         self.frame_count()
     }
 
@@ -186,8 +239,16 @@ impl Trajectory {
         self.block_count()
     }
 
+    pub fn nblock(&self) -> usize {
+        self.block_count()
+    }
+
     pub fn block(&self, index: usize) -> Option<&TrajBlock> {
         self.blocks.get(index)
+    }
+
+    pub fn get_block(&self, index: usize) -> Option<&TrajBlock> {
+        self.block(index)
     }
 
     pub fn frame(&self) -> usize {
@@ -206,12 +267,36 @@ impl Trajectory {
         self.frame_count()
     }
 
+    pub fn nframe(&self) -> usize {
+        self.frame_count()
+    }
+
+    pub fn dynframe(&self) -> usize {
+        self.frame()
+    }
+
     pub fn frame_average_size(&self) -> usize {
         self.frame_average_size
     }
 
+    pub fn frame_aver_size(&self) -> usize {
+        self.frame_average_size()
+    }
+
+    pub fn get_frm_aver_size(&self) -> usize {
+        self.frame_average_size()
+    }
+
     pub fn set_frame_average_size(&mut self, value: usize) {
         self.frame_average_size = value;
+    }
+
+    pub fn set_frame_aver_size(&mut self, value: usize) {
+        self.set_frame_average_size(value);
+    }
+
+    pub fn set_frm_aver_size(&mut self, value: usize) {
+        self.set_frame_average_size(value);
     }
 
     pub fn set_frame(&mut self, index: usize) -> Result<()> {
@@ -342,6 +427,7 @@ impl Default for DcdReadOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DcdTrajReader {
     reader: ObjReader,
+    block_reader: TrajBlockReader,
     options: DcdReadOptions,
 }
 
@@ -349,6 +435,7 @@ impl DcdTrajReader {
     pub fn new() -> Self {
         Self {
             reader: ObjReader::new("dcdtraj", "DCD binary trajectory (*.dcd)", "*.dcd"),
+            block_reader: TrajBlockReader::new(),
             options: DcdReadOptions::default(),
         }
     }
@@ -363,6 +450,46 @@ impl DcdTrajReader {
 
     pub fn handler(&self) -> &InOutHandler {
         self.reader.handler()
+    }
+
+    pub fn block_reader(&self) -> &TrajBlockReader {
+        &self.block_reader
+    }
+
+    pub fn block_reader_mut(&mut self) -> &mut TrajBlockReader {
+        &mut self.block_reader
+    }
+
+    pub fn lazy_load(&self) -> bool {
+        self.block_reader.lazy_load()
+    }
+
+    pub fn is_lazy_load(&self) -> bool {
+        self.lazy_load()
+    }
+
+    pub fn set_lazy_load(&mut self, value: bool) {
+        self.block_reader.set_lazy_load(value);
+    }
+
+    pub fn target_trajectory_uid(&self) -> u64 {
+        self.block_reader.target_trajectory_uid()
+    }
+
+    pub fn targ_traj_uid(&self) -> u64 {
+        self.target_trajectory_uid()
+    }
+
+    pub fn get_targ_traj_uid(&self) -> u64 {
+        self.target_trajectory_uid()
+    }
+
+    pub fn set_targ_traj_uid(&mut self, value: u64) {
+        self.block_reader.set_targ_traj_uid(value);
+    }
+
+    pub fn set_target_trajectory_uid(&mut self, value: u64) {
+        self.set_targ_traj_uid(value);
     }
 
     pub fn options(&self) -> &DcdReadOptions {
@@ -381,8 +508,16 @@ impl DcdTrajReader {
         self.skip_no()
     }
 
+    pub fn nevery(&self) -> usize {
+        self.skip_no()
+    }
+
     pub fn set_skip_no(&mut self, value: usize) {
         self.options.skip_no = value;
+    }
+
+    pub fn set_nevery(&mut self, value: usize) {
+        self.set_skip_no(value);
     }
 
     pub fn create_default_obj(&self) -> TrajBlock {
