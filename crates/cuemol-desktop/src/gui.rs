@@ -1813,7 +1813,7 @@ enum AnimationTaskOutput {
 #[derive(Debug)]
 struct AnimationRenderJob {
     settings: AnimationRenderSettings,
-    restore: AnimationRenderRestore,
+    restore: Option<AnimationRenderRestore>,
     total_frames: u32,
     next_frame: u32,
     completed_frames: u32,
@@ -13424,7 +13424,7 @@ impl GuiApplication {
         self.animation_playing = false;
         self.animation_render_job = Some(AnimationRenderJob {
             settings,
-            restore,
+            restore: Some(restore),
             total_frames,
             next_frame: 0,
             completed_frames: 0,
@@ -13436,6 +13436,68 @@ impl GuiApplication {
             encoding_started: false,
         });
         self.set_status("Animation rendering started");
+    }
+
+    fn start_animation_movie_reencode(&mut self) {
+        if self.animation_render_job.is_some() {
+            return;
+        }
+        let mut settings = self.animation_render_settings.clone();
+        settings.base_name = settings.base_name.trim().to_string();
+        settings.fps = settings.fps.clamp(1, 240);
+        settings.bitrate_kbps = settings.bitrate_kbps.clamp(1, 200_000);
+        if !settings.make_movie {
+            self.set_status("Movie encoding is disabled");
+            return;
+        }
+        if settings.ffmpeg_executable.trim().is_empty() {
+            self.set_status("FFmpeg executable is required");
+            return;
+        }
+        let output_dir = Path::new(settings.output_dir.trim());
+        let total_frames = match crate::animation_frame_count(output_dir, &settings.base_name) {
+            Ok(0) => {
+                self.set_status("No complete frame sequence found in the output folder");
+                return;
+            }
+            Ok(count) => count,
+            Err(error) => {
+                self.set_status(format!("Error: {error}"));
+                return;
+            }
+        };
+        let progress = Arc::new(AtomicU32::new(950_000));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let frame_paths = (0..total_frames)
+            .map(|index| animation_frame_path(&settings, index, "png"))
+            .collect();
+        let mut job = AnimationRenderJob {
+            settings: settings.clone(),
+            restore: None,
+            total_frames,
+            next_frame: total_frames,
+            completed_frames: total_frames,
+            frame_paths,
+            frame_receivers: Vec::new(),
+            movie_receiver: None,
+            progress,
+            cancel,
+            encoding_started: false,
+        };
+        match spawn_animation_movie_task(&job) {
+            Ok(receiver) => {
+                job.movie_receiver = Some(receiver);
+                job.encoding_started = true;
+                self.animation_render_settings = settings;
+                self.animation_render_total_frames = total_frames;
+                self.animation_render_log.clear();
+                self.animation_render_log
+                    .push(format!("Re-encoding {total_frames} rendered frame(s)"));
+                self.animation_render_job = Some(job);
+                self.set_status("Animation movie encoding started");
+            }
+            Err(error) => self.set_status(format!("Error: {error}")),
+        }
     }
 
     fn capture_animation_render_restore(
@@ -13534,6 +13596,10 @@ impl GuiApplication {
                 }
             }
         }
+        if job.movie_receiver.is_some() {
+            self.animation_render_job = Some(job);
+            return;
+        }
 
         if job.cancel.load(Ordering::Relaxed) {
             if job.frame_receivers.is_empty() && job.movie_receiver.is_none() {
@@ -13597,8 +13663,12 @@ impl GuiApplication {
             .ok_or_else(|| "no active view".to_string())?;
         let animation = self.active_animation_manager()?;
         if animation.startcam().is_empty() {
+            let restore = job
+                .restore
+                .as_ref()
+                .ok_or_else(|| "animation render restore state is missing".to_string())?;
             self.state
-                .set_active_view_camera(&job.restore.camera.to_qsys_camera("__current"))
+                .set_active_view_camera(&restore.camera.to_qsys_camera("__current"))
                 .map_err(|error| error.to_string())?;
         }
         let animated_camera = self
@@ -13637,13 +13707,16 @@ impl GuiApplication {
         camera: &mut CameraController,
         status: &str,
     ) {
-        self.state = job.restore.state;
-        *camera = job.restore.camera;
-        self.animation_elapsed = job.restore.elapsed;
-        self.animation_playing = false;
-        self.animation_start_camera = None;
-        self.animation_start_state = None;
-        self.rebuild_snapshot();
+        if let Some(restore) = job.restore {
+            self.state = restore.state;
+            *camera = restore.camera;
+            self.animation_elapsed = restore.elapsed;
+            self.animation_playing = false;
+            self.animation_start_camera = None;
+            self.animation_start_state = None;
+            self.rebuild_snapshot();
+        }
+        self.refresh_animation_render_outputs();
         self.set_status(status);
     }
 
@@ -16703,15 +16776,27 @@ impl GuiApplication {
                 );
             });
         });
-        if ui
-            .add_enabled(
-                self.animation_render_total_frames > 0,
-                egui::Button::new("Clean up"),
-            )
-            .on_hover_text("Delete the rendered frames and the output movie")
-            .clicked()
-        {
-            self.animation_cleanup_confirmation = true;
+        let outputs_available =
+            self.animation_render_settings.make_movie && self.animation_render_total_frames > 0;
+        let mut reencode = false;
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(outputs_available, egui::Button::new("Re-encode"))
+                .on_hover_text("Re-encode the rendered frames into a movie (no re-rendering)")
+                .clicked()
+            {
+                reencode = true;
+            }
+            if ui
+                .add_enabled(outputs_available, egui::Button::new("Clean up"))
+                .on_hover_text("Delete the rendered frames and the output movie")
+                .clicked()
+            {
+                self.animation_cleanup_confirmation = true;
+            }
+        });
+        if reencode {
+            self.start_animation_movie_reencode();
         }
         if self.animation_cleanup_confirmation {
             ui.colored_label(
@@ -35646,7 +35731,7 @@ mod tests {
         camera.rotate_by(20.0, -10.0);
         let job = AnimationRenderJob {
             settings: AnimationRenderSettings::default(),
-            restore,
+            restore: Some(restore),
             total_frames: 1,
             next_frame: 1,
             completed_frames: 1,
@@ -35682,6 +35767,71 @@ mod tests {
             denoise: UmbreonDenoiseMode::None,
         };
         assert_eq!(render_animation_frame(&task).unwrap_err(), "cancelled");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_animation_movie_reencode_uses_disk_frames_without_live_animation() {
+        let output_dir = std::env::temp_dir().join(format!(
+            "cuemol-native-animation-reencode-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&output_dir).unwrap();
+        fs::write(output_dir.join("movie_frm_0000.png"), b"PNG").unwrap();
+        fs::write(output_dir.join("movie_frm_0001.png"), b"PNG").unwrap();
+        let mut app = GuiApplication::new();
+        app.animation_render_settings = AnimationRenderSettings {
+            output_dir: output_dir.to_string_lossy().into_owned(),
+            base_name: "movie".to_string(),
+            make_movie: true,
+            ffmpeg_executable: "/usr/bin/false".to_string(),
+            ..Default::default()
+        };
+
+        app.start_animation_movie_reencode();
+
+        let mut job = app.animation_render_job.take().expect("movie encode job");
+        assert!(job.restore.is_none());
+        assert_eq!(job.total_frames, 2);
+        assert_eq!(job.completed_frames, 2);
+        assert_eq!(job.frame_paths.len(), 2);
+        assert!(job.encoding_started);
+        assert!(job.movie_receiver.is_some());
+        let result = job
+            .movie_receiver
+            .take()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert!(result.is_err());
+        fs::remove_dir_all(output_dir).unwrap();
+    }
+
+    #[test]
+    fn native_animation_movie_job_stays_active_while_encoder_is_pending() {
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        let (_sender, receiver) = mpsc::channel();
+        app.animation_render_job = Some(AnimationRenderJob {
+            settings: AnimationRenderSettings {
+                make_movie: true,
+                ..Default::default()
+            },
+            restore: None,
+            total_frames: 1,
+            next_frame: 1,
+            completed_frames: 1,
+            frame_paths: vec![PathBuf::from("output_frm_0000.png")],
+            frame_receivers: Vec::new(),
+            movie_receiver: Some(receiver),
+            progress: Arc::new(AtomicU32::new(950_000)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            encoding_started: true,
+        });
+
+        app.poll_animation_render(&mut camera);
+
+        assert!(app.animation_render_job.is_some());
     }
 
     #[test]
