@@ -26754,11 +26754,10 @@ impl DesktopAppState {
                     exporter.write_mesh_file_with_camera(&mesh, &camera)
                 }
                 ScriptNativeSceneExporter::LuxRend(exporter) => exporter
-                    .write_scene_file_with_background(
-                        &mesh,
-                        camera.center(),
-                        (camera.zoom() / 1.2).max(1.0),
-                        camera.is_perspective(),
+                    .write_snapshot_file_with_camera(
+                        &scene_name,
+                        &render_scene.snapshot,
+                        &camera,
                         background,
                     ),
                 ScriptNativeSceneExporter::LuxCore(exporter) => {
@@ -52836,6 +52835,9 @@ mod tests {
         assert!(pov_include.contains("mesh2 {"));
         let lux_scene = fs::read_to_string(dir.join("scene.lxs")).unwrap();
         assert!(lux_scene.contains("\"string filename\" [\"scene\"]"));
+        assert!(
+            lux_scene.contains("LookAt 0.000000 0.000000 25.000000  0.000000 0.000000 0.000000")
+        );
         assert!(lux_scene.contains("\"color Kd\" [0.0706 0.2039 0.3373]"));
         let wbp_project = fs::read_to_string(dir.join("scene.wbp")).unwrap();
         assert!(wbp_project.contains("BackgroundColor : [ 0.070588, 0.203922, 0.337255 ]"));
