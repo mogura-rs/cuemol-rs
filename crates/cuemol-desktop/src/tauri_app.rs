@@ -9026,15 +9026,6 @@ fn tauri_animation_pov_process_task(
     }
 }
 
-fn tauri_animation_movie_extension(format: &str) -> &'static str {
-    match format {
-        "mov_h264" | "mov_h265" | "mov_raw" => "mov",
-        "wmv2" => "wmv",
-        "gifanim" => "gif",
-        _ => "mp4",
-    }
-}
-
 fn spawn_tauri_animation_movie(
     task: TauriAnimationMovieTask,
 ) -> Result<mpsc::Receiver<Result<TauriAnimationTaskOutput, String>>, String> {
@@ -9060,47 +9051,22 @@ fn spawn_tauri_animation_movie(
 fn encode_tauri_animation_movie(
     task: &TauriAnimationMovieTask,
 ) -> Result<TauriAnimationTaskOutput, String> {
-    let extension = tauri_animation_movie_extension(&task.input.movie_format);
     let output_dir = PathBuf::from(task.input.output_dir.trim());
-    let output_file = format!("{}.{}", task.input.base_name.trim(), extension);
-    let output_path = output_dir.join(&output_file);
-    let input_pattern = format!("{}_frm_%04d.png", task.input.base_name.trim());
+    let args = crate::animation_ffmpeg_args(
+        &task.input.base_name,
+        task.input.frame_rate,
+        task.total_frames,
+        &task.input.movie_format,
+        task.input.bitrate_kbps,
+    )?;
+    let output_file = args
+        .last()
+        .ok_or_else(|| "FFmpeg output file is missing".to_string())?;
+    let output_path = output_dir.join(output_file);
     let mut command = Command::new(task.input.ffmpeg_executable.trim());
     command
         .current_dir(&output_dir)
-        .args(["-y", "-framerate"])
-        .arg(task.input.frame_rate.to_string())
-        .args(["-start_number", "0", "-i"])
-        .arg(input_pattern)
-        .args(["-an", "-frames:v"])
-        .arg(task.total_frames.to_string());
-    match task.input.movie_format.as_str() {
-        "mov_h265" => {
-            command.args(["-c:v", "libx265", "-tag:v", "hvc1", "-pix_fmt", "yuv420p"]);
-        }
-        "mp4_h265" => {
-            command.args(["-c:v", "libx265", "-pix_fmt", "yuv420p"]);
-        }
-        "mov_raw" => {
-            command.args(["-c:v", "rawvideo"]);
-        }
-        "wmv2" => {
-            command.args(["-c:v", "wmv2"]);
-        }
-        "gifanim" => {
-            command.args(["-loop", "0"]);
-        }
-        _ => {
-            command.args(["-c:v", "libx264", "-pix_fmt", "yuv420p"]);
-        }
-    }
-    if task.input.movie_format != "mov_raw" {
-        command
-            .arg("-b:v")
-            .arg(format!("{}k", task.input.bitrate_kbps));
-    }
-    command
-        .arg(&output_file)
+        .args(&args)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let mut child = command
@@ -24130,6 +24096,17 @@ mod tests {
         let args = fs::read_to_string(output_dir.join("ffmpeg-args.txt")).unwrap();
         assert!(args.contains("movie_frm_%04d.png"));
         assert!(args.contains("2048k"));
+        for expected in [
+            "-r\n24",
+            "-an",
+            "-vframes\n2",
+            "-c:v\nlibx264",
+            "-f\nmp4",
+            "-vf\nfps=24,format=yuv420p",
+            "-y\nmovie.mp4",
+        ] {
+            assert!(args.contains(expected), "{expected}");
+        }
         assert!(args.contains("movie.mp4"));
         fs::remove_dir_all(output_dir).unwrap();
     }

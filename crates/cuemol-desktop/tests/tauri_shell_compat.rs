@@ -1564,6 +1564,9 @@ fn animation_render_uses_cancellable_progress_and_reference_frame_controls() {
     assert!(NATIVE_GUI_RS.contains("Choose the folder for the rendered frames"));
     assert!(NATIVE_GUI_RS.contains("Select FFmpeg executable file"));
     assert!(NATIVE_GUI_RS.contains("(\"QVGA\", 320, 240)"));
+    assert!(NATIVE_GUI_RS.contains("animation_ffmpeg_format_options("));
+    assert!(TAURI_APP_RS.contains("animation_ffmpeg_args("));
+    assert!(NATIVE_GUI_RS.contains("animation_ffmpeg_args("));
     assert!(NATIVE_GUI_RS.contains("egui::Button::new(\"Re-encode\")"));
     assert!(NATIVE_GUI_RS.contains("egui::Button::new(\"Clean up\")"));
     assert!(NATIVE_GUI_RS.contains("crate::cleanup_animation_outputs("));

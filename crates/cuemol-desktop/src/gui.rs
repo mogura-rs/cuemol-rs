@@ -2005,6 +2005,7 @@ struct AnimationFrameTask {
 
 struct AnimationMovieTask {
     settings: AnimationRenderSettings,
+    total_frames: u32,
     cancel: Arc<AtomicBool>,
     progress: Arc<AtomicU32>,
 }
@@ -16805,6 +16806,15 @@ impl GuiApplication {
                         );
                     }
                 });
+            ui.horizontal(|ui| {
+                ui.label("FFmpeg options");
+                ui.monospace(
+                    crate::animation_ffmpeg_format_options(
+                        &self.animation_render_settings.movie_format,
+                    )
+                    .unwrap_or("Unsupported format"),
+                );
+            });
             ui.horizontal(|ui| {
                 ui.label("Bitrate");
                 ui.add(
@@ -33703,15 +33713,6 @@ fn pov_lighting_values(settings: &NativePovRenderSettings) -> (u32, f64, f64, f6
     }
 }
 
-fn animation_movie_extension(format: &str) -> &'static str {
-    match format {
-        "mov_h264" | "mov_h265" | "mov_raw" => "mov",
-        "wmv2" => "wmv",
-        "gifanim" => "gif",
-        _ => "mp4",
-    }
-}
-
 fn animation_frame_path(
     settings: &AnimationRenderSettings,
     index: u32,
@@ -33899,6 +33900,7 @@ fn spawn_animation_movie_task(
     }
     let task = AnimationMovieTask {
         settings: job.settings.clone(),
+        total_frames: job.total_frames,
         cancel: Arc::clone(&job.cancel),
         progress: Arc::clone(&job.progress),
     };
@@ -33913,42 +33915,22 @@ fn spawn_animation_movie_task(
 fn encode_animation_movie(
     task: &AnimationMovieTask,
 ) -> std::result::Result<AnimationTaskOutput, String> {
-    let extension = animation_movie_extension(&task.settings.movie_format);
     let output_dir = PathBuf::from(task.settings.output_dir.trim());
-    let output_file = format!("{}.{}", task.settings.base_name, extension);
-    let output_path = output_dir.join(&output_file);
-    let input_pattern = format!("{}_frm_%04d.png", task.settings.base_name);
+    let args = crate::animation_ffmpeg_args(
+        &task.settings.base_name,
+        f64::from(task.settings.fps),
+        task.total_frames,
+        &task.settings.movie_format,
+        task.settings.bitrate_kbps,
+    )?;
+    let output_file = args
+        .last()
+        .ok_or_else(|| "FFmpeg output file is missing".to_string())?;
+    let output_path = output_dir.join(output_file);
     let mut command = Command::new(task.settings.ffmpeg_executable.trim());
     command
         .current_dir(&output_dir)
-        .args(["-y", "-framerate"])
-        .arg(task.settings.fps.to_string())
-        .args(["-start_number", "0", "-i"])
-        .arg(input_pattern);
-    match task.settings.movie_format.as_str() {
-        "mov_h265" | "mp4_h265" => {
-            command.args(["-c:v", "libx265", "-pix_fmt", "yuv420p"]);
-        }
-        "mov_raw" => {
-            command.args(["-c:v", "rawvideo"]);
-        }
-        "wmv2" => {
-            command.args(["-c:v", "wmv2"]);
-        }
-        "gifanim" => {
-            command.args(["-loop", "0"]);
-        }
-        _ => {
-            command.args(["-c:v", "libx264", "-pix_fmt", "yuv420p"]);
-        }
-    }
-    if task.settings.movie_format != "mov_raw" {
-        command
-            .arg("-b:v")
-            .arg(format!("{}k", task.settings.bitrate_kbps.max(1)));
-    }
-    command
-        .arg(&output_file)
+        .args(&args)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let mut child = command
@@ -35680,11 +35662,6 @@ mod tests {
             "demo_frame_1"
         );
         assert_eq!(sanitize_animation_base_name("   "), "output");
-        assert_eq!(animation_movie_extension("mov_h265"), "mov");
-        assert_eq!(animation_movie_extension("wmv2"), "wmv");
-        assert_eq!(animation_movie_extension("gifanim"), "gif");
-        assert_eq!(animation_movie_extension("mp4_h264"), "mp4");
-
         let settings = AnimationRenderSettings {
             output_dir: "frames".to_string(),
             base_name: "demo".to_string(),

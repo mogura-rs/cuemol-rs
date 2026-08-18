@@ -7827,7 +7827,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     const updateFfmpegOptions = () => {
       const options = {
         mov_h264: "-c:v libx264 -f mov",
-        mov_h265: "-c:v libx265 -tag:v hvc1 -f mov",
+        mov_h265: "-c:v libx265 -tag hvc1 -f mov",
         mov_raw: "-c:v rawvideo -f mov",
         mp4_h264: "-c:v libx264 -f mp4",
         mp4_h265: "-c:v libx265 -f mp4",
