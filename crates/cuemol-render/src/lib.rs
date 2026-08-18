@@ -1155,12 +1155,16 @@ impl PovSceneExporter {
     ) -> Result<String> {
         if !self.use_post_blend {
             self.blend_table.clear();
-            return self.write_scene_string_with_camera(&tessellate_snapshot(snapshot), camera);
+            let sections = pov_snapshot_sections(snapshot, false)
+                .into_iter()
+                .filter_map(|section| section.mesh_section())
+                .collect::<Vec<_>>();
+            return self.write_pov_section_scene(&sections, camera);
         }
 
         let plan = pov_post_blend_plan(snapshot);
         self.blend_table = plan.blend_table_json();
-        let mut output = self.write_scene_string_with_camera(&plan.background, camera)?;
+        let mut output = self.write_pov_section_scene(&plan.background, camera)?;
         if plan.layers.is_empty() {
             return Ok(output);
         }
@@ -1180,15 +1184,45 @@ impl PovSceneExporter {
                 layer.alpha_digit
             )
             .unwrap();
-            let layer_source = self.write_scene_string_with_camera(&layer.mesh, camera)?;
-            let geometry = layer_source
-                .find("mesh2 {")
-                .map(|offset| &layer_source[offset..])
-                .unwrap_or_default();
-            output.push_str(geometry);
+            for section in &layer.sections {
+                self.append_pov_section_geometry(&mut output, section, camera)?;
+            }
             output.push_str("#end\n");
         }
         Ok(output)
+    }
+
+    fn write_pov_section_scene(
+        &self,
+        sections: &[PovMaterialSection],
+        camera: &Camera,
+    ) -> Result<String> {
+        let mut sections = sections.iter();
+        let Some(first) = sections.next() else {
+            return self.write_scene_string_with_camera(&RenderMesh::new(), camera);
+        };
+        let mut output =
+            self.write_scene_string_with_camera_material(&first.mesh, camera, &first.material)?;
+        for section in sections {
+            self.append_pov_section_geometry(&mut output, section, camera)?;
+        }
+        Ok(output)
+    }
+
+    fn append_pov_section_geometry(
+        &self,
+        output: &mut String,
+        section: &PovMaterialSection,
+        camera: &Camera,
+    ) -> Result<()> {
+        let section_source =
+            self.write_scene_string_with_camera_material(&section.mesh, camera, &section.material)?;
+        let geometry = section_source
+            .find("mesh2 {")
+            .map(|offset| &section_source[offset..])
+            .unwrap_or_default();
+        output.push_str(geometry);
+        Ok(())
     }
 
     pub fn write_mesh2_string(&self, vertices: &[Vector4], triangles: &[[usize; 3]]) -> String {
@@ -1268,6 +1302,7 @@ impl PovSceneExporter {
             Vector4::new3(0.0, 1.0, 0.0),
             Vector4::new3(0.0, 0.0, -1.0),
             self.use_clip_z.then_some(size * 2.0),
+            "default",
         )
     }
 
@@ -1277,6 +1312,15 @@ impl PovSceneExporter {
         &self,
         mesh: &RenderMesh,
         camera: &Camera,
+    ) -> Result<String> {
+        self.write_scene_string_with_camera_material(mesh, camera, "default")
+    }
+
+    fn write_scene_string_with_camera_material(
+        &self,
+        mesh: &RenderMesh,
+        camera: &Camera,
+        material: &str,
     ) -> Result<String> {
         let inverse_rotation = camera.rotation().inv()?.to_matrix();
         let right = inverse_rotation.mul_vec(Vector4::new4(1.0, 0.0, 0.0, 0.0));
@@ -1292,6 +1336,7 @@ impl PovSceneExporter {
             up,
             forward,
             self.use_clip_z.then_some(camera.slab_depth()),
+            material,
         ))
     }
 
@@ -1307,6 +1352,7 @@ impl PovSceneExporter {
         up: Vector4,
         forward: Vector4,
         slab_depth: Option<f64>,
+        material: &str,
     ) -> String {
         let location = Vector4::new3(
             center.x - forward.x * distance,
@@ -1324,6 +1370,10 @@ impl PovSceneExporter {
         let persp = i32::from(perspective);
         let mut out = String::new();
         out.push_str("// CueMol POV-Ray scene\n");
+        out.push_str("#include \"colors.inc\"\n");
+        out.push_str("#include \"metals.inc\"\n");
+        out.push_str("#include \"woods.inc\"\n");
+        out.push_str("#include \"stones.inc\"\n");
         out.push_str("#declare _bgcolor = <1,1,1>;\n");
         out.push_str("#ifndef (_transpbg)\nbackground {color rgb _bgcolor}\n");
         out.push_str("#else\nbackground {color rgbt <1,1,1,0.999>}\n#end\n");
@@ -1408,26 +1458,7 @@ impl PovSceneExporter {
         out.push_str("  }\n");
         writeln!(&mut out, "  texture_list {{ {}", mat_keys.len()).unwrap();
         for c in &mat_keys {
-            if c[3] < u8::MAX {
-                writeln!(
-                    &mut out,
-                    "    texture {{ pigment {{ color rgbt <{:.6}, {:.6}, {:.6}, {:.6}> }} }},",
-                    c[0] as f32 / 255.0,
-                    c[1] as f32 / 255.0,
-                    c[2] as f32 / 255.0,
-                    1.0 - c[3] as f32 / 255.0,
-                )
-                .unwrap();
-            } else {
-                writeln!(
-                    &mut out,
-                    "    texture {{ pigment {{ color rgb <{:.6}, {:.6}, {:.6}> }} }},",
-                    c[0] as f32 / 255.0,
-                    c[1] as f32 / 255.0,
-                    c[2] as f32 / 255.0,
-                )
-                .unwrap();
-            }
+            writeln!(&mut out, "    {},", pov_material_texture(material, *c)).unwrap();
         }
         out.push_str("  }\n");
         let tris = mesh.triangles();
@@ -2529,6 +2560,47 @@ fn face_material_table(mesh: &RenderMesh) -> (Vec<[u8; 4]>, Vec<usize>) {
     (keys, face_mat)
 }
 
+fn pov_material_texture(material: &str, color: [u8; 4]) -> String {
+    let rgba = format!(
+        "<{:.6}, {:.6}, {:.6}, {:.6}>",
+        f32::from(color[0]) / 255.0,
+        f32::from(color[1]) / 255.0,
+        f32::from(color[2]) / 255.0,
+        1.0 - f32::from(color[3]) / 255.0
+    );
+    match material.trim() {
+        "spec_metal" => format!(
+            "texture {{ finish {{ F_MetalD }} pigment {{ color rgbt {rgba} }} }}"
+        ),
+        "diff_metal" => format!(
+            "texture {{ finish {{ F_MetalA }} pigment {{ color rgbt {rgba} }} }}"
+        ),
+        "matte" => format!(
+            "texture {{ finish {{ ambient 0.3 }} pigment {{ color rgbt {rgba} }} }}"
+        ),
+        "shadow" => format!(
+            "texture {{ finish {{ ambient 0.75 diffuse 0.0 specular 0.0 }} pigment {{ color rgbt {rgba} }} }}"
+        ),
+        "nolighting" => format!(
+            "texture {{ finish {{ ambient 1.0 diffuse 0.0 specular 0.0 }} pigment {{ color rgbt {rgba} }} }}"
+        ),
+        "toon1" => format!(
+            "texture {{ finish {{ ambient 0.0 diffuse 0.8 brilliance 0 }} pigment {{ color rgbt {rgba} }} }}"
+        ),
+        "toon2" => format!(
+            "texture {{ finish {{ ambient 0.3 diffuse 0.5 brilliance 0 phong 10000 phong_size 50 }} pigment {{ color rgbt {rgba} }} }}"
+        ),
+        "metallic_chrome" => "texture { T_Chrome_4D }".to_string(),
+        "metallic_copper" => "texture { T_Copper_3C }".to_string(),
+        "stone35" => "texture { T_Stone35 }".to_string(),
+        "wood31" => "texture { T_Wood31 }".to_string(),
+        "wood14scl2" => "texture { T_Wood14 scale 2 }".to_string(),
+        _ => format!(
+            "texture {{ finish {{ ambient 0.2 diffuse 0.8 brilliance 1.0 specular 0.4 roughness 0.01 }} pigment {{ color rgbt {rgba} }} }}"
+        ),
+    }
+}
+
 fn valid_triangle_vertices(
     vertices: &[Vector4],
     triangles: &[[usize; 3]],
@@ -3245,15 +3317,38 @@ pub fn atom_intr_snapshot_with_options(
 }
 
 #[derive(Debug)]
-struct PovPostBlendLayer {
-    alpha_digit: u8,
-    section_names: Vec<String>,
+struct PovMaterialSection {
+    material: String,
     mesh: RenderMesh,
 }
 
 #[derive(Debug)]
+struct PovSnapshotSection {
+    name: String,
+    alpha_digit: Option<u8>,
+    material: String,
+    mesh: RenderMesh,
+}
+
+impl PovSnapshotSection {
+    fn mesh_section(self) -> Option<PovMaterialSection> {
+        (!self.mesh.indices.is_empty()).then_some(PovMaterialSection {
+            material: self.material,
+            mesh: self.mesh,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct PovPostBlendLayer {
+    alpha_digit: u8,
+    section_names: Vec<String>,
+    sections: Vec<PovMaterialSection>,
+}
+
+#[derive(Debug)]
 struct PovPostBlendPlan {
-    background: RenderMesh,
+    background: Vec<PovMaterialSection>,
     layers: Vec<PovPostBlendLayer>,
 }
 
@@ -3282,79 +3377,97 @@ impl PovPostBlendPlan {
 }
 
 fn pov_post_blend_plan(snapshot: &RenderSceneSnapshot) -> PovPostBlendPlan {
-    let mut grouped_sections = BTreeMap::<u8, Vec<usize>>::new();
-    let mut background_atoms = vec![Some(1.0_f32); snapshot.atoms.len()];
-    let mut background_bonds = vec![Some(1.0_f32); snapshot.bonds.len()];
-    let mut background_meshes = vec![Some(1.0_f32); snapshot.meshes.len()];
-
-    for (section_index, section) in snapshot.transparency_groups.iter().enumerate() {
-        let digit = (section.alpha.clamp(0.0, 1.0) * 10.0 + 0.5).floor() as u8;
-        let is_blended = digit < 10;
-        if is_blended {
-            grouped_sections
-                .entry(digit)
-                .or_default()
-                .push(section_index);
+    let mut background = Vec::new();
+    let mut layers = BTreeMap::<u8, PovPostBlendLayer>::new();
+    for section in pov_snapshot_sections(snapshot, true) {
+        let Some(alpha_digit) = section.alpha_digit else {
+            if let Some(section) = section.mesh_section() {
+                background.push(section);
+            }
+            continue;
+        };
+        let layer = layers
+            .entry(alpha_digit)
+            .or_insert_with(|| PovPostBlendLayer {
+                alpha_digit,
+                section_names: Vec::new(),
+                sections: Vec::new(),
+            });
+        layer.section_names.push(section.name.clone());
+        if let Some(section) = section.mesh_section() {
+            layer.sections.push(section);
         }
-        set_pov_section_factors(
-            &mut background_atoms,
-            section.atom_range.clone(),
-            (!is_blended).then_some(section.alpha),
-        );
-        set_pov_section_factors(
-            &mut background_bonds,
-            section.bond_range.clone(),
-            (!is_blended).then_some(section.alpha),
-        );
-        set_pov_section_factors(
-            &mut background_meshes,
-            section.mesh_range.clone(),
-            (!is_blended).then_some(section.alpha),
-        );
+    }
+    let layers = layers.into_values().collect();
+    PovPostBlendPlan { background, layers }
+}
+
+fn pov_snapshot_sections(
+    snapshot: &RenderSceneSnapshot,
+    restore_renderer_alpha: bool,
+) -> Vec<PovSnapshotSection> {
+    let mut claimed_atoms = vec![false; snapshot.atoms.len()];
+    let mut claimed_bonds = vec![false; snapshot.bonds.len()];
+    let mut claimed_meshes = vec![false; snapshot.meshes.len()];
+    let mut sections = Vec::with_capacity(snapshot.transparency_groups.len() + 1);
+
+    for section in &snapshot.transparency_groups {
+        mark_pov_claimed(&mut claimed_atoms, section.atom_range.clone());
+        mark_pov_claimed(&mut claimed_bonds, section.bond_range.clone());
+        mark_pov_claimed(&mut claimed_meshes, section.mesh_range.clone());
+        let factor = if restore_renderer_alpha {
+            section.alpha
+        } else {
+            1.0
+        };
+        let mut atom_factors = vec![None; snapshot.atoms.len()];
+        let mut bond_factors = vec![None; snapshot.bonds.len()];
+        let mut mesh_factors = vec![None; snapshot.meshes.len()];
+        set_pov_section_factors(&mut atom_factors, section.atom_range.clone(), Some(factor));
+        set_pov_section_factors(&mut bond_factors, section.bond_range.clone(), Some(factor));
+        set_pov_section_factors(&mut mesh_factors, section.mesh_range.clone(), Some(factor));
+        let alpha_digit = (section.alpha.clamp(0.0, 1.0) * 10.0 + 0.5).floor() as u8;
+        sections.push(PovSnapshotSection {
+            name: section.name.clone(),
+            alpha_digit: (alpha_digit < 10).then_some(alpha_digit),
+            material: section.material.clone(),
+            mesh: tessellate_pov_subset(snapshot, &atom_factors, &bond_factors, &mesh_factors),
+        });
     }
 
-    let background = tessellate_pov_subset(
+    let ungrouped = tessellate_pov_subset(
         snapshot,
-        &background_atoms,
-        &background_bonds,
-        &background_meshes,
+        &claimed_atoms
+            .iter()
+            .map(|claimed| (!claimed).then_some(1.0))
+            .collect::<Vec<_>>(),
+        &claimed_bonds
+            .iter()
+            .map(|claimed| (!claimed).then_some(1.0))
+            .collect::<Vec<_>>(),
+        &claimed_meshes
+            .iter()
+            .map(|claimed| (!claimed).then_some(1.0))
+            .collect::<Vec<_>>(),
     );
-    let layers = grouped_sections
-        .into_iter()
-        .map(|(alpha_digit, section_indices)| {
-            let mut atom_factors = vec![None; snapshot.atoms.len()];
-            let mut bond_factors = vec![None; snapshot.bonds.len()];
-            let mut mesh_factors = vec![None; snapshot.meshes.len()];
-            for &section_index in &section_indices {
-                let section = &snapshot.transparency_groups[section_index];
-                set_pov_section_factors(
-                    &mut atom_factors,
-                    section.atom_range.clone(),
-                    Some(section.alpha),
-                );
-                set_pov_section_factors(
-                    &mut bond_factors,
-                    section.bond_range.clone(),
-                    Some(section.alpha),
-                );
-                set_pov_section_factors(
-                    &mut mesh_factors,
-                    section.mesh_range.clone(),
-                    Some(section.alpha),
-                );
-            }
-            let section_names = section_indices
-                .iter()
-                .map(|index| snapshot.transparency_groups[*index].name.clone())
-                .collect();
-            PovPostBlendLayer {
-                alpha_digit,
-                section_names,
-                mesh: tessellate_pov_subset(snapshot, &atom_factors, &bond_factors, &mesh_factors),
-            }
-        })
-        .collect();
-    PovPostBlendPlan { background, layers }
+    if !ungrouped.indices.is_empty() {
+        sections.insert(
+            0,
+            PovSnapshotSection {
+                name: "default".to_string(),
+                alpha_digit: None,
+                material: "default".to_string(),
+                mesh: ungrouped,
+            },
+        );
+    }
+    sections
+}
+
+fn mark_pov_claimed(claimed: &mut [bool], range: Range<usize>) {
+    let start = range.start.min(claimed.len());
+    let end = range.end.min(claimed.len());
+    claimed[start..end].fill(true);
 }
 
 fn json_string_contents(value: &str) -> String {
@@ -4345,7 +4458,8 @@ mod tests {
         // Coloured geometry: a texture_list carrying the red atom colour + mesh2.
         assert!(pov.contains("mesh2 {"));
         assert!(pov.contains("texture_list {"));
-        assert!(pov.contains("pigment { color rgb <1.000000, 0.000000, 0.000000> }"));
+        assert!(pov.contains("#include \"metals.inc\""));
+        assert!(pov.contains("pigment { color rgbt <1.000000, 0.000000, 0.000000, 0.000000> }"));
         // Balanced braces (the macro/camera/mesh nesting closes cleanly).
         assert_eq!(pov.matches('{').count(), pov.matches('}').count());
     }
@@ -4448,7 +4562,7 @@ mod tests {
                 RenderTransparencyGroup {
                     name: "translucent-a".to_string(),
                     alpha: 0.5,
-                    material: "default".to_string(),
+                    material: "matte".to_string(),
                     atom_range: 0..0,
                     bond_range: 0..0,
                     mesh_range: 0..1,
@@ -4456,7 +4570,7 @@ mod tests {
                 RenderTransparencyGroup {
                     name: "translucent-b".to_string(),
                     alpha: 0.54,
-                    material: "default".to_string(),
+                    material: "metallic_chrome".to_string(),
                     atom_range: 0..0,
                     bond_range: 0..0,
                     mesh_range: 1..2,
@@ -4464,7 +4578,7 @@ mod tests {
                 RenderTransparencyGroup {
                     name: "near-opaque".to_string(),
                     alpha: 0.95,
-                    material: "default".to_string(),
+                    material: "toon2".to_string(),
                     atom_range: 0..0,
                     bond_range: 0..0,
                     mesh_range: 2..3,
@@ -4485,9 +4599,20 @@ mod tests {
         );
         assert!(source.contains("// CueMol post-blend groups: 5"));
         assert!(source.contains("(_cuemol_blend_group = 5)"));
-        assert_eq!(source.matches("mesh2 {").count(), 2);
+        assert_eq!(source.matches("mesh2 {").count(), 3);
+        assert!(source.contains("finish { ambient 0.3 }"));
+        assert!(source.contains("texture { T_Chrome_4D }"));
+        assert!(source.contains("phong 10000 phong_size 50"));
         assert!(!source.contains("0.498039"));
         assert!(!source.contains("0.050980"));
+    }
+
+    #[test]
+    fn pov_unknown_material_falls_back_to_default_finish() {
+        let texture = pov_material_texture("missing", [128, 64, 32, 255]);
+        assert!(texture.contains("ambient 0.2 diffuse 0.8"));
+        assert!(texture.contains("specular 0.4 roughness 0.01"));
+        assert!(texture.contains("rgbt <0.501961, 0.250980, 0.125490, 0.000000>"));
     }
 
     #[test]

@@ -61082,19 +61082,32 @@ end_header
             .iter()
             .any(cuemol_render::MeshVertex::is_silhouette_outline));
 
-        app.scene_manager_mut()
+        let renderer = app
+            .scene_manager_mut()
             .object_mut(object)
             .unwrap()
             .renderer_mut(renderer_uid)
-            .unwrap()
-            .set_qsc_attr("alpha", "0.5");
+            .unwrap();
+        renderer.set_qsc_attr("alpha", "0.5");
+        renderer.set_qsc_attr("material", "toon2");
         let translucent = app.active_render_snapshot("").unwrap();
         assert_eq!(translucent.transparency_groups.len(), 1);
         let group = &translucent.transparency_groups[0];
+        assert_eq!(group.name, "bs");
         assert_eq!(group.alpha, 0.5);
+        assert_eq!(group.material, "toon2");
         assert_eq!(group.atom_range, 0..translucent.atoms.len());
         assert_eq!(group.bond_range, 0..translucent.bonds.len());
         assert_eq!(group.mesh_range, 0..translucent.meshes.len());
+
+        let mut exporter = PovSceneExporter::new();
+        exporter.set_use_post_blend(true);
+        exporter.set_show_edge_lines(false);
+        let pov = exporter
+            .write_snapshot_string_with_camera(&translucent, &Camera::new())
+            .unwrap();
+        assert_eq!(exporter.blend_table(), "{\"5\":\"bs\"}");
+        assert!(pov.contains("phong 10000 phong_size 50"));
     }
 
     #[test]
