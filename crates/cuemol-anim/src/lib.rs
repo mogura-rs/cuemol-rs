@@ -1372,6 +1372,7 @@ impl MorphMol {
 
     pub fn set_frame(&mut self, value: f64) {
         self.frame = value;
+        self.update_molecule_positions();
     }
 
     pub fn scale_frame(&self) -> bool {
@@ -1384,6 +1385,7 @@ impl MorphMol {
 
     pub fn set_scale_frame(&mut self, value: bool) {
         self.scale_frame = value;
+        self.update_molecule_positions();
     }
 
     pub fn frame_size(&self) -> usize {
@@ -1514,6 +1516,20 @@ impl MorphMol {
             .map(|(l, r)| *l * (1.0 - rho) + *r * rho)
             .collect()
     }
+
+    fn update_molecule_positions(&mut self) {
+        if self.frames.is_empty() {
+            return;
+        }
+        let positions = self.interpolated_positions(self.frame);
+        if positions.len() != self.molecule.atom_count() {
+            return;
+        }
+        for (atom, position) in self.molecule.atoms_mut().iter_mut().zip(positions) {
+            atom.position = position;
+        }
+        self.molecule.fire_atoms_moved();
+    }
 }
 
 impl std::ops::Deref for MorphMol {
@@ -1612,7 +1628,7 @@ impl AnimMgr {
     }
 
     pub fn set_length(&mut self, value: TimeValue) {
-        self.length = value.max(0);
+        self.length = value;
     }
 
     pub fn startcam(&self) -> &str {
@@ -1713,8 +1729,16 @@ impl AnimMgr {
     }
 
     pub fn start_detached(&mut self) {
-        self.elapsed = 0;
-        self.play_state = AnimPlayState::Play;
+        match self.play_state {
+            AnimPlayState::Stop => {
+                self.elapsed = 0;
+                self.play_state = AnimPlayState::Play;
+            }
+            AnimPlayState::Pause => {
+                self.play_state = AnimPlayState::Play;
+            }
+            AnimPlayState::Play => {}
+        }
     }
 
     pub fn run(&mut self) {
@@ -1727,7 +1751,15 @@ impl AnimMgr {
     }
 
     pub fn pause(&mut self) {
-        self.play_state = AnimPlayState::Pause;
+        if self.play_state != AnimPlayState::Play {
+            return;
+        }
+        let remaining = self.length.saturating_sub(self.elapsed).max(0);
+        self.play_state = if remaining > 0 {
+            AnimPlayState::Pause
+        } else {
+            AnimPlayState::Stop
+        };
     }
 
     pub fn go_time(&mut self, value: TimeValue, view: &mut View) {
@@ -1736,8 +1768,13 @@ impl AnimMgr {
     }
 
     pub fn go_time_detached(&mut self, value: TimeValue) {
-        self.elapsed = value.clamp(0, self.length.max(value));
-        self.play_state = AnimPlayState::Pause;
+        self.elapsed = value;
+        let remaining = self.length.saturating_sub(value).max(0);
+        self.play_state = if remaining > 0 {
+            AnimPlayState::Pause
+        } else {
+            AnimPlayState::Stop
+        };
     }
 
     pub fn go_time_in_scene<T>(
@@ -1927,7 +1964,11 @@ impl AnimMgr {
     }
 
     pub fn clear(&mut self) {
+        if self.play_state != AnimPlayState::Stop {
+            self.stop();
+        }
         self.motions.clear();
+        self.elapsed = 0;
     }
 
     pub fn get_at(&self, index: usize) -> Option<&AnimObj> {
@@ -2083,7 +2124,8 @@ impl AnimMgr {
             .iter()
             .map(|motion| motion.base().abs_end())
             .max()
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .max(0);
     }
 
     /// Resolve relative motion times using each motion's `timeRefName`.
@@ -2590,6 +2632,16 @@ mod tests {
             morph.positions_for_molecule(&partial),
             vec![Vector4::new3(0.0, 0.0, 0.0), Vector4::new3(30.0, 0.0, 0.0)]
         );
+        morph.set_frame(0.5);
+        assert_eq!(
+            morph.molecule().atoms()[0].position,
+            Vector4::new3(5.0, 0.0, 0.0)
+        );
+        assert_eq!(
+            morph.molecule().atoms()[1].position,
+            Vector4::new3(15.0, 0.0, 0.0)
+        );
+        assert_eq!(morph.molecule().atoms_moved_generation(), 1);
         assert!(morph.remove_frame(1));
         assert!(!morph.remove_frame(10));
     }
@@ -2732,6 +2784,37 @@ mod tests {
         assert_eq!(writer.client_scene(), None);
         manager.clear();
         assert_eq!(manager.size(), 0);
+    }
+
+    #[test]
+    fn anim_manager_playback_state_transitions_match_reference() {
+        let mut manager = AnimMgr::new();
+        let view = View::new(Uid::new(20), Uid::new(10));
+
+        manager.pause();
+        assert_eq!(manager.play_state(), AnimPlayState::Stop);
+        manager.set_length(100);
+        manager.start(&view);
+        manager.go_time_detached(40);
+        assert_eq!(manager.play_state(), AnimPlayState::Pause);
+        manager.start(&view);
+        assert_eq!(manager.play_state(), AnimPlayState::Play);
+        assert_eq!(manager.elapsed(), 40);
+        manager.pause();
+        assert_eq!(manager.play_state(), AnimPlayState::Pause);
+
+        manager.go_time_detached(100);
+        assert_eq!(manager.play_state(), AnimPlayState::Stop);
+        assert_eq!(manager.elapsed(), 100);
+        manager.go_time_detached(-5);
+        assert_eq!(manager.play_state(), AnimPlayState::Pause);
+        assert_eq!(manager.elapsed(), -5);
+        manager.clear();
+        assert_eq!(manager.play_state(), AnimPlayState::Stop);
+        assert_eq!(manager.elapsed(), 0);
+
+        manager.set_length(-10);
+        assert_eq!(manager.length(), -10);
     }
 
     #[test]
