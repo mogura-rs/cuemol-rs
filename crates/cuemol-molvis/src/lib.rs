@@ -5029,6 +5029,7 @@ pub fn molecule_render_snapshot(
         atoms,
         bonds,
         meshes: Vec::new(),
+        transparency_groups: Vec::new(),
         bounds,
     }
 }
@@ -5179,6 +5180,7 @@ pub fn selection_overlay_snapshot(
         atoms: Vec::new(),
         bonds,
         meshes: Vec::new(),
+        transparency_groups: Vec::new(),
         bounds,
     }
 }
@@ -5331,6 +5333,7 @@ pub fn simple_line_snapshot(
         atoms: Vec::new(),
         bonds,
         meshes: Vec::new(),
+        transparency_groups: Vec::new(),
         bounds,
     }
 }
@@ -5482,6 +5485,7 @@ pub fn mainchain_line_snapshot(
         atoms: Vec::new(),
         bonds,
         meshes: Vec::new(),
+        transparency_groups: Vec::new(),
         bounds,
     }
 }
@@ -5728,6 +5732,7 @@ pub fn mainchain_trace_snapshot(
         atoms,
         bonds,
         meshes: Vec::new(),
+        transparency_groups: Vec::new(),
         bounds: molecule.bounding_box_for(None),
     }
 }
@@ -6552,6 +6557,7 @@ pub fn ribbon_mesh_snapshot(
         atoms: Vec::new(),
         bonds: Vec::new(),
         meshes,
+        transparency_groups: Vec::new(),
         bounds,
     }
 }
@@ -7181,6 +7187,7 @@ pub fn ring_meshes_snapshot_with(
         atoms: Vec::new(),
         bonds: Vec::new(),
         meshes,
+        transparency_groups: Vec::new(),
         bounds: molecule.bounding_box_for(None),
     }
 }
@@ -7251,6 +7258,7 @@ pub fn valence_wedge_meshes_snapshot(molecule: &MolCoord, width: f64) -> RenderS
         atoms: Vec::new(),
         bonds: Vec::new(),
         meshes,
+        transparency_groups: Vec::new(),
         bounds: molecule.bounding_box_for(None),
     }
 }
@@ -7540,6 +7548,7 @@ pub fn disorder_lines_snapshot_with_style(
         atoms,
         bonds: Vec::new(),
         meshes: Vec::new(),
+        transparency_groups: Vec::new(),
         bounds: molecule.bounding_box_for(None),
     }
 }
@@ -7873,6 +7882,7 @@ pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> R
         atoms,
         bonds,
         meshes,
+        transparency_groups: Vec::new(),
         bounds: molecule.bounding_box_for(None),
     }
 }

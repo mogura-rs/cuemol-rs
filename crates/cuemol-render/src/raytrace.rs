@@ -644,6 +644,7 @@ struct Hit {
     normal: Vector4,
     color: [f64; 4],
     unlit: bool,
+    transparency_group: Option<usize>,
 }
 
 fn trace_sample(
@@ -653,7 +654,39 @@ fn trace_sample(
     background: [f32; 4],
     params: &UmbreonRenderParams,
 ) -> [f64; 4] {
-    let mut hits = scene_hits(snapshot, ray);
+    if snapshot.transparency_groups.is_empty() {
+        return trace_sample_pass(snapshot, ray, camera, background, params, None);
+    }
+
+    let alpha_sum = snapshot
+        .transparency_groups
+        .iter()
+        .map(|group| f64::from(group.alpha))
+        .sum::<f64>();
+    let background_pass = trace_sample_pass(snapshot, ray, camera, background, params, None);
+    let mut out = background_pass.map(|channel| channel * (1.0 - alpha_sum));
+    for (index, group) in snapshot.transparency_groups.iter().enumerate() {
+        let alpha = f64::from(group.alpha);
+        if alpha <= 0.0 {
+            continue;
+        }
+        let pass = trace_sample_pass(snapshot, ray, camera, background, params, Some(index));
+        for channel in 0..4 {
+            out[channel] += pass[channel] * alpha;
+        }
+    }
+    out
+}
+
+fn trace_sample_pass(
+    snapshot: &RenderSceneSnapshot,
+    ray: Ray,
+    camera: &Camera,
+    background: [f32; 4],
+    params: &UmbreonRenderParams,
+    visible_group: Option<usize>,
+) -> [f64; 4] {
+    let mut hits = scene_hits(snapshot, ray, visible_group);
     if params.use_clip_z {
         let rotation = camera.rotation().to_matrix();
         let half_slab = camera.slab_depth() * 0.5;
@@ -673,8 +706,16 @@ fn trace_sample(
             1.0,
         ]
     };
-    for hit in hits.iter().rev() {
-        let shaded = shade_hit(snapshot, *hit, ray, camera, params);
+    for hit in hits.iter_mut().rev() {
+        if let Some(group_index) = hit.transparency_group {
+            let group_alpha = f64::from(snapshot.transparency_groups[group_index].alpha);
+            hit.color[3] = if group_alpha > 0.0 {
+                (hit.color[3] / group_alpha).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+        }
+        let shaded = shade_hit(snapshot, *hit, ray, camera, params, visible_group);
         let alpha = hit.color[3].clamp(0.0, 1.0);
         for channel in 0..3 {
             out[channel] = shaded[channel] * alpha + out[channel] * (1.0 - alpha);
@@ -690,6 +731,7 @@ fn shade_hit(
     ray: Ray,
     camera: &Camera,
     params: &UmbreonRenderParams,
+    visible_group: Option<usize>,
 ) -> [f64; 3] {
     if hit.unlit {
         return [hit.color[0], hit.color[1], hit.color[2]];
@@ -713,6 +755,7 @@ fn shade_hit(
             hit,
             params.gi_samples.clamp(1, 64) as usize,
             f64::INFINITY,
+            visible_group,
         );
         ambient +=
             0.18 * params.gi_intensity.max(0.0) * params.gi_env_intensity.max(0.0) * openness;
@@ -728,7 +771,7 @@ fn shade_hit(
                 origin: hit.position + hit.normal * 1.0e-4,
                 direction,
             };
-            if !has_occluder(snapshot, shadow_ray, f64::INFINITY) {
+            if !has_occluder(snapshot, shadow_ray, f64::INFINITY, visible_group) {
                 visible += 1;
             }
         }
@@ -741,6 +784,7 @@ fn shade_hit(
             hit,
             params.ao_samples.clamp(1, 64) as usize,
             params.ao_distance.max(0.0),
+            visible_group,
         );
         let occlusion = 1.0 - openness;
         illumination *= 1.0 - 0.55 * params.ao_intensity.clamp(0.0, 1.0) * occlusion;
@@ -763,6 +807,7 @@ fn hemisphere_visibility(
     hit: Hit,
     sample_count: usize,
     max_distance: f64,
+    visible_group: Option<usize>,
 ) -> f64 {
     let mut visible = 0_usize;
     for sample in 0..sample_count {
@@ -770,15 +815,20 @@ fn hemisphere_visibility(
             origin: hit.position + hit.normal * 1.0e-4,
             direction: hemisphere_sample(hit.normal, sample, sample_count),
         };
-        if !has_occluder(snapshot, ray, max_distance) {
+        if !has_occluder(snapshot, ray, max_distance, visible_group) {
             visible += 1;
         }
     }
     visible as f64 / sample_count as f64
 }
 
-fn has_occluder(snapshot: &RenderSceneSnapshot, ray: Ray, max_distance: f64) -> bool {
-    scene_hits(snapshot, ray).iter().any(|hit| {
+fn has_occluder(
+    snapshot: &RenderSceneSnapshot,
+    ray: Ray,
+    max_distance: f64,
+    visible_group: Option<usize>,
+) -> bool {
+    scene_hits(snapshot, ray, visible_group).iter().any(|hit| {
         hit.distance > 1.0e-4 && (!max_distance.is_finite() || hit.distance <= max_distance)
     })
 }
@@ -854,9 +904,18 @@ fn pixel_luma(pixel: &[u8]) -> f64 {
     0.2126 * f64::from(pixel[0]) + 0.7152 * f64::from(pixel[1]) + 0.0722 * f64::from(pixel[2])
 }
 
-fn scene_hits(snapshot: &RenderSceneSnapshot, ray: Ray) -> Vec<Hit> {
+fn scene_hits(snapshot: &RenderSceneSnapshot, ray: Ray, visible_group: Option<usize>) -> Vec<Hit> {
     let mut hits = Vec::new();
-    for atom in snapshot.atoms.iter().filter(|atom| atom.hit.is_none()) {
+    for (atom_index, atom) in snapshot
+        .atoms
+        .iter()
+        .enumerate()
+        .filter(|(_, atom)| atom.hit.is_none())
+    {
+        let transparency_group = transparency_group_for_atom(snapshot, atom_index);
+        if transparency_group.is_some() && transparency_group != visible_group {
+            continue;
+        }
         let main_hit = ray_sphere(ray, atom.center, f64::from(atom.radius));
         if let Some((distance, normal)) = main_hit {
             hits.push(Hit {
@@ -865,16 +924,27 @@ fn scene_hits(snapshot: &RenderSceneSnapshot, ray: Ray) -> Vec<Hit> {
                 normal,
                 color: color_from_spec(atom.color.as_ref()),
                 unlit: false,
+                transparency_group,
             });
         } else if let Some(edge) = atom.edge.filter(|edge| edge.width > 0.0) {
             if let Some((distance, normal)) =
                 ray_sphere(ray, atom.center, f64::from(atom.radius + edge.width))
             {
-                hits.push(primitive_edge_hit(ray, distance, normal, edge));
+                hits.push(primitive_edge_hit(
+                    ray,
+                    distance,
+                    normal,
+                    edge,
+                    transparency_group,
+                ));
             }
         }
     }
-    for bond in &snapshot.bonds {
+    for (bond_index, bond) in snapshot.bonds.iter().enumerate() {
+        let transparency_group = transparency_group_for_bond(snapshot, bond_index);
+        if transparency_group.is_some() && transparency_group != visible_group {
+            continue;
+        }
         let main_hit = if bond.screen_point {
             ray_sphere(ray, bond.from, f64::from(bond.radius))
         } else {
@@ -887,6 +957,7 @@ fn scene_hits(snapshot: &RenderSceneSnapshot, ray: Ray) -> Vec<Hit> {
                 normal,
                 color: color_from_spec(bond.color.as_ref()),
                 unlit: false,
+                transparency_group,
             });
         } else if let Some(edge) = bond
             .edge
@@ -899,11 +970,21 @@ fn scene_hits(snapshot: &RenderSceneSnapshot, ray: Ray) -> Vec<Hit> {
                 ray_cylinder(ray, bond.from, bond.to, radius)
             };
             if let Some((distance, normal)) = edge_hit {
-                hits.push(primitive_edge_hit(ray, distance, normal, edge));
+                hits.push(primitive_edge_hit(
+                    ray,
+                    distance,
+                    normal,
+                    edge,
+                    transparency_group,
+                ));
             }
         }
     }
-    for mesh in &snapshot.meshes {
+    for (mesh_index, mesh) in snapshot.meshes.iter().enumerate() {
+        let transparency_group = transparency_group_for_mesh(snapshot, mesh_index);
+        if transparency_group.is_some() && transparency_group != visible_group {
+            continue;
+        }
         for triangle in mesh.indices.chunks_exact(3) {
             let Some(v0) = mesh.vertices.get(triangle[0] as usize) else {
                 continue;
@@ -937,6 +1018,7 @@ fn scene_hits(snapshot: &RenderSceneSnapshot, ray: Ray) -> Vec<Hit> {
                     },
                     color,
                     unlit: v0.is_edge_outline(),
+                    transparency_group,
                 });
             }
         }
@@ -949,6 +1031,7 @@ fn primitive_edge_hit(
     distance: f64,
     normal: Vector4,
     edge: crate::RenderEdgeStyle,
+    transparency_group: Option<usize>,
 ) -> Hit {
     let position = ray.origin + ray.direction * distance;
     Hit {
@@ -961,7 +1044,29 @@ fn primitive_edge_hit(
         normal,
         color: edge.color.map(f64::from),
         unlit: true,
+        transparency_group,
     }
+}
+
+fn transparency_group_for_atom(snapshot: &RenderSceneSnapshot, index: usize) -> Option<usize> {
+    snapshot
+        .transparency_groups
+        .iter()
+        .position(|group| group.atom_range.contains(&index))
+}
+
+fn transparency_group_for_bond(snapshot: &RenderSceneSnapshot, index: usize) -> Option<usize> {
+    snapshot
+        .transparency_groups
+        .iter()
+        .position(|group| group.bond_range.contains(&index))
+}
+
+fn transparency_group_for_mesh(snapshot: &RenderSceneSnapshot, index: usize) -> Option<usize> {
+    snapshot
+        .transparency_groups
+        .iter()
+        .position(|group| group.mesh_range.contains(&index))
 }
 
 fn ray_sphere(ray: Ray, center: Vector4, radius: f64) -> Option<(f64, Vector4)> {
@@ -1153,7 +1258,7 @@ pub fn render_umbreon_smoke() -> UmbreonSmokeResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MeshVertex, RenderAtom, RenderMesh};
+    use crate::{MeshVertex, RenderAtom, RenderMesh, RenderTransparencyGroup};
     use cuemol_gfx::{ColorBase, ColorSpec};
 
     fn color(r: u8, g: u8, b: u8, a: u8) -> Option<ColorSpec> {
@@ -1268,7 +1373,7 @@ mod tests {
             origin: Vector4::new3(0.0, 0.0, 1.0),
             direction: Vector4::new3(0.0, 0.0, -1.0),
         };
-        let hits = scene_hits(&snapshot, ray);
+        let hits = scene_hits(&snapshot, ray, None);
 
         assert_eq!(hits.len(), 1);
         assert!(hits[0].unlit);
@@ -1279,6 +1384,7 @@ mod tests {
                 ray,
                 &test_camera(),
                 &UmbreonRenderParams::default(),
+                None,
             ),
             [
                 f64::from(color[0]),
@@ -1304,14 +1410,14 @@ mod tests {
             crate::RenderAtom::new(Vector4::new3(0.0, 0.0, 0.0), 1.0, None).with_edge(Some(edge)),
         );
 
-        let hits = scene_hits(&snapshot, ray);
+        let hits = scene_hits(&snapshot, ray, None);
         assert_eq!(hits.len(), 1);
         assert!(hits[0].unlit);
         assert_eq!(hits[0].color, edge.color.map(f64::from));
         assert!(hits[0].distance.is_finite());
 
         snapshot.atoms[0].edge.as_mut().unwrap().mode = crate::RenderEdgeMode::Silhouette;
-        let silhouette_hits = scene_hits(&snapshot, ray);
+        let silhouette_hits = scene_hits(&snapshot, ray, None);
         assert_eq!(silhouette_hits.len(), 1);
         assert_eq!(silhouette_hits[0].distance, f64::MAX);
 
@@ -1319,7 +1425,7 @@ mod tests {
             origin: Vector4::new3(0.0, 0.0, 5.0),
             direction: Vector4::new3(0.0, 0.0, -1.0),
         };
-        let center_hits = scene_hits(&snapshot, center_ray);
+        let center_hits = scene_hits(&snapshot, center_ray, None);
         assert_eq!(center_hits.len(), 1);
         assert!(!center_hits[0].unlit);
     }
@@ -1342,7 +1448,7 @@ mod tests {
             direction: Vector4::new3(0.0, 0.0, -1.0),
         };
 
-        assert_eq!(scene_hits(&snapshot, ray).len(), 1);
+        assert_eq!(scene_hits(&snapshot, ray, None).len(), 1);
     }
 
     #[test]
@@ -1392,11 +1498,18 @@ mod tests {
             ));
             for index in 0..translucent_sections {
                 let x = if index == 0 { -2.5 } else { 2.5 };
+                let atom_index = snapshot.atoms.len();
                 snapshot.atoms.push(RenderAtom::new(
                     Vector4::new3(x, 2.0, 0.0),
                     0.4,
                     color(51, 102, 255, 242),
                 ));
+                snapshot.transparency_groups.push(RenderTransparencyGroup {
+                    alpha: 0.95,
+                    atom_range: atom_index..atom_index + 1,
+                    bond_range: 0..0,
+                    mesh_range: 0..0,
+                });
             }
             let params = UmbreonRenderParams {
                 width: 64,
@@ -1417,6 +1530,45 @@ mod tests {
         assert!(baseline.iter().all(|channel| (9..250).contains(channel)));
         assert_eq!(render_with(1), baseline);
         assert_eq!(render_with(2), baseline);
+    }
+
+    #[test]
+    fn translucent_renderer_is_composited_as_one_section() {
+        let render_with = |sphere_count: usize, grouped: bool| {
+            let mut snapshot = RenderSceneSnapshot::empty();
+            for _ in 0..sphere_count {
+                snapshot.atoms.push(RenderAtom::new(
+                    Vector4::new3(0.0, 0.0, 0.0),
+                    1.0,
+                    color(204, 51, 51, 128),
+                ));
+            }
+            if grouped {
+                snapshot.transparency_groups.push(RenderTransparencyGroup {
+                    alpha: 0.5,
+                    atom_range: 0..sphere_count,
+                    bond_range: 0..0,
+                    mesh_range: 0..0,
+                });
+            }
+            let params = UmbreonRenderParams {
+                width: 32,
+                height: 32,
+                perspective: false,
+                supersample: 1,
+                show_edge_lines: false,
+                ..UmbreonRenderParams::default()
+            };
+            let frame =
+                render_umbreon_snapshot(&snapshot, &test_camera(), [0.0, 0.0, 0.0, 1.0], &params)
+                    .unwrap();
+            let center = (16 * 32 + 16) * 3;
+            frame.pixels[center..center + 3].to_vec()
+        };
+
+        let grouped_once = render_with(1, true);
+        assert_eq!(render_with(2, true), grouped_once);
+        assert_ne!(render_with(2, false), grouped_once);
     }
 
     #[test]

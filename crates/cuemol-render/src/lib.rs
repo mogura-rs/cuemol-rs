@@ -4,6 +4,7 @@ use cuemol_core::{CueMolError, Matrix4, Result, Uid, Vector4};
 use cuemol_gfx::{CmsXform, ColorSpec, Rgba8};
 use cuemol_qsys::{Camera, InOutHandler, SceneExporter as QsysSceneExporter};
 use std::fmt::Write as _;
+use std::ops::Range;
 
 pub use raytrace::{
     render_umbreon_smoke, render_umbreon_snapshot, UmbreonDenoiseMode, UmbreonFrame,
@@ -186,10 +187,20 @@ impl RenderMesh {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct RenderTransparencyGroup {
+    pub alpha: f32,
+    pub atom_range: Range<usize>,
+    pub bond_range: Range<usize>,
+    pub mesh_range: Range<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct RenderSceneSnapshot {
     pub atoms: Vec<RenderAtom>,
     pub bonds: Vec<RenderBond>,
     pub meshes: Vec<RenderMesh>,
+    /// Renderer-sized transparency sections for blendpng-compatible output.
+    pub transparency_groups: Vec<RenderTransparencyGroup>,
     pub bounds: Option<(Vector4, Vector4)>,
 }
 
@@ -447,8 +458,18 @@ impl RenderSceneSnapshot {
             atoms: Vec::new(),
             bonds: Vec::new(),
             meshes: Vec::new(),
+            transparency_groups: Vec::new(),
             bounds: None,
         }
+    }
+
+    pub fn mark_transparency_group(&mut self, alpha: f32) {
+        self.transparency_groups.push(RenderTransparencyGroup {
+            alpha: alpha.clamp(0.0, 1.0),
+            atom_range: 0..self.atoms.len(),
+            bond_range: 0..self.bonds.len(),
+            mesh_range: 0..self.meshes.len(),
+        });
     }
 
     pub fn atom_count(&self) -> usize {
@@ -3140,6 +3161,7 @@ pub fn atom_intr_snapshot_with_options(
             .then_some(mesh)
             .into_iter()
             .collect(),
+        transparency_groups: Vec::new(),
         bounds,
     }
 }
@@ -3371,6 +3393,7 @@ mod tests {
                 None,
             )],
             meshes: vec![mesh],
+            transparency_groups: Vec::new(),
             bounds: None,
         };
         snapshot.apply_xform(&m);
@@ -3464,6 +3487,7 @@ mod tests {
                 }],
                 indices: Vec::new(),
             }],
+            transparency_groups: Vec::new(),
             bounds: None,
         };
         apply_generic_color_proof(&mut snapshot);
@@ -3547,6 +3571,7 @@ mod tests {
             atoms: vec![RenderAtom::new(Vector4::ZERO, 1.0, None)],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            transparency_groups: Vec::new(),
             bounds: None,
         };
         let mesh = tessellate_snapshot(&snapshot);
@@ -3653,6 +3678,7 @@ mod tests {
             atoms: vec![RenderAtom::new(c, 1.0, None)],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            transparency_groups: Vec::new(),
             bounds: None,
         };
         let mesh = tessellate_snapshot(&snapshot);
@@ -3679,6 +3705,7 @@ mod tests {
             atoms: vec![RenderAtom::new(center, radius as f32, None)],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            transparency_groups: Vec::new(),
             bounds: None,
         };
         let mesh = tessellate_snapshot(&snapshot);
@@ -3706,6 +3733,7 @@ mod tests {
             ],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            transparency_groups: Vec::new(),
             bounds: None,
         };
         let down = Vector4::new3(0.0, 0.0, -1.0);
@@ -3729,6 +3757,7 @@ mod tests {
             ],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            transparency_groups: Vec::new(),
             bounds: None,
         };
         let near = pick_atom_by_ray(&stacked, &Ray::new(Vector4::new3(0.0, 0.0, 10.0), down));
@@ -3840,6 +3869,7 @@ mod tests {
             atoms: vec![RenderAtom::new(Vector4::new3(0.0, 0.0, 0.0), 1.0, None)],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            transparency_groups: Vec::new(),
             bounds: None,
         };
         // detail 4 reproduces the default 8x12 = 192 triangles.
@@ -3866,6 +3896,7 @@ mod tests {
             ],
             bonds: vec![RenderBond::new(a, b, 0.08, None)],
             meshes: Vec::new(),
+            transparency_groups: Vec::new(),
             bounds: None,
         };
         let mesh = tessellate_snapshot(&snapshot);
@@ -3876,6 +3907,7 @@ mod tests {
             atoms: Vec::new(),
             bonds: vec![RenderBond::new(a, a, 0.08, None)],
             meshes: Vec::new(),
+            transparency_groups: Vec::new(),
             bounds: None,
         };
         assert_eq!(tessellate_snapshot(&degenerate).triangle_count(), 0);
@@ -3894,6 +3926,7 @@ mod tests {
             atoms: vec![RenderAtom::new(from, 1.0, None).with_edge(Some(edge))],
             bonds: vec![RenderBond::new(from, to, 0.25, None).with_edge(Some(edge))],
             meshes: Vec::new(),
+            transparency_groups: Vec::new(),
             bounds: None,
         };
         snapshot.recompute_bounds();
@@ -3956,6 +3989,7 @@ mod tests {
             ],
             bonds: vec![RenderBond::new(a, b, 0.08, None)],
             meshes: Vec::new(),
+            transparency_groups: Vec::new(),
             bounds: None,
         };
         let mesh = tessellate_snapshot(&snapshot);
@@ -4004,6 +4038,7 @@ mod tests {
             atoms: vec![RenderAtom::new(c, 1.0, red)],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            transparency_groups: Vec::new(),
             bounds: None,
         };
         let mesh = tessellate_snapshot(&snapshot);
@@ -4111,6 +4146,7 @@ mod tests {
             atoms: vec![RenderAtom::new(a, 0.45, red)],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            transparency_groups: Vec::new(),
             bounds: None,
         };
         let mesh = tessellate_snapshot(&snapshot);
@@ -4140,6 +4176,7 @@ mod tests {
             atoms: vec![RenderAtom::new(a, 0.45, None)],
             bonds: vec![RenderBond::new(a, b, 0.08, None)],
             meshes: Vec::new(),
+            transparency_groups: Vec::new(),
             bounds: None,
         };
         let mesh = tessellate_snapshot(&snapshot);
@@ -4174,6 +4211,7 @@ mod tests {
             atoms: vec![RenderAtom::new(Vector4::new3(0.0, 0.0, 0.0), 1.0, None)],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            transparency_groups: Vec::new(),
             bounds: None,
         };
         let mesh = tessellate_snapshot(&snapshot);

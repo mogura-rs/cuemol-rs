@@ -1341,6 +1341,7 @@ mod tests {
                 solid(0.5, 0.5, 0.5),
             )],
             meshes: Vec::new(),
+            transparency_groups: Vec::new(),
             bounds: None,
         };
         // The tessellation itself is always checkable (no GPU needed).
@@ -1430,6 +1431,7 @@ mod tests {
             )],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            transparency_groups: Vec::new(),
             bounds: None,
         };
         let mvp = camera_mvp(&camera, 1.0);
@@ -1457,6 +1459,7 @@ mod tests {
             )],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            transparency_groups: Vec::new(),
             bounds: None,
         };
         let Some(png_bytes) =
@@ -1495,6 +1498,7 @@ mod tests {
             )],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            transparency_groups: Vec::new(),
             bounds: None,
         };
         let Some(img) =
@@ -1537,6 +1541,7 @@ mod tests {
             ],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            transparency_groups: Vec::new(),
             bounds: None,
         };
         let mut camera = Camera::new();
@@ -1653,6 +1658,7 @@ mod tests {
             ],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            transparency_groups: Vec::new(),
             bounds: None,
         };
         let mut camera = Camera::new();

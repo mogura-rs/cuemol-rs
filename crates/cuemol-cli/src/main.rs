@@ -1328,6 +1328,7 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
             atoms: Vec::new(),
             bonds: Vec::new(),
             meshes: vec![combined.clone()],
+            transparency_groups: Vec::new(),
             bounds: None,
         };
         snapshot.recompute_bounds();

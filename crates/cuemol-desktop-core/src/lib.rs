@@ -2292,10 +2292,7 @@ impl DesktopAppState {
                 if alpha < 1.0 {
                     apply_renderer_alpha(&mut rendered, alpha);
                 }
-                merge_bounds(&mut snapshot.bounds, rendered.bounds);
-                snapshot.atoms.extend(rendered.atoms);
-                snapshot.bonds.extend(rendered.bonds);
-                snapshot.meshes.extend(rendered.meshes);
+                append_snapshot(snapshot, rendered);
             }
         }
     }
@@ -6607,10 +6604,7 @@ impl DesktopAppState {
                 } else {
                     rendered.recompute_bounds();
                 }
-                merge_bounds(&mut snapshot.bounds, rendered.bounds);
-                snapshot.atoms.extend(rendered.atoms);
-                snapshot.bonds.extend(rendered.bonds);
-                snapshot.meshes.extend(rendered.meshes);
+                append_snapshot(snapshot, rendered);
             }
         }
     }
@@ -47133,10 +47127,24 @@ fn transform_leaves_point_fixed(matrix: Matrix4, point: Vector4) -> bool {
 }
 
 fn append_snapshot(target: &mut RenderSceneSnapshot, source: RenderSceneSnapshot) {
+    let atom_offset = target.atoms.len();
+    let bond_offset = target.bonds.len();
+    let mesh_offset = target.meshes.len();
     merge_bounds(&mut target.bounds, source.bounds);
     target.atoms.extend(source.atoms);
     target.bonds.extend(source.bonds);
     target.meshes.extend(source.meshes);
+    target
+        .transparency_groups
+        .extend(source.transparency_groups.into_iter().map(|mut group| {
+            group.atom_range.start += atom_offset;
+            group.atom_range.end += atom_offset;
+            group.bond_range.start += bond_offset;
+            group.bond_range.end += bond_offset;
+            group.mesh_range.start += mesh_offset;
+            group.mesh_range.end += mesh_offset;
+            group
+        }));
 }
 
 fn append_selection_overlay_snapshot(
@@ -47534,13 +47542,11 @@ fn append_object_renderer_snapshot(
     if xform != Matrix4::IDENTITY {
         snapshot.apply_xform(&xform);
     }
-    merge_bounds(&mut target.bounds, snapshot.bounds);
-    target.atoms.extend(snapshot.atoms);
-    target.bonds.extend(snapshot.bonds);
-    target.meshes.extend(snapshot.meshes);
+    append_snapshot(target, snapshot);
 }
 
 fn apply_renderer_alpha(snapshot: &mut RenderSceneSnapshot, alpha: f64) {
+    snapshot.mark_transparency_group(alpha as f32);
     let apply_color = |color: &mut Option<cuemol_gfx::ColorSpec>| {
         let Some(rgba) = color.as_ref().and_then(cuemol_gfx::ColorSpec::rgba8) else {
             return;
@@ -47876,10 +47882,7 @@ fn append_lw_object_snapshot(
         } else {
             snapshot.recompute_bounds();
         }
-        merge_bounds(&mut target.bounds, snapshot.bounds);
-        target.atoms.extend(snapshot.atoms);
-        target.bonds.extend(snapshot.bonds);
-        target.meshes.extend(snapshot.meshes);
+        append_snapshot(target, snapshot);
     }
     Ok(())
 }
@@ -58670,7 +58673,7 @@ end_header
     }
 
     #[test]
-    fn renderer_opacity_multiplies_snapshot_primitive_alpha() {
+    fn renderer_opacity_marks_one_snapshot_transparency_group() {
         let mut snapshot = RenderSceneSnapshot::empty();
         snapshot.atoms.push(cuemol_render::RenderAtom {
             center: Vector4::new3(0.0, 0.0, 0.0),
@@ -58697,6 +58700,42 @@ end_header
             128
         );
         assert_eq!(snapshot.meshes[0].vertices[0].color[3], 0.4);
+        assert_eq!(snapshot.transparency_groups.len(), 1);
+        let group = &snapshot.transparency_groups[0];
+        assert_eq!(group.alpha, 0.5);
+        assert_eq!(group.atom_range, 0..1);
+        assert_eq!(group.bond_range, 0..0);
+        assert_eq!(group.mesh_range, 0..1);
+    }
+
+    #[test]
+    fn appended_transparency_group_ranges_follow_primitive_offsets() {
+        let mut target = RenderSceneSnapshot::empty();
+        target.atoms.push(cuemol_render::RenderAtom::new(
+            Vector4::new3(-2.0, 0.0, 0.0),
+            1.0,
+            None,
+        ));
+        let mut source = RenderSceneSnapshot::empty();
+        source.atoms.push(cuemol_render::RenderAtom::new(
+            Vector4::new3(0.0, 0.0, 0.0),
+            1.0,
+            None,
+        ));
+        source.bonds.push(cuemol_render::RenderBond::new(
+            Vector4::new3(0.0, 0.0, 0.0),
+            Vector4::new3(1.0, 0.0, 0.0),
+            0.1,
+            None,
+        ));
+        apply_renderer_alpha(&mut source, 0.25);
+
+        append_snapshot(&mut target, source);
+
+        let group = &target.transparency_groups[0];
+        assert_eq!(group.atom_range, 1..2);
+        assert_eq!(group.bond_range, 0..1);
+        assert_eq!(group.mesh_range, 0..0);
     }
 
     #[test]
@@ -60064,6 +60103,9 @@ end_header
         assert_eq!(rendered.mesh_count(), 0);
         assert_eq!(rendered.bond_count(), 6);
         assert_eq!(rendered.atom_count(), 0);
+        assert_eq!(rendered.transparency_groups.len(), 1);
+        assert_eq!(rendered.transparency_groups[0].alpha, 0.5);
+        assert_eq!(rendered.transparency_groups[0].bond_range, 0..3);
         assert_eq!(
             rendered
                 .bonds
@@ -60991,6 +61033,7 @@ end_header
             .unwrap()
             .renderer_mut(renderer)
             .unwrap();
+        let renderer_uid = renderer.uid();
         renderer.set_qsc_attr("egtype", "silhouette");
         renderer.set_qsc_attr("eglinew", "0.04");
         renderer.set_qsc_attr("egcolor", "#123456");
@@ -61012,6 +61055,20 @@ end_header
             .vertices
             .iter()
             .any(cuemol_render::MeshVertex::is_silhouette_outline));
+
+        app.scene_manager_mut()
+            .object_mut(object)
+            .unwrap()
+            .renderer_mut(renderer_uid)
+            .unwrap()
+            .set_qsc_attr("alpha", "0.5");
+        let translucent = app.active_render_snapshot("").unwrap();
+        assert_eq!(translucent.transparency_groups.len(), 1);
+        let group = &translucent.transparency_groups[0];
+        assert_eq!(group.alpha, 0.5);
+        assert_eq!(group.atom_range, 0..translucent.atoms.len());
+        assert_eq!(group.bond_range, 0..translucent.bonds.len());
+        assert_eq!(group.mesh_range, 0..translucent.meshes.len());
     }
 
     #[test]
@@ -64509,6 +64566,13 @@ attribute \"dep\" string \"positions\"
             rendered.bonds[0].color.as_ref().unwrap().rgba8().unwrap().a,
             191
         );
+        assert_eq!(rendered.transparency_groups.len(), 1);
+        assert_eq!(rendered.transparency_groups[0].alpha, 0.75);
+        assert_eq!(
+            rendered.transparency_groups[0].bond_range,
+            0..rendered.bond_count()
+        );
+        assert_eq!(rendered.transparency_groups[0].mesh_range, 0..0);
 
         app.set_density_renderer_visible(map_uid, isosurf_uid, false)
             .unwrap();
@@ -64956,6 +65020,9 @@ attribute \"dep\" string \"positions\"
         assert!(!reloaded_lw.renderers[1].visible);
         let rendered = reloaded.active_render_snapshot("").unwrap();
         assert_eq!(rendered.mesh_triangle_count(), 5);
+        assert_eq!(rendered.transparency_groups.len(), 1);
+        assert_eq!(rendered.transparency_groups[0].alpha, 0.5);
+        assert!(!rendered.transparency_groups[0].mesh_range.is_empty());
         assert!(rendered.meshes.iter().any(|mesh| {
             mesh.vertices
                 .iter()
