@@ -1552,8 +1552,14 @@ impl PovSceneExporter {
         // NPR silhouette/crease edge lines (C++ show_edge_lines / GraphEdge),
         // drawn as thin black cylinders. The camera sits at center + distance·z.
         if self.show_edge_lines {
-            let edges = extract_edge_lines(mesh, location, self.crease_limit);
+            let edges = extract_edge_lines_with_projection(
+                mesh,
+                location,
+                (!perspective).then_some(forward),
+                self.crease_limit,
+            );
             let ew = (zoom * (0.004 / 1.2)).max(1.0e-4);
+            let rise = self.edge_rise * ew * 0.5;
             let clip = clip_planes.map_or_else(String::new, |(front, back)| {
                 format!(
                     " clipped_by {{ plane {{ <{:.6},{:.6},{:.6}>, {:.6} }} plane {{ <{:.6},{:.6},{:.6}>, {:.6} }} }}",
@@ -1569,10 +1575,12 @@ impl PovSceneExporter {
             });
             writeln!(&mut out, "// {} edge lines", edges.len()).unwrap();
             for e in &edges {
+                let a = e.a + e.normal_a.scale(rise);
+                let b = e.b + e.normal_b.scale(rise);
                 writeln!(
                     &mut out,
                     "cylinder {{ <{:.6},{:.6},{:.6}>, <{:.6},{:.6},{:.6}>, {ew:.6} pigment {{ color rgb <0,0,0> }}{clip} }}",
-                    e.a.x, e.a.y, e.a.z, e.b.x, e.b.y, e.b.z,
+                    a.x, a.y, a.z, b.x, b.y, b.z,
                 )
                 .unwrap();
             }
@@ -4132,6 +4140,8 @@ pub fn pick_atom_by_ray(snapshot: &RenderSceneSnapshot, ray: &Ray) -> Option<usi
 pub struct EdgeSegment {
     pub a: Vector4,
     pub b: Vector4,
+    pub normal_a: Vector4,
+    pub normal_b: Vector4,
 }
 
 /// Extract silhouette + crease + boundary edge lines from a mesh — a faithful
@@ -4147,6 +4157,15 @@ pub struct EdgeSegment {
 /// the closed manifold the algorithm needs (the equivalent of C++ welding the
 /// mesh in `buildMeshes`).
 pub fn extract_edge_lines(mesh: &RenderMesh, cam: Vector4, crease_limit: f64) -> Vec<EdgeSegment> {
+    extract_edge_lines_with_projection(mesh, cam, None, crease_limit)
+}
+
+fn extract_edge_lines_with_projection(
+    mesh: &RenderMesh,
+    cam: Vector4,
+    orthographic_forward: Option<Vector4>,
+    crease_limit: f64,
+) -> Vec<EdgeSegment> {
     use std::collections::HashMap;
 
     type Key = (i64, i64, i64);
@@ -4163,6 +4182,8 @@ pub fn extract_edge_lines(mesh: &RenderMesh, cam: Vector4, crease_limit: f64) ->
     struct EdgeAcc {
         a: Vector4,
         b: Vector4,
+        normal_a: Vector4,
+        normal_b: Vector4,
         n: [Option<Vector4>; 2],
     }
     let mut edges: HashMap<(Key, Key), EdgeAcc> = HashMap::new();
@@ -4171,16 +4192,22 @@ pub fn extract_edge_lines(mesh: &RenderMesh, cam: Vector4, crease_limit: f64) ->
         let vj = mesh.vertices[j].position;
         let vk = mesh.vertices[k].position;
         let normal = normalize3((vj - vi).cross(vk - vi));
-        for (pa, pb) in [(vi, vj), (vj, vk), (vk, vi)] {
+        for (ia, ib) in [(i, j), (j, k), (k, i)] {
+            let pa = mesh.vertices[ia].position;
+            let pb = mesh.vertices[ib].position;
+            let na = normalize3(mesh.vertices[ia].normal);
+            let nb = normalize3(mesh.vertices[ib].normal);
             let (ka, kb) = (key(pa), key(pb));
-            let (k1, k2, a, b) = if ka <= kb {
-                (ka, kb, pa, pb)
+            let (k1, k2, a, b, normal_a, normal_b) = if ka <= kb {
+                (ka, kb, pa, pb, na, nb)
             } else {
-                (kb, ka, pb, pa)
+                (kb, ka, pb, pa, nb, na)
             };
             let acc = edges.entry((k1, k2)).or_insert(EdgeAcc {
                 a,
                 b,
+                normal_a,
+                normal_b,
                 n: [None, None],
             });
             if acc.n[0].is_none() {
@@ -4198,8 +4225,8 @@ pub fn extract_edge_lines(mesh: &RenderMesh, cam: Vector4, crease_limit: f64) ->
             (Some(n1), Some(n2)) => {
                 let crease =
                     crease_limit > 0.0 && dot3(n1, n2).clamp(-1.0, 1.0).acos() > crease_limit;
-                let va = acc.a - cam;
-                let vb = acc.b - cam;
+                let va = orthographic_forward.unwrap_or(acc.a - cam);
+                let vb = orthographic_forward.unwrap_or(acc.b - cam);
                 let silhouette =
                     dot3(va, n1) * dot3(va, n2) < 0.0 || dot3(vb, n1) * dot3(vb, n2) < 0.0;
                 crease || silhouette
@@ -4207,7 +4234,12 @@ pub fn extract_edge_lines(mesh: &RenderMesh, cam: Vector4, crease_limit: f64) ->
             _ => false,
         };
         if emit {
-            out.push(EdgeSegment { a: acc.a, b: acc.b });
+            out.push(EdgeSegment {
+                a: acc.a,
+                b: acc.b,
+                normal_a: acc.normal_a,
+                normal_b: acc.normal_b,
+            });
         }
     }
     out
@@ -6147,6 +6179,73 @@ mod tests {
         assert!(pov.contains("SpecLighting(_light_spread, _distance, _light_inten*(1-_amb_frac)*(1-_flash_frac), _shadow)"));
         assert!(!pov.contains("edge lines"));
         assert_eq!(pov.matches('{').count(), pov.matches('}').count());
+    }
+
+    #[test]
+    fn pov_edge_rise_offsets_lines_along_vertex_normals() {
+        let mesh = RenderMesh {
+            vertices: vec![
+                MeshVertex {
+                    position: Vector4::new3(-1.0, -1.0, 0.0),
+                    normal: Vector4::new3(0.0, 0.0, 1.0),
+                    color: [1.0; 4],
+                },
+                MeshVertex {
+                    position: Vector4::new3(1.0, -1.0, 0.0),
+                    normal: Vector4::new3(0.0, 0.0, 1.0),
+                    color: [1.0; 4],
+                },
+                MeshVertex {
+                    position: Vector4::new3(0.0, 1.0, 0.0),
+                    normal: Vector4::new3(0.0, 0.0, 1.0),
+                    color: [1.0; 4],
+                },
+            ],
+            indices: vec![0, 1, 2],
+        };
+        let mut camera = Camera::new();
+        camera.set_zoom(6.0);
+        let mut exporter = PovSceneExporter::new();
+        exporter.set_edge_rise(2.0);
+        let source = exporter
+            .write_scene_string_with_camera(&mesh, &camera)
+            .unwrap();
+        assert!(source.contains(",0.020000>,"), "{source}");
+    }
+
+    #[test]
+    fn orthographic_pov_edges_use_parallel_view_vectors() {
+        let points = [
+            Vector4::new3(1.0, -1.0, 0.0),
+            Vector4::new3(1.0, 1.0, 0.0),
+            Vector4::new3(2.0, 0.0, 1.0),
+            Vector4::new3(0.0, 0.0, 1.0),
+        ];
+        let mesh = RenderMesh {
+            vertices: points
+                .iter()
+                .map(|position| MeshVertex {
+                    position: *position,
+                    normal: Vector4::new3(0.0, 0.0, 1.0),
+                    color: [1.0; 4],
+                })
+                .collect(),
+            indices: vec![0, 1, 2, 1, 0, 3],
+        };
+        let is_shared = |edge: &EdgeSegment| {
+            (edge.a == points[0] && edge.b == points[1])
+                || (edge.a == points[1] && edge.b == points[0])
+        };
+        let camera = Vector4::new3(-10.0, 0.0, 10.0);
+        let perspective = extract_edge_lines_with_projection(&mesh, camera, None, -1.0);
+        let orthographic = extract_edge_lines_with_projection(
+            &mesh,
+            camera,
+            Some(Vector4::new3(0.0, 0.0, -1.0)),
+            -1.0,
+        );
+        assert!(perspective.iter().any(is_shared));
+        assert!(!orthographic.iter().any(is_shared));
     }
 
     #[test]
