@@ -5500,7 +5500,14 @@ pub fn mainchain_line_snapshot(
             let lhs = &colors[pivots[segment].atom_index];
             let rhs = &colors[pivots[segment + 1].atom_index];
             for step in 0..subdiv {
-                sample_colors.push(interpolate_color(lhs, rhs, step as f64 / subdiv as f64));
+                let fraction = step as f64 / subdiv as f64;
+                sample_colors.push(if smooth_color || mode == MainchainLineMode::Trace {
+                    interpolate_color(lhs, rhs, fraction)
+                } else if fraction > 0.5 {
+                    rhs.clone()
+                } else {
+                    lhs.clone()
+                });
             }
         }
         sample_colors.push(colors[pivots.last().expect("non-empty pivots").atom_index].clone());
@@ -11045,6 +11052,38 @@ return cuemol.makeColor("#0000ff");
         assert_eq!(spline.bond_count(), 8);
         assert_eq!(spline.mesh_count(), 0);
         assert!(spline.bonds.iter().all(|bond| bond.color == bond.end_color));
+
+        let mut colored_atoms = vec![
+            ca_atom(1, 0.0, 0.0, 0.0),
+            ca_atom(2, 3.0, 2.0, 0.0),
+            ca_atom(3, 6.0, 0.0, 0.0),
+        ];
+        colored_atoms[1].element = "N".to_string();
+        colored_atoms[2].element = "O".to_string();
+        let stepped = mainchain_line_snapshot(
+            &MolCoord::with_atoms(colored_atoms),
+            &options,
+            MainchainLineMode::Spline,
+            1.8,
+            4,
+            0.0,
+            false,
+        );
+        let endpoint_colors = [
+            rgb_spec(0.38, 0.38, 0.38).rgba8().unwrap(),
+            rgb_spec(0.20, 0.35, 0.95).rgba8().unwrap(),
+            rgb_spec(0.92, 0.12, 0.12).rgba8().unwrap(),
+        ];
+        assert!(stepped.bonds.iter().all(|bond| {
+            bond.color
+                .as_ref()
+                .and_then(ColorSpec::rgba8)
+                .is_some_and(|color| endpoint_colors.contains(&color))
+        }));
+        assert!(endpoint_colors.iter().all(|color| stepped
+            .bonds
+            .iter()
+            .any(|bond| { bond.color.as_ref().and_then(ColorSpec::rgba8) == Some(*color) })));
 
         let isolated = MolCoord::with_atoms(vec![ca_atom(1, 0.0, 0.0, 0.0)]);
         let isolated_trace = mainchain_line_snapshot(
