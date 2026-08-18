@@ -33884,7 +33884,7 @@ impl DesktopAppState {
                     ("detail", RendererAttrKind::Integer, "16"),
                 ],
                 RendererChildKind::Junction => vec![
-                    ("type", RendererAttrKind::String, "smooth"),
+                    ("type", RendererAttrKind::String, "arrow"),
                     ("gamma", RendererAttrKind::Real, "2.2"),
                     ("basw", RendererAttrKind::Real, "0"),
                     ("arrow", RendererAttrKind::Real, "1.8"),
@@ -33985,7 +33985,7 @@ impl DesktopAppState {
                             js_string!("JctTable"),
                             Attribute::all(),
                         )
-                        .property(js_string!("type"), js_string!("smooth"), Attribute::all())
+                        .property(js_string!("type"), js_string!("arrow"), Attribute::all())
                         .property(js_string!("gamma"), 2.2, Attribute::all())
                         .property(js_string!("basw"), 0.0, Attribute::all())
                         .property(js_string!("arrow"), 1.8, Attribute::all());
@@ -51769,7 +51769,10 @@ mod tests {
                 inherited_defaults(name, &apis, &mut values);
                 let values = values
                     .into_iter()
-                    .filter(|(property, _)| !(*name == "Color" && property == "alpha"))
+                    .filter(|(property, _)| {
+                        !((*name == "Color" && property == "alpha")
+                            || (*name == "JctTable" && property == "type"))
+                    })
                     .map(|(property, value)| {
                         let kind = if value == "true" || value == "false" {
                             "boolean"
@@ -56064,9 +56067,10 @@ end_header
                  print('rendererChildren=' + cuemol.getClassName(ribbon.helix) + ':' + \
                        ribbon.helix.width + ':' + ribbon.helix.type + ':' + \
                        cuemol.getClassName(ribbon.helixhead) + ':' + ribbon.helixhead.type + ':' + \
-                       ribbon.helixhead.gamma + ':' + nucl.section.tuber + ':' + \
+                       ribbon.helixhead.gamma + ':' + ribbon.helixtail.type + ':' + nucl.section.tuber + ':' + \
                        cuemol.getClassName(standaloneSection) + ':' + standaloneSection.width + ':' + \
-                       cuemol.getClassName(standaloneJunction) + ':' + standaloneJunction.arrow); \
+                       cuemol.getClassName(standaloneJunction) + ':' + standaloneJunction.type + ':' + \
+                       standaloneJunction.arrow); \
                  print('rendererColoring=' + cuemol.getClassName(simple.coloring) + ':' + \
                        cuemol.implIface2(simple.coloring, 'ColoringScheme') + ':' + \
                        simple.coloring.start_hue + ':' + simple.coloring.end_hue + ':' + \
@@ -56088,7 +56092,7 @@ end_header
                     "rendererProps=2.5:false:name CA:128:0.4:false:9:1.25:false:0.75:3:255:1.8:true"
                 )
                 && log.contains(
-                    "rendererChildren=TubeSection:0.9:rectangle:JctTable:arrow:3:0.6:TubeSection:0.35:JctTable:1.8"
+                    "rendererChildren=TubeSection:0.9:rectangle:JctTable:arrow:3:arrow:0.6:TubeSection:0.35:JctTable:arrow:1.8"
                 )
                 && log.contains(
                     "rendererColoring=RainbowColoring:true:180:20:PaintColoring:2:name CA:255"

@@ -1878,7 +1878,7 @@ pub struct JctTable {
 impl Default for JctTable {
     fn default() -> Self {
         Self {
-            jct_type: Self::JT_SMOOTH1,
+            jct_type: Self::JT_ARROW1,
             gamma: 2.2,
             basw: 0.0,
             arrow: 1.8,
@@ -10969,7 +10969,7 @@ return cuemol.makeColor("#0000ff");
     }
 
     #[test]
-    fn tube_ribbon_and_na_defaults_match_qif() {
+    fn tube_ribbon_and_na_defaults_match_reference_runtime() {
         let section = TubeSection::new();
         assert_f64_eq(section.width(), 0.35);
         assert_f64_eq(section.tuber(), 1.0);
@@ -10981,12 +10981,12 @@ return cuemol.makeColor("#0000ff");
         assert_eq!(section.get_detail(), 16);
 
         let jct = JctTable::new();
-        assert_eq!(jct.jct_type(), JctTable::JT_SMOOTH1);
+        assert_eq!(jct.jct_type(), JctTable::JT_ARROW1);
         assert_f64_eq(jct.gamma(), 2.2);
         assert_f64_eq(jct.basw(), 0.0);
         assert_f64_eq(jct.arrow(), 1.8);
-        assert_eq!(jct.get_type(), JctTable::JT_SMOOTH1);
-        assert_eq!(jct.r#type(), JctTable::JT_SMOOTH1);
+        assert_eq!(jct.get_type(), JctTable::JT_ARROW1);
+        assert_eq!(jct.r#type(), JctTable::JT_ARROW1);
         assert_f64_eq(jct.get_gamma(), 2.2);
 
         let tube = TubeRenderer::new();
