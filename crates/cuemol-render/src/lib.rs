@@ -1,7 +1,7 @@
 pub mod raytrace;
 
 use cuemol_core::{CueMolError, Matrix4, Result, Uid, Vector4};
-use cuemol_gfx::{CmsXform, ColorSpec, Rgba8};
+use cuemol_gfx::{CmsXform, ColorSpec, PixelBuffer, Rgba8};
 use cuemol_qsys::{Camera, InOutHandler, SceneExporter as QsysSceneExporter};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -196,6 +196,35 @@ pub struct RenderTransparencyGroup {
     pub atom_range: Range<usize>,
     pub bond_range: Range<usize>,
     pub mesh_range: Range<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PovPixelImage {
+    position: Vector4,
+    color: [u8; 4],
+    pixels: PixelBuffer,
+}
+
+impl PovPixelImage {
+    pub fn new(position: Vector4, color: [u8; 4], pixels: PixelBuffer) -> Self {
+        Self {
+            position,
+            color,
+            pixels,
+        }
+    }
+
+    pub fn position(&self) -> Vector4 {
+        self.position
+    }
+
+    pub fn color(&self) -> [u8; 4] {
+        self.color
+    }
+
+    pub fn pixels(&self) -> &PixelBuffer {
+        &self.pixels
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -992,6 +1021,7 @@ pub struct PovSceneExporter {
     edge_rise: f64,
     use_pix_imgs: bool,
     img_file_names: String,
+    pixel_images: Vec<PovPixelImage>,
 }
 
 impl PovSceneExporter {
@@ -1008,6 +1038,7 @@ impl PovSceneExporter {
             edge_rise: 0.5,
             use_pix_imgs: false,
             img_file_names: String::new(),
+            pixel_images: Vec::new(),
         }
     }
 
@@ -1103,6 +1134,18 @@ impl PovSceneExporter {
         self.img_file_names = value.into();
     }
 
+    pub fn pixel_images(&self) -> &[PovPixelImage] {
+        &self.pixel_images
+    }
+
+    pub fn set_pixel_images(&mut self, images: Vec<PovPixelImage>) {
+        self.pixel_images = images;
+    }
+
+    pub fn add_pixel_image(&mut self, image: PovPixelImage) {
+        self.pixel_images.push(image);
+    }
+
     pub fn write(&mut self) {
         self.state.write();
     }
@@ -1115,7 +1158,8 @@ impl PovSceneExporter {
         size: f64,
         perspective: bool,
     ) -> Result<()> {
-        let output = self.write_scene_string(mesh, center, size, perspective);
+        let mut output = self.write_scene_string(mesh, center, size, perspective);
+        self.write_pixel_image_files(&mut output)?;
         self.write_scene_documents(&output)
     }
 
@@ -1125,7 +1169,8 @@ impl PovSceneExporter {
         mesh: &RenderMesh,
         camera: &Camera,
     ) -> Result<()> {
-        let output = self.write_scene_string_with_camera(mesh, camera)?;
+        let mut output = self.write_scene_string_with_camera(mesh, camera)?;
+        self.write_pixel_image_files(&mut output)?;
         self.write_scene_documents(&output)
     }
 
@@ -1145,9 +1190,58 @@ impl PovSceneExporter {
         camera: &Camera,
         background: [f32; 3],
     ) -> Result<()> {
-        let output =
+        let mut output =
             self.write_snapshot_string_with_camera_background(snapshot, camera, background)?;
+        self.write_pixel_image_files(&mut output)?;
         self.write_scene_documents(&output)
+    }
+
+    fn write_pixel_image_files(&mut self, output: &mut String) -> Result<()> {
+        self.img_file_names.clear();
+        if !self.use_pix_imgs || self.pixel_images.is_empty() {
+            return Ok(());
+        }
+
+        let (base_path, base_reference) = self.pixel_image_base_paths()?;
+        let mut file_names = Vec::with_capacity(self.pixel_images.len());
+        let mut geometry = String::new();
+        for (index, image) in self.pixel_images.iter().enumerate() {
+            let path = PathBuf::from(format!("{}_{index:04}.png", base_path.to_string_lossy()));
+            let reference = format!("{base_reference}_{index:04}.png");
+            write_pov_pixel_png(&path, image)?;
+            append_pov_pixel_mesh(&mut geometry, image, &reference);
+            file_names.push(path.to_string_lossy().into_owned());
+        }
+        self.img_file_names = file_names.join(",");
+        let insert_at = output
+            .find("\n// CueMol post-blend groups:")
+            .unwrap_or(output.len());
+        output.insert_str(insert_at, &geometry);
+        Ok(())
+    }
+
+    fn pixel_image_base_paths(&self) -> Result<(PathBuf, String)> {
+        let inc_path = self.handler().sub_path("inc");
+        if !inc_path.is_empty() {
+            return pov_include_paths(self.handler().path(), inc_path, self.make_rel_inc_path);
+        }
+        let main_path = self.handler().path();
+        if main_path.is_empty() {
+            return Err(CueMolError::invalid_argument(
+                "path is empty for stream key ''",
+            ));
+        }
+        let current_dir = std::env::current_dir()?;
+        let absolute = absolute_normalized_path(Path::new(main_path), &current_dir);
+        let reference = if self.make_rel_inc_path {
+            absolute
+                .file_name()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| absolute.clone())
+        } else {
+            PathBuf::from(main_path)
+        };
+        Ok((absolute, pov_path_string(&reference)))
     }
 
     fn write_scene_documents(&mut self, output: &str) -> Result<()> {
@@ -1448,6 +1542,18 @@ impl PovSceneExporter {
             center.x, center.y, center.z
         )
         .unwrap();
+        writeln!(
+            &mut out,
+            "#declare _camera_right = <{:.6},{:.6},{:.6}>;",
+            right.x, right.y, right.z
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "#declare _camera_up = <{:.6},{:.6},{:.6}>;",
+            up.x, up.y, up.z
+        )
+        .unwrap();
         writeln!(&mut out, "#declare _distance = {distance:.6};").unwrap();
         writeln!(
             &mut out,
@@ -1691,6 +1797,117 @@ fn split_pov_scene_documents(source: &str, include_path: &str) -> (String, Strin
     }
     include.push_str("#if (!_shadow)\n  no_shadow\n#end\n} // union\n");
     (main, include)
+}
+
+fn write_pov_pixel_png(path: &Path, image: &PovPixelImage) -> Result<()> {
+    let width = image.pixels.width();
+    let height = image.pixels.height();
+    if width == 0 || height == 0 {
+        return Err(CueMolError::invalid_argument(
+            "POV pixel image dimensions must be positive",
+        ));
+    }
+    let pixel_count = width.saturating_mul(height);
+    let source_components = match image.pixels.depth() {
+        8 => 1,
+        32 => 4,
+        depth => {
+            return Err(CueMolError::invalid_argument(format!(
+                "unsupported POV pixel image depth: {depth}"
+            )));
+        }
+    };
+    if image.pixels.data().len() < pixel_count.saturating_mul(source_components) {
+        return Err(CueMolError::invalid_argument(
+            "POV pixel image data is shorter than its dimensions",
+        ));
+    }
+
+    let mut rgba = Vec::with_capacity(pixel_count.saturating_mul(4));
+    for output_y in 0..height {
+        let source_y = height - 1 - output_y;
+        for x in 0..width {
+            let source_index = (source_y * width + x) * source_components;
+            if source_components == 1 {
+                let coverage = image.pixels.data()[source_index];
+                rgba.extend_from_slice(&[
+                    image.color[0],
+                    image.color[1],
+                    image.color[2],
+                    ((u16::from(coverage) * u16::from(image.color[3]) + 127) / 255) as u8,
+                ]);
+            } else {
+                let source = &image.pixels.data()[source_index..source_index + 4];
+                rgba.extend_from_slice(&[
+                    ((u16::from(source[0]) * u16::from(image.color[0]) + 127) / 255) as u8,
+                    ((u16::from(source[1]) * u16::from(image.color[1]) + 127) / 255) as u8,
+                    ((u16::from(source[2]) * u16::from(image.color[2]) + 127) / 255) as u8,
+                    ((u16::from(source[3]) * u16::from(image.color[3]) + 127) / 255) as u8,
+                ]);
+            }
+        }
+    }
+
+    let width = u32::try_from(width)
+        .map_err(|_| CueMolError::invalid_argument("POV pixel image width is too large"))?;
+    let height = u32::try_from(height)
+        .map_err(|_| CueMolError::invalid_argument("POV pixel image height is too large"))?;
+    let file = std::fs::File::create(path)?;
+    let mut encoder = png::Encoder::new(file, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
+    let mut writer = encoder
+        .write_header()
+        .map_err(|error| CueMolError::Io(error.to_string()))?;
+    writer
+        .write_image_data(&rgba)
+        .map_err(|error| CueMolError::Io(error.to_string()))?;
+    Ok(())
+}
+
+fn append_pov_pixel_mesh(output: &mut String, image: &PovPixelImage, path: &str) {
+    let width = image.pixels.width() / 2;
+    let height = image.pixels.height() / 2;
+    let position = image.position;
+    output.push_str("\n// Pixel image\nmesh2 {\n");
+    output.push_str("  vertex_vectors { 4,\n");
+    writeln!(
+        output,
+        "    <{:.6},{:.6},{:.6}>,",
+        position.x, position.y, position.z
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "    <{:.6},{:.6},{:.6}> + _camera_right*{width}*_zoomx/image_width,",
+        position.x, position.y, position.z
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "    <{:.6},{:.6},{:.6}> + (_camera_right*{width} + _camera_up*{height})*_zoomx/image_width,",
+        position.x, position.y, position.z
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "    <{:.6},{:.6},{:.6}> + _camera_up*{height}*_zoomx/image_width",
+        position.x, position.y, position.z
+    )
+    .unwrap();
+    output.push_str("  }\n");
+    output.push_str("  uv_vectors { 4, <0,0>, <1,0>, <1,1>, <0,1> }\n");
+    output.push_str("  texture_list { 1, texture {\n");
+    writeln!(
+        output,
+        "    pigment {{ uv_mapping image_map {{ png \"{path}\" once interpolate 2 }} }}"
+    )
+    .unwrap();
+    output.push_str("    finish { ambient 1 diffuse 0 specular 0 }\n  } }\n");
+    output.push_str("  face_indices { 2, <0,1,2>,0, <0,2,3>,0 }\n");
+    output.push_str("  uv_indices { 2, <0,1,2>, <0,2,3> }\n");
+    output.push_str("  no_shadow\n}\n");
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5412,6 +5629,17 @@ mod tests {
             .set_path(dir.join("scene.pov").to_string_lossy());
         pov.handler_mut()
             .set_sub_path("inc", dir.join("geometry.inc").to_string_lossy());
+        let mut pixels = PixelBuffer::new();
+        pixels.set_width(2);
+        pixels.set_height(2);
+        pixels.resize(4);
+        pixels.data_mut().copy_from_slice(&[255, 0, 128, 25]);
+        pov.set_use_pix_imgs(true);
+        pov.add_pixel_image(PovPixelImage::new(
+            Vector4::new3(1.0, 2.0, 3.0),
+            [10, 20, 30, 255],
+            pixels,
+        ));
         pov.write_scene_file(&mesh, Vector4::ZERO, 4.0, false)
             .unwrap();
         assert_eq!(pov.write_count(), 1);
@@ -5423,6 +5651,17 @@ mod tests {
         assert!(pov_include.contains("union {"));
         assert!(pov_include.contains("mesh2 {"));
         assert!(pov_include.contains("} // union"));
+        assert!(pov_include.contains("uv_mapping image_map"));
+        assert!(pov_include.contains("png \"geometry.inc_0000.png\""));
+        let pixel_path = dir.join("geometry.inc_0000.png");
+        assert!(pixel_path.is_file());
+        assert_eq!(pov.img_file_names(), pixel_path.to_string_lossy());
+        let decoder = png::Decoder::new(std::fs::File::open(pixel_path).unwrap());
+        let mut reader = decoder.read_info().unwrap();
+        let mut rgba = vec![0; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut rgba).unwrap();
+        assert_eq!((info.width, info.height), (2, 2));
+        assert_eq!(&rgba[..8], &[10, 20, 30, 128, 10, 20, 30, 25]);
 
         let mut mqo = MqoSceneExporter::new();
         mqo.handler_mut()

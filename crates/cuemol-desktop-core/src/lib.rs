@@ -36,7 +36,9 @@ use cuemol_molvis::{default_style_manager, disorder_lines_snapshot};
 use cuemol_qsys::{Camera, MultiGradient, ScalarHistogram, ScalarObject, StyleManager, View};
 #[cfg(any(feature = "offscreen", feature = "scripting"))]
 use cuemol_render::PngSceneExporter;
-use cuemol_render::{PovSceneExporter, RenderSceneSnapshot, UmbreonFrame, UmbreonSceneExporter};
+use cuemol_render::{
+    PovPixelImage, PovSceneExporter, RenderSceneSnapshot, UmbreonFrame, UmbreonSceneExporter,
+};
 use cuemol_surface::{MolSurfObj, PqrFileWriter, XyzrFileWriter};
 use cuemol_xtal::{
     density_map_from_cif, read_mmcif_map_file, read_mtz_metadata_file, read_opendx_file,
@@ -13224,6 +13226,14 @@ impl DesktopAppState {
         exporter.set_use_post_blend(options.use_post_blend);
         exporter.set_show_edge_lines(options.show_edge_lines);
         exporter.set_use_pix_imgs(options.use_pixel_labels);
+        if options.use_pixel_labels {
+            let scene = self
+                .scene_manager()
+                .scene(scene_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+            let styles = scene_style_manager(scene);
+            exporter.set_pixel_images(pov_lw_pixel_images(scene, &styles)?);
+        }
         let path = path.as_ref();
         exporter
             .handler_mut()
@@ -47966,6 +47976,62 @@ fn append_lw_object_snapshot(
     Ok(())
 }
 
+fn pov_lw_pixel_images(
+    scene: &cuemol_molstr::MolScene,
+    styles: &StyleManager,
+) -> Result<Vec<PovPixelImage>> {
+    let mut images = Vec::new();
+    for loaded in scene
+        .loaded_lw_objects()
+        .iter()
+        .filter(|object| object.visible)
+    {
+        let object = cuemol_lwview::read_qdf_lwobj_bytes(&loaded.raw_data)?;
+        let renderer_nodes = loaded
+            .qsc_node
+            .iter()
+            .flat_map(|node| node.children())
+            .filter(|node| {
+                !node.is_attr() && node.tag_name() == "renderer" && node.type_name() == "lwrend"
+            })
+            .collect::<Vec<_>>();
+        for (index, renderer) in loaded.renderers.iter().enumerate() {
+            if !renderer.visible {
+                continue;
+            }
+            let node = renderer_nodes.get(index).copied();
+            let style = node
+                .map(|node| node.str_attr("style").to_string())
+                .unwrap_or_default();
+            let data_id = node
+                .map(|node| node.str_attr("data_id").to_string())
+                .filter(|value| !value.is_empty())
+                .or_else(|| styles.resolve_style_attr(DEFAULT_STYLE_SCOPE, &style, "data_id"))
+                .and_then(|value| value.parse::<i32>().ok())
+                .unwrap_or(renderer.data_id);
+            if data_id == 0 {
+                continue;
+            }
+            let xform = renderer.xform.mul_mat(loaded.xform);
+            for element in object.draw_elements_for(data_id) {
+                let cuemol_lwview::LWDrawData::Pixel(pixel) = element.data() else {
+                    continue;
+                };
+                let mut position = f32_position(pixel.position());
+                if xform != Matrix4::IDENTITY {
+                    xform.xform3d(&mut position);
+                }
+                images.push(PovPixelImage::new(
+                    position,
+                    pixel.color(),
+                    pixel.pixels().clone(),
+                ));
+            }
+        }
+    }
+    Ok(images)
+}
+
 fn append_lw_hit_points(
     target: &mut RenderSceneSnapshot,
     object: &cuemol_lwview::LWObject,
@@ -60454,6 +60520,26 @@ end_header
         );
         assert!(snapshot.bounds.is_some());
 
+        let pov_path = std::env::temp_dir().join(format!(
+            "cuemol_core_qsc_lwo3_pixels_{}.pov",
+            std::process::id()
+        ));
+        app.export_active_scene_pov_with_camera(
+            &pov_path,
+            "",
+            &Camera::new(),
+            GuiPovSceneOptions {
+                use_pixel_labels: true,
+                ..GuiPovSceneOptions::default()
+            },
+        )
+        .unwrap();
+        let inc_path = pov_path.with_extension("inc");
+        let pixel_path = PathBuf::from(format!("{}_0000.png", inc_path.to_string_lossy()));
+        let pov_include = std::fs::read_to_string(&inc_path).unwrap();
+        assert!(pov_include.contains("uv_mapping image_map"));
+        assert!(pixel_path.is_file());
+
         #[cfg(feature = "scripting")]
         {
             let (script_log, _) = app
@@ -60541,6 +60627,9 @@ end_header
         );
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&rewritten_path);
+        let _ = std::fs::remove_file(&pov_path);
+        let _ = std::fs::remove_file(inc_path);
+        let _ = std::fs::remove_file(pixel_path);
     }
 
     #[test]
