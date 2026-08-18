@@ -856,7 +856,7 @@ fn export_scene(input: &str, output: &str) -> Result<(), String> {
     } else if lower.ends_with(".mqo") {
         let camera = camera_for_snapshot(&snapshot);
         MqoSceneExporter::new()
-            .write_mqo_string_with_camera(name, &mesh, &camera)
+            .write_snapshot_string_with_camera(name, &snapshot, &camera)
             .into_bytes()
     } else if lower.ends_with(".lxs") {
         let (center, size) = scene_center_size(&snapshot);
@@ -1653,7 +1653,7 @@ fn export_wbp(
     let mut exporter = WbpSceneExporter::new();
     exporter.handler_mut().set_path(output);
     exporter
-        .write_scene_files_with_camera(name, mesh, &camera, [0.0; 3])
+        .write_snapshot_files_with_camera(name, snapshot, &camera, [0.0; 3])
         .map_err(|err| err.to_string())?;
     eprintln!(
         "exported {} atoms / {} bonds -> {} vertices / {} triangles to {output} (+ {mqo_path})",

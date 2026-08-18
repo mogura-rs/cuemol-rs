@@ -1619,6 +1619,84 @@ impl MqoSceneExporter {
         self.write_mqo_string(name, &export_mesh)
     }
 
+    pub fn write_snapshot_string_with_camera(
+        &self,
+        fallback_name: &str,
+        snapshot: &RenderSceneSnapshot,
+        camera: &Camera,
+    ) -> String {
+        let sections = snapshot_mesh_sections(fallback_name, snapshot, camera, self.use_clip_z);
+        self.write_mqo_sections_string(&sections)
+    }
+
+    fn write_mqo_sections_string(&self, sections: &[(String, RenderMesh)]) -> String {
+        let tables = sections
+            .iter()
+            .map(|(_, mesh)| face_material_table_with_grad_steps(mesh, self.grad_steps))
+            .collect::<Vec<_>>();
+        let material_count = tables.iter().map(|(colors, _)| colors.len()).sum::<usize>();
+        let mut out = String::new();
+        out.push_str("Metasequoia Document\nFormat Text Ver 1.0\n\n");
+        out.push_str("Scene {\n");
+        out.push_str("    pos 0.0000 0.0000 100.0000\n");
+        out.push_str("    lookat 0.0000 0.0000 0.0000\n");
+        out.push_str("    head 0.0000\n");
+        out.push_str("    pich 0.0000\n");
+        out.push_str("    ortho 0\n");
+        out.push_str("    zoom2 10.0000\n");
+        out.push_str("    amb 0.250 0.250 0.250\n");
+        out.push_str("}\n");
+        writeln!(&mut out, "Material {material_count} {{").unwrap();
+        for ((name, _), (colors, _)) in sections.iter().zip(&tables) {
+            for (index, color) in colors.iter().enumerate() {
+                writeln!(
+                    &mut out,
+                    "    \"{name}_mat{index}\" col({:.6} {:.6} {:.6} {:.6}) dif(0.7) amb(0.1) emi(0.000) spc(0.3) power(0.00)",
+                    f32::from(color[0]) / 255.0,
+                    f32::from(color[1]) / 255.0,
+                    f32::from(color[2]) / 255.0,
+                    f32::from(color[3]) / 255.0,
+                )
+                .unwrap();
+            }
+        }
+        out.push_str("}\n");
+        let mut material_offset = 0usize;
+        for ((name, mesh), (colors, face_materials)) in sections.iter().zip(tables) {
+            writeln!(&mut out, "Object \"{name}\" {{").unwrap();
+            out.push_str("    visible 15\n");
+            out.push_str("    locking 0\n");
+            out.push_str("    shading 1\n");
+            out.push_str("    facet 59.5\n");
+            out.push_str("    color 1 1 1\n");
+            out.push_str("    color_type 0\n");
+            writeln!(&mut out, "    vertex {} {{", mesh.vertices.len()).unwrap();
+            for vertex in &mesh.vertices {
+                writeln!(
+                    &mut out,
+                    "{:.6} {:.6} {:.6}",
+                    vertex.position.x, vertex.position.y, vertex.position.z
+                )
+                .unwrap();
+            }
+            out.push_str("    }\n");
+            let triangles = mesh.triangles();
+            writeln!(&mut out, "    face {} {{", triangles.len()).unwrap();
+            for (face, [i, j, k]) in triangles.iter().enumerate() {
+                writeln!(
+                    &mut out,
+                    "3 V({i} {k} {j}) M({})",
+                    material_offset + face_materials[face]
+                )
+                .unwrap();
+            }
+            out.push_str("    }\n}\n");
+            material_offset += colors.len();
+        }
+        out.push_str("Eof\n");
+        out
+    }
+
     pub fn state(&self) -> &ExportState {
         &self.state
     }
@@ -1670,6 +1748,18 @@ impl MqoSceneExporter {
         camera: &Camera,
     ) -> Result<()> {
         let output = self.write_mqo_string_with_camera(name, mesh, camera);
+        self.handler().write_string(&output)?;
+        self.state.write();
+        Ok(())
+    }
+
+    pub fn write_snapshot_file_with_camera(
+        &mut self,
+        fallback_name: &str,
+        snapshot: &RenderSceneSnapshot,
+        camera: &Camera,
+    ) -> Result<()> {
+        let output = self.write_snapshot_string_with_camera(fallback_name, snapshot, camera);
         self.handler().write_string(&output)?;
         self.state.write();
         Ok(())
@@ -1869,6 +1959,52 @@ impl WbpSceneExporter {
         out.push_str(WBP_OBJECT_BODY);
         out.push_str("      }\n"); // close Children
         out.push_str("    }\n"); // close External
+        self.write_wbp_camera_footer(&mut out, camera, background);
+        out
+    }
+
+    fn write_wbp_sections_string(
+        &self,
+        sections: &[(String, RenderMesh)],
+        mqo_filename: &str,
+        camera: &Camera,
+        background: [f32; 3],
+    ) -> String {
+        let mut out = String::new();
+        out.push_str("# Warabi Project 1.1 utf8\n");
+        for (name, mesh) in sections {
+            let (colors, _) = face_material_table_with_grad_steps(mesh, self.grad_steps);
+            for (index, color) in colors.iter().enumerate() {
+                writeln!(&mut out, "Material \"{name}_mat{index}\" : {{").unwrap();
+                writeln!(
+                    &mut out,
+                    "  Color : [{:.6}, {:.6}, {:.6}]",
+                    f32::from(color[0]) / 255.0,
+                    f32::from(color[1]) / 255.0,
+                    f32::from(color[2]) / 255.0,
+                )
+                .unwrap();
+                writeln!(&mut out, "  Opacity : {:.6}", f32::from(color[3]) / 255.0).unwrap();
+                out.push_str(WBP_DEFAULT_MATERIAL);
+                out.push_str("}\n");
+            }
+        }
+        out.push_str(WBP_DEFAULT_BRUSH);
+        out.push_str(WBP_SCENE_PREAMBLE);
+        writeln!(&mut out, "      FileName : \"{mqo_filename}\"").unwrap();
+        out.push_str(WBP_IMPORT_OPTIONS);
+        out.push_str("      Children : {\n");
+        for (name, _) in sections {
+            writeln!(&mut out, "        Object \"{name}\" : {{").unwrap();
+            out.push_str(WBP_OBJECT_BODY);
+        }
+        out.push_str("      }\n");
+        out.push_str("    }\n");
+        self.write_wbp_camera_footer(&mut out, camera, background);
+        out
+    }
+
+    fn write_wbp_camera_footer(&self, out: &mut String, camera: &Camera, background: [f32; 3]) {
         out.push_str(WBP_DIRECTIONAL_LIGHT);
         let camera_name = if !self.camera_name.is_empty() {
             self.camera_name.as_str()
@@ -1883,17 +2019,16 @@ impl WbpSceneExporter {
             1000.0
         };
         let fov = 2.0 * ((camera.zoom() / 2.0) / distance).atan();
-        writeln!(&mut out, "    Camera \"{camera_name}\" : {{").unwrap();
-        writeln!(&mut out, "      Position : [ 0, 0, {distance:.6} ]").unwrap();
+        writeln!(out, "    Camera \"{camera_name}\" : {{").unwrap();
+        writeln!(out, "      Position : [ 0, 0, {distance:.6} ]").unwrap();
         out.push_str("      Focus : [ 0, 0, 0 ]\n");
         out.push_str("      Up : [ 0, 1, 0 ]\n");
-        writeln!(&mut out, "      Fov : {fov:.6}").unwrap();
+        writeln!(out, "      Fov : {fov:.6}").unwrap();
         out.push_str("      Visible : true\n");
         out.push_str("    }\n");
         out.push_str("  }\n"); // close scene Children
         out.push_str("}\n"); // close Scene
-        write_wbp_rendering_options(&mut out, camera_name, background);
-        out
+        write_wbp_rendering_options(out, camera_name, background);
     }
 
     pub fn state(&self) -> &ExportState {
@@ -1991,6 +2126,73 @@ impl WbpSceneExporter {
         self.state.write();
         Ok(())
     }
+
+    pub fn write_snapshot_files_with_camera(
+        &mut self,
+        fallback_name: &str,
+        snapshot: &RenderSceneSnapshot,
+        camera: &Camera,
+        background: [f32; 3],
+    ) -> Result<()> {
+        if self.handler().path().is_empty() {
+            return Err(CueMolError::invalid_argument("Warabi output path is empty"));
+        }
+        let project_path = std::path::Path::new(self.handler().path());
+        let mqo_path = project_path.with_extension("mqo");
+        let mqo_filename = mqo_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("scene.mqo");
+        let sections = snapshot_mesh_sections(fallback_name, snapshot, camera, self.use_clip_z);
+        let mut mqo_exporter = MqoSceneExporter::new();
+        mqo_exporter.set_grad_steps(self.grad_steps);
+        std::fs::write(&mqo_path, mqo_exporter.write_mqo_sections_string(&sections))?;
+        let project = self.write_wbp_sections_string(&sections, mqo_filename, camera, background);
+        self.handler().write_string(&project)?;
+        self.state.write();
+        Ok(())
+    }
+}
+
+fn snapshot_mesh_sections(
+    fallback_name: &str,
+    snapshot: &RenderSceneSnapshot,
+    camera: &Camera,
+    use_clip_z: bool,
+) -> Vec<(String, RenderMesh)> {
+    let mut sections = Vec::new();
+    let mut name_counts = BTreeMap::<String, usize>::new();
+    for (index, group) in snapshot.transparency_groups.iter().enumerate() {
+        let mesh = tessellate_snapshot_section(snapshot, group);
+        if mesh.triangle_count() == 0 {
+            continue;
+        }
+        let base_name = sanitize_luxcore_identifier(&group.name, index);
+        let count = name_counts.entry(base_name.clone()).or_default();
+        let name = if *count == 0 {
+            base_name
+        } else {
+            format!("{base_name}_{count}")
+        };
+        *count += 1;
+        let view_mesh = camera_space_render_mesh(&mesh, camera);
+        let export_mesh = if use_clip_z {
+            clip_render_mesh_z(&view_mesh, camera.slab_depth() / 2.0)
+        } else {
+            view_mesh
+        };
+        sections.push((name, export_mesh));
+    }
+    if sections.is_empty() {
+        let mesh = camera_space_render_mesh(&tessellate_snapshot(snapshot), camera);
+        let mesh = if use_clip_z {
+            clip_render_mesh_z(&mesh, camera.slab_depth() / 2.0)
+        } else {
+            mesh
+        };
+        sections.push((sanitize_luxcore_identifier(fallback_name, 0), mesh));
+    }
+    sections
 }
 
 fn camera_space_render_mesh(mesh: &RenderMesh, camera: &Camera) -> RenderMesh {
@@ -3227,7 +3429,7 @@ impl LuxCoreSceneExporter {
         let mut written_sections = 0usize;
         let mut name_counts = BTreeMap::<String, usize>::new();
         for (index, group) in snapshot.transparency_groups.iter().enumerate() {
-            let mesh = tessellate_luxcore_section(snapshot, group);
+            let mesh = tessellate_snapshot_section(snapshot, group);
             if mesh.triangle_count() == 0 {
                 continue;
             }
@@ -3267,7 +3469,7 @@ impl LuxCoreSceneExporter {
     }
 }
 
-fn tessellate_luxcore_section(
+fn tessellate_snapshot_section(
     snapshot: &RenderSceneSnapshot,
     group: &RenderTransparencyGroup,
 ) -> RenderMesh {
@@ -5925,6 +6127,69 @@ mod tests {
     }
 
     #[test]
+    fn mqo_and_wbp_snapshot_exports_keep_renderer_objects_separate() {
+        let mut snapshot = RenderSceneSnapshot {
+            atoms: vec![
+                RenderAtom::new(Vector4::new3(-2.0, 0.0, 0.0), 0.5, None),
+                RenderAtom::new(Vector4::new3(2.0, 0.0, 0.0), 0.5, None),
+            ],
+            bonds: Vec::new(),
+            meshes: Vec::new(),
+            transparency_groups: Vec::new(),
+            bounds: None,
+        };
+        snapshot.transparency_groups = vec![
+            RenderTransparencyGroup {
+                name: "left renderer".to_string(),
+                alpha: 1.0,
+                material: "default".to_string(),
+                atom_range: 0..1,
+                bond_range: 0..0,
+                mesh_range: 0..0,
+            },
+            RenderTransparencyGroup {
+                name: "right renderer".to_string(),
+                alpha: 1.0,
+                material: "default".to_string(),
+                atom_range: 1..2,
+                bond_range: 0..0,
+                mesh_range: 0..0,
+            },
+        ];
+        let camera = Camera::new();
+        let mqo = MqoSceneExporter::new()
+            .write_snapshot_string_with_camera("fallback", &snapshot, &camera);
+        assert!(mqo.contains("Material 2 {"));
+        assert!(mqo.contains("Object \"left_renderer\" {"));
+        assert!(mqo.contains("Object \"right_renderer\" {"));
+        assert!(mqo.contains("M(0)"));
+        assert!(mqo.contains("M(1)"));
+
+        let dir = std::env::temp_dir().join(format!(
+            "cuemol-render-wbp-sections-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut exporter = WbpSceneExporter::new();
+        exporter
+            .handler_mut()
+            .set_path(dir.join("scene.wbp").to_string_lossy());
+        exporter
+            .write_snapshot_files_with_camera("fallback", &snapshot, &camera, [0.0; 3])
+            .unwrap();
+        let wbp = std::fs::read_to_string(dir.join("scene.wbp")).unwrap();
+        assert!(wbp.contains("Material \"left_renderer_mat0\" : {"));
+        assert!(wbp.contains("Material \"right_renderer_mat0\" : {"));
+        assert!(wbp.contains("Object \"left_renderer\" : {"));
+        assert!(wbp.contains("Object \"right_renderer\" : {"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn luxcore_writes_ply_geometry_and_scn_cfg_references() {
         let a = Vector4::new3(0.0, 0.0, 0.0);
         let b = Vector4::new3(2.0, 0.0, 0.0);
@@ -6051,7 +6316,7 @@ mod tests {
         assert!(!dir.join("scene.ply").exists());
         let left_ply = std::fs::read_to_string(&left_path).unwrap();
         let section_vertex_count =
-            tessellate_luxcore_section(&snapshot, &snapshot.transparency_groups[0])
+            tessellate_snapshot_section(&snapshot, &snapshot.transparency_groups[0])
                 .vertices
                 .len();
         assert!(left_ply.contains(&format!("element vertex {section_vertex_count}")));

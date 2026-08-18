@@ -26705,12 +26705,15 @@ impl DesktopAppState {
                     (camera.zoom() / 1.2).max(1.0),
                     exporter.perspective(),
                 ),
-                ScriptNativeSceneExporter::Mqo(exporter) => {
-                    exporter.write_mesh_file_with_camera(&scene_name, &mesh, &camera)
-                }
-                ScriptNativeSceneExporter::Wbp(exporter) => {
-                    exporter.write_scene_files_with_camera(&scene_name, &mesh, &camera, background)
-                }
+                ScriptNativeSceneExporter::Mqo(exporter) => exporter
+                    .write_snapshot_file_with_camera(&scene_name, &render_scene.snapshot, &camera),
+                ScriptNativeSceneExporter::Wbp(exporter) => exporter
+                    .write_snapshot_files_with_camera(
+                        &scene_name,
+                        &render_scene.snapshot,
+                        &camera,
+                        background,
+                    ),
                 ScriptNativeSceneExporter::Stl(exporter) => exporter.write_mesh_file(&mesh),
                 ScriptNativeSceneExporter::LuxRend(exporter) => exporter
                     .write_scene_file_with_background(
