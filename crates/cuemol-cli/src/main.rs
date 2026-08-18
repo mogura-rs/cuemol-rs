@@ -1025,7 +1025,7 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                 .map(str::trim)
                 .filter(|sel| !sel.is_empty() && *sel != "*")
             {
-                if let Ok(selector) = parse_selector(sel) {
+                if let Some(selector) = qsc_selector(sel, &styles) {
                     options.draw_indices = Some(object.mol().select_indices(&selector));
                 }
             }
@@ -1402,7 +1402,8 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                 qsc_node_attr(renderer_node, "bndry_molname", &styles).unwrap_or_default();
             let bndry_sel = qsc_node_attr(renderer_node, "bndry_sel", &styles)
                 .filter(|value| !value.trim().is_empty())
-                .and_then(|value| parse_selector(&value).ok())
+                .as_deref()
+                .and_then(|value| qsc_selector(value, &styles))
                 .unwrap_or(cuemol_molstr::Selector::All);
             let boundary_points = if bndry_molname.is_empty() {
                 None

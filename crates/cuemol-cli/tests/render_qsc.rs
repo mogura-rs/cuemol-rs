@@ -387,13 +387,15 @@ fn render_qsc_exports_molecule_edge_styles() {
     let obj_path = std::env::temp_dir().join(format!("{stem}.obj"));
     let mqo_path = std::env::temp_dir().join(format!("{stem}.mqo"));
     let qsc = "<scene>\n\
+               <styles id=\"named-selections\"><sel id=\"carbononly\" value=\"elem C\"/></styles>\n\
                <object type=\"MolCoord\" name=\"mol\" src=\"datachunk:00000\" srctype=\"pdb\">\n\
-               <renderer type=\"ballstick\" name=\"edged-ball\" color=\"#abcdef\" egtype=\"silhouette\" eglinew=\"0.2\" egcolor=\"#010203\"/>\n\
+               <renderer type=\"ballstick\" name=\"edged-ball\" sel=\"carbononly\" color=\"#abcdef\" egtype=\"silhouette\" eglinew=\"0.2\" egcolor=\"#010203\"/>\n\
                </object>\n\
                </scene>\n\
                ========== End of XML ==========\n\
                ==========START datachunk:00000==========\n\
 ATOM      1  C1  LIG A   1       0.000   0.000   0.000  1.00 20.00           C\n\
+ATOM      2  O1  LIG A   1      10.000   0.000   0.000  1.00 20.00           O\n\
 END\n\
                ==========END datachunk:00000==========\n";
     std::fs::write(&qsc_path, qsc).unwrap();
@@ -408,7 +410,9 @@ END\n\
         .expect("export edge-styled molecule to OBJ");
     assert!(status.success());
     let obj = std::fs::read_to_string(&obj_path).unwrap();
-    assert!(obj.lines().filter(|line| line.starts_with("f ")).count() > 100);
+    let faces = obj.lines().filter(|line| line.starts_with("f ")).count();
+    assert!(faces > 100);
+    assert!(faces < 300, "named selection must exclude oxygen: {faces}");
 
     let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
         .args([
