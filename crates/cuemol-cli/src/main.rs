@@ -1224,6 +1224,8 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                         base_detail,
                         base_type,
                         show_basepair,
+                        atom_colors: Some(resolve_atom_colors(object.mol(), &options)),
+                        draw_indices: options.draw_indices.clone(),
                     },
                 );
                 snapshot.atoms.extend(bases.atoms);

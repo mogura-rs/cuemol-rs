@@ -47586,6 +47586,8 @@ fn append_object_renderer_snapshot(
                     base_detail,
                     base_type,
                     show_basepair,
+                    atom_colors: Some(resolve_atom_colors(object.mol(), &options)),
+                    draw_indices: options.draw_indices.clone(),
                 },
             );
             merge_bounds(&mut snapshot.bounds, bases.bounds);
@@ -66299,9 +66301,7 @@ attribute \"dep\" string \"positions\"
         assert!(pqr.starts_with("ATOM"));
         assert!(pqr.contains("  1.000   2.000   3.000"));
         let xyzr = std::fs::read_to_string(&xyzr_path).unwrap();
-        assert!(xyzr.contains("1.000000"));
-        assert!(xyzr.contains("2.000000"));
-        assert!(xyzr.contains("3.000000"));
+        assert_eq!(xyzr, "   1.000    2.000    3.000 1.60\n");
 
         for path in [input_path, pqr_path, xyzr_path] {
             std::fs::remove_file(path).unwrap();

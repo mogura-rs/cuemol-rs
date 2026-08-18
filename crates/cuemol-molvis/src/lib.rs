@@ -7721,13 +7721,15 @@ pub fn disorder_lines_snapshot_with_style(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NARenderOptions {
     pub base_size: f64,
     pub base_thick: f64,
     pub base_detail: i32,
     pub base_type: i32,
     pub show_basepair: bool,
+    pub atom_colors: Option<Vec<ColorSpec>>,
+    pub draw_indices: Option<Vec<usize>>,
 }
 
 impl Default for NARenderOptions {
@@ -7738,6 +7740,8 @@ impl Default for NARenderOptions {
             base_detail: 3,
             base_type: NARenderer::NAREND_BP,
             show_basepair: true,
+            atom_colors: None,
+            draw_indices: None,
         }
     }
 }
@@ -7759,11 +7763,81 @@ pub fn na_base_sticks_snapshot(
     )
 }
 
+fn na_atom_color(options: &NARenderOptions, atom_index: usize) -> Option<ColorSpec> {
+    options
+        .atom_colors
+        .as_ref()
+        .and_then(|colors| colors.get(atom_index))
+        .cloned()
+}
+
+fn append_na_colored_bond(
+    bonds: &mut Vec<RenderBond>,
+    start: Vector4,
+    end: Vector4,
+    radius: f32,
+    start_color: Option<ColorSpec>,
+    end_color: Option<ColorSpec>,
+    atom_indices: Option<(usize, usize)>,
+) {
+    let colors_differ = match (&start_color, &end_color) {
+        (Some(start), Some(end)) => start.rgba8() != end.rgba8(),
+        _ => false,
+    };
+    if colors_differ {
+        let middle = (start + end).scale(0.5);
+        bonds.push(
+            RenderBond::new(start, middle, radius, start_color).with_picking(
+                None,
+                atom_indices,
+                false,
+            ),
+        );
+        bonds.push(
+            RenderBond::new(middle, end, radius, end_color).with_picking(None, atom_indices, false),
+        );
+    } else {
+        bonds.push(
+            RenderBond::new(start, end, radius, start_color.or(end_color)).with_picking(
+                None,
+                atom_indices,
+                false,
+            ),
+        );
+    }
+}
+
+fn na_mesh_color(color: Option<&ColorSpec>) -> [f32; 4] {
+    color
+        .and_then(ColorSpec::rgba8)
+        .map(|color| {
+            [
+                f32::from(color.r) / 255.0,
+                f32::from(color.g) / 255.0,
+                f32::from(color.b) / 255.0,
+                f32::from(color.a) / 255.0,
+            ]
+        })
+        .unwrap_or([0.75, 0.75, 0.75, 1.0])
+}
+
 /// Nucleic-acid representation matching all four C++ `NARenderer` modes.
 pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> RenderSceneSnapshot {
     use std::collections::{HashMap, HashSet};
 
     let summaries = molecule.residue_summaries();
+    let draw = options
+        .draw_indices
+        .as_ref()
+        .map(|indices| indices.iter().copied().collect::<HashSet<_>>());
+    let residue_selected = |index: usize| {
+        draw.as_ref().is_none_or(|draw| {
+            summaries[index]
+                .atom_indices
+                .iter()
+                .any(|atom_index| draw.contains(atom_index))
+        })
+    };
     let atom_in = |indices: &[usize], name: &str| -> Option<(usize, Vector4)> {
         indices
             .iter()
@@ -7820,7 +7894,7 @@ pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> R
         {
             let (chain, residue) = value.split_once('.')?;
             if let Some(&partner) = residue_lookup.get(&(chain.to_string(), residue.to_string())) {
-                return Some(partner);
+                return residue_selected(partner).then_some(partner);
             }
         }
         let partner_resid = summary
@@ -7828,7 +7902,8 @@ pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> R
             .iter()
             .find_map(|&ai| molecule.atoms()[ai].int_prop("base_pair"))?;
         summaries.iter().enumerate().find_map(|(candidate, other)| {
-            (candidate != index && other.key.res_id == partner_resid).then_some(candidate)
+            (candidate != index && other.key.res_id == partner_resid && residue_selected(candidate))
+                .then_some(candidate)
         })
     };
 
@@ -7840,7 +7915,7 @@ pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> R
     let mut rendered = HashSet::new();
 
     for (index, summary) in summaries.iter().enumerate() {
-        if rendered.contains(&index) {
+        if rendered.contains(&index) || !residue_selected(index) {
             continue;
         }
         let Some(kind) = base_kind(summary) else {
@@ -7857,8 +7932,18 @@ pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> R
                 if options.show_basepair {
                     if let Some(partner_index) = partner_of(index) {
                         if !rendered.contains(&partner_index) {
-                            if let Some((_, partner_pivot)) = pivot_in(&summaries[partner_index]) {
-                                bonds.push(RenderBond::new(pivot, partner_pivot, radius, None));
+                            if let Some((partner_pivot_index, partner_pivot)) =
+                                pivot_in(&summaries[partner_index])
+                            {
+                                append_na_colored_bond(
+                                    &mut bonds,
+                                    pivot,
+                                    partner_pivot,
+                                    radius,
+                                    na_atom_color(options, pivot_index),
+                                    na_atom_color(options, partner_pivot_index),
+                                    Some((pivot_index, partner_pivot_index)),
+                                );
                                 rendered.insert(partner_index);
                                 rendered.insert(index);
                                 continue;
@@ -7867,13 +7952,18 @@ pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> R
                     }
                 }
                 if let Some((far_index, far)) = atom_in(&summary.atom_indices, far_name) {
-                    bonds.push(RenderBond::new(pivot, far, radius, None).with_picking(
-                        None,
+                    let color = na_atom_color(options, pivot_index);
+                    append_na_colored_bond(
+                        &mut bonds,
+                        pivot,
+                        far,
+                        radius,
+                        color.clone(),
+                        color.clone(),
                         Some((pivot_index, far_index)),
-                        false,
-                    ));
+                    );
                     atoms.push(
-                        RenderAtom::new(far, radius, None)
+                        RenderAtom::new(far, radius, color)
                             .with_picking(None, Some(far_index), false)
                             .with_detail(detail),
                     );
@@ -7899,27 +7989,41 @@ pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> R
                                 pivot_in(partner),
                                 atom_in(&partner.atom_indices, partner_glyco_name),
                             ) {
-                                bonds.push(
-                                    RenderBond::new(pivot, glyco, radius, None).with_picking(
-                                        None,
-                                        Some((pivot_index, glyco_index)),
-                                        false,
-                                    ),
+                                let color1 = na_atom_color(options, pivot_index);
+                                let color2 = na_atom_color(options, partner_pivot_index);
+                                append_na_colored_bond(
+                                    &mut bonds,
+                                    pivot,
+                                    glyco,
+                                    radius,
+                                    color1.clone(),
+                                    color1.clone(),
+                                    Some((pivot_index, glyco_index)),
                                 );
-                                bonds.push(RenderBond::new(glyco, partner_glyco, radius, None));
-                                bonds.push(
-                                    RenderBond::new(partner_glyco, partner_pivot, radius, None)
-                                        .with_picking(
-                                            None,
-                                            Some((partner_glyco_index, partner_pivot_index)),
-                                            false,
-                                        ),
+                                append_na_colored_bond(
+                                    &mut bonds,
+                                    glyco,
+                                    partner_glyco,
+                                    radius,
+                                    color1.clone(),
+                                    color2.clone(),
+                                    Some((glyco_index, partner_glyco_index)),
                                 );
-                                for (atom_index, position) in
-                                    [(glyco_index, glyco), (partner_glyco_index, partner_glyco)]
-                                {
+                                append_na_colored_bond(
+                                    &mut bonds,
+                                    partner_glyco,
+                                    partner_pivot,
+                                    radius,
+                                    color2.clone(),
+                                    color2.clone(),
+                                    Some((partner_glyco_index, partner_pivot_index)),
+                                );
+                                for (atom_index, position, color) in [
+                                    (glyco_index, glyco, color1),
+                                    (partner_glyco_index, partner_glyco, color2),
+                                ] {
                                     atoms.push(
-                                        RenderAtom::new(position, radius, None)
+                                        RenderAtom::new(position, radius, color)
                                             .with_picking(None, Some(atom_index), false)
                                             .with_detail(detail),
                                     );
@@ -7934,19 +8038,28 @@ pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> R
                 let Some((far_index, far)) = atom_in(&summary.atom_indices, far_name) else {
                     continue;
                 };
-                bonds.push(RenderBond::new(pivot, glyco, radius, None).with_picking(
-                    None,
+                let color = na_atom_color(options, pivot_index);
+                append_na_colored_bond(
+                    &mut bonds,
+                    pivot,
+                    glyco,
+                    radius,
+                    color.clone(),
+                    color.clone(),
                     Some((pivot_index, glyco_index)),
-                    false,
-                ));
-                bonds.push(RenderBond::new(glyco, far, radius, None).with_picking(
-                    None,
+                );
+                append_na_colored_bond(
+                    &mut bonds,
+                    glyco,
+                    far,
+                    radius,
+                    color.clone(),
+                    color.clone(),
                     Some((glyco_index, far_index)),
-                    false,
-                ));
+                );
                 for (atom_index, position) in [(glyco_index, glyco), (far_index, far)] {
                     atoms.push(
-                        RenderAtom::new(position, radius, None)
+                        RenderAtom::new(position, radius, color.clone())
                             .with_picking(None, Some(atom_index), false)
                             .with_detail(detail),
                     );
@@ -7954,6 +8067,7 @@ pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> R
             }
             NARenderer::NAREND_DETAIL1 | NARenderer::NAREND_DETAIL2 => {
                 let mut included: HashMap<String, (usize, Vector4)> = HashMap::new();
+                let pivot_color = na_atom_color(options, pivot_index);
                 let mut names = vec!["C1'", "C4", "C5", "N7", "C8", "N9", "N1", "C2", "N3", "C6"];
                 if options.base_type == NARenderer::NAREND_DETAIL2 {
                     names.extend(["C2'", "C3'", "C4'", "O4'"]);
@@ -7962,9 +8076,13 @@ pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> R
                     if let Some((atom_index, position)) = atom_in(&summary.atom_indices, name) {
                         included.insert(name.to_string(), (atom_index, position));
                         atoms.push(
-                            RenderAtom::new(position, radius, None)
-                                .with_picking(None, Some(atom_index), false)
-                                .with_detail(detail),
+                            RenderAtom::new(
+                                position,
+                                radius,
+                                na_atom_color(options, atom_index).or_else(|| pivot_color.clone()),
+                            )
+                            .with_picking(None, Some(atom_index), false)
+                            .with_detail(detail),
                         );
                     }
                 }
@@ -7975,12 +8093,14 @@ pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> R
                         return;
                     };
                     if lhs_index != rhs_index {
-                        bonds.push(
-                            RenderBond::new(lhs_pos, rhs_pos, radius, None).with_picking(
-                                None,
-                                Some((lhs_index, rhs_index)),
-                                false,
-                            ),
+                        append_na_colored_bond(
+                            &mut bonds,
+                            lhs_pos,
+                            rhs_pos,
+                            radius,
+                            na_atom_color(options, lhs_index).or_else(|| pivot_color.clone()),
+                            na_atom_color(options, rhs_index).or_else(|| pivot_color.clone()),
+                            Some((lhs_index, rhs_index)),
                         );
                     }
                 };
@@ -8015,11 +8135,15 @@ pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> R
                 }
                 if options.base_type == NARenderer::NAREND_DETAIL1 {
                     if let Some(&(c1_index, c1)) = included.get("C1'") {
-                        bonds.push(RenderBond::new(pivot, c1, radius, None).with_picking(
-                            None,
+                        append_na_colored_bond(
+                            &mut bonds,
+                            pivot,
+                            c1,
+                            radius,
+                            pivot_color.clone(),
+                            na_atom_color(options, c1_index).or_else(|| pivot_color.clone()),
                             Some((pivot_index, c1_index)),
-                            false,
-                        ));
+                        );
                     }
                 } else {
                     for (lhs, rhs) in [
@@ -8032,14 +8156,24 @@ pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> R
                         add_named_bond(lhs, rhs);
                     }
                     if let Some(&(c4_index, c4)) = included.get("C4'") {
-                        bonds.push(RenderBond::new(pivot, c4, radius, None).with_picking(
-                            None,
+                        append_na_colored_bond(
+                            &mut bonds,
+                            pivot,
+                            c4,
+                            radius,
+                            pivot_color.clone(),
+                            na_atom_color(options, c4_index).or_else(|| pivot_color.clone()),
                             Some((pivot_index, c4_index)),
-                            false,
-                        ));
+                        );
                     }
                 }
-                append_na_ring_meshes(summary, &included, options.base_thick, &mut meshes);
+                append_na_ring_meshes(
+                    summary,
+                    &included,
+                    options.base_thick,
+                    na_mesh_color(pivot_color.as_ref()),
+                    &mut meshes,
+                );
             }
             _ => {}
         }
@@ -8059,6 +8193,7 @@ fn append_na_ring_meshes(
     summary: &cuemol_molstr::ResidueSummary,
     included: &std::collections::HashMap<String, (usize, Vector4)>,
     thickness: f64,
+    color: [f32; 4],
     meshes: &mut Vec<RenderMesh>,
 ) {
     let rings = cuemol_molstr::toppar::TopoDB::global().rings(&summary.res_name);
@@ -8078,7 +8213,6 @@ fn append_na_ring_meshes(
             Vector4::new3(0.0, 0.0, 1.0),
         );
         let offset = normal * (thickness.max(0.0) * 0.5);
-        let color = [0.75_f32, 0.75, 0.75, 1.0];
         let mut mesh = RenderMesh::new();
         for point in &points {
             mesh.vertices.push(MeshVertex {
@@ -10046,6 +10180,54 @@ return cuemol.makeColor("#0000ff");
             }),
             "rung connects the paired bases' glycosidic N atoms"
         );
+        let mut colors = vec![rgb_spec(1.0, 1.0, 1.0); mol.atom_count()];
+        colors[0] = rgb_spec(1.0, 0.0, 0.0);
+        colors[7] = rgb_spec(0.0, 0.0, 1.0);
+        let colored = na_renderer_snapshot(
+            &mol,
+            &NARenderOptions {
+                base_type: NARenderer::NAREND_SIMPLE1,
+                atom_colors: Some(colors),
+                ..NARenderOptions::default()
+            },
+        );
+        assert_eq!(colored.bonds.len(), 4, "two colors split the central rung");
+        assert_eq!(
+            colored
+                .bonds
+                .first()
+                .unwrap()
+                .color
+                .as_ref()
+                .unwrap()
+                .rgba8(),
+            rgb_spec(1.0, 0.0, 0.0).rgba8()
+        );
+        assert_eq!(
+            colored
+                .bonds
+                .last()
+                .unwrap()
+                .color
+                .as_ref()
+                .unwrap()
+                .rgba8(),
+            rgb_spec(0.0, 0.0, 1.0).rgba8()
+        );
+
+        let selected = na_renderer_snapshot(
+            &mol,
+            &NARenderOptions {
+                base_type: NARenderer::NAREND_SIMPLE1,
+                draw_indices: Some(vec![0]),
+                ..NARenderOptions::default()
+            },
+        );
+        assert_eq!(
+            selected.bonds.len(),
+            2,
+            "unselected peer is not paired or drawn"
+        );
         // With show_basepair off, the rung is gone.
         assert_eq!(
             na_base_sticks_snapshot(&mol, 0.3, false).bonds.len(),
@@ -10094,15 +10276,23 @@ return cuemol.makeColor("#0000ff");
         assert_eq!(basepair.bonds.len(), 1);
         assert_eq!(basepair.atoms.len(), 1);
 
+        let mut detail_colors = vec![rgb_spec(1.0, 1.0, 1.0); mol.atom_count()];
+        detail_colors[0] = rgb_spec(1.0, 0.0, 0.0);
         let detail1 = na_renderer_snapshot(
             &mol,
             &NARenderOptions {
                 base_type: NARenderer::NAREND_DETAIL1,
+                atom_colors: Some(detail_colors),
                 ..NARenderOptions::default()
             },
         );
         assert_eq!(detail1.meshes.len(), 2, "purine base has two rings");
         assert!(detail1.atoms.iter().all(|atom| atom.detail == Some(3)));
+        assert!(detail1.meshes.iter().all(|mesh| {
+            mesh.vertices
+                .iter()
+                .all(|vertex| vertex.color == [1.0, 0.0, 0.0, 1.0])
+        }));
 
         let detail2 = na_renderer_snapshot(
             &mol,
