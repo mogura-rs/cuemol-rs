@@ -1092,6 +1092,14 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
         }
     }
 
+    for snapshot in loaded_surface_snapshots(scene, &styles)? {
+        total_atoms += snapshot.atom_count();
+        total_bonds += snapshot.bond_count();
+        merge_mesh(&mut combined, &tessellate_snapshot(&snapshot));
+        append_render_snapshot(&mut rendered, snapshot);
+        renderer_count += 1;
+    }
+
     for loaded in scene.loaded_density_maps() {
         let map = read_loaded_density_map(loaded)?;
         let Some(object_node) = loaded.qsc_node.as_ref() else {
@@ -1577,6 +1585,211 @@ fn append_render_snapshot(target: &mut RenderSceneSnapshot, source: RenderSceneS
             group.mesh_range.end += mesh_offset;
             group
         }));
+}
+
+fn loaded_surface_snapshots(
+    scene: &cuemol_molstr::MolScene,
+    styles: &cuemol_qsys::StyleManager,
+) -> Result<Vec<RenderSceneSnapshot>, String> {
+    let mut snapshots = Vec::new();
+    for surface in scene.loaded_surfaces() {
+        let object_node = surface.qsc_node.as_ref();
+        if object_node
+            .and_then(|node| qsc_node_attr(node, "visible", styles))
+            .as_deref()
+            .is_some_and(|value| !qsc_bool(value))
+        {
+            continue;
+        }
+        let renderer_nodes = object_node
+            .into_iter()
+            .flat_map(|node| node.children())
+            .filter(|node| !node.is_attr() && node.tag_name() == "renderer")
+            .filter(|node| {
+                let renderer_type = if node.type_name().is_empty() {
+                    node.str_attr("type").to_string()
+                } else {
+                    node.type_name().to_string()
+                };
+                matches!(renderer_type.as_str(), "molsurf" | "MolSurfRenderer")
+            })
+            .collect::<Vec<_>>();
+        let renderer_nodes = if renderer_nodes.is_empty() {
+            vec![None]
+        } else {
+            renderer_nodes
+                .into_iter()
+                .filter(|node| {
+                    qsc_node_attr(node, "visible", styles)
+                        .as_deref()
+                        .is_none_or(qsc_bool)
+                })
+                .map(Some)
+                .collect()
+        };
+        let mesh = match surface.srctype.as_str() {
+            "obj" => cuemol_surface::read_obj_str(&surface.data),
+            "ply" => cuemol_surface::read_ply_bytes(&surface.raw_data),
+            "qdfsurf" => cuemol_surface::qdf::read_qdf_surface_bytes(&surface.raw_data)
+                .map(|surface| surface.mesh().clone()),
+            format => return Err(format!("unsupported QSC surface format {format}")),
+        }
+        .map_err(|error| error.to_string())?;
+        let object_xform = object_node
+            .and_then(|node| qsc_node_attr(node, "xformMat", styles))
+            .and_then(|value| Matrix4::from_script_string(&value).ok())
+            .unwrap_or(Matrix4::IDENTITY);
+        for renderer_node in renderer_nodes {
+            let attr =
+                |name: &str| renderer_node.and_then(|node| qsc_node_attr(node, name, styles));
+            let color = attr("defaultcolor")
+                .and_then(|value| qsc_color_rgba(&value, styles))
+                .map(|color| {
+                    [color.r, color.g, color.b, color.a]
+                        .map(|component| f32::from(component) / 255.0)
+                })
+                .unwrap_or_else(|| {
+                    if renderer_node.is_some() {
+                        [192.0 / 255.0, 192.0 / 255.0, 1.0, 1.0]
+                    } else {
+                        [0.45, 0.65, 0.95, 1.0]
+                    }
+                });
+            let renderer_xform = attr("xformMat")
+                .and_then(|value| Matrix4::from_script_string(&value).ok())
+                .unwrap_or(Matrix4::IDENTITY);
+            let xform = renderer_xform.mul_mat(object_xform);
+            let vertices = mesh
+                .vertices()
+                .iter()
+                .map(|vertex| {
+                    let position = xform.transform_point(Vector4::new4(
+                        vertex.position.x,
+                        vertex.position.y,
+                        vertex.position.z,
+                        1.0,
+                    ));
+                    let normal = xform
+                        .mul_vec(Vector4::new4(
+                            vertex.normal.x,
+                            vertex.normal.y,
+                            vertex.normal.z,
+                            0.0,
+                        ))
+                        .normalize3d()
+                        .unwrap_or(vertex.normal);
+                    cuemol_render::MeshVertex {
+                        position,
+                        normal,
+                        color,
+                    }
+                })
+                .collect();
+            let render_mesh = RenderMesh {
+                vertices,
+                indices: mesh
+                    .triangles()
+                    .iter()
+                    .flat_map(|triangle| triangle.iter().copied())
+                    .collect(),
+            };
+            let draw_mode = match attr("drawmode")
+                .unwrap_or_else(|| "fill".to_string())
+                .trim()
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "line" | "1" => MapSurfaceDrawMode::Line,
+                "point" | "2" => MapSurfaceDrawMode::Point,
+                _ => MapSurfaceDrawMode::Fill,
+            };
+            let width = attr("width")
+                .and_then(|value| value.trim().parse::<f32>().ok())
+                .unwrap_or(1.0)
+                .clamp(0.1, 10.0);
+            let mut snapshot =
+                surface_snapshot_for_mode(render_mesh, draw_mode, width, surface.uid);
+            let alpha = attr("alpha")
+                .and_then(|value| value.trim().parse::<f64>().ok())
+                .unwrap_or(1.0)
+                .clamp(0.0, 1.0);
+            let material = attr("material").unwrap_or_else(|| "default".to_string());
+            let renderer_name = attr("name")
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| format!("{}_surface", surface.name));
+            apply_snapshot_renderer_properties(&mut snapshot, &renderer_name, alpha, &material);
+            snapshots.push(snapshot);
+        }
+    }
+    Ok(snapshots)
+}
+
+fn surface_snapshot_for_mode(
+    mesh: RenderMesh,
+    draw_mode: MapSurfaceDrawMode,
+    width: f32,
+    object_uid: cuemol_core::Uid,
+) -> RenderSceneSnapshot {
+    let radius = (0.02 * width).max(0.002);
+    let color_spec = |color: [f32; 4]| {
+        Some(cuemol_gfx::ColorSpec {
+            base: cuemol_gfx::ColorBase::Html {
+                r: (color[0] * 255.0).round() as u8,
+                g: (color[1] * 255.0).round() as u8,
+                b: (color[2] * 255.0).round() as u8,
+                a: (color[3] * 255.0).round() as u8,
+            },
+            modifiers: Vec::new(),
+        })
+    };
+    let mut snapshot = RenderSceneSnapshot::empty();
+    match draw_mode {
+        MapSurfaceDrawMode::Fill => snapshot.meshes.push(mesh),
+        MapSurfaceDrawMode::Line => {
+            let mut edges = std::collections::BTreeSet::new();
+            for triangle in mesh.indices.chunks_exact(3) {
+                for (lhs, rhs) in [
+                    (triangle[0], triangle[1]),
+                    (triangle[1], triangle[2]),
+                    (triangle[2], triangle[0]),
+                ] {
+                    edges.insert((lhs.min(rhs), lhs.max(rhs)));
+                }
+            }
+            for (lhs, rhs) in edges {
+                let lhs = &mesh.vertices[lhs as usize];
+                let rhs = &mesh.vertices[rhs as usize];
+                snapshot.bonds.push(
+                    cuemol_render::RenderBond::new(
+                        lhs.position,
+                        rhs.position,
+                        radius,
+                        color_spec(lhs.color),
+                    )
+                    .with_end_color(color_spec(rhs.color))
+                    .with_picking(Some(object_uid.get()), None, false)
+                    .with_screen_style(width, false),
+                );
+            }
+        }
+        MapSurfaceDrawMode::Point => {
+            snapshot
+                .bonds
+                .extend(mesh.vertices.into_iter().map(|vertex| {
+                    cuemol_render::RenderBond::new(
+                        vertex.position,
+                        vertex.position,
+                        radius,
+                        color_spec(vertex.color),
+                    )
+                    .with_picking(Some(object_uid.get()), None, false)
+                    .with_screen_style(width, false)
+                    .as_screen_point()
+                }));
+        }
+    }
+    snapshot.recompute_bounds();
+    snapshot
 }
 
 fn direct_surface_scene_snapshot(

@@ -166,3 +166,54 @@ fn render_qsc_preserves_exporter_scene_context() {
     std::fs::remove_file(inc_path).ok();
     std::fs::remove_file(mqo_path).ok();
 }
+
+#[test]
+fn render_qsc_exports_saved_surface_renderers() {
+    let stem = format!("cuemol_render_qsc_surface_{}", std::process::id());
+    let qsc_path = std::env::temp_dir().join(format!("{stem}.qsc"));
+    let obj_path = std::env::temp_dir().join(format!("{stem}.obj"));
+    let mqo_path = std::env::temp_dir().join(format!("{stem}.mqo"));
+    let qsc = "<scene>\n\
+               <object type=\"MolSurf\" name=\"surface\" src=\"datachunk:00000\" srctype=\"obj\" xformMat=\"(1,0,0,0,0,1,0,0,0,0,1,0,2,3,4,1)\">\n\
+               <renderer type=\"molsurf\" name=\"surface-fill\" defaultcolor=\"#336699\" alpha=\"0.5\" xformMat=\"(1,0,0,0,0,1,0,0,0,0,1,0,0,0,1,1)\"/>\n\
+               </object>\n\
+               </scene>\n\
+               ========== End of XML ==========\n\
+               ==========START datachunk:00000==========\n\
+               v 0 0 0\n\
+               v 1 0 0\n\
+               v 0 1 0\n\
+               f 1 2 3\n\
+               ==========END datachunk:00000==========\n";
+    std::fs::write(&qsc_path, qsc).unwrap();
+
+    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+        .args([
+            "render-qsc",
+            qsc_path.to_str().unwrap(),
+            obj_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("export QSC surface to OBJ");
+    assert!(status.success());
+    let obj = std::fs::read_to_string(&obj_path).unwrap();
+    assert!(obj.contains("v 2.000000 3.000000 5.000000"));
+    assert_eq!(obj.lines().filter(|line| line.starts_with("f ")).count(), 1);
+
+    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+        .args([
+            "render-qsc",
+            qsc_path.to_str().unwrap(),
+            mqo_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("export QSC surface to MQO");
+    assert!(status.success());
+    let mqo = std::fs::read_to_string(&mqo_path).unwrap();
+    assert!(mqo.contains("Object \"surface_fill\""));
+    assert!(mqo.contains("col(0.200000 0.400000 0.600000 0.501961)"));
+
+    std::fs::remove_file(qsc_path).ok();
+    std::fs::remove_file(obj_path).ok();
+    std::fs::remove_file(mqo_path).ok();
+}
