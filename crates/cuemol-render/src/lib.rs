@@ -3011,6 +3011,8 @@ pub struct LuxRendSceneExporter {
     film_opts: String,
     bg_mode: LuxBackgroundMode,
     material_definitions: BTreeMap<String, String>,
+    preamble: String,
+    world_preamble: String,
 }
 
 impl LuxRendSceneExporter {
@@ -3022,6 +3024,8 @@ impl LuxRendSceneExporter {
             film_opts: String::new(),
             bg_mode: LuxBackgroundMode::Transparent,
             material_definitions: BTreeMap::new(),
+            preamble: String::new(),
+            world_preamble: String::new(),
         }
     }
 
@@ -3203,7 +3207,9 @@ impl LuxRendSceneExporter {
             slab_depth * 0.5
         };
         let mut out = String::new();
-        out.push_str("# CueMol LuxRender exporter output\n\n");
+        out.push_str("# CueMol LuxRender exporter output\n");
+        out.push('\n');
+        append_lux_preamble(&mut out, &self.preamble);
         writeln!(
             &mut out,
             "LookAt {:.6} {:.6} {:.6}  {:.6} {:.6} {:.6}  0 1 0",
@@ -3263,6 +3269,7 @@ impl LuxRendSceneExporter {
         out.push_str("PixelFilter \"mitchell\" \"float xwidth\" [2] \"float ywidth\" [2] \"bool supersample\" [\"true\"]\n");
         out.push_str("Sampler \"metropolis\"\n");
         out.push_str("\nWorldBegin\n\n");
+        append_lux_preamble(&mut out, &self.world_preamble);
         out.push_str("Texture \"utex\" \"float\" \"bilerp\"\n");
         out.push_str("  \"float v00\" [0]\n");
         out.push_str("  \"float v10\" [1]\n");
@@ -3371,6 +3378,14 @@ impl LuxRendSceneExporter {
 
     pub fn clear_material_definitions(&mut self) {
         self.material_definitions.clear();
+    }
+
+    pub fn set_preamble(&mut self, value: impl Into<String>) {
+        self.preamble = value.into();
+    }
+
+    pub fn set_world_preamble(&mut self, value: impl Into<String>) {
+        self.world_preamble = value.into();
     }
 
     fn material_definition(&self, material: &str) -> Option<&str> {
@@ -3651,6 +3666,14 @@ fn write_lux_material(out: &mut String, material: &str, texture: &str, definitio
     out.push_str("    \"color Ks\" [0.2 0.2 0.2]\n");
     out.push_str("    \"float uroughness\" [0.4]\n");
     out.push_str("    \"float vroughness\" [0.4]\n");
+}
+
+fn append_lux_preamble(out: &mut String, value: &str) {
+    let value = value.trim();
+    if !value.is_empty() {
+        out.push_str(value);
+        out.push('\n');
+    }
 }
 
 fn write_lux_vector(out: &mut String, x: f64, y: f64, z: f64) {

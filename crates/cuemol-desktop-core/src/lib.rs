@@ -26754,6 +26754,14 @@ impl DesktopAppState {
                     exporter.write_mesh_file_with_camera(&mesh, &camera)
                 }
                 ScriptNativeSceneExporter::LuxRend(exporter) => {
+                    let (preamble, world_preamble) = script_env::with(|env| {
+                        (
+                            env.styles.get_config("lux", "preamble", scene_uid),
+                            env.styles.get_config("lux", "worldpreamble", scene_uid),
+                        )
+                    });
+                    exporter.set_preamble(preamble);
+                    exporter.set_world_preamble(world_preamble);
                     exporter.clear_material_definitions();
                     let material_names = std::iter::once("default")
                         .chain(
@@ -52916,6 +52924,14 @@ mod tests {
                 "lux",
                 "\"string type\" [\"matte\"]\n\"texture Kd\" [\"@COLOR@\"]\n\"float sigma\" [0.25]",
             ));
+        assert!(
+            app.script_styles.load_style_set_from_xml(
+                scene_uid.get(),
+                "lux-preamble-test",
+                "<styles><setting type=\"lux\"><preamble># scoped preamble</preamble><worldpreamble># scoped world preamble</worldpreamble></setting></styles>",
+                false,
+            ) > 0
+        );
 
         app.run_script_js(&format!(
             "var e = cuemol.LuxRendSceneExporter(); e.attach(scene); \
@@ -52928,6 +52944,12 @@ mod tests {
         assert!(scene.contains("\"string type\" [\"matte\"]"));
         assert!(scene.contains("\"texture Kd\" [\"atoms_tex_0\"]"));
         assert!(scene.contains("\"float sigma\" [0.25]"));
+        assert!(scene.find("# scoped preamble").unwrap() < scene.find("LookAt ").unwrap());
+        assert!(scene.find("WorldBegin").unwrap() < scene.find("# scoped world preamble").unwrap());
+        assert!(
+            scene.find("# scoped world preamble").unwrap()
+                < scene.find("Texture \"utex\"").unwrap()
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 
