@@ -443,6 +443,18 @@ impl MolAnlManager {
         if shift == 0 {
             return false;
         }
+        let existing = molecule
+            .residue_summaries()
+            .into_iter()
+            .map(|summary| summary.key)
+            .collect::<BTreeSet<_>>();
+        if selected.iter().any(|key| {
+            let destination =
+                ResidueKey::new(key.chain_id.clone(), key.res_id + shift, key.ins_code);
+            existing.contains(&destination) && !selected.contains(&destination)
+        }) {
+            return false;
+        }
         let changed = molecule.relabel_residue_keys(|atom| {
             let key = ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code);
             selected
@@ -485,6 +497,17 @@ impl MolAnlManager {
         let mut mapping: BTreeMap<ResidueKey, i32> = BTreeMap::new();
         for (offset, key) in ordered.into_iter().enumerate() {
             mapping.insert(key, start + offset as i32);
+        }
+        let existing = molecule
+            .residue_summaries()
+            .into_iter()
+            .map(|summary| summary.key)
+            .collect::<BTreeSet<_>>();
+        if mapping.iter().any(|(key, &resid)| {
+            let destination = ResidueKey::new(key.chain_id.clone(), resid, None);
+            existing.contains(&destination) && !selected.contains(&destination)
+        }) {
+            return false;
         }
         let changed = molecule.relabel_residue_keys(|atom| {
             let key = ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code);
@@ -1308,6 +1331,39 @@ mod tests {
                 .map(|atom| atom.res_id)
                 .collect::<Vec<_>>(),
             vec![11, 11, 12]
+        );
+    }
+
+    #[test]
+    fn residue_index_edits_abort_on_unselected_destination_collision() {
+        let manager = MolAnlManager::new();
+
+        let mut shifted = MolCoord::new();
+        shifted.push_atom(atom(1, "CA", "A", 1, "C", 0.0));
+        shifted.push_atom(atom(2, "CA", "A", 2, "C", 1.0));
+        let first = parse_selector("resi 1").unwrap();
+        assert!(!manager.shift_res_index(&mut shifted, &first, true, 1));
+        assert_eq!(
+            shifted
+                .atoms()
+                .iter()
+                .map(|atom| atom.res_id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        let mut renumbered = MolCoord::new();
+        renumbered.push_atom(atom(1, "CA", "A", 10, "C", 0.0));
+        renumbered.push_atom(atom(2, "CA", "A", 1, "C", 1.0));
+        let tenth = parse_selector("resi 10").unwrap();
+        assert!(!manager.renum_res_index(&mut renumbered, &tenth, false, 1));
+        assert_eq!(
+            renumbered
+                .atoms()
+                .iter()
+                .map(|atom| atom.res_id)
+                .collect::<Vec<_>>(),
+            vec![10, 1]
         );
     }
 
