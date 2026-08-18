@@ -50,5 +50,5 @@ USER_CHARGES
     assert_eq!(mol.atom_count(), 3);
     assert_eq!(mol.atoms()[0].res_name, "first");
     assert_eq!(mol.atoms()[1].name, "2C");
-    assert_eq!(mol.atoms()[2].chain_id, "A1");
+    assert_eq!(mol.atoms()[2].chain_id, "02_A");
 }
