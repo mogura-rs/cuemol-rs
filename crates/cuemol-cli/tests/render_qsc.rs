@@ -70,13 +70,16 @@ fn render_qsc_renders_saved_density_map_renderers() {
         "<scene>\n\
          <object type=\"DensityMap\" name=\"map\" src=\"datachunk:00000\" srctype=\"qdfmap\" xformMat=\"(1,0,0,0,0,1,0,0,0,0,1,0,20,0,0,1)\">\n\
          <renderer type=\"contour\" name=\"wire\" siglevel=\"0\"/>\n\
-         <renderer type=\"isosurf\" name=\"solid\" siglevel=\"0\" color=\"#0000ff\" binning=\"2\" max_grids=\"77\" use_pbc=\"false\" colormode=\"multigrad\" color_mapname=\"map\">\n\
+         <renderer type=\"isosurf\" name=\"solid\" siglevel=\"0\" color=\"#0000ff\" binning=\"2\" max_grids=\"77\" use_pbc=\"false\" colormode=\"multigrad\" color_mapname=\"map\" egtype=\"edges\" eglinew=\"0.05\" egcolor=\"#040506\" cullface=\"true\">\n\
          <multi_grad><gradnode par=\"-1\"><col value=\"#ff0000\"/></gradnode><gradnode par=\"1\"><col value=\"#00ff00\"/></gradnode></multi_grad>\n\
          </renderer>\n\
          <renderer type=\"isosurf\" name=\"lines\" siglevel=\"0\" use_pbc=\"false\" drawmode=\"line\"/>\n\
          <renderer type=\"isosurf\" name=\"points\" siglevel=\"0\" use_pbc=\"false\" drawmode=\"point\"/>\n\
          <renderer type=\"gpu_mapvol\" name=\"volume\" siglevel=\"0\" use_pbc=\"false\"/>\n\
          <renderer type=\"*unitcell\" name=\"cell\" width=\"1.5\" color=\"#abcdef\"/>\n\
+         </object>\n\
+         <object type=\"MolCoord\" name=\"direct-mol\" src=\"datachunk:00002\" srctype=\"pdb\" xformMat=\"(1,0,0,0,0,1,0,0,0,0,1,0,40,0,0,1)\">\n\
+         <renderer type=\"dsurf2\" name=\"direct-potential\" sel=\"*\" surftype=\"vdw\" detail=\"4\" vdwr_C=\"1.0\" colormode=\"potential\" elepot=\"map\" lowpar=\"-1\" midpar=\"0\" highpar=\"1\" lowcol=\"#fedcba\" midcol=\"#fedcba\" highcol=\"#fedcba\" egtype=\"silhouette\" eglinew=\"0.1\" egcolor=\"#010203\" cullface=\"true\"/>\n\
          </object>\n\
          <object type=\"MolSurf\" name=\"colored-surface\" src=\"datachunk:00001\" srctype=\"obj\" xformMat=\"(1,0,0,0,0,1,0,0,0,0,1,0,30,0,0,1)\">\n\
          <renderer type=\"molsurf\" name=\"surface-potential\" colormode=\"potential\" elepot=\"map\" lowpar=\"-1\" midpar=\"0\" highpar=\"1\" lowcol=\"#123456\" midcol=\"#123456\" highcol=\"#123456\"/>\n\
@@ -94,7 +97,11 @@ fn render_qsc_renders_saved_density_map_renderers() {
          v 1 0 0\n\
          v 0 1 0\n\
          f 1 2 3\n\
-         ==========END datachunk:00001==========\n"
+         ==========END datachunk:00001==========\n\
+         ==========START datachunk:00002==========\n\
+ATOM      1  C1  LIG A   1       0.000   0.000   0.000  1.00 20.00           C\n\
+END\n\
+         ==========END datachunk:00002==========\n"
     );
     let qsc_path = std::env::temp_dir().join("cuemol_render_qsc_map_test.qsc");
     let out = std::env::temp_dir().join("cuemol_render_qsc_map_test.obj");
@@ -133,8 +140,12 @@ fn render_qsc_renders_saved_density_map_renderers() {
     assert!(mqo.contains("Object \"cell\""));
     assert!(mqo.contains("Object \"surface_potential\""));
     assert!(mqo.contains("Object \"surface_gradient\""));
+    assert!(mqo.contains("Object \"direct_potential\""));
     assert!(mqo.contains("col(0.070588 0.203922 0.337255 1.000000)"));
     assert!(mqo.contains("col(0.396078 0.262745 0.129412 1.000000)"));
+    assert!(mqo.contains("col(0.996078 0.862745 0.729412 1.000000)"));
+    assert!(mqo.contains("col(0.003922 0.007843 0.011765 1.000000)"));
+    assert!(mqo.contains("col(0.015686 0.019608 0.023529 1.000000)"));
     std::fs::remove_file(qsc_path).ok();
     std::fs::remove_file(out).ok();
     std::fs::remove_file(mqo_path).ok();
@@ -321,6 +332,54 @@ f 4 5 6\n\
 }
 
 #[test]
+fn render_qsc_exports_molecule_edge_styles() {
+    let stem = format!("cuemol_render_qsc_molecule_edge_{}", std::process::id());
+    let qsc_path = std::env::temp_dir().join(format!("{stem}.qsc"));
+    let obj_path = std::env::temp_dir().join(format!("{stem}.obj"));
+    let mqo_path = std::env::temp_dir().join(format!("{stem}.mqo"));
+    let qsc = "<scene>\n\
+               <object type=\"MolCoord\" name=\"mol\" src=\"datachunk:00000\" srctype=\"pdb\">\n\
+               <renderer type=\"ballstick\" name=\"edged-ball\" color=\"#abcdef\" egtype=\"silhouette\" eglinew=\"0.2\" egcolor=\"#010203\"/>\n\
+               </object>\n\
+               </scene>\n\
+               ========== End of XML ==========\n\
+               ==========START datachunk:00000==========\n\
+ATOM      1  C1  LIG A   1       0.000   0.000   0.000  1.00 20.00           C\n\
+END\n\
+               ==========END datachunk:00000==========\n";
+    std::fs::write(&qsc_path, qsc).unwrap();
+
+    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+        .args([
+            "render-qsc",
+            qsc_path.to_str().unwrap(),
+            obj_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("export edge-styled molecule to OBJ");
+    assert!(status.success());
+    let obj = std::fs::read_to_string(&obj_path).unwrap();
+    assert!(obj.lines().filter(|line| line.starts_with("f ")).count() > 100);
+
+    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+        .args([
+            "render-qsc",
+            qsc_path.to_str().unwrap(),
+            mqo_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("export edge-styled molecule to MQO");
+    assert!(status.success());
+    let mqo = std::fs::read_to_string(&mqo_path).unwrap();
+    assert!(mqo.contains("Object \"edged_ball\""));
+    assert!(mqo.contains("col(0.003922 0.007843 0.011765 1.000000)"));
+
+    std::fs::remove_file(qsc_path).ok();
+    std::fs::remove_file(obj_path).ok();
+    std::fs::remove_file(mqo_path).ok();
+}
+
+#[test]
 fn render_qsc_exports_saved_lightweight_renderers() {
     let mut object = cuemol_lwview::LWObject::new();
     object.add_draw_element(cuemol_lwview::LWDrawElement::new(
@@ -340,7 +399,7 @@ fn render_qsc_exports_saved_lightweight_renderers() {
     let qsc = format!(
         "<scene>\n\
          <object type=\"LWObject\" name=\"lightweight\" src=\"datachunk:00000\" srctype=\"qdflwobj\" xformMat=\"(1,0,0,0,0,1,0,0,0,0,1,0,2,0,0,1)\">\n\
-         <renderer type=\"lwrend\" name=\"lw-mesh\" data_id=\"7\" alpha=\"0.5\" xformMat=\"(1,0,0,0,0,1,0,0,0,0,1,0,0,0,1,1)\"/>\n\
+         <renderer type=\"lwrend\" name=\"lw-mesh\" data_id=\"7\" alpha=\"0.5\" egtype=\"edges\" eglinew=\"0.15\" egcolor=\"#070809\" xformMat=\"(1,0,0,0,0,1,0,0,0,0,1,0,0,0,1,1)\"/>\n\
          </object>\n\
          </scene>\n\
          ========== End of XML ==========\n\
@@ -365,7 +424,7 @@ fn render_qsc_exports_saved_lightweight_renderers() {
     assert!(status.success());
     let obj = std::fs::read_to_string(&obj_path).unwrap();
     assert!(obj.contains("v 2.000000 0.000000 1.000000"));
-    assert_eq!(obj.lines().filter(|line| line.starts_with("f ")).count(), 1);
+    assert_eq!(obj.lines().filter(|line| line.starts_with("f ")).count(), 2);
 
     let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
         .args([
@@ -379,6 +438,7 @@ fn render_qsc_exports_saved_lightweight_renderers() {
     let mqo = std::fs::read_to_string(&mqo_path).unwrap();
     assert!(mqo.contains("Object \"lw_mesh\""));
     assert!(mqo.contains("col(0.125490 0.250980 0.501961 0.501961)"));
+    assert!(mqo.contains("col(0.027451 0.031373 0.035294 0.501961)"));
 
     std::fs::remove_file(qsc_path).ok();
     std::fs::remove_file(obj_path).ok();

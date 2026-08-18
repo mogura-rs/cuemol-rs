@@ -1191,7 +1191,7 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                 snapshot.meshes.extend(bases.meshes);
                 snapshot
             } else if matches!(rtype, "dsurface" | "directsurf" | "dsurf2") {
-                direct_surface_scene_snapshot(object, renderer, &options)
+                direct_surface_scene_snapshot(object, renderer, &styles, scene)?
             } else if is_ribbon_mesh_type(rtype) {
                 ribbon_mesh_snapshot(object.mol(), &options)
             } else {
@@ -1228,6 +1228,20 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                     options.draw_indices.as_deref(),
                 );
                 snapshot.meshes.extend(rings.meshes);
+            }
+            if let Some(edge_style) = surface_edge_style(
+                renderer
+                    .resolved_attr("egtype", &styles, DEFAULT_STYLE_SCOPE)
+                    .as_deref(),
+                renderer
+                    .resolved_attr("eglinew", &styles, DEFAULT_STYLE_SCOPE)
+                    .as_deref(),
+                renderer
+                    .resolved_attr("egcolor", &styles, DEFAULT_STYLE_SCOPE)
+                    .as_deref(),
+                &styles,
+            ) {
+                append_snapshot_edge_style(&mut snapshot, edge_style);
             }
             // Bake the object + renderer `xformMat` (C++ display-time transform)
             // into this renderer's geometry — effective transform `renderer · object`
@@ -1384,6 +1398,15 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                 .and_then(|value| Matrix4::from_script_string(&value).ok())
                 .unwrap_or(Matrix4::IDENTITY);
             let xform = renderer_xform.mul_mat(object_xform);
+            let edge_style = surface_edge_style(
+                qsc_node_attr(renderer_node, "egtype", &styles).as_deref(),
+                qsc_node_attr(renderer_node, "eglinew", &styles).as_deref(),
+                qsc_node_attr(renderer_node, "egcolor", &styles).as_deref(),
+                &styles,
+            );
+            let cull_back_faces = qsc_node_attr(renderer_node, "cullface", &styles)
+                .as_deref()
+                .is_some_and(qsc_bool);
             let color_map =
                 if color_mode == MapColorMode::MultiGradient && !color_mapname.is_empty() {
                     if color_mapname == loaded.name {
@@ -1428,6 +1451,7 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                         edge: None,
                     });
                 }
+                apply_snapshot_surface_style(&mut snapshot, cull_back_faces, edge_style);
                 if xform != Matrix4::IDENTITY {
                     snapshot.apply_xform(&xform);
                 }
@@ -1485,6 +1509,7 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                         edge: None,
                     });
                 }
+                apply_snapshot_surface_style(&mut snapshot, cull_back_faces, edge_style);
                 if xform != Matrix4::IDENTITY {
                     snapshot.apply_xform(&xform);
                 }
@@ -1615,6 +1640,7 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                         snapshot
                     }
                 };
+                apply_snapshot_surface_style(&mut snapshot, cull_back_faces, edge_style);
                 if xform != Matrix4::IDENTITY {
                     snapshot.apply_xform(&xform);
                 }
@@ -2262,6 +2288,61 @@ fn surface_edge_outline_mesh(mesh: &RenderMesh, style: SurfaceEdgeStyle) -> Rend
     }
 }
 
+fn append_snapshot_edge_style(snapshot: &mut RenderSceneSnapshot, style: SurfaceEdgeStyle) {
+    let outlines = snapshot
+        .meshes
+        .iter()
+        .filter(|mesh| {
+            mesh.vertices
+                .first()
+                .is_none_or(|vertex| !vertex.is_edge_outline())
+        })
+        .map(|mesh| surface_edge_outline_mesh(mesh, style))
+        .collect::<Vec<_>>();
+    if !outlines.is_empty() {
+        let mut meshes = Vec::with_capacity(outlines.len() + snapshot.meshes.len());
+        meshes.extend(outlines);
+        meshes.append(&mut snapshot.meshes);
+        snapshot.meshes = meshes;
+    }
+    let edge = cuemol_render::RenderEdgeStyle {
+        mode: match style.mode {
+            SurfaceEdgeMode::Edges => cuemol_render::RenderEdgeMode::Edges,
+            SurfaceEdgeMode::Silhouette => cuemol_render::RenderEdgeMode::Silhouette,
+        },
+        width: style.width as f32,
+        color: style.color,
+    };
+    for atom in &mut snapshot.atoms {
+        atom.edge = Some(edge);
+    }
+    for bond in snapshot
+        .bonds
+        .iter_mut()
+        .filter(|bond| bond.screen_width.is_none())
+    {
+        bond.edge = Some(edge);
+    }
+    snapshot.recompute_bounds();
+}
+
+fn apply_snapshot_surface_style(
+    snapshot: &mut RenderSceneSnapshot,
+    cull_back_faces: bool,
+    edge_style: Option<SurfaceEdgeStyle>,
+) {
+    for mesh in &mut snapshot.meshes {
+        for vertex in &mut mesh.vertices {
+            *vertex = (*vertex).with_back_face_culling(cull_back_faces || edge_style.is_some());
+        }
+    }
+    if let Some(edge_style) = edge_style {
+        append_snapshot_edge_style(snapshot, edge_style);
+    } else {
+        snapshot.recompute_bounds();
+    }
+}
+
 fn loaded_surface_snapshots(
     scene: &cuemol_molstr::MolScene,
     styles: &cuemol_qsys::StyleManager,
@@ -2620,6 +2701,14 @@ fn loaded_lw_snapshots(
             for element in object.draw_elements_for(data_id) {
                 cuemol_lwview::append_draw_element_snapshot(&mut snapshot, element);
             }
+            if let Some(edge_style) = surface_edge_style(
+                attr("egtype").as_deref(),
+                attr("eglinew").as_deref(),
+                attr("egcolor").as_deref(),
+                styles,
+            ) {
+                append_snapshot_edge_style(&mut snapshot, edge_style);
+            }
             let alpha = attr("alpha")
                 .and_then(|value| value.trim().parse::<f64>().ok())
                 .unwrap_or(1.0)
@@ -2646,89 +2735,145 @@ fn loaded_lw_snapshots(
 fn direct_surface_scene_snapshot(
     object: &cuemol_molstr::MolObject,
     renderer: &cuemol_molstr::MolRenderer,
-    options: &MoleculeRenderOptions,
-) -> RenderSceneSnapshot {
-    let selector = renderer
-        .qsc_attr("sel")
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && *value != "*")
-        .and_then(|value| parse_selector(value).ok())
+    styles: &cuemol_qsys::StyleManager,
+    scene: &cuemol_molstr::MolScene,
+) -> Result<RenderSceneSnapshot, String> {
+    let resolved = |name: &str| {
+        renderer
+            .resolved_attr(name, styles, DEFAULT_STYLE_SCOPE)
+            .map(|value| value.trim().to_string())
+    };
+    let selector = resolved("sel")
+        .as_deref()
+        .and_then(|value| qsc_selector(value, styles))
         .unwrap_or(cuemol_molstr::Selector::All);
     let mut surface_renderer = cuemol_surface::DirectSurfRenderer::new();
     surface_renderer.set_selection(selector.clone());
-    if let Some(value) = renderer
-        .qsc_attr("detail")
-        .and_then(|value| value.parse().ok())
-    {
+    if let Some(value) = resolved("detail").and_then(|value| value.parse().ok()) {
         surface_renderer.set_detail(value);
     }
-    if let Some(value) = renderer
-        .qsc_attr("proberad")
-        .and_then(|value| value.parse().ok())
-    {
+    if let Some(value) = resolved("proberad").and_then(|value| value.parse().ok()) {
         surface_renderer.set_probe_radius(value);
     }
-    if let Some(surface_type) = renderer.qsc_attr("surftype").and_then(|value| match value {
-        "vdw" | "0" => Some(cuemol_surface::DirectSurfRenderer::DS_VDW),
-        "sas" | "1" => Some(cuemol_surface::DirectSurfRenderer::DS_SAS),
-        "ses" | "2" => Some(cuemol_surface::DirectSurfRenderer::DS_SES),
-        _ => None,
-    }) {
-        surface_renderer.set_surface_type(surface_type);
+    if let Some(value) = resolved("surftype") {
+        let surface_type = match value.as_str() {
+            "vdw" | "0" => Some(cuemol_surface::DirectSurfRenderer::DS_VDW),
+            "sas" | "1" => Some(cuemol_surface::DirectSurfRenderer::DS_SAS),
+            "ses" | "2" => Some(cuemol_surface::DirectSurfRenderer::DS_SES),
+            _ => None,
+        };
+        if let Some(surface_type) = surface_type {
+            surface_renderer.set_surface_type(surface_type);
+        }
     }
-    let surface = surface_renderer.render_mesh(object.mol());
-    let atom_colors = cuemol_molvis::resolve_atom_colors(object.mol(), options);
-    let palette = object
-        .mol()
-        .select_indices(&selector)
-        .into_iter()
-        .filter_map(|index| {
-            let atom = object.mol().atoms().get(index)?;
-            let color = atom_colors
-                .get(index)
-                .and_then(|color| color.rgba8())
-                .map(|color| {
-                    [
-                        f32::from(color.r) / 255.0,
-                        f32::from(color.g) / 255.0,
-                        f32::from(color.b) / 255.0,
-                        f32::from(color.a) / 255.0,
-                    ]
-                })
-                .unwrap_or([0.76, 0.79, 0.84, 1.0]);
-            Some((atom.position, color))
+    for (element, attr) in [
+        ("H", "vdwr_H"),
+        ("C", "vdwr_C"),
+        ("N", "vdwr_N"),
+        ("O", "vdwr_O"),
+        ("S", "vdwr_S"),
+        ("P", "vdwr_P"),
+        ("X", "vdwr_X"),
+    ] {
+        if let Some(value) = resolved(attr).and_then(|value| value.parse().ok()) {
+            surface_renderer.set_vdw_radius(element, value);
+        }
+    }
+    let surface = if renderer.renderer_type() == "dsurf2" {
+        let mut renderer2 = cuemol_surface::DirectSurfRenderer2::new();
+        *renderer2.as_renderer_mut() = surface_renderer;
+        renderer2.render_mesh(object.mol())
+    } else {
+        surface_renderer.render_mesh(object.mol())
+    };
+    let use_potential =
+        resolved("colormode").is_some_and(|value| matches!(value.as_str(), "potential" | "1"));
+    let potential = if use_potential {
+        let map_name = resolved("elepot").unwrap_or_default();
+        scene
+            .loaded_density_maps()
+            .iter()
+            .find(|map| {
+                (!map_name.is_empty() && map.name == map_name)
+                    || (map_name.is_empty() && map.object_type == "ElePotMap")
+            })
+            .map(read_loaded_density_map)
+            .transpose()?
+    } else {
+        None
+    };
+    let ramp_offset = resolved("ramp_above")
+        .as_deref()
+        .is_some_and(qsc_bool)
+        .then(|| {
+            resolved("ramp_value")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(1.4)
+        });
+    let color = |name: &str, default| {
+        resolved(name)
+            .and_then(|value| qsc_color_rgba(&value, styles))
+            .map(rgba8_render_color)
+            .unwrap_or(default)
+    };
+    let mut render_mesh = potential
+        .as_ref()
+        .map(|potential| {
+            surface_mesh_with_color(&surface, |vertex| {
+                let position = ramp_offset.map_or(vertex.position, |distance| {
+                    vertex.position + vertex.normal.scale(distance)
+                });
+                surface_potential_color(
+                    potential.value_at(position),
+                    resolved("lowpar")
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(-10.0),
+                    resolved("midpar")
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(0.0),
+                    resolved("highpar")
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(10.0),
+                    color("lowcol", [1.0, 0.0, 0.0, 1.0]),
+                    color("midcol", [1.0, 1.0, 1.0, 1.0]),
+                    color("highcol", [0.0, 0.0, 1.0, 1.0]),
+                )
+            })
         })
-        .collect::<Vec<_>>();
-    let vertices = surface
-        .vertices()
-        .iter()
-        .map(|vertex| {
-            let color = palette
-                .iter()
-                .min_by(|(lhs, _), (rhs, _)| {
-                    lhs.sub(vertex.position)
-                        .sqlen3d()
-                        .partial_cmp(&rhs.sub(vertex.position).sqlen3d())
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .map(|(_, color)| *color)
-                .unwrap_or([0.76, 0.79, 0.84, 1.0]);
-            cuemol_render::MeshVertex {
-                position: vertex.position,
-                normal: vertex.normal,
-                color,
-            }
-        })
-        .collect();
-    let indices = surface
-        .triangles()
-        .iter()
-        .flat_map(|triangle| triangle.iter().copied())
-        .collect();
-    let mut snapshot = RenderSceneSnapshot::empty();
-    snapshot.meshes.push(RenderMesh { vertices, indices });
-    snapshot.recompute_bounds();
-    snapshot
+        .unwrap_or_else(|| surface_molecule_render_mesh(object, &selector, &surface));
+    if let Some(show_selection) = resolved("showsel")
+        .filter(|value| !value.is_empty() && value != "*")
+        .as_deref()
+        .and_then(|value| qsc_selector(value, styles))
+    {
+        render_mesh =
+            filter_surface_render_mesh(render_mesh, &surface, object, &selector, &show_selection);
+    }
+    let draw_mode = match resolved("drawmode").as_deref().unwrap_or("fill") {
+        "line" | "1" => MapSurfaceDrawMode::Line,
+        "point" | "2" => MapSurfaceDrawMode::Point,
+        _ => MapSurfaceDrawMode::Fill,
+    };
+    let width = resolved("width")
+        .and_then(|value| value.parse::<f32>().ok())
+        .unwrap_or(1.2)
+        .clamp(0.1, 10.0);
+    let edge_style = surface_edge_style(
+        resolved("egtype").as_deref(),
+        resolved("eglinew").as_deref(),
+        resolved("egcolor").as_deref(),
+        styles,
+    );
+    let cull_back_faces =
+        resolved("cullface").as_deref().is_some_and(qsc_bool) || edge_style.is_some();
+    Ok(surface_snapshot_for_mode(
+        render_mesh,
+        draw_mode,
+        width,
+        object.uid(),
+        cull_back_faces,
+        None,
+    ))
 }
 
 fn is_ribbon_mesh_type(renderer_type: &str) -> bool {
