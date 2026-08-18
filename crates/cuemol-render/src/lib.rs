@@ -1767,20 +1767,13 @@ const WBP_OBJECT_BODY: &str = concat!(
     "        }\n",
 );
 
-/// DirectionalLight + orthographic Camera (C++ `writeWbp` tail).
-const WBP_LIGHT_AND_CAMERA: &str = concat!(
+/// DirectionalLight section preceding the selected camera (C++ `writeWbp`).
+const WBP_DIRECTIONAL_LIGHT: &str = concat!(
     "    DirectionalLight \"Light 1\" : {\n",
     "      Position : [ 500, 500, 500 ]\n",
     "      Color : [ 1, 1, 1 ]\n",
     "      Visible : true\n",
     "      Default : true\n",
-    "    }\n",
-    "    Camera \"camera1\" : {\n",
-    "      Position : [ 0, 0, 1000 ]\n",
-    "      Focus : [ 0, 0, 0 ]\n",
-    "      Up : [ 0, 1, 0 ]\n",
-    "      Fov : 0.100000\n",
-    "      Visible : true\n",
     "    }\n",
 );
 
@@ -1812,6 +1805,17 @@ impl WbpSceneExporter {
     /// the `.mqo` and holds the Object, a DirectionalLight, and a Camera.
     /// `mqo_filename` is the relative `.mqo` reference.
     pub fn write_wbp_string(&self, name: &str, mesh: &RenderMesh, mqo_filename: &str) -> String {
+        self.write_wbp_string_with_camera(name, mesh, mqo_filename, &Camera::new(), [0.0; 3])
+    }
+
+    pub fn write_wbp_string_with_camera(
+        &self,
+        name: &str,
+        mesh: &RenderMesh,
+        mqo_filename: &str,
+        camera: &Camera,
+        background: [f32; 3],
+    ) -> String {
         let (mat_keys, _) = face_material_table_with_grad_steps(mesh, self.grad_steps);
         let mut out = String::new();
         out.push_str("# Warabi Project 1.1 utf8\n");
@@ -1838,9 +1842,30 @@ impl WbpSceneExporter {
         out.push_str(WBP_OBJECT_BODY);
         out.push_str("      }\n"); // close Children
         out.push_str("    }\n"); // close External
-        out.push_str(WBP_LIGHT_AND_CAMERA);
+        out.push_str(WBP_DIRECTIONAL_LIGHT);
+        let camera_name = if !self.camera_name.is_empty() {
+            self.camera_name.as_str()
+        } else if !camera.name().is_empty() {
+            camera.name()
+        } else {
+            "camera1"
+        };
+        let distance = if camera.is_perspective() {
+            camera.cam_dist()
+        } else {
+            1000.0
+        };
+        let fov = 2.0 * ((camera.zoom() / 2.0) / distance).atan();
+        writeln!(&mut out, "    Camera \"{camera_name}\" : {{").unwrap();
+        writeln!(&mut out, "      Position : [ 0, 0, {distance:.6} ]").unwrap();
+        out.push_str("      Focus : [ 0, 0, 0 ]\n");
+        out.push_str("      Up : [ 0, 1, 0 ]\n");
+        writeln!(&mut out, "      Fov : {fov:.6}").unwrap();
+        out.push_str("      Visible : true\n");
+        out.push_str("    }\n");
         out.push_str("  }\n"); // close scene Children
         out.push_str("}\n"); // close Scene
+        write_wbp_rendering_options(&mut out, camera_name, background);
         out
     }
 
@@ -1902,6 +1927,16 @@ impl WbpSceneExporter {
 
     /// Write a Warabi project and its sibling MQO geometry file.
     pub fn write_scene_files(&mut self, name: &str, mesh: &RenderMesh) -> Result<()> {
+        self.write_scene_files_with_camera(name, mesh, &Camera::new(), [0.0; 3])
+    }
+
+    pub fn write_scene_files_with_camera(
+        &mut self,
+        name: &str,
+        mesh: &RenderMesh,
+        camera: &Camera,
+        background: [f32; 3],
+    ) -> Result<()> {
         if self.handler().path().is_empty() {
             return Err(CueMolError::invalid_argument("Warabi output path is empty"));
         }
@@ -1911,15 +1946,74 @@ impl WbpSceneExporter {
             .file_name()
             .and_then(|value| value.to_str())
             .unwrap_or("scene.mqo");
+        let view_mesh = camera_space_render_mesh(mesh, camera);
         let mut mqo_exporter = MqoSceneExporter::new();
         mqo_exporter.set_grad_steps(self.grad_steps);
-        let mqo = mqo_exporter.write_mqo_string(name, mesh);
+        mqo_exporter.set_use_clip_z(self.use_clip_z);
+        mqo_exporter.set_perspective(self.perspective);
+        let mqo = mqo_exporter.write_mqo_string(name, &view_mesh);
         std::fs::write(&mqo_path, mqo)?;
-        let project = self.write_wbp_string(name, mesh, mqo_filename);
+        let project =
+            self.write_wbp_string_with_camera(name, &view_mesh, mqo_filename, camera, background);
         self.handler().write_string(&project)?;
         self.state.write();
         Ok(())
     }
+}
+
+fn camera_space_render_mesh(mesh: &RenderMesh, camera: &Camera) -> RenderMesh {
+    let rotation = camera.rotation().to_matrix();
+    let center = camera.center();
+    RenderMesh {
+        vertices: mesh
+            .vertices
+            .iter()
+            .map(|vertex| {
+                let mut transformed = *vertex;
+                transformed.position = rotation.mul_vec(vertex.position - center);
+                transformed.normal = rotation.mul_vec(Vector4::new3(
+                    vertex.normal.x,
+                    vertex.normal.y,
+                    vertex.normal.z,
+                ));
+                transformed.normal.w = vertex.normal.w;
+                transformed
+            })
+            .collect(),
+        indices: mesh.indices.clone(),
+    }
+}
+
+fn write_wbp_rendering_options(out: &mut String, camera_name: &str, background: [f32; 3]) {
+    out.push_str("RenderingOptions \"RenderingOption 1\" : {\n");
+    writeln!(out, "  Camera : \"{camera_name}\"").unwrap();
+    out.push_str("  OutputWidth : 1000\n");
+    out.push_str("  OutputHeight : 1000\n");
+    out.push_str("  AntiAliasing : true\n");
+    out.push_str("  SamplingPixels : 6\n");
+    out.push_str("  AntiAliasingFilter : 2\n");
+    out.push_str("  DropShadow : false\n");
+    out.push_str("  DropShadowType : \"RayTrace\"\n");
+    out.push_str("  ShadowMapSize : 512\n");
+    out.push_str("  TextureFilter : 1\n");
+    out.push_str("  LineWidthScale : 1\n");
+    out.push_str("  PatternScale : 1\n");
+    writeln!(
+        out,
+        "  BackgroundColor : [ {:.6}, {:.6}, {:.6} ]",
+        background[0], background[1], background[2]
+    )
+    .unwrap();
+    out.push_str("  FillBackground : true\n");
+    out.push_str("  PaintPolygons : true\n");
+    out.push_str("  DrawLines : true\n");
+    out.push_str("  FogEnabled : false\n");
+    out.push_str("  FogStart : 0\n");
+    out.push_str("  FogEnd : 100\n");
+    out.push_str("  FogCenter : 0\n");
+    out.push_str("  BlendMode : \"Normal\"\n");
+    out.push_str("  Opacity : 1\n");
+    out.push_str("}\n");
 }
 
 impl Default for WbpSceneExporter {
@@ -5577,10 +5671,72 @@ mod tests {
         assert!(wbp.contains("Object \"mol\" : {"));
         assert!(wbp.contains("DirectionalLight \"Light 1\" : {"));
         assert!(wbp.contains("Camera \"camera1\" : {"));
+        assert!(wbp.contains("RenderingOptions \"RenderingOption 1\" : {"));
+        assert!(wbp.contains("Camera : \"camera1\""));
+        assert!(wbp.contains("BackgroundColor : [ 0.000000, 0.000000, 0.000000 ]"));
         // Balanced top-level braces (every '{' has a matching '}').
         let opens = wbp.matches('{').count();
         let closes = wbp.matches('}').count();
         assert_eq!(opens, closes, "unbalanced braces in WBP output");
+    }
+
+    #[test]
+    fn wbp_uses_selected_camera_background_and_camera_space_mqo() {
+        let color = [1.0, 0.0, 0.0, 1.0];
+        let mesh = RenderMesh {
+            vertices: vec![
+                MeshVertex {
+                    position: Vector4::new3(2.0, 2.0, 3.0),
+                    normal: Vector4::new3(0.0, 0.0, 1.0),
+                    color,
+                },
+                MeshVertex {
+                    position: Vector4::new3(1.0, 3.0, 3.0),
+                    normal: Vector4::new3(0.0, 0.0, 1.0),
+                    color,
+                },
+                MeshVertex {
+                    position: Vector4::new3(1.0, 2.0, 4.0),
+                    normal: Vector4::new3(0.0, 0.0, 1.0),
+                    color,
+                },
+            ],
+            indices: vec![0, 1, 2],
+        };
+        let mut camera = Camera::new();
+        camera.set_name("front");
+        camera.set_center(Vector4::new3(1.0, 2.0, 3.0));
+        camera.set_zoom(20.0);
+        camera.set_cam_dist(100.0);
+        camera.set_perspective(true);
+        let dir = std::env::temp_dir().join(format!(
+            "cuemol-render-wbp-camera-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut exporter = WbpSceneExporter::new();
+        exporter.set_camera("front");
+        exporter
+            .handler_mut()
+            .set_path(dir.join("scene.wbp").to_string_lossy());
+        exporter
+            .write_scene_files_with_camera("mol", &mesh, &camera, [0.1, 0.2, 0.3])
+            .unwrap();
+
+        let wbp = std::fs::read_to_string(dir.join("scene.wbp")).unwrap();
+        assert!(wbp.contains("Camera \"front\" : {"));
+        assert!(wbp.contains("Position : [ 0, 0, 100.000000 ]"));
+        assert!(wbp.contains("Fov : 0.199337"));
+        assert!(wbp.contains("Camera : \"front\""));
+        assert!(wbp.contains("BackgroundColor : [ 0.100000, 0.200000, 0.300000 ]"));
+        let mqo = std::fs::read_to_string(dir.join("scene.mqo")).unwrap();
+        assert!(mqo.contains("1.000000 0.000000 0.000000"));
+        assert!(!mqo.contains("2.000000 2.000000 3.000000"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

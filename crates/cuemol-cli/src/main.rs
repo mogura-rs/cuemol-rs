@@ -1647,21 +1647,13 @@ fn export_wbp(
         .strip_suffix(".wbp")
         .or_else(|| output.strip_suffix(".WBP"))
         .unwrap_or(output);
-    let out_stem = std::path::Path::new(base)
-        .file_name()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("scene");
     let mqo_path = format!("{base}.mqo");
-    std::fs::write(
-        &mqo_path,
-        MqoSceneExporter::new().write_mqo_string(name, mesh),
-    )
-    .map_err(|err| err.to_string())?;
-    std::fs::write(
-        output,
-        WbpSceneExporter::new().write_wbp_string(name, mesh, &format!("{out_stem}.mqo")),
-    )
-    .map_err(|err| err.to_string())?;
+    let camera = camera_for_snapshot(snapshot);
+    let mut exporter = WbpSceneExporter::new();
+    exporter.handler_mut().set_path(output);
+    exporter
+        .write_scene_files_with_camera(name, mesh, &camera, [0.0; 3])
+        .map_err(|err| err.to_string())?;
     eprintln!(
         "exported {} atoms / {} bonds -> {} vertices / {} triangles to {output} (+ {mqo_path})",
         snapshot.atom_count(),

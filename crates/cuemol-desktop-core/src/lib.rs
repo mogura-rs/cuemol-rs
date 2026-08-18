@@ -26709,7 +26709,7 @@ impl DesktopAppState {
                     exporter.write_mesh_file(&scene_name, &mesh)
                 }
                 ScriptNativeSceneExporter::Wbp(exporter) => {
-                    exporter.write_scene_files(&scene_name, &mesh)
+                    exporter.write_scene_files_with_camera(&scene_name, &mesh, &camera, background)
                 }
                 ScriptNativeSceneExporter::Stl(exporter) => exporter.write_mesh_file(&mesh),
                 ScriptNativeSceneExporter::LuxRend(exporter) => exporter
@@ -52729,6 +52729,8 @@ mod tests {
         let lux_scene = fs::read_to_string(dir.join("scene.lxs")).unwrap();
         assert!(lux_scene.contains("\"string filename\" [\"scene\"]"));
         assert!(lux_scene.contains("\"color Kd\" [0.0706 0.2039 0.3373]"));
+        let wbp_project = fs::read_to_string(dir.join("scene.wbp")).unwrap();
+        assert!(wbp_project.contains("BackgroundColor : [ 0.070588, 0.203922, 0.337255 ]"));
         assert!(dir.join("scene.scn").is_file());
         let luxcore_scene = fs::read_to_string(dir.join("scene.scn")).unwrap();
         assert!(luxcore_scene.contains(".type = \"hitpointcolor\""));
