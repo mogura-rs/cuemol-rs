@@ -2236,10 +2236,7 @@ impl LuxRendSceneExporter {
             perspective,
             background,
         );
-        out.push_str("Material \"matte\" \"color Kd\" [0.7 0.7 0.7]\n");
-        out.push_str("AttributeBegin\n");
-        out.push_str(&self.write_mesh_string(&mesh.positions(), &mesh.triangles()));
-        out.push_str("AttributeEnd\n\n");
+        write_lux_colored_mesh(&mut out, mesh);
         out.push_str("WorldEnd\n");
         out
     }
@@ -2353,6 +2350,185 @@ impl LuxRendSceneExporter {
         self.handler().write_string(&output)?;
         self.state.write();
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum LuxMeshMaterial {
+    Solid(usize),
+    Gradient(usize, usize),
+}
+
+fn write_lux_colored_mesh(out: &mut String, mesh: &RenderMesh) {
+    let mut color_ids = BTreeMap::<[u8; 4], usize>::new();
+    let mut colors = Vec::<[u8; 4]>::new();
+    let vertex_color_ids = mesh
+        .vertices
+        .iter()
+        .map(|vertex| {
+            let color = vertex
+                .color
+                .map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8);
+            if let Some(id) = color_ids.get(&color) {
+                *id
+            } else {
+                let id = colors.len();
+                colors.push(color);
+                color_ids.insert(color, id);
+                id
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut groups = BTreeMap::<LuxMeshMaterial, Vec<[usize; 3]>>::new();
+    for triangle in mesh.triangles() {
+        if !triangle.iter().all(|index| *index < mesh.vertices.len()) {
+            continue;
+        }
+        let ids = triangle.map(|index| vertex_color_ids[index]);
+        let material = if ids[0] == ids[1] && ids[1] == ids[2] {
+            LuxMeshMaterial::Solid(ids[0])
+        } else {
+            let mut unique = ids;
+            unique.sort_unstable();
+            let unique_len = if unique[0] == unique[2] {
+                1
+            } else if unique[0] == unique[1] || unique[1] == unique[2] {
+                2
+            } else {
+                3
+            };
+            if unique_len == 2 {
+                LuxMeshMaterial::Gradient(unique[0], unique[2])
+            } else {
+                // The reference exporter assigns a three-colour face to its
+                // first vertex colour because LuxRender supports two-way mix.
+                LuxMeshMaterial::Solid(ids[0])
+            }
+        };
+        groups.entry(material).or_default().push(triangle);
+    }
+    if groups.is_empty() {
+        return;
+    }
+
+    for (id, color) in colors.iter().enumerate() {
+        let texture = format!("scene_tex_{id}");
+        writeln!(
+            out,
+            "Texture \"{texture}\" \"color\" \"constant\" \"color value\" [{:.6} {:.6} {:.6}]",
+            f64::from(color[0]) / 255.0,
+            f64::from(color[1]) / 255.0,
+            f64::from(color[2]) / 255.0,
+        )
+        .unwrap();
+        let material = format!("scene_mat_{id}");
+        if color[3] == u8::MAX {
+            write_lux_glossy_material(out, &material, &texture);
+        } else {
+            let opaque = format!("{material}_o");
+            write_lux_glossy_material(out, &opaque, &texture);
+            writeln!(out, "MakeNamedMaterial \"{material}\"").unwrap();
+            out.push_str("    \"string type\" [\"mix\"]\n");
+            out.push_str("    \"string namedmaterial1\" [\"NullMat\"]\n");
+            writeln!(out, "    \"string namedmaterial2\" [\"{opaque}\"]").unwrap();
+            writeln!(
+                out,
+                "    \"float amount\" [{:.6}]",
+                f64::from(color[3]) / 255.0
+            )
+            .unwrap();
+        }
+        out.push('\n');
+    }
+    for material in groups.keys() {
+        let LuxMeshMaterial::Gradient(left, right) = *material else {
+            continue;
+        };
+        writeln!(out, "MakeNamedMaterial \"scene_grad_{left}_{right}\"").unwrap();
+        out.push_str("    \"string type\" [\"mix\"]\n");
+        writeln!(out, "    \"string namedmaterial1\" [\"scene_mat_{left}\"]").unwrap();
+        writeln!(out, "    \"string namedmaterial2\" [\"scene_mat_{right}\"]").unwrap();
+        out.push_str("    \"texture amount\" [\"utex\"]\n\n");
+    }
+
+    out.push_str("AttributeBegin # Object scene\n");
+    for (material, triangles) in groups {
+        let material_name = match material {
+            LuxMeshMaterial::Solid(id) => format!("scene_mat_{id}"),
+            LuxMeshMaterial::Gradient(left, right) => {
+                format!("scene_grad_{left}_{right}")
+            }
+        };
+        writeln!(out, "NamedMaterial \"{material_name}\"").unwrap();
+
+        let mut used = vec![false; mesh.vertices.len()];
+        for triangle in &triangles {
+            for index in triangle {
+                used[*index] = true;
+            }
+        }
+        let mut remap = vec![usize::MAX; mesh.vertices.len()];
+        let mut selected = Vec::new();
+        for (index, is_used) in used.into_iter().enumerate() {
+            if is_used {
+                remap[index] = selected.len();
+                selected.push(index);
+            }
+        }
+
+        out.push_str("Shape \"trianglemesh\" \"point P\" [");
+        for index in &selected {
+            let position = mesh.vertices[*index].position;
+            write_lux_vector(out, position.x, position.y, position.z);
+        }
+        out.push_str("]\n\"normal N\" [");
+        for index in &selected {
+            let normal = mesh.vertices[*index].normal;
+            write_lux_vector(out, normal.x, normal.y, normal.z);
+        }
+        out.push_str("]\n");
+        if let LuxMeshMaterial::Gradient(left, right) = material {
+            out.push_str("\"float uv\" [");
+            for index in &selected {
+                let color_id = vertex_color_ids[*index];
+                let u = if color_id == right {
+                    0.9999
+                } else {
+                    debug_assert_eq!(color_id, left);
+                    0.0
+                };
+                write!(out, "{u:.4} 0 ").unwrap();
+            }
+            out.push_str("]\n");
+        }
+        out.push_str("\"integer indices\" [");
+        for triangle in triangles {
+            writeln!(
+                out,
+                "{} {} {}",
+                remap[triangle[0]], remap[triangle[1]], remap[triangle[2]]
+            )
+            .unwrap();
+        }
+        out.push_str("]\n");
+    }
+    out.push_str("AttributeEnd\n\n");
+}
+
+fn write_lux_glossy_material(out: &mut String, material: &str, texture: &str) {
+    writeln!(out, "MakeNamedMaterial \"{material}\"").unwrap();
+    out.push_str("    \"string type\" [\"glossy\"]\n");
+    writeln!(out, "    \"texture Kd\" [\"{texture}\"]").unwrap();
+    out.push_str("    \"color Ks\" [0.2 0.2 0.2]\n");
+    out.push_str("    \"float uroughness\" [0.4]\n");
+    out.push_str("    \"float vroughness\" [0.4]\n");
+}
+
+fn write_lux_vector(out: &mut String, x: f64, y: f64, z: f64) {
+    if x.is_finite() && y.is_finite() && z.is_finite() {
+        write!(out, "{x:.6} {y:.6} {z:.6} ").unwrap();
+    } else {
+        out.push_str("0 0 0 ");
     }
 }
 
@@ -4435,9 +4611,40 @@ mod tests {
         assert!(lxs.contains("Texture \"utex\" \"float\" \"bilerp\""));
         assert!(lxs.contains("MakeNamedMaterial \"NullMat\""));
         assert!(lxs.contains("LightSource \"distant\""));
-        assert!(lxs.contains("Material \"matte\""));
-        assert!(lxs.contains("Shape \"mesh\""));
+        assert!(lxs.contains("MakeNamedMaterial \"scene_mat_0\""));
+        assert!(lxs.contains("Shape \"trianglemesh\""));
         assert!(lxs.trim_end().ends_with("WorldEnd"));
+    }
+
+    #[test]
+    fn luxrender_scene_preserves_gradient_and_alpha_materials() {
+        let vertex = |x, color| MeshVertex {
+            position: Vector4::new3(x, 0.0, 0.0),
+            normal: Vector4::new3(0.0, 1.0, 0.0),
+            color,
+        };
+        let mesh = RenderMesh {
+            vertices: vec![
+                vertex(0.0, [1.0, 0.0, 0.0, 0.5]),
+                vertex(1.0, [1.0, 0.0, 0.0, 0.5]),
+                vertex(2.0, [0.0, 0.0, 1.0, 1.0]),
+            ],
+            indices: vec![0, 1, 2],
+        };
+        let scene = LuxRendSceneExporter::new().write_scene_string(&mesh, Vector4::ZERO, 4.0, true);
+
+        assert!(scene.contains(
+            "Texture \"scene_tex_0\" \"color\" \"constant\" \"color value\" [1.000000 0.000000 0.000000]"
+        ));
+        assert!(scene.contains("MakeNamedMaterial \"scene_mat_0_o\""));
+        assert!(scene.contains("\"string namedmaterial1\" [\"NullMat\"]"));
+        assert!(scene.contains("\"float amount\" [0.501961]"));
+        assert!(scene.contains("MakeNamedMaterial \"scene_grad_0_1\""));
+        assert!(scene.contains("NamedMaterial \"scene_grad_0_1\""));
+        assert!(scene.contains("\"texture amount\" [\"utex\"]"));
+        assert!(scene.contains("\"float uv\" [0.0000 0 0.0000 0 0.9999 0 ]"));
+        assert!(scene.contains("\"integer indices\" [0 1 2"));
+        assert!(!scene.contains("# Floor"));
     }
 
     #[test]
