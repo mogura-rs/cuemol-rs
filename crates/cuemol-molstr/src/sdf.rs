@@ -1,3 +1,4 @@
+use crate::chem::ElemSym;
 use crate::molecule::{Atom, BondOrder, MolCoord};
 use crate::selection::Selector;
 use cuemol_core::{CueMolError, Result, Vector4};
@@ -164,6 +165,7 @@ pub fn read_sdf_str_with_options(input: &str, options: &SdfReadOptions) -> Resul
         if index + 3 >= lines.len() {
             break;
         }
+        let compound_name = lines[index].trim().to_string();
         index += 3;
         let counts = lines[index];
         index += 1;
@@ -175,6 +177,7 @@ pub fn read_sdf_str_with_options(input: &str, options: &SdfReadOptions) -> Resul
 
         let skip = options.load_compound_id >= 0 && options.load_compound_id != compound_id;
         let mut atom_map = Vec::new();
+        let mut element_counts = BTreeMap::<String, usize>::new();
         for _ in 0..atom_count {
             let line = lines
                 .get(index)
@@ -183,7 +186,16 @@ pub fn read_sdf_str_with_options(input: &str, options: &SdfReadOptions) -> Resul
             let x = parse_sdf_f64(line, 0, 10)?;
             let y = parse_sdf_f64(line, 10, 20)?;
             let z = parse_sdf_f64(line, 20, 30)?;
-            let element = line.get(31..34).unwrap_or("").trim().to_string();
+            let raw_element = line.get(31..34).unwrap_or("").trim();
+            let element_id = ElemSym::from_name(raw_element);
+            let element = if element_id == ElemSym::XX {
+                raw_element.to_string()
+            } else {
+                element_id.name().to_string()
+            };
+            let element_count = element_counts.entry(element.clone()).or_default();
+            *element_count += 1;
+            let atom_name = format!("{element}{element_count}");
             if skip {
                 atom_map.push(None);
             } else {
@@ -200,9 +212,9 @@ pub fn read_sdf_str_with_options(input: &str, options: &SdfReadOptions) -> Resul
                 };
                 mol.push_atom(Atom {
                     serial: (new_index + 1) as i32,
-                    name: element.clone(),
+                    name: atom_name,
                     alt_loc: None,
-                    res_name: "MOL".to_string(),
+                    res_name: compound_name.clone(),
                     chain_id,
                     res_id,
                     ins_code: None,
@@ -435,7 +447,11 @@ $$$$
         assert_eq!(mol.atom_count(), 2);
         assert_eq!(mol.atoms()[0].chain_id, "A");
         assert_eq!(mol.atoms()[0].res_id, 1);
+        assert_eq!(mol.atoms()[0].res_name, "first");
+        assert_eq!(mol.atoms()[0].name, "C1");
         assert_eq!(mol.atoms()[1].res_id, 2);
+        assert_eq!(mol.atoms()[1].res_name, "second");
+        assert_eq!(mol.atoms()[1].name, "N1");
         assert_eq!(
             mol.get_residue_prop_str("A", "1", "noautogen").unwrap(),
             Some("true")
@@ -454,8 +470,29 @@ $$$$
         let mol = read_sdf_str_with_options(TWO_COMPOUNDS, &options).unwrap();
         assert_eq!(mol.atom_count(), 1);
         assert_eq!(mol.atoms()[0].element, "N");
+        assert_eq!(mol.atoms()[0].res_name, "second");
+        assert_eq!(mol.atoms()[0].name, "N1");
         assert_eq!(mol.atoms()[0].chain_id, "Z1");
         assert_eq!(mol.atoms()[0].res_id, 5);
+    }
+
+    #[test]
+    fn sdf_reader_numbers_repeated_elements_within_each_compound() {
+        let input = concat!(
+            "ligand\n",
+            "  CueMol\n",
+            "\n",
+            "  2  0  0  0  0  0  0  0  0  0999 V2000\n",
+            "    0.0000    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n",
+            "    1.0000    0.0000    0.0000 c   0  0  0  0  0  0  0  0  0  0  0  0\n",
+            "M  END\n",
+            "$$$$\n",
+        );
+        let mol = read_sdf_str(input).unwrap();
+        assert_eq!(mol.atoms()[0].name, "C1");
+        assert_eq!(mol.atoms()[1].name, "C2");
+        assert_eq!(mol.atoms()[1].element, "C");
+        assert!(mol.atoms().iter().all(|atom| atom.res_name == "ligand"));
     }
 
     #[test]
