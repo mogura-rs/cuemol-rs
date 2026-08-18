@@ -347,10 +347,10 @@ impl SymmOpManager {
         }
     }
 
-    pub fn get_sg_names_json(&self, lattice: &str) -> String {
-        let Some(lattice) = LatticeSystem::from_name(lattice) else {
-            return "[]".to_string();
-        };
+    pub fn get_sg_names_json(&self, lattice: &str) -> Result<String> {
+        let lattice = LatticeSystem::from_name(lattice).ok_or_else(|| {
+            CueMolError::invalid_argument(format!("invalid lattice name: {lattice}"))
+        })?;
         let body = self
             .groups
             .values()
@@ -364,7 +364,7 @@ impl SymmOpManager {
             })
             .collect::<Vec<_>>()
             .join(",");
-        format!("[{body}]")
+        Ok(format!("[{body}]"))
     }
 
     pub fn space_groups_for_lattice(&self, lattice: LatticeSystem) -> Vec<&SpaceGroup> {
@@ -688,11 +688,15 @@ impl SymmRenderer {
         &self.operators
     }
 
-    pub fn get_xform_matrix(&self, symid: usize) -> Matrix4 {
+    pub fn get_xform_matrix(&self, symid: usize) -> Result<Matrix4> {
         self.operators
             .get(symid)
             .map(|operator| operator.matrix)
-            .unwrap_or(Matrix4::IDENTITY)
+            .ok_or_else(|| {
+                CueMolError::invalid_argument(format!(
+                    "symmetry operator index out of range: {symid}"
+                ))
+            })
     }
 
     pub fn interpret_hit(
@@ -1481,7 +1485,11 @@ mod tests {
         assert_eq!(manager.get_sg_id_by_cname("P 21 21 21"), 19);
         assert_eq!(manager.get_sg_id_by_name("P212121"), 19);
         assert_eq!(manager.get_sg_id_by_name("not a group"), -1);
-        assert!(manager.get_sg_names_json("TRICLINIC").contains("\"id\":1"));
+        assert!(manager
+            .get_sg_names_json("TRICLINIC")
+            .unwrap()
+            .contains("\"id\":1"));
+        assert!(manager.get_sg_names_json("invalid").is_err());
         assert!(manager
             .space_groups_for_lattice(LatticeSystem::Cubic)
             .iter()
@@ -1706,7 +1714,10 @@ mod tests {
         assert_eq!(count, 4);
         assert_eq!(renderer.operators().len(), 4);
         let center_pt = Vector4::new4(center.x, center.y, center.z, 1.0);
-        let moved = renderer.get_xform_matrix(0).transform_point(center_pt);
+        let moved = renderer
+            .get_xform_matrix(0)
+            .unwrap()
+            .transform_point(center_pt);
         assert_in_home_cell(crystal.orth_to_frac(moved), "renderer mate 0");
     }
 
@@ -1764,6 +1775,7 @@ mod tests {
         for i in 0..count {
             let moved = renderer
                 .get_xform_matrix(i)
+                .unwrap()
                 .transform_point(Vector4::new4(5.0, 5.0, 5.0, 1.0));
             assert!((moved - renderer.center()).length3d() <= 8.0 + 1.0e-6);
         }
@@ -1791,8 +1803,8 @@ mod tests {
             matrix: Matrix4::IDENTITY,
         }]);
         assert!(!renderer.update_required());
-        assert_eq!(renderer.get_xform_matrix(0), Matrix4::IDENTITY);
-        assert_eq!(renderer.get_xform_matrix(99), Matrix4::IDENTITY);
+        assert_eq!(renderer.get_xform_matrix(0).unwrap(), Matrix4::IDENTITY);
+        assert!(renderer.get_xform_matrix(99).is_err());
         renderer.clear();
         assert!(renderer.operators().is_empty());
     }

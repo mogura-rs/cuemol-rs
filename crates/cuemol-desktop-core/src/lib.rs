@@ -6189,7 +6189,9 @@ impl DesktopAppState {
     }
 
     pub fn space_group_summaries_json(&self, lattice: &str) -> String {
-        cuemol_symm::SymmOpManager::new().get_sg_names_json(lattice)
+        cuemol_symm::SymmOpManager::new()
+            .get_sg_names_json(lattice)
+            .unwrap_or_else(|_| "[]".to_string())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -40433,10 +40435,10 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            Ok(JsString::from(
-                cuemol_symm::SymmOpManager::new().get_sg_names_json(&arg0(args, ctx)),
-            )
-            .into())
+            let value = cuemol_symm::SymmOpManager::new()
+                .get_sg_names_json(&arg0(args, ctx))
+                .map_err(|error| script_error(error.to_string()))?;
+            Ok(JsString::from(value).into())
         }
         fn js_symm_cname(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
             let nsg = args
