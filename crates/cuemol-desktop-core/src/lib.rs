@@ -13194,6 +13194,27 @@ impl DesktopAppState {
         options: GuiPovSceneOptions,
     ) -> Result<usize> {
         let snapshot = self.render_snapshot(scene_uid, selection_text)?;
+        let background = self
+            .scene_manager()
+            .scene(scene_uid)
+            .map(|scene| {
+                let styles = scene_style_manager(scene);
+                let color = scene
+                    .scene_attribute("bgcolor")
+                    .and_then(|value| resolve_qsc_color(value, &styles))
+                    .unwrap_or(cuemol_gfx::Rgba8 {
+                        r: 0,
+                        g: 0,
+                        b: 0,
+                        a: 255,
+                    });
+                [
+                    f32::from(color.r) / 255.0,
+                    f32::from(color.g) / 255.0,
+                    f32::from(color.b) / 255.0,
+                ]
+            })
+            .unwrap_or([0.0; 3]);
         let mut camera = camera.clone();
         if let Some(perspective) = options.perspective {
             camera.set_perspective(perspective);
@@ -13203,10 +13224,15 @@ impl DesktopAppState {
         exporter.set_use_post_blend(options.use_post_blend);
         exporter.set_show_edge_lines(options.show_edge_lines);
         exporter.set_use_pix_imgs(options.use_pixel_labels);
+        let path = path.as_ref();
         exporter
             .handler_mut()
-            .set_path(path.as_ref().to_string_lossy().into_owned());
-        exporter.write_snapshot_file_with_camera(&snapshot, &camera)?;
+            .set_path(path.to_string_lossy().into_owned());
+        exporter.handler_mut().set_sub_path(
+            "inc",
+            path.with_extension("inc").to_string_lossy().into_owned(),
+        );
+        exporter.write_snapshot_file_with_camera_background(&snapshot, &camera, background)?;
         Ok(snapshot.atom_count())
     }
 
@@ -66143,11 +66169,17 @@ attribute \"dep\" string \"positions\"
         let pov_path = dir.join("scene.pov");
 
         let mut app = DesktopAppState::new();
-        let GuiLoadedPath::Object { object_uid, .. } =
-            app.open_path(root.join("1CRN.pdb")).unwrap()
+        let GuiLoadedPath::Object {
+            scene_uid,
+            object_uid,
+        } = app.open_path(root.join("1CRN.pdb")).unwrap()
         else {
             panic!("expected object load");
         };
+        app.scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .set_scene_attribute("bgcolor", "#123456");
         app.save_object_as(object_uid, &pdb_path).unwrap();
         assert!(std::fs::read_to_string(&pdb_path).unwrap().contains("ATOM"));
 
@@ -66161,9 +66193,13 @@ attribute \"dep\" string \"positions\"
         assert_eq!(exported_atoms, 0);
         let pov = std::fs::read_to_string(&pov_path).unwrap();
         assert!(pov.contains("camera {"));
-        assert!(pov.contains("mesh2 {"));
+        assert!(pov.contains("#declare _scene = #include \"scene.inc\""));
+        assert!(pov.contains("#declare _bgcolor = <0.070588,0.203922,0.337255>;"));
+        assert!(!pov.contains("mesh2 {"));
         assert!(pov.contains("#declare _camera_pos = <1.000000,2.000000,13.000000>"));
         assert!(pov.contains("orthographic"));
+        let pov_include = std::fs::read_to_string(dir.join("scene.inc")).unwrap();
+        assert!(pov_include.contains("mesh2 {"));
 
         app.export_active_scene_pov_with_camera(
             &pov_path,
@@ -66180,8 +66216,10 @@ attribute \"dep\" string \"positions\"
         .unwrap();
         let configured_pov = std::fs::read_to_string(&pov_path).unwrap();
         assert!(configured_pov.contains("#declare _perspective = 1;"));
-        assert!(configured_pov.contains("clipped_by { plane"));
         assert!(!configured_pov.contains("edge lines"));
+        let configured_include = std::fs::read_to_string(dir.join("scene.inc")).unwrap();
+        assert!(configured_include.contains("clipped_by { plane"));
+        assert!(!configured_include.contains("edge lines"));
 
         let rows = app.active_sequence_summaries();
         assert_eq!(rows.len(), 1);
@@ -66191,6 +66229,7 @@ attribute \"dep\" string \"positions\"
 
         let _ = std::fs::remove_file(pdb_path);
         let _ = std::fs::remove_file(pov_path);
+        let _ = std::fs::remove_file(dir.join("scene.inc"));
         let _ = std::fs::remove_dir(dir);
     }
 
@@ -66239,8 +66278,10 @@ attribute \"dep\" string \"positions\"
         assert_eq!(count, 1);
         let pov = std::fs::read_to_string(&path).unwrap();
         assert!(pov.contains("#declare _camera_pos = <4.000000,5.000000,18.000000>"));
+        assert!(path.with_extension("inc").is_file());
         assert_eq!(app.active_scene(), Some(active_scene));
-        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(path.with_extension("inc")).unwrap();
     }
 
     #[test]
