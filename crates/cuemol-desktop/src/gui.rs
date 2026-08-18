@@ -16,8 +16,8 @@ use cuemol_core::{
 use cuemol_gfx::Rgba8;
 use cuemol_qsys::{StereoMode, View};
 use cuemol_render::{
-    tessellate_snapshot, MeshVertex, PovSceneExporter, RenderAtom, RenderBond, RenderSceneSnapshot,
-    UmbreonDenoiseMode, UmbreonSceneExporter,
+    MeshVertex, PovSceneExporter, RenderAtom, RenderBond, RenderSceneSnapshot, UmbreonDenoiseMode,
+    UmbreonSceneExporter,
 };
 use egui_wgpu::ScreenDescriptor;
 use glam::{Mat4, Quat, Vec3, Vec4 as GlamVec4};
@@ -17688,6 +17688,8 @@ impl GuiApplication {
                 ambient_fraction,
                 radiosity: settings.radiosity,
                 verbose: true,
+                post_blend: settings.post_blend,
+                blend_group: None,
             },
         };
         let labels = collect_scene_pov_labels(
@@ -33850,7 +33852,6 @@ fn render_pov_animation_frame(
 ) -> std::result::Result<AnimationTaskOutput, String> {
     let pov_path = animation_frame_path(&task.settings, task.index, "pov");
     let png_path = animation_frame_path(&task.settings, task.index, "png");
-    let mesh = tessellate_snapshot(&task.snapshot);
     let mut exporter = PovSceneExporter::new();
     exporter.set_use_clip_z(task.settings.pov_clip_plane);
     exporter.set_use_post_blend(task.settings.pov_post_blend);
@@ -33859,7 +33860,7 @@ fn render_pov_animation_frame(
         .handler_mut()
         .set_path(pov_path.to_string_lossy().into_owned());
     exporter
-        .write_scene_file_with_camera(&mesh, &task.camera)
+        .write_snapshot_file_with_camera(&task.snapshot, &task.camera)
         .map_err(|error| error.to_string())?;
     if task.cancel.load(Ordering::Relaxed) {
         return Err("cancelled".to_string());
@@ -33909,6 +33910,7 @@ fn animation_pov_process_task(
             transparent: false,
             shadow: settings.pov_shadow,
             radiosity: settings.pov_radiosity,
+            post_blend: settings.pov_post_blend,
             ..PovProcessOptions::default()
         },
     }

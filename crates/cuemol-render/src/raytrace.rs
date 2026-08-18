@@ -1669,6 +1669,7 @@ mod tests {
                     color(51, 102, 255, 242),
                 ));
                 snapshot.transparency_groups.push(RenderTransparencyGroup {
+                    name: format!("translucent-{index}"),
                     alpha: 0.95,
                     material: "default".to_string(),
                     atom_range: atom_index..atom_index + 1,
@@ -1710,6 +1711,7 @@ mod tests {
             }
             if grouped {
                 snapshot.transparency_groups.push(RenderTransparencyGroup {
+                    name: "translucent".to_string(),
                     alpha: 0.5,
                     material: "default".to_string(),
                     atom_range: 0..sphere_count,

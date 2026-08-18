@@ -2290,7 +2290,11 @@ impl DesktopAppState {
                     .unwrap_or(1.0)
                     .clamp(0.0, 1.0);
                 let material = attr("material").unwrap_or_else(|| "default".to_string());
-                apply_renderer_properties(&mut rendered, alpha, &material);
+                let renderer_name = renderer_node
+                    .map(|node| node.str_attr("name").to_string())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| format!("{}_surface", surface.name));
+                apply_renderer_properties(&mut rendered, &renderer_name, alpha, &material);
                 append_snapshot(snapshot, rendered);
             }
         }
@@ -6592,7 +6596,7 @@ impl DesktopAppState {
                     .unwrap_or(1.0)
                     .clamp(0.0, 1.0);
                 let material = config_attr("material").unwrap_or_else(|| "default".to_string());
-                apply_renderer_properties(&mut rendered, alpha, &material);
+                apply_renderer_properties(&mut rendered, &config.name, alpha, &material);
                 let renderer_xform = config_attr("xformMat")
                     .and_then(|value| Matrix4::from_script_string(&value).ok())
                     .unwrap_or(Matrix4::IDENTITY);
@@ -13190,7 +13194,6 @@ impl DesktopAppState {
         options: GuiPovSceneOptions,
     ) -> Result<usize> {
         let snapshot = self.render_snapshot(scene_uid, selection_text)?;
-        let mesh = cuemol_render::tessellate_snapshot(&snapshot);
         let mut camera = camera.clone();
         if let Some(perspective) = options.perspective {
             camera.set_perspective(perspective);
@@ -13203,7 +13206,7 @@ impl DesktopAppState {
         exporter
             .handler_mut()
             .set_path(path.as_ref().to_string_lossy().into_owned());
-        exporter.write_scene_file_with_camera(&mesh, &camera)?;
+        exporter.write_snapshot_file_with_camera(&snapshot, &camera)?;
         Ok(snapshot.atom_count())
     }
 
@@ -47527,7 +47530,8 @@ fn append_object_renderer_snapshot(
     let material = renderer
         .and_then(|renderer| renderer.resolved_attr("material", styles, style_scope_id))
         .unwrap_or_else(|| "default".to_string());
-    apply_renderer_properties(&mut snapshot, alpha, &material);
+    let renderer_name = renderer.map(MolRenderer::name).unwrap_or("default");
+    apply_renderer_properties(&mut snapshot, renderer_name, alpha, &material);
     // Apply the object + renderer `xformMat` (C++ `Object`/`Renderer` xformMat,
     // multiplied onto the modelview at display; the object xform is propagated onto
     // atom positions). The effective transform is `renderer · object`, baked into
@@ -47544,8 +47548,14 @@ fn append_object_renderer_snapshot(
     append_snapshot(target, snapshot);
 }
 
-fn apply_renderer_properties(snapshot: &mut RenderSceneSnapshot, alpha: f64, material: &str) {
-    snapshot.mark_renderer_section(
+fn apply_renderer_properties(
+    snapshot: &mut RenderSceneSnapshot,
+    name: &str,
+    alpha: f64,
+    material: &str,
+) {
+    snapshot.mark_named_renderer_section(
+        name,
         alpha as f32,
         if material.trim().is_empty() {
             "default"
@@ -47883,7 +47893,7 @@ fn append_lw_object_snapshot(
             .unwrap_or(1.0)
             .clamp(0.0, 1.0);
         let material = resolved("material").unwrap_or_else(|| "default".to_string());
-        apply_renderer_properties(&mut snapshot, alpha, &material);
+        apply_renderer_properties(&mut snapshot, &renderer.name, alpha, &material);
         let xform = renderer.xform.mul_mat(loaded.xform);
         if xform != Matrix4::IDENTITY {
             snapshot.apply_xform(&xform);
@@ -58702,7 +58712,7 @@ end_header
             }],
             indices: Vec::new(),
         });
-        apply_renderer_properties(&mut snapshot, 0.5, "matte");
+        apply_renderer_properties(&mut snapshot, "test-renderer", 0.5, "matte");
         assert_eq!(
             snapshot.atoms[0].color.as_ref().unwrap().rgba8().unwrap().a,
             128
@@ -58710,6 +58720,7 @@ end_header
         assert_eq!(snapshot.meshes[0].vertices[0].color[3], 0.4);
         assert_eq!(snapshot.transparency_groups.len(), 1);
         let group = &snapshot.transparency_groups[0];
+        assert_eq!(group.name, "test-renderer");
         assert_eq!(group.alpha, 0.5);
         assert_eq!(group.material, "matte");
         assert_eq!(group.atom_range, 0..1);
@@ -58737,7 +58748,7 @@ end_header
             0.1,
             None,
         ));
-        apply_renderer_properties(&mut source, 0.25, "default");
+        apply_renderer_properties(&mut source, "source-renderer", 0.25, "default");
 
         append_snapshot(&mut target, source);
 

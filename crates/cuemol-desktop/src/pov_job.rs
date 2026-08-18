@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -33,6 +33,8 @@ pub(crate) struct PovProcessOptions {
     pub ambient_fraction: f64,
     pub radiosity: i32,
     pub verbose: bool,
+    pub post_blend: bool,
+    pub blend_group: Option<u8>,
 }
 
 impl Default for PovProcessOptions {
@@ -52,6 +54,8 @@ impl Default for PovProcessOptions {
             ambient_fraction: 0.0,
             radiosity: -1,
             verbose: true,
+            post_blend: false,
+            blend_group: None,
         }
     }
 }
@@ -115,6 +119,9 @@ pub(crate) fn povray_args(task: &PovProcessTask) -> Vec<String> {
     if options.radiosity >= 0 {
         args.push(format!("Declare=_radiosity={}", options.radiosity));
     }
+    if let Some(group) = options.blend_group {
+        args.push(format!("Declare=_cuemol_blend_group={group}"));
+    }
     args.push(if options.verbose { "+V" } else { "-V" }.to_string());
     args
 }
@@ -130,6 +137,81 @@ pub(crate) fn run_pov_process_with_poll(
     task: PovProcessTask,
     cancel: Arc<AtomicBool>,
     mut poll: impl FnMut(),
+) -> Result<PovProcessOutput, String> {
+    let blend_groups = if task.options.post_blend {
+        read_post_blend_groups(&task.input_path)?
+    } else {
+        Vec::new()
+    };
+    if blend_groups.is_empty() {
+        return run_single_pov_process_with_poll(task, cancel, &mut poll);
+    }
+    run_post_blend_process(task, blend_groups, cancel, &mut poll)
+}
+
+fn run_post_blend_process(
+    task: PovProcessTask,
+    blend_groups: Vec<u8>,
+    cancel: Arc<AtomicBool>,
+    poll: &mut impl FnMut(),
+) -> Result<PovProcessOutput, String> {
+    if task.output_path.exists() {
+        fs::remove_file(&task.output_path).map_err(|error| {
+            format!(
+                "failed to replace POV-Ray output {}: {error}",
+                task.output_path.display()
+            )
+        })?;
+    }
+    let background_path = pov_pass_path(&task.output_path, "background");
+    let layer_paths = blend_groups
+        .iter()
+        .map(|group| pov_pass_path(&task.output_path, &format!("blend-{group}")))
+        .collect::<Vec<_>>();
+    let pass_paths = std::iter::once(background_path.clone())
+        .chain(layer_paths.iter().cloned())
+        .collect::<Vec<_>>();
+
+    let result = (|| {
+        let mut background_task = task.clone();
+        background_task.output_path = background_path.clone();
+        background_task.options.post_blend = false;
+        background_task.options.blend_group = Some(10);
+        let background =
+            run_single_pov_process_with_poll(background_task, Arc::clone(&cancel), poll)?;
+        let mut log = background.log;
+        for (&group, layer_path) in blend_groups.iter().zip(&layer_paths) {
+            let mut layer_task = task.clone();
+            layer_task.output_path = layer_path.clone();
+            layer_task.options.post_blend = false;
+            layer_task.options.blend_group = Some(group);
+            let layer = run_single_pov_process_with_poll(layer_task, Arc::clone(&cancel), poll)?;
+            log.push_str(&layer.log);
+        }
+        blend_pov_passes(
+            &background_path,
+            &layer_paths
+                .iter()
+                .zip(&blend_groups)
+                .map(|(path, group)| (path.as_path(), f64::from(*group) / 10.0))
+                .collect::<Vec<_>>(),
+            &task.output_path,
+        )?;
+        Ok(PovProcessOutput {
+            output_path: task.output_path.clone(),
+            log,
+        })
+    })();
+    for path in pass_paths {
+        let _ = fs::remove_file(path);
+    }
+    result
+}
+
+fn run_single_pov_process_with_poll(
+    task: PovProcessTask,
+    cancel: Arc<AtomicBool>,
+    poll: &mut impl FnMut(),
 ) -> Result<PovProcessOutput, String> {
     if task.executable.trim().is_empty() {
         return Err("POV-Ray executable path is required".to_string());
@@ -219,6 +301,101 @@ pub(crate) fn run_pov_process_with_poll(
         }),
         _ => Err("POV-Ray did not produce an image".to_string()),
     }
+}
+
+fn read_post_blend_groups(path: &Path) -> Result<Vec<u8>, String> {
+    const PREFIX: &str = "// CueMol post-blend groups:";
+    let source = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read POV-Ray input {}: {error}", path.display()))?;
+    let Some(line) = source.lines().find(|line| line.starts_with(PREFIX)) else {
+        return Ok(Vec::new());
+    };
+    line[PREFIX.len()..]
+        .split_whitespace()
+        .map(|value| {
+            value
+                .parse::<u8>()
+                .ok()
+                .filter(|value| *value < 10)
+                .ok_or_else(|| format!("invalid POV-Ray post-blend group: {value}"))
+        })
+        .collect()
+}
+
+fn pov_pass_path(output_path: &Path, suffix: &str) -> PathBuf {
+    let stem = output_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("render");
+    output_path.with_file_name(format!(".{stem}.cuemol-{suffix}.png"))
+}
+
+fn blend_pov_passes(
+    background_path: &Path,
+    layers: &[(&Path, f64)],
+    output_path: &Path,
+) -> Result<(), String> {
+    let background = image::open(background_path).map_err(|error| {
+        format!(
+            "failed to decode POV-Ray background {}: {error}",
+            background_path.display()
+        )
+    })?;
+    let color_type = background.color();
+    if !matches!(color_type, image::ColorType::Rgb8 | image::ColorType::Rgba8) {
+        return Err(format!(
+            "POV-Ray post-blend requires an 8-bit RGB or RGBA image, got {color_type:?}"
+        ));
+    }
+    let width = background.width();
+    let height = background.height();
+    let background_bytes = match color_type {
+        image::ColorType::Rgb8 => background.into_rgb8().into_raw(),
+        image::ColorType::Rgba8 => background.into_rgba8().into_raw(),
+        _ => unreachable!(),
+    };
+    let mut decoded_layers = Vec::with_capacity(layers.len());
+    for &(path, alpha) in layers {
+        let layer = image::open(path).map_err(|error| {
+            format!("failed to decode POV-Ray layer {}: {error}", path.display())
+        })?;
+        if layer.width() != width || layer.height() != height || layer.color() != color_type {
+            return Err(format!(
+                "POV-Ray post-blend layer does not match the background: {}",
+                path.display()
+            ));
+        }
+        let bytes = match color_type {
+            image::ColorType::Rgb8 => layer.into_rgb8().into_raw(),
+            image::ColorType::Rgba8 => layer.into_rgba8().into_raw(),
+            _ => unreachable!(),
+        };
+        decoded_layers.push((bytes, alpha));
+    }
+
+    let background_weight = 1.0 - decoded_layers.iter().map(|(_, alpha)| alpha).sum::<f64>();
+    let mut output = vec![0_u8; background_bytes.len()];
+    for (index, value) in output.iter_mut().enumerate() {
+        let blended = decoded_layers.iter().fold(
+            f64::from(background_bytes[index]) * background_weight,
+            |acc, (layer, alpha)| acc + f64::from(layer[index]) * alpha,
+        );
+        *value = blended.clamp(0.0, 255.0) as u8;
+    }
+    image::save_buffer_with_format(
+        output_path,
+        &output,
+        width,
+        height,
+        color_type,
+        image::ImageFormat::Png,
+    )
+    .map_err(|error| {
+        format!(
+            "failed to write POV-Ray post-blend output {}: {error}",
+            output_path.display()
+        )
+    })
 }
 
 fn validate_options(options: &PovProcessOptions) -> Result<(), String> {
@@ -321,6 +498,73 @@ mod tests {
                 "{expected}"
             );
         }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn runs_quantized_post_blend_passes_and_composites_the_png() {
+        let dir =
+            std::env::temp_dir().join(format!("cuemol-pov-post-blend-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let input_path = dir.join("render.pov");
+        let output_path = dir.join("render.png");
+        let background_path = dir.join("background.png");
+        let layer_path = dir.join("layer.png");
+        let executable = dir.join("povray.sh");
+        fs::write(&input_path, "// CueMol post-blend groups: 5\ncamera {}\n").unwrap();
+        image::save_buffer_with_format(
+            &background_path,
+            &[100, 100, 100],
+            1,
+            1,
+            image::ColorType::Rgb8,
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+        image::save_buffer_with_format(
+            &layer_path,
+            &[200, 40, 100],
+            1,
+            1,
+            image::ColorType::Rgb8,
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nout=''\nsrc='{}'\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    +O*) out=${{arg#'+O'}} ;;\n    Declare=_cuemol_blend_group=5) src='{}' ;;\n  esac\ndone\ncp \"$src\" \"$out\"\n",
+                background_path.display(),
+                layer_path.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+
+        let output = run_pov_process(
+            PovProcessTask {
+                executable: executable.to_string_lossy().into_owned(),
+                include_dir: String::new(),
+                input_path,
+                output_path: output_path.clone(),
+                options: PovProcessOptions {
+                    post_blend: true,
+                    ..PovProcessOptions::default()
+                },
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+
+        assert_eq!(output.output_path, output_path);
+        assert_eq!(
+            image::open(&output_path).unwrap().into_rgb8().as_raw(),
+            &[150, 70, 100]
+        );
+        assert!(!pov_pass_path(&output_path, "background").exists());
+        assert!(!pov_pass_path(&output_path, "blend-5").exists());
         fs::remove_dir_all(dir).unwrap();
     }
 

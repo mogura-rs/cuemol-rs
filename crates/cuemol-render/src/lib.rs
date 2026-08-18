@@ -3,6 +3,7 @@ pub mod raytrace;
 use cuemol_core::{CueMolError, Matrix4, Result, Uid, Vector4};
 use cuemol_gfx::{CmsXform, ColorSpec, Rgba8};
 use cuemol_qsys::{Camera, InOutHandler, SceneExporter as QsysSceneExporter};
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::ops::Range;
 
@@ -188,6 +189,7 @@ impl RenderMesh {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderTransparencyGroup {
+    pub name: String,
     pub alpha: f32,
     pub material: String,
     pub atom_range: Range<usize>,
@@ -469,7 +471,18 @@ impl RenderSceneSnapshot {
     }
 
     pub fn mark_renderer_section(&mut self, alpha: f32, material: impl Into<String>) {
+        let name = format!("section{}", self.transparency_groups.len());
+        self.mark_named_renderer_section(name, alpha, material);
+    }
+
+    pub fn mark_named_renderer_section(
+        &mut self,
+        name: impl Into<String>,
+        alpha: f32,
+        material: impl Into<String>,
+    ) {
         self.transparency_groups.push(RenderTransparencyGroup {
+            name: name.into(),
             alpha: alpha.clamp(0.0, 1.0),
             material: material.into(),
             atom_range: 0..self.atoms.len(),
@@ -1119,6 +1132,65 @@ impl PovSceneExporter {
         Ok(())
     }
 
+    /// Write a complete scene while preserving renderer-sized sections for
+    /// CueMol's blendpng-compatible post-blend pipeline.
+    pub fn write_snapshot_file_with_camera(
+        &mut self,
+        snapshot: &RenderSceneSnapshot,
+        camera: &Camera,
+    ) -> Result<()> {
+        let output = self.write_snapshot_string_with_camera(snapshot, camera)?;
+        self.handler().write_string(&output)?;
+        self.state.write();
+        Ok(())
+    }
+
+    /// Serialize a snapshot as one POV source. In post-blend mode the opaque
+    /// background is always present and each quantized alpha group is enabled
+    /// with `_cuemol_blend_group` for a separate render pass.
+    pub fn write_snapshot_string_with_camera(
+        &mut self,
+        snapshot: &RenderSceneSnapshot,
+        camera: &Camera,
+    ) -> Result<String> {
+        if !self.use_post_blend {
+            self.blend_table.clear();
+            return self.write_scene_string_with_camera(&tessellate_snapshot(snapshot), camera);
+        }
+
+        let plan = pov_post_blend_plan(snapshot);
+        self.blend_table = plan.blend_table_json();
+        let mut output = self.write_scene_string_with_camera(&plan.background, camera)?;
+        if plan.layers.is_empty() {
+            return Ok(output);
+        }
+
+        output.push_str("\n// CueMol post-blend groups:");
+        for layer in &plan.layers {
+            write!(&mut output, " {}", layer.alpha_digit).unwrap();
+        }
+        output.push('\n');
+        output.push_str(
+            "#ifndef (_cuemol_blend_group)\n  #declare _cuemol_blend_group = -1;\n#end\n",
+        );
+        for layer in &plan.layers {
+            writeln!(
+                &mut output,
+                "#if ((_cuemol_blend_group < 0) | (_cuemol_blend_group = {}))",
+                layer.alpha_digit
+            )
+            .unwrap();
+            let layer_source = self.write_scene_string_with_camera(&layer.mesh, camera)?;
+            let geometry = layer_source
+                .find("mesh2 {")
+                .map(|offset| &layer_source[offset..])
+                .unwrap_or_default();
+            output.push_str(geometry);
+            output.push_str("#end\n");
+        }
+        Ok(output)
+    }
+
     pub fn write_mesh2_string(&self, vertices: &[Vector4], triangles: &[[usize; 3]]) -> String {
         let valid_triangles = triangles
             .iter()
@@ -1336,7 +1408,7 @@ impl PovSceneExporter {
         out.push_str("  }\n");
         writeln!(&mut out, "  texture_list {{ {}", mat_keys.len()).unwrap();
         for c in &mat_keys {
-            if self.use_post_blend {
+            if c[3] < u8::MAX {
                 writeln!(
                     &mut out,
                     "    texture {{ pigment {{ color rgbt <{:.6}, {:.6}, {:.6}, {:.6}> }} }},",
@@ -3172,6 +3244,216 @@ pub fn atom_intr_snapshot_with_options(
     }
 }
 
+#[derive(Debug)]
+struct PovPostBlendLayer {
+    alpha_digit: u8,
+    section_names: Vec<String>,
+    mesh: RenderMesh,
+}
+
+#[derive(Debug)]
+struct PovPostBlendPlan {
+    background: RenderMesh,
+    layers: Vec<PovPostBlendLayer>,
+}
+
+impl PovPostBlendPlan {
+    fn blend_table_json(&self) -> String {
+        let entries = self
+            .layers
+            .iter()
+            .map(|layer| {
+                let sections = layer
+                    .section_names
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!(
+                    "\"{}\":\"{}\"",
+                    layer.alpha_digit,
+                    json_string_contents(&sections)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",\n");
+        format!("{{{entries}}}")
+    }
+}
+
+fn pov_post_blend_plan(snapshot: &RenderSceneSnapshot) -> PovPostBlendPlan {
+    let mut grouped_sections = BTreeMap::<u8, Vec<usize>>::new();
+    let mut background_atoms = vec![Some(1.0_f32); snapshot.atoms.len()];
+    let mut background_bonds = vec![Some(1.0_f32); snapshot.bonds.len()];
+    let mut background_meshes = vec![Some(1.0_f32); snapshot.meshes.len()];
+
+    for (section_index, section) in snapshot.transparency_groups.iter().enumerate() {
+        let digit = (section.alpha.clamp(0.0, 1.0) * 10.0 + 0.5).floor() as u8;
+        let is_blended = digit < 10;
+        if is_blended {
+            grouped_sections
+                .entry(digit)
+                .or_default()
+                .push(section_index);
+        }
+        set_pov_section_factors(
+            &mut background_atoms,
+            section.atom_range.clone(),
+            (!is_blended).then_some(section.alpha),
+        );
+        set_pov_section_factors(
+            &mut background_bonds,
+            section.bond_range.clone(),
+            (!is_blended).then_some(section.alpha),
+        );
+        set_pov_section_factors(
+            &mut background_meshes,
+            section.mesh_range.clone(),
+            (!is_blended).then_some(section.alpha),
+        );
+    }
+
+    let background = tessellate_pov_subset(
+        snapshot,
+        &background_atoms,
+        &background_bonds,
+        &background_meshes,
+    );
+    let layers = grouped_sections
+        .into_iter()
+        .map(|(alpha_digit, section_indices)| {
+            let mut atom_factors = vec![None; snapshot.atoms.len()];
+            let mut bond_factors = vec![None; snapshot.bonds.len()];
+            let mut mesh_factors = vec![None; snapshot.meshes.len()];
+            for &section_index in &section_indices {
+                let section = &snapshot.transparency_groups[section_index];
+                set_pov_section_factors(
+                    &mut atom_factors,
+                    section.atom_range.clone(),
+                    Some(section.alpha),
+                );
+                set_pov_section_factors(
+                    &mut bond_factors,
+                    section.bond_range.clone(),
+                    Some(section.alpha),
+                );
+                set_pov_section_factors(
+                    &mut mesh_factors,
+                    section.mesh_range.clone(),
+                    Some(section.alpha),
+                );
+            }
+            let section_names = section_indices
+                .iter()
+                .map(|index| snapshot.transparency_groups[*index].name.clone())
+                .collect();
+            PovPostBlendLayer {
+                alpha_digit,
+                section_names,
+                mesh: tessellate_pov_subset(snapshot, &atom_factors, &bond_factors, &mesh_factors),
+            }
+        })
+        .collect();
+    PovPostBlendPlan { background, layers }
+}
+
+fn json_string_contents(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            character if character.is_control() => {
+                write!(&mut escaped, "\\u{:04x}", character as u32).unwrap();
+            }
+            character => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn set_pov_section_factors(factors: &mut [Option<f32>], range: Range<usize>, value: Option<f32>) {
+    let start = range.start.min(factors.len());
+    let end = range.end.min(factors.len());
+    for factor in &mut factors[start..end] {
+        *factor = value;
+    }
+}
+
+fn tessellate_pov_subset(
+    snapshot: &RenderSceneSnapshot,
+    atom_factors: &[Option<f32>],
+    bond_factors: &[Option<f32>],
+    mesh_factors: &[Option<f32>],
+) -> RenderMesh {
+    let mut subset = RenderSceneSnapshot::empty();
+    subset.bounds = snapshot.bounds;
+    for (atom, factor) in snapshot.atoms.iter().zip(atom_factors) {
+        if let Some(factor) = factor {
+            let mut atom = atom.clone();
+            restore_pov_renderer_alpha(&mut atom.color, *factor);
+            if let Some(edge) = &mut atom.edge {
+                restore_pov_float_alpha(&mut edge.color[3], *factor);
+            }
+            subset.atoms.push(atom);
+        }
+    }
+    for (bond, factor) in snapshot.bonds.iter().zip(bond_factors) {
+        if let Some(factor) = factor {
+            let mut bond = bond.clone();
+            restore_pov_renderer_alpha(&mut bond.color, *factor);
+            restore_pov_renderer_alpha(&mut bond.end_color, *factor);
+            if let Some(edge) = &mut bond.edge {
+                restore_pov_float_alpha(&mut edge.color[3], *factor);
+            }
+            subset.bonds.push(bond);
+        }
+    }
+    for (mesh, factor) in snapshot.meshes.iter().zip(mesh_factors) {
+        if let Some(factor) = factor {
+            let mut mesh = mesh.clone();
+            for vertex in &mut mesh.vertices {
+                restore_pov_float_alpha(&mut vertex.color[3], *factor);
+            }
+            subset.meshes.push(mesh);
+        }
+    }
+    tessellate_snapshot(&subset)
+}
+
+fn restore_pov_renderer_alpha(color: &mut Option<ColorSpec>, renderer_alpha: f32) {
+    let Some(rgba) = color.as_ref().and_then(ColorSpec::rgba8) else {
+        return;
+    };
+    let alpha = if renderer_alpha > f32::EPSILON {
+        (f32::from(rgba.a) / renderer_alpha)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    } else {
+        u8::MAX
+    };
+    *color = Some(ColorSpec {
+        base: cuemol_gfx::ColorBase::Html {
+            r: rgba.r,
+            g: rgba.g,
+            b: rgba.b,
+            a: alpha,
+        },
+        modifiers: Vec::new(),
+    });
+}
+
+fn restore_pov_float_alpha(alpha: &mut f32, renderer_alpha: f32) {
+    *alpha = if renderer_alpha > f32::EPSILON {
+        (*alpha / renderer_alpha).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+}
+
 pub fn tessellate_snapshot(snapshot: &RenderSceneSnapshot) -> RenderMesh {
     let mut mesh = RenderMesh::new();
     for atom in snapshot.atoms.iter().filter(|atom| atom.hit.is_none()) {
@@ -4121,7 +4403,7 @@ mod tests {
         camera.set_slab_depth(2.0);
         let mut exporter = PovSceneExporter::new();
         exporter.set_use_clip_z(true);
-        exporter.set_use_post_blend(true);
+        exporter.set_use_post_blend(false);
         exporter.set_show_edge_lines(false);
 
         let pov = exporter
@@ -4134,6 +4416,78 @@ mod tests {
         assert!(pov.contains("SpecLighting(_light_spread, _distance, _light_inten*(1-_amb_frac)*(1-_flash_frac), _shadow)"));
         assert!(!pov.contains("edge lines"));
         assert_eq!(pov.matches('{').count(), pov.matches('}').count());
+    }
+
+    #[test]
+    fn pov_scene_emits_quantized_renderer_post_blend_groups() {
+        let triangle = |offset: f64, alpha: f32| RenderMesh {
+            vertices: vec![
+                MeshVertex {
+                    position: Vector4::new3(offset, 0.0, 0.0),
+                    normal: Vector4::new3(0.0, 0.0, 1.0),
+                    color: [1.0, 0.0, 0.0, alpha],
+                },
+                MeshVertex {
+                    position: Vector4::new3(offset + 1.0, 0.0, 0.0),
+                    normal: Vector4::new3(0.0, 0.0, 1.0),
+                    color: [1.0, 0.0, 0.0, alpha],
+                },
+                MeshVertex {
+                    position: Vector4::new3(offset, 1.0, 0.0),
+                    normal: Vector4::new3(0.0, 0.0, 1.0),
+                    color: [1.0, 0.0, 0.0, alpha],
+                },
+            ],
+            indices: vec![0, 1, 2],
+        };
+        let snapshot = RenderSceneSnapshot {
+            atoms: Vec::new(),
+            bonds: Vec::new(),
+            meshes: vec![triangle(0.0, 0.5), triangle(2.0, 0.54), triangle(4.0, 0.95)],
+            transparency_groups: vec![
+                RenderTransparencyGroup {
+                    name: "translucent-a".to_string(),
+                    alpha: 0.5,
+                    material: "default".to_string(),
+                    atom_range: 0..0,
+                    bond_range: 0..0,
+                    mesh_range: 0..1,
+                },
+                RenderTransparencyGroup {
+                    name: "translucent-b".to_string(),
+                    alpha: 0.54,
+                    material: "default".to_string(),
+                    atom_range: 0..0,
+                    bond_range: 0..0,
+                    mesh_range: 1..2,
+                },
+                RenderTransparencyGroup {
+                    name: "near-opaque".to_string(),
+                    alpha: 0.95,
+                    material: "default".to_string(),
+                    atom_range: 0..0,
+                    bond_range: 0..0,
+                    mesh_range: 2..3,
+                },
+            ],
+            bounds: None,
+        };
+        let mut exporter = PovSceneExporter::new();
+        exporter.set_use_post_blend(true);
+        exporter.set_show_edge_lines(false);
+        let source = exporter
+            .write_snapshot_string_with_camera(&snapshot, &Camera::new())
+            .unwrap();
+
+        assert_eq!(
+            exporter.blend_table(),
+            "{\"5\":\"translucent-a,translucent-b\"}"
+        );
+        assert!(source.contains("// CueMol post-blend groups: 5"));
+        assert!(source.contains("(_cuemol_blend_group = 5)"));
+        assert_eq!(source.matches("mesh2 {").count(), 2);
+        assert!(!source.contains("0.498039"));
+        assert!(!source.contains("0.050980"));
     }
 
     #[test]

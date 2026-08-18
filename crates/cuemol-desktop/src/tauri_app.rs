@@ -8960,7 +8960,6 @@ fn render_tauri_pov_animation_frame(
 ) -> Result<TauriAnimationTaskOutput, String> {
     let pov_path = tauri_animation_frame_path(&task.input, task.index, "pov");
     let png_path = tauri_animation_frame_path(&task.input, task.index, "png");
-    let mesh = tessellate_snapshot(&task.snapshot);
     let mut exporter = PovSceneExporter::new();
     exporter.set_use_clip_z(task.input.pov_clip_plane);
     exporter.set_use_post_blend(task.input.pov_post_blend);
@@ -8969,7 +8968,7 @@ fn render_tauri_pov_animation_frame(
         .handler_mut()
         .set_path(pov_path.to_string_lossy().into_owned());
     exporter
-        .write_scene_file_with_camera(&mesh, &task.camera)
+        .write_snapshot_file_with_camera(&task.snapshot, &task.camera)
         .map_err(|error| error.to_string())?;
     if task.cancel.load(Ordering::Relaxed) {
         return Err("Animation rendering cancelled".to_string());
@@ -9021,6 +9020,7 @@ fn tauri_animation_pov_process_task(
             shadow: input.pov_shadow,
             radiosity: input.pov_radiosity,
             verbose: false,
+            post_blend: input.pov_post_blend,
             ..PovProcessOptions::default()
         },
     }
@@ -12478,6 +12478,8 @@ fn handle_model_request(
                     ambient_fraction,
                     radiosity: input.radiosity,
                     verbose: true,
+                    post_blend: input.post_blend,
+                    blend_group: None,
                 },
             };
             let labels = collect_scene_pov_labels(
