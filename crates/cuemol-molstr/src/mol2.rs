@@ -1,3 +1,4 @@
+use crate::chem::ElemSym;
 use crate::molecule::{Atom, BondOrder, MolCoord};
 use cuemol_core::{CueMolError, Result, Vector4};
 use std::collections::{BTreeMap, HashMap};
@@ -305,18 +306,7 @@ fn element_from_mol2_type(atom_type: &str) -> Result<String> {
         .next()
         .filter(|value| !value.is_empty())
         .ok_or_else(|| CueMolError::parse("invalid MOL2 atom type"))?;
-    let mut chars = raw.chars();
-    let Some(first) = chars.next() else {
-        return Err(CueMolError::parse("invalid MOL2 atom type"));
-    };
-    let mut element = String::new();
-    element.push(first.to_ascii_uppercase());
-    if let Some(second) = chars.next() {
-        if second.is_ascii_lowercase() {
-            element.push(second);
-        }
-    }
-    Ok(element)
+    Ok(ElemSym::from_name(raw).name().to_string())
 }
 
 fn split_biopolymer_residue(input: &str) -> Option<(String, i32)> {
@@ -393,6 +383,25 @@ NO_CHARGES
             .bonds()
             .iter()
             .all(|bond| bond.order == BondOrder::Single));
+    }
+
+    #[test]
+    fn mol2_reader_normalizes_elements_with_reference_symbol_table() {
+        let input = "\
+@<TRIPOS>MOLECULE
+elements
+3 0 1 0 0
+SMALL
+NO_CHARGES
+@<TRIPOS>ATOM
+1 CL1 0.0 0.0 0.0 CL 1 LIG
+2 br1 1.0 0.0 0.0 br.any 1 LIG
+3 DU1 2.0 0.0 0.0 Du 1 LIG
+";
+        let molecule = read_mol2_str(input).unwrap();
+        assert_eq!(molecule.atoms()[0].element, "Cl");
+        assert_eq!(molecule.atoms()[1].element, "Br");
+        assert_eq!(molecule.atoms()[2].element, "Unknown");
     }
 
     #[test]
