@@ -6330,8 +6330,8 @@ fn pivot_distance(a: Vector4, b: Vector4) -> f64 {
 const PROTEIN_PIVOT_LINK_DIST: f64 = 5.0;
 const NUCLEIC_PIVOT_LINK_DIST: f64 = 8.0;
 
-/// Pick the residue's configured backbone pivot atom, falling back to CA
-/// (protein) and then nucleic-acid defaults when the configured atom is absent.
+/// Pick the residue's configured backbone pivot atom, or the residue-type
+/// defaults when no explicit name is configured.
 /// Returns the pivot point and its link-distance cutoff (protein vs nucleic),
 /// used to break the backbone run at chain gaps.
 fn mainchain_pivot_point(
@@ -6342,12 +6342,7 @@ fn mainchain_pivot_point(
     let indices = residue.atom_indices();
     let default_names = ["CA", "P", "C1'", "O5'"];
     let custom_name = pivot_atom.filter(|name| !name.trim().is_empty());
-    let custom_names = [custom_name.unwrap_or_default()];
-    for name in custom_names
-        .iter()
-        .filter(|_| custom_name.is_some())
-        .chain(default_names.iter())
-    {
+    let find_named = |name: &str| {
         for &index in indices {
             let Some(atom) = molecule.atoms().get(index) else {
                 continue;
@@ -6374,6 +6369,15 @@ fn mainchain_pivot_point(
                 };
                 return Some((point, cutoff));
             }
+        }
+        None
+    };
+    if let Some(name) = custom_name {
+        return find_named(name);
+    }
+    for name in default_names {
+        if let Some(point) = find_named(name) {
+            return Some(point);
         }
     }
     None
@@ -11246,6 +11250,10 @@ return cuemol.makeColor("#0000ff");
         let runs = collect_mainchain_pivots(&mol, None, None);
         assert_eq!(runs.len(), 1, "a contiguous Ca-only chain is one run");
         assert_eq!(runs[0].len(), 5);
+        assert!(
+            collect_mainchain_pivots(&mol, None, Some("CB")).is_empty(),
+            "an explicit missing pivot must not fall back to CA"
+        );
 
         let mut no_pivot = sample_atom("CB", "C", 2.0, 0.0, 0.0);
         no_pivot.res_id = 2;
@@ -11430,14 +11438,7 @@ return cuemol.makeColor("#0000ff");
         assert!((first_center.y - 2.0).abs() < 1.0e-6);
 
         options.pivot_atom = Some("MISSING".to_string());
-        let fallback = ribbon_mesh_snapshot(&molecule, &options);
-        let fallback_center = fallback.meshes[0].vertices[..9]
-            .iter()
-            .fold(Vector4::new3(0.0, 0.0, 0.0), |sum, vertex| {
-                sum + vertex.position
-            })
-            .scale(1.0 / 9.0);
-        assert!(fallback_center.y.abs() < 1.0e-6);
+        assert!(ribbon_mesh_snapshot(&molecule, &options).meshes.is_empty());
     }
 
     #[test]
