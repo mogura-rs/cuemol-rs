@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 cuemol-core.workspace = true
 cuemol-gfx.workspace = true
+cuemol-lwview.workspace = true
 cuemol-mdtools.workspace = true
 cuemol-molstr.workspace = true
 cuemol-molvis.workspace = true

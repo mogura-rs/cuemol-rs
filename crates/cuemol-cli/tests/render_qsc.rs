@@ -217,3 +217,68 @@ fn render_qsc_exports_saved_surface_renderers() {
     std::fs::remove_file(obj_path).ok();
     std::fs::remove_file(mqo_path).ok();
 }
+
+#[test]
+fn render_qsc_exports_saved_lightweight_renderers() {
+    let mut object = cuemol_lwview::LWObject::new();
+    object.add_draw_element(cuemol_lwview::LWDrawElement::new(
+        7,
+        cuemol_gfx::AbstDrawElem::DRAW_TRIANGLES as i8,
+        1.0,
+        [32, 64, 128, 255],
+        cuemol_lwview::LWDrawData::Vertices(vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ]),
+    ));
+    let qdf = cuemol_lwview::write_qdf_lwobj_bytes(&object);
+    let encoded =
+        String::from_utf8(cuemol_qsys::encode_qdf0_bytes(&qdf, 1, "13").unwrap()).unwrap();
+    let qsc = format!(
+        "<scene>\n\
+         <object type=\"LWObject\" name=\"lightweight\" src=\"datachunk:00000\" srctype=\"qdflwobj\" xformMat=\"(1,0,0,0,0,1,0,0,0,0,1,0,2,0,0,1)\">\n\
+         <renderer type=\"lwrend\" name=\"lw-mesh\" data_id=\"7\" alpha=\"0.5\" xformMat=\"(1,0,0,0,0,1,0,0,0,0,1,0,0,0,1,1)\"/>\n\
+         </object>\n\
+         </scene>\n\
+         ========== End of XML ==========\n\
+         ==========START datachunk:00000==========\n\
+         {encoded}\
+         ==========END datachunk:00000==========\n"
+    );
+    let stem = format!("cuemol_render_qsc_lw_{}", std::process::id());
+    let qsc_path = std::env::temp_dir().join(format!("{stem}.qsc"));
+    let obj_path = std::env::temp_dir().join(format!("{stem}.obj"));
+    let mqo_path = std::env::temp_dir().join(format!("{stem}.mqo"));
+    std::fs::write(&qsc_path, qsc).unwrap();
+
+    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+        .args([
+            "render-qsc",
+            qsc_path.to_str().unwrap(),
+            obj_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("export QSC lightweight object to OBJ");
+    assert!(status.success());
+    let obj = std::fs::read_to_string(&obj_path).unwrap();
+    assert!(obj.contains("v 2.000000 0.000000 1.000000"));
+    assert_eq!(obj.lines().filter(|line| line.starts_with("f ")).count(), 1);
+
+    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+        .args([
+            "render-qsc",
+            qsc_path.to_str().unwrap(),
+            mqo_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("export QSC lightweight object to MQO");
+    assert!(status.success());
+    let mqo = std::fs::read_to_string(&mqo_path).unwrap();
+    assert!(mqo.contains("Object \"lw_mesh\""));
+    assert!(mqo.contains("col(0.125490 0.250980 0.501961 0.501961)"));
+
+    std::fs::remove_file(qsc_path).ok();
+    std::fs::remove_file(obj_path).ok();
+    std::fs::remove_file(mqo_path).ok();
+}

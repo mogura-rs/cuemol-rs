@@ -1240,6 +1240,7 @@ version = "0.1.0"
 dependencies = [
  "cuemol-core",
  "cuemol-gfx",
+ "cuemol-lwview",
  "cuemol-mdtools",
  "cuemol-molstr",
  "cuemol-molvis",

@@ -1100,6 +1100,14 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
         renderer_count += 1;
     }
 
+    for snapshot in loaded_lw_snapshots(scene, &styles)? {
+        total_atoms += snapshot.atom_count();
+        total_bonds += snapshot.bond_count();
+        merge_mesh(&mut combined, &tessellate_snapshot(&snapshot));
+        append_render_snapshot(&mut rendered, snapshot);
+        renderer_count += 1;
+    }
+
     for loaded in scene.loaded_density_maps() {
         let map = read_loaded_density_map(loaded)?;
         let Some(object_node) = loaded.qsc_node.as_ref() else {
@@ -1790,6 +1798,71 @@ fn surface_snapshot_for_mode(
     }
     snapshot.recompute_bounds();
     snapshot
+}
+
+fn loaded_lw_snapshots(
+    scene: &cuemol_molstr::MolScene,
+    styles: &cuemol_qsys::StyleManager,
+) -> Result<Vec<RenderSceneSnapshot>, String> {
+    let mut snapshots = Vec::new();
+    for loaded in scene
+        .loaded_lw_objects()
+        .iter()
+        .filter(|object| object.visible)
+    {
+        let object = cuemol_lwview::read_qdf_lwobj_bytes(&loaded.raw_data)
+            .map_err(|error| error.to_string())?;
+        let renderer_nodes = loaded
+            .qsc_node
+            .iter()
+            .flat_map(|node| node.children())
+            .filter(|node| {
+                !node.is_attr()
+                    && node.tag_name() == "renderer"
+                    && if node.type_name().is_empty() {
+                        node.str_attr("type").as_str() == "lwrend"
+                    } else {
+                        node.type_name() == "lwrend"
+                    }
+            })
+            .collect::<Vec<_>>();
+        for (index, renderer) in loaded.renderers.iter().enumerate() {
+            if !renderer.visible {
+                continue;
+            }
+            let node = renderer_nodes.get(index).copied();
+            let attr = |name: &str| node.and_then(|node| qsc_node_attr(node, name, styles));
+            let data_id = attr("data_id")
+                .and_then(|value| value.trim().parse::<i32>().ok())
+                .unwrap_or(renderer.data_id);
+            if data_id == 0 {
+                continue;
+            }
+            let mut snapshot = RenderSceneSnapshot::empty();
+            for element in object.draw_elements_for(data_id) {
+                cuemol_lwview::append_draw_element_snapshot(&mut snapshot, element);
+            }
+            let alpha = attr("alpha")
+                .and_then(|value| value.trim().parse::<f64>().ok())
+                .unwrap_or(1.0)
+                .clamp(0.0, 1.0);
+            let material = attr("material").unwrap_or_else(|| "default".to_string());
+            let renderer_name = if renderer.name.trim().is_empty() {
+                "lwrend"
+            } else {
+                &renderer.name
+            };
+            apply_snapshot_renderer_properties(&mut snapshot, renderer_name, alpha, &material);
+            let xform = renderer.xform.mul_mat(loaded.xform);
+            if xform != Matrix4::IDENTITY {
+                snapshot.apply_xform(&xform);
+            } else {
+                snapshot.recompute_bounds();
+            }
+            snapshots.push(snapshot);
+        }
+    }
+    Ok(snapshots)
 }
 
 fn direct_surface_scene_snapshot(

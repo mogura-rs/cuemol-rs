@@ -642,6 +642,284 @@ impl LWViewerManager {
     }
 }
 
+/// Append one lightweight draw element to a render snapshot while preserving
+/// its primitive mode, vertex colors, normals, line width, and pixel coverage.
+pub fn append_draw_element_snapshot(target: &mut RenderSceneSnapshot, element: &LWDrawElement) {
+    let default_color = element.default_color();
+    let (positions, normals, colors, order) = match element.data() {
+        LWDrawData::Vertices(vertices) => (
+            vertices.as_slice(),
+            None,
+            vec![default_color; vertices.len()],
+            (0..vertices.len()).collect::<Vec<_>>(),
+        ),
+        LWDrawData::VertexColors(vertices) => {
+            let positions = vertices
+                .iter()
+                .map(|vertex| vertex.position)
+                .collect::<Vec<_>>();
+            let colors = vertices
+                .iter()
+                .map(|vertex| vertex.color)
+                .collect::<Vec<_>>();
+            append_draw_arrays(
+                target,
+                &positions,
+                None,
+                &colors,
+                &(0..positions.len()).collect::<Vec<_>>(),
+                element.draw_mode(),
+                element.line_width(),
+            );
+            return;
+        }
+        LWDrawData::VertexNormalColorIndices { vertices, indices } => {
+            let positions = vertices
+                .iter()
+                .map(|vertex| vertex.position)
+                .collect::<Vec<_>>();
+            let normals = vertices
+                .iter()
+                .map(|vertex| vertex.normal)
+                .collect::<Vec<_>>();
+            let colors = vertices
+                .iter()
+                .map(|vertex| vertex.color)
+                .collect::<Vec<_>>();
+            let order = indices
+                .iter()
+                .filter_map(|&index| usize::try_from(index).ok())
+                .collect::<Vec<_>>();
+            append_draw_arrays(
+                target,
+                &positions,
+                Some(&normals),
+                &colors,
+                &order,
+                element.draw_mode(),
+                element.line_width(),
+            );
+            return;
+        }
+        LWDrawData::Pixel(pixel) => {
+            append_pixel_points(target, pixel);
+            return;
+        }
+    };
+    append_draw_arrays(
+        target,
+        positions,
+        normals,
+        &colors,
+        &order,
+        element.draw_mode(),
+        element.line_width(),
+    );
+}
+
+fn append_pixel_points(target: &mut RenderSceneSnapshot, pixel: &LWPixelData) {
+    let pixels = pixel.pixels();
+    let width = pixels.width();
+    let pixel_count = width.saturating_mul(pixels.height());
+    if width == 0 || pixel_count == 0 {
+        return;
+    }
+    let position = f32_to_vector(pixel.position());
+    let base_color = pixel.color();
+    for (index, coverage) in pixels.data().iter().copied().take(pixel_count).enumerate() {
+        if coverage <= 25 {
+            continue;
+        }
+        let mut color = base_color;
+        color[3] = ((u16::from(color[3]) * u16::from(coverage) + 127) / 255) as u8;
+        let x = (index % width) as f32 + 0.5;
+        let y = (index / width) as f32 + 0.5;
+        target.bonds.push(
+            cuemol_render::RenderBond::new(position, position, 0.03, Some(lw_color_spec(color)))
+                .with_screen_style(1.0, false)
+                .with_screen_offset(x, -y)
+                .as_screen_point(),
+        );
+    }
+}
+
+fn append_draw_arrays(
+    target: &mut RenderSceneSnapshot,
+    positions: &[[f32; 3]],
+    normals: Option<&[[f32; 3]]>,
+    colors: &[[u8; 4]],
+    order: &[usize],
+    draw_mode: i8,
+    line_width: f32,
+) {
+    use cuemol_gfx::AbstDrawElem;
+
+    match i32::from(draw_mode) {
+        AbstDrawElem::DRAW_POINTS => {
+            for &index in order {
+                let (Some(position), Some(color)) = (positions.get(index), colors.get(index))
+                else {
+                    continue;
+                };
+                target.bonds.push(
+                    cuemol_render::RenderBond::new(
+                        f32_to_vector(*position),
+                        f32_to_vector(*position),
+                        (line_width * 0.03).max(0.03),
+                        Some(lw_color_spec(*color)),
+                    )
+                    .with_screen_style(line_width, false)
+                    .as_screen_point(),
+                );
+            }
+        }
+        AbstDrawElem::DRAW_LINE_STRIP | AbstDrawElem::DRAW_LINE_LOOP | AbstDrawElem::DRAW_LINES => {
+            for [start, end] in draw_line_indices(order, i32::from(draw_mode)) {
+                let (Some(from), Some(to), Some(color), Some(end_color)) = (
+                    positions.get(start),
+                    positions.get(end),
+                    colors.get(start),
+                    colors.get(end),
+                ) else {
+                    continue;
+                };
+                target.bonds.push(
+                    cuemol_render::RenderBond::new(
+                        f32_to_vector(*from),
+                        f32_to_vector(*to),
+                        (line_width * 0.02).max(0.01),
+                        Some(lw_color_spec(*color)),
+                    )
+                    .with_end_color(Some(lw_color_spec(*end_color)))
+                    .with_screen_style(line_width, false),
+                );
+            }
+        }
+        _ => {
+            let triangles = draw_triangle_indices(order, i32::from(draw_mode));
+            let mut mesh = cuemol_render::RenderMesh::new();
+            for triangle in triangles {
+                let Some(points) = triangle
+                    .map(|index| positions.get(index).copied())
+                    .into_iter()
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    continue;
+                };
+                let points = [
+                    f32_to_vector(points[0]),
+                    f32_to_vector(points[1]),
+                    f32_to_vector(points[2]),
+                ];
+                let face_normal = (points[1] - points[0])
+                    .cross(points[2] - points[0])
+                    .normalize3d()
+                    .unwrap_or(Vector4::new3(0.0, 0.0, 1.0));
+                for &index in &triangle {
+                    let normal = normals
+                        .and_then(|normals| normals.get(index))
+                        .map_or(face_normal, |normal| f32_to_vector(*normal));
+                    let color = colors.get(index).copied().unwrap_or([255; 4]);
+                    mesh.vertices.push(cuemol_render::MeshVertex {
+                        position: f32_to_vector(positions[index]),
+                        normal,
+                        color: lw_color_f32(color),
+                    });
+                    mesh.indices.push(mesh.indices.len() as u32);
+                }
+            }
+            if !mesh.indices.is_empty() {
+                target.meshes.push(mesh);
+            }
+        }
+    }
+}
+
+fn draw_line_indices(order: &[usize], draw_mode: i32) -> Vec<[usize; 2]> {
+    use cuemol_gfx::AbstDrawElem;
+
+    match draw_mode {
+        AbstDrawElem::DRAW_LINES => order
+            .chunks_exact(2)
+            .map(|pair| [pair[0], pair[1]])
+            .collect(),
+        AbstDrawElem::DRAW_LINE_STRIP => order.windows(2).map(|pair| [pair[0], pair[1]]).collect(),
+        AbstDrawElem::DRAW_LINE_LOOP => {
+            let mut pairs = order
+                .windows(2)
+                .map(|pair| [pair[0], pair[1]])
+                .collect::<Vec<_>>();
+            if order.len() > 2 {
+                pairs.push([order[order.len() - 1], order[0]]);
+            }
+            pairs
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn draw_triangle_indices(order: &[usize], draw_mode: i32) -> Vec<[usize; 3]> {
+    use cuemol_gfx::AbstDrawElem;
+
+    match draw_mode {
+        AbstDrawElem::DRAW_TRIANGLES => order
+            .chunks_exact(3)
+            .map(|triangle| [triangle[0], triangle[1], triangle[2]])
+            .collect(),
+        AbstDrawElem::DRAW_TRIANGLE_STRIP => order
+            .windows(3)
+            .enumerate()
+            .map(|(index, triangle)| {
+                if index % 2 == 0 {
+                    [triangle[0], triangle[1], triangle[2]]
+                } else {
+                    [triangle[1], triangle[0], triangle[2]]
+                }
+            })
+            .collect(),
+        AbstDrawElem::DRAW_TRIANGLE_FAN | AbstDrawElem::DRAW_POLYGON => order
+            .get(1..)
+            .unwrap_or_default()
+            .windows(2)
+            .map(|pair| [order[0], pair[0], pair[1]])
+            .collect(),
+        AbstDrawElem::DRAW_QUADS => order
+            .chunks_exact(4)
+            .flat_map(|quad| [[quad[0], quad[1], quad[2]], [quad[0], quad[2], quad[3]]])
+            .collect(),
+        AbstDrawElem::DRAW_QUAD_STRIP => order
+            .windows(4)
+            .step_by(2)
+            .flat_map(|quad| [[quad[0], quad[1], quad[3]], [quad[0], quad[3], quad[2]]])
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn f32_to_vector(position: [f32; 3]) -> Vector4 {
+    Vector4::new3(
+        f64::from(position[0]),
+        f64::from(position[1]),
+        f64::from(position[2]),
+    )
+}
+
+fn lw_color_spec(color: [u8; 4]) -> ColorSpec {
+    ColorSpec {
+        base: cuemol_gfx::ColorBase::Html {
+            r: color[0],
+            g: color[1],
+            b: color[2],
+            a: color[3],
+        },
+        modifiers: Vec::new(),
+    }
+}
+
+fn lw_color_f32(color: [u8; 4]) -> [f32; 4] {
+    color.map(|component| f32::from(component) / 255.0)
+}
+
 fn append_hit_data(object: &mut LWObject, data_id: i32, snapshot: &RenderSceneSnapshot) {
     let indices = snapshot
         .atoms
