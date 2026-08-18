@@ -14,10 +14,12 @@ use cuemol_molstr::{
 };
 use cuemol_molvis::{
     anisou_mesh_snapshot_with_options, apply_object_coloring, apply_renderer_styles,
-    apply_tube_renderer_styles, atom_intr_render_options, disorder_lines_snapshot,
-    molecule_render_options_for_renderer, molecule_render_snapshot, na_renderer_snapshot,
-    ribbon_mesh_snapshot, scene_style_manager, AnIsoURenderOptions, MoleculeRenderOptions,
-    NARenderOptions, NARenderer, DEFAULT_STYLE_SCOPE,
+    apply_tube_renderer_styles, atom_intr_render_options, disorder_lines_snapshot_with_style,
+    mainchain_line_snapshot, molecule_render_options_for_renderer, molecule_render_snapshot,
+    na_renderer_snapshot, resolve_atom_colors, ribbon_mesh_snapshot, ring_meshes_snapshot_with,
+    scene_style_manager, simple_line_snapshot, AnIsoURenderOptions, DisorderRenderOptions,
+    MainchainLineMode, MoleculeRenderOptions, NARenderOptions, NARenderer, ValenceBondMode,
+    DEFAULT_STYLE_SCOPE,
 };
 use cuemol_qsys::{Camera, MultiGradient, ScalarObject};
 use cuemol_render::{
@@ -948,9 +950,34 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                 continue;
             }
             let mut options = molecule_render_options_for_renderer(rtype);
+            options.object_uid = Some(object.uid().get());
             apply_renderer_styles(&mut options, renderer, &styles, DEFAULT_STYLE_SCOPE);
             if matches!(rtype, "tube" | "nucl") {
                 apply_tube_renderer_styles(&mut options, renderer, &styles, DEFAULT_STYLE_SCOPE);
+            }
+            if rtype == "simple" {
+                if renderer
+                    .resolved_attr("valbond", &styles, DEFAULT_STYLE_SCOPE)
+                    .as_deref()
+                    .is_some_and(|value| !qsc_bool(value))
+                {
+                    options.valence_bond_mode = ValenceBondMode::Off;
+                }
+                for (index, name) in ["vb_scl1", "vb_scl2"].into_iter().enumerate() {
+                    if let Some(value) = renderer
+                        .resolved_attr(name, &styles, DEFAULT_STYLE_SCOPE)
+                        .and_then(|value| value.trim().parse().ok())
+                    {
+                        options.simple_bond_offsets[index] = value;
+                    }
+                }
+            } else if rtype == "ballstick"
+                && renderer
+                    .resolved_attr("valbond_mode", &styles, DEFAULT_STYLE_SCOPE)
+                    .as_deref()
+                    .is_some_and(|value| matches!(value.trim(), "type1" | "1"))
+            {
+                options.valence_bond_mode = ValenceBondMode::BallStickType1;
             }
             // Per-renderer `sel="..."` draw restriction (shared behaviour with the GUI).
             if let Some(sel) = renderer
@@ -976,12 +1003,57 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                     object.mol().default_color(),
                 );
             }
-            let mut snapshot = if rtype == "atomintr" {
+            let mut snapshot = if rtype == "simple" {
+                let width = renderer
+                    .resolved_attr("width", &styles, DEFAULT_STYLE_SCOPE)
+                    .and_then(|value| value.trim().parse::<f32>().ok())
+                    .unwrap_or(1.2);
+                simple_line_snapshot(object.mol(), &options, width)
+            } else if rtype == "trace" {
+                let width = renderer
+                    .resolved_attr("width", &styles, DEFAULT_STYLE_SCOPE)
+                    .and_then(|value| value.trim().parse::<f32>().ok())
+                    .unwrap_or(1.2);
+                mainchain_line_snapshot(
+                    object.mol(),
+                    &options,
+                    MainchainLineMode::Trace,
+                    width,
+                    1,
+                    0.0,
+                    true,
+                )
+            } else if rtype == "spline" {
+                let resolved =
+                    |name: &str| renderer.resolved_attr(name, &styles, DEFAULT_STYLE_SCOPE);
+                let width = resolved("line_width")
+                    .and_then(|value| value.trim().parse::<f32>().ok())
+                    .unwrap_or(1.2);
+                let axial_detail = resolved("axialdetail")
+                    .and_then(|value| value.trim().parse::<u32>().ok())
+                    .unwrap_or(6);
+                let smoothing = resolved("smooth")
+                    .and_then(|value| value.trim().parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                let smooth_color = resolved("smoothcolor")
+                    .as_deref()
+                    .map(qsc_bool)
+                    .unwrap_or(true);
+                mainchain_line_snapshot(
+                    object.mol(),
+                    &options,
+                    MainchainLineMode::Spline,
+                    width,
+                    axial_detail,
+                    smoothing,
+                    smooth_color,
+                )
+            } else if rtype == "atomintr" {
                 // Measurement lines between the renderer's atom pairs, not the
                 // whole molecule (the single source of truth shared with the GUI).
                 cuemol_render::atom_intr_snapshot_with_options(
                     &object.atom_intr_segments(renderer),
-                    None,
+                    Some(object.uid().get()),
                     &atom_intr_render_options(renderer, &styles, DEFAULT_STYLE_SCOPE),
                 )
             } else if rtype == "anisou" {
@@ -1007,7 +1079,69 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                     },
                 )
             } else if rtype == "disorder" {
-                disorder_lines_snapshot(object.mol(), 1.0, 0.15, 2.0, -1.0)
+                let resolved = |name: &str, default: f64| {
+                    renderer
+                        .resolved_attr(name, &styles, DEFAULT_STYLE_SCOPE)
+                        .and_then(|value| value.trim().parse::<f64>().ok())
+                        .unwrap_or(default)
+                };
+                let target = renderer
+                    .resolved_attr("target", &styles, DEFAULT_STYLE_SCOPE)
+                    .and_then(|name| {
+                        object.renderer_by_name(name.trim()).filter(|target| {
+                            matches!(
+                                target.renderer_type(),
+                                "tube" | "ribbon" | "cartoon" | "nucl"
+                            )
+                        })
+                    });
+                let Some(target) = target else {
+                    continue;
+                };
+                let detail = renderer
+                    .resolved_attr("detail", &styles, DEFAULT_STYLE_SCOPE)
+                    .and_then(|value| value.trim().parse::<u32>().ok())
+                    .unwrap_or(5);
+                let color = renderer
+                    .resolved_attr("defaultcolor", &styles, DEFAULT_STYLE_SCOPE)
+                    .and_then(|value| qsc_color_rgba(&value, &styles))
+                    .unwrap_or(cuemol_gfx::Rgba8 {
+                        r: 255,
+                        g: 255,
+                        b: 255,
+                        a: 255,
+                    });
+                disorder_lines_snapshot_with_style(
+                    object.mol(),
+                    &DisorderRenderOptions {
+                        dot_sep: resolved("dotsep", 1.0),
+                        dot_radius: resolved("width", 0.3),
+                        loopsize: resolved("loopsize", 2.0),
+                        loopsize2: resolved("loopsize2", -1.0),
+                        detail: Some(detail),
+                        color: Some(cuemol_gfx::ColorSpec {
+                            base: cuemol_gfx::ColorBase::Html {
+                                r: color.r,
+                                g: color.g,
+                                b: color.b,
+                                a: color.a,
+                            },
+                            modifiers: Vec::new(),
+                        }),
+                        atom_colors: renderer_coloring_type
+                            .is_some()
+                            .then(|| resolve_atom_colors(object.mol(), &options)),
+                        pivot_atom: target
+                            .resolved_attr("pivotatom", &styles, DEFAULT_STYLE_SCOPE)
+                            .map(|value| value.trim().to_string())
+                            .filter(|value| !value.is_empty()),
+                        smoothing: target
+                            .resolved_attr("smooth", &styles, DEFAULT_STYLE_SCOPE)
+                            .and_then(|value| value.trim().parse::<f64>().ok())
+                            .unwrap_or(0.0),
+                        draw_indices: options.draw_indices.clone(),
+                    },
+                )
             } else if rtype == "nucl" {
                 let resolved =
                     |name: &str| renderer.resolved_attr(name, &styles, DEFAULT_STYLE_SCOPE);
@@ -1058,11 +1192,43 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                 snapshot
             } else if matches!(rtype, "dsurface" | "directsurf" | "dsurf2") {
                 direct_surface_scene_snapshot(object, renderer, &options)
-            } else if is_mainchain_trace_type(rtype) {
+            } else if is_ribbon_mesh_type(rtype) {
                 ribbon_mesh_snapshot(object.mol(), &options)
             } else {
                 molecule_render_snapshot(object.mol(), &options)
             };
+            if matches!(rtype, "ballstick" | "anisou")
+                && renderer
+                    .resolved_attr("ring", &styles, DEFAULT_STYLE_SCOPE)
+                    .as_deref()
+                    .is_some_and(qsc_bool)
+            {
+                let thickness = renderer
+                    .resolved_attr("thickness", &styles, DEFAULT_STYLE_SCOPE)
+                    .and_then(|value| value.trim().parse().ok())
+                    .unwrap_or(0.2);
+                let color = renderer
+                    .resolved_attr("ringcolor", &styles, DEFAULT_STYLE_SCOPE)
+                    .and_then(|value| qsc_color_rgba(&value, &styles))
+                    .unwrap_or(cuemol_gfx::Rgba8 {
+                        r: 255,
+                        g: 255,
+                        b: 191,
+                        a: 255,
+                    });
+                let rings = ring_meshes_snapshot_with(
+                    object.mol(),
+                    thickness,
+                    [
+                        f32::from(color.r) / 255.0,
+                        f32::from(color.g) / 255.0,
+                        f32::from(color.b) / 255.0,
+                        f32::from(color.a) / 255.0,
+                    ],
+                    options.draw_indices.as_deref(),
+                );
+                snapshot.meshes.extend(rings.meshes);
+            }
             // Bake the object + renderer `xformMat` (C++ display-time transform)
             // into this renderer's geometry — effective transform `renderer · object`
             // — so render-qsc matches the GUI and the scene's saved placement.
@@ -2188,11 +2354,8 @@ fn direct_surface_scene_snapshot(
     snapshot
 }
 
-fn is_mainchain_trace_type(renderer_type: &str) -> bool {
-    matches!(
-        renderer_type,
-        "trace" | "ribbon" | "cartoon" | "tube" | "spline" | "nucl"
-    )
+fn is_ribbon_mesh_type(renderer_type: &str) -> bool {
+    matches!(renderer_type, "ribbon" | "cartoon" | "tube")
 }
 
 fn qsc_bool(value: &str) -> bool {
