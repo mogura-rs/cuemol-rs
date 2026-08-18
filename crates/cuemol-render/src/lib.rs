@@ -2611,6 +2611,23 @@ fn snapshot_mesh_sections(
         };
         sections.push((name, export_mesh));
     }
+    let ungrouped = tessellate_ungrouped_snapshot(snapshot);
+    if ungrouped.triangle_count() > 0 {
+        let base_name = sanitize_luxcore_identifier(fallback_name, 0);
+        let count = name_counts.entry(base_name.clone()).or_default();
+        let name = if *count == 0 {
+            base_name
+        } else {
+            format!("{base_name}_{count}")
+        };
+        let view_mesh = camera_space_render_mesh(&ungrouped, camera);
+        let export_mesh = if use_clip_z {
+            clip_render_mesh_z(&view_mesh, camera.slab_depth() / 2.0)
+        } else {
+            view_mesh
+        };
+        sections.insert(0, (name, export_mesh));
+    }
     if sections.is_empty() {
         let mesh = camera_space_render_mesh(&tessellate_snapshot(snapshot), camera);
         let mesh = if use_clip_z {
@@ -3056,10 +3073,60 @@ impl LuxRendSceneExporter {
         )
     }
 
+    /// Serialize renderer sections as separate LuxRender objects.
+    pub fn write_snapshot_string_with_camera_background(
+        &self,
+        fallback_name: &str,
+        snapshot: &RenderSceneSnapshot,
+        camera: &Camera,
+        background: [f32; 3],
+    ) -> String {
+        let sections = snapshot_mesh_sections(fallback_name, snapshot, camera, false);
+        let section_refs = sections
+            .iter()
+            .map(|(name, mesh)| (name.as_str(), mesh))
+            .collect::<Vec<_>>();
+        let environment_mesh = camera_space_render_mesh(&tessellate_snapshot(snapshot), camera);
+        self.write_scene_view_sections_string(
+            &environment_mesh,
+            &section_refs,
+            Vector4::ZERO,
+            camera.cam_dist(),
+            camera.zoom(),
+            camera.slab_depth(),
+            camera.is_perspective(),
+            background,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn write_scene_view_string(
         &self,
         mesh: &RenderMesh,
+        center: Vector4,
+        view_dist: f64,
+        zoom: f64,
+        slab_depth: f64,
+        perspective: bool,
+        background: [f32; 3],
+    ) -> String {
+        self.write_scene_view_sections_string(
+            mesh,
+            &[("scene", mesh)],
+            center,
+            view_dist,
+            zoom,
+            slab_depth,
+            perspective,
+            background,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_scene_view_sections_string(
+        &self,
+        environment_mesh: &RenderMesh,
+        sections: &[(&str, &RenderMesh)],
         center: Vector4,
         view_dist: f64,
         zoom: f64,
@@ -3159,7 +3226,7 @@ impl LuxRendSceneExporter {
         write_lux_environment(
             &mut out,
             self.bg_mode,
-            mesh,
+            environment_mesh,
             center,
             slab_depth,
             view_dist,
@@ -3168,7 +3235,9 @@ impl LuxRendSceneExporter {
             perspective,
             background,
         );
-        write_lux_colored_mesh(&mut out, mesh);
+        for (name, mesh) in sections {
+            write_lux_colored_mesh_named(&mut out, name, mesh);
+        }
         out.push_str("WorldEnd\n");
         out
     }
@@ -3303,6 +3372,32 @@ impl LuxRendSceneExporter {
         self.state.write();
         Ok(())
     }
+
+    /// Write renderer sections as separate LuxRender objects.
+    pub fn write_snapshot_file_with_camera(
+        &mut self,
+        fallback_name: &str,
+        snapshot: &RenderSceneSnapshot,
+        camera: &Camera,
+        background: [f32; 3],
+    ) -> Result<()> {
+        if self.output_base.is_empty() {
+            self.output_base = std::path::Path::new(self.handler().path())
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_owned();
+        }
+        let output = self.write_snapshot_string_with_camera_background(
+            fallback_name,
+            snapshot,
+            camera,
+            background,
+        );
+        self.handler().write_string(&output)?;
+        self.state.write();
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -3311,7 +3406,7 @@ enum LuxMeshMaterial {
     Gradient(usize, usize),
 }
 
-fn write_lux_colored_mesh(out: &mut String, mesh: &RenderMesh) {
+fn write_lux_colored_mesh_named(out: &mut String, name: &str, mesh: &RenderMesh) {
     let mut color_ids = BTreeMap::<[u8; 4], usize>::new();
     let mut colors = Vec::<[u8; 4]>::new();
     let vertex_color_ids = mesh
@@ -3364,7 +3459,7 @@ fn write_lux_colored_mesh(out: &mut String, mesh: &RenderMesh) {
     }
 
     for (id, color) in colors.iter().enumerate() {
-        let texture = format!("scene_tex_{id}");
+        let texture = format!("{name}_tex_{id}");
         writeln!(
             out,
             "Texture \"{texture}\" \"color\" \"constant\" \"color value\" [{:.6} {:.6} {:.6}]",
@@ -3373,7 +3468,7 @@ fn write_lux_colored_mesh(out: &mut String, mesh: &RenderMesh) {
             f64::from(color[2]) / 255.0,
         )
         .unwrap();
-        let material = format!("scene_mat_{id}");
+        let material = format!("{name}_mat_{id}");
         if color[3] == u8::MAX {
             write_lux_glossy_material(out, &material, &texture);
         } else {
@@ -3396,19 +3491,23 @@ fn write_lux_colored_mesh(out: &mut String, mesh: &RenderMesh) {
         let LuxMeshMaterial::Gradient(left, right) = *material else {
             continue;
         };
-        writeln!(out, "MakeNamedMaterial \"scene_grad_{left}_{right}\"").unwrap();
+        writeln!(out, "MakeNamedMaterial \"{name}_grad_{left}_{right}\"").unwrap();
         out.push_str("    \"string type\" [\"mix\"]\n");
-        writeln!(out, "    \"string namedmaterial1\" [\"scene_mat_{left}\"]").unwrap();
-        writeln!(out, "    \"string namedmaterial2\" [\"scene_mat_{right}\"]").unwrap();
+        writeln!(out, "    \"string namedmaterial1\" [\"{name}_mat_{left}\"]").unwrap();
+        writeln!(
+            out,
+            "    \"string namedmaterial2\" [\"{name}_mat_{right}\"]"
+        )
+        .unwrap();
         out.push_str("    \"texture amount\" [\"utex\"]\n\n");
     }
 
-    out.push_str("AttributeBegin # Object scene\n");
+    writeln!(out, "AttributeBegin # Object {name}").unwrap();
     for (material, triangles) in groups {
         let material_name = match material {
-            LuxMeshMaterial::Solid(id) => format!("scene_mat_{id}"),
+            LuxMeshMaterial::Solid(id) => format!("{name}_mat_{id}"),
             LuxMeshMaterial::Gradient(left, right) => {
-                format!("scene_grad_{left}_{right}")
+                format!("{name}_grad_{left}_{right}")
             }
         };
         writeln!(out, "NamedMaterial \"{material_name}\"").unwrap();
@@ -3966,6 +4065,27 @@ impl LuxCoreSceneExporter {
             write_luxcore_object(&mut scn, &name, &ply_path.to_string_lossy(), scale);
             written_sections += 1;
         }
+        let ungrouped = tessellate_ungrouped_snapshot(snapshot);
+        if ungrouped.triangle_count() > 0 {
+            let base_name = sanitize_luxcore_identifier(fallback_name, 0);
+            let count = name_counts.entry(base_name.clone()).or_default();
+            let name = if *count == 0 {
+                base_name
+            } else {
+                format!("{base_name}_{count}")
+            };
+            let ply_path = cfg_path.with_extension("ply");
+            let ply_filename = ply_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("scene.ply");
+            std::fs::write(
+                &ply_path,
+                self.write_ply_string_with_camera(&ungrouped, camera),
+            )?;
+            write_luxcore_object(&mut scn, &name, ply_filename, scale);
+            written_sections += 1;
+        }
         if written_sections == 0 {
             let mesh = tessellate_snapshot(snapshot);
             let name = sanitize_luxcore_identifier(fallback_name, 0);
@@ -4021,6 +4141,32 @@ fn tessellate_snapshot_section(
         .meshes
         .extend(snapshot.meshes[mesh_start..mesh_end].iter().cloned());
     tessellate_snapshot(&subset)
+}
+
+fn tessellate_ungrouped_snapshot(snapshot: &RenderSceneSnapshot) -> RenderMesh {
+    let mut claimed_atoms = vec![false; snapshot.atoms.len()];
+    let mut claimed_bonds = vec![false; snapshot.bonds.len()];
+    let mut claimed_meshes = vec![false; snapshot.meshes.len()];
+    for group in &snapshot.transparency_groups {
+        mark_pov_claimed(&mut claimed_atoms, group.atom_range.clone());
+        mark_pov_claimed(&mut claimed_bonds, group.bond_range.clone());
+        mark_pov_claimed(&mut claimed_meshes, group.mesh_range.clone());
+    }
+    tessellate_pov_subset(
+        snapshot,
+        &claimed_atoms
+            .iter()
+            .map(|claimed| (!claimed).then_some(1.0))
+            .collect::<Vec<_>>(),
+        &claimed_bonds
+            .iter()
+            .map(|claimed| (!claimed).then_some(1.0))
+            .collect::<Vec<_>>(),
+        &claimed_meshes
+            .iter()
+            .map(|claimed| (!claimed).then_some(1.0))
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn sanitize_luxcore_identifier(name: &str, index: usize) -> String {
@@ -6847,11 +6993,12 @@ mod tests {
     }
 
     #[test]
-    fn mqo_and_wbp_snapshot_exports_keep_renderer_objects_separate() {
+    fn sectioned_vector_exports_keep_renderer_and_ungrouped_objects() {
         let mut snapshot = RenderSceneSnapshot {
             atoms: vec![
                 RenderAtom::new(Vector4::new3(-2.0, 0.0, 0.0), 0.5, None),
                 RenderAtom::new(Vector4::new3(2.0, 0.0, 0.0), 0.5, None),
+                RenderAtom::new(Vector4::new3(0.0, 2.0, 0.0), 0.5, None),
             ],
             bonds: Vec::new(),
             meshes: Vec::new(),
@@ -6879,11 +7026,23 @@ mod tests {
         let camera = Camera::new();
         let mqo = MqoSceneExporter::new()
             .write_snapshot_string_with_camera("fallback", &snapshot, &camera);
-        assert!(mqo.contains("Material 2 {"));
+        assert!(mqo.contains("Material 3 {"));
+        assert!(mqo.contains("Object \"fallback\" {"));
         assert!(mqo.contains("Object \"left_renderer\" {"));
         assert!(mqo.contains("Object \"right_renderer\" {"));
         assert!(mqo.contains("M(0)"));
         assert!(mqo.contains("M(1)"));
+        assert!(mqo.contains("M(2)"));
+
+        let lxs = LuxRendSceneExporter::new()
+            .write_snapshot_string_with_camera_background("fallback", &snapshot, &camera, [0.0; 3]);
+        assert_eq!(lxs.matches("AttributeBegin # Object ").count(), 3);
+        assert!(lxs.contains("AttributeBegin # Object fallback"));
+        assert!(lxs.contains("AttributeBegin # Object left_renderer"));
+        assert!(lxs.contains("AttributeBegin # Object right_renderer"));
+        assert!(lxs.contains("MakeNamedMaterial \"fallback_mat_0\""));
+        assert!(lxs.contains("MakeNamedMaterial \"left_renderer_mat_0\""));
+        assert!(lxs.contains("MakeNamedMaterial \"right_renderer_mat_0\""));
 
         let dir = std::env::temp_dir().join(format!(
             "cuemol-render-wbp-sections-{}-{}",
@@ -6902,8 +7061,10 @@ mod tests {
             .write_snapshot_files_with_camera("fallback", &snapshot, &camera, [0.0; 3])
             .unwrap();
         let wbp = std::fs::read_to_string(dir.join("scene.wbp")).unwrap();
+        assert!(wbp.contains("Material \"fallback_mat0\" : {"));
         assert!(wbp.contains("Material \"left_renderer_mat0\" : {"));
         assert!(wbp.contains("Material \"right_renderer_mat0\" : {"));
+        assert!(wbp.contains("Object \"fallback\" : {"));
         assert!(wbp.contains("Object \"left_renderer\" : {"));
         assert!(wbp.contains("Object \"right_renderer\" : {"));
         std::fs::remove_dir_all(dir).unwrap();
@@ -6989,6 +7150,7 @@ mod tests {
             atoms: vec![
                 RenderAtom::new(Vector4::new3(-2.0, 0.0, 0.0), 0.5, None),
                 RenderAtom::new(Vector4::new3(2.0, 0.0, 0.0), 0.5, None),
+                RenderAtom::new(Vector4::new3(0.0, 2.0, 0.0), 0.5, None),
             ],
             bonds: Vec::new(),
             meshes: Vec::new(),
@@ -7031,9 +7193,10 @@ mod tests {
 
         let left_path = dir.join("sceneleft_renderer.ply");
         let right_path = dir.join("sceneright_renderer.ply");
+        let fallback_path = dir.join("scene.ply");
         assert!(left_path.is_file());
         assert!(right_path.is_file());
-        assert!(!dir.join("scene.ply").exists());
+        assert!(fallback_path.is_file());
         let left_ply = std::fs::read_to_string(&left_path).unwrap();
         let section_vertex_count =
             tessellate_snapshot_section(&snapshot, &snapshot.transparency_groups[0])
@@ -7047,8 +7210,10 @@ mod tests {
         let scn = std::fs::read_to_string(dir.join("scene.scn")).unwrap();
         assert!(scn.contains("scene.objects.left_renderer.shape = left_renderer"));
         assert!(scn.contains("scene.objects.right_renderer.shape = right_renderer"));
+        assert!(scn.contains("scene.objects.fallback.shape = fallback"));
         assert!(scn.contains(&left_path.to_string_lossy().to_string()));
         assert!(scn.contains(&right_path.to_string_lossy().to_string()));
+        assert!(scn.contains("scene.ply"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
