@@ -16,10 +16,10 @@ use cuemol_molvis::{
     anisou_mesh_snapshot_with_options, apply_object_coloring, apply_renderer_styles,
     apply_tube_renderer_styles, atom_intr_render_options, disorder_lines_snapshot_with_style,
     mainchain_line_snapshot, molecule_render_options_for_renderer, molecule_render_snapshot,
-    na_renderer_snapshot, resolve_atom_colors, ribbon_mesh_snapshot, ring_meshes_snapshot_with,
-    scene_style_manager, simple_line_snapshot, AnIsoURenderOptions, DisorderRenderOptions,
-    MainchainLineMode, MoleculeRenderOptions, NARenderOptions, NARenderer, ValenceBondMode,
-    DEFAULT_STYLE_SCOPE,
+    na_renderer_snapshot, resolve_atom_colors, ribbon_mesh_snapshot,
+    ring_meshes_snapshot_with_coloring, scene_style_manager, simple_line_snapshot,
+    AnIsoURenderOptions, DisorderRenderOptions, MainchainLineMode, MoleculeRenderOptions,
+    NARenderOptions, NARenderer, ValenceBondMode, DEFAULT_STYLE_SCOPE,
 };
 use cuemol_qsys::{Camera, MultiGradient, ScalarObject};
 use cuemol_render::{
@@ -1263,24 +1263,41 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                     .resolved_attr("thickness", &styles, DEFAULT_STYLE_SCOPE)
                     .and_then(|value| value.trim().parse().ok())
                     .unwrap_or(0.2);
-                let color = renderer
+                let color_value = renderer
                     .resolved_attr("ringcolor", &styles, DEFAULT_STYLE_SCOPE)
-                    .and_then(|value| qsc_color_rgba(&value, &styles))
-                    .unwrap_or(cuemol_gfx::Rgba8 {
-                        r: 255,
-                        g: 255,
-                        b: 191,
-                        a: 255,
+                    .unwrap_or_else(|| "#ffffbf".to_string());
+                let color = cuemol_gfx::parse_color(&color_value)
+                    .ok()
+                    .filter(|color| {
+                        matches!(&color.base, cuemol_gfx::ColorBase::MolColor(_))
+                            || color.rgba8().is_some()
+                    })
+                    .or_else(|| {
+                        qsc_color_rgba(&color_value, &styles).map(|color| cuemol_gfx::ColorSpec {
+                            base: cuemol_gfx::ColorBase::Html {
+                                r: color.r,
+                                g: color.g,
+                                b: color.b,
+                                a: color.a,
+                            },
+                            modifiers: Vec::new(),
+                        })
+                    })
+                    .unwrap_or_else(|| cuemol_gfx::ColorSpec {
+                        base: cuemol_gfx::ColorBase::Html {
+                            r: 255,
+                            g: 255,
+                            b: 191,
+                            a: 255,
+                        },
+                        modifiers: Vec::new(),
                     });
-                let rings = ring_meshes_snapshot_with(
+                let atom_colors = resolve_atom_colors(object.mol(), &options);
+                let rings = ring_meshes_snapshot_with_coloring(
                     object.mol(),
                     thickness,
-                    [
-                        f32::from(color.r) / 255.0,
-                        f32::from(color.g) / 255.0,
-                        f32::from(color.b) / 255.0,
-                        f32::from(color.a) / 255.0,
-                    ],
+                    &color,
+                    &atom_colors,
                     options.draw_indices.as_deref(),
                 );
                 snapshot.meshes.extend(rings.meshes);

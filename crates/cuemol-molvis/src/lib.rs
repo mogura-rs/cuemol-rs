@@ -1,5 +1,5 @@
 use cuemol_core::Vector4;
-use cuemol_gfx::{ColorSpec, SolidColor};
+use cuemol_gfx::{ColorBase, ColorSpec, MolColorRef, SolidColor};
 use cuemol_molstr::{
     parse_selector, Atom, BfacColoring, Bond, BondOrder, MolCoord, MolRenderer, MolScene,
     ResidIterator, ResidueView,
@@ -7277,6 +7277,74 @@ pub fn ring_meshes_snapshot_with(
     ring_color: [f32; 4],
     draw_indices: Option<&[usize]>,
 ) -> RenderSceneSnapshot {
+    ring_meshes_snapshot_impl(molecule, thickness, draw_indices, |_| ring_color)
+}
+
+/// Ring fills whose `$molcol` color is resolved against the first carbon atom
+/// in each ring, matching C++ `BallStickRenderer::drawRingImpl`.
+pub fn ring_meshes_snapshot_with_coloring(
+    molecule: &MolCoord,
+    thickness: f64,
+    ring_color: &ColorSpec,
+    atom_colors: &[ColorSpec],
+    draw_indices: Option<&[usize]>,
+) -> RenderSceneSnapshot {
+    ring_meshes_snapshot_impl(molecule, thickness, draw_indices, |pivot| {
+        let base = match &ring_color.base {
+            ColorBase::MolColor(_) => atom_colors.get(pivot).and_then(ColorSpec::rgba8),
+            _ => ring_color.rgba8(),
+        }
+        .unwrap_or(cuemol_gfx::Rgba8 {
+            r: 127,
+            g: 127,
+            b: 127,
+            a: 255,
+        });
+        let mut modifier = MolColorRef::new();
+        for value in &ring_color.modifiers {
+            match value.name.as_str() {
+                "alpha" => {
+                    if let Some(alpha) = value.value.as_number() {
+                        modifier.set_alpha(f64::from(alpha));
+                    }
+                }
+                "material" => modifier.set_material(value.value.as_text()),
+                "mod_h" => {
+                    if let Some(amount) = value.value.as_number() {
+                        modifier.set_mod_h(f64::from(amount));
+                    }
+                }
+                "mod_s" => {
+                    if let Some(amount) = value.value.as_number() {
+                        modifier.set_mod_s(f64::from(amount));
+                    }
+                }
+                "mod_b" => {
+                    if let Some(amount) = value.value.as_number() {
+                        modifier.set_mod_b(f64::from(amount));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let color = modifier
+            .modify_color(&SolidColor::from_rgba_u8(base.r, base.g, base.b, base.a))
+            .rgba8();
+        [
+            f32::from(color.r) / 255.0,
+            f32::from(color.g) / 255.0,
+            f32::from(color.b) / 255.0,
+            f32::from(color.a) / 255.0,
+        ]
+    })
+}
+
+fn ring_meshes_snapshot_impl(
+    molecule: &MolCoord,
+    thickness: f64,
+    draw_indices: Option<&[usize]>,
+    mut ring_color: impl FnMut(usize) -> [f32; 4],
+) -> RenderSceneSnapshot {
     let db = cuemol_molstr::toppar::TopoDB::global();
     let summaries = molecule.residue_summaries();
     let draw = draw_indices.map(|indices| {
@@ -7312,6 +7380,12 @@ pub fn ring_meshes_snapshot_with(
                 .iter()
                 .map(|(_, position)| *position)
                 .collect::<Vec<_>>();
+            let pivot = members
+                .iter()
+                .find(|(index, _)| molecule.atoms()[*index].element.eq_ignore_ascii_case("C"))
+                .map(|(index, _)| *index)
+                .unwrap_or(members[members.len() - 1].0);
+            let color = ring_color(pivot);
             let mut centroid = Vector4::new3(0.0, 0.0, 0.0);
             for v in &verts {
                 centroid = centroid + *v;
@@ -7338,13 +7412,13 @@ pub fn ring_meshes_snapshot_with(
             mesh.vertices.push(MeshVertex {
                 position: centroid + offset,
                 normal,
-                color: ring_color,
+                color,
             });
             for v in &verts {
                 mesh.vertices.push(MeshVertex {
                     position: *v + offset,
                     normal,
-                    color: ring_color,
+                    color,
                 });
             }
             let n = verts.len() as u32;
@@ -7355,13 +7429,13 @@ pub fn ring_meshes_snapshot_with(
             mesh.vertices.push(MeshVertex {
                 position: centroid - offset,
                 normal: -normal,
-                color: ring_color,
+                color,
             });
             for v in &verts {
                 mesh.vertices.push(MeshVertex {
                     position: *v - offset,
                     normal: -normal,
-                    color: ring_color,
+                    color,
                 });
             }
             for k in 0..n {
@@ -10355,6 +10429,15 @@ return cuemol.makeColor("#0000ff");
             .all(|vertex| (vertex.position.z.abs() - 0.2).abs() < 1.0e-9));
         assert!(m.vertices[0].normal.z.abs() > 0.99);
         assert_eq!(m.vertices[0].color, [0.2, 0.4, 0.6, 1.0]);
+
+        let mut atom_colors = vec![rgb_spec(0.0, 1.0, 0.0); mol.atom_count()];
+        atom_colors[0] = rgb_spec(1.0, 0.0, 0.0);
+        let mol_color = cuemol_gfx::parse_color("$molcol{alpha: 0.5}").unwrap();
+        let colored = ring_meshes_snapshot_with_coloring(&mol, 0.2, &mol_color, &atom_colors, None);
+        assert_eq!(
+            colored.meshes[0].vertices[0].color,
+            [1.0, 0.0, 0.0, 128.0 / 255.0]
+        );
 
         let warped = MolCoord::with_atoms(
             (0..6)
