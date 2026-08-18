@@ -5397,9 +5397,8 @@ fn interpolate_color(lhs: &ColorSpec, rhs: &ColorSpec, t: f64) -> ColorSpec {
         a: 255,
     });
     let rhs = rhs.rgba8().unwrap_or(lhs);
-    let lerp = |a: u8, b: u8| {
-        (f64::from(a) + (f64::from(b) - f64::from(a)) * t.clamp(0.0, 1.0)).round() as u8
-    };
+    let lerp =
+        |a: u8, b: u8| (f64::from(a) + (f64::from(b) - f64::from(a)) * t.clamp(0.0, 1.0)) as u8;
     rgba_to_spec([
         f32::from(lerp(lhs.r, rhs.r)) / 255.0,
         f32::from(lerp(lhs.g, rhs.g)) / 255.0,
@@ -7557,13 +7556,13 @@ pub fn disorder_lines_snapshot_with_style(
     options: &DisorderRenderOptions,
 ) -> RenderSceneSnapshot {
     // C++ DisoRenderer: loopsize scales the N-terminal Bézier tangent (gap
-    // bulge amplitude); loopsize2 the C-terminal one, with a negative loopsize2
-    // meaning "reuse loopsize".
+    // bulge amplitude); loopsize2 the C-terminal one, with a non-positive
+    // loopsize2 meaning "reuse loopsize".
     let loop1 = options.loopsize;
-    let loop2 = if options.loopsize2 < 0.0 {
-        options.loopsize
-    } else {
+    let loop2 = if options.loopsize2 > 0.0 {
         options.loopsize2
+    } else {
+        options.loopsize
     };
     use std::collections::{HashMap, HashSet};
     let summaries = molecule.residue_summaries();
@@ -9734,6 +9733,17 @@ return cuemol.makeColor("#0000ff");
     }
 
     #[test]
+    fn gradient_color_interpolation_matches_cpp_integer_truncation() {
+        let black = rgba_to_spec([0.0, 0.0, 0.0, 0.0]);
+        let white = rgba_to_spec([1.0, 1.0, 1.0, 1.0]);
+        let middle = interpolate_color(&black, &white, 0.5).rgba8().unwrap();
+        assert_eq!(
+            (middle.r, middle.g, middle.b, middle.a),
+            (127, 127, 127, 127)
+        );
+    }
+
+    #[test]
     fn disorder_lines_bridge_unbonded_chain_gaps_only() {
         // Both sides need a target-renderer spline, as in C++ getDiffVec().
         let mol = disorder_gap_molecule();
@@ -9872,6 +9882,20 @@ return cuemol.makeColor("#0000ff");
         assert!(
             large > small + 0.5,
             "larger loopsize should bulge the arc higher: {small} vs {large}"
+        );
+
+        let inherited = disorder_lines_snapshot(&mol, 1.0, 0.2, 2.0, -1.0);
+        let zero = disorder_lines_snapshot(&mol, 1.0, 0.2, 2.0, 0.0);
+        assert_eq!(
+            inherited
+                .atoms
+                .iter()
+                .map(|atom| atom.center)
+                .collect::<Vec<_>>(),
+            zero.atoms
+                .iter()
+                .map(|atom| atom.center)
+                .collect::<Vec<_>>()
         );
     }
 
