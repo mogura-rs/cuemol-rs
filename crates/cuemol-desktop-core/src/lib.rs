@@ -47931,17 +47931,7 @@ fn append_lw_draw_element(
             return;
         }
         LWDrawData::Pixel(pixel) => {
-            let position = pixel.position();
-            target.atoms.push(cuemol_render::RenderAtom {
-                center: f32_position(position),
-                radius: (element.line_width() * 0.03).max(0.03),
-                color: Some(lw_color_spec(pixel.color())),
-                object_uid: None,
-                atom_index: None,
-                selected: false,
-                detail: Some(4),
-                edge: None,
-            });
+            append_lw_pixel_points(target, pixel);
             return;
         }
     };
@@ -47954,6 +47944,32 @@ fn append_lw_draw_element(
         element.draw_mode(),
         element.line_width(),
     );
+}
+
+fn append_lw_pixel_points(target: &mut RenderSceneSnapshot, pixel: &cuemol_lwview::LWPixelData) {
+    let pixels = pixel.pixels();
+    let width = pixels.width();
+    let pixel_count = width.saturating_mul(pixels.height());
+    if width == 0 || pixel_count == 0 {
+        return;
+    }
+    let position = f32_position(pixel.position());
+    let base_color = pixel.color();
+    for (index, coverage) in pixels.data().iter().copied().take(pixel_count).enumerate() {
+        if coverage <= 25 {
+            continue;
+        }
+        let mut color = base_color;
+        color[3] = ((u16::from(color[3]) * u16::from(coverage) + 127) / 255) as u8;
+        let x = (index % width) as f32 + 0.5;
+        let y = (index / width) as f32 + 0.5;
+        target.bonds.push(
+            cuemol_render::RenderBond::new(position, position, 0.03, Some(lw_color_spec(color)))
+                .with_screen_style(1.0, false)
+                .with_screen_offset(x, -y)
+                .as_screen_point(),
+        );
+    }
 }
 
 fn append_lw_arrays(
@@ -59988,6 +60004,22 @@ end_header
             [0, 255, 0, 255],
             cuemol_lwview::LWDrawData::Vertices(vec![[0.5, 0.5, 0.0]]),
         ));
+        let mut pixels = cuemol_gfx::PixelBuffer::new();
+        pixels.set_width(2);
+        pixels.set_height(2);
+        pixels.resize(4);
+        pixels.data_mut().copy_from_slice(&[255, 0, 128, 25]);
+        object.add_draw_element(cuemol_lwview::LWDrawElement::new(
+            7,
+            0,
+            1.0,
+            [255, 255, 255, 255],
+            cuemol_lwview::LWDrawData::Pixel(cuemol_lwview::LWPixelData::new(
+                [0.25, 0.25, 0.0],
+                [10, 20, 30, 255],
+                pixels,
+            )),
+        ));
         let qdf0 = cuemol_lwview::write_qdf_lwobj_bytes(&object);
         let encoded = cuemol_qsys::encode_qdf0_bytes(&qdf0, 1, "13").unwrap();
         let encoded = String::from_utf8(encoded).unwrap();
@@ -60016,7 +60048,7 @@ end_header
             [32.0 / 255.0, 64.0 / 255.0, 128.0 / 255.0, 1.0]
         );
         assert_eq!(snapshot.atom_count(), 0);
-        assert_eq!(snapshot.bond_count(), 2);
+        assert_eq!(snapshot.bond_count(), 4);
         let line = snapshot
             .bonds
             .iter()
@@ -60044,9 +60076,36 @@ end_header
         let point = snapshot
             .bonds
             .iter()
-            .find(|primitive| primitive.screen_point)
+            .find(|primitive| primitive.screen_point && primitive.screen_offset == [0.0, 0.0])
             .expect("lightweight point is rendered in screen space");
         assert_eq!(point.screen_width, Some(3.0));
+        let pixel_points = snapshot
+            .bonds
+            .iter()
+            .filter(|primitive| primitive.screen_point && primitive.screen_offset != [0.0, 0.0])
+            .collect::<Vec<_>>();
+        assert_eq!(pixel_points.len(), 2);
+        assert_eq!(pixel_points[0].screen_width, Some(1.0));
+        assert_eq!(pixel_points[0].screen_offset, [0.5, -0.5]);
+        assert_eq!(pixel_points[1].screen_offset, [0.5, -1.5]);
+        assert_eq!(
+            pixel_points[0].color.as_ref().unwrap().rgba8().unwrap(),
+            cuemol_gfx::Rgba8 {
+                r: 10,
+                g: 20,
+                b: 30,
+                a: 255,
+            }
+        );
+        assert_eq!(
+            pixel_points[1].color.as_ref().unwrap().rgba8().unwrap(),
+            cuemol_gfx::Rgba8 {
+                r: 10,
+                g: 20,
+                b: 30,
+                a: 128,
+            }
+        );
         assert!(snapshot.bounds.is_some());
 
         #[cfg(feature = "scripting")]
