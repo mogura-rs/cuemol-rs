@@ -51,7 +51,7 @@ impl Mol2MolReader {
             reader: ObjReader::new("mol2", "SYBYL Mol2 Coordinates (*.mol2)", "*.mol2"),
             load_compound_id: -1,
             load_as_chain: true,
-            chain_name: "_".to_string(),
+            chain_name: "A".to_string(),
             residue_index: 1,
         }
     }
@@ -292,7 +292,7 @@ impl SdfMolReader {
             reader: ObjReader::new("sdf", "MOL/SDF Coordinates (*.mol;*.sdf)", "*.mol; *.sdf"),
             load_compound_id: -1,
             load_as_chain: false,
-            chain_name: "_".to_string(),
+            chain_name: "A".to_string(),
             residue_index: 1,
         }
     }
@@ -856,7 +856,7 @@ mod tests {
     }
 
     #[test]
-    fn importers_reader_defaults_match_qif() {
+    fn importers_reader_defaults_match_reference_runtime() {
         let mol2 = Mol2MolReader::new();
         assert_eq!(mol2.handler().name(), "mol2");
         assert_eq!(
@@ -867,9 +867,9 @@ mod tests {
         assert_eq!(mol2.handler().category(), InOutHandler::IOH_CAT_OBJREADER);
         assert_eq!(mol2.load_compound_id(), -1);
         assert!(mol2.load_as_chain());
-        assert_eq!(mol2.chain_name(), "_");
+        assert_eq!(mol2.chain_name(), "A");
         assert_eq!(mol2.residue_index(), 1);
-        assert_eq!(mol2.options().chain_name, "_");
+        assert_eq!(mol2.options().chain_name, "A");
 
         let mmcif = MmcifMolReader::new();
         assert_eq!(mmcif.handler().name(), "mmcif");
@@ -883,9 +883,9 @@ mod tests {
         assert_eq!(sdf.handler().name(), "sdf");
         assert_eq!(sdf.load_compound_id(), -1);
         assert!(!sdf.load_as_chain());
-        assert_eq!(sdf.chain_name(), "_");
+        assert_eq!(sdf.chain_name(), "A");
         assert_eq!(sdf.residue_index(), 1);
-        assert_eq!(sdf.options().chain_name, "_");
+        assert_eq!(sdf.options().chain_name, "A");
     }
 
     #[test]

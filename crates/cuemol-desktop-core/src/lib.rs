@@ -40177,13 +40177,13 @@ impl DesktopAppState {
                     object
                         .property(js_string!("load_cmpd_id"), -1, Attribute::all())
                         .property(js_string!("load_as_chain"), false, Attribute::all())
-                        .property(js_string!("chain_name"), js_string!("_"), Attribute::all())
+                        .property(js_string!("chain_name"), js_string!("A"), Attribute::all())
                         .property(js_string!("resid_index"), 1, Attribute::all());
                 }
                 "MOL2MolReader" => {
                     object
                         .property(js_string!("load_cmpd_id"), -1, Attribute::all())
-                        .property(js_string!("chain_name"), js_string!("_"), Attribute::all())
+                        .property(js_string!("chain_name"), js_string!("A"), Attribute::all())
                         .property(js_string!("resid_index"), 1, Attribute::all());
                 }
                 "CCP4MapReader" => {
@@ -51769,7 +51769,9 @@ mod tests {
                     .into_iter()
                     .filter(|(property, _)| {
                         !((*name == "Color" && property == "alpha")
-                            || (*name == "JctTable" && property == "type"))
+                            || (*name == "JctTable" && property == "type")
+                            || (matches!(*name, "MOL2MolReader" | "SDFMolReader")
+                                && property == "chain_name"))
                     })
                     .map(|(property, value)| {
                         let kind = if value == "true" || value == "false" {
@@ -52540,6 +52542,8 @@ mod tests {
              print('reader=' + reader.type + ':' + reader.name + ':' + reader.loadmodel + ':' + \
                    reader.loadanisou + ':' + reader.build2ndry + ':' + \
                    cuemol.implIface2(reader, 'ObjReader')); \
+             var mol2 = cuemol.MOL2MolReader(); var sdf = cuemol.SDFMolReader(); \
+             print('readerDefaults=' + mol2.chain_name + ':' + sdf.chain_name); \
              var mol = reader.createDefaultObj(); reader.attach(mol); \
              reader.setPath({pdb_path:?}); reader.read(); \
              print('molecule=' + mol.getAtomCount() + ':' + reader.detach().type); \
@@ -52560,6 +52564,7 @@ mod tests {
         assert_eq!(
             log,
             "reader=PDBFileReader:pdb:false:true:true:true\n\
+             readerDefaults=A:A\n\
              molecule=1:MolCoord\n\
              writer=sdf:false:true\n\
              stream=PDBFileReader:true\n"
