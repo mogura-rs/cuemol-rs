@@ -1604,6 +1604,21 @@ impl MqoSceneExporter {
         out
     }
 
+    pub fn write_mqo_string_with_camera(
+        &self,
+        name: &str,
+        mesh: &RenderMesh,
+        camera: &Camera,
+    ) -> String {
+        let view_mesh = camera_space_render_mesh(mesh, camera);
+        let export_mesh = if self.use_clip_z {
+            clip_render_mesh_z(&view_mesh, camera.slab_depth() / 2.0)
+        } else {
+            view_mesh
+        };
+        self.write_mqo_string(name, &export_mesh)
+    }
+
     pub fn state(&self) -> &ExportState {
         &self.state
     }
@@ -1643,6 +1658,18 @@ impl MqoSceneExporter {
     /// Write an MQO document to the configured handler path.
     pub fn write_mesh_file(&mut self, name: &str, mesh: &RenderMesh) -> Result<()> {
         let output = self.write_mqo_string(name, mesh);
+        self.handler().write_string(&output)?;
+        self.state.write();
+        Ok(())
+    }
+
+    pub fn write_mesh_file_with_camera(
+        &mut self,
+        name: &str,
+        mesh: &RenderMesh,
+        camera: &Camera,
+    ) -> Result<()> {
+        let output = self.write_mqo_string_with_camera(name, mesh, camera);
         self.handler().write_string(&output)?;
         self.state.write();
         Ok(())
@@ -1947,6 +1974,11 @@ impl WbpSceneExporter {
             .and_then(|value| value.to_str())
             .unwrap_or("scene.mqo");
         let view_mesh = camera_space_render_mesh(mesh, camera);
+        let view_mesh = if self.use_clip_z {
+            clip_render_mesh_z(&view_mesh, camera.slab_depth() / 2.0)
+        } else {
+            view_mesh
+        };
         let mut mqo_exporter = MqoSceneExporter::new();
         mqo_exporter.set_grad_steps(self.grad_steps);
         mqo_exporter.set_use_clip_z(self.use_clip_z);
@@ -1982,6 +2014,111 @@ fn camera_space_render_mesh(mesh: &RenderMesh, camera: &Camera) -> RenderMesh {
             .collect(),
         indices: mesh.indices.clone(),
     }
+}
+
+fn clip_render_mesh_z(mesh: &RenderMesh, clip_z: f64) -> RenderMesh {
+    let clipped = mesh
+        .vertices
+        .iter()
+        .map(|vertex| vertex.position.z >= clip_z)
+        .collect::<Vec<_>>();
+    if clipped.iter().all(|value| !*value) {
+        return mesh.clone();
+    }
+
+    let mut output = RenderMesh::new();
+    let mut remap = vec![None; mesh.vertices.len()];
+    for (index, vertex) in mesh.vertices.iter().enumerate() {
+        if !clipped[index] {
+            remap[index] = Some(output.vertices.len() as u32);
+            output.vertices.push(*vertex);
+        }
+    }
+    for triangle in mesh.triangles() {
+        if !triangle.iter().all(|index| *index < mesh.vertices.len()) {
+            continue;
+        }
+        let is_clipped = triangle.map(|index| clipped[index]);
+        let clipped_count = is_clipped.iter().filter(|value| **value).count();
+        if clipped_count == 3 {
+            continue;
+        }
+        if clipped_count == 0 {
+            output.indices.extend(
+                triangle
+                    .iter()
+                    .map(|index| remap[*index].expect("unclipped vertex must be mapped")),
+            );
+            continue;
+        }
+        if clipped_count == 2 {
+            for j in 0..3 {
+                if !is_clipped[j] && is_clipped[(j + 1) % 3] && is_clipped[(j + 2) % 3] {
+                    let inside = remap[triangle[j]].expect("unclipped vertex must be mapped");
+                    let edge1 = append_clipped_edge_vertex(
+                        &mut output,
+                        mesh.vertices[triangle[j]],
+                        mesh.vertices[triangle[(j + 1) % 3]],
+                        clip_z,
+                    );
+                    let edge2 = append_clipped_edge_vertex(
+                        &mut output,
+                        mesh.vertices[triangle[j]],
+                        mesh.vertices[triangle[(j + 2) % 3]],
+                        clip_z,
+                    );
+                    output.indices.extend([inside, edge1, edge2]);
+                    break;
+                }
+            }
+            continue;
+        }
+        for j in 0..3 {
+            if !is_clipped[j] && !is_clipped[(j + 1) % 3] && is_clipped[(j + 2) % 3] {
+                let inside0 = remap[triangle[j]].expect("unclipped vertex must be mapped");
+                let inside1 =
+                    remap[triangle[(j + 1) % 3]].expect("unclipped vertex must be mapped");
+                let clipped_vertex = mesh.vertices[triangle[(j + 2) % 3]];
+                let edge1 = append_clipped_edge_vertex(
+                    &mut output,
+                    clipped_vertex,
+                    mesh.vertices[triangle[j]],
+                    clip_z,
+                );
+                let edge2 = append_clipped_edge_vertex(
+                    &mut output,
+                    clipped_vertex,
+                    mesh.vertices[triangle[(j + 1) % 3]],
+                    clip_z,
+                );
+                output
+                    .indices
+                    .extend([inside0, inside1, edge1, edge2, edge1, inside1]);
+                break;
+            }
+        }
+    }
+    output
+}
+
+fn append_clipped_edge_vertex(
+    mesh: &mut RenderMesh,
+    first: MeshVertex,
+    second: MeshVertex,
+    clip_z: f64,
+) -> u32 {
+    let t = (clip_z - first.position.z) / (second.position.z - first.position.z);
+    let position = second.position * t + first.position * (1.0 - t);
+    let mixed_normal = second.normal * t + first.normal * (1.0 - t);
+    let mut normal = mixed_normal.normalize3d().unwrap_or(first.normal);
+    normal.w = first.normal.w;
+    let index = mesh.vertices.len() as u32;
+    mesh.vertices.push(MeshVertex {
+        position,
+        normal,
+        color: first.color,
+    });
+    index
 }
 
 fn write_wbp_rendering_options(out: &mut String, camera_name: &str, background: [f32; 3]) {
@@ -5408,6 +5545,54 @@ mod tests {
         assert!(mqo
             .lines()
             .all(|l| !l.starts_with("3 V(") || l.contains(") M(")));
+    }
+
+    #[test]
+    fn mqo_camera_export_clips_crossing_triangles_at_slab_front() {
+        let normal = Vector4::new3(0.0, 1.0, 0.0);
+        let mesh = RenderMesh {
+            vertices: vec![
+                MeshVertex {
+                    position: Vector4::new3(-1.0, 0.0, 0.0),
+                    normal,
+                    color: [1.0, 0.0, 0.0, 1.0],
+                },
+                MeshVertex {
+                    position: Vector4::new3(1.0, 0.0, 0.0),
+                    normal,
+                    color: [0.0, 1.0, 0.0, 1.0],
+                },
+                MeshVertex {
+                    position: Vector4::new3(0.0, 1.0, 2.0),
+                    normal,
+                    color: [0.0, 0.0, 1.0, 1.0],
+                },
+            ],
+            indices: vec![0, 1, 2],
+        };
+        let mut camera = Camera::new();
+        camera.set_slab_depth(2.0);
+        let mut exporter = MqoSceneExporter::new();
+        exporter.set_use_clip_z(true);
+
+        let clipped = clip_render_mesh_z(&mesh, 1.0);
+        assert_eq!(clipped.vertices.len(), 4);
+        assert_eq!(clipped.triangle_count(), 2);
+        assert!(clipped.vertices[2..]
+            .iter()
+            .all(|vertex| (vertex.position.z - 1.0).abs() < 1.0e-9));
+        let mqo = exporter.write_mqo_string_with_camera("clip", &mesh, &camera);
+        assert!(mqo.contains("    vertex 4 {"));
+        assert!(mqo.contains("    face 2 {"));
+
+        let mut double_crossing = mesh;
+        double_crossing.vertices[1].position.z = 2.0;
+        let clipped = clip_render_mesh_z(&double_crossing, 1.0);
+        assert_eq!(clipped.vertices.len(), 3);
+        assert_eq!(clipped.triangle_count(), 1);
+        assert!(clipped.vertices[1..]
+            .iter()
+            .all(|vertex| (vertex.position.z - 1.0).abs() < 1.0e-9));
     }
 
     #[test]

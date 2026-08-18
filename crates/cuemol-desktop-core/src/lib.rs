@@ -26706,7 +26706,7 @@ impl DesktopAppState {
                     exporter.perspective(),
                 ),
                 ScriptNativeSceneExporter::Mqo(exporter) => {
-                    exporter.write_mesh_file(&scene_name, &mesh)
+                    exporter.write_mesh_file_with_camera(&scene_name, &mesh, &camera)
                 }
                 ScriptNativeSceneExporter::Wbp(exporter) => {
                     exporter.write_scene_files_with_camera(&scene_name, &mesh, &camera, background)

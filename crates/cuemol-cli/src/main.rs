@@ -854,8 +854,9 @@ fn export_scene(input: &str, output: &str) -> Result<(), String> {
             .write_scene_string(&mesh, center, size, false)
             .into_bytes()
     } else if lower.ends_with(".mqo") {
+        let camera = camera_for_snapshot(&snapshot);
         MqoSceneExporter::new()
-            .write_mqo_string(name, &mesh)
+            .write_mqo_string_with_camera(name, &mesh, &camera)
             .into_bytes()
     } else if lower.ends_with(".lxs") {
         let (center, size) = scene_center_size(&snapshot);
