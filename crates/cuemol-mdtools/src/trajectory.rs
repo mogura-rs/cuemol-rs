@@ -163,6 +163,133 @@ pub struct Trajectory {
     total_frames: usize,
 }
 
+/// Undo/redo record for a trajectory block append, remove, or move operation.
+///
+/// This is the Rust ownership-model counterpart of C++ `TrajBlockEditInfo`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrajBlockEditInfo {
+    Append { block: TrajBlock, index: usize },
+    Remove { block: TrajBlock, index: usize },
+    Move { from: usize, to: usize },
+}
+
+impl TrajBlockEditInfo {
+    fn undo(&mut self, trajectory: &mut Trajectory) -> Result<()> {
+        match self {
+            Self::Append { index, .. } => {
+                trajectory.remove_block(*index)?;
+            }
+            Self::Remove { block, index } => {
+                trajectory.insert_block(*index, block.clone())?;
+            }
+            Self::Move { from, to } => {
+                trajectory.move_block(*to, *from)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn redo(&mut self, trajectory: &mut Trajectory) -> Result<()> {
+        match self {
+            Self::Append { block, .. } => trajectory.append(block.clone())?,
+            Self::Remove { index, .. } => {
+                trajectory.remove_block(*index)?;
+            }
+            Self::Move { from, to } => trajectory.move_block(*from, *to)?,
+        }
+        Ok(())
+    }
+
+    fn description(&self) -> &'static str {
+        match self {
+            Self::Append { .. } => "append trajectory block",
+            Self::Remove { .. } => "remove trajectory block",
+            Self::Move { .. } => "move trajectory block",
+        }
+    }
+}
+
+/// Undo/redo stacks for trajectory block edits.
+#[derive(Debug, Default)]
+pub struct TrajectoryUndoManager {
+    undo_stack: Vec<TrajBlockEditInfo>,
+    redo_stack: Vec<TrajBlockEditInfo>,
+    disabled: bool,
+}
+
+impl TrajectoryUndoManager {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_disabled(&self) -> bool {
+        self.disabled
+    }
+
+    pub fn set_disabled(&mut self, disabled: bool) {
+        self.disabled = disabled;
+    }
+
+    pub fn is_undoable(&self) -> bool {
+        !self.undo_stack.is_empty()
+    }
+
+    pub fn is_redoable(&self) -> bool {
+        !self.redo_stack.is_empty()
+    }
+
+    pub fn undo_size(&self) -> usize {
+        self.undo_stack.len()
+    }
+
+    pub fn redo_size(&self) -> usize {
+        self.redo_stack.len()
+    }
+
+    pub fn record(&mut self, edit: TrajBlockEditInfo) {
+        if self.disabled {
+            return;
+        }
+        self.undo_stack.push(edit);
+        self.redo_stack.clear();
+    }
+
+    pub fn undo(&mut self, trajectory: &mut Trajectory) -> bool {
+        let Some(mut edit) = self.undo_stack.pop() else {
+            return false;
+        };
+        self.disabled = true;
+        let result = edit.undo(trajectory).is_ok();
+        self.disabled = false;
+        self.redo_stack.push(edit);
+        result
+    }
+
+    pub fn redo(&mut self, trajectory: &mut Trajectory) -> bool {
+        let Some(mut edit) = self.redo_stack.pop() else {
+            return false;
+        };
+        self.disabled = true;
+        let result = edit.redo(trajectory).is_ok();
+        self.disabled = false;
+        self.undo_stack.push(edit);
+        result
+    }
+
+    pub fn clear_all(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+    }
+
+    pub fn undo_desc(&self) -> Option<&'static str> {
+        self.undo_stack.last().map(TrajBlockEditInfo::description)
+    }
+
+    pub fn redo_desc(&self) -> Option<&'static str> {
+        self.redo_stack.last().map(TrajBlockEditInfo::description)
+    }
+}
+
 impl Trajectory {
     pub fn new(molecule: MolCoord) -> Self {
         Self {
@@ -189,6 +316,21 @@ impl Trajectory {
         if self.blocks.len() == 1 && self.total_frames > 0 {
             self.prime_initial_frame()?;
         }
+        Ok(())
+    }
+
+    pub fn append_with_undo(
+        &mut self,
+        block: TrajBlock,
+        undo: &mut TrajectoryUndoManager,
+    ) -> Result<()> {
+        let index = self.blocks.len();
+        let stored = block.clone();
+        self.append(block)?;
+        undo.record(TrajBlockEditInfo::Append {
+            block: stored,
+            index,
+        });
         Ok(())
     }
 
@@ -221,6 +363,19 @@ impl Trajectory {
         Ok(block)
     }
 
+    pub fn remove_block_with_undo(
+        &mut self,
+        index: usize,
+        undo: &mut TrajectoryUndoManager,
+    ) -> Result<TrajBlock> {
+        let block = self.remove_block(index)?;
+        undo.record(TrajBlockEditInfo::Remove {
+            block: block.clone(),
+            index,
+        });
+        Ok(block)
+    }
+
     pub fn move_block(&mut self, from: usize, to: usize) -> Result<()> {
         if from >= self.blocks.len() || to >= self.blocks.len() {
             return Err(CueMolError::invalid_argument(
@@ -234,6 +389,19 @@ impl Trajectory {
         self.blocks.insert(to, block);
         self.recompute_block_layout();
         self.refresh_current_frame()
+    }
+
+    pub fn move_block_with_undo(
+        &mut self,
+        from: usize,
+        to: usize,
+        undo: &mut TrajectoryUndoManager,
+    ) -> Result<()> {
+        self.move_block(from, to)?;
+        if from != to {
+            undo.record(TrajBlockEditInfo::Move { from, to });
+        }
+        Ok(())
     }
 
     pub fn block_count(&self) -> usize {
@@ -1016,5 +1184,43 @@ mod tests {
 
         assert!((trajectory.atoms()[1].position.x - 1.4).abs() < 1.0e-6);
         assert_eq!(trajectory.bond_count(), 1);
+    }
+
+    #[test]
+    fn trajectory_block_edits_record_undo_and_redo() {
+        let mut molecule = MolCoord::new();
+        molecule.push_atom(atom(1));
+        let mut first = TrajBlock::new(1);
+        first.append_frame(vec![1.0, 0.0, 0.0], None).unwrap();
+        let mut second = TrajBlock::new(1);
+        second.append_frame(vec![2.0, 0.0, 0.0], None).unwrap();
+        let mut trajectory = Trajectory::new(molecule);
+        let mut undo = TrajectoryUndoManager::new();
+
+        trajectory.append_with_undo(first, &mut undo).unwrap();
+        trajectory.append_with_undo(second, &mut undo).unwrap();
+        assert_eq!(trajectory.block_count(), 2);
+        assert_eq!(undo.undo_desc(), Some("append trajectory block"));
+        assert!(undo.undo(&mut trajectory));
+        assert_eq!(trajectory.block_count(), 1);
+        assert!(undo.redo(&mut trajectory));
+        assert_eq!(trajectory.block_count(), 2);
+
+        trajectory.move_block_with_undo(0, 1, &mut undo).unwrap();
+        assert_eq!(trajectory.atoms()[0].position.x, 2.0);
+        assert!(undo.undo(&mut trajectory));
+        assert_eq!(trajectory.atoms()[0].position.x, 1.0);
+        assert!(undo.redo(&mut trajectory));
+        assert_eq!(trajectory.atoms()[0].position.x, 2.0);
+
+        trajectory.remove_block_with_undo(0, &mut undo).unwrap();
+        assert_eq!(trajectory.block_count(), 1);
+        assert_eq!(undo.undo_desc(), Some("remove trajectory block"));
+        assert!(undo.undo(&mut trajectory));
+        assert_eq!(trajectory.block_count(), 2);
+        assert_eq!(trajectory.atoms()[0].position.x, 2.0);
+        assert!(undo.redo(&mut trajectory));
+        assert_eq!(trajectory.block_count(), 1);
+        assert_eq!(trajectory.atoms()[0].position.x, 1.0);
     }
 }

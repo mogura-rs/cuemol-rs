@@ -34,7 +34,8 @@ pub use netcdf::{
 pub use psf::{read_psf_file, read_psf_str, sniff_psf_content, PsfReader};
 pub use trajectory::{
     read_dcd_bytes, read_dcd_bytes_with_options, read_dcd_file, read_dcd_file_with_options,
-    sniff_dcd_content, DcdReadOptions, DcdTrajReader, TrajBlock, TrajBlockReader, Trajectory,
+    sniff_dcd_content, DcdReadOptions, DcdTrajReader, TrajBlock, TrajBlockEditInfo,
+    TrajBlockReader, Trajectory, TrajectoryUndoManager,
 };
 pub use trr::{
     read_trr_bytes, read_trr_bytes_with_options, read_trr_file, read_trr_file_with_options,
