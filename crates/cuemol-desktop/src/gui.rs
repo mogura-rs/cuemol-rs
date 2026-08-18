@@ -2483,6 +2483,7 @@ enum NativeFileDialog {
     OpenPsf,
     OpenMsmsVertex,
     OpenPovExecutable,
+    OpenFfmpegExecutable,
     OpenScene,
     OpenCamera,
     OpenStyle,
@@ -16620,7 +16621,18 @@ impl GuiApplication {
             .num_columns(2)
             .show(ui, |ui| {
                 ui.label("Output dir");
-                ui.text_edit_singleline(&mut self.animation_render_settings.output_dir);
+                ui.horizontal(|ui| {
+                    ui.text_edit_singleline(&mut self.animation_render_settings.output_dir);
+                    if ui.button("Change ...").clicked() {
+                        if let Some(path) = native_folder_dialog(
+                            "Choose the folder for the rendered frames",
+                            &self.animation_render_settings.output_dir,
+                        ) {
+                            self.animation_render_settings.output_dir =
+                                path.to_string_lossy().into_owned();
+                        }
+                    }
+                });
                 ui.end_row();
                 ui.label("Output base name");
                 ui.text_edit_singleline(&mut self.animation_render_settings.base_name);
@@ -16643,6 +16655,7 @@ impl GuiApplication {
         ui.horizontal(|ui| {
             ui.label("Preset size");
             for (label, width, height) in [
+                ("QVGA", 320, 240),
                 ("VGA", 640, 480),
                 ("SVGA", 800, 600),
                 ("XGA", 1024, 768),
@@ -16766,8 +16779,19 @@ impl GuiApplication {
     fn animation_render_movie_options_ui(&mut self, ui: &mut egui::Ui) {
         ui.checkbox(&mut self.animation_render_settings.make_movie, "Make movie");
         ui.add_enabled_ui(self.animation_render_settings.make_movie, |ui| {
-            ui.label("FFmpeg executable");
-            ui.text_edit_singleline(&mut self.animation_render_settings.ffmpeg_executable);
+            ui.horizontal(|ui| {
+                ui.label("FFmpeg executable");
+                ui.text_edit_singleline(&mut self.animation_render_settings.ffmpeg_executable);
+                if ui.button("Change ...").clicked() {
+                    if let Some(path) = native_file_dialog(
+                        NativeFileDialog::OpenFfmpegExecutable,
+                        &self.animation_render_settings.ffmpeg_executable,
+                    ) {
+                        self.animation_render_settings.ffmpeg_executable =
+                            path.to_string_lossy().into_owned();
+                    }
+                }
+            });
             egui::ComboBox::from_label("Output format")
                 .selected_text(animation_movie_format_label(
                     &self.animation_render_settings.movie_format,
@@ -33148,6 +33172,12 @@ fn native_file_dialog_spec(dialog: NativeFileDialog) -> NativeFileDialogSpec {
             default_extension: None,
             save: false,
         },
+        NativeFileDialog::OpenFfmpegExecutable => NativeFileDialogSpec {
+            title: "Select FFmpeg executable file",
+            filters: &[],
+            default_extension: None,
+            save: false,
+        },
         NativeFileDialog::OpenScene => NativeFileDialogSpec {
             title: "Open Scene",
             filters: SCENE_OPEN_FILTERS,
@@ -36347,6 +36377,9 @@ mod tests {
         let open_msms_vertex = native_file_dialog_spec(NativeFileDialog::OpenMsmsVertex);
         assert_eq!(open_msms_vertex.title, "Select MSMS vertex file");
         assert_eq!(open_msms_vertex.filters[0].extensions, &["vert"]);
+        let open_ffmpeg = native_file_dialog_spec(NativeFileDialog::OpenFfmpegExecutable);
+        assert_eq!(open_ffmpeg.title, "Select FFmpeg executable file");
+        assert!(!open_ffmpeg.save);
 
         let save_scene = native_file_dialog_spec(NativeFileDialog::SaveScene);
         assert!(save_scene.save);

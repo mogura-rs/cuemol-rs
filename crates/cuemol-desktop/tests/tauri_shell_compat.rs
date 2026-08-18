@@ -1561,6 +1561,9 @@ fn animation_render_uses_cancellable_progress_and_reference_frame_controls() {
     assert!(NATIVE_GUI_RS.contains("fn persist_animation_render_settings("));
     assert!(NATIVE_GUI_RS.contains("fn start_animation_movie_reencode("));
     assert!(NATIVE_GUI_RS.contains("fn set_animation_render_error("));
+    assert!(NATIVE_GUI_RS.contains("Choose the folder for the rendered frames"));
+    assert!(NATIVE_GUI_RS.contains("Select FFmpeg executable file"));
+    assert!(NATIVE_GUI_RS.contains("(\"QVGA\", 320, 240)"));
     assert!(NATIVE_GUI_RS.contains("egui::Button::new(\"Re-encode\")"));
     assert!(NATIVE_GUI_RS.contains("egui::Button::new(\"Clean up\")"));
     assert!(NATIVE_GUI_RS.contains("crate::cleanup_animation_outputs("));
