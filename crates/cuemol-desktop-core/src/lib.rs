@@ -26720,12 +26720,17 @@ impl DesktopAppState {
                         camera.is_perspective(),
                         background,
                     ),
-                ScriptNativeSceneExporter::LuxCore(exporter) => exporter.write_scene_files(
-                    &scene_name,
-                    &mesh,
-                    exporter.base().width(),
-                    exporter.base().height(),
-                ),
+                ScriptNativeSceneExporter::LuxCore(exporter) => {
+                    let width = exporter.base().width();
+                    let height = exporter.base().height();
+                    exporter.write_scene_files_with_camera(
+                        &scene_name,
+                        &mesh,
+                        &camera,
+                        width,
+                        height,
+                    )
+                }
             };
             script_env::with_mut(|env| {
                 env.native_scene_exporters.insert(id, exporter);
@@ -52725,6 +52730,10 @@ mod tests {
         assert!(lux_scene.contains("\"string filename\" [\"scene\"]"));
         assert!(lux_scene.contains("\"color Kd\" [0.0706 0.2039 0.3373]"));
         assert!(dir.join("scene.scn").is_file());
+        let luxcore_scene = fs::read_to_string(dir.join("scene.scn")).unwrap();
+        assert!(luxcore_scene.contains(".type = \"hitpointcolor\""));
+        assert!(luxcore_scene.contains("scene.camera.type = \"orthographic\""));
+        assert!(luxcore_scene.contains(".transformation = 0.030000 0 0"));
         assert!(dir.join("scene.ply").is_file());
         fs::remove_dir_all(dir).unwrap();
     }

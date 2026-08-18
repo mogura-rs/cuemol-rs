@@ -2758,37 +2758,12 @@ impl LuxCoreSceneExporter {
     /// faces). Kept internal to LuxCore (C++ has no standalone PLY exporter, so
     /// neither do we — match the reference, don't out-feature it).
     pub fn write_ply_string(&self, mesh: &RenderMesh) -> String {
-        let tris = mesh.triangles();
-        let mut out = String::new();
-        out.push_str("ply\nformat ascii 1.0\ncomment Created by CueMol\n");
-        writeln!(&mut out, "element vertex {}", mesh.vertices.len()).unwrap();
-        out.push_str("property float x\nproperty float y\nproperty float z\n");
-        out.push_str("property float nx\nproperty float ny\nproperty float nz\n");
-        out.push_str("property uchar red\nproperty uchar green\nproperty uchar blue\n");
-        writeln!(&mut out, "element face {}", tris.len()).unwrap();
-        out.push_str("property list uchar uint vertex_indices\n");
-        out.push_str("end_header\n");
-        for v in &mesh.vertices {
-            let q = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
-            writeln!(
-                &mut out,
-                "{:.6} {:.6} {:.6} {:.6} {:.6} {:.6} {} {} {}",
-                v.position.x,
-                v.position.y,
-                v.position.z,
-                v.normal.x,
-                v.normal.y,
-                v.normal.z,
-                q(v.color[0]),
-                q(v.color[1]),
-                q(v.color[2]),
-            )
-            .unwrap();
-        }
-        for [i, j, k] in tris {
-            writeln!(&mut out, "3 {i} {j} {k}").unwrap();
-        }
-        out
+        write_luxcore_ply(mesh, None, Vector4::ZERO)
+    }
+
+    /// Write camera-space PLY geometry as the reference display context does.
+    pub fn write_ply_string_with_camera(&self, mesh: &RenderMesh, camera: &Camera) -> String {
+        write_luxcore_ply(mesh, Some(camera.rotation().to_matrix()), camera.center())
     }
 
     /// LuxCore `.scn` scene file referencing the mesh `.ply` — faithful to C++
@@ -2802,20 +2777,45 @@ impl LuxCoreSceneExporter {
         out.push_str("scene.camera.lookat.target = 0 0 0\n");
         out.push_str("scene.camera.type = \"orthographic\"\n");
         out.push_str("scene.camera.lookat.orig = 0 0 100\n");
-        out.push_str("# Lights\n");
-        out.push_str("scene.lights.il.type = constantinfinite\n");
-        out.push_str("scene.lights.il.color = 1 1 1\n");
-        out.push_str("scene.lights.il.gain = 0.15 0.15 0.15\n");
-        out.push_str("scene.lights.distl.type = distant\n");
-        out.push_str("scene.lights.distl.color = 1 1 1\n");
-        out.push_str("scene.lights.distl.gain = 20 20 20\n");
-        out.push_str("scene.lights.distl.direction = 1 1 -1\n");
-        writeln!(&mut out, "scene.materials.{name}.type = matte").unwrap();
-        writeln!(&mut out, "scene.materials.{name}.kd = 0.7 0.7 0.7").unwrap();
-        writeln!(&mut out, "scene.shapes.{name}.type = mesh").unwrap();
-        writeln!(&mut out, "scene.shapes.{name}.ply = {ply_filename}").unwrap();
-        writeln!(&mut out, "scene.objects.{name}.material = {name}").unwrap();
-        writeln!(&mut out, "scene.objects.{name}.shape = {name}").unwrap();
+        write_luxcore_scene_tail(&mut out, name, ply_filename, 1.0);
+        out
+    }
+
+    /// Write a LuxCore scene using CueMol camera projection and framing.
+    pub fn write_scn_string_with_camera(
+        &self,
+        name: &str,
+        ply_filename: &str,
+        camera: &Camera,
+        width: i32,
+        height: i32,
+    ) -> String {
+        let width = width.max(1);
+        let height = height.max(1);
+        let zoom_y = camera.zoom().max(1.0e-6);
+        let zoom_x = zoom_y * f64::from(width) / f64::from(height);
+        let view_dist = camera.cam_dist().max(1.0e-6);
+        let fov_x = 2.0 * (zoom_x / (2.0 * view_dist)).atan().to_degrees();
+        let fov_y = 2.0 * (zoom_y / (2.0 * view_dist)).atan().to_degrees();
+        let fov = if height < width { fov_y } else { fov_x };
+        let perspective = camera.is_perspective() && fov >= 10.0;
+        let mut out = String::new();
+        out.push_str("scene.camera.up = 0 1 0\n");
+        out.push_str("scene.camera.lookat.target = 0 0 0\n");
+        if perspective {
+            out.push_str("scene.camera.type = \"perspective\"\n");
+            writeln!(&mut out, "scene.camera.lookat.orig = 0 0 {view_dist:.6}").unwrap();
+            writeln!(&mut out, "scene.camera.fieldofview = {fov:.6}").unwrap();
+        } else {
+            out.push_str("scene.camera.type = \"orthographic\"\n");
+            writeln!(
+                &mut out,
+                "scene.camera.lookat.orig = 0 0 {:.6}",
+                camera.slab_depth() / 2.0
+            )
+            .unwrap();
+        }
+        write_luxcore_scene_tail(&mut out, name, ply_filename, 1.0 / (zoom_x / 2.0));
         out
     }
 
@@ -2920,12 +2920,34 @@ impl LuxCoreSceneExporter {
         width: i32,
         height: i32,
     ) -> Result<()> {
+        self.write_scene_files_impl(name, mesh, None, width, height)
+    }
+
+    pub fn write_scene_files_with_camera(
+        &mut self,
+        name: &str,
+        mesh: &RenderMesh,
+        camera: &Camera,
+        width: i32,
+        height: i32,
+    ) -> Result<()> {
+        self.write_scene_files_impl(name, mesh, Some(camera), width, height)
+    }
+
+    fn write_scene_files_impl(
+        &mut self,
+        name: &str,
+        mesh: &RenderMesh,
+        camera: Option<&Camera>,
+        width: i32,
+        height: i32,
+    ) -> Result<()> {
         if self.handler().path().is_empty() {
             return Err(CueMolError::invalid_argument(
                 "LuxCore output path is empty",
             ));
         }
-        let cfg_path = std::path::Path::new(self.handler().path());
+        let cfg_path = std::path::PathBuf::from(self.handler().path());
         let scn_path = cfg_path.with_extension("scn");
         let ply_path = cfg_path.with_extension("ply");
         let scene_base = cfg_path
@@ -2936,13 +2958,116 @@ impl LuxCoreSceneExporter {
             .file_name()
             .and_then(|value| value.to_str())
             .unwrap_or("scene.ply");
-        std::fs::write(&ply_path, self.write_ply_string(mesh))?;
-        std::fs::write(&scn_path, self.write_scn_string(name, ply_filename))?;
-        self.handler()
-            .write_string(&self.write_cfg_string(scene_base, width, height))?;
+        self.rel_output_base = scene_base.to_string();
+        self.abs_output_base = cfg_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(""))
+            .join(scene_base)
+            .to_string_lossy()
+            .into_owned();
+        let ply = if let Some(camera) = camera {
+            self.write_ply_string_with_camera(mesh, camera)
+        } else {
+            self.write_ply_string(mesh)
+        };
+        let scn = if let Some(camera) = camera {
+            self.write_scn_string_with_camera(name, ply_filename, camera, width, height)
+        } else {
+            self.write_scn_string(name, ply_filename)
+        };
+        std::fs::write(&ply_path, ply)?;
+        std::fs::write(&scn_path, scn)?;
+        self.handler().write_string(&self.write_cfg_string(
+            &self.rel_output_base,
+            width,
+            height,
+        ))?;
         self.state.write();
         Ok(())
     }
+}
+
+fn write_luxcore_ply(mesh: &RenderMesh, rotation: Option<Matrix4>, center: Vector4) -> String {
+    let triangles = mesh
+        .triangles()
+        .into_iter()
+        .filter(|triangle| triangle.iter().all(|index| *index < mesh.vertices.len()))
+        .collect::<Vec<_>>();
+    let mut out = String::new();
+    out.push_str("ply\nformat ascii 1.0\ncomment Created by XXX\n");
+    writeln!(&mut out, "element vertex {}", mesh.vertices.len()).unwrap();
+    out.push_str("property float x\nproperty float y\nproperty float z\n");
+    out.push_str("property float nx\nproperty float ny\nproperty float nz\n");
+    out.push_str("property uchar red\nproperty uchar green\nproperty uchar blue\n");
+    writeln!(&mut out, "element face {}", triangles.len()).unwrap();
+    out.push_str("property list uchar uint vertex_indices\nend_header\n");
+    for vertex in &mesh.vertices {
+        let (position, normal) = if let Some(rotation) = &rotation {
+            (
+                rotation.mul_vec(vertex.position - center),
+                rotation.mul_vec(Vector4::new3(
+                    vertex.normal.x,
+                    vertex.normal.y,
+                    vertex.normal.z,
+                )),
+            )
+        } else {
+            (vertex.position, vertex.normal)
+        };
+        if position.x.is_finite() && position.y.is_finite() && position.z.is_finite() {
+            write!(
+                &mut out,
+                "{:.6} {:.6} {:.6} ",
+                position.x, position.y, position.z
+            )
+            .unwrap();
+        } else {
+            out.push_str("0 0 0 ");
+        }
+        if normal.x.is_finite() && normal.y.is_finite() && normal.z.is_finite() {
+            write!(&mut out, "{:.6} {:.6} {:.6} ", normal.x, normal.y, normal.z).unwrap();
+        } else {
+            out.push_str("1 0 0 ");
+        }
+        let quantize = |channel: f32| (channel.clamp(0.0, 1.0) * 255.0).round() as u8;
+        writeln!(
+            &mut out,
+            "{} {} {}",
+            quantize(vertex.color[0]),
+            quantize(vertex.color[1]),
+            quantize(vertex.color[2])
+        )
+        .unwrap();
+    }
+    for [i, j, k] in triangles {
+        writeln!(&mut out, "3 {i} {j} {k}").unwrap();
+    }
+    out
+}
+
+fn write_luxcore_scene_tail(out: &mut String, name: &str, ply_filename: &str, scale: f64) {
+    out.push_str("# Light1\n");
+    out.push_str("scene.lights.il.type = constantinfinite\n");
+    out.push_str("scene.lights.il.color = 1 1 1\n");
+    out.push_str("scene.lights.il.gain = 0.15 0.15 0.15\n");
+    out.push_str("# Light2\n");
+    out.push_str("scene.lights.distl.type = distant\n");
+    out.push_str("scene.lights.distl.color = 1 1 1\n");
+    out.push_str("scene.lights.distl.gain = 20 20 20\n");
+    out.push_str("scene.lights.distl.direction = 1 1 -1\n");
+    out.push_str("scene.lights.distl.theta = 10\n");
+    writeln!(out, "scene.textures.{name}.type = \"hitpointcolor\"").unwrap();
+    writeln!(out, "scene.materials.{name}.type = matte").unwrap();
+    writeln!(out, "scene.materials.{name}.kd = {name}").unwrap();
+    writeln!(out, "scene.shapes.{name}.type = mesh").unwrap();
+    writeln!(out, "scene.shapes.{name}.ply = {ply_filename}").unwrap();
+    writeln!(out, "scene.objects.{name}.material = {name}").unwrap();
+    writeln!(out, "scene.objects.{name}.shape = {name}").unwrap();
+    writeln!(
+        out,
+        "scene.objects.{name}.transformation = {scale:.6} 0 0 0 0 {scale:.6} 0 0 0 0 {scale:.6} 0 0 0 0 1"
+    )
+    .unwrap();
 }
 
 impl Default for LuxCoreSceneExporter {
@@ -4539,6 +4664,8 @@ mod tests {
         assert!(dir.join("scene.cfg").is_file());
         assert!(dir.join("scene.scn").is_file());
         assert!(dir.join("scene.ply").is_file());
+        assert_eq!(core.rel_output_base(), "scene");
+        assert_eq!(core.abs_output_base(), dir.join("scene").to_string_lossy());
 
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -5346,11 +5473,48 @@ mod tests {
         assert!(scn.contains("scene.shapes.mol.ply = mol.ply"));
         assert!(scn.contains("scene.objects.mol.shape = mol"));
         assert!(scn.contains("scene.camera.type = \"orthographic\""));
+        assert!(scn.contains("scene.textures.mol.type = \"hitpointcolor\""));
+        assert!(scn.contains("scene.materials.mol.kd = mol"));
+        assert!(scn.contains("scene.lights.distl.theta = 10"));
+        assert!(scn.contains("scene.objects.mol.transformation = 1.000000 0 0"));
 
         let cfg = lux.write_cfg_string("mol", 640, 480);
         assert!(cfg.contains("scene.file = mol.scn"));
         assert!(cfg.contains("film.width = 640"));
         assert!(cfg.contains("film.outputs.1.filename = mol.png"));
+    }
+
+    #[test]
+    fn luxcore_camera_export_bakes_view_transform_and_projection() {
+        let mesh = RenderMesh {
+            vertices: vec![MeshVertex {
+                position: Vector4::new3(2.0, 4.0, 6.0),
+                normal: Vector4::new3(0.0, 1.0, 0.0),
+                color: [0.25, 0.5, 1.0, 1.0],
+            }],
+            indices: Vec::new(),
+        };
+        let mut camera = Camera::new();
+        camera.set_center(Vector4::new3(1.0, 2.0, 3.0));
+        camera.set_zoom(50.0);
+        camera.set_cam_dist(200.0);
+        camera.set_slab_depth(80.0);
+        camera.set_perspective(true);
+        let exporter = LuxCoreSceneExporter::new();
+
+        let ply = exporter.write_ply_string_with_camera(&mesh, &camera);
+        assert!(ply.contains("1.000000 2.000000 3.000000 0.000000 1.000000 0.000000 64 128 255"));
+        let scn = exporter.write_scn_string_with_camera("mol", "mol.ply", &camera, 800, 400);
+        assert!(scn.contains("scene.camera.type = \"perspective\""));
+        assert!(scn.contains("scene.camera.lookat.orig = 0 0 200.000000"));
+        assert!(scn.contains("scene.camera.fieldofview = 14."));
+        assert!(scn.contains("scene.objects.mol.transformation = 0.020000 0 0"));
+
+        camera.set_zoom(1.0);
+        let narrow = exporter.write_scn_string_with_camera("mol", "mol.ply", &camera, 800, 400);
+        assert!(narrow.contains("scene.camera.type = \"orthographic\""));
+        assert!(narrow.contains("scene.camera.lookat.orig = 0 0 40.000000"));
+        assert!(!narrow.contains("scene.camera.fieldofview"));
     }
 
     #[test]

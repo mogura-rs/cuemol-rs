@@ -1620,6 +1620,7 @@ fn export_luxcore(
     snapshot: &RenderSceneSnapshot,
 ) -> Result<(), String> {
     let lux = LuxCoreSceneExporter::new();
+    let camera = camera_for_snapshot(snapshot);
     let base = output
         .strip_suffix(".cfg")
         .or_else(|| output.strip_suffix(".CFG"))
@@ -1630,10 +1631,11 @@ fn export_luxcore(
         .unwrap_or("scene");
     let ply_path = format!("{base}.ply");
     let scn_path = format!("{base}.scn");
-    std::fs::write(&ply_path, lux.write_ply_string(mesh)).map_err(|err| err.to_string())?;
+    std::fs::write(&ply_path, lux.write_ply_string_with_camera(mesh, &camera))
+        .map_err(|err| err.to_string())?;
     std::fs::write(
         &scn_path,
-        lux.write_scn_string(name, &format!("{out_stem}.ply")),
+        lux.write_scn_string_with_camera(name, &format!("{out_stem}.ply"), &camera, 640, 480),
     )
     .map_err(|err| err.to_string())?;
     std::fs::write(output, lux.write_cfg_string(out_stem, 640, 480))
