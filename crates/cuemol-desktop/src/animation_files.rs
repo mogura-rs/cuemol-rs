@@ -16,6 +16,22 @@ pub(crate) fn animation_ffmpeg_format_options(format: &str) -> Result<&'static s
     }
 }
 
+pub(crate) fn animation_movie_output_path(
+    output_dir: &Path,
+    base_name: &str,
+    format: &str,
+) -> Result<std::path::PathBuf, String> {
+    let base_name = validate_base_name(base_name)?;
+    let extension = match format {
+        "mov_h264" | "mov_h265" | "mov_raw" => "mov",
+        "mp4_h264" | "mp4_h265" => "mp4",
+        "wmv2" => "wmv",
+        "gifanim" => "gif",
+        _ => return Err(format!("unsupported animation movie format: {format}")),
+    };
+    Ok(output_dir.join(format!("{base_name}.{extension}")))
+}
+
 pub(crate) fn animation_ffmpeg_args(
     base_name: &str,
     fps: f64,
@@ -209,6 +225,10 @@ mod tests {
         let gif = animation_ffmpeg_args("movie", 12.5, 3, "gifanim", 512).unwrap();
         assert_eq!(gif.last().map(String::as_str), Some("movie.gif"));
         assert_eq!(animation_ffmpeg_format_options("gifanim").unwrap(), "");
+        assert_eq!(
+            animation_movie_output_path(Path::new("frames"), " movie ", "mov_h265").unwrap(),
+            Path::new("frames/movie.mov")
+        );
         assert!(animation_ffmpeg_args("movie", 30.0, 1, "unknown", 1).is_err());
     }
 }

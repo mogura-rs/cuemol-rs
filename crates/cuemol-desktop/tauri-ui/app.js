@@ -7763,7 +7763,10 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     ffmpegOptions.readOnly = true;
     const reencode = button("Re-encode", "", () => {});
     const cleanupOutputs = button("Clean up", "", () => {});
-    moviePage.append(reencode, cleanupOutputs);
+    const openMovie = button("Open movie", "", () => {});
+    const revealMovie = button("Reveal", "", () => {});
+    revealMovie.title = "Reveal movie in file browser";
+    moviePage.append(reencode, cleanupOutputs, openMovie, revealMovie);
 
     const previewControls = document.createElement("label");
     previewControls.className = "dialog-field animation-preview-controls";
@@ -7813,6 +7816,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     let stopping = false;
     let renderedFrames = 0;
     let renderComplete = false;
+    let movieAvailable = false;
     let encodingOnlyRun = false;
     let lastLoggedFrame = 0;
     let previewSerial = 0;
@@ -7848,15 +7852,27 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       ffmpegOptions.disabled = !makeMovie.checked || running;
       reencode.disabled = running || !makeMovie.checked || !renderComplete;
       cleanupOutputs.disabled = running || !makeMovie.checked || renderedFrames < 1;
+      openMovie.disabled = running || !movieAvailable;
+      revealMovie.disabled = running || !movieAvailable;
     };
     const refreshFrames = async () => {
       try {
-        const count = Number(await invoke("animation_render_frame_count", {
+        const output = {
           outputDir: outputDir.value,
           baseName: baseName.value,
-        }));
+          movieFormat: movieFormat.value,
+        };
+        const [frameCount, available] = await Promise.all([
+          invoke("animation_render_frame_count", {
+            outputDir: output.outputDir,
+            baseName: output.baseName,
+          }),
+          invoke("animation_render_movie_available", output),
+        ]);
+        const count = Number(frameCount);
         renderedFrames = Number.isFinite(count) ? Math.max(0, count) : 0;
         renderComplete = renderedFrames > 0;
+        movieAvailable = Boolean(available);
         previewSlider.max = String(Math.max(0, renderedFrames - 1));
         previewSlider.disabled = renderedFrames < 1;
         if (renderedFrames < 1) {
@@ -7867,6 +7883,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       } catch {
         renderedFrames = 0;
         renderComplete = false;
+        movieAvailable = false;
         syncMovie();
       }
     };
@@ -7968,6 +7985,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           const count = Number(state.slice("complete:".length));
           renderedFrames = count;
           renderComplete = true;
+          await refreshFrames();
           syncMovie();
           progress.value = 1;
           progressText.textContent = `Animation rendered: ${count} frame(s)`;
@@ -8076,9 +8094,31 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         showError(error);
       }
     };
+    const movieOutput = () => ({
+      outputDir: outputDir.value,
+      baseName: baseName.value,
+      movieFormat: movieFormat.value,
+    });
+    openMovie.onclick = async () => {
+      try {
+        await invoke("open_animation_render_movie", movieOutput());
+      } catch (error) {
+        showError(error);
+      }
+    };
+    revealMovie.onclick = async () => {
+      try {
+        await invoke("reveal_animation_render_movie", movieOutput());
+      } catch (error) {
+        showError(error);
+      }
+    };
     backend.addEventListener("change", syncBackend);
     makeMovie.addEventListener("change", syncMovie);
-    movieFormat.addEventListener("change", updateFfmpegOptions);
+    movieFormat.addEventListener("change", () => {
+      updateFfmpegOptions();
+      void refreshFrames();
+    });
     outputDir.addEventListener("change", () => { void refreshFrames(); });
     baseName.addEventListener("change", () => { void refreshFrames(); });
     previewSlider.addEventListener("input", () => {

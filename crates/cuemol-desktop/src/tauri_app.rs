@@ -15870,6 +15870,43 @@ fn cleanup_animation_render_outputs(
     crate::cleanup_animation_outputs(Path::new(output_dir.trim()), &base_name)
 }
 
+fn animation_render_movie_output(
+    output_dir: &str,
+    base_name: &str,
+    movie_format: &str,
+) -> Result<PathBuf, String> {
+    crate::animation_movie_output_path(Path::new(output_dir.trim()), base_name, movie_format)
+}
+
+#[tauri::command]
+fn animation_render_movie_available(
+    output_dir: String,
+    base_name: String,
+    movie_format: String,
+) -> Result<bool, String> {
+    Ok(animation_render_movie_output(&output_dir, &base_name, &movie_format)?.is_file())
+}
+
+#[tauri::command]
+fn open_animation_render_movie(
+    output_dir: String,
+    base_name: String,
+    movie_format: String,
+) -> Result<(), String> {
+    let path = animation_render_movie_output(&output_dir, &base_name, &movie_format)?;
+    crate::open_system_path(&path)
+}
+
+#[tauri::command]
+fn reveal_animation_render_movie(
+    output_dir: String,
+    base_name: String,
+    movie_format: String,
+) -> Result<(), String> {
+    let path = animation_render_movie_output(&output_dir, &base_name, &movie_format)?;
+    crate::reveal_system_path(&path)
+}
+
 #[tauri::command]
 fn render_viewport(
     width: u32,
@@ -16321,6 +16358,9 @@ pub fn run() -> Result<(), tauri::Error> {
             animation_render_preview,
             animation_render_frame_count,
             cleanup_animation_render_outputs,
+            animation_render_movie_available,
+            open_animation_render_movie,
+            reveal_animation_render_movie,
             render_viewport,
             update_camera,
             save_scene,
@@ -24019,6 +24059,31 @@ mod tests {
             response,
             ModelResponse::Message(ref value) if value == "data:image/png;base64,UE5H"
         ));
+        fs::remove_dir_all(output_dir).unwrap();
+    }
+
+    #[test]
+    fn animation_movie_availability_tracks_selected_output_format() {
+        let output_dir = std::env::temp_dir().join(format!(
+            "cuemol-tauri-animation-movie-availability-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&output_dir).unwrap();
+        fs::write(output_dir.join("movie.mp4"), b"movie").unwrap();
+        let output_dir = output_dir.to_string_lossy().into_owned();
+
+        assert!(animation_render_movie_available(
+            output_dir.clone(),
+            "movie".to_string(),
+            "mp4_h264".to_string(),
+        )
+        .unwrap());
+        assert!(!animation_render_movie_available(
+            output_dir.clone(),
+            "movie".to_string(),
+            "mov_h264".to_string(),
+        )
+        .unwrap());
         fs::remove_dir_all(output_dir).unwrap();
     }
 

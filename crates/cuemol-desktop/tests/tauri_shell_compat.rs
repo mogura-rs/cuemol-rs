@@ -386,6 +386,9 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "start_animation_render",
         "animation_render_frame_count",
         "cleanup_animation_render_outputs",
+        "animation_render_movie_available",
+        "open_animation_render_movie",
+        "reveal_animation_render_movie",
         "start_animation_movie",
         "poll_animation_render",
         "cancel_animation_render",
@@ -1523,6 +1526,8 @@ fn animation_render_uses_cancellable_progress_and_reference_frame_controls() {
         "Bitrate (kbps)",
         "Re-encode",
         "Clean up",
+        "Open movie",
+        "Reveal",
         "Progress",
         "Log",
     ] {
@@ -1539,6 +1544,9 @@ fn animation_render_uses_cancellable_progress_and_reference_frame_controls() {
         "animation_render_preview",
         "animation_render_frame_count",
         "cleanup_animation_render_outputs",
+        "animation_render_movie_available",
+        "open_animation_render_movie",
+        "reveal_animation_render_movie",
     ] {
         assert!(
             dialog.contains(command),
@@ -1569,6 +1577,8 @@ fn animation_render_uses_cancellable_progress_and_reference_frame_controls() {
     assert!(NATIVE_GUI_RS.contains("animation_ffmpeg_args("));
     assert!(NATIVE_GUI_RS.contains("egui::Button::new(\"Re-encode\")"));
     assert!(NATIVE_GUI_RS.contains("egui::Button::new(\"Clean up\")"));
+    assert!(NATIVE_GUI_RS.contains("egui::Button::new(\"Open movie\")"));
+    assert!(NATIVE_GUI_RS.contains("egui::Button::new(\"Reveal\")"));
     assert!(NATIVE_GUI_RS.contains("crate::cleanup_animation_outputs("));
     for key in [
         "animation_render:height",

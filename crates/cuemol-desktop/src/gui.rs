@@ -16826,7 +16826,16 @@ impl GuiApplication {
         });
         let outputs_available =
             self.animation_render_settings.make_movie && self.animation_render_total_frames > 0;
+        let movie_path = crate::animation_movie_output_path(
+            Path::new(self.animation_render_settings.output_dir.trim()),
+            &self.animation_render_settings.base_name,
+            &self.animation_render_settings.movie_format,
+        )
+        .ok();
+        let movie_available = movie_path.as_ref().is_some_and(|path| path.is_file());
         let mut reencode = false;
+        let mut open_movie = false;
+        let mut reveal_movie = false;
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(outputs_available, egui::Button::new("Re-encode"))
@@ -16842,9 +16851,36 @@ impl GuiApplication {
             {
                 self.animation_cleanup_confirmation = true;
             }
+            if ui
+                .add_enabled(movie_available, egui::Button::new("Open movie"))
+                .clicked()
+            {
+                open_movie = true;
+            }
+            if ui
+                .add_enabled(movie_available, egui::Button::new("Reveal"))
+                .on_hover_text("Reveal movie in file browser")
+                .clicked()
+            {
+                reveal_movie = true;
+            }
         });
         if reencode {
             self.start_animation_movie_reencode();
+        }
+        if open_movie {
+            if let Some(path) = movie_path.as_deref() {
+                if let Err(error) = crate::open_system_path(path) {
+                    self.set_animation_render_error(error);
+                }
+            }
+        }
+        if reveal_movie {
+            if let Some(path) = movie_path.as_deref() {
+                if let Err(error) = crate::reveal_system_path(path) {
+                    self.set_animation_render_error(error);
+                }
+            }
         }
         if self.animation_cleanup_confirmation {
             ui.colored_label(
