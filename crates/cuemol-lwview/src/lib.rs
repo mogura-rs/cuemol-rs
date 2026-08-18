@@ -1,5 +1,5 @@
 use cuemol_core::{Uid, Vector4};
-use cuemol_gfx::{PixelBuffer, RawHitData};
+use cuemol_gfx::{ColorSpec, PixelBuffer, RawHitData};
 use cuemol_qsys::{Renderer, Scene, SceneObject};
 use cuemol_render::{tessellate_snapshot, RenderSceneSnapshot};
 use std::collections::BTreeMap;
@@ -601,7 +601,16 @@ impl LWViewerManager {
                     renderer.set_visible(source_renderer.visible);
                     renderer.set_property_str("data_id", data_id.to_string());
                 }
-                let mesh = tessellate_snapshot(&source_renderer.snapshot);
+                append_screen_draw_elements(
+                    scene_object.data_mut(),
+                    data_id,
+                    &source_renderer.snapshot,
+                );
+                let mut mesh_snapshot = source_renderer.snapshot.clone();
+                mesh_snapshot
+                    .bonds
+                    .retain(|bond| bond.screen_width.is_none());
+                let mesh = tessellate_snapshot(&mesh_snapshot);
                 if !mesh.indices.is_empty() {
                     let vertices = mesh
                         .vertices
@@ -630,6 +639,89 @@ impl LWViewerManager {
     pub fn conv_to_lwscene<T: Clone>(&mut self, source: &Scene<T>, target: &mut Scene<LWObject>) {
         self.conv_to_lw_scene(source, target);
     }
+}
+
+fn append_screen_draw_elements(
+    object: &mut LWObject,
+    data_id: i32,
+    snapshot: &RenderSceneSnapshot,
+) {
+    let points = snapshot
+        .bonds
+        .iter()
+        .filter(|bond| bond.screen_width.is_some() && bond.screen_point)
+        .map(|bond| LWVertexColor {
+            position: vector_to_f32(bond.from),
+            color: render_color_u8(bond.color.as_ref()),
+        })
+        .collect::<Vec<_>>();
+    if let Some(width) = snapshot
+        .bonds
+        .iter()
+        .find(|bond| bond.screen_width.is_some() && bond.screen_point)
+        .and_then(|bond| bond.screen_width)
+    {
+        object.add_draw_element(screen_draw_element(
+            data_id,
+            cuemol_gfx::AbstDrawElem::DRAW_POINTS as i8,
+            width,
+            points,
+        ));
+    }
+
+    let lines = snapshot
+        .bonds
+        .iter()
+        .filter(|bond| bond.screen_width.is_some() && !bond.screen_point)
+        .flat_map(|bond| {
+            [
+                LWVertexColor {
+                    position: vector_to_f32(bond.from),
+                    color: render_color_u8(bond.color.as_ref()),
+                },
+                LWVertexColor {
+                    position: vector_to_f32(bond.to),
+                    color: render_color_u8(bond.end_color.as_ref().or(bond.color.as_ref())),
+                },
+            ]
+        })
+        .collect::<Vec<_>>();
+    if let Some(width) = snapshot
+        .bonds
+        .iter()
+        .find(|bond| bond.screen_width.is_some() && !bond.screen_point)
+        .and_then(|bond| bond.screen_width)
+    {
+        object.add_draw_element(screen_draw_element(
+            data_id,
+            cuemol_gfx::AbstDrawElem::DRAW_LINES as i8,
+            width,
+            lines,
+        ));
+    }
+}
+
+fn screen_draw_element(
+    data_id: i32,
+    draw_mode: i8,
+    line_width: f32,
+    vertices: Vec<LWVertexColor>,
+) -> LWDrawElement {
+    let default_color = vertices.first().map_or([179, 179, 179, 255], |v| v.color);
+    let data = if vertices.iter().all(|vertex| vertex.color == default_color) {
+        LWDrawData::Vertices(vertices.into_iter().map(|vertex| vertex.position).collect())
+    } else {
+        LWDrawData::VertexColors(vertices)
+    };
+    LWDrawElement::new(data_id, draw_mode, line_width, default_color, data)
+}
+
+fn render_color_u8(color: Option<&ColorSpec>) -> [u8; 4] {
+    color
+        .and_then(ColorSpec::rgba8)
+        .map_or([179, 179, 179, 255], |rgba| {
+            [rgba.r, rgba.g, rgba.b, rgba.a]
+        })
 }
 
 fn vector_to_f32(value: Vector4) -> [f32; 3] {
@@ -770,6 +862,68 @@ mod tests {
                 .and_then(|value| value.parse::<u64>().ok()),
             Some(renderer.uid().get())
         );
+    }
+
+    #[test]
+    fn lw_viewer_manager_preserves_screen_points_and_lines() {
+        let red = cuemol_gfx::parse_color("#ff0000").unwrap();
+        let green = cuemol_gfx::parse_color("#00ff00").unwrap();
+        let blue = cuemol_gfx::parse_color("#0000ff").unwrap();
+        let mut snapshot = RenderSceneSnapshot::empty();
+        snapshot.bonds.push(
+            cuemol_render::RenderBond::new(
+                Vector4::new3(1.0, 2.0, 3.0),
+                Vector4::new3(1.0, 2.0, 3.0),
+                0.06,
+                Some(green),
+            )
+            .with_screen_style(3.0, false)
+            .as_screen_point(),
+        );
+        snapshot.bonds.push(
+            cuemol_render::RenderBond::new(
+                Vector4::ZERO,
+                Vector4::new3(1.0, 0.0, 0.0),
+                0.04,
+                Some(red),
+            )
+            .with_end_color(Some(blue))
+            .with_screen_style(2.0, false),
+        );
+        let source = [RenderLWObjectSnapshot {
+            uid: Uid::new(10),
+            name: "screen-primitives".to_string(),
+            visible: true,
+            renderers: vec![RenderLWRendererSnapshot {
+                name: "lines".to_string(),
+                visible: true,
+                snapshot,
+            }],
+        }];
+        let mut target = Scene::new(Uid::new(2), "target");
+        LWViewerManager::new().conv_render_objects_to_lw_scene(&source, &mut target);
+
+        let object = target.object(Uid::new(10)).unwrap().data();
+        assert_eq!(object.draw_elements().len(), 2);
+        let points = &object.draw_elements()[0];
+        assert_eq!(
+            points.draw_mode(),
+            cuemol_gfx::AbstDrawElem::DRAW_POINTS as i8
+        );
+        assert_eq!(points.line_width(), 3.0);
+        assert_eq!(points.default_color(), [0, 255, 0, 255]);
+        assert!(matches!(points.data(), LWDrawData::Vertices(vertices) if vertices.len() == 1));
+        let lines = &object.draw_elements()[1];
+        assert_eq!(
+            lines.draw_mode(),
+            cuemol_gfx::AbstDrawElem::DRAW_LINES as i8
+        );
+        assert_eq!(lines.line_width(), 2.0);
+        let LWDrawData::VertexColors(vertices) = lines.data() else {
+            panic!("per-endpoint colors must remain variable");
+        };
+        assert_eq!(vertices[0].color, [255, 0, 0, 255]);
+        assert_eq!(vertices[1].color, [0, 0, 255, 255]);
     }
 
     #[test]

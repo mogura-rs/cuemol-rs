@@ -47974,40 +47974,38 @@ fn append_lw_arrays(
                 else {
                     continue;
                 };
-                target.atoms.push(cuemol_render::RenderAtom {
-                    center: f32_position(*position),
-                    radius: (line_width * 0.03).max(0.03),
-                    color: Some(lw_color_spec(*color)),
-                    object_uid: None,
-                    atom_index: None,
-                    selected: false,
-                    detail: Some(4),
-                    edge: None,
-                });
+                target.bonds.push(
+                    cuemol_render::RenderBond::new(
+                        f32_position(*position),
+                        f32_position(*position),
+                        (line_width * 0.03).max(0.03),
+                        Some(lw_color_spec(*color)),
+                    )
+                    .with_screen_style(line_width, false)
+                    .as_screen_point(),
+                );
             }
         }
         AbstDrawElem::DRAW_LINE_STRIP | AbstDrawElem::DRAW_LINE_LOOP | AbstDrawElem::DRAW_LINES => {
             for [start, end] in lw_line_indices(order, i32::from(draw_mode)) {
-                let (Some(from), Some(to), Some(color)) =
-                    (positions.get(start), positions.get(end), colors.get(start))
-                else {
+                let (Some(from), Some(to), Some(color), Some(end_color)) = (
+                    positions.get(start),
+                    positions.get(end),
+                    colors.get(start),
+                    colors.get(end),
+                ) else {
                     continue;
                 };
-                target.bonds.push(cuemol_render::RenderBond {
-                    from: f32_position(*from),
-                    to: f32_position(*to),
-                    radius: (line_width * 0.02).max(0.01),
-                    color: Some(lw_color_spec(*color)),
-                    end_color: None,
-                    object_uid: None,
-                    atom_indices: None,
-                    selected: false,
-                    screen_width: None,
-                    screen_stipple: false,
-                    screen_offset: [0.0, 0.0],
-                    screen_point: false,
-                    edge: None,
-                });
+                target.bonds.push(
+                    cuemol_render::RenderBond::new(
+                        f32_position(*from),
+                        f32_position(*to),
+                        (line_width * 0.02).max(0.01),
+                        Some(lw_color_spec(*color)),
+                    )
+                    .with_end_color(Some(lw_color_spec(*end_color)))
+                    .with_screen_style(line_width, false),
+                );
             }
         }
         _ => {
@@ -59962,6 +59960,29 @@ end_header
                 [0.0, 1.0, 0.0],
             ]),
         ));
+        object.add_draw_element(cuemol_lwview::LWDrawElement::new(
+            7,
+            cuemol_gfx::AbstDrawElem::DRAW_LINES as i8,
+            2.0,
+            [255, 0, 0, 255],
+            cuemol_lwview::LWDrawData::VertexColors(vec![
+                cuemol_lwview::LWVertexColor {
+                    position: [0.0, 0.0, 0.0],
+                    color: [255, 0, 0, 255],
+                },
+                cuemol_lwview::LWVertexColor {
+                    position: [1.0, 1.0, 0.0],
+                    color: [0, 0, 255, 255],
+                },
+            ]),
+        ));
+        object.add_draw_element(cuemol_lwview::LWDrawElement::new(
+            7,
+            cuemol_gfx::AbstDrawElem::DRAW_POINTS as i8,
+            3.0,
+            [0, 255, 0, 255],
+            cuemol_lwview::LWDrawData::Vertices(vec![[0.5, 0.5, 0.0]]),
+        ));
         let qdf0 = cuemol_lwview::write_qdf_lwobj_bytes(&object);
         let encoded = cuemol_qsys::encode_qdf0_bytes(&qdf0, 1, "13").unwrap();
         let encoded = String::from_utf8(encoded).unwrap();
@@ -59989,6 +60010,38 @@ end_header
             snapshot.meshes[0].vertices[0].color,
             [32.0 / 255.0, 64.0 / 255.0, 128.0 / 255.0, 1.0]
         );
+        assert_eq!(snapshot.atom_count(), 0);
+        assert_eq!(snapshot.bond_count(), 2);
+        let line = snapshot
+            .bonds
+            .iter()
+            .find(|primitive| !primitive.screen_point)
+            .expect("lightweight line is rendered in screen space");
+        assert_eq!(line.screen_width, Some(2.0));
+        assert_eq!(
+            line.color.as_ref().unwrap().rgba8().unwrap(),
+            cuemol_gfx::Rgba8 {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            }
+        );
+        assert_eq!(
+            line.end_color.as_ref().unwrap().rgba8().unwrap(),
+            cuemol_gfx::Rgba8 {
+                r: 0,
+                g: 0,
+                b: 255,
+                a: 255,
+            }
+        );
+        let point = snapshot
+            .bonds
+            .iter()
+            .find(|primitive| primitive.screen_point)
+            .expect("lightweight point is rendered in screen space");
+        assert_eq!(point.screen_width, Some(3.0));
         assert!(snapshot.bounds.is_some());
 
         #[cfg(feature = "scripting")]
@@ -60027,7 +60080,14 @@ end_header
             .expect("LWObject display state is editable");
             let moved = app.active_render_snapshot("").unwrap();
             assert_eq!(moved.mesh_triangle_count(), 1);
-            assert!(moved.bounds.expect("moved LW bounds").0.x >= 3.0);
+            assert!(moved.meshes[0]
+                .vertices
+                .iter()
+                .all(|vertex| vertex.position.x >= 3.0));
+            assert!(moved
+                .bonds
+                .iter()
+                .all(|primitive| primitive.from.x >= 3.0 && primitive.to.x >= 3.0));
         }
 
         let rewritten = app
