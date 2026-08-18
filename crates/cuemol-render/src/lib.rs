@@ -1548,7 +1548,7 @@ impl MqoSceneExporter {
     /// (`3 V(i1 i3 i2) M(im)`); MQO indices are 0-based.
     pub fn write_mqo_string(&self, name: &str, mesh: &RenderMesh) -> String {
         let tris = mesh.triangles();
-        let (mat_keys, face_mat) = face_material_table(mesh);
+        let (mat_keys, face_mat) = face_material_table_with_grad_steps(mesh, self.grad_steps);
 
         let mut out = String::new();
         out.push_str("Metasequoia Document\n");
@@ -1812,7 +1812,7 @@ impl WbpSceneExporter {
     /// the `.mqo` and holds the Object, a DirectionalLight, and a Camera.
     /// `mqo_filename` is the relative `.mqo` reference.
     pub fn write_wbp_string(&self, name: &str, mesh: &RenderMesh, mqo_filename: &str) -> String {
-        let (mat_keys, _) = face_material_table(mesh);
+        let (mat_keys, _) = face_material_table_with_grad_steps(mesh, self.grad_steps);
         let mut out = String::new();
         out.push_str("# Warabi Project 1.1 utf8\n");
         for (i, c) in mat_keys.iter().enumerate() {
@@ -1911,7 +1911,9 @@ impl WbpSceneExporter {
             .file_name()
             .and_then(|value| value.to_str())
             .unwrap_or("scene.mqo");
-        let mqo = MqoSceneExporter::new().write_mqo_string(name, mesh);
+        let mut mqo_exporter = MqoSceneExporter::new();
+        mqo_exporter.set_grad_steps(self.grad_steps);
+        let mqo = mqo_exporter.write_mqo_string(name, mesh);
         std::fs::write(&mqo_path, mqo)?;
         let project = self.write_wbp_string(name, mesh, mqo_filename);
         self.handler().write_string(&project)?;
@@ -2558,6 +2560,67 @@ fn face_material_table(mesh: &RenderMesh) -> (Vec<[u8; 4]>, Vec<usize>) {
         keys.push([204, 204, 204, 255]);
     }
     (keys, face_mat)
+}
+
+/// Build the MQO/Warabi material table while quantizing a face that mixes two
+/// endpoint colors to the nearest `gradSteps` entry. This is the resolved-color
+/// counterpart of C++ `MqoDisplayContext::getMatIndex`.
+fn face_material_table_with_grad_steps(
+    mesh: &RenderMesh,
+    grad_steps: i32,
+) -> (Vec<[u8; 4]>, Vec<usize>) {
+    let quantize =
+        |color: [f32; 4]| color.map(|component| (component.clamp(0.0, 1.0) * 255.0).round() as u8);
+    let steps = grad_steps.clamp(1, 256) as f32;
+    let mut keys = Vec::<[u8; 4]>::new();
+    let mut face_materials = Vec::with_capacity(mesh.triangle_count());
+    for [i, j, k] in mesh.triangles() {
+        let vertex_colors = [
+            quantize(mesh.vertices[i].color),
+            quantize(mesh.vertices[j].color),
+            quantize(mesh.vertices[k].color),
+        ];
+        let mut endpoints = Vec::<[u8; 4]>::new();
+        for color in vertex_colors {
+            if !endpoints.contains(&color) {
+                endpoints.push(color);
+            }
+        }
+        let key = if endpoints.len() == 2 {
+            let first_count = vertex_colors
+                .iter()
+                .filter(|color| **color == endpoints[0])
+                .count() as f32;
+            let first_weight = ((first_count / 3.0) * steps).round() / steps;
+            std::array::from_fn(|channel| {
+                (f32::from(endpoints[0][channel]) * first_weight
+                    + f32::from(endpoints[1][channel]) * (1.0 - first_weight))
+                    .round()
+                    .clamp(0.0, 255.0) as u8
+            })
+        } else {
+            std::array::from_fn(|channel| {
+                (vertex_colors
+                    .iter()
+                    .map(|color| f32::from(color[channel]) / 3.0)
+                    .sum::<f32>())
+                .round()
+                .clamp(0.0, 255.0) as u8
+            })
+        };
+        let material = keys
+            .iter()
+            .position(|color| *color == key)
+            .unwrap_or_else(|| {
+                keys.push(key);
+                keys.len() - 1
+            });
+        face_materials.push(material);
+    }
+    if keys.is_empty() {
+        keys.push([204, 204, 204, 255]);
+    }
+    (keys, face_materials)
 }
 
 fn pov_material_texture(material: &str, color: [u8; 4]) -> String {
@@ -4421,6 +4484,43 @@ mod tests {
         assert!(mqo
             .lines()
             .all(|l| !l.starts_with("3 V(") || l.contains(") M(")));
+    }
+
+    #[test]
+    fn mqo_and_warabi_quantize_two_color_faces_by_grad_steps() {
+        let mesh = RenderMesh {
+            vertices: vec![
+                MeshVertex {
+                    position: Vector4::new3(0.0, 0.0, 0.0),
+                    normal: Vector4::new3(0.0, 0.0, 1.0),
+                    color: [0.0, 0.0, 0.0, 1.0],
+                },
+                MeshVertex {
+                    position: Vector4::new3(1.0, 0.0, 0.0),
+                    normal: Vector4::new3(0.0, 0.0, 1.0),
+                    color: [1.0, 1.0, 1.0, 1.0],
+                },
+                MeshVertex {
+                    position: Vector4::new3(0.0, 1.0, 0.0),
+                    normal: Vector4::new3(0.0, 0.0, 1.0),
+                    color: [1.0, 1.0, 1.0, 1.0],
+                },
+            ],
+            indices: vec![0, 1, 2],
+        };
+        let mut mqo = MqoSceneExporter::new();
+        mqo.set_grad_steps(2);
+        let two_step = mqo.write_mqo_string("gradient", &mesh);
+        mqo.set_grad_steps(3);
+        let three_step = mqo.write_mqo_string("gradient", &mesh);
+        assert!(two_step.contains("col(0.501961 0.501961 0.501961 1.000000)"));
+        assert!(three_step.contains("col(0.666667 0.666667 0.666667 1.000000)"));
+
+        let mut wbp = WbpSceneExporter::new();
+        wbp.set_grad_steps(2);
+        assert!(wbp
+            .write_wbp_string("gradient", &mesh, "gradient.mqo")
+            .contains("Color : [0.501961, 0.501961, 0.501961]"));
     }
 
     #[test]
