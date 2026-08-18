@@ -201,7 +201,7 @@ pub fn read_sdf_str_with_options(input: &str, options: &SdfReadOptions) -> Resul
             } else {
                 let new_index = mol.atom_count();
                 let chain_id = if options.load_as_chain {
-                    sdf_chain_name(&options.chain_name, compound_id)
+                    MolCoord::encode_model_in_chain(&options.chain_name, compound_id + 1)?
                 } else {
                     options.chain_name.clone()
                 };
@@ -375,14 +375,6 @@ fn write_sdf_residue(output: &mut String, mol: &MolCoord, atom_indices: &[usize]
     output.push_str("M  END\n$$$$\n");
 }
 
-fn sdf_chain_name(base: &str, compound_id: i32) -> String {
-    if compound_id == 0 {
-        base.to_string()
-    } else {
-        format!("{base}{compound_id}")
-    }
-}
-
 fn read_charge_line(line: &str, atom_map: &[Option<usize>], mol: &mut MolCoord) -> Result<()> {
     let count = parse_counts_int(line, 6, 9, "charge count")?;
     for index in 0..count {
@@ -477,7 +469,7 @@ $$$$
         assert_eq!(mol.atoms()[0].element, "N");
         assert_eq!(mol.atoms()[0].res_name, "second");
         assert_eq!(mol.atoms()[0].name, "N1");
-        assert_eq!(mol.atoms()[0].chain_id, "Z1");
+        assert_eq!(mol.atoms()[0].chain_id, "02_Z");
         assert_eq!(mol.atoms()[0].res_id, 5);
     }
 

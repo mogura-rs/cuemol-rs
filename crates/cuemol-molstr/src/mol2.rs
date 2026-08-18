@@ -180,7 +180,7 @@ fn read_one_mol2(
         let element = element_from_mol2_type(atom_type)?;
         if !skip {
             let chain_id = if options.load_as_chain {
-                mol2_chain_name(&options.chain_name, compound_id)
+                MolCoord::encode_model_in_chain(&options.chain_name, compound_id + 1)?
             } else {
                 options.chain_name.clone()
             };
@@ -340,14 +340,6 @@ fn mol2_bond_order(value: &str) -> BondOrder {
     }
 }
 
-fn mol2_chain_name(base: &str, compound_id: i32) -> String {
-    if compound_id == 0 {
-        base.to_string()
-    } else {
-        format!("{base}{compound_id}")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,7 +419,7 @@ USER_CHARGES
         let mol = read_mol2_str(input).unwrap();
         assert_eq!(mol.atom_count(), 2);
         assert_eq!(mol.atoms()[0].chain_id, "A");
-        assert_eq!(mol.atoms()[1].chain_id, "A1");
+        assert_eq!(mol.atoms()[1].chain_id, "02_A");
 
         let options = Mol2ReadOptions {
             load_compound_id: 1,
