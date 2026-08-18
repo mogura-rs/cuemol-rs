@@ -2954,7 +2954,7 @@ pub struct LuxRendSceneExporter {
 impl LuxRendSceneExporter {
     pub fn new() -> Self {
         Self {
-            state: ExportState::new("luxrender", "LuxRender scene (*.lxs)", "*.lxs"),
+            state: ExportState::new("luxrend", "LuxRender Scene (*.lxs)", "*.lxs"),
             halt_spp: 10000,
             output_base: String::new(),
             film_opts: String::new(),
@@ -3021,6 +3021,54 @@ impl LuxRendSceneExporter {
     ) -> String {
         let dist = (size * 3.0).max(1.0);
         let zoom = (size * 1.2).max(1.0);
+        self.write_scene_view_string(
+            mesh,
+            center,
+            dist,
+            zoom,
+            size * 2.0,
+            perspective,
+            background,
+        )
+    }
+
+    /// Serialize a complete LuxRender scene using the CueMol camera transform.
+    pub fn write_scene_string_with_camera(&self, mesh: &RenderMesh, camera: &Camera) -> String {
+        self.write_scene_string_with_camera_background(mesh, camera, [0.0; 3])
+    }
+
+    /// Serialize a complete LuxRender scene using the camera and scene background.
+    pub fn write_scene_string_with_camera_background(
+        &self,
+        mesh: &RenderMesh,
+        camera: &Camera,
+        background: [f32; 3],
+    ) -> String {
+        let view_mesh = camera_space_render_mesh(mesh, camera);
+        self.write_scene_view_string(
+            &view_mesh,
+            Vector4::ZERO,
+            camera.cam_dist(),
+            camera.zoom(),
+            camera.slab_depth(),
+            camera.is_perspective(),
+            background,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_scene_view_string(
+        &self,
+        mesh: &RenderMesh,
+        center: Vector4,
+        view_dist: f64,
+        zoom: f64,
+        slab_depth: f64,
+        perspective: bool,
+        background: [f32; 3],
+    ) -> String {
+        let view_dist = view_dist.max(1.0e-3);
+        let slab_depth = slab_depth.max(1.0e-3);
         let width = if self.state.base().width() > 0 {
             self.state.base().width()
         } else {
@@ -3032,10 +3080,15 @@ impl LuxRendSceneExporter {
             480
         };
         let zoom_x = zoom * f64::from(width) / f64::from(height);
-        let fov_x = 2.0 * (zoom_x / (2.0 * dist)).atan().to_degrees();
-        let fov_y = 2.0 * (zoom / (2.0 * dist)).atan().to_degrees();
+        let fov_x = 2.0 * (zoom_x / (2.0 * view_dist)).atan().to_degrees();
+        let fov_y = 2.0 * (zoom / (2.0 * view_dist)).atan().to_degrees();
         let fov = if height < width { fov_y } else { fov_x };
         let perspective = perspective && fov >= 10.0;
+        let camera_distance = if perspective {
+            view_dist
+        } else {
+            slab_depth * 0.5
+        };
         let mut out = String::new();
         out.push_str("# CueMol LuxRender exporter output\n\n");
         writeln!(
@@ -3043,7 +3096,7 @@ impl LuxRendSceneExporter {
             "LookAt {:.6} {:.6} {:.6}  {:.6} {:.6} {:.6}  0 1 0",
             center.x,
             center.y,
-            center.z + dist,
+            center.z + camera_distance,
             center.x,
             center.y,
             center.z,
@@ -3054,7 +3107,7 @@ impl LuxRendSceneExporter {
             writeln!(
                 &mut out,
                 "      \"float hither\" [{:.6}]",
-                (dist - size).max(0.0)
+                view_dist - slab_depth * 0.5
             )
             .unwrap();
         } else {
@@ -3108,8 +3161,8 @@ impl LuxRendSceneExporter {
             self.bg_mode,
             mesh,
             center,
-            size,
-            dist,
+            slab_depth,
+            view_dist,
             zoom_x,
             zoom,
             perspective,
@@ -3226,6 +3279,26 @@ impl LuxRendSceneExporter {
         }
         let output =
             self.write_scene_string_with_background(mesh, center, size, perspective, background);
+        self.handler().write_string(&output)?;
+        self.state.write();
+        Ok(())
+    }
+
+    /// Write a complete LuxRender scene using the CueMol camera transform.
+    pub fn write_scene_file_with_camera(
+        &mut self,
+        mesh: &RenderMesh,
+        camera: &Camera,
+        background: [f32; 3],
+    ) -> Result<()> {
+        if self.output_base.is_empty() {
+            self.output_base = std::path::Path::new(self.handler().path())
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_owned();
+        }
+        let output = self.write_scene_string_with_camera_background(mesh, camera, background);
         self.handler().write_string(&output)?;
         self.state.write();
         Ok(())
@@ -3417,7 +3490,7 @@ fn write_lux_environment(
     mode: LuxBackgroundMode,
     mesh: &RenderMesh,
     center: Vector4,
-    size: f64,
+    slab_depth: f64,
     view_dist: f64,
     zoom_x: f64,
     zoom_y: f64,
@@ -3438,7 +3511,7 @@ fn write_lux_environment(
     out.push_str("LightSource \"infinite\" \"color L\" [1 1 1] \"float gain\" [0.1]\n");
     out.push_str("AttributeEnd\n\n");
 
-    let slab_depth = size * 2.0;
+    let size = slab_depth * 0.5;
     let z_back = center.z - slab_depth;
     if mode == LuxBackgroundMode::Wall {
         let (half_x, half_y) = if perspective {
@@ -3622,7 +3695,7 @@ pub struct LuxCoreSceneExporter {
 impl LuxCoreSceneExporter {
     pub fn new() -> Self {
         Self {
-            state: ExportState::new("luxcore", "LuxCore scene (*.cfg)", "*.cfg"),
+            state: ExportState::new("luxcore", "LuxCore Scene CFG (*.cfg)", "*.cfg"),
             halt_spp: 10000,
             film_opts: String::new(),
             abs_output_base: String::new(),
@@ -5631,7 +5704,8 @@ mod tests {
         assert_eq!(LuxBackgroundMode::from_i32(9), None);
 
         let lux = LuxRendSceneExporter::new();
-        assert_eq!(lux.handler().name(), "luxrender");
+        assert_eq!(lux.handler().name(), "luxrend");
+        assert_eq!(lux.handler().type_descr(), "LuxRender Scene (*.lxs)");
         assert_eq!(lux.halt_spp(), 10000);
         assert_eq!(lux.output_base(), "");
         assert_eq!(lux.film_opts(), "");
@@ -5639,6 +5713,7 @@ mod tests {
 
         let core = LuxCoreSceneExporter::new();
         assert_eq!(core.handler().name(), "luxcore");
+        assert_eq!(core.handler().type_descr(), "LuxCore Scene CFG (*.cfg)");
         assert_eq!(core.halt_spp(), 10000);
         assert_eq!(core.film_opts(), "");
         assert_eq!(core.bg_mode(), LuxBackgroundMode::Transparent);
@@ -5831,6 +5906,45 @@ mod tests {
         assert!(lxs.contains("MakeNamedMaterial \"scene_mat_0\""));
         assert!(lxs.contains("Shape \"trianglemesh\""));
         assert!(lxs.trim_end().ends_with("WorldEnd"));
+    }
+
+    #[test]
+    fn luxrender_camera_export_bakes_view_transform_and_projection() {
+        let vertex = |position| MeshVertex {
+            position,
+            normal: Vector4::new3(0.0, 1.0, 0.0),
+            color: [1.0; 4],
+        };
+        let mesh = RenderMesh {
+            vertices: vec![
+                vertex(Vector4::new3(1.0, 2.0, 4.0)),
+                vertex(Vector4::new3(1.0, 3.0, 4.0)),
+                vertex(Vector4::new3(2.0, 2.0, 4.0)),
+            ],
+            indices: vec![0, 1, 2],
+        };
+        let mut camera = Camera::new();
+        camera.set_center(Vector4::new3(1.0, 2.0, 3.0));
+        camera.set_cam_dist(10.0);
+        camera.set_zoom(6.0);
+        camera.set_slab_depth(12.0);
+        camera.set_perspective(true);
+        camera.set_rotation(camera.rotation().rotate_y(90.0).unwrap());
+        let exporter = LuxRendSceneExporter::new();
+
+        let scene = exporter.write_scene_string_with_camera(&mesh, &camera);
+        assert!(scene.contains("LookAt 0.000000 0.000000 10.000000  0.000000 0.000000 0.000000"));
+        assert!(scene.contains("Camera \"perspective\""));
+        assert!(scene.contains("\"float hither\" [4.000000]"));
+        assert!(scene.contains(
+            "\"point P\" [-1.000000 0.000000 0.000000 -1.000000 1.000000 0.000000 -1.000000 0.000000 1.000000"
+        ));
+
+        camera.set_zoom(1.0);
+        let narrow = exporter.write_scene_string_with_camera(&mesh, &camera);
+        assert!(narrow.contains("LookAt 0.000000 0.000000 6.000000  0.000000 0.000000 0.000000"));
+        assert!(narrow.contains("Camera \"orthographic\""));
+        assert!(!narrow.contains("\"float hither\""));
     }
 
     #[test]

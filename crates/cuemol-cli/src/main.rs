@@ -876,9 +876,9 @@ fn export_scene(input: &str, output: &str) -> Result<(), String> {
             .write_snapshot_string_with_camera(name, &snapshot, &camera)
             .into_bytes()
     } else if lower.ends_with(".lxs") {
-        let (center, size) = scene_center_size(&snapshot);
+        let camera = camera_for_snapshot(&snapshot);
         LuxRendSceneExporter::new()
-            .write_scene_string(&mesh, center, size, false)
+            .write_scene_string_with_camera(&mesh, &camera)
             .into_bytes()
     } else {
         return Err(format!(
