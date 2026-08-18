@@ -936,6 +936,28 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
             continue;
         }
         let mut object_rendered = RenderSceneSnapshot::empty();
+        if object.renderers().is_empty() {
+            let mut options = molecule_render_options_for_renderer("simple");
+            options.object_uid = Some(object.uid().get());
+            apply_object_coloring(
+                &mut options,
+                object.coloring_type(),
+                |name| object.coloring_attr(name),
+                object.paint_coloring(),
+                object.mol().default_color(),
+            );
+            let mut snapshot = simple_line_snapshot(object.mol(), &options, 1.2);
+            let xform = object.xform_matrix();
+            if xform != Matrix4::IDENTITY {
+                snapshot.apply_xform(&xform);
+            }
+            apply_snapshot_renderer_properties(&mut snapshot, "default", 1.0, "default");
+            total_atoms += snapshot.atom_count();
+            total_bonds += snapshot.bond_count();
+            merge_mesh(&mut combined, &tessellate_snapshot(&snapshot));
+            append_render_snapshot(&mut object_rendered, snapshot);
+            renderer_count += 1;
+        }
         for renderer in object.renderers() {
             if !renderer.is_visible() {
                 continue;
@@ -943,7 +965,7 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
             let rtype = renderer.renderer_type();
             // Skip internal/overlay renderers (e.g. "*selection") which carry no
             // standalone geometry — drawing them would spuriously dump all atoms.
-            if rtype.starts_with('*') {
+            if rtype.starts_with('*') || matches!(rtype, "selection" | "sel") {
                 continue;
             }
             if matches!(rtype, "symm" | "unitcell") {
@@ -1190,6 +1212,20 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                 snapshot.bonds.extend(bases.bonds);
                 snapshot.meshes.extend(bases.meshes);
                 snapshot
+            } else if rtype == "ms2test" {
+                let mesh = cuemol_surface::Ms2TestRenderer::new().render_mesh(object.mol());
+                let mut snapshot = RenderSceneSnapshot::empty();
+                if !mesh.triangles().is_empty() {
+                    snapshot.meshes.push(surface_molecule_render_mesh(
+                        object,
+                        &cuemol_molstr::Selector::All,
+                        &mesh,
+                    ));
+                    snapshot.recompute_bounds();
+                }
+                snapshot
+            } else if rtype == "test" {
+                test_renderer_scene_snapshot(renderer, &styles)
             } else if matches!(rtype, "dsurface" | "directsurf" | "dsurf2") {
                 direct_surface_scene_snapshot(object, renderer, &styles, scene)?
             } else if is_ribbon_mesh_type(rtype) {
@@ -2730,6 +2766,99 @@ fn loaded_lw_snapshots(
         }
     }
     Ok(snapshots)
+}
+
+fn test_renderer_scene_snapshot(
+    renderer: &cuemol_molstr::MolRenderer,
+    styles: &cuemol_qsys::StyleManager,
+) -> RenderSceneSnapshot {
+    let color1 = renderer
+        .resolved_attr("color1", styles, DEFAULT_STYLE_SCOPE)
+        .and_then(|value| qsc_color_rgba(&value, styles))
+        .map(rgba8_render_color)
+        .unwrap_or([0.0, 1.0, 1.0, 1.0]);
+    let red = [1.0, 0.0, 0.0, 1.0];
+    let green = [0.0, 1.0, 0.0, 1.0];
+    let blue = [0.0, 0.0, 1.0, 1.0];
+    let yellow = [1.0, 1.0, 0.0, 1.0];
+    let distance = 5.0;
+    let faces = [
+        (
+            Vector4::new3(0.0, 0.0, 1.0),
+            [
+                (Vector4::new3(distance, distance, distance), color1),
+                (Vector4::new3(-distance, distance, distance), blue),
+                (Vector4::new3(-distance, -distance, distance), green),
+                (Vector4::new3(distance, -distance, distance), color1),
+            ],
+        ),
+        (
+            Vector4::new3(0.0, 0.0, -1.0),
+            [
+                (Vector4::new3(-distance, distance, -distance), yellow),
+                (Vector4::new3(distance, distance, -distance), red),
+                (Vector4::new3(distance, -distance, -distance), blue),
+                (Vector4::new3(-distance, -distance, -distance), color1),
+            ],
+        ),
+        (
+            Vector4::new3(1.0, 0.0, 0.0),
+            [
+                (Vector4::new3(distance, distance, distance), red),
+                (Vector4::new3(distance, -distance, distance), yellow),
+                (Vector4::new3(distance, -distance, -distance), color1),
+                (Vector4::new3(distance, distance, -distance), blue),
+            ],
+        ),
+        (
+            Vector4::new3(-1.0, 0.0, 0.0),
+            [
+                (Vector4::new3(-distance, distance, -distance), red),
+                (Vector4::new3(-distance, -distance, -distance), color1),
+                (Vector4::new3(-distance, -distance, distance), yellow),
+                (Vector4::new3(-distance, distance, distance), blue),
+            ],
+        ),
+        (
+            Vector4::new3(0.0, 1.0, 0.0),
+            [
+                (Vector4::new3(distance, distance, distance), color1),
+                (Vector4::new3(distance, distance, -distance), yellow),
+                (Vector4::new3(-distance, distance, -distance), red),
+                (Vector4::new3(-distance, distance, distance), blue),
+            ],
+        ),
+        (
+            Vector4::new3(0.0, -1.0, 0.0),
+            [
+                (Vector4::new3(-distance, -distance, distance), red),
+                (Vector4::new3(-distance, -distance, -distance), yellow),
+                (Vector4::new3(distance, -distance, -distance), blue),
+                (Vector4::new3(distance, -distance, distance), color1),
+            ],
+        ),
+    ];
+    let mut mesh = RenderMesh {
+        vertices: Vec::with_capacity(24),
+        indices: Vec::with_capacity(36),
+    };
+    for (normal, face) in faces {
+        let base = mesh.vertices.len() as u32;
+        mesh.vertices.extend(
+            face.into_iter()
+                .map(|(position, color)| cuemol_render::MeshVertex {
+                    position,
+                    normal,
+                    color,
+                }),
+        );
+        mesh.indices
+            .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    let mut snapshot = RenderSceneSnapshot::empty();
+    snapshot.meshes.push(mesh);
+    snapshot.recompute_bounds();
+    snapshot
 }
 
 fn direct_surface_scene_snapshot(

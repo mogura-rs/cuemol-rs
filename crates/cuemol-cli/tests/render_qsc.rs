@@ -274,7 +274,7 @@ fn render_qsc_colors_and_filters_saved_surfaces_by_molecule() {
     let obj_path = std::env::temp_dir().join(format!("{stem}.obj"));
     let mqo_path = std::env::temp_dir().join(format!("{stem}.mqo"));
     let qsc = "<scene>\n\
-               <object type=\"MolCoord\" name=\"mol\" src=\"datachunk:00000\" srctype=\"pdb\">\n\
+               <object type=\"MolCoord\" name=\"mol\" src=\"datachunk:00000\" srctype=\"pdb\" visible=\"false\">\n\
                <coloring type=\"PaintColoring\"><paint sel=\"elem C\" color=\"#00ff00\"/><paint sel=\"elem O\" color=\"#ff0000\"/></coloring>\n\
                </object>\n\
                <object type=\"MolSurf\" name=\"surface\" src=\"datachunk:00001\" srctype=\"obj\" orig_mol=\"mol\">\n\
@@ -373,6 +373,65 @@ END\n\
     let mqo = std::fs::read_to_string(&mqo_path).unwrap();
     assert!(mqo.contains("Object \"edged_ball\""));
     assert!(mqo.contains("col(0.003922 0.007843 0.011765 1.000000)"));
+
+    std::fs::remove_file(qsc_path).ok();
+    std::fs::remove_file(obj_path).ok();
+    std::fs::remove_file(mqo_path).ok();
+}
+
+#[test]
+fn render_qsc_uses_default_and_special_molecule_renderers() {
+    let stem = format!("cuemol_render_qsc_special_renderers_{}", std::process::id());
+    let qsc_path = std::env::temp_dir().join(format!("{stem}.qsc"));
+    let obj_path = std::env::temp_dir().join(format!("{stem}.obj"));
+    let mqo_path = std::env::temp_dir().join(format!("{stem}.mqo"));
+    let qsc = "<scene>\n\
+               <object type=\"MolCoord\" name=\"default-mol\" src=\"datachunk:00000\" srctype=\"pdb\"/>\n\
+               <object type=\"MolCoord\" name=\"special-mol\" src=\"datachunk:00001\" srctype=\"pdb\">\n\
+               <renderer type=\"selection\" name=\"selection-overlay\"/>\n\
+               <renderer type=\"test\" name=\"debug-cube\" color1=\"#112233\"/>\n\
+               <renderer type=\"ms2test\" name=\"ms2-surface\"/>\n\
+               </object>\n\
+               </scene>\n\
+               ========== End of XML ==========\n\
+               ==========START datachunk:00000==========\n\
+ATOM      1  C1  LIG A   1       0.000   0.000   0.000  1.00 20.00           C\n\
+ATOM      2  O1  LIG A   1       1.500   0.000   0.000  1.00 20.00           O\n\
+CONECT    1    2\n\
+END\n\
+               ==========END datachunk:00000==========\n\
+               ==========START datachunk:00001==========\n\
+ATOM      1  C1  LIG A   1      20.000   0.000   0.000  1.00 20.00           C\n\
+END\n\
+               ==========END datachunk:00001==========\n";
+    std::fs::write(&qsc_path, qsc).unwrap();
+
+    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+        .args([
+            "render-qsc",
+            qsc_path.to_str().unwrap(),
+            obj_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("export default and special renderers to OBJ");
+    assert!(status.success());
+    let obj = std::fs::read_to_string(&obj_path).unwrap();
+    assert!(obj.lines().filter(|line| line.starts_with("f ")).count() > 12);
+
+    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+        .args([
+            "render-qsc",
+            qsc_path.to_str().unwrap(),
+            mqo_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("export default and special renderers to MQO");
+    assert!(status.success());
+    let mqo = std::fs::read_to_string(&mqo_path).unwrap();
+    assert!(mqo.contains("Object \"default\""));
+    assert!(mqo.contains("Object \"debug_cube\""));
+    assert!(mqo.contains("Object \"ms2_surface\""));
+    assert!(!mqo.contains("Object \"selection_overlay\""));
 
     std::fs::remove_file(qsc_path).ok();
     std::fs::remove_file(obj_path).ok();
