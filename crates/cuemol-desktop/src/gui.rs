@@ -40033,7 +40033,7 @@ mod tests {
 
         app.calculate_contacts();
 
-        assert_eq!(app.status, "Defined 2 interaction(s) in measure");
+        assert_eq!(app.status, "Defined 3 interaction(s) in measure");
         let renderer_uid = app
             .selected_renderer
             .expect("selected interaction renderer");
@@ -40045,7 +40045,7 @@ mod tests {
             .renderer(renderer_uid)
             .unwrap();
         assert_eq!(renderer.renderer_type(), "atomintr");
-        assert_eq!(renderer.atom_intr_lines().len(), 2);
+        assert_eq!(renderer.atom_intr_lines().len(), 3);
         assert_eq!(renderer.atom_intr_lines()[0].positions().len(), 2);
         app.undo(&mut camera);
         assert!(app

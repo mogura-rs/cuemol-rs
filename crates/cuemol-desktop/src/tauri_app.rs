@@ -23137,7 +23137,7 @@ mod tests {
         let ModelResponse::Snapshot(snapshot) = response else {
             panic!("expected a snapshot");
         };
-        assert_eq!(snapshot.status, "Defined 2 interaction(s) in measure");
+        assert_eq!(snapshot.status, "Defined 3 interaction(s) in measure");
         let renderer = model
             .desktop
             .scene_manager()
@@ -23147,7 +23147,7 @@ mod tests {
             .iter()
             .find(|renderer| renderer.renderer_type() == "atomintr")
             .expect("interaction renderer");
-        assert_eq!(renderer.atom_intr_lines().len(), 2);
+        assert_eq!(renderer.atom_intr_lines().len(), 3);
         assert_eq!(renderer.atom_intr_lines()[0].positions().len(), 2);
         let response = handle_model_request(
             &mut model,

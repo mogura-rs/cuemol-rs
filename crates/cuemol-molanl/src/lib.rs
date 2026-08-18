@@ -390,12 +390,27 @@ impl MolAnlManager {
         if selected.is_empty() {
             return false;
         }
-        molecule.relabel_residue_keys(|atom| {
+        let existing = molecule
+            .residue_summaries()
+            .into_iter()
+            .map(|summary| summary.key)
+            .collect::<BTreeSet<_>>();
+        if selected
+            .iter()
+            .any(|key| existing.contains(&ResidueKey::new(name, key.res_id, key.ins_code)))
+        {
+            return false;
+        }
+        let changed = molecule.relabel_residue_keys(|atom| {
             let key = ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code);
             selected
                 .contains(&key)
                 .then(|| ResidueKey::new(name, atom.res_id, atom.ins_code))
-        })
+        });
+        if changed {
+            molecule.apply_topology();
+        }
+        changed
     }
 
     pub fn shift_res_index(
@@ -428,12 +443,16 @@ impl MolAnlManager {
         if shift == 0 {
             return false;
         }
-        molecule.relabel_residue_keys(|atom| {
+        let changed = molecule.relabel_residue_keys(|atom| {
             let key = ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code);
             selected
                 .contains(&key)
                 .then(|| ResidueKey::new(atom.chain_id.clone(), atom.res_id + shift, atom.ins_code))
-        })
+        });
+        if changed {
+            molecule.apply_topology();
+        }
+        changed
     }
 
     pub fn renum_res_index(
@@ -467,12 +486,16 @@ impl MolAnlManager {
         for (offset, key) in ordered.into_iter().enumerate() {
             mapping.insert(key, start + offset as i32);
         }
-        molecule.relabel_residue_keys(|atom| {
+        let changed = molecule.relabel_residue_keys(|atom| {
             let key = ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code);
             mapping
                 .get(&key)
                 .map(|&resid| ResidueKey::new(atom.chain_id.clone(), resid, None))
-        })
+        });
+        if changed {
+            molecule.apply_topology();
+        }
+        changed
     }
 
     pub fn make_bond(&self, molecule: &mut MolCoord, aid1: i32, aid2: i32) -> bool {
@@ -957,7 +980,7 @@ fn contact_pairs_same_molecule(
         }
         checked[index1] = true;
     }
-    hits.into_iter().take(max_count).collect()
+    hits.into_iter().take(max_count.saturating_add(1)).collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -986,7 +1009,7 @@ fn contact_pairs_two_molecules(
             }
         }
     }
-    hits.into_iter().take(max_count).collect()
+    hits.into_iter().take(max_count.saturating_add(1)).collect()
 }
 
 fn excluded_contact_atom(atom: &Atom, hbond: bool) -> bool {
@@ -1250,6 +1273,7 @@ mod tests {
         let carbon_alpha = parse_selector("name CA").unwrap();
 
         assert!(manager.shift_res_index(&mut molecule, &carbon_alpha, true, 5));
+        assert_eq!(molecule.bond_count(), 1);
         assert_eq!(
             molecule
                 .atoms()
@@ -1299,6 +1323,7 @@ mod tests {
         assert_eq!(molecule.atoms()[0].chain_id, "Z");
         assert_eq!(molecule.atoms()[1].chain_id, "Z");
         assert_eq!(molecule.atoms()[2].chain_id, "A");
+        assert_eq!(molecule.bond_count(), 1);
     }
 
     #[test]
@@ -1324,6 +1349,7 @@ mod tests {
             "B",
             "the molecule is left untouched"
         );
+        assert!(!manager.change_chain_name(&mut mol, &parse_selector("chain A").unwrap(), "A"));
     }
 
     #[test]
@@ -1390,6 +1416,45 @@ mod tests {
         );
         assert!(manager.remove_bond(&mut molecule, 1, 2));
         assert_eq!(manager.get_nostd_bonds_json(&molecule), "[]");
+    }
+
+    #[test]
+    fn contact_limit_matches_reference_inclusive_boundary() {
+        let manager = MolAnlManager::new();
+        let mut molecule = MolCoord::new();
+        molecule.push_atom(atom(1, "N", "A", 1, "N", 0.0));
+        molecule.push_atom(atom(2, "O", "A", 2, "O", 2.0));
+        molecule.push_atom(atom(3, "N", "A", 3, "N", 4.0));
+
+        assert_eq!(
+            manager.calc_atom_contact_pairs(
+                &molecule,
+                &Selector::All,
+                &Selector::All,
+                1.0,
+                5.0,
+                false,
+                0,
+            ),
+            vec![(1, 2)]
+        );
+
+        let mut molecule2 = MolCoord::new();
+        molecule2.push_atom(atom(4, "O", "B", 1, "O", 1.0));
+        molecule2.push_atom(atom(5, "O", "B", 2, "O", 3.0));
+        assert_eq!(
+            manager.calc_atom_contact3_pairs(
+                &molecule,
+                &Selector::All,
+                &molecule2,
+                &Selector::All,
+                0.5,
+                5.0,
+                false,
+                0,
+            ),
+            vec![(1, 4)]
+        );
     }
 
     #[test]
