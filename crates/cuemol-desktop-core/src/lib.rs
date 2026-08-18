@@ -26087,12 +26087,8 @@ impl DesktopAppState {
                 (NativeSceneExporterProperty::Camera, _) => {
                     Some(JsString::from(exporter.camera_name()).into())
                 }
-                (NativeSceneExporterProperty::Width, _) => {
-                    Some(JsValue::new(exporter.base().width()))
-                }
-                (NativeSceneExporterProperty::Height, _) => {
-                    Some(JsValue::new(exporter.base().height()))
-                }
+                (NativeSceneExporterProperty::Width, _) => Some(JsValue::new(exporter.width())),
+                (NativeSceneExporterProperty::Height, _) => Some(JsValue::new(exporter.height())),
                 (
                     NativeSceneExporterProperty::Resolution,
                     ScriptNativeSceneExporter::Png(exporter),
@@ -26274,15 +26270,11 @@ impl DesktopAppState {
                         true
                     }
                     (NativeSceneExporterProperty::Width, exporter) => {
-                        exporter
-                            .base_mut()
-                            .set_width(integer_value.unwrap_or_default());
+                        exporter.set_width(integer_value.unwrap_or_default());
                         true
                     }
                     (NativeSceneExporterProperty::Height, exporter) => {
-                        exporter
-                            .base_mut()
-                            .set_height(integer_value.unwrap_or_default());
+                        exporter.set_height(integer_value.unwrap_or_default());
                         true
                     }
                     (
@@ -46090,6 +46082,34 @@ impl ScriptNativeSceneExporter {
             _ => self.base_mut().set_camera_name(value),
         }
     }
+
+    fn width(&self) -> i32 {
+        match self {
+            Self::Png(exporter) => exporter.width(),
+            _ => self.base().width(),
+        }
+    }
+
+    fn set_width(&mut self, value: i32) {
+        match self {
+            Self::Png(exporter) => exporter.set_width(value),
+            _ => self.base_mut().set_width(value),
+        }
+    }
+
+    fn height(&self) -> i32 {
+        match self {
+            Self::Png(exporter) => exporter.height(),
+            _ => self.base().height(),
+        }
+    }
+
+    fn set_height(&mut self, value: i32) {
+        match self {
+            Self::Png(exporter) => exporter.set_height(value),
+            _ => self.base_mut().set_height(value),
+        }
+    }
 }
 
 #[cfg(feature = "scripting")]
@@ -52428,6 +52448,15 @@ mod tests {
     #[cfg(feature = "scripting")]
     #[test]
     fn script_native_scene_exporters_expose_qif_properties_and_write_files() {
+        let mut native_png = ScriptNativeSceneExporter::new("PngSceneExporter").unwrap();
+        assert_eq!((native_png.width(), native_png.height()), (500, 500));
+        native_png.set_width(640);
+        native_png.set_height(360);
+        let ScriptNativeSceneExporter::Png(native_png) = native_png else {
+            unreachable!();
+        };
+        assert_eq!((native_png.width(), native_png.height()), (640, 360));
+
         let dir =
             std::env::temp_dir().join(format!("cuemol-script-exporters-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
@@ -52453,6 +52482,7 @@ mod tests {
             .join(" ");
         let source = format!(
             "var png = cuemol.PngSceneExporter(); \
+             print('png-default=' + png.width + ':' + png.height); \
              png.width = 640; png.height = 360; png.resoln = 144; \
              png.alpha = true; png.depth = true; png.interlace = true; png.compress = 9; \
              print('png=' + png.name + ':' + png.fileext + ':' + png.width + ':' + \
@@ -52477,7 +52507,8 @@ mod tests {
         let (log, _) = app.run_script_js(&source).unwrap();
         assert_eq!(
             log,
-            "png=png:*.png:640:360:144:true:true:true:9\n\
+            "png-default=500:500\n\
+             png=png:*.png:640:360:144:true:true:true:9\n\
              pov=false:false:true:true:blend:false:0.25:0.75:true:images:bzip2:true\n\
              lux=20:TONEMAP:box\n"
         );
@@ -66119,7 +66150,7 @@ attribute \"dep\" string \"positions\"
         let defined = app
             .define_atom_contacts(first, "name CA", None, None, 1.0, 8.0, false, 4, "measure")
             .unwrap();
-        assert_eq!(defined.count, 4);
+        assert_eq!(defined.count, 5);
         let cross = app
             .define_atom_contacts(
                 first,
@@ -66133,7 +66164,7 @@ attribute \"dep\" string \"positions\"
                 "measure",
             )
             .unwrap();
-        assert_eq!(cross.count, 2);
+        assert_eq!(cross.count, 3);
         assert_eq!(cross.renderer_uid, defined.renderer_uid);
         let renderer = app
             .scene_manager()
@@ -66141,16 +66172,16 @@ attribute \"dep\" string \"positions\"
             .unwrap()
             .renderer(defined.renderer_uid)
             .unwrap();
-        assert_eq!(renderer.atom_intr_lines().len(), 6);
+        assert_eq!(renderer.atom_intr_lines().len(), 8);
         assert_eq!(
             renderer.qsc_attr("style"),
             Some("DefaultLabel,DefaultAtomIntr")
         );
-        assert!(renderer.atom_intr_lines()[4].positions().len() == 2);
+        assert!(renderer.atom_intr_lines()[5].positions().len() == 2);
         let entries = app
             .atom_intr_def_summaries(first, defined.renderer_uid)
             .unwrap();
-        assert_eq!(entries.len(), 6);
+        assert_eq!(entries.len(), 8);
         assert_eq!(entries[0].mode, 1);
         assert_eq!(entries[0].atoms.len(), 2);
         assert_eq!(
@@ -66164,7 +66195,7 @@ attribute \"dep\" string \"positions\"
                 .into_iter()
                 .map(|entry| entry.id)
                 .collect::<Vec<_>>(),
-            vec![1, 3, 4, 5]
+            vec![1, 3, 4, 5, 6, 7]
         );
         assert_eq!(
             app.assign_secondary_structure_in_object(first, false, 60.0)
