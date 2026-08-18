@@ -69,6 +69,16 @@ impl AnimObj {
         Self::default()
     }
 
+    pub fn clone_object(&self) -> Self {
+        let mut cloned = self.clone();
+        cloned.assign_new_uid();
+        cloned
+    }
+
+    fn assign_new_uid(&mut self) {
+        self.uid = Uid::new(NEXT_ANIM_UID.fetch_add(1, Ordering::Relaxed));
+    }
+
     pub fn uid(&self) -> Uid {
         self.uid
     }
@@ -1030,7 +1040,33 @@ macro_rules! impl_anim_obj_deref {
     };
 }
 
+macro_rules! impl_anim_obj_clone {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl $ty {
+                pub fn clone_object(&self) -> Self {
+                    let mut cloned = self.clone();
+                    cloned.base_mut().assign_new_uid();
+                    cloned
+                }
+            }
+        )+
+    };
+}
+
 impl_anim_obj_deref!(
+    NoopAnimObj,
+    CamMotion,
+    RealPropAnim,
+    RendPropAnim,
+    MolAnim,
+    RendXformAnim,
+    ShowHideAnim,
+    SimpleSpin,
+    SlideInOutAnim,
+);
+
+impl_anim_obj_clone!(
     NoopAnimObj,
     CamMotion,
     RealPropAnim,
@@ -1056,6 +1092,12 @@ pub enum AnimMotion {
 }
 
 impl AnimMotion {
+    pub fn clone_object(&self) -> Self {
+        let mut cloned = self.clone();
+        cloned.base_mut().assign_new_uid();
+        cloned
+    }
+
     pub fn type_name(&self) -> &str {
         match self {
             Self::Noop(_) => "NoopAnimObj",
@@ -1792,6 +1834,13 @@ impl AnimMgr {
         };
         self.target_scene_uid = Some(scene.uid());
         self.go_time_detached(value);
+        let primary_property_motions = primary_property_motions(scene, &self.motions);
+        initialize_primary_property_motions(
+            scene,
+            &self.motions,
+            &primary_property_motions,
+            work_camera.zoom(),
+        );
 
         for motion in &self.motions {
             let base = motion.base();
@@ -1810,11 +1859,17 @@ impl AnimMgr {
                     }
                 }
                 AnimMotion::RealProperty(value) => {
+                    if phase == MotionPhase::Before {
+                        continue;
+                    }
                     apply_to_renderer_targets(scene, value.rend(), |renderer| {
                         set_renderer_real(renderer, value.prop(), value.value_at_rho(rho));
                     });
                 }
                 AnimMotion::Molecule(value) => {
+                    if phase == MotionPhase::Before {
+                        continue;
+                    }
                     if let Some(uid) = scene.object_by_name(value.mol()).map(|object| object.uid())
                     {
                         let current = value.value_at_rho(rho);
@@ -1828,6 +1883,9 @@ impl AnimMgr {
                     }
                 }
                 AnimMotion::RendererTransform(value) => {
+                    if phase == MotionPhase::Before {
+                        continue;
+                    }
                     let rotation = Matrix4::make_rot_mat(work_camera.rotation().conj());
                     let translation = rotation.transform_point(Vector4::new4(
                         value.translation_at_rho(rho).x,
@@ -1840,17 +1898,11 @@ impl AnimMgr {
                     });
                 }
                 AnimMotion::ShowHide(value) => {
+                    if phase == MotionPhase::Before {
+                        continue;
+                    }
                     apply_to_renderer_targets(scene, value.rend(), |renderer| match phase {
-                        MotionPhase::Before => {
-                            renderer.set_visible(value.hide());
-                            if value.fade() {
-                                renderer.set_alpha(if value.hide() {
-                                    value.tgt_alpha()
-                                } else {
-                                    0.0
-                                });
-                            }
-                        }
+                        MotionPhase::Before => unreachable!(),
                         MotionPhase::Active => {
                             renderer.set_visible(true);
                             if value.fade() {
@@ -1875,6 +1927,9 @@ impl AnimMgr {
                     }
                 }
                 AnimMotion::Slide(value) => {
+                    if phase == MotionPhase::Before {
+                        continue;
+                    }
                     let translation = value.translation_at_rho(work_camera.zoom(), rho);
                     let rotation = Matrix4::make_rot_mat(work_camera.rotation().conj());
                     let translation = rotation.transform_point(Vector4::new4(
@@ -1884,10 +1939,7 @@ impl AnimMgr {
                         0.0,
                     ));
                     apply_to_renderer_targets(scene, value.rend(), |renderer| match phase {
-                        MotionPhase::Before => {
-                            renderer.set_visible(value.hide());
-                            renderer.set_xform_matrix(Matrix4::make_trans_mat(translation));
-                        }
+                        MotionPhase::Before => unreachable!(),
                         MotionPhase::Active => {
                             renderer.set_visible(true);
                             renderer.set_xform_matrix(Matrix4::make_trans_mat(translation));
@@ -2301,6 +2353,139 @@ impl MotionPhase {
     }
 }
 
+type PrimaryPropertyMotions = BTreeMap<(Uid, String), (usize, Option<Uid>)>;
+
+fn primary_property_motions<T>(scene: &Scene<T>, motions: &[AnimMotion]) -> PrimaryPropertyMotions {
+    let mut result = BTreeMap::new();
+    for (motion_index, motion) in motions.iter().enumerate() {
+        if motion.base().disabled() {
+            continue;
+        }
+        let (targets, property) = match motion {
+            AnimMotion::RealProperty(value) => (
+                renderer_target_ids(scene, value.rend())
+                    .into_iter()
+                    .map(|(object_uid, renderer_uid)| (renderer_uid, Some(object_uid)))
+                    .collect::<Vec<_>>(),
+                value.prop(),
+            ),
+            AnimMotion::Molecule(value) => (
+                scene
+                    .object_by_name(value.mol())
+                    .map(|object| vec![(object.uid(), None)])
+                    .unwrap_or_default(),
+                value.prop(),
+            ),
+            AnimMotion::RendererTransform(value) => (
+                renderer_target_ids(scene, value.rend())
+                    .into_iter()
+                    .map(|(object_uid, renderer_uid)| (renderer_uid, Some(object_uid)))
+                    .collect::<Vec<_>>(),
+                "xformMat",
+            ),
+            AnimMotion::ShowHide(value) => (
+                renderer_target_ids(scene, value.rend())
+                    .into_iter()
+                    .map(|(object_uid, renderer_uid)| (renderer_uid, Some(object_uid)))
+                    .collect::<Vec<_>>(),
+                "visible",
+            ),
+            AnimMotion::Slide(value) => (
+                renderer_target_ids(scene, value.rend())
+                    .into_iter()
+                    .map(|(object_uid, renderer_uid)| (renderer_uid, Some(object_uid)))
+                    .collect::<Vec<_>>(),
+                "visible",
+            ),
+            AnimMotion::Noop(_)
+            | AnimMotion::Camera(_)
+            | AnimMotion::Spin(_)
+            | AnimMotion::Unknown { .. } => continue,
+        };
+        for (target_uid, owner_uid) in targets {
+            let key = (target_uid, property.to_string());
+            match result.entry(key) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert((motion_index, owner_uid));
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    if motion.base().abs_start() < motions[entry.get().0].base().abs_start() {
+                        entry.insert((motion_index, owner_uid));
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
+fn initialize_primary_property_motions<T>(
+    scene: &mut Scene<T>,
+    motions: &[AnimMotion],
+    primary_motions: &PrimaryPropertyMotions,
+    zoom: f64,
+) {
+    for ((target_uid, _), (motion_index, owner_uid)) in primary_motions {
+        let motion = &motions[*motion_index];
+        match motion {
+            AnimMotion::RealProperty(value) => {
+                if let Some(renderer) = owner_uid.and_then(|object_uid| {
+                    scene
+                        .object_mut(object_uid)
+                        .and_then(|object| object.renderer_mut(*target_uid))
+                }) {
+                    set_renderer_real(renderer, value.prop(), value.start_value());
+                }
+            }
+            AnimMotion::Molecule(value) => {
+                if let Some(object) = scene.object_mut(*target_uid) {
+                    if value.prop() == "visible" {
+                        object.set_visible(value.start_value() >= 0.5);
+                    } else {
+                        object.set_property_str(value.prop(), value.start_value().to_string());
+                    }
+                }
+            }
+            AnimMotion::RendererTransform(value) => {
+                if let Some(renderer) = owner_uid.and_then(|object_uid| {
+                    scene
+                        .object_mut(object_uid)
+                        .and_then(|object| object.renderer_mut(*target_uid))
+                }) {
+                    renderer.set_xform_matrix(Matrix4::make_trans_mat(value.start_tran()));
+                }
+            }
+            AnimMotion::ShowHide(value) => {
+                if let Some(renderer) = owner_uid.and_then(|object_uid| {
+                    scene
+                        .object_mut(object_uid)
+                        .and_then(|object| object.renderer_mut(*target_uid))
+                }) {
+                    renderer.set_visible(value.hide());
+                    if value.fade() {
+                        renderer.set_alpha(if value.hide() { value.tgt_alpha() } else { 0.0 });
+                    }
+                }
+            }
+            AnimMotion::Slide(value) => {
+                if let Some(renderer) = owner_uid.and_then(|object_uid| {
+                    scene
+                        .object_mut(object_uid)
+                        .and_then(|object| object.renderer_mut(*target_uid))
+                }) {
+                    let (start, _) = value.calc_slide_positions(zoom);
+                    renderer.set_xform_matrix(Matrix4::make_trans_mat(start));
+                    renderer.set_visible(value.hide());
+                }
+            }
+            AnimMotion::Noop(_)
+            | AnimMotion::Camera(_)
+            | AnimMotion::Spin(_)
+            | AnimMotion::Unknown { .. } => {}
+        }
+    }
+}
+
 fn apply_camera_motion(camera: &mut Camera, destination: &Camera, motion: &CamMotion, rho: f64) {
     if !motion.ignorerotate() {
         if let Ok(rotation) = slerp_quat(
@@ -2469,6 +2654,29 @@ mod tests {
         obj.set_quadric(0.25);
         assert_eq!(obj.quadric(), 0.25);
         assert!(obj.conv_rho(0.125) < 0.125);
+    }
+
+    #[test]
+    fn cloned_animation_gets_a_distinct_uid() {
+        let mut original = RealPropAnim::new();
+        original.set_name("width");
+        original.set_start_value(2.0);
+        original.set_end_value(4.0);
+        original.set_rel_end(100);
+
+        let snapshot = original.clone();
+        let cloned = original.clone_object();
+
+        assert_eq!(snapshot.uid(), original.uid());
+        assert_ne!(cloned.uid(), original.uid());
+        assert_eq!(cloned.name(), original.name());
+        assert_eq!(cloned.start_value(), original.start_value());
+        assert_eq!(cloned.end_value(), original.end_value());
+        assert_eq!(cloned.rel_end(), original.rel_end());
+
+        let motion = AnimMotion::RealProperty(original);
+        let cloned_motion = motion.clone_object();
+        assert_ne!(cloned_motion.base().uid(), motion.base().uid());
     }
 
     #[test]
@@ -2730,6 +2938,65 @@ mod tests {
             .unwrap();
         assert!(!renderer.visible());
         assert!((renderer.alpha() - 0.8).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn future_property_animation_does_not_override_the_active_animation() {
+        let mut scene = Scene::new(Uid::new(1), "scene");
+        let view_uid = scene.create_view();
+        let object_uid = scene.add_object("mol", ());
+        let renderer_uid = scene
+            .object_mut(object_uid)
+            .unwrap()
+            .create_renderer("simple");
+        scene
+            .object_mut(object_uid)
+            .unwrap()
+            .renderer_mut(renderer_uid)
+            .unwrap()
+            .set_name("main");
+
+        let mut first = RealPropAnim::new();
+        first.set_rend("main");
+        first.set_prop("width");
+        first.set_start_value(1.0);
+        first.set_end_value(3.0);
+        first.set_rel_end(100);
+
+        let mut second = RealPropAnim::new();
+        second.set_rend("main");
+        second.set_prop("width");
+        second.set_start_value(3.0);
+        second.set_end_value(5.0);
+        second.set_rel_start(100);
+        second.set_rel_end(200);
+
+        let mut alpha = RealPropAnim::new();
+        alpha.set_rend("main");
+        alpha.set_prop("alpha");
+        alpha.set_start_value(0.2);
+        alpha.set_end_value(0.6);
+        alpha.set_rel_end(100);
+
+        let mut future_show = ShowHideAnim::new();
+        future_show.set_rend("main");
+        future_show.set_rel_start(100);
+        future_show.set_rel_end(200);
+
+        let mut manager = AnimMgr::new();
+        manager.append_motion(AnimMotion::RealProperty(first));
+        manager.append_motion(AnimMotion::RealProperty(second));
+        manager.append_motion(AnimMotion::RealProperty(alpha));
+        manager.append_motion(AnimMotion::ShowHide(future_show));
+        manager.go_time_in_scene(50, &mut scene, view_uid).unwrap();
+
+        let renderer = scene
+            .object(object_uid)
+            .unwrap()
+            .renderer(renderer_uid)
+            .unwrap();
+        assert_eq!(renderer.property_str("width"), Some("2"));
+        assert!((renderer.alpha() - 0.4).abs() < 1.0e-12);
     }
 
     #[test]
