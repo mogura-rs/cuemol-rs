@@ -5800,9 +5800,18 @@ mod tests {
         let mut lux = LuxRendSceneExporter::new();
         lux.handler_mut()
             .set_path(dir.join("scene.lxs").to_string_lossy());
-        lux.write_scene_file(&mesh, Vector4::ZERO, 4.0, false)
+        let mut lux_camera = Camera::new();
+        lux_camera.set_center(Vector4::new3(1.0, 2.0, 3.0));
+        lux_camera.set_cam_dist(10.0);
+        lux_camera.set_zoom(6.0);
+        lux_camera.set_slab_depth(12.0);
+        lux_camera.set_perspective(true);
+        lux.write_scene_file_with_camera(&mesh, &lux_camera, [0.0; 3])
             .unwrap();
         assert!(dir.join("scene.lxs").is_file());
+        let lxs = std::fs::read_to_string(dir.join("scene.lxs")).unwrap();
+        assert!(lxs.contains("\"string filename\" [\"scene\"]"));
+        assert!(lxs.contains("LookAt 0.000000 0.000000 10.000000"));
 
         let mut core = LuxCoreSceneExporter::new();
         core.handler_mut()

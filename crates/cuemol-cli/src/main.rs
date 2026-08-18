@@ -865,6 +865,22 @@ fn export_scene(input: &str, output: &str) -> Result<(), String> {
         );
         return Ok(());
     }
+    if lower.ends_with(".lxs") {
+        let camera = camera_for_snapshot(&snapshot);
+        let mut exporter = LuxRendSceneExporter::new();
+        exporter.handler_mut().set_path(output);
+        exporter
+            .write_scene_file_with_camera(&mesh, &camera, [0.0; 3])
+            .map_err(|error| error.to_string())?;
+        eprintln!(
+            "exported {} atoms / {} bonds -> {} vertices / {} triangles to {output}",
+            snapshot.atom_count(),
+            snapshot.bond_count(),
+            mesh.vertices.len(),
+            mesh.triangle_count()
+        );
+        return Ok(());
+    }
     let bytes: Vec<u8> = if lower.ends_with(".stl") {
         let camera = camera_for_snapshot(&snapshot);
         StlSceneExporter::new().write_binary_stl_bytes_with_camera(&mesh, &camera)
@@ -874,11 +890,6 @@ fn export_scene(input: &str, output: &str) -> Result<(), String> {
         let camera = camera_for_snapshot(&snapshot);
         MqoSceneExporter::new()
             .write_snapshot_string_with_camera(name, &snapshot, &camera)
-            .into_bytes()
-    } else if lower.ends_with(".lxs") {
-        let camera = camera_for_snapshot(&snapshot);
-        LuxRendSceneExporter::new()
-            .write_scene_string_with_camera(&mesh, &camera)
             .into_bytes()
     } else {
         return Err(format!(
