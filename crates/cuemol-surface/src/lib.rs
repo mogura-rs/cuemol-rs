@@ -405,17 +405,15 @@ impl PqrFileWriter {
             // (explicit-H), C++ getVdwRadius(atom, m_bUseH).
             let radius = cuemol_molstr::toppar::vdw_radius_for_atom_mode(atom, self.use_h);
             output.push_str(&format!(
-                "ATOM  {:5} {:<4} {:>3} {:1}{:4}    {:8.3}{:8.3}{:8.3} {:7.4} {:6.3}\n",
-                output_index,
-                atom.name,
-                atom.res_name,
-                atom.chain_id,
-                atom.res_id,
-                atom.position.x,
-                atom.position.y,
-                atom.position.z,
-                charge,
-                radius
+                "ATOM {output_index:>6} {atom_name:>4} {res_name:>3} {chain_id} {res_id:>4} \
+                 {x:>7.3} {y:>7.3} {z:>7.3} {charge:>11.8} {radius:>7.3}\n",
+                atom_name = atom.name,
+                res_name = atom.res_name,
+                chain_id = atom.chain_id,
+                res_id = atom.res_id,
+                x = atom.position.x,
+                y = atom.position.y,
+                z = atom.position.z,
             ));
             output_index += 1;
         }
@@ -500,7 +498,7 @@ impl XyzrFileWriter {
             // vdwhr (XYZRFileWriter.cpp:104), not the bare element radius.
             let radius = cuemol_molstr::toppar::vdw_radius_for_atom(atom);
             output.push_str(&format!(
-                "{:12.6} {:12.6} {:12.6} {:8.4}\n",
+                "{:>8.3} {:>8.3} {:>8.3} {:>4.2}\n",
                 atom.position.x, atom.position.y, atom.position.z, radius
             ));
         }
@@ -4071,9 +4069,10 @@ attribute \"dep\" string \"positions\"
         let mut pqr = PqrFileWriter::new();
         pqr.set_selection(Some(parse_selector("name CA,H").unwrap()));
         let no_h = pqr.write_pqr_string(&molecule);
-        assert_eq!(no_h.lines().count(), 1);
-        assert!(no_h.contains(" CA "));
-        assert!(!no_h.contains(" H "));
+        assert_eq!(
+            no_h,
+            "ATOM      0   CA ALA A    1   1.000   0.000   0.000  0.10400000   1.950\n"
+        );
 
         pqr.set_use_h(true);
         pqr.set_namespace("ns");
@@ -4086,9 +4085,8 @@ attribute \"dep\" string \"positions\"
         let mut xyzr = XyzrFileWriter::new();
         xyzr.set_selection(Some(parse_selector("name N").unwrap()));
         let xyzr = xyzr.write_xyzr_string(&molecule);
-        assert_eq!(xyzr.lines().count(), 1);
         // N in ALA -> NH1 united-atom radius 1.60 (vdwhr), not element 1.55.
-        assert!(xyzr.contains("1.6000"), "got: {xyzr}");
+        assert_eq!(xyzr, "   0.000    0.000    0.000 1.60\n");
     }
 
     #[test]
