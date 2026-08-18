@@ -189,6 +189,7 @@ impl RenderMesh {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderTransparencyGroup {
     pub alpha: f32,
+    pub material: String,
     pub atom_range: Range<usize>,
     pub bond_range: Range<usize>,
     pub mesh_range: Range<usize>,
@@ -199,7 +200,7 @@ pub struct RenderSceneSnapshot {
     pub atoms: Vec<RenderAtom>,
     pub bonds: Vec<RenderBond>,
     pub meshes: Vec<RenderMesh>,
-    /// Renderer-sized transparency sections for blendpng-compatible output.
+    /// Renderer-sized sections used for material and blendpng-compatible output.
     pub transparency_groups: Vec<RenderTransparencyGroup>,
     pub bounds: Option<(Vector4, Vector4)>,
 }
@@ -464,8 +465,13 @@ impl RenderSceneSnapshot {
     }
 
     pub fn mark_transparency_group(&mut self, alpha: f32) {
+        self.mark_renderer_section(alpha, "default");
+    }
+
+    pub fn mark_renderer_section(&mut self, alpha: f32, material: impl Into<String>) {
         self.transparency_groups.push(RenderTransparencyGroup {
             alpha: alpha.clamp(0.0, 1.0),
+            material: material.into(),
             atom_range: 0..self.atoms.len(),
             bond_range: 0..self.bonds.len(),
             mesh_range: 0..self.meshes.len(),

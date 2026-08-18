@@ -647,6 +647,108 @@ struct Hit {
     transparency_group: Option<usize>,
 }
 
+#[derive(Clone, Copy)]
+enum MaterialPreset {
+    Physical {
+        ambient: f64,
+        diffuse: f64,
+        metallic: f64,
+        roughness: f64,
+        specular: f64,
+    },
+    Toon {
+        ambient: f64,
+        diffuse: f64,
+        phong: f64,
+        phong_size: f64,
+    },
+}
+
+fn named_material(name: &str) -> MaterialPreset {
+    match name {
+        "matte" => MaterialPreset::Physical {
+            ambient: 0.30,
+            diffuse: 0.80,
+            metallic: 0.0,
+            roughness: 0.50,
+            specular: 0.0,
+        },
+        "diff_metal" => MaterialPreset::Physical {
+            ambient: 0.35,
+            diffuse: 0.30,
+            metallic: 1.0,
+            roughness: 0.549_100_5,
+            specular: 0.80,
+        },
+        "spec_metal" => MaterialPreset::Physical {
+            ambient: 0.15,
+            diffuse: 0.60,
+            metallic: 1.0,
+            roughness: 0.374_203_2,
+            specular: 0.80,
+        },
+        "metallic_chrome" => MaterialPreset::Physical {
+            ambient: 0.20,
+            diffuse: 0.80,
+            metallic: 1.0,
+            roughness: 0.05,
+            specular: 0.50,
+        },
+        "metallic_copper" => MaterialPreset::Physical {
+            ambient: 0.20,
+            diffuse: 0.80,
+            metallic: 1.0,
+            roughness: 0.15,
+            specular: 0.50,
+        },
+        "stone35" => MaterialPreset::Physical {
+            ambient: 0.20,
+            diffuse: 0.80,
+            metallic: 0.0,
+            roughness: 0.85,
+            specular: 0.25,
+        },
+        "wood31" | "wood14scl2" => MaterialPreset::Physical {
+            ambient: 0.20,
+            diffuse: 0.80,
+            metallic: 0.0,
+            roughness: 0.45,
+            specular: 0.50,
+        },
+        "shadow" => MaterialPreset::Toon {
+            ambient: 0.75,
+            diffuse: 0.0,
+            phong: 0.0,
+            phong_size: 40.0,
+        },
+        "nolighting" => MaterialPreset::Toon {
+            ambient: 1.0,
+            diffuse: 0.0,
+            phong: 0.0,
+            phong_size: 40.0,
+        },
+        "toon1" => MaterialPreset::Toon {
+            ambient: 0.0,
+            diffuse: 0.8,
+            phong: 0.0,
+            phong_size: 40.0,
+        },
+        "toon2" => MaterialPreset::Toon {
+            ambient: 0.30,
+            diffuse: 0.50,
+            phong: 10_000.0,
+            phong_size: 50.0,
+        },
+        _ => MaterialPreset::Physical {
+            ambient: 0.20,
+            diffuse: 0.80,
+            metallic: 0.0,
+            roughness: 0.374_203_2,
+            specular: 0.40,
+        },
+    }
+}
+
 fn trace_sample(
     snapshot: &RenderSceneSnapshot,
     ray: Ray,
@@ -654,18 +756,23 @@ fn trace_sample(
     background: [f32; 4],
     params: &UmbreonRenderParams,
 ) -> [f64; 4] {
-    if snapshot.transparency_groups.is_empty() {
+    let translucent_groups = snapshot
+        .transparency_groups
+        .iter()
+        .enumerate()
+        .filter(|(_, group)| group.alpha < 1.0 - 1.0e-4)
+        .collect::<Vec<_>>();
+    if translucent_groups.is_empty() {
         return trace_sample_pass(snapshot, ray, camera, background, params, None);
     }
 
-    let alpha_sum = snapshot
-        .transparency_groups
+    let alpha_sum = translucent_groups
         .iter()
-        .map(|group| f64::from(group.alpha))
+        .map(|(_, group)| f64::from(group.alpha))
         .sum::<f64>();
     let background_pass = trace_sample_pass(snapshot, ray, camera, background, params, None);
     let mut out = background_pass.map(|channel| channel * (1.0 - alpha_sum));
-    for (index, group) in snapshot.transparency_groups.iter().enumerate() {
+    for (index, group) in translucent_groups {
         let alpha = f64::from(group.alpha);
         if alpha <= 0.0 {
             continue;
@@ -709,11 +816,13 @@ fn trace_sample_pass(
     for hit in hits.iter_mut().rev() {
         if let Some(group_index) = hit.transparency_group {
             let group_alpha = f64::from(snapshot.transparency_groups[group_index].alpha);
-            hit.color[3] = if group_alpha > 0.0 {
-                (hit.color[3] / group_alpha).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
+            if group_alpha < 1.0 - 1.0e-4 {
+                hit.color[3] = if group_alpha > 0.0 {
+                    (hit.color[3] / group_alpha).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+            }
         }
         let shaded = shade_hit(snapshot, *hit, ray, camera, params, visible_group);
         let alpha = hit.color[3].clamp(0.0, 1.0);
@@ -736,6 +845,10 @@ fn shade_hit(
     if hit.unlit {
         return [hit.color[0], hit.color[1], hit.color[2]];
     }
+    let material = hit
+        .transparency_group
+        .and_then(|index| snapshot.transparency_groups.get(index))
+        .map(|group| named_material(group.material.as_str()));
     let camera_position = camera.center()
         + transform_direction(
             camera
@@ -747,9 +860,45 @@ fn shade_hit(
         );
     let camera_direction = normalize(camera_position - hit.position);
     let light = normalize(Vector4::new3(0.35, 0.55, 1.0) + camera_direction * 0.5);
-    let diffuse = hit.normal.dot3d(light).max(0.0);
-    let mut ambient = 0.24;
-    if params.use_gi {
+    let normal_light = hit.normal.dot3d(light).max(0.0);
+    let (mut illumination, mut material_specular) = match material {
+        None => (0.24 + 0.76 * normal_light, [0.0; 3]),
+        Some(MaterialPreset::Toon {
+            ambient,
+            diffuse,
+            phong,
+            phong_size,
+        }) => {
+            let reflected = normalize(hit.normal * (2.0 * hit.normal.dot3d(light)) - light);
+            let highlight = phong * reflected.dot3d(camera_direction).max(0.0).powf(phong_size);
+            (ambient + diffuse * normal_light, [highlight; 3])
+        }
+        Some(MaterialPreset::Physical {
+            ambient,
+            diffuse,
+            metallic,
+            roughness,
+            specular,
+        }) => {
+            let half_vector = normalize(light + camera_direction);
+            let exponent = (2.0 / roughness.max(0.02).powi(2) - 2.0).clamp(1.0, 5_000.0);
+            let highlight = specular * hit.normal.dot3d(half_vector).max(0.0).powf(exponent);
+            let specular_color = if metallic > 0.5 {
+                [
+                    hit.color[0] * highlight,
+                    hit.color[1] * highlight,
+                    hit.color[2] * highlight,
+                ]
+            } else {
+                [0.04 * highlight; 3]
+            };
+            (
+                ambient + diffuse * (1.0 - metallic) * normal_light,
+                specular_color,
+            )
+        }
+    };
+    if params.use_gi && !matches!(material, Some(MaterialPreset::Toon { .. })) {
         let openness = hemisphere_visibility(
             snapshot,
             hit,
@@ -757,10 +906,9 @@ fn shade_hit(
             f64::INFINITY,
             visible_group,
         );
-        ambient +=
+        illumination +=
             0.18 * params.gi_intensity.max(0.0) * params.gi_env_intensity.max(0.0) * openness;
     }
-    let mut illumination = ambient + 0.76 * diffuse;
     if params.shadows {
         let sample_count = params.shadow_samples.clamp(1, 64) as usize;
         let angular_radius = params.light_radius.max(0.0).to_radians();
@@ -776,7 +924,11 @@ fn shade_hit(
             }
         }
         let visibility = visible as f64 / sample_count as f64;
-        illumination *= 0.45 + 0.55 * visibility;
+        let shadow_factor = 0.45 + 0.55 * visibility;
+        illumination *= shadow_factor;
+        for channel in &mut material_specular {
+            *channel *= shadow_factor;
+        }
     }
     if params.ao_samples > 0 {
         let openness = hemisphere_visibility(
@@ -793,12 +945,15 @@ fn shade_hit(
         let rim = hit.normal.dot3d(ray.direction * -1.0).abs();
         if rim < (0.08 + params.edge_rise.max(0.0) * 0.08).min(0.45) {
             illumination *= 0.12;
+            for channel in &mut material_specular {
+                *channel *= 0.12;
+            }
         }
     }
     [
-        hit.color[0] * illumination,
-        hit.color[1] * illumination,
-        hit.color[2] * illumination,
+        hit.color[0] * illumination + material_specular[0],
+        hit.color[1] * illumination + material_specular[1],
+        hit.color[2] * illumination + material_specular[2],
     ]
 }
 
@@ -913,8 +1068,11 @@ fn scene_hits(snapshot: &RenderSceneSnapshot, ray: Ray, visible_group: Option<us
         .filter(|(_, atom)| atom.hit.is_none())
     {
         let transparency_group = transparency_group_for_atom(snapshot, atom_index);
-        if transparency_group.is_some() && transparency_group != visible_group {
-            continue;
+        if let Some(group_index) = transparency_group {
+            let group = &snapshot.transparency_groups[group_index];
+            if group.alpha < 1.0 - 1.0e-4 && transparency_group != visible_group {
+                continue;
+            }
         }
         let main_hit = ray_sphere(ray, atom.center, f64::from(atom.radius));
         if let Some((distance, normal)) = main_hit {
@@ -942,8 +1100,11 @@ fn scene_hits(snapshot: &RenderSceneSnapshot, ray: Ray, visible_group: Option<us
     }
     for (bond_index, bond) in snapshot.bonds.iter().enumerate() {
         let transparency_group = transparency_group_for_bond(snapshot, bond_index);
-        if transparency_group.is_some() && transparency_group != visible_group {
-            continue;
+        if let Some(group_index) = transparency_group {
+            let group = &snapshot.transparency_groups[group_index];
+            if group.alpha < 1.0 - 1.0e-4 && transparency_group != visible_group {
+                continue;
+            }
         }
         let main_hit = if bond.screen_point {
             ray_sphere(ray, bond.from, f64::from(bond.radius))
@@ -982,8 +1143,11 @@ fn scene_hits(snapshot: &RenderSceneSnapshot, ray: Ray, visible_group: Option<us
     }
     for (mesh_index, mesh) in snapshot.meshes.iter().enumerate() {
         let transparency_group = transparency_group_for_mesh(snapshot, mesh_index);
-        if transparency_group.is_some() && transparency_group != visible_group {
-            continue;
+        if let Some(group_index) = transparency_group {
+            let group = &snapshot.transparency_groups[group_index];
+            if group.alpha < 1.0 - 1.0e-4 && transparency_group != visible_group {
+                continue;
+            }
         }
         for triangle in mesh.indices.chunks_exact(3) {
             let Some(v0) = mesh.vertices.get(triangle[0] as usize) else {
@@ -1506,6 +1670,7 @@ mod tests {
                 ));
                 snapshot.transparency_groups.push(RenderTransparencyGroup {
                     alpha: 0.95,
+                    material: "default".to_string(),
                     atom_range: atom_index..atom_index + 1,
                     bond_range: 0..0,
                     mesh_range: 0..0,
@@ -1546,6 +1711,7 @@ mod tests {
             if grouped {
                 snapshot.transparency_groups.push(RenderTransparencyGroup {
                     alpha: 0.5,
+                    material: "default".to_string(),
                     atom_range: 0..sphere_count,
                     bond_range: 0..0,
                     mesh_range: 0..0,
@@ -1569,6 +1735,46 @@ mod tests {
         let grouped_once = render_with(1, true);
         assert_eq!(render_with(2, true), grouped_once);
         assert_ne!(render_with(2, false), grouped_once);
+    }
+
+    #[test]
+    fn named_renderer_materials_change_umbreon_shading() {
+        let render_with = |material: &str| {
+            let mut snapshot = RenderSceneSnapshot::empty();
+            snapshot.meshes.push(RenderMesh {
+                vertices: [(-2.0, -2.0), (2.0, -2.0), (0.0, 2.0)]
+                    .into_iter()
+                    .map(|(x, y)| MeshVertex {
+                        position: Vector4::new3(x, y, 0.0),
+                        normal: Vector4::new3(0.0, 0.0, 1.0),
+                        color: [0.5, 0.5, 0.5, 1.0],
+                    })
+                    .collect(),
+                indices: vec![0, 1, 2],
+            });
+            snapshot.mark_renderer_section(1.0, material);
+            let params = UmbreonRenderParams {
+                width: 32,
+                height: 32,
+                perspective: false,
+                supersample: 1,
+                show_edge_lines: false,
+                ..UmbreonRenderParams::default()
+            };
+            let frame =
+                render_umbreon_snapshot(&snapshot, &test_camera(), [0.0, 0.0, 0.0, 1.0], &params)
+                    .unwrap();
+            let center = (16 * 32 + 16) * 3;
+            frame.pixels[center..center + 3].to_vec()
+        };
+
+        let default = render_with("default");
+        let chrome = render_with("metallic_chrome");
+        let shadow = render_with("shadow");
+        let nolighting = render_with("nolighting");
+        assert!(chrome[0] < default[0]);
+        assert!(nolighting[0] > shadow[0]);
+        assert_eq!(render_with("unknown-material"), default);
     }
 
     #[test]

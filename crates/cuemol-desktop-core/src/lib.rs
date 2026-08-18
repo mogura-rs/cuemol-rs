@@ -2289,9 +2289,8 @@ impl DesktopAppState {
                     .and_then(|value| value.parse::<f64>().ok())
                     .unwrap_or(1.0)
                     .clamp(0.0, 1.0);
-                if alpha < 1.0 {
-                    apply_renderer_alpha(&mut rendered, alpha);
-                }
+                let material = attr("material").unwrap_or_else(|| "default".to_string());
+                apply_renderer_properties(&mut rendered, alpha, &material);
                 append_snapshot(snapshot, rendered);
             }
         }
@@ -6592,9 +6591,8 @@ impl DesktopAppState {
                     .and_then(|value| value.trim().parse::<f64>().ok())
                     .unwrap_or(1.0)
                     .clamp(0.0, 1.0);
-                if alpha < 1.0 {
-                    apply_renderer_alpha(&mut rendered, alpha);
-                }
+                let material = config_attr("material").unwrap_or_else(|| "default".to_string());
+                apply_renderer_properties(&mut rendered, alpha, &material);
                 let renderer_xform = config_attr("xformMat")
                     .and_then(|value| Matrix4::from_script_string(&value).ok())
                     .unwrap_or(Matrix4::IDENTITY);
@@ -47526,9 +47524,10 @@ fn append_object_renderer_snapshot(
         .and_then(|value| value.trim().parse::<f64>().ok())
         .unwrap_or(1.0)
         .clamp(0.0, 1.0);
-    if alpha < 1.0 {
-        apply_renderer_alpha(&mut snapshot, alpha);
-    }
+    let material = renderer
+        .and_then(|renderer| renderer.resolved_attr("material", styles, style_scope_id))
+        .unwrap_or_else(|| "default".to_string());
+    apply_renderer_properties(&mut snapshot, alpha, &material);
     // Apply the object + renderer `xformMat` (C++ `Object`/`Renderer` xformMat,
     // multiplied onto the modelview at display; the object xform is propagated onto
     // atom positions). The effective transform is `renderer · object`, baked into
@@ -47545,8 +47544,18 @@ fn append_object_renderer_snapshot(
     append_snapshot(target, snapshot);
 }
 
-fn apply_renderer_alpha(snapshot: &mut RenderSceneSnapshot, alpha: f64) {
-    snapshot.mark_transparency_group(alpha as f32);
+fn apply_renderer_properties(snapshot: &mut RenderSceneSnapshot, alpha: f64, material: &str) {
+    snapshot.mark_renderer_section(
+        alpha as f32,
+        if material.trim().is_empty() {
+            "default"
+        } else {
+            material.trim()
+        },
+    );
+    if alpha >= 1.0 {
+        return;
+    }
     let apply_color = |color: &mut Option<cuemol_gfx::ColorSpec>| {
         let Some(rgba) = color.as_ref().and_then(cuemol_gfx::ColorSpec::rgba8) else {
             return;
@@ -47873,9 +47882,8 @@ fn append_lw_object_snapshot(
             .and_then(|value| value.parse::<f64>().ok())
             .unwrap_or(1.0)
             .clamp(0.0, 1.0);
-        if alpha < 1.0 {
-            apply_renderer_alpha(&mut snapshot, alpha);
-        }
+        let material = resolved("material").unwrap_or_else(|| "default".to_string());
+        apply_renderer_properties(&mut snapshot, alpha, &material);
         let xform = renderer.xform.mul_mat(loaded.xform);
         if xform != Matrix4::IDENTITY {
             snapshot.apply_xform(&xform);
@@ -58694,7 +58702,7 @@ end_header
             }],
             indices: Vec::new(),
         });
-        apply_renderer_alpha(&mut snapshot, 0.5);
+        apply_renderer_properties(&mut snapshot, 0.5, "matte");
         assert_eq!(
             snapshot.atoms[0].color.as_ref().unwrap().rgba8().unwrap().a,
             128
@@ -58703,6 +58711,7 @@ end_header
         assert_eq!(snapshot.transparency_groups.len(), 1);
         let group = &snapshot.transparency_groups[0];
         assert_eq!(group.alpha, 0.5);
+        assert_eq!(group.material, "matte");
         assert_eq!(group.atom_range, 0..1);
         assert_eq!(group.bond_range, 0..0);
         assert_eq!(group.mesh_range, 0..1);
@@ -58728,7 +58737,7 @@ end_header
             0.1,
             None,
         ));
-        apply_renderer_alpha(&mut source, 0.25);
+        apply_renderer_properties(&mut source, 0.25, "default");
 
         append_snapshot(&mut target, source);
 
@@ -60103,9 +60112,15 @@ end_header
         assert_eq!(rendered.mesh_count(), 0);
         assert_eq!(rendered.bond_count(), 6);
         assert_eq!(rendered.atom_count(), 0);
-        assert_eq!(rendered.transparency_groups.len(), 1);
-        assert_eq!(rendered.transparency_groups[0].alpha, 0.5);
-        assert_eq!(rendered.transparency_groups[0].bond_range, 0..3);
+        assert_eq!(rendered.transparency_groups.len(), 2);
+        let translucent = rendered
+            .transparency_groups
+            .iter()
+            .find(|group| group.alpha < 1.0)
+            .unwrap();
+        assert_eq!(translucent.alpha, 0.5);
+        assert_eq!(translucent.material, "glass");
+        assert_eq!(translucent.bond_range, 0..3);
         assert_eq!(
             rendered
                 .bonds
@@ -64566,13 +64581,16 @@ attribute \"dep\" string \"positions\"
             rendered.bonds[0].color.as_ref().unwrap().rgba8().unwrap().a,
             191
         );
-        assert_eq!(rendered.transparency_groups.len(), 1);
-        assert_eq!(rendered.transparency_groups[0].alpha, 0.75);
-        assert_eq!(
-            rendered.transparency_groups[0].bond_range,
-            0..rendered.bond_count()
-        );
-        assert_eq!(rendered.transparency_groups[0].mesh_range, 0..0);
+        assert_eq!(rendered.transparency_groups.len(), 2);
+        let translucent = rendered
+            .transparency_groups
+            .iter()
+            .find(|group| group.alpha < 1.0)
+            .unwrap();
+        assert_eq!(translucent.alpha, 0.75);
+        assert_eq!(translucent.material, "glass");
+        assert_eq!(translucent.bond_range, 0..rendered.bond_count());
+        assert_eq!(translucent.mesh_range, 0..0);
 
         app.set_density_renderer_visible(map_uid, isosurf_uid, false)
             .unwrap();
@@ -65020,9 +65038,14 @@ attribute \"dep\" string \"positions\"
         assert!(!reloaded_lw.renderers[1].visible);
         let rendered = reloaded.active_render_snapshot("").unwrap();
         assert_eq!(rendered.mesh_triangle_count(), 5);
-        assert_eq!(rendered.transparency_groups.len(), 1);
-        assert_eq!(rendered.transparency_groups[0].alpha, 0.5);
-        assert!(!rendered.transparency_groups[0].mesh_range.is_empty());
+        let translucent = rendered
+            .transparency_groups
+            .iter()
+            .find(|group| group.alpha < 1.0)
+            .unwrap();
+        assert_eq!(translucent.alpha, 0.5);
+        assert_eq!(translucent.material, "matte");
+        assert!(!translucent.mesh_range.is_empty());
         assert!(rendered.meshes.iter().any(|mesh| {
             mesh.vertices
                 .iter()
