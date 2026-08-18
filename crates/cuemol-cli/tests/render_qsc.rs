@@ -78,11 +78,23 @@ fn render_qsc_renders_saved_density_map_renderers() {
          <renderer type=\"gpu_mapvol\" name=\"volume\" siglevel=\"0\" use_pbc=\"false\"/>\n\
          <renderer type=\"*unitcell\" name=\"cell\" width=\"1.5\" color=\"#abcdef\"/>\n\
          </object>\n\
+         <object type=\"MolSurf\" name=\"colored-surface\" src=\"datachunk:00001\" srctype=\"obj\" xformMat=\"(1,0,0,0,0,1,0,0,0,0,1,0,30,0,0,1)\">\n\
+         <renderer type=\"molsurf\" name=\"surface-potential\" colormode=\"potential\" elepot=\"map\" lowpar=\"-1\" midpar=\"0\" highpar=\"1\" lowcol=\"#123456\" midcol=\"#123456\" highcol=\"#123456\"/>\n\
+         <renderer type=\"molsurf\" name=\"surface-gradient\" colormode=\"multigrad\" color_mapname=\"map\">\n\
+         <multi_grad><gradnode par=\"-1\"><col value=\"#654321\"/></gradnode><gradnode par=\"1\"><col value=\"#654321\"/></gradnode></multi_grad>\n\
+         </renderer>\n\
+         </object>\n\
          </scene>\n\
          ========== End of XML ==========\n\
          ==========START datachunk:00000==========\n\
          {encoded}\
-         ==========END datachunk:00000==========\n"
+         ==========END datachunk:00000==========\n\
+         ==========START datachunk:00001==========\n\
+         v 0 0 0\n\
+         v 1 0 0\n\
+         v 0 1 0\n\
+         f 1 2 3\n\
+         ==========END datachunk:00001==========\n"
     );
     let qsc_path = std::env::temp_dir().join("cuemol_render_qsc_map_test.qsc");
     let out = std::env::temp_dir().join("cuemol_render_qsc_map_test.obj");
@@ -119,6 +131,10 @@ fn render_qsc_renders_saved_density_map_renderers() {
     let mqo = std::fs::read_to_string(&mqo_path).unwrap();
     assert!(mqo.contains("Object \"volume\""));
     assert!(mqo.contains("Object \"cell\""));
+    assert!(mqo.contains("Object \"surface_potential\""));
+    assert!(mqo.contains("Object \"surface_gradient\""));
+    assert!(mqo.contains("col(0.070588 0.203922 0.337255 1.000000)"));
+    assert!(mqo.contains("col(0.396078 0.262745 0.129412 1.000000)"));
     std::fs::remove_file(qsc_path).ok();
     std::fs::remove_file(out).ok();
     std::fs::remove_file(mqo_path).ok();
@@ -196,7 +212,7 @@ fn render_qsc_exports_saved_surface_renderers() {
     let mqo_path = std::env::temp_dir().join(format!("{stem}.mqo"));
     let qsc = "<scene>\n\
                <object type=\"MolSurf\" name=\"surface\" src=\"datachunk:00000\" srctype=\"obj\" xformMat=\"(1,0,0,0,0,1,0,0,0,0,1,0,2,3,4,1)\">\n\
-               <renderer type=\"molsurf\" name=\"surface-fill\" defaultcolor=\"#336699\" alpha=\"0.5\" xformMat=\"(1,0,0,0,0,1,0,0,0,0,1,0,0,0,1,1)\"/>\n\
+               <renderer type=\"molsurf\" name=\"surface-fill\" defaultcolor=\"#336699\" alpha=\"0.5\" egtype=\"silhouette\" eglinew=\"0.25\" egcolor=\"#ff0000\" cullface=\"true\" xformMat=\"(1,0,0,0,0,1,0,0,0,0,1,0,0,0,1,1)\"/>\n\
                </object>\n\
                </scene>\n\
                ========== End of XML ==========\n\
@@ -219,7 +235,7 @@ fn render_qsc_exports_saved_surface_renderers() {
     assert!(status.success());
     let obj = std::fs::read_to_string(&obj_path).unwrap();
     assert!(obj.contains("v 2.000000 3.000000 5.000000"));
-    assert_eq!(obj.lines().filter(|line| line.starts_with("f ")).count(), 1);
+    assert_eq!(obj.lines().filter(|line| line.starts_with("f ")).count(), 2);
 
     let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
         .args([
@@ -233,6 +249,71 @@ fn render_qsc_exports_saved_surface_renderers() {
     let mqo = std::fs::read_to_string(&mqo_path).unwrap();
     assert!(mqo.contains("Object \"surface_fill\""));
     assert!(mqo.contains("col(0.200000 0.400000 0.600000 0.501961)"));
+    assert!(mqo.contains("col(1.000000 0.000000 0.000000 0.501961)"));
+
+    std::fs::remove_file(qsc_path).ok();
+    std::fs::remove_file(obj_path).ok();
+    std::fs::remove_file(mqo_path).ok();
+}
+
+#[test]
+fn render_qsc_colors_and_filters_saved_surfaces_by_molecule() {
+    let stem = format!("cuemol_render_qsc_surface_molecule_{}", std::process::id());
+    let qsc_path = std::env::temp_dir().join(format!("{stem}.qsc"));
+    let obj_path = std::env::temp_dir().join(format!("{stem}.obj"));
+    let mqo_path = std::env::temp_dir().join(format!("{stem}.mqo"));
+    let qsc = "<scene>\n\
+               <object type=\"MolCoord\" name=\"mol\" src=\"datachunk:00000\" srctype=\"pdb\">\n\
+               <coloring type=\"PaintColoring\"><paint sel=\"elem C\" color=\"#00ff00\"/><paint sel=\"elem O\" color=\"#ff0000\"/></coloring>\n\
+               </object>\n\
+               <object type=\"MolSurf\" name=\"surface\" src=\"datachunk:00001\" srctype=\"obj\" orig_mol=\"mol\">\n\
+               <renderer type=\"molsurf\" name=\"molecule-color\" colormode=\"molecule\" target=\"mol\" sel=\"*\" showsel=\"elem C\"/>\n\
+               </object>\n\
+               </scene>\n\
+               ========== End of XML ==========\n\
+               ==========START datachunk:00000==========\n\
+ATOM      1  C1  LIG A   1       0.000   0.000   0.000  1.00 20.00           C\n\
+ATOM      2  O1  LIG A   1      10.000   0.000   0.000  1.00 20.00           O\n\
+END\n\
+               ==========END datachunk:00000==========\n\
+               ==========START datachunk:00001==========\n\
+v 0 0 0\n\
+v 1 0 0\n\
+v 0 1 0\n\
+v 10 0 0\n\
+v 11 0 0\n\
+v 10 1 0\n\
+f 1 2 3\n\
+f 4 5 6\n\
+               ==========END datachunk:00001==========\n";
+    std::fs::write(&qsc_path, qsc).unwrap();
+
+    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+        .args([
+            "render-qsc",
+            qsc_path.to_str().unwrap(),
+            obj_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("export molecule-colored QSC surface to OBJ");
+    assert!(status.success());
+    let obj = std::fs::read_to_string(&obj_path).unwrap();
+    assert_eq!(obj.lines().filter(|line| line.starts_with("f ")).count(), 1);
+    assert!(!obj.contains("v 10.000000"));
+
+    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+        .args([
+            "render-qsc",
+            qsc_path.to_str().unwrap(),
+            mqo_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("export molecule-colored QSC surface to MQO");
+    assert!(status.success());
+    let mqo = std::fs::read_to_string(&mqo_path).unwrap();
+    assert!(mqo.contains("Object \"molecule_color\""));
+    assert!(mqo.contains("col(0.000000 1.000000 0.000000 1.000000)"));
+    assert!(!mqo.contains("col(1.000000 0.000000 0.000000 1.000000)"));
 
     std::fs::remove_file(qsc_path).ok();
     std::fs::remove_file(obj_path).ok();

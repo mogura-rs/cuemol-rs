@@ -1996,6 +1996,272 @@ fn transform_leaves_point_fixed(matrix: Matrix4, point: Vector4) -> bool {
     delta.x * delta.x + delta.y * delta.y + delta.z * delta.z <= 1.0e-6
 }
 
+fn rgba8_render_color(color: cuemol_gfx::Rgba8) -> [f32; 4] {
+    [color.r, color.g, color.b, color.a].map(|component| f32::from(component) / 255.0)
+}
+
+fn qsc_selector(
+    selection: &str,
+    styles: &cuemol_qsys::StyleManager,
+) -> Option<cuemol_molstr::Selector> {
+    let selection = selection.trim();
+    if selection.is_empty() || selection == "*" {
+        return Some(cuemol_molstr::Selector::All);
+    }
+    let registry = styles
+        .str_data_entries("sel", DEFAULT_STYLE_SCOPE)
+        .into_iter()
+        .filter_map(|(name, expression)| {
+            parse_selector(&expression)
+                .ok()
+                .map(|selector| (name, selector))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    cuemol_molstr::parse_named_selector(selection, &registry).ok()
+}
+
+fn surface_mesh_with_color(
+    mesh: &cuemol_surface::SurfaceMesh,
+    color: impl Fn(&cuemol_surface::SurfaceVertex) -> [f32; 4],
+) -> RenderMesh {
+    RenderMesh {
+        vertices: mesh
+            .vertices()
+            .iter()
+            .map(|vertex| cuemol_render::MeshVertex {
+                position: vertex.position,
+                normal: vertex.normal,
+                color: color(vertex),
+            })
+            .collect(),
+        indices: mesh
+            .triangles()
+            .iter()
+            .flat_map(|triangle| triangle.iter().copied())
+            .collect(),
+    }
+}
+
+fn surface_molecule_render_mesh(
+    object: &cuemol_molstr::MolObject,
+    selector: &cuemol_molstr::Selector,
+    mesh: &cuemol_surface::SurfaceMesh,
+) -> RenderMesh {
+    const GREY: [f32; 4] = [0.76, 0.79, 0.84, 1.0];
+    let mut options = MoleculeRenderOptions::default();
+    apply_object_coloring(
+        &mut options,
+        object.coloring_type(),
+        |name| object.coloring_attr(name),
+        object.paint_coloring(),
+        object.mol().default_color(),
+    );
+    let atom_colors = resolve_atom_colors(object.mol(), &options);
+    let palette = object
+        .mol()
+        .select_indices(selector)
+        .into_iter()
+        .filter_map(|index| {
+            let atom = object.mol().atoms().get(index)?;
+            let color = atom_colors
+                .get(index)
+                .and_then(|color| color.rgba8())
+                .map(rgba8_render_color)
+                .unwrap_or(GREY);
+            Some((atom.serial as u32, atom.position, color))
+        })
+        .collect::<Vec<_>>();
+    surface_mesh_with_color(mesh, |vertex| {
+        palette
+            .iter()
+            .find(|(serial, _, _)| vertex.info != 0 && *serial == vertex.info)
+            .or_else(|| {
+                palette.iter().min_by(|(_, lhs, _), (_, rhs, _)| {
+                    lhs.sub(vertex.position)
+                        .sqlen3d()
+                        .partial_cmp(&rhs.sub(vertex.position).sqlen3d())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+            })
+            .map(|(_, _, color)| *color)
+            .unwrap_or(GREY)
+    })
+}
+
+fn filter_surface_render_mesh(
+    render_mesh: RenderMesh,
+    surface_mesh: &cuemol_surface::SurfaceMesh,
+    object: &cuemol_molstr::MolObject,
+    map_selection: &cuemol_molstr::Selector,
+    show_selection: &cuemol_molstr::Selector,
+) -> RenderMesh {
+    let map_atoms = object.mol().select_indices(map_selection);
+    let shown_atoms = object
+        .mol()
+        .select_indices(show_selection)
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    let mut remap = vec![None; surface_mesh.vertex_count()];
+    let mut vertices = Vec::with_capacity(render_mesh.vertices.len());
+    for (index, (surface_vertex, render_vertex)) in surface_mesh
+        .vertices()
+        .iter()
+        .zip(render_mesh.vertices)
+        .enumerate()
+    {
+        let nearest = map_atoms
+            .iter()
+            .copied()
+            .find(|&atom_index| {
+                surface_vertex.info != 0
+                    && object
+                        .mol()
+                        .atoms()
+                        .get(atom_index)
+                        .is_some_and(|atom| atom.serial as u32 == surface_vertex.info)
+            })
+            .or_else(|| {
+                map_atoms.iter().copied().min_by(|lhs, rhs| {
+                    let distance = |index: usize| {
+                        object
+                            .mol()
+                            .atoms()
+                            .get(index)
+                            .map(|atom| atom.position.sub(surface_vertex.position).sqlen3d())
+                            .unwrap_or(f64::INFINITY)
+                    };
+                    distance(*lhs)
+                        .partial_cmp(&distance(*rhs))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+            });
+        if nearest.is_none_or(|atom| shown_atoms.contains(&atom)) {
+            remap[index] = Some(vertices.len() as u32);
+            vertices.push(render_vertex);
+        }
+    }
+    let indices = surface_mesh
+        .triangles()
+        .iter()
+        .filter_map(|triangle| {
+            Some([
+                remap.get(triangle[0] as usize).copied().flatten()?,
+                remap.get(triangle[1] as usize).copied().flatten()?,
+                remap.get(triangle[2] as usize).copied().flatten()?,
+            ])
+        })
+        .flatten()
+        .collect();
+    RenderMesh { vertices, indices }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn surface_potential_color(
+    value: f64,
+    low: f64,
+    mid: f64,
+    high: f64,
+    low_color: [f32; 4],
+    mid_color: [f32; 4],
+    high_color: [f32; 4],
+) -> [f32; 4] {
+    let lerp = |lhs: [f32; 4], rhs: [f32; 4], factor: f64| {
+        let factor = factor.clamp(0.0, 1.0) as f32;
+        [
+            lhs[0] + (rhs[0] - lhs[0]) * factor,
+            lhs[1] + (rhs[1] - lhs[1]) * factor,
+            lhs[2] + (rhs[2] - lhs[2]) * factor,
+            lhs[3] + (rhs[3] - lhs[3]) * factor,
+        ]
+    };
+    if value <= low {
+        low_color
+    } else if value >= high {
+        high_color
+    } else if value <= mid {
+        lerp(
+            low_color,
+            mid_color,
+            if mid > low {
+                (value - low) / (mid - low)
+            } else {
+                1.0
+            },
+        )
+    } else {
+        lerp(
+            mid_color,
+            high_color,
+            if high > mid {
+                (value - mid) / (high - mid)
+            } else {
+                1.0
+            },
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SurfaceEdgeMode {
+    Edges,
+    Silhouette,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SurfaceEdgeStyle {
+    mode: SurfaceEdgeMode,
+    width: f64,
+    color: [f32; 4],
+}
+
+fn surface_edge_style(
+    edge_type: Option<&str>,
+    edge_width: Option<&str>,
+    edge_color: Option<&str>,
+    styles: &cuemol_qsys::StyleManager,
+) -> Option<SurfaceEdgeStyle> {
+    let mode = match edge_type?.trim() {
+        "edges" | "1" => SurfaceEdgeMode::Edges,
+        "silhouette" | "2" => SurfaceEdgeMode::Silhouette,
+        _ => return None,
+    };
+    let width = edge_width
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite())
+        .unwrap_or(0.01)
+        .max(0.0);
+    let color = edge_color
+        .and_then(|value| qsc_color_rgba(value, styles))
+        .map(rgba8_render_color)
+        .unwrap_or([0.0, 0.0, 0.0, 1.0]);
+    Some(SurfaceEdgeStyle { mode, width, color })
+}
+
+fn surface_edge_outline_mesh(mesh: &RenderMesh, style: SurfaceEdgeStyle) -> RenderMesh {
+    let silhouette = style.mode == SurfaceEdgeMode::Silhouette;
+    RenderMesh {
+        vertices: mesh
+            .vertices
+            .iter()
+            .copied()
+            .map(|mut vertex| {
+                let length = vertex.normal.length3d();
+                if length > 1.0e-12 {
+                    let normal = Vector4::new3(vertex.normal.x, vertex.normal.y, vertex.normal.z);
+                    vertex.position = vertex.position + normal.scale(style.width / length);
+                }
+                vertex.color = style.color;
+                vertex.with_edge_outline(silhouette)
+            })
+            .collect(),
+        indices: mesh
+            .indices
+            .chunks_exact(3)
+            .flat_map(|triangle| [triangle[0], triangle[2], triangle[1]])
+            .collect(),
+    }
+}
+
 fn loaded_surface_snapshots(
     scene: &cuemol_molstr::MolScene,
     styles: &cuemol_qsys::StyleManager,
@@ -2051,57 +2317,141 @@ fn loaded_surface_snapshots(
         for renderer_node in renderer_nodes {
             let attr =
                 |name: &str| renderer_node.and_then(|node| qsc_node_attr(node, name, styles));
-            let color = attr("defaultcolor")
-                .and_then(|value| qsc_color_rgba(&value, styles))
-                .map(|color| {
-                    [color.r, color.g, color.b, color.a]
-                        .map(|component| f32::from(component) / 255.0)
+            let number = |name: &str, default| {
+                attr(name)
+                    .and_then(|value| value.trim().parse::<f64>().ok())
+                    .unwrap_or(default)
+            };
+            let rgba = |name: &str, default| {
+                attr(name)
+                    .and_then(|value| qsc_color_rgba(&value, styles))
+                    .map(rgba8_render_color)
+                    .unwrap_or(default)
+            };
+            let flat_color = rgba(
+                "defaultcolor",
+                if renderer_node.is_some() {
+                    [192.0 / 255.0, 192.0 / 255.0, 1.0, 1.0]
+                } else {
+                    [0.45, 0.65, 0.95, 1.0]
+                },
+            );
+            let flat_mesh = || surface_mesh_with_color(&mesh, |_| flat_color);
+            let target_name = attr("target")
+                .or_else(|| {
+                    object_node
+                        .map(|node| node.str_attr("orig_mol").to_string())
+                        .filter(|value| !value.is_empty())
                 })
-                .unwrap_or_else(|| {
-                    if renderer_node.is_some() {
-                        [192.0 / 255.0, 192.0 / 255.0, 1.0, 1.0]
-                    } else {
-                        [0.45, 0.65, 0.95, 1.0]
-                    }
-                });
+                .unwrap_or_default();
+            let map_selection = attr("sel")
+                .as_deref()
+                .and_then(|value| qsc_selector(value, styles))
+                .unwrap_or(cuemol_molstr::Selector::All);
+            let ramp_offset = attr("ramp_above")
+                .as_deref()
+                .is_some_and(qsc_bool)
+                .then(|| number("ramp_value", 1.4));
+            let color_mode = attr("colormode")
+                .unwrap_or_else(|| "solid".to_string())
+                .trim()
+                .to_ascii_lowercase();
+            let mut render_mesh = match color_mode.as_str() {
+                "molecule" | "3" => scene
+                    .object_by_name(&target_name)
+                    .map(|object| surface_molecule_render_mesh(object, &map_selection, &mesh))
+                    .unwrap_or_else(&flat_mesh),
+                "potential" | "1" => {
+                    let map_name = attr("elepot").unwrap_or_default();
+                    let scalar = scene.loaded_density_maps().iter().find(|map| {
+                        (!map_name.is_empty() && map.name == map_name)
+                            || (map_name.is_empty() && map.object_type == "ElePotMap")
+                    });
+                    scalar
+                        .map(read_loaded_density_map)
+                        .transpose()?
+                        .map(|scalar| {
+                            surface_mesh_with_color(&mesh, |vertex| {
+                                let position = ramp_offset.map_or(vertex.position, |distance| {
+                                    vertex.position + vertex.normal.scale(distance)
+                                });
+                                surface_potential_color(
+                                    scalar.value_at(position),
+                                    number("lowpar", -10.0),
+                                    number("midpar", 0.0),
+                                    number("highpar", 10.0),
+                                    rgba("lowcol", [1.0, 0.0, 0.0, 1.0]),
+                                    rgba("midcol", [1.0, 1.0, 1.0, 1.0]),
+                                    rgba("highcol", [0.0, 0.0, 1.0, 1.0]),
+                                )
+                            })
+                        })
+                        .unwrap_or_else(&flat_mesh)
+                }
+                "multigrad" | "4" => {
+                    let map_name = attr("color_mapname")
+                        .or_else(|| attr("elepot"))
+                        .unwrap_or_default();
+                    let scalar = scene
+                        .loaded_density_maps()
+                        .iter()
+                        .find(|map| map.name == map_name);
+                    let gradient = renderer_node
+                        .map(|node| qsc_multi_gradient(node, styles))
+                        .unwrap_or_default();
+                    scalar
+                        .map(read_loaded_density_map)
+                        .transpose()?
+                        .map(|scalar| {
+                            surface_mesh_with_color(&mesh, |vertex| {
+                                let position = ramp_offset.map_or(vertex.position, |distance| {
+                                    vertex.position + vertex.normal.scale(distance)
+                                });
+                                rgba8_render_color(gradient.color(scalar.value_at(position)))
+                            })
+                        })
+                        .unwrap_or_else(&flat_mesh)
+                }
+                _ => flat_mesh(),
+            };
+            if let Some(show_selection) = attr("showsel")
+                .filter(|value| !value.trim().is_empty() && value.trim() != "*")
+                .as_deref()
+                .and_then(|value| qsc_selector(value, styles))
+            {
+                if let Some(object) = scene.object_by_name(&target_name) {
+                    render_mesh = filter_surface_render_mesh(
+                        render_mesh,
+                        &mesh,
+                        object,
+                        &map_selection,
+                        &show_selection,
+                    );
+                }
+            }
             let renderer_xform = attr("xformMat")
                 .and_then(|value| Matrix4::from_script_string(&value).ok())
                 .unwrap_or(Matrix4::IDENTITY);
             let xform = renderer_xform.mul_mat(object_xform);
-            let vertices = mesh
-                .vertices()
-                .iter()
-                .map(|vertex| {
-                    let position = xform.transform_point(Vector4::new4(
-                        vertex.position.x,
-                        vertex.position.y,
-                        vertex.position.z,
-                        1.0,
-                    ));
-                    let normal = xform
-                        .mul_vec(Vector4::new4(
-                            vertex.normal.x,
-                            vertex.normal.y,
-                            vertex.normal.z,
-                            0.0,
-                        ))
-                        .normalize3d()
-                        .unwrap_or(vertex.normal);
-                    cuemol_render::MeshVertex {
-                        position,
-                        normal,
-                        color,
-                    }
-                })
-                .collect();
-            let render_mesh = RenderMesh {
-                vertices,
-                indices: mesh
-                    .triangles()
-                    .iter()
-                    .flat_map(|triangle| triangle.iter().copied())
-                    .collect(),
-            };
+            for vertex in &mut render_mesh.vertices {
+                let position = xform.transform_point(Vector4::new4(
+                    vertex.position.x,
+                    vertex.position.y,
+                    vertex.position.z,
+                    1.0,
+                ));
+                let normal = xform
+                    .mul_vec(Vector4::new4(
+                        vertex.normal.x,
+                        vertex.normal.y,
+                        vertex.normal.z,
+                        0.0,
+                    ))
+                    .normalize3d()
+                    .unwrap_or(vertex.normal);
+                vertex.position = position;
+                vertex.normal = normal;
+            }
             let draw_mode = match attr("drawmode")
                 .unwrap_or_else(|| "fill".to_string())
                 .trim()
@@ -2114,10 +2464,23 @@ fn loaded_surface_snapshots(
             };
             let width = attr("width")
                 .and_then(|value| value.trim().parse::<f32>().ok())
-                .unwrap_or(1.0)
+                .unwrap_or(1.2)
                 .clamp(0.1, 10.0);
-            let mut snapshot =
-                surface_snapshot_for_mode(render_mesh, draw_mode, width, surface.uid);
+            let edge_style = surface_edge_style(
+                attr("egtype").as_deref(),
+                attr("eglinew").as_deref(),
+                attr("egcolor").as_deref(),
+                styles,
+            );
+            let cull_back_faces = attr("cullface").as_deref().is_some_and(qsc_bool);
+            let mut snapshot = surface_snapshot_for_mode(
+                render_mesh,
+                draw_mode,
+                width,
+                surface.uid,
+                cull_back_faces,
+                edge_style,
+            );
             let alpha = attr("alpha")
                 .and_then(|value| value.trim().parse::<f64>().ok())
                 .unwrap_or(1.0)
@@ -2134,10 +2497,12 @@ fn loaded_surface_snapshots(
 }
 
 fn surface_snapshot_for_mode(
-    mesh: RenderMesh,
+    mut mesh: RenderMesh,
     draw_mode: MapSurfaceDrawMode,
     width: f32,
     object_uid: cuemol_core::Uid,
+    cull_back_faces: bool,
+    edge_style: Option<SurfaceEdgeStyle>,
 ) -> RenderSceneSnapshot {
     let radius = (0.02 * width).max(0.002);
     let color_spec = |color: [f32; 4]| {
@@ -2153,7 +2518,19 @@ fn surface_snapshot_for_mode(
     };
     let mut snapshot = RenderSceneSnapshot::empty();
     match draw_mode {
-        MapSurfaceDrawMode::Fill => snapshot.meshes.push(mesh),
+        MapSurfaceDrawMode::Fill => {
+            if let Some(edge_style) = edge_style {
+                snapshot
+                    .meshes
+                    .push(surface_edge_outline_mesh(&mesh, edge_style));
+            }
+            for vertex in &mut mesh.vertices {
+                *vertex = (*vertex).with_back_face_culling(cull_back_faces || edge_style.is_some());
+            }
+            if !mesh.indices.is_empty() {
+                snapshot.meshes.push(mesh);
+            }
+        }
         MapSurfaceDrawMode::Line => {
             let mut edges = std::collections::BTreeSet::new();
             for triangle in mesh.indices.chunks_exact(3) {
