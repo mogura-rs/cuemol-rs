@@ -329,6 +329,17 @@ fn tauri_main_menu_matches_the_reference_inventory() {
     ] {
         assert!(HTML.contains(item), "missing menu item {item}");
     }
+    assert!(HTML.contains("<span>Background color</span>"));
+    assert!(HTML.contains("<button type=\"button\" data-background=\"white\">White</button>"));
+    assert!(HTML.contains("<button type=\"button\" data-background=\"black\">Black</button>"));
+    assert!(HTML.contains("<span>Center mark</span>"));
+    assert!(HTML.contains("data-center-mark=\"cross\">Cross</button>"));
+    assert!(HTML.contains("data-center-mark=\"axis\">Axis</button>"));
+    assert!(HTML.contains("data-center-mark=\"none\">None</button>"));
+    assert!(!HTML.contains("Background color: White"));
+    assert!(!HTML.contains("Center mark: Cross"));
+    assert_eq!(HTML.matches("class=\"menu-popup has-submenu\"").count(), 2);
+    assert!(CSS.contains(".menu-popup.has-submenu"));
     for command in [
         "undo",
         "redo",

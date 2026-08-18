@@ -201,7 +201,8 @@ summary:focus-visible {
 }
 
 .file-menu-popup,
-.window-menu-popup {
+.window-menu-popup,
+.menu-popup.has-submenu {
   overflow: visible;
 }
 

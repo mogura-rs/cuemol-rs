@@ -66,22 +66,36 @@
         </details>
         <details class="menu">
           <summary>Scene</summary>
-          <div class="menu-popup">
-            <button type="button" data-background="white">Background color: White</button>
-            <button type="button" data-background="black">Background color: Black</button>
+          <div class="menu-popup has-submenu">
+            <div class="menu-submenu">
+              <button type="button" class="menu-submenu-trigger" aria-haspopup="menu">
+                <span>Background color</span><span class="menu-arrow" aria-hidden="true">›</span>
+              </button>
+              <div class="menu-popup nested-menu" role="menu">
+                <button type="button" data-background="white">White</button>
+                <button type="button" data-background="black">Black</button>
+              </div>
+            </div>
             <button type="button" data-local-action="color-proof">Use color proofing</button>
             <button type="button" data-dialog="Scene Properties">Properties…</button>
           </div>
         </details>
         <details class="menu">
           <summary>View</summary>
-          <div class="menu-popup">
+          <div class="menu-popup has-submenu">
             <button type="button" data-projection="perspective">Perspective</button>
             <button type="button" data-projection="orthographic">Orthographic</button>
             <span class="menu-separator"></span>
-            <button type="button" class="checked" data-center-mark="cross">Center mark: Cross</button>
-            <button type="button" data-center-mark="axis">Center mark: Axis</button>
-            <button type="button" data-center-mark="none">Center mark: None</button>
+            <div class="menu-submenu">
+              <button type="button" class="menu-submenu-trigger" aria-haspopup="menu">
+                <span>Center mark</span><span class="menu-arrow" aria-hidden="true">›</span>
+              </button>
+              <div class="menu-popup nested-menu" role="menu">
+                <button type="button" class="checked" data-center-mark="cross">Cross</button>
+                <button type="button" data-center-mark="axis">Axis</button>
+                <button type="button" data-center-mark="none">None</button>
+              </div>
+            </div>
             <span class="menu-separator"></span>
             <button type="button" disabled>Hardware stereo</button>
             <button type="button" data-dialog="View Property">View property…</button>
