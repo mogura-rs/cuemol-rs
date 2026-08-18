@@ -5244,15 +5244,17 @@ fn add_fancy_atom_intr_segment(
     let direction = delta.scale(1.0 / length);
     let mut start = from;
     let mut end = to;
+    let mut body_length = length;
     if options.start_cap == AtomIntrCapType::Arrow {
         start = start + direction.scale(options.arrow_height);
         add_atom_intr_arrow(mesh, from, direction, options, color);
+        body_length -= options.arrow_height;
     }
     if options.end_cap == AtomIntrCapType::Arrow {
         end = end - direction.scale(options.arrow_height);
         add_atom_intr_arrow(mesh, to, direction.scale(-1.0), options, color);
+        body_length -= options.arrow_height;
     }
-    let body_length = (end - start).length3d();
     if body_length < 0.001 {
         return;
     }
@@ -7452,5 +7454,22 @@ mod tests {
         assert!((simple.bonds[0].radius - 0.02).abs() < 1.0e-6);
         assert_eq!(simple.bonds[0].screen_width, Some(2.0));
         assert!(simple.bonds[0].screen_stipple);
+
+        let mut short_options = AtomIntrRenderOptions::default();
+        short_options.stipples.fill(-1.0);
+        short_options.start_cap = AtomIntrCapType::Arrow;
+        short_options.end_cap = AtomIntrCapType::Arrow;
+        short_options.arrow_height = 1.0;
+        let short = atom_intr_snapshot_with_options(
+            &[(Vector4::new3(0.0, 0.0, 0.0), Vector4::new3(1.5, 0.0, 0.0))],
+            None,
+            &short_options,
+        );
+        let (_, cone_segments) = sphere_detail_to_rings_segs(short_options.detail);
+        assert_eq!(
+            short.meshes[0].triangle_count(),
+            cone_segments * 4,
+            "overlapping arrowheads suppress the line body"
+        );
     }
 }
