@@ -263,13 +263,10 @@ fn finish_mol2_topology(
         return;
     }
 
-    let residue_keys = molecule.atoms()[atom_offset..]
-        .iter()
-        .map(|atom| (atom.chain_id.clone(), atom.res_id))
-        .collect::<std::collections::BTreeSet<_>>();
-    for (chain_id, residue_id) in residue_keys {
-        let _ =
-            molecule.set_residue_prop_str(&chain_id, &residue_id.to_string(), "noautogen", "true");
+    if let Some(atom) = molecule.atoms().get(atom_offset) {
+        let chain_id = atom.chain_id.clone();
+        let residue_id = atom.res_id.to_string();
+        let _ = molecule.set_residue_prop_str(&chain_id, &residue_id, "noautogen", "true");
     }
 }
 
@@ -396,6 +393,33 @@ NO_CHARGES
             .bonds()
             .iter()
             .all(|bond| bond.order == BondOrder::Single));
+    }
+
+    #[test]
+    fn mol2_reader_marks_only_first_small_molecule_residue_noautogen() {
+        let input = "\
+@<TRIPOS>MOLECULE
+ligand
+2 0 2 0 0
+SMALL
+NO_CHARGES
+@<TRIPOS>ATOM
+1 C1 0.0 0.0 0.0 C.3 1 L1
+2 C2 1.0 0.0 0.0 C.3 2 L2
+";
+        let molecule = read_mol2_str(input).unwrap();
+        assert_eq!(
+            molecule
+                .get_residue_prop_str("A", "1", "noautogen")
+                .unwrap(),
+            Some("true")
+        );
+        assert_eq!(
+            molecule
+                .get_residue_prop_str("A", "2", "noautogen")
+                .unwrap(),
+            None
+        );
     }
 
     #[test]
