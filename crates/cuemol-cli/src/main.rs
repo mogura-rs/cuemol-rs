@@ -1113,9 +1113,8 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                         disc_thickness: resolved("discthick")
                             .and_then(|value| value.trim().parse().ok())
                             .unwrap_or(0.1),
-                        max_vertices: resolved("maxverts")
-                            .and_then(|value| value.trim().parse().ok())
-                            .unwrap_or(1_000_000),
+                        // C++ bypasses the interactive GL vertex cap for file contexts.
+                        max_vertices: usize::MAX,
                     },
                 )
             } else if rtype == "disorder" {

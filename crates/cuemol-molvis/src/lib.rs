@@ -8669,18 +8669,25 @@ pub fn anisou_mesh_snapshot_with_options(
         .collect::<std::collections::BTreeSet<_>>();
     let colors = resolve_atom_colors(molecule, options);
     let scale = f64::from(options.atom_radius_abs.unwrap_or(0.3));
-    let mut detail = options.sphere_detail.unwrap_or(3).max(2) as usize;
-    let estimated_vertices = |value: usize| {
-        let sphere = (2 * value + 1) * (4 * value + 1);
-        let discs = if anisou.draw_discs {
-            3 * (4 * (4 * value + 1) + 2)
-        } else {
-            0
-        };
-        sphere + discs
-    };
-    while detail > 2 && estimated_vertices(detail) > anisou.max_vertices {
-        detail -= 1;
+    let mut detail = options.sphere_detail.unwrap_or(3).max(1) as usize;
+    let atom_count = molecule
+        .atoms()
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| drawn(*index))
+        .count();
+    let bond_count = molecule
+        .bonds()
+        .iter()
+        .filter(|bond| drawn(bond.atom1) && drawn(bond.atom2))
+        .count();
+    let estimated_vertices = (detail + 1).saturating_mul(2).saturating_mul(
+        atom_count
+            .saturating_mul(detail + 1)
+            .saturating_add(bond_count),
+    );
+    if estimated_vertices > anisou.max_vertices {
+        detail = 1;
     }
     let stacks = 2 * detail;
     let slices = 4 * detail;
@@ -10701,6 +10708,18 @@ return cuemol.makeColor("#0000ff");
         );
         let with_discs =
             anisou_mesh_snapshot_with_options(&molecule, &options, &AnIsoURenderOptions::default());
+        let limited = anisou_mesh_snapshot_with_options(
+            &molecule,
+            &MoleculeRenderOptions {
+                sphere_detail: Some(5),
+                ..options.clone()
+            },
+            &AnIsoURenderOptions {
+                draw_discs: false,
+                max_vertices: 0,
+                ..AnIsoURenderOptions::default()
+            },
+        );
 
         assert_eq!(without_discs.meshes.len(), 1);
         assert_eq!(without_discs.atoms.len(), 1);
@@ -10712,6 +10731,7 @@ return cuemol.makeColor("#0000ff");
             .fold(0.0_f64, f64::max);
         assert!((radius - 0.05).abs() < 1.0e-6);
         assert!(with_discs.meshes[0].triangle_count() > without_discs.meshes[0].triangle_count());
+        assert_eq!(limited.meshes[0].vertices.len(), 15);
     }
 
     #[test]
