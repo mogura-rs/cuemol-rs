@@ -26753,13 +26753,32 @@ impl DesktopAppState {
                 ScriptNativeSceneExporter::Stl(exporter) => {
                     exporter.write_mesh_file_with_camera(&mesh, &camera)
                 }
-                ScriptNativeSceneExporter::LuxRend(exporter) => exporter
-                    .write_snapshot_file_with_camera(
+                ScriptNativeSceneExporter::LuxRend(exporter) => {
+                    exporter.clear_material_definitions();
+                    let material_names = std::iter::once("default")
+                        .chain(
+                            render_scene
+                                .snapshot
+                                .transparency_groups
+                                .iter()
+                                .map(|group| group.material.as_str()),
+                        )
+                        .collect::<BTreeSet<_>>();
+                    for material in material_names {
+                        let definition = script_env::with(|env| {
+                            env.styles.get_material_string(material, "lux", scene_uid)
+                        });
+                        if !definition.is_empty() {
+                            exporter.set_material_definition(material, definition);
+                        }
+                    }
+                    exporter.write_snapshot_file_with_camera(
                         &scene_name,
                         &render_scene.snapshot,
                         &camera,
                         background,
-                    ),
+                    )
+                }
                 ScriptNativeSceneExporter::LuxCore(exporter) => {
                     let width = exporter.base().width();
                     let height = exporter.base().height();
@@ -52847,6 +52866,68 @@ mod tests {
         assert!(luxcore_scene.contains("scene.camera.type = \"orthographic\""));
         assert!(luxcore_scene.contains(".transformation = 0.030000 0 0"));
         assert!(dir.join("scene.ply").is_file());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_luxrender_export_uses_scoped_material_definition() {
+        let dir = std::env::temp_dir().join(format!(
+            "cuemol-script-lux-material-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let output = dir.join("scene.lxs");
+        let mut app = DesktopAppState::new();
+        let scene_uid = app.ensure_active_scene();
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        let object_uid = app
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("material-molecule", molecule);
+        let renderer_uid = app
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("cpk", "atoms");
+        app.scene_manager_mut()
+            .object_mut(object_uid)
+            .unwrap()
+            .renderer_mut(renderer_uid)
+            .unwrap()
+            .set_qsc_attr("material", "custom-lux");
+        let style_set = app
+            .script_styles
+            .create_style_set("lux-material-test", scene_uid.get());
+        assert!(app
+            .script_styles
+            .get_style_set_mut(style_set)
+            .unwrap()
+            .put_material_string(
+                "custom-lux",
+                "lux",
+                "\"string type\" [\"matte\"]\n\"texture Kd\" [\"@COLOR@\"]\n\"float sigma\" [0.25]",
+            ));
+
+        app.run_script_js(&format!(
+            "var e = cuemol.LuxRendSceneExporter(); e.attach(scene); \
+             e.setPath({:?}); e.write();",
+            output.to_string_lossy()
+        ))
+        .unwrap();
+        let scene = fs::read_to_string(&output).unwrap();
+        assert!(scene.contains("MakeNamedMaterial \"atoms_mat_0\""));
+        assert!(scene.contains("\"string type\" [\"matte\"]"));
+        assert!(scene.contains("\"texture Kd\" [\"atoms_tex_0\"]"));
+        assert!(scene.contains("\"float sigma\" [0.25]"));
         fs::remove_dir_all(dir).unwrap();
     }
 

@@ -2640,6 +2640,50 @@ fn snapshot_mesh_sections(
     sections
 }
 
+fn lux_snapshot_mesh_sections(
+    fallback_name: &str,
+    snapshot: &RenderSceneSnapshot,
+    camera: &Camera,
+) -> Vec<(String, String, RenderMesh)> {
+    let has_ungrouped = tessellate_ungrouped_snapshot(snapshot).triangle_count() > 0;
+    let mut name_counts = BTreeMap::<String, usize>::new();
+    let mut sections = Vec::new();
+    for (index, section) in pov_snapshot_sections(snapshot, false)
+        .into_iter()
+        .enumerate()
+    {
+        if section.mesh.triangle_count() == 0 {
+            continue;
+        }
+        let source_name = if has_ungrouped && index == 0 {
+            fallback_name
+        } else {
+            &section.name
+        };
+        let base_name = sanitize_luxcore_identifier(source_name, index);
+        let count = name_counts.entry(base_name.clone()).or_default();
+        let name = if *count == 0 {
+            base_name
+        } else {
+            format!("{base_name}_{count}")
+        };
+        *count += 1;
+        sections.push((
+            name,
+            section.material,
+            camera_space_render_mesh(&section.mesh, camera),
+        ));
+    }
+    if sections.is_empty() {
+        sections.push((
+            sanitize_luxcore_identifier(fallback_name, 0),
+            "default".to_string(),
+            camera_space_render_mesh(&tessellate_snapshot(snapshot), camera),
+        ));
+    }
+    sections
+}
+
 fn camera_space_render_mesh(mesh: &RenderMesh, camera: &Camera) -> RenderMesh {
     let rotation = camera.rotation().to_matrix();
     let center = camera.center();
@@ -2966,6 +3010,7 @@ pub struct LuxRendSceneExporter {
     output_base: String,
     film_opts: String,
     bg_mode: LuxBackgroundMode,
+    material_definitions: BTreeMap<String, String>,
 }
 
 impl LuxRendSceneExporter {
@@ -2976,6 +3021,7 @@ impl LuxRendSceneExporter {
             output_base: String::new(),
             film_opts: String::new(),
             bg_mode: LuxBackgroundMode::Transparent,
+            material_definitions: BTreeMap::new(),
         }
     }
 
@@ -3081,10 +3127,10 @@ impl LuxRendSceneExporter {
         camera: &Camera,
         background: [f32; 3],
     ) -> String {
-        let sections = snapshot_mesh_sections(fallback_name, snapshot, camera, false);
+        let sections = lux_snapshot_mesh_sections(fallback_name, snapshot, camera);
         let section_refs = sections
             .iter()
-            .map(|(name, mesh)| (name.as_str(), mesh))
+            .map(|(name, material, mesh)| (name.as_str(), material.as_str(), mesh))
             .collect::<Vec<_>>();
         let environment_mesh = camera_space_render_mesh(&tessellate_snapshot(snapshot), camera);
         self.write_scene_view_sections_string(
@@ -3112,7 +3158,7 @@ impl LuxRendSceneExporter {
     ) -> String {
         self.write_scene_view_sections_string(
             mesh,
-            &[("scene", mesh)],
+            &[("scene", "default", mesh)],
             center,
             view_dist,
             zoom,
@@ -3126,7 +3172,7 @@ impl LuxRendSceneExporter {
     fn write_scene_view_sections_string(
         &self,
         environment_mesh: &RenderMesh,
-        sections: &[(&str, &RenderMesh)],
+        sections: &[(&str, &str, &RenderMesh)],
         center: Vector4,
         view_dist: f64,
         zoom: f64,
@@ -3235,8 +3281,8 @@ impl LuxRendSceneExporter {
             perspective,
             background,
         );
-        for (name, mesh) in sections {
-            write_lux_colored_mesh_named(&mut out, name, mesh);
+        for (name, material, mesh) in sections {
+            write_lux_colored_mesh_named(&mut out, name, mesh, self.material_definition(material));
         }
         out.push_str("WorldEnd\n");
         out
@@ -3312,6 +3358,27 @@ impl LuxRendSceneExporter {
 
     pub fn set_bgmode(&mut self, value: LuxBackgroundMode) {
         self.set_bg_mode(value);
+    }
+
+    pub fn set_material_definition(
+        &mut self,
+        material: impl Into<String>,
+        definition: impl Into<String>,
+    ) {
+        self.material_definitions
+            .insert(material.into(), definition.into());
+    }
+
+    pub fn clear_material_definitions(&mut self) {
+        self.material_definitions.clear();
+    }
+
+    fn material_definition(&self, material: &str) -> Option<&str> {
+        self.material_definitions
+            .get(material)
+            .or_else(|| self.material_definitions.get("default"))
+            .map(String::as_str)
+            .filter(|definition| !definition.trim().is_empty())
     }
 
     pub fn write(&mut self) {
@@ -3406,7 +3473,12 @@ enum LuxMeshMaterial {
     Gradient(usize, usize),
 }
 
-fn write_lux_colored_mesh_named(out: &mut String, name: &str, mesh: &RenderMesh) {
+fn write_lux_colored_mesh_named(
+    out: &mut String,
+    name: &str,
+    mesh: &RenderMesh,
+    material_definition: Option<&str>,
+) {
     let mut color_ids = BTreeMap::<[u8; 4], usize>::new();
     let mut colors = Vec::<[u8; 4]>::new();
     let vertex_color_ids = mesh
@@ -3470,10 +3542,10 @@ fn write_lux_colored_mesh_named(out: &mut String, name: &str, mesh: &RenderMesh)
         .unwrap();
         let material = format!("{name}_mat_{id}");
         if color[3] == u8::MAX {
-            write_lux_glossy_material(out, &material, &texture);
+            write_lux_material(out, &material, &texture, material_definition);
         } else {
             let opaque = format!("{material}_o");
-            write_lux_glossy_material(out, &opaque, &texture);
+            write_lux_material(out, &opaque, &texture, material_definition);
             writeln!(out, "MakeNamedMaterial \"{material}\"").unwrap();
             out.push_str("    \"string type\" [\"mix\"]\n");
             out.push_str("    \"string namedmaterial1\" [\"NullMat\"]\n");
@@ -3566,8 +3638,14 @@ fn write_lux_colored_mesh_named(out: &mut String, name: &str, mesh: &RenderMesh)
     out.push_str("AttributeEnd\n\n");
 }
 
-fn write_lux_glossy_material(out: &mut String, material: &str, texture: &str) {
+fn write_lux_material(out: &mut String, material: &str, texture: &str, definition: Option<&str>) {
     writeln!(out, "MakeNamedMaterial \"{material}\"").unwrap();
+    if let Some(definition) = definition {
+        let definition = definition.trim().replace("@COLOR@", texture);
+        out.push_str(&definition);
+        out.push('\n');
+        return;
+    }
     out.push_str("    \"string type\" [\"glossy\"]\n");
     writeln!(out, "    \"texture Kd\" [\"{texture}\"]").unwrap();
     out.push_str("    \"color Ks\" [0.2 0.2 0.2]\n");
@@ -7009,7 +7087,7 @@ mod tests {
             RenderTransparencyGroup {
                 name: "left renderer".to_string(),
                 alpha: 1.0,
-                material: "default".to_string(),
+                material: "custom".to_string(),
                 atom_range: 0..1,
                 bond_range: 0..0,
                 mesh_range: 0..0,
@@ -7034,7 +7112,12 @@ mod tests {
         assert!(mqo.contains("M(1)"));
         assert!(mqo.contains("M(2)"));
 
-        let lxs = LuxRendSceneExporter::new()
+        let mut lux = LuxRendSceneExporter::new();
+        lux.set_material_definition(
+            "custom",
+            "\"string type\" [\"matte\"]\n\"texture Kd\" [\"@COLOR@\"]",
+        );
+        let lxs = lux
             .write_snapshot_string_with_camera_background("fallback", &snapshot, &camera, [0.0; 3]);
         assert_eq!(lxs.matches("AttributeBegin # Object ").count(), 3);
         assert!(lxs.contains("AttributeBegin # Object fallback"));
@@ -7043,6 +7126,12 @@ mod tests {
         assert!(lxs.contains("MakeNamedMaterial \"fallback_mat_0\""));
         assert!(lxs.contains("MakeNamedMaterial \"left_renderer_mat_0\""));
         assert!(lxs.contains("MakeNamedMaterial \"right_renderer_mat_0\""));
+        assert!(lxs.contains(
+            "MakeNamedMaterial \"left_renderer_mat_0\"\n\"string type\" [\"matte\"]\n\"texture Kd\" [\"left_renderer_tex_0\"]"
+        ));
+        assert!(lxs.contains(
+            "MakeNamedMaterial \"right_renderer_mat_0\"\n    \"string type\" [\"glossy\"]"
+        ));
 
         let dir = std::env::temp_dir().join(format!(
             "cuemol-render-wbp-sections-{}-{}",
