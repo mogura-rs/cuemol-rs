@@ -1247,6 +1247,7 @@ dependencies = [
  "cuemol-qsys",
  "cuemol-render",
  "cuemol-surface",
+ "cuemol-symm",
  "cuemol-xtal",
 ]
 

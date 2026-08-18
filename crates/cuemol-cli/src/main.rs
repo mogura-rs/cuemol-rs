@@ -1134,7 +1134,7 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
             };
             if !matches!(
                 renderer_type.as_str(),
-                "contour" | "gpu_mapmesh" | "isosurf"
+                "contour" | "gpu_mapmesh" | "isosurf" | "gpu_mapvol" | "unitcell" | "*unitcell"
             ) {
                 continue;
             }
@@ -1220,7 +1220,43 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                 } else {
                     None
                 };
-            if matches!(renderer_type.as_str(), "contour" | "gpu_mapmesh") {
+            if matches!(renderer_type.as_str(), "unitcell" | "*unitcell") {
+                let width = number("width", 1.0);
+                let color = Some(cuemol_gfx::ColorSpec {
+                    base: cuemol_gfx::ColorBase::Html {
+                        r: base_rgba.r,
+                        g: base_rgba.g,
+                        b: base_rgba.b,
+                        a: base_rgba.a,
+                    },
+                    modifiers: Vec::new(),
+                });
+                let mut snapshot = RenderSceneSnapshot::empty();
+                for (from, to) in cuemol_symm::unit_cell_edges(&map.cell()) {
+                    snapshot.bonds.push(cuemol_render::RenderBond {
+                        from,
+                        to,
+                        radius: (0.04 * width.max(0.1)) as f32,
+                        color: color.clone(),
+                        end_color: None,
+                        object_uid: None,
+                        atom_indices: None,
+                        selected: false,
+                        screen_width: None,
+                        screen_stipple: false,
+                        screen_offset: [0.0, 0.0],
+                        screen_point: false,
+                        edge: None,
+                    });
+                }
+                if xform != Matrix4::IDENTITY {
+                    snapshot.apply_xform(&xform);
+                }
+                apply_snapshot_renderer_properties(&mut snapshot, &renderer_name, alpha, &material);
+                total_bonds += snapshot.bond_count();
+                merge_mesh(&mut combined, &tessellate_snapshot(&snapshot));
+                append_render_snapshot(&mut rendered, snapshot);
+            } else if matches!(renderer_type.as_str(), "contour" | "gpu_mapmesh") {
                 let mut renderer = MapMeshRenderer::new();
                 renderer.map_mut().set_siglevel(number("siglevel", 1.1));
                 renderer.map_mut().set_extent(number("extent", 15.0));

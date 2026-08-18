@@ -14,6 +14,7 @@ cuemol-molvis.workspace = true
 cuemol-qsys.workspace = true
 cuemol-render.workspace = true
 cuemol-surface.workspace = true
+cuemol-symm.workspace = true
 cuemol-xtal.workspace = true
 
 [[bin]]

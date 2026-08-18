@@ -77,6 +77,8 @@ fn render_qsc_renders_saved_density_map_renderers() {
          </renderer>\n\
          <renderer type=\"isosurf\" name=\"lines\" siglevel=\"0\" use_pbc=\"false\" drawmode=\"line\"/>\n\
          <renderer type=\"isosurf\" name=\"points\" siglevel=\"0\" use_pbc=\"false\" drawmode=\"point\"/>\n\
+         <renderer type=\"gpu_mapvol\" name=\"volume\" siglevel=\"0\" use_pbc=\"false\"/>\n\
+         <renderer type=\"*unitcell\" name=\"cell\" width=\"1.5\" color=\"#abcdef\"/>\n\
          </object>\n\
          </scene>\n\
          ========== End of XML ==========\n\
@@ -86,6 +88,7 @@ fn render_qsc_renders_saved_density_map_renderers() {
     );
     let qsc_path = std::env::temp_dir().join("cuemol_render_qsc_map_test.qsc");
     let out = std::env::temp_dir().join("cuemol_render_qsc_map_test.obj");
+    let mqo_path = std::env::temp_dir().join("cuemol_render_qsc_map_test.mqo");
     std::fs::write(&qsc_path, qsc).unwrap();
     let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
         .args([
@@ -106,8 +109,21 @@ fn render_qsc_renders_saved_density_map_renderers() {
         .filter_map(|value| value.parse::<f64>().ok())
         .fold(f64::INFINITY, f64::min);
     assert!(min_x > 4.0, "density transform was not applied: {min_x}");
+    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+        .args([
+            "render-qsc",
+            qsc_path.to_str().unwrap(),
+            mqo_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("export QSC density renderers to MQO");
+    assert!(status.success());
+    let mqo = std::fs::read_to_string(&mqo_path).unwrap();
+    assert!(mqo.contains("Object \"volume\""));
+    assert!(mqo.contains("Object \"cell\""));
     std::fs::remove_file(qsc_path).ok();
     std::fs::remove_file(out).ok();
+    std::fs::remove_file(mqo_path).ok();
 }
 
 #[test]
