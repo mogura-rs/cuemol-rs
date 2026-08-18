@@ -1382,6 +1382,44 @@ mod tests {
     }
 
     #[test]
+    fn opaque_geometry_survives_two_nearly_opaque_translucent_sections() {
+        let render_with = |translucent_sections: usize| {
+            let mut snapshot = RenderSceneSnapshot::empty();
+            snapshot.atoms.push(RenderAtom::new(
+                Vector4::new3(0.0, 0.0, 0.0),
+                1.0,
+                color(204, 204, 204, 255),
+            ));
+            for index in 0..translucent_sections {
+                let x = if index == 0 { -2.5 } else { 2.5 };
+                snapshot.atoms.push(RenderAtom::new(
+                    Vector4::new3(x, 2.0, 0.0),
+                    0.4,
+                    color(51, 102, 255, 242),
+                ));
+            }
+            let params = UmbreonRenderParams {
+                width: 64,
+                height: 64,
+                perspective: false,
+                supersample: 1,
+                show_edge_lines: false,
+                ..UmbreonRenderParams::default()
+            };
+            let frame =
+                render_umbreon_snapshot(&snapshot, &test_camera(), [0.0, 0.0, 0.0, 1.0], &params)
+                    .unwrap();
+            let center = (32 * 64 + 32) * 3;
+            frame.pixels[center..center + 3].to_vec()
+        };
+
+        let baseline = render_with(0);
+        assert!(baseline.iter().all(|channel| (9..250).contains(channel)));
+        assert_eq!(render_with(1), baseline);
+        assert_eq!(render_with(2), baseline);
+    }
+
+    #[test]
     fn sampling_and_denoising_parameters_change_the_cpu_pipeline() {
         let normal = Vector4::new3(0.0, 0.0, 1.0);
         for sample in 0..16 {
