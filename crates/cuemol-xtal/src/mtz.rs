@@ -137,6 +137,18 @@ impl Mtz2MapReader {
         self.reader.handler()
     }
 
+    pub fn create_default_obj(&self) -> DensityMap {
+        DensityMap::new()
+    }
+
+    pub fn can_handle_content(&self, input: &[u8]) -> cuemol_molstr::ContentVerdict {
+        if input.get(..4) == Some(b"MTZ ".as_slice()) {
+            cuemol_molstr::ContentVerdict::Yes
+        } else {
+            cuemol_molstr::ContentVerdict::Unknown
+        }
+    }
+
     pub fn resolution(&self) -> f64 {
         self.resolution
     }

@@ -412,6 +412,25 @@ impl MmcifMapReader {
         self.reader.handler()
     }
 
+    pub fn create_default_obj(&self) -> DensityMap {
+        DensityMap::new()
+    }
+
+    pub fn can_handle_content(&self, input: &str) -> cuemol_molstr::ContentVerdict {
+        for line in input.lines().map(str::trim) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if line.starts_with("_refln.") {
+                return cuemol_molstr::ContentVerdict::Yes;
+            }
+            if line.starts_with("_atom_site.") {
+                return cuemol_molstr::ContentVerdict::No;
+            }
+        }
+        cuemol_molstr::ContentVerdict::Unknown
+    }
+
     pub fn resolution(&self) -> f64 {
         self.resolution
     }
@@ -599,6 +618,30 @@ mod tests {
         );
         assert_eq!(
             xplor.can_handle_content("XYZ\n"),
+            cuemol_molstr::ContentVerdict::Unknown
+        );
+
+        let mmcif = MmcifMapReader::new();
+        assert_eq!(
+            mmcif.can_handle_content("data_map\n# comment\n_refln.index_h 1\n"),
+            cuemol_molstr::ContentVerdict::Yes
+        );
+        assert_eq!(
+            mmcif.can_handle_content("data_model\n_atom_site.id 1\n"),
+            cuemol_molstr::ContentVerdict::No
+        );
+        assert_eq!(
+            mmcif.can_handle_content("data_empty\n_cell.length_a 10\n"),
+            cuemol_molstr::ContentVerdict::Unknown
+        );
+
+        let mtz = Mtz2MapReader::new();
+        assert_eq!(
+            mtz.can_handle_content(b"MTZ \0\0\0\0"),
+            cuemol_molstr::ContentVerdict::Yes
+        );
+        assert_eq!(
+            mtz.can_handle_content(b"MTZ"),
             cuemol_molstr::ContentVerdict::Unknown
         );
     }
