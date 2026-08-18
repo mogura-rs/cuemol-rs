@@ -384,6 +384,8 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "execute_script_file",
         "export_pov",
         "start_animation_render",
+        "animation_render_frame_count",
+        "cleanup_animation_render_outputs",
         "start_animation_movie",
         "poll_animation_render",
         "cancel_animation_render",
@@ -1520,6 +1522,7 @@ fn animation_render_uses_cancellable_progress_and_reference_frame_controls() {
         "Output format",
         "Bitrate (kbps)",
         "Re-encode",
+        "Clean up",
         "Progress",
         "Log",
     ] {
@@ -1534,6 +1537,8 @@ fn animation_render_uses_cancellable_progress_and_reference_frame_controls() {
         "poll_animation_render",
         "cancel_animation_render",
         "animation_render_preview",
+        "animation_render_frame_count",
+        "cleanup_animation_render_outputs",
     ] {
         assert!(
             dialog.contains(command),
@@ -1554,6 +1559,8 @@ fn animation_render_uses_cancellable_progress_and_reference_frame_controls() {
     assert!(TAURI_APP_RS.contains("_frm_%04d.png"));
     assert!(NATIVE_GUI_RS.contains("fn load_animation_render_settings("));
     assert!(NATIVE_GUI_RS.contains("fn persist_animation_render_settings("));
+    assert!(NATIVE_GUI_RS.contains("egui::Button::new(\"Clean up\")"));
+    assert!(NATIVE_GUI_RS.contains("crate::cleanup_animation_outputs("));
     for key in [
         "animation_render:height",
         "animation_render:concurrency",

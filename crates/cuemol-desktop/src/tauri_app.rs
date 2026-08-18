@@ -12689,14 +12689,14 @@ fn handle_model_request(
             if model.animation_render_job.is_some() {
                 return Err("an animation rendering job is already running".to_string());
             }
-            model.restore_animation_playback(false)?;
             if !input.make_movie {
                 return Err("movie encoding is disabled".to_string());
             }
-            let expected_frames = model.animation_render_frame_count(&input)?;
-            if total_frames != expected_frames {
+            let available_frames =
+                crate::animation_frame_count(Path::new(input.output_dir.trim()), &input.base_name)?;
+            if total_frames == 0 || total_frames != available_frames {
                 return Err(format!(
-                    "movie frame count must be {expected_frames} for the current animation"
+                    "movie frame count must match the {available_frames} contiguous frame(s) on disk"
                 ));
             }
             let progress = Arc::new(AtomicU32::new(950_000));
@@ -15892,6 +15892,19 @@ fn animation_render_preview(
 }
 
 #[tauri::command]
+fn animation_render_frame_count(output_dir: String, base_name: String) -> Result<u32, String> {
+    crate::animation_frame_count(Path::new(output_dir.trim()), &base_name)
+}
+
+#[tauri::command]
+fn cleanup_animation_render_outputs(
+    output_dir: String,
+    base_name: String,
+) -> Result<usize, String> {
+    crate::cleanup_animation_outputs(Path::new(output_dir.trim()), &base_name)
+}
+
+#[tauri::command]
 fn render_viewport(
     width: u32,
     height: u32,
@@ -16340,6 +16353,8 @@ pub fn run() -> Result<(), tauri::Error> {
             poll_animation_render,
             cancel_animation_render,
             animation_render_preview,
+            animation_render_frame_count,
+            cleanup_animation_render_outputs,
             render_viewport,
             update_camera,
             save_scene,
@@ -24037,6 +24052,40 @@ mod tests {
         assert!(matches!(
             response,
             ModelResponse::Message(ref value) if value == "data:image/png;base64,UE5H"
+        ));
+        fs::remove_dir_all(output_dir).unwrap();
+    }
+
+    #[test]
+    fn animation_movie_reencode_uses_contiguous_frames_without_live_animation() {
+        let output_dir = std::env::temp_dir().join(format!(
+            "cuemol-tauri-animation-reencode-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&output_dir).unwrap();
+        fs::write(output_dir.join("movie_frm_0000.png"), b"PNG").unwrap();
+        fs::write(output_dir.join("movie_frm_0001.png"), b"PNG").unwrap();
+        let mut input = animation_test_input(1, &output_dir);
+        input.make_movie = true;
+        let mut model = model_without_gpu();
+        let response = handle_model_request(
+            &mut model,
+            ModelRequest::StartAnimationMovie {
+                input,
+                total_frames: 2,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            response,
+            ModelResponse::Message(ref value) if value == "running:2:2:950000:movie"
+        ));
+        handle_model_request(&mut model, ModelRequest::CancelAnimationRender).unwrap();
+        let response = handle_model_request(&mut model, ModelRequest::PollAnimationRender).unwrap();
+        assert!(matches!(
+            response,
+            ModelResponse::Message(ref value)
+                if value == "error:Animation rendering cancelled"
         ));
         fs::remove_dir_all(output_dir).unwrap();
     }

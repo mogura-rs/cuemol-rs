@@ -1347,6 +1347,7 @@ struct GuiApplication {
     animation_render_job: Option<AnimationRenderJob>,
     animation_render_log: Vec<String>,
     animation_render_total_frames: u32,
+    animation_cleanup_confirmation: bool,
     animation_preview_frame: u32,
     animation_preview_texture: Option<AnimationPreviewTexture>,
     superpose_reference: Option<cuemol_core::Uid>,
@@ -4707,6 +4708,11 @@ impl GuiApplication {
             .unwrap_or(ANIMATION_TIME_COLUMN_DEFAULT_WIDTH)
             .clamp(ANIMATION_TIME_COLUMN_MIN_WIDTH, 200.0);
         let animation_render_settings = load_animation_render_settings(&state);
+        let animation_render_total_frames = crate::animation_frame_count(
+            Path::new(animation_render_settings.output_dir.trim()),
+            &animation_render_settings.base_name,
+        )
+        .unwrap_or(0);
         let coloring_paint_selection_column_width = state
             .config_value("coloring_paint:selection_width")
             .parse::<f32>()
@@ -4957,7 +4963,8 @@ impl GuiApplication {
             animation_render_settings,
             animation_render_job: None,
             animation_render_log: Vec::new(),
-            animation_render_total_frames: 0,
+            animation_render_total_frames,
+            animation_cleanup_confirmation: false,
             animation_preview_frame: 0,
             animation_preview_texture: None,
             superpose_reference: None,
@@ -16512,6 +16519,11 @@ impl GuiApplication {
             }
         }
         if self.animation_render_settings != previous_settings {
+            if self.animation_render_settings.output_dir != previous_settings.output_dir
+                || self.animation_render_settings.base_name != previous_settings.base_name
+            {
+                self.refresh_animation_render_outputs();
+            }
             persist_animation_render_settings(&mut self.state, &self.animation_render_settings);
         }
     }
@@ -16691,6 +16703,62 @@ impl GuiApplication {
                 );
             });
         });
+        if ui
+            .add_enabled(
+                self.animation_render_total_frames > 0,
+                egui::Button::new("Clean up"),
+            )
+            .on_hover_text("Delete the rendered frames and the output movie")
+            .clicked()
+        {
+            self.animation_cleanup_confirmation = true;
+        }
+        if self.animation_cleanup_confirmation {
+            ui.colored_label(
+                egui::Color32::DARK_RED,
+                format!(
+                    "Delete the {} rendered frame(s) and any encoded movie? This cannot be undone.",
+                    self.animation_render_total_frames
+                ),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Delete").clicked() {
+                    match crate::cleanup_animation_outputs(
+                        Path::new(self.animation_render_settings.output_dir.trim()),
+                        &self.animation_render_settings.base_name,
+                    ) {
+                        Ok(deleted) => {
+                            self.animation_render_log
+                                .push(format!("Cleaned up {deleted} animation output file(s)"));
+                            self.animation_render_total_frames = 0;
+                            self.animation_preview_frame = 0;
+                            self.animation_preview_texture = None;
+                            self.set_status(format!(
+                                "Cleaned up {deleted} animation output file(s)"
+                            ));
+                        }
+                        Err(error) => self.set_status(format!("Error: {error}")),
+                    }
+                    self.animation_cleanup_confirmation = false;
+                }
+                if ui.button("Cancel").clicked() {
+                    self.animation_cleanup_confirmation = false;
+                }
+            });
+        }
+    }
+
+    fn refresh_animation_render_outputs(&mut self) {
+        self.animation_render_total_frames = crate::animation_frame_count(
+            Path::new(self.animation_render_settings.output_dir.trim()),
+            &self.animation_render_settings.base_name,
+        )
+        .unwrap_or(0);
+        self.animation_preview_frame = self
+            .animation_preview_frame
+            .min(self.animation_render_total_frames.saturating_sub(1));
+        self.animation_preview_texture = None;
+        self.animation_cleanup_confirmation = false;
     }
 
     fn animation_render_progress_ui(&self, ui: &mut egui::Ui) {

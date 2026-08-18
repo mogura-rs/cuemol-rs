@@ -7762,7 +7762,8 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     const ffmpegOptions = dialogField("FFmpeg options", "", "text", moviePage);
     ffmpegOptions.readOnly = true;
     const reencode = button("Re-encode", "", () => {});
-    moviePage.append(reencode);
+    const cleanupOutputs = button("Clean up", "", () => {});
+    moviePage.append(reencode, cleanupOutputs);
 
     const previewControls = document.createElement("label");
     previewControls.className = "dialog-field animation-preview-controls";
@@ -7846,6 +7847,28 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       movieControls.forEach((control) => { control.disabled = !makeMovie.checked || running; });
       ffmpegOptions.disabled = !makeMovie.checked || running;
       reencode.disabled = running || !makeMovie.checked || !renderComplete;
+      cleanupOutputs.disabled = running || !makeMovie.checked || renderedFrames < 1;
+    };
+    const refreshFrames = async () => {
+      try {
+        const count = Number(await invoke("animation_render_frame_count", {
+          outputDir: outputDir.value,
+          baseName: baseName.value,
+        }));
+        renderedFrames = Number.isFinite(count) ? Math.max(0, count) : 0;
+        renderComplete = renderedFrames > 0;
+        previewSlider.max = String(Math.max(0, renderedFrames - 1));
+        previewSlider.disabled = renderedFrames < 1;
+        if (renderedFrames < 1) {
+          previewImage.hidden = true;
+          previewReadout.textContent = "No rendered frames are available.";
+        }
+        syncMovie();
+      } catch {
+        renderedFrames = 0;
+        renderComplete = false;
+        syncMovie();
+      }
     };
     const renderInput = () => ({
       sceneUid: Number(targetScene.value),
@@ -8035,15 +8058,36 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         showError(error);
       }
     };
+    cleanupOutputs.onclick = async () => {
+      const confirmed = await showConfirmationDialog({
+        title: "Clean up animation rendering",
+        message: `Delete the ${renderedFrames} rendered frame${renderedFrames === 1 ? "" : "s"} and any encoded movie in the output folder? This cannot be undone.`,
+        confirmLabel: "Delete",
+      });
+      if (!confirmed) return;
+      try {
+        const deleted = await invoke("cleanup_animation_render_outputs", {
+          outputDir: outputDir.value,
+          baseName: baseName.value,
+        });
+        appendLog(`Cleaned up ${deleted} animation output file(s)`);
+        await refreshFrames();
+      } catch (error) {
+        showError(error);
+      }
+    };
     backend.addEventListener("change", syncBackend);
     makeMovie.addEventListener("change", syncMovie);
     movieFormat.addEventListener("change", updateFfmpegOptions);
+    outputDir.addEventListener("change", () => { void refreshFrames(); });
+    baseName.addEventListener("change", () => { void refreshFrames(); });
     previewSlider.addEventListener("input", () => {
       void refreshPreview(Number(previewSlider.value));
     });
     updateFfmpegOptions();
     syncBackend();
     syncMovie();
+    void refreshFrames();
     const preventCloseWhileRunning = (event) => {
       if (running) event.preventDefault();
     };

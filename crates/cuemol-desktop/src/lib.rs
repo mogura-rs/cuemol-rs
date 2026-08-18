@@ -12,6 +12,11 @@
 pub use cuemol_desktop_core::*;
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+mod animation_files;
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+pub(crate) use animation_files::{animation_frame_count, cleanup_animation_outputs};
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 mod apbs_job;
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 pub(crate) use apbs_job::{
