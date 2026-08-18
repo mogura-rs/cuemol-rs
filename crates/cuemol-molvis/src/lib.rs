@@ -6304,7 +6304,11 @@ fn collect_mainchain_pivots(
                     }
                     runs.last_mut().expect("a run was just pushed").push(point);
                     prev = Some((chain, pos, cutoff));
+                } else {
+                    prev = None;
                 }
+            } else {
+                prev = None;
             }
         }
         iter.next();
@@ -11242,6 +11246,31 @@ return cuemol.makeColor("#0000ff");
         let runs = collect_mainchain_pivots(&mol, None, None);
         assert_eq!(runs.len(), 1, "a contiguous Ca-only chain is one run");
         assert_eq!(runs[0].len(), 5);
+
+        let mut no_pivot = sample_atom("CB", "C", 2.0, 0.0, 0.0);
+        no_pivot.res_id = 2;
+        let missing_pivot = MolCoord::with_atoms(vec![
+            ca_atom(1, 0.0, 0.0, 0.0),
+            no_pivot,
+            ca_atom(3, 4.0, 0.0, 0.0),
+        ]);
+        let runs = collect_mainchain_pivots(&missing_pivot, None, None);
+        assert_eq!(runs.len(), 2, "a missing pivot terminates the current run");
+        assert!(runs.iter().all(|run| run.len() == 1));
+
+        let selected_gap = MolCoord::with_atoms(vec![
+            ca_atom(1, 0.0, 0.0, 0.0),
+            ca_atom(2, 2.0, 0.0, 0.0),
+            ca_atom(3, 4.0, 0.0, 0.0),
+        ]);
+        let draw = [0, 2].into_iter().collect();
+        let runs = collect_mainchain_pivots(&selected_gap, Some(&draw), None);
+        assert_eq!(
+            runs.len(),
+            2,
+            "an unselected residue terminates the current run"
+        );
+        assert!(runs.iter().all(|run| run.len() == 1));
 
         // (2) A single chain with an internal coordinate GAP breaks into two runs;
         // no run bridges residues 3 and 50 (42 A apart >> the 5 A Ca cutoff).
