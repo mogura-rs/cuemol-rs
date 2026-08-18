@@ -26714,7 +26714,9 @@ impl DesktopAppState {
                         &camera,
                         background,
                     ),
-                ScriptNativeSceneExporter::Stl(exporter) => exporter.write_mesh_file(&mesh),
+                ScriptNativeSceneExporter::Stl(exporter) => {
+                    exporter.write_mesh_file_with_camera(&mesh, &camera)
+                }
                 ScriptNativeSceneExporter::LuxRend(exporter) => exporter
                     .write_scene_file_with_background(
                         &mesh,

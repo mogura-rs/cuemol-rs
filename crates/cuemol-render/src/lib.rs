@@ -2403,6 +2403,24 @@ impl StlSceneExporter {
         Ok(())
     }
 
+    pub fn write_mesh_file_with_camera(
+        &mut self,
+        mesh: &RenderMesh,
+        camera: &Camera,
+    ) -> Result<()> {
+        let mesh = camera_space_render_mesh(mesh, camera);
+        self.write_mesh_file(&mesh)
+    }
+
+    pub fn write_binary_stl_bytes_with_camera(
+        &self,
+        mesh: &RenderMesh,
+        camera: &Camera,
+    ) -> Vec<u8> {
+        let mesh = camera_space_render_mesh(mesh, camera);
+        self.write_binary_stl_bytes(&mesh.positions(), &mesh.triangles())
+    }
+
     pub fn write_binary_stl_bytes(
         &self,
         vertices: &[Vector4],
@@ -5260,6 +5278,24 @@ mod tests {
         let ascii = stl.write_ascii_stl_string("tri", &vertices, &triangles);
         assert!(ascii.contains("solid tri"));
         assert!(ascii.contains("vertex 2.000000 0.000000 0.000000"));
+        let mesh = RenderMesh {
+            vertices: vertices
+                .iter()
+                .map(|position| MeshVertex {
+                    position: *position,
+                    normal: Vector4::new3(0.0, 0.0, 1.0),
+                    color: [1.0; 4],
+                })
+                .collect(),
+            indices: vec![0, 1, 2],
+        };
+        let mut camera = Camera::new();
+        camera.set_center(Vector4::new3(-1.0, 0.0, 0.0));
+        let bytes = stl.write_binary_stl_bytes_with_camera(&mesh, &camera);
+        let coordinate = |offset| f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        assert_eq!(coordinate(96), 2.0);
+        assert_eq!(coordinate(100), 0.0);
+        assert_eq!(coordinate(104), 0.0);
 
         let pov = PovSceneExporter::new();
         let mesh = pov.write_mesh2_string(&vertices, &triangles);

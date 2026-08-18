@@ -843,9 +843,8 @@ fn export_scene(input: &str, output: &str) -> Result<(), String> {
         return Ok(());
     }
     let bytes: Vec<u8> = if lower.ends_with(".stl") {
-        StlSceneExporter::new()
-            .write_ascii_stl_string(name, &mesh.positions(), &mesh.triangles())
-            .into_bytes()
+        let camera = camera_for_snapshot(&snapshot);
+        StlSceneExporter::new().write_binary_stl_bytes_with_camera(&mesh, &camera)
     } else if lower.ends_with(".obj") {
         mesh.to_obj_string(name).into_bytes()
     } else if lower.ends_with(".pov") {
@@ -1350,9 +1349,16 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
         return Ok(());
     }
     let bytes: Vec<u8> = if lower.ends_with(".stl") {
-        StlSceneExporter::new()
-            .write_ascii_stl_string(name, &combined.positions(), &combined.triangles())
-            .into_bytes()
+        let mut snapshot = RenderSceneSnapshot {
+            atoms: Vec::new(),
+            bonds: Vec::new(),
+            meshes: vec![combined.clone()],
+            transparency_groups: Vec::new(),
+            bounds: None,
+        };
+        snapshot.recompute_bounds();
+        let camera = camera_for_snapshot(&snapshot);
+        StlSceneExporter::new().write_binary_stl_bytes_with_camera(&combined, &camera)
     } else if lower.ends_with(".obj") {
         combined.to_obj_string(name).into_bytes()
     } else {
