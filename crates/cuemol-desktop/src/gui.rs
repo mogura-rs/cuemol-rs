@@ -13362,15 +13362,15 @@ impl GuiApplication {
             return;
         }
         if let Err(error) = self.restore_animation_playback(camera, false) {
-            self.set_status(format!("Error: {error}"));
+            self.set_animation_render_error(error);
             return;
         }
         let Ok(animation) = self.active_animation_manager() else {
-            self.set_status("No animation in active scene");
+            self.set_animation_render_error("No animation in active scene");
             return;
         };
         if animation.size() == 0 || animation.length() <= 0 {
-            self.set_status("No animation in active scene");
+            self.set_animation_render_error("No animation in active scene");
             return;
         }
         let mut settings = self.animation_render_settings.clone();
@@ -13380,23 +13380,23 @@ impl GuiApplication {
         settings.concurrency = settings.concurrency.clamp(1, 32);
         settings.base_name = sanitize_animation_base_name(&settings.base_name);
         if settings.backend == "POV-Ray" && settings.povray_executable.trim().is_empty() {
-            self.set_status("POV-Ray executable is required");
+            self.set_animation_render_error("POV-Ray executable is required");
             return;
         }
         if settings.backend == "POV-Ray"
             && !settings.povray_include_dir.trim().is_empty()
             && !Path::new(settings.povray_include_dir.trim()).is_dir()
         {
-            self.set_status("POV-Ray include directory does not exist");
+            self.set_animation_render_error("POV-Ray include directory does not exist");
             return;
         }
         if settings.make_movie && settings.ffmpeg_executable.trim().is_empty() {
-            self.set_status("FFmpeg executable is required");
+            self.set_animation_render_error("FFmpeg executable is required");
             return;
         }
         let output_dir = PathBuf::from(settings.output_dir.trim());
         if let Err(error) = fs::create_dir_all(&output_dir) {
-            self.set_status(format!("Error: {error}"));
+            self.set_animation_render_error(error.to_string());
             return;
         }
         let total_frames = animation_render_frame_count(
@@ -13405,7 +13405,7 @@ impl GuiApplication {
             settings.duplicate_last_frame,
         );
         if total_frames == 0 {
-            self.set_status("Animation has no renderable frames");
+            self.set_animation_render_error("Animation has no renderable frames");
             return;
         }
 
@@ -13447,22 +13447,24 @@ impl GuiApplication {
         settings.fps = settings.fps.clamp(1, 240);
         settings.bitrate_kbps = settings.bitrate_kbps.clamp(1, 200_000);
         if !settings.make_movie {
-            self.set_status("Movie encoding is disabled");
+            self.set_animation_render_error("Movie encoding is disabled");
             return;
         }
         if settings.ffmpeg_executable.trim().is_empty() {
-            self.set_status("FFmpeg executable is required");
+            self.set_animation_render_error("FFmpeg executable is required");
             return;
         }
         let output_dir = Path::new(settings.output_dir.trim());
         let total_frames = match crate::animation_frame_count(output_dir, &settings.base_name) {
             Ok(0) => {
-                self.set_status("No complete frame sequence found in the output folder");
+                self.set_animation_render_error(
+                    "No complete frame sequence found in the output folder",
+                );
                 return;
             }
             Ok(count) => count,
             Err(error) => {
-                self.set_status(format!("Error: {error}"));
+                self.set_animation_render_error(error);
                 return;
             }
         };
@@ -13496,7 +13498,7 @@ impl GuiApplication {
                 self.animation_render_job = Some(job);
                 self.set_status("Animation movie encoding started");
             }
-            Err(error) => self.set_status(format!("Error: {error}")),
+            Err(error) => self.set_animation_render_error(error),
         }
     }
 
@@ -13554,7 +13556,7 @@ impl GuiApplication {
         if let Some(message) = frame_failure {
             job.cancel.store(true, Ordering::Relaxed);
             self.animation_render_log.push(message.clone());
-            self.finish_animation_render(job, camera, &message);
+            self.finish_animation_render(job, camera, &message, true);
             return;
         }
 
@@ -13566,13 +13568,13 @@ impl GuiApplication {
                     }
                     self.animation_render_log
                         .push(format!("Movie: {}", path.to_string_lossy()));
-                    self.finish_animation_render(job, camera, "Animation movie rendered");
+                    self.finish_animation_render(job, camera, "Animation movie rendered", false);
                     return;
                 }
                 Ok(Ok(AnimationTaskOutput::Frame { .. })) => {
                     let message = "Animation movie worker returned a frame";
                     self.animation_render_log.push(message.to_string());
-                    self.finish_animation_render(job, camera, message);
+                    self.finish_animation_render(job, camera, message, true);
                     return;
                 }
                 Ok(Err(error)) => {
@@ -13582,7 +13584,8 @@ impl GuiApplication {
                         format!("Animation rendering failed: {error}")
                     };
                     self.animation_render_log.push(message.clone());
-                    self.finish_animation_render(job, camera, &message);
+                    let failed = !job.cancel.load(Ordering::Relaxed);
+                    self.finish_animation_render(job, camera, &message, failed);
                     return;
                 }
                 Err(mpsc::TryRecvError::Empty) => {
@@ -13591,7 +13594,7 @@ impl GuiApplication {
                 Err(mpsc::TryRecvError::Disconnected) => {
                     let message = "Animation movie worker disconnected";
                     self.animation_render_log.push(message.to_string());
-                    self.finish_animation_render(job, camera, message);
+                    self.finish_animation_render(job, camera, message, true);
                     return;
                 }
             }
@@ -13603,7 +13606,7 @@ impl GuiApplication {
 
         if job.cancel.load(Ordering::Relaxed) {
             if job.frame_receivers.is_empty() && job.movie_receiver.is_none() {
-                self.finish_animation_render(job, camera, "Animation rendering cancelled");
+                self.finish_animation_render(job, camera, "Animation rendering cancelled", false);
             } else {
                 self.animation_render_job = Some(job);
             }
@@ -13615,7 +13618,7 @@ impl GuiApplication {
             if let Err(error) = self.schedule_animation_frame(&mut job, camera) {
                 let message = format!("Animation rendering failed: {error}");
                 self.animation_render_log.push(message.clone());
-                self.finish_animation_render(job, camera, &message);
+                self.finish_animation_render(job, camera, &message, true);
                 return;
             }
         }
@@ -13636,13 +13639,13 @@ impl GuiApplication {
                 }
                 Err(error) => {
                     self.animation_render_log.push(error.clone());
-                    self.finish_animation_render(job, camera, &error);
+                    self.finish_animation_render(job, camera, &error, true);
                 }
             }
             return;
         }
 
-        self.finish_animation_render(job, camera, "Animation frames rendered");
+        self.finish_animation_render(job, camera, "Animation frames rendered", false);
     }
 
     fn schedule_animation_frame(
@@ -13706,6 +13709,7 @@ impl GuiApplication {
         job: AnimationRenderJob,
         camera: &mut CameraController,
         status: &str,
+        failed: bool,
     ) {
         if let Some(restore) = job.restore {
             self.state = restore.state;
@@ -13717,7 +13721,17 @@ impl GuiApplication {
             self.rebuild_snapshot();
         }
         self.refresh_animation_render_outputs();
-        self.set_status(status);
+        if failed {
+            self.set_animation_render_error(status);
+        } else {
+            self.set_status(status);
+        }
+    }
+
+    fn set_animation_render_error(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        self.error_alert = Some(message.clone());
+        self.set_status(format!("Error: {message}"));
     }
 
     fn clear_animation_selection(&mut self) {
@@ -16822,7 +16836,7 @@ impl GuiApplication {
                                 "Cleaned up {deleted} animation output file(s)"
                             ));
                         }
-                        Err(error) => self.set_status(format!("Error: {error}")),
+                        Err(error) => self.set_animation_render_error(error),
                     }
                     self.animation_cleanup_confirmation = false;
                 }
@@ -35742,7 +35756,7 @@ mod tests {
             cancel: Arc::new(AtomicBool::new(false)),
             encoding_started: false,
         };
-        app.finish_animation_render(job, &mut camera, "done");
+        app.finish_animation_render(job, &mut camera, "done", false);
         assert_eq!(app.background, SceneBackground::Black);
         assert_eq!(app.animation_elapsed, 1.25);
         assert!(camera.target.abs_diff_eq(initial_camera.target, 1.0e-6));
@@ -35832,6 +35846,30 @@ mod tests {
         app.poll_animation_render(&mut camera);
 
         assert!(app.animation_render_job.is_some());
+    }
+
+    #[test]
+    fn native_animation_render_failure_opens_error_alert() {
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        let job = AnimationRenderJob {
+            settings: AnimationRenderSettings::default(),
+            restore: None,
+            total_frames: 1,
+            next_frame: 1,
+            completed_frames: 0,
+            frame_paths: Vec::new(),
+            frame_receivers: Vec::new(),
+            movie_receiver: None,
+            progress: Arc::new(AtomicU32::new(0)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            encoding_started: false,
+        };
+
+        app.finish_animation_render(job, &mut camera, "FFmpeg failed", true);
+
+        assert_eq!(app.error_alert.as_deref(), Some("FFmpeg failed"));
+        assert_eq!(app.status, "Error: FFmpeg failed");
     }
 
     #[test]
