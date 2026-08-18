@@ -3887,9 +3887,9 @@ pub fn molecule_render_options_for_renderer(renderer_type: &str) -> MoleculeRend
             options.bond_radius = 0.0;
             options.draw_bonds = false;
         }
-        "ballstick" => {
-            options.vdw_scale = 0.16;
-            options.bond_radius = 0.08;
+        "ballstick" | "anisou" => {
+            options.atom_radius_abs = Some(0.3);
+            options.bond_radius = 0.2;
             options.sphere_detail = Some(3);
         }
         "trace" | "ribbon" | "cartoon" | "tube" | "spline" | "nucl" => {
@@ -11604,6 +11604,13 @@ return cuemol.makeColor("#0000ff");
         assert_f64_eq(anisou.discthick(), 0.1);
         assert_eq!(anisou.maxverts(), 1_000_000);
         assert_eq!(anisou.get_glu_vert_max(), 1_000_000);
+
+        for renderer_type in ["ballstick", "anisou"] {
+            let options = molecule_render_options_for_renderer(renderer_type);
+            assert_eq!(options.atom_radius_abs, Some(0.3));
+            assert_eq!(options.bond_radius, 0.2);
+            assert_eq!(options.sphere_detail, Some(3));
+        }
     }
 
     #[test]
