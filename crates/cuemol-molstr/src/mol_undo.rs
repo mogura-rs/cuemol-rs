@@ -244,6 +244,106 @@ pub struct ResiduePropsEdit {
     description: String,
 }
 
+/// Undo/redo record for a persistent bond edit.
+///
+/// This mirrors C++ `MolBondEditInfo`: undoing a made bond removes it, while
+/// undoing a removed bond recreates it as a persistent single bond.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MolBondEditInfo {
+    make: bool,
+    atom1: i32,
+    atom2: i32,
+    description: String,
+}
+
+impl MolBondEditInfo {
+    pub fn new(make: bool, atom1: i32, atom2: i32) -> Self {
+        Self {
+            make,
+            atom1,
+            atom2,
+            description: if make { "make bond" } else { "remove bond" }.to_string(),
+        }
+    }
+
+    fn apply(&self, molecule: &mut MolCoord, make: bool) -> bool {
+        if make {
+            molecule.make_bond(self.atom1, self.atom2, true)
+        } else {
+            molecule.remove_bond(self.atom1, self.atom2)
+        }
+    }
+}
+
+impl MolEditInfo for MolBondEditInfo {
+    fn undo(&mut self, molecule: &mut MolCoord) -> bool {
+        self.apply(molecule, !self.make)
+    }
+
+    fn redo(&mut self, molecule: &mut MolCoord) -> bool {
+        self.apply(molecule, self.make)
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+}
+
+/// Undo/redo record for chain-name and residue-index changes.
+///
+/// C++ uses `ChgChnameEditInfo` and `ShiftResIndexEditInfo`; both store old/new
+/// residue keys and replay the relabel operation in the required direction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResidueRelabelEdit {
+    changes: Vec<(ResidueKey, ResidueKey)>,
+    description: String,
+}
+
+impl ResidueRelabelEdit {
+    pub fn new(changes: Vec<(ResidueKey, ResidueKey)>, description: impl Into<String>) -> Self {
+        Self {
+            changes,
+            description: description.into(),
+        }
+    }
+
+    fn apply(&self, molecule: &mut MolCoord, reverse: bool) -> bool {
+        let mapping = self
+            .changes
+            .iter()
+            .map(|(old, new)| {
+                if reverse {
+                    (new.clone(), old.clone())
+                } else {
+                    (old.clone(), new.clone())
+                }
+            })
+            .collect::<BTreeMap<_, _>>();
+        let changed = molecule.relabel_residue_keys(|atom| {
+            let key = ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code);
+            mapping.get(&key).cloned()
+        });
+        if changed {
+            molecule.apply_topology();
+        }
+        changed
+    }
+}
+
+impl MolEditInfo for ResidueRelabelEdit {
+    fn undo(&mut self, molecule: &mut MolCoord) -> bool {
+        self.apply(molecule, true)
+    }
+
+    fn redo(&mut self, molecule: &mut MolCoord) -> bool {
+        self.apply(molecule, false)
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+}
+
 impl ResiduePropsEdit {
     pub fn new(
         before: ResiduePropsMap,
@@ -449,6 +549,59 @@ mod tests {
         assert_eq!(
             molecule.atom_by_serial(1).unwrap().position,
             Vector4::new3(5.0, 2.0, 3.0)
+        );
+    }
+
+    #[test]
+    fn bond_edit_undoes_and_redoes_both_directions() {
+        let mut molecule = MolCoord::new();
+        molecule.push_atom(atom(1, "A", 1, "CA"));
+        molecule.push_atom(atom(2, "A", 2, "CA"));
+
+        let mut make = MolBondEditInfo::new(true, 1, 2);
+        assert!(molecule.make_bond(1, 2, true));
+        assert!(make.undo(&mut molecule));
+        assert_eq!(molecule.bond_count(), 0);
+        assert!(make.redo(&mut molecule));
+        assert!(molecule.bonds()[0].persist);
+
+        let mut remove = MolBondEditInfo::new(false, 1, 2);
+        assert!(molecule.remove_bond(1, 2));
+        assert!(remove.undo(&mut molecule));
+        assert!(molecule.bonds()[0].persist);
+        assert!(remove.redo(&mut molecule));
+        assert_eq!(molecule.bond_count(), 0);
+    }
+
+    #[test]
+    fn residue_relabel_edit_moves_properties_on_undo_and_redo() {
+        let mut molecule = MolCoord::new();
+        molecule.push_atom(atom(1, "A", 1, "CA"));
+        molecule
+            .set_residue_prop_str("A", "1", "secondary", "Hs")
+            .unwrap();
+        let old = ResidueKey::new("A", 1, None);
+        let new = ResidueKey::new("B", 5, None);
+        assert!(molecule.relabel_residue_keys(|_| Some(new.clone())));
+
+        let mut edit = ResidueRelabelEdit::new(vec![(old.clone(), new.clone())], "relabel");
+        assert!(edit.undo(&mut molecule));
+        assert_eq!(molecule.atoms()[0].chain_id, "A");
+        assert_eq!(molecule.atoms()[0].res_id, 1);
+        assert_eq!(
+            molecule
+                .get_residue_prop_str("A", "1", "secondary")
+                .unwrap(),
+            Some("Hs")
+        );
+        assert!(edit.redo(&mut molecule));
+        assert_eq!(molecule.atoms()[0].chain_id, "B");
+        assert_eq!(molecule.atoms()[0].res_id, 5);
+        assert_eq!(
+            molecule
+                .get_residue_prop_str("B", "5", "secondary")
+                .unwrap(),
+            Some("Hs")
         );
     }
 }

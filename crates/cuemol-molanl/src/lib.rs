@@ -1,5 +1,7 @@
 use cuemol_core::{CueMolError, Matrix4, Result, Uid, Vector4};
-use cuemol_molstr::mol_undo::{MolUndoManager, ResiduePropsEdit};
+use cuemol_molstr::mol_undo::{
+    MolBondEditInfo, MolUndoManager, ResiduePropsEdit, ResidueRelabelEdit,
+};
 use cuemol_molstr::{
     parse_selector, Atom, MolCoord, MolSceneManager, Prot2ndrySet, ResidueKey, Selector,
 };
@@ -413,6 +415,30 @@ impl MolAnlManager {
         changed
     }
 
+    pub fn change_chain_name_with_undo(
+        &self,
+        molecule: &mut MolCoord,
+        selector: &Selector,
+        name: &str,
+        undo: &mut MolUndoManager,
+    ) -> bool {
+        let changes = selected_residue_keys_in_atom_order(molecule, selector)
+            .into_iter()
+            .map(|old| {
+                let new = ResidueKey::new(name, old.res_id, old.ins_code);
+                (old, new)
+            })
+            .collect::<Vec<_>>();
+        if !self.change_chain_name(molecule, selector, name) {
+            return false;
+        }
+        undo.record(Box::new(ResidueRelabelEdit::new(
+            changes,
+            "change chain name",
+        )));
+        true
+    }
+
     pub fn shift_res_index(
         &self,
         molecule: &mut MolCoord,
@@ -465,6 +491,40 @@ impl MolAnlManager {
             molecule.apply_topology();
         }
         changed
+    }
+
+    pub fn shift_res_index_with_undo(
+        &self,
+        molecule: &mut MolCoord,
+        selector: &Selector,
+        shift_mode: bool,
+        value: i32,
+        undo: &mut MolUndoManager,
+    ) -> bool {
+        let ordered = selected_residue_keys_in_atom_order(molecule, selector);
+        let Some(first) = ordered.first() else {
+            return false;
+        };
+        let shift = if shift_mode {
+            value
+        } else {
+            value - first.res_id
+        };
+        let changes = ordered
+            .into_iter()
+            .map(|old| {
+                let new = ResidueKey::new(old.chain_id.clone(), old.res_id + shift, old.ins_code);
+                (old, new)
+            })
+            .collect::<Vec<_>>();
+        if !self.shift_res_index(molecule, selector, shift_mode, value) {
+            return false;
+        }
+        undo.record(Box::new(ResidueRelabelEdit::new(
+            changes,
+            "shift residue index",
+        )));
+        true
     }
 
     pub fn renum_res_index(
@@ -521,12 +581,75 @@ impl MolAnlManager {
         changed
     }
 
+    pub fn renum_res_index_with_undo(
+        &self,
+        molecule: &mut MolCoord,
+        selector: &Selector,
+        shift_mode: bool,
+        value: i32,
+        undo: &mut MolUndoManager,
+    ) -> bool {
+        let ordered = selected_residue_keys_in_atom_order(molecule, selector);
+        let Some(first) = ordered.first() else {
+            return false;
+        };
+        let start = if shift_mode {
+            first.res_id + value
+        } else {
+            value
+        };
+        let changes = ordered
+            .into_iter()
+            .enumerate()
+            .map(|(offset, old)| {
+                let new = ResidueKey::new(old.chain_id.clone(), start + offset as i32, None);
+                (old, new)
+            })
+            .collect::<Vec<_>>();
+        if !self.renum_res_index(molecule, selector, shift_mode, value) {
+            return false;
+        }
+        undo.record(Box::new(ResidueRelabelEdit::new(
+            changes,
+            "renumber residue index",
+        )));
+        true
+    }
+
     pub fn make_bond(&self, molecule: &mut MolCoord, aid1: i32, aid2: i32) -> bool {
         molecule.make_bond(aid1, aid2, true)
     }
 
+    pub fn make_bond_with_undo(
+        &self,
+        molecule: &mut MolCoord,
+        aid1: i32,
+        aid2: i32,
+        undo: &mut MolUndoManager,
+    ) -> bool {
+        if !self.make_bond(molecule, aid1, aid2) {
+            return false;
+        }
+        undo.record(Box::new(MolBondEditInfo::new(true, aid1, aid2)));
+        true
+    }
+
     pub fn remove_bond(&self, molecule: &mut MolCoord, aid1: i32, aid2: i32) -> bool {
         molecule.remove_bond(aid1, aid2)
+    }
+
+    pub fn remove_bond_with_undo(
+        &self,
+        molecule: &mut MolCoord,
+        aid1: i32,
+        aid2: i32,
+        undo: &mut MolUndoManager,
+    ) -> bool {
+        if !self.remove_bond(molecule, aid1, aid2) {
+            return false;
+        }
+        undo.record(Box::new(MolBondEditInfo::new(false, aid1, aid2)));
+        true
     }
 
     pub fn get_nostd_bonds_json(&self, molecule: &MolCoord) -> String {
@@ -681,6 +804,23 @@ impl MolAnlManager {
         molecule.calc_prot_2ndry2(ignore_breaks, angle);
     }
 
+    pub fn calc_prot_2ndry2_with_undo(
+        &self,
+        molecule: &mut MolCoord,
+        ignore_breaks: bool,
+        angle: f64,
+        undo: &mut MolUndoManager,
+    ) {
+        let before = molecule.residue_props().clone();
+        self.calc_prot_2ndry2(molecule, ignore_breaks, angle);
+        let after = molecule.residue_props().clone();
+        undo.record(Box::new(ResiduePropsEdit::new(
+            before,
+            after,
+            "calculate secondary structure",
+        )));
+    }
+
     pub fn calc_prot2ndry2(&self, molecule: &mut MolCoord, ignore_breaks: bool, angle: f64) {
         self.calc_prot_2ndry2(molecule, ignore_breaks, angle);
     }
@@ -824,6 +964,22 @@ fn selected_indices_in_mol_array_order(molecule: &MolCoord, selector: &Selector)
             .or_insert(index);
     }
     atoms.into_values().collect()
+}
+
+fn selected_residue_keys_in_atom_order(
+    molecule: &MolCoord,
+    selector: &Selector,
+) -> Vec<ResidueKey> {
+    let mut seen = BTreeSet::new();
+    molecule
+        .atoms()
+        .iter()
+        .filter(|atom| selector.matches(atom))
+        .filter_map(|atom| {
+            let key = ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code);
+            seen.insert(key.clone()).then_some(key)
+        })
+        .collect()
 }
 
 fn validate_superpose_ids(reference_id: u64, moving_id: u64) -> Result<()> {
@@ -1287,6 +1443,97 @@ mod tests {
     }
 
     #[test]
+    fn manager_residue_edits_record_undo_and_redo() {
+        let manager = MolAnlManager::new();
+        let mut molecule = MolCoord::new();
+        molecule.push_atom(atom(1, "CA", "A", 10, "C", 0.0));
+        molecule.push_atom(atom(2, "CA", "A", 20, "C", 1.0));
+        molecule
+            .set_residue_prop_str("A", "10", "secondary", "Hs")
+            .unwrap();
+        let first = parse_selector("resi 10").unwrap();
+        let mut undo = MolUndoManager::new();
+
+        assert!(manager.change_chain_name_with_undo(&mut molecule, &first, "B", &mut undo,));
+        assert_eq!(undo.undo_desc(), Some("change chain name"));
+        assert!(undo.undo(&mut molecule));
+        assert_eq!(molecule.atoms()[0].chain_id, "A");
+        assert_eq!(
+            molecule
+                .get_residue_prop_str("A", "10", "secondary")
+                .unwrap(),
+            Some("Hs")
+        );
+        assert!(undo.redo(&mut molecule));
+        assert_eq!(molecule.atoms()[0].chain_id, "B");
+
+        let first = parse_selector("chain B").unwrap();
+        assert!(manager.shift_res_index_with_undo(&mut molecule, &first, true, 5, &mut undo,));
+        assert_eq!(molecule.atoms()[0].res_id, 15);
+        assert!(undo.undo(&mut molecule));
+        assert_eq!(molecule.atoms()[0].res_id, 10);
+        assert!(undo.redo(&mut molecule));
+        assert_eq!(molecule.atoms()[0].res_id, 15);
+
+        assert!(manager.renum_res_index_with_undo(
+            &mut molecule,
+            &Selector::All,
+            false,
+            1,
+            &mut undo,
+        ));
+        assert_eq!(
+            molecule
+                .atoms()
+                .iter()
+                .map(|atom| atom.res_id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert!(undo.undo(&mut molecule));
+        assert_eq!(
+            molecule
+                .atoms()
+                .iter()
+                .map(|atom| atom.res_id)
+                .collect::<Vec<_>>(),
+            vec![15, 20]
+        );
+        assert!(undo.redo(&mut molecule));
+        assert_eq!(
+            molecule
+                .atoms()
+                .iter()
+                .map(|atom| atom.res_id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn manager_bond_edits_record_undo_and_redo() {
+        let manager = MolAnlManager::new();
+        let mut molecule = MolCoord::new();
+        molecule.push_atom(atom(1, "CA", "A", 1, "C", 0.0));
+        molecule.push_atom(atom(2, "CA", "A", 2, "C", 1.0));
+        let mut undo = MolUndoManager::new();
+
+        assert!(manager.make_bond_with_undo(&mut molecule, 1, 2, &mut undo));
+        assert_eq!(undo.undo_desc(), Some("make bond"));
+        assert!(undo.undo(&mut molecule));
+        assert_eq!(molecule.bond_count(), 0);
+        assert!(undo.redo(&mut molecule));
+        assert!(molecule.bonds()[0].persist);
+
+        assert!(manager.remove_bond_with_undo(&mut molecule, 1, 2, &mut undo));
+        assert_eq!(undo.undo_desc(), Some("remove bond"));
+        assert!(undo.undo(&mut molecule));
+        assert!(molecule.bonds()[0].persist);
+        assert!(undo.redo(&mut molecule));
+        assert_eq!(molecule.bond_count(), 0);
+    }
+
+    #[test]
     fn residue_index_modes_match_the_reference_manager() {
         let manager = MolAnlManager::new();
         let mut molecule = MolCoord::new();
@@ -1647,5 +1894,42 @@ mod tests {
             .atoms()
             .iter()
             .all(|atom| atom.int_prop("secondary").is_none()));
+    }
+
+    #[test]
+    fn manager_calc_secondary_records_undo_and_redo() {
+        let manager = MolAnlManager::new();
+        let mut molecule = MolCoord::new();
+        for (serial, name) in [(1, "N"), (2, "CA"), (3, "C"), (4, "O")] {
+            let mut a = atom(serial, name, "A", 1, "C", 0.0);
+            a.position = Vector4::new3(serial as f64, 0.0, 0.0);
+            molecule.push_atom(a);
+        }
+        molecule
+            .set_residue_prop_str("A", "1", "secondary2", "Hs")
+            .unwrap();
+        let mut undo = MolUndoManager::new();
+
+        manager.calc_prot_2ndry2_with_undo(&mut molecule, false, 60.0, &mut undo);
+        assert_eq!(
+            molecule
+                .get_residue_prop_str("A", "1", "secondary2")
+                .unwrap(),
+            Some("")
+        );
+        assert!(undo.undo(&mut molecule));
+        assert_eq!(
+            molecule
+                .get_residue_prop_str("A", "1", "secondary2")
+                .unwrap(),
+            Some("Hs")
+        );
+        assert!(undo.redo(&mut molecule));
+        assert_eq!(
+            molecule
+                .get_residue_prop_str("A", "1", "secondary2")
+                .unwrap(),
+            Some("")
+        );
     }
 }
