@@ -842,19 +842,34 @@ fn export_scene(input: &str, output: &str) -> Result<(), String> {
         );
         return Ok(());
     }
+    if lower.ends_with(".pov") {
+        let camera = camera_for_snapshot(&snapshot);
+        let mut exporter = PovSceneExporter::new();
+        exporter.handler_mut().set_path(output);
+        exporter.handler_mut().set_sub_path(
+            "inc",
+            std::path::Path::new(output)
+                .with_extension("inc")
+                .to_string_lossy(),
+        );
+        exporter.set_perspective(false);
+        exporter
+            .write_snapshot_file_with_camera_background(&snapshot, &camera, [0.0; 3])
+            .map_err(|error| error.to_string())?;
+        eprintln!(
+            "exported {} atoms / {} bonds -> {} vertices / {} triangles to {output}",
+            snapshot.atom_count(),
+            snapshot.bond_count(),
+            mesh.vertices.len(),
+            mesh.triangle_count()
+        );
+        return Ok(());
+    }
     let bytes: Vec<u8> = if lower.ends_with(".stl") {
         let camera = camera_for_snapshot(&snapshot);
         StlSceneExporter::new().write_binary_stl_bytes_with_camera(&mesh, &camera)
     } else if lower.ends_with(".obj") {
         mesh.to_obj_string(name).into_bytes()
-    } else if lower.ends_with(".pov") {
-        let camera = camera_for_snapshot(&snapshot);
-        let mut exporter = PovSceneExporter::new();
-        exporter.set_perspective(false);
-        exporter
-            .write_snapshot_string_with_camera_background(&snapshot, &camera, [0.0; 3])
-            .map_err(|error| error.to_string())?
-            .into_bytes()
     } else if lower.ends_with(".mqo") {
         let camera = camera_for_snapshot(&snapshot);
         MqoSceneExporter::new()

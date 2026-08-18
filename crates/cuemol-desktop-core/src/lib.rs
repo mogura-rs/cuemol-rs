@@ -52680,10 +52680,13 @@ mod tests {
         let writes = paths
             .iter()
             .map(|(class_name, path)| {
-                let settings = if *class_name == "LuxRendSceneExporter" {
-                    "e.bgmode = 'wall';"
-                } else {
-                    ""
+                let settings = match *class_name {
+                    "PovSceneExporter" => format!(
+                        "e.setSubPath('inc', {:?});",
+                        dir.join("scene.inc").to_string_lossy()
+                    ),
+                    "LuxRendSceneExporter" => "e.bgmode = 'wall';".to_string(),
+                    _ => String::new(),
                 };
                 format!(
                     "var e = cuemol.{class_name}(); \
@@ -52734,6 +52737,11 @@ mod tests {
         let pov_scene = fs::read_to_string(dir.join("scene.pov")).unwrap();
         assert!(pov_scene.contains("#declare _perspective = 1;"));
         assert!(pov_scene.contains("#declare _bgcolor = <0.070588,0.203922,0.337255>;"));
+        assert!(pov_scene.contains("#declare _scene = #include \"scene.inc\""));
+        assert!(!pov_scene.contains("mesh2 {"));
+        let pov_include = fs::read_to_string(dir.join("scene.inc")).unwrap();
+        assert!(pov_include.contains("union {"));
+        assert!(pov_include.contains("mesh2 {"));
         let lux_scene = fs::read_to_string(dir.join("scene.lxs")).unwrap();
         assert!(lux_scene.contains("\"string filename\" [\"scene\"]"));
         assert!(lux_scene.contains("\"color Kd\" [0.0706 0.2039 0.3373]"));

@@ -6,6 +6,7 @@ use cuemol_qsys::{Camera, InOutHandler, SceneExporter as QsysSceneExporter};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::ops::Range;
+use std::path::{Component, Path, PathBuf};
 
 pub use raytrace::{
     render_umbreon_smoke, render_umbreon_snapshot, UmbreonDenoiseMode, UmbreonFrame,
@@ -1115,9 +1116,7 @@ impl PovSceneExporter {
         perspective: bool,
     ) -> Result<()> {
         let output = self.write_scene_string(mesh, center, size, perspective);
-        self.handler().write_string(&output)?;
-        self.state.write();
-        Ok(())
+        self.write_scene_documents(&output)
     }
 
     /// Write a complete POV-Ray scene using the full CueMol camera transform.
@@ -1127,9 +1126,7 @@ impl PovSceneExporter {
         camera: &Camera,
     ) -> Result<()> {
         let output = self.write_scene_string_with_camera(mesh, camera)?;
-        self.handler().write_string(&output)?;
-        self.state.write();
-        Ok(())
+        self.write_scene_documents(&output)
     }
 
     /// Write a complete scene while preserving renderer-sized sections for
@@ -1150,7 +1147,22 @@ impl PovSceneExporter {
     ) -> Result<()> {
         let output =
             self.write_snapshot_string_with_camera_background(snapshot, camera, background)?;
-        self.handler().write_string(&output)?;
+        self.write_scene_documents(&output)
+    }
+
+    fn write_scene_documents(&mut self, output: &str) -> Result<()> {
+        let inc_path = self.handler().sub_path("inc").to_owned();
+        if inc_path.is_empty() {
+            self.handler().write_string(output)?;
+            self.state.write();
+            return Ok(());
+        }
+
+        let (inc_write_path, inc_reference) =
+            pov_include_paths(self.handler().path(), &inc_path, self.make_rel_inc_path)?;
+        let (main, include) = split_pov_scene_documents(output, &inc_reference);
+        self.handler().write_string(&main)?;
+        std::fs::write(inc_write_path, include)?;
         self.state.write();
         Ok(())
     }
@@ -1573,6 +1585,104 @@ impl Default for PovSceneExporter {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn pov_include_paths(
+    main_path: &str,
+    inc_path: &str,
+    make_relative: bool,
+) -> Result<(PathBuf, String)> {
+    if !make_relative {
+        return Ok((
+            PathBuf::from(inc_path),
+            pov_path_string(Path::new(inc_path)),
+        ));
+    }
+    if main_path.is_empty() {
+        return Err(CueMolError::invalid_argument(
+            "path is empty for stream key ''",
+        ));
+    }
+
+    let current_dir = std::env::current_dir()?;
+    let main_path = absolute_normalized_path(Path::new(main_path), &current_dir);
+    let main_dir = main_path.parent().unwrap_or(current_dir.as_path());
+    let inc_input = Path::new(inc_path);
+    let inc_write_path = absolute_normalized_path(inc_input, main_dir);
+    let inc_reference = if inc_input.is_absolute() {
+        relative_path(main_dir, &inc_write_path)
+    } else {
+        inc_input.to_path_buf()
+    };
+    Ok((inc_write_path, pov_path_string(&inc_reference)))
+}
+
+fn absolute_normalized_path(path: &Path, base: &Path) -> PathBuf {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn relative_path(base: &Path, target: &Path) -> PathBuf {
+    let base = base.components().collect::<Vec<_>>();
+    let target = target.components().collect::<Vec<_>>();
+    let common = base
+        .iter()
+        .zip(&target)
+        .take_while(|(left, right)| left == right)
+        .count();
+    if common == 0 {
+        return target.iter().collect();
+    }
+
+    let mut relative = PathBuf::new();
+    for component in &base[common..] {
+        if matches!(component, Component::Normal(_)) {
+            relative.push("..");
+        }
+    }
+    for component in &target[common..] {
+        relative.push(component.as_os_str());
+    }
+    if relative.as_os_str().is_empty() {
+        relative.push(".");
+    }
+    relative
+}
+
+fn pov_path_string(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .replace('"', "\\\"")
+}
+
+fn split_pov_scene_documents(source: &str, include_path: &str) -> (String, String) {
+    let geometry_offset = source.find("mesh2 {").unwrap_or(source.len());
+    let (header, geometry) = source.split_at(geometry_offset);
+    let mut main = header.to_owned();
+    writeln!(&mut main, "#declare _scene = #include \"{include_path}\"").unwrap();
+    main.push_str("object {\n  _scene\n}\n");
+
+    let mut include = String::from("/* CueMol POV-Ray include */\n\nunion {\n");
+    include.push_str(geometry);
+    if !geometry.ends_with('\n') {
+        include.push('\n');
+    }
+    include.push_str("#if (!_shadow)\n  no_shadow\n#end\n} // union\n");
+    (main, include)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5268,12 +5378,19 @@ mod tests {
         let mut pov = PovSceneExporter::new();
         pov.handler_mut()
             .set_path(dir.join("scene.pov").to_string_lossy());
+        pov.handler_mut()
+            .set_sub_path("inc", dir.join("geometry.inc").to_string_lossy());
         pov.write_scene_file(&mesh, Vector4::ZERO, 4.0, false)
             .unwrap();
         assert_eq!(pov.write_count(), 1);
-        assert!(std::fs::read_to_string(dir.join("scene.pov"))
-            .unwrap()
-            .contains("camera {"));
+        let pov_main = std::fs::read_to_string(dir.join("scene.pov")).unwrap();
+        assert!(pov_main.contains("camera {"));
+        assert!(pov_main.contains("#declare _scene = #include \"geometry.inc\""));
+        assert!(!pov_main.contains("mesh2 {"));
+        let pov_include = std::fs::read_to_string(dir.join("geometry.inc")).unwrap();
+        assert!(pov_include.contains("union {"));
+        assert!(pov_include.contains("mesh2 {"));
+        assert!(pov_include.contains("} // union"));
 
         let mut mqo = MqoSceneExporter::new();
         mqo.handler_mut()
