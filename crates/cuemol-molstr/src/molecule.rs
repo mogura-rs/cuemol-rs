@@ -1170,6 +1170,16 @@ impl MolCoord {
         self.delete_atom_indices(&selected)
     }
 
+    pub(crate) fn delete_atom_keys(&mut self, keys: &BTreeSet<AtomKey>) -> usize {
+        let selected = self
+            .atoms
+            .iter()
+            .enumerate()
+            .filter_map(|(index, atom)| keys.contains(&atom_key(atom)).then_some(index))
+            .collect::<BTreeSet<_>>();
+        self.delete_atom_indices(&selected)
+    }
+
     fn delete_atom_indices(&mut self, selected: &BTreeSet<usize>) -> usize {
         if selected.is_empty() {
             return 0;
@@ -1328,7 +1338,10 @@ impl MolCoord {
         }
         for bond in &source.bonds {
             if let (Some(atom1), Some(atom2)) = (remap.get(&bond.atom1), remap.get(&bond.atom2)) {
-                self.add_bond(*atom1, *atom2, bond.order);
+                self.add_bond_stereo(*atom1, *atom2, bond.order, bond.stereo);
+                if bond.persist {
+                    self.mark_bond_persistent(*atom1, *atom2);
+                }
             }
         }
         for index in &selected {
@@ -1651,7 +1664,9 @@ fn residue_key(atom: &Atom) -> ResidueKey {
     ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code)
 }
 
-fn atom_key(atom: &Atom) -> (String, i32, Option<char>, String, Option<char>) {
+pub(crate) type AtomKey = (String, i32, Option<char>, String, Option<char>);
+
+pub(crate) fn atom_key(atom: &Atom) -> AtomKey {
     (
         atom.chain_id.clone(),
         atom.res_id,

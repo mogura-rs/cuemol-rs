@@ -13,11 +13,11 @@
 //! `undo(&mut self)` cannot reach a molecule — it was orphaned for exactly this
 //! reason. This molecule-reaching variant is the consumer-backed version.)
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::molecule::{MolCoord, ResidueKey};
+use crate::molecule::{atom_key, AtomKey, MolCoord, ResidueKey};
 use crate::Selector;
-use cuemol_core::Vector4;
+use cuemol_core::{Result, Vector4};
 
 /// A reversible record of a single molecule edit (port of C++ `EditInfo`).
 pub trait MolEditInfo {
@@ -282,6 +282,78 @@ impl MolEditInfo for MolBondEditInfo {
 
     fn redo(&mut self, molecule: &mut MolCoord) -> bool {
         self.apply(molecule, self.make)
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+}
+
+/// Undo/redo record for copying atoms into or deleting atoms from a molecule.
+///
+/// This mirrors C++ `MolMergeEditInfo`. The selected atoms are retained in a
+/// private molecule, while structural atom keys identify the copied atoms that
+/// must be removed during undo.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MolMergeEditInfo {
+    copy: bool,
+    stored: MolCoord,
+    atom_keys: BTreeSet<AtomKey>,
+    description: String,
+}
+
+impl MolMergeEditInfo {
+    pub fn new_copy(source: &MolCoord, selector: &Selector) -> Result<Self> {
+        Self::from_selection(true, source, selector)
+    }
+
+    pub fn new_delete(source: &MolCoord, selector: &Selector) -> Result<Self> {
+        Self::from_selection(false, source, selector)
+    }
+
+    fn from_selection(copy: bool, source: &MolCoord, selector: &Selector) -> Result<Self> {
+        let mut stored = MolCoord::new();
+        stored.copy_selected_atoms_from(source, selector)?;
+        let atom_keys = stored.atoms().iter().map(atom_key).collect();
+        Ok(Self {
+            copy,
+            stored,
+            atom_keys,
+            description: if copy { "copy atoms" } else { "delete atoms" }.to_string(),
+        })
+    }
+
+    fn copy_atoms(&self, molecule: &mut MolCoord) -> bool {
+        molecule
+            .copy_selected_atoms_from(&self.stored, &Selector::All)
+            .is_ok_and(|count| count > 0)
+    }
+
+    fn delete_atoms(&self, molecule: &mut MolCoord) -> bool {
+        let count = molecule.delete_atom_keys(&self.atom_keys);
+        if count == 0 {
+            return false;
+        }
+        molecule.apply_topology();
+        true
+    }
+}
+
+impl MolEditInfo for MolMergeEditInfo {
+    fn undo(&mut self, molecule: &mut MolCoord) -> bool {
+        if self.copy {
+            self.delete_atoms(molecule)
+        } else {
+            self.copy_atoms(molecule)
+        }
+    }
+
+    fn redo(&mut self, molecule: &mut MolCoord) -> bool {
+        if self.copy {
+            self.copy_atoms(molecule)
+        } else {
+            self.delete_atoms(molecule)
+        }
     }
 
     fn description(&self) -> &str {
@@ -603,5 +675,44 @@ mod tests {
                 .unwrap(),
             Some("Hs")
         );
+    }
+
+    #[test]
+    fn merge_edit_undoes_copy_and_delete() {
+        let mut source = MolCoord::new();
+        source.push_atom(atom(1, "B", 2, "CA"));
+        source.push_atom(atom(2, "B", 2, "CB"));
+        source.add_bond_stereo(0, 1, crate::BondOrder::Double, 1);
+        source.mark_bond_persistent(0, 1);
+        source
+            .set_residue_prop_str("B", "2", "secondary", "Es")
+            .unwrap();
+
+        let mut copied = MolCoord::new();
+        let mut copy_edit = MolMergeEditInfo::new_copy(&source, &Selector::All).unwrap();
+        assert_eq!(
+            copied
+                .copy_selected_atoms_from(&source, &Selector::All)
+                .unwrap(),
+            2
+        );
+        assert!(copy_edit.undo(&mut copied));
+        assert_eq!(copied.atom_count(), 0);
+        assert!(copy_edit.redo(&mut copied));
+        assert_eq!(copied.atom_count(), 2);
+        assert_eq!(copied.bonds()[0].order, crate::BondOrder::Double);
+        assert_eq!(copied.bonds()[0].stereo, 1);
+        assert!(copied.bonds()[0].persist);
+
+        let mut delete_edit = MolMergeEditInfo::new_delete(&copied, &Selector::All).unwrap();
+        assert_eq!(copied.delete_selected_atoms(&Selector::All), 2);
+        assert!(delete_edit.undo(&mut copied));
+        assert_eq!(copied.atom_count(), 2);
+        assert_eq!(
+            copied.get_residue_prop_str("B", "2", "secondary").unwrap(),
+            Some("Es")
+        );
+        assert!(delete_edit.redo(&mut copied));
+        assert_eq!(copied.atom_count(), 0);
     }
 }

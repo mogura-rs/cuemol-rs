@@ -1,6 +1,6 @@
 use cuemol_core::{CueMolError, Matrix4, Result, Uid, Vector4};
 use cuemol_molstr::mol_undo::{
-    MolBondEditInfo, MolUndoManager, ResiduePropsEdit, ResidueRelabelEdit,
+    MolBondEditInfo, MolMergeEditInfo, MolUndoManager, ResiduePropsEdit, ResidueRelabelEdit,
 };
 use cuemol_molstr::{
     parse_selector, Atom, MolCoord, MolSceneManager, Prot2ndrySet, ResidueKey, Selector,
@@ -373,8 +373,37 @@ impl MolAnlManager {
             .map(|count| count > 0)
     }
 
+    pub fn copy_atoms_with_undo(
+        &self,
+        target: &mut MolCoord,
+        source: &MolCoord,
+        selector: &Selector,
+        undo: &mut MolUndoManager,
+    ) -> Result<bool> {
+        let edit = MolMergeEditInfo::new_copy(source, selector)?;
+        let changed = self.copy_atoms(target, source, selector)?;
+        if changed {
+            undo.record(Box::new(edit));
+        }
+        Ok(changed)
+    }
+
     pub fn delete_atoms(&self, molecule: &mut MolCoord, selector: &Selector) -> bool {
         molecule.delete_selected_atoms(selector) > 0
+    }
+
+    pub fn delete_atoms_with_undo(
+        &self,
+        molecule: &mut MolCoord,
+        selector: &Selector,
+        undo: &mut MolUndoManager,
+    ) -> Result<bool> {
+        let edit = MolMergeEditInfo::new_delete(molecule, selector)?;
+        let changed = self.delete_atoms(molecule, selector);
+        if changed {
+            undo.record(Box::new(edit));
+        }
+        Ok(changed)
     }
 
     pub fn change_chain_name(
@@ -1440,6 +1469,50 @@ mod tests {
         assert_eq!(target.atoms()[0].res_id, 1);
         assert!(manager.delete_atoms(&mut target, &Selector::All));
         assert_eq!(target.atom_count(), 0);
+    }
+
+    #[test]
+    fn manager_copy_and_delete_record_undo_and_redo() {
+        let manager = MolAnlManager::new();
+        let mut source = MolCoord::new();
+        source.push_atom(atom(1, "CA", "B", 2, "C", 1.0));
+        source.push_atom(atom(2, "CB", "B", 2, "C", 2.0));
+        source.add_bond_stereo(0, 1, cuemol_molstr::BondOrder::Double, 1);
+        source.mark_bond_persistent(0, 1);
+        source
+            .set_residue_prop_str("B", "2", "secondary", "Es")
+            .unwrap();
+        let mut target = MolCoord::new();
+        target.push_atom(atom(3, "CA", "A", 1, "C", 0.0));
+        let mut undo = MolUndoManager::new();
+
+        assert!(manager
+            .copy_atoms_with_undo(&mut target, &source, &Selector::All, &mut undo)
+            .unwrap());
+        assert_eq!(target.atom_count(), 3);
+        assert_eq!(undo.undo_desc(), Some("copy atoms"));
+        assert!(undo.undo(&mut target));
+        assert_eq!(target.atom_count(), 1);
+        assert!(undo.redo(&mut target));
+        assert_eq!(target.atom_count(), 3);
+        assert_eq!(target.bonds()[0].order, cuemol_molstr::BondOrder::Double);
+        assert_eq!(target.bonds()[0].stereo, 1);
+        assert!(target.bonds()[0].persist);
+
+        let copied = parse_selector("chain B").unwrap();
+        assert!(manager
+            .delete_atoms_with_undo(&mut target, &copied, &mut undo)
+            .unwrap());
+        assert_eq!(target.atom_count(), 1);
+        assert_eq!(undo.undo_desc(), Some("delete atoms"));
+        assert!(undo.undo(&mut target));
+        assert_eq!(target.atom_count(), 3);
+        assert_eq!(
+            target.get_residue_prop_str("B", "2", "secondary").unwrap(),
+            Some("Es")
+        );
+        assert!(undo.redo(&mut target));
+        assert_eq!(target.atom_count(), 1);
     }
 
     #[test]
