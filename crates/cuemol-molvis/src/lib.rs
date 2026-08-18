@@ -5038,22 +5038,25 @@ pub fn molecule_render_snapshot(
             .iter()
             .enumerate()
             .filter(|(index, _)| drawn(*index))
-            .map(|(index, atom)| {
+            .filter_map(|(index, atom)| {
                 let color = atom_colors[index].clone();
-                RenderAtom::new(
-                    Vector4::new3(atom.position.x, atom.position.y, atom.position.z),
-                    atom_radius(atom.element.as_str(), options),
-                    Some(color),
-                )
-                .with_picking(options.object_uid, Some(index), selected.contains(&index))
-                .with_detail(options.sphere_detail)
+                let radius = atom_radius(atom.element.as_str(), options);
+                (radius > 0.0).then(|| {
+                    RenderAtom::new(
+                        Vector4::new3(atom.position.x, atom.position.y, atom.position.z),
+                        radius,
+                        Some(color),
+                    )
+                    .with_picking(options.object_uid, Some(index), selected.contains(&index))
+                    .with_detail(options.sphere_detail)
+                })
             })
             .collect::<Vec<_>>()
     } else {
         Vec::new()
     };
     let mut bonds = Vec::new();
-    if options.draw_bonds {
+    if options.draw_bonds && options.bond_radius > 0.0 {
         for bond in molecule
             .bonds()
             .iter()
@@ -7345,6 +7348,15 @@ fn ring_meshes_snapshot_impl(
     draw_indices: Option<&[usize]>,
     mut ring_color: impl FnMut(usize) -> [f32; 4],
 ) -> RenderSceneSnapshot {
+    if thickness.abs() < 1.0e-4 {
+        return RenderSceneSnapshot {
+            atoms: Vec::new(),
+            bonds: Vec::new(),
+            meshes: Vec::new(),
+            transparency_groups: Vec::new(),
+            bounds: molecule.bounding_box_for(None),
+        };
+    }
     let db = cuemol_molstr::toppar::TopoDB::global();
     let summaries = molecule.residue_summaries();
     let draw = draw_indices.map(|indices| {
@@ -10429,6 +10441,18 @@ return cuemol.makeColor("#0000ff");
             .all(|vertex| (vertex.position.z.abs() - 0.2).abs() < 1.0e-9));
         assert!(m.vertices[0].normal.z.abs() > 0.99);
         assert_eq!(m.vertices[0].color, [0.2, 0.4, 0.6, 1.0]);
+        assert!(ring_meshes_snapshot_with(&mol, 0.0, [1.0; 4], None)
+            .meshes
+            .is_empty());
+        assert!(ring_meshes_snapshot_with(&mol, 0.000_099, [1.0; 4], None)
+            .meshes
+            .is_empty());
+        assert_eq!(
+            ring_meshes_snapshot_with(&mol, 0.000_1, [1.0; 4], None)
+                .meshes
+                .len(),
+            1
+        );
 
         let mut atom_colors = vec![rgb_spec(0.0, 1.0, 0.0); mol.atom_count()];
         atom_colors[0] = rgb_spec(1.0, 0.0, 0.0);
@@ -10852,6 +10876,17 @@ return cuemol.makeColor("#0000ff");
         );
         assert_eq!(bonds_only.atom_count(), 0);
         assert_eq!(bonds_only.bond_count(), 2);
+
+        let hidden = molecule_render_snapshot(
+            &mol,
+            &MoleculeRenderOptions {
+                atom_radius_abs: Some(0.0),
+                bond_radius: 0.0,
+                ..MoleculeRenderOptions::default()
+            },
+        );
+        assert_eq!(hidden.atom_count(), 0);
+        assert_eq!(hidden.bond_count(), 0);
     }
 
     fn ca_atom(res_id: i32, x: f64, y: f64, z: f64) -> Atom {
