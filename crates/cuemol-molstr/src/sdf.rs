@@ -249,7 +249,12 @@ pub fn read_sdf_str_with_options(input: &str, options: &SdfReadOptions) -> Resul
                 let Some(Some(atom2)) = atom_map.get(atom2) else {
                     continue;
                 };
-                mol.add_bond_stereo(*atom1, *atom2, BondOrder::from_sdf(order as i32), stereo);
+                let order = if order >= 4 {
+                    BondOrder::Aromatic
+                } else {
+                    BondOrder::from_sdf(order as i32)
+                };
+                mol.add_bond_stereo(*atom1, *atom2, order, stereo);
                 mol.mark_bond_persistent(*atom1, *atom2);
             }
         }
@@ -496,6 +501,23 @@ $$$$
     }
 
     #[test]
+    fn sdf_reader_maps_extended_bond_types_to_delocalized() {
+        let input = concat!(
+            "ligand\n",
+            "  CueMol\n",
+            "\n",
+            "  2  1  0  0  0  0  0  0  0  0999 V2000\n",
+            "    0.0000    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n",
+            "    1.0000    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n",
+            "  1  2  8  0\n",
+            "M  END\n",
+            "$$$$\n",
+        );
+        let mol = read_sdf_str(input).unwrap();
+        assert_eq!(mol.bonds()[0].order, BondOrder::Aromatic);
+    }
+
+    #[test]
     fn sdf_writer_emits_one_record_per_residue_with_local_indices() {
         let mut mol = MolCoord::new();
         mol.push_atom(test_atom(10, "C1", "C", 1, 0.0, None));
@@ -527,7 +549,7 @@ $$$$
         assert_eq!(roundtrip.bond_count(), 2);
         assert_eq!(roundtrip.atoms()[1].formal_charge, Some(1));
         assert_eq!(roundtrip.atoms()[2].formal_charge, Some(-1));
-        assert_eq!(roundtrip.bonds()[1].order, BondOrder::Other(8));
+        assert_eq!(roundtrip.bonds()[1].order, BondOrder::Aromatic);
         assert!(roundtrip.bonds().iter().all(|bond| bond.persist));
     }
 

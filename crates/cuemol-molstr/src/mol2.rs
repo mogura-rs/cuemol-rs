@@ -336,10 +336,7 @@ fn mol2_bond_order(value: &str) -> BondOrder {
         "2" => BondOrder::Double,
         "3" => BondOrder::Triple,
         "ar" | "am" => BondOrder::Aromatic,
-        other => other
-            .parse::<i32>()
-            .map(BondOrder::Other)
-            .unwrap_or(BondOrder::Other(0)),
+        _ => BondOrder::Single,
     }
 }
 
@@ -384,6 +381,29 @@ USER_CHARGES
                 .unwrap(),
             Some("true")
         );
+    }
+
+    #[test]
+    fn mol2_reader_keeps_unknown_bond_types_single() {
+        let input = "\
+@<TRIPOS>MOLECULE
+ligand
+3 2 1 0 0
+SMALL
+NO_CHARGES
+@<TRIPOS>ATOM
+1 C1 0.0 0.0 0.0 C.3 1 LIG
+2 C2 1.0 0.0 0.0 C.3 1 LIG
+3 C3 2.0 0.0 0.0 C.3 1 LIG
+@<TRIPOS>BOND
+1 1 2 du
+2 2 3 9
+";
+        let molecule = read_mol2_str(input).unwrap();
+        assert!(molecule
+            .bonds()
+            .iter()
+            .all(|bond| bond.order == BondOrder::Single));
     }
 
     #[test]
