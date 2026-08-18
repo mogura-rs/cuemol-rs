@@ -13975,6 +13975,13 @@ impl DesktopAppState {
                             source_uid.get(),
                             self.surface_potential.as_ref(),
                         );
+                        append_molecule_lw_hit_points(
+                            &mut snapshot,
+                            object,
+                            Some(renderer),
+                            &styles,
+                            source_uid.get(),
+                        );
                         cuemol_lwview::RenderLWRendererSnapshot {
                             name: if renderer.name().is_empty() {
                                 format!("({})", renderer.renderer_type())
@@ -13996,6 +14003,13 @@ impl DesktopAppState {
                         &styles,
                         source_uid.get(),
                         self.surface_potential.as_ref(),
+                    );
+                    append_molecule_lw_hit_points(
+                        &mut snapshot,
+                        object,
+                        None,
+                        &styles,
+                        source_uid.get(),
                     );
                     renderers.push(cuemol_lwview::RenderLWRendererSnapshot {
                         name: "(simple)".to_string(),
@@ -14021,6 +14035,7 @@ impl DesktopAppState {
                     for element in object.draw_elements_for(renderer.data_id) {
                         append_lw_draw_element(&mut snapshot, element);
                     }
+                    append_lw_hit_points(&mut snapshot, &object, renderer.data_id, loaded.uid);
                     let xform = renderer.xform.mul_mat(loaded.xform);
                     if xform != Matrix4::IDENTITY {
                         snapshot.apply_xform(&xform);
@@ -47838,22 +47853,7 @@ fn append_lw_object_snapshot(
         for element in object.draw_elements_for(data_id) {
             append_lw_draw_element(&mut snapshot, element);
         }
-        if let Some(hit_set) = object
-            .hit_index_sets()
-            .iter()
-            .find(|set| set.data_id() == data_id)
-        {
-            for &hit_index in hit_set.indices() {
-                let Some(hit) = object.hit_data(hit_index) else {
-                    continue;
-                };
-                snapshot.atoms.push(
-                    cuemol_render::RenderAtom::new(hit.position(), 0.0, None)
-                        .with_picking(Some(loaded.uid.get()), None, false)
-                        .with_hit(hit_index, hit.message()),
-                );
-            }
-        }
+        append_lw_hit_points(&mut snapshot, &object, data_id, loaded.uid);
         if let Some(edge_style) = renderer_edge_style(
             resolved("egtype").as_deref(),
             resolved("eglinew").as_deref(),
@@ -47882,6 +47882,124 @@ fn append_lw_object_snapshot(
         target.meshes.extend(snapshot.meshes);
     }
     Ok(())
+}
+
+fn append_lw_hit_points(
+    target: &mut RenderSceneSnapshot,
+    object: &cuemol_lwview::LWObject,
+    data_id: i32,
+    object_uid: Uid,
+) {
+    let Some(hit_set) = object
+        .hit_index_sets()
+        .iter()
+        .find(|set| set.data_id() == data_id)
+    else {
+        return;
+    };
+    for &hit_index in hit_set.indices() {
+        let Some(hit) = object.hit_data(hit_index) else {
+            continue;
+        };
+        target.atoms.push(
+            cuemol_render::RenderAtom::new(hit.position(), 0.0, None)
+                .with_picking(Some(object_uid.get()), None, false)
+                .with_hit(hit_index, hit.message()),
+        );
+    }
+}
+
+#[cfg(feature = "scripting")]
+fn append_molecule_lw_hit_points(
+    target: &mut RenderSceneSnapshot,
+    object: &MolObject,
+    renderer: Option<&MolRenderer>,
+    styles: &StyleManager,
+    style_scope_id: u64,
+) {
+    let renderer_type = renderer.map(MolRenderer::renderer_type).unwrap_or("simple");
+    let mainchain = matches!(
+        renderer_type,
+        "trace" | "spline" | "tube" | "ribbon" | "cartoon" | "nucl"
+    );
+    if !mainchain
+        && !matches!(
+            renderer_type,
+            "simple" | "ballstick" | "cpk" | "anisou" | "disorder"
+        )
+    {
+        return;
+    }
+
+    let parsed_selector = renderer
+        .and_then(|renderer| renderer.qsc_attr("sel"))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| parse_selector_with_styles(value, styles, style_scope_id).ok());
+    let selector = parsed_selector
+        .as_ref()
+        .or_else(|| renderer.map(MolRenderer::selection));
+    let selected = object
+        .mol()
+        .atoms()
+        .iter()
+        .enumerate()
+        .filter(|(_, atom)| selector.is_none_or(|selector| selector.matches(atom)))
+        .map(|(index, _)| index)
+        .collect::<BTreeSet<_>>();
+    let indices = if mainchain {
+        let custom_pivot = renderer
+            .and_then(|renderer| renderer.resolved_attr("pivotatom", styles, style_scope_id))
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        object
+            .mol()
+            .residue_summaries()
+            .into_iter()
+            .filter(|residue| {
+                residue
+                    .atom_indices
+                    .iter()
+                    .any(|index| selected.contains(index))
+            })
+            .filter_map(|residue| {
+                let find_named = |name: &str| {
+                    residue.atom_indices.iter().copied().find(|&index| {
+                        object.mol().atoms()[index]
+                            .name
+                            .trim()
+                            .eq_ignore_ascii_case(name)
+                    })
+                };
+                if let Some(index) = custom_pivot.as_deref().and_then(&find_named) {
+                    return Some(index);
+                }
+                ["CA", "P", "C1'", "O5'"].into_iter().find_map(find_named)
+            })
+            .collect::<Vec<_>>()
+    } else {
+        selected.into_iter().collect::<Vec<_>>()
+    };
+
+    let object_xform = object.xform_matrix();
+    let renderer_xform = renderer
+        .map(MolRenderer::xform_matrix)
+        .unwrap_or(Matrix4::IDENTITY);
+    let xform = renderer_xform.mul_mat(object_xform);
+    for index in indices {
+        let Some(atom) = object.mol().atoms().get(index) else {
+            continue;
+        };
+        let mut position = atom.position;
+        if xform != Matrix4::IDENTITY {
+            xform.xform3d(&mut position);
+        }
+        target.atoms.push(
+            cuemol_render::RenderAtom::new(position, 0.0, None)
+                .with_picking(Some(object.uid().get()), None, false)
+                .with_hit(i32::try_from(index).unwrap_or(i32::MAX), atom.format_msg()),
+        );
+    }
 }
 
 fn append_lw_draw_element(
@@ -53669,13 +53787,22 @@ end_header
             GuiLoadedPath::Object { scene_uid, .. } => scene_uid,
             _ => panic!("expected molecule load"),
         };
-        let (first_uid, first_name, molecule, first_renderer_count) = {
+        let (
+            first_uid,
+            first_name,
+            molecule,
+            molecule_atom_count,
+            molecule_residue_count,
+            first_renderer_count,
+        ) = {
             let scene = app.scene_manager().scene(source_uid).unwrap();
             let object = &scene.objects()[0];
             (
                 object.uid(),
                 object.name().to_string(),
                 object.mol().clone(),
+                object.mol().atom_count(),
+                object.mol().residue_count(),
                 object
                     .renderers()
                     .iter()
@@ -53695,6 +53822,8 @@ end_header
                 [0.0, 1.0, 0.0],
             ]),
         ));
+        source_lw_data.add_point_hit(5, Vector4::new3(0.25, 0.25, 0.0), "source hit");
+        source_lw_data.set_hit_index_set(7, 0, vec![0]);
         {
             let scene = app.scene_manager_mut().scene_mut(source_uid).unwrap();
             let hidden_uid = scene
@@ -53707,6 +53836,10 @@ end_header
                 .renderer_mut(hidden_uid)
                 .unwrap()
                 .set_visible(false);
+            scene
+                .object_mut(first_uid)
+                .unwrap()
+                .add_renderer("trace", "trace-hits");
             let second_uid = scene.add_molecule("second-hidden", molecule);
             let second = scene.object_mut(second_uid).unwrap();
             second.set_visible(false);
@@ -53794,8 +53927,21 @@ end_header
             .find(|object| object.name == first_name)
             .unwrap();
         let first_data = cuemol_lwview::read_qdf_lwobj_bytes(&first.raw_data).unwrap();
-        assert_eq!(first.renderers.len(), first_renderer_count + 1);
-        assert_eq!(first_data.draw_elements().len(), first_renderer_count + 1);
+        assert_eq!(first.renderers.len(), first_renderer_count + 2);
+        assert_eq!(first_data.draw_elements().len(), first_renderer_count + 2);
+        assert!(first_data.hit_data_len() >= molecule_atom_count);
+        let trace_data_id = first
+            .renderers
+            .iter()
+            .find(|renderer| renderer.name == "trace-hits")
+            .unwrap()
+            .data_id;
+        let trace_hits = first_data
+            .hit_index_sets()
+            .iter()
+            .find(|set| set.data_id() == trace_data_id)
+            .unwrap();
+        assert_eq!(trace_hits.indices().len(), molecule_residue_count);
         assert!(
             !first
                 .renderers
@@ -53834,6 +53980,13 @@ end_header
             .find(|object| object.name == "source-lightweight")
             .unwrap();
         assert_eq!(lightweight.renderers[0].name, "source-lwrend");
+        let lightweight_data = cuemol_lwview::read_qdf_lwobj_bytes(&lightweight.raw_data).unwrap();
+        assert_eq!(lightweight_data.hit_data_len(), 1);
+        assert_eq!(
+            lightweight_data.hit_data(0).unwrap().message(),
+            "source hit"
+        );
+        assert_eq!(lightweight_data.hit_index_sets()[0].indices(), &[0]);
         let density = target
             .loaded_lw_objects()
             .iter()

@@ -24,6 +24,22 @@ pub struct Atom {
 }
 
 impl Atom {
+    pub fn format_msg(&self) -> String {
+        let mut residue_id = self.res_id.to_string();
+        if let Some(ins_code) = self.ins_code {
+            residue_id.push(ins_code);
+        }
+        let mut message = format!(
+            "{} {} {} {}",
+            self.chain_id, self.res_name, residue_id, self.name
+        );
+        if let Some(alt_loc) = self.alt_loc {
+            message.push(':');
+            message.push(alt_loc);
+        }
+        message
+    }
+
     pub fn matches_name_case_insensitive(&self, value: &str) -> bool {
         self.name.trim().eq_ignore_ascii_case(value)
     }
@@ -1679,6 +1695,14 @@ mod tests {
             int_props: BTreeMap::new(),
             real_props: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn atom_format_msg_matches_cuemol_hit_text() {
+        let mut atom = atom(1, "A", 10, "CA", 0.0);
+        atom.ins_code = Some('B');
+        atom.alt_loc = Some('C');
+        assert_eq!(atom.format_msg(), "A ALA 10B CA:C");
     }
 
     #[test]

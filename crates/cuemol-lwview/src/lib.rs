@@ -606,6 +606,7 @@ impl LWViewerManager {
                     data_id,
                     &source_renderer.snapshot,
                 );
+                append_hit_data(scene_object.data_mut(), data_id, &source_renderer.snapshot);
                 let mut mesh_snapshot = source_renderer.snapshot.clone();
                 mesh_snapshot
                     .bonds
@@ -638,6 +639,20 @@ impl LWViewerManager {
 
     pub fn conv_to_lwscene<T: Clone>(&mut self, source: &Scene<T>, target: &mut Scene<LWObject>) {
         self.conv_to_lw_scene(source, target);
+    }
+}
+
+fn append_hit_data(object: &mut LWObject, data_id: i32, snapshot: &RenderSceneSnapshot) {
+    let indices = snapshot
+        .atoms
+        .iter()
+        .filter_map(|atom| {
+            let hit = atom.hit.as_ref()?;
+            Some(object.add_point_hit(hit.index, atom.center, &hit.message))
+        })
+        .collect::<Vec<_>>();
+    if !indices.is_empty() {
+        object.set_hit_index_set(data_id, 0, indices);
     }
 }
 
@@ -950,6 +965,10 @@ mod tests {
         };
         let mut snapshot = RenderSceneSnapshot::empty();
         snapshot.meshes.push(mesh);
+        snapshot.atoms.push(
+            cuemol_render::RenderAtom::new(Vector4::new3(0.5, 0.5, 0.0), 0.0, None)
+                .with_hit(9, "mesh feature"),
+        );
         snapshot.recompute_bounds();
         let mut source = Scene::new(Uid::new(1), "source");
         let object_uid = source.add_object("mesh", snapshot);
@@ -980,6 +999,10 @@ mod tests {
         assert_eq!(vertices.len(), 3);
         assert_eq!(vertices[0].color, [255, 0, 0, 255]);
         assert_eq!(indices, &[0, 1, 2]);
+        assert_eq!(object.data().hit_data_len(), 1);
+        assert_eq!(object.data().hit_data(0).unwrap().message(), "mesh feature");
+        assert_eq!(object.data().hit_index_sets().len(), 1);
+        assert_eq!(object.data().hit_index_sets()[0].indices(), &[0]);
         assert!(read_qdf_lwobj_bytes(&write_qdf_lwobj_bytes(object.data())).is_ok());
     }
 
