@@ -216,6 +216,55 @@ fn render_qsc_preserves_exporter_scene_context() {
 }
 
 #[test]
+fn render_qsc_applies_current_camera_visibility() {
+    let stem = format!("cuemol_render_qsc_camera_visibility_{}", std::process::id());
+    let qsc_path = std::env::temp_dir().join(format!("{stem}.qsc"));
+    let mqo_path = std::env::temp_dir().join(format!("{stem}.mqo"));
+    let qsc = "<scene>\n\
+               <object type=\"MolCoord\" name=\"hidden-object\" src=\"datachunk:00000\" srctype=\"pdb\">\n\
+               <renderer type=\"ballstick\" name=\"hidden-object-renderer\"/>\n\
+               </object>\n\
+               <object type=\"MolCoord\" name=\"partial-object\" src=\"datachunk:00001\" srctype=\"pdb\">\n\
+               <renderer type=\"ballstick\" name=\"shown-renderer\"/>\n\
+               <renderer type=\"ballstick\" name=\"camera-hidden-renderer\"/>\n\
+               </object>\n\
+               <camera name=\"__current\">\n\
+               <visibilities>\n\
+               <object target=\"hidden-object\" value=\"false\"/>\n\
+               <renderer target=\"camera-hidden-renderer\" type=\"ballstick\" client=\"partial-object\" value=\"false\"/>\n\
+               </visibilities>\n\
+               </camera>\n\
+               </scene>\n\
+               ========== End of XML ==========\n\
+               ==========START datachunk:00000==========\n\
+ATOM      1  C1  LIG A   1       0.000   0.000   0.000  1.00 20.00           C\n\
+END\n\
+               ==========END datachunk:00000==========\n\
+               ==========START datachunk:00001==========\n\
+ATOM      1  O1  LIG A   1      10.000   0.000   0.000  1.00 20.00           O\n\
+END\n\
+               ==========END datachunk:00001==========\n";
+    std::fs::write(&qsc_path, qsc).unwrap();
+
+    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+        .args([
+            "render-qsc",
+            qsc_path.to_str().unwrap(),
+            mqo_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("export QSC current-camera visibility to MQO");
+    assert!(status.success());
+    let mqo = std::fs::read_to_string(&mqo_path).unwrap();
+    assert!(mqo.contains("Object \"shown_renderer\""));
+    assert!(!mqo.contains("Object \"hidden_object_renderer\""));
+    assert!(!mqo.contains("Object \"camera_hidden_renderer\""));
+
+    std::fs::remove_file(qsc_path).ok();
+    std::fs::remove_file(mqo_path).ok();
+}
+
+#[test]
 fn render_qsc_exports_saved_surface_renderers() {
     let stem = format!("cuemol_render_qsc_surface_{}", std::process::id());
     let qsc_path = std::env::temp_dir().join(format!("{stem}.qsc"));

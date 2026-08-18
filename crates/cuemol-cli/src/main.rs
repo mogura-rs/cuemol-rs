@@ -925,6 +925,16 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
         .ok_or_else(|| "loaded scene not found".to_string())?;
 
     let styles = scene_style_manager(scene);
+    let saved_camera = scene
+        .camera_by_name("__current")
+        .or_else(|| scene.cameras().first())
+        .cloned();
+    let camera_visibility = saved_camera
+        .as_ref()
+        .into_iter()
+        .flat_map(|camera| camera.visibility_settings())
+        .map(|(uid, visible, is_object)| ((is_object, uid), visible))
+        .collect::<std::collections::BTreeMap<_, _>>();
     let mut combined = RenderMesh::new();
     let mut rendered = RenderSceneSnapshot::empty();
     let (mut total_atoms, mut total_bonds, mut renderer_count) = (0usize, 0usize, 0usize);
@@ -932,7 +942,11 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
     for object in scene.objects() {
         // Object-level visibility gate (C++ `Scene.cpp:635`): a hidden object
         // contributes no geometry, regardless of its renderers' own visibility.
-        if !object.is_visible() {
+        if !camera_visibility
+            .get(&(true, object.uid().get()))
+            .copied()
+            .unwrap_or_else(|| object.is_visible())
+        {
             continue;
         }
         let mut object_rendered = RenderSceneSnapshot::empty();
@@ -959,7 +973,11 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
             renderer_count += 1;
         }
         for renderer in object.renderers() {
-            if !renderer.is_visible() {
+            if !camera_visibility
+                .get(&(false, renderer.uid().get()))
+                .copied()
+                .unwrap_or_else(|| renderer.is_visible())
+            {
                 continue;
             }
             let rtype = renderer.renderer_type();
@@ -1311,7 +1329,9 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
             renderer_count += 1;
         }
         let crystal_base = object_rendered.clone();
-        for snapshot in molecule_crystal_snapshots(object, &crystal_base, &styles) {
+        for snapshot in
+            molecule_crystal_snapshots(object, &crystal_base, &styles, &camera_visibility)
+        {
             total_atoms += snapshot.atom_count();
             total_bonds += snapshot.bond_count();
             merge_mesh(&mut combined, &tessellate_snapshot(&snapshot));
@@ -1695,11 +1715,7 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
     }
 
     rendered.recompute_bounds();
-    let camera = scene
-        .camera_by_name("__current")
-        .or_else(|| scene.cameras().first())
-        .cloned()
-        .unwrap_or_else(|| camera_for_snapshot(&rendered));
+    let camera = saved_camera.unwrap_or_else(|| camera_for_snapshot(&rendered));
     let background = scene
         .scene_attribute("bgcolor")
         .and_then(|value| qsc_color_rgba(value, &styles))
@@ -1895,6 +1911,7 @@ fn molecule_crystal_snapshots(
     object: &cuemol_molstr::MolObject,
     base: &RenderSceneSnapshot,
     styles: &cuemol_qsys::StyleManager,
+    camera_visibility: &std::collections::BTreeMap<(bool, u64), bool>,
 ) -> Vec<RenderSceneSnapshot> {
     let Some(cell) = object.mol().cell_params() else {
         return Vec::new();
@@ -1909,7 +1926,10 @@ fn molecule_crystal_snapshots(
     let symmetry = cuemol_symm::SymmOpManager::new();
     let mut snapshots = Vec::new();
     for renderer in object.renderers().iter().filter(|renderer| {
-        renderer.is_visible()
+        camera_visibility
+            .get(&(false, renderer.uid().get()))
+            .copied()
+            .unwrap_or_else(|| renderer.is_visible())
             && matches!(
                 renderer.renderer_type(),
                 "*symm" | "symm" | "*unitcell" | "unitcell"
