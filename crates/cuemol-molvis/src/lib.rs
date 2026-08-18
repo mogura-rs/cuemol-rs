@@ -5060,7 +5060,13 @@ pub fn molecule_render_snapshot(
             .filter(|bond| drawn(bond.atom1) && drawn(bond.atom2))
         {
             append_valence_bond_geometry(
-                molecule, bond, options, &selected, &mut atoms, &mut bonds,
+                molecule,
+                bond,
+                options,
+                &atom_colors,
+                &selected,
+                &mut atoms,
+                &mut bonds,
             );
         }
     }
@@ -5538,6 +5544,7 @@ fn append_valence_bond_geometry(
     molecule: &MolCoord,
     bond: &Bond,
     options: &MoleculeRenderOptions,
+    atom_colors: &[ColorSpec],
     selected: &std::collections::BTreeSet<usize>,
     atoms: &mut Vec<RenderAtom>,
     bonds: &mut Vec<RenderBond>,
@@ -5550,16 +5557,26 @@ fn append_valence_bond_geometry(
     };
     let pos1 = atom1.position;
     let pos2 = atom2.position;
+    let color1 = atom_colors[bond.atom1].clone();
+    let color2 = atom_colors[bond.atom2].clone();
     let selected_bond = selected.contains(&bond.atom1) || selected.contains(&bond.atom2);
     let add_bond = |bonds: &mut Vec<RenderBond>, from: Vector4, to: Vector4| {
-        bonds.push(
-            RenderBond::new(from, to, options.bond_radius, Some(default_bond_color()))
-                .with_picking(
+        let mut push = |from, to, color| {
+            bonds.push(
+                RenderBond::new(from, to, options.bond_radius, Some(color)).with_picking(
                     options.object_uid,
                     Some((bond.atom1, bond.atom2)),
                     selected_bond,
                 ),
-        );
+            );
+        };
+        if same_resolved_color(&color1, &color2) {
+            push(from, to, color1.clone());
+        } else {
+            let midpoint = (from + to).scale(0.5);
+            push(from, midpoint, color1.clone());
+            push(to, midpoint, color2.clone());
+        }
     };
     let multiple = matches!(bond.order, BondOrder::Double | BondOrder::Triple);
     if !multiple || options.valence_bond_mode == ValenceBondMode::Off {
@@ -5597,9 +5614,12 @@ fn append_valence_bond_geometry(
             let end1 = pos1 + axis.scale(shorten) + side;
             let end2 = pos2 - axis.scale(shorten) + side;
             add_bond(bonds, end1, end2);
-            for (position, atom_index) in [(end1, bond.atom1), (end2, bond.atom2)] {
+            for (position, atom_index, color) in [
+                (end1, bond.atom1, color1.clone()),
+                (end2, bond.atom2, color2.clone()),
+            ] {
                 atoms.push(
-                    RenderAtom::new(position, options.bond_radius, Some(default_bond_color()))
+                    RenderAtom::new(position, options.bond_radius, Some(color))
                         .with_picking(
                             options.object_uid,
                             Some(atom_index),
@@ -5609,18 +5629,6 @@ fn append_valence_bond_geometry(
                 );
             }
         }
-    }
-}
-
-fn default_bond_color() -> ColorSpec {
-    ColorSpec {
-        base: cuemol_gfx::ColorBase::Rgb {
-            r: 0.72,
-            g: 0.72,
-            b: 0.72,
-            a: 1.0,
-        },
-        modifiers: Vec::new(),
     }
 }
 
@@ -7309,11 +7317,23 @@ pub fn ring_meshes_snapshot_with(
                 centroid = centroid + *v;
             }
             centroid = centroid.scale(1.0 / verts.len() as f64);
-            let normal = normalize_or(
-                (verts[1] - verts[0]).cross(verts[2] - verts[0]),
-                Vector4::new3(0.0, 0.0, 1.0),
-            );
-            let offset = normal.scale(thickness.max(0.0));
+            let mut normal = Vector4::new3(0.0, 0.0, 0.0);
+            let mut degenerate = false;
+            for index in 0..verts.len() {
+                let edge = verts[(index + 1) % verts.len()] - verts[index];
+                let local = edge.cross(centroid - verts[index]);
+                let length = local.length3d();
+                if length <= 1.0e-8 {
+                    degenerate = true;
+                    break;
+                }
+                normal = normal + local.scale(1.0 / length);
+            }
+            if degenerate || normal.length3d() <= 1.0e-8 {
+                continue;
+            }
+            normal = normal.scale(1.0 / normal.length3d());
+            let offset = normal.scale(thickness);
             let mut mesh = RenderMesh::new();
             mesh.vertices.push(MeshVertex {
                 position: centroid + offset,
@@ -10336,6 +10356,29 @@ return cuemol.makeColor("#0000ff");
         assert!(m.vertices[0].normal.z.abs() > 0.99);
         assert_eq!(m.vertices[0].color, [0.2, 0.4, 0.6, 1.0]);
 
+        let warped = MolCoord::with_atoms(
+            (0..6)
+                .map(|k| {
+                    let angle = std::f64::consts::TAU * k as f64 / 6.0;
+                    let z = [0.0, 0.2, -0.1, 0.3, -0.2, 0.1][k];
+                    let mut atom = sample_atom(names[k], "C", angle.cos(), angle.sin(), z);
+                    atom.res_name = "PHE".to_string();
+                    atom.res_id = 1;
+                    atom
+                })
+                .collect(),
+        );
+        let warped = ring_meshes_snapshot_with(&warped, -0.25, [1.0; 4], None);
+        let normal = warped.meshes[0].vertices[0].normal;
+        assert!((normal.x - -0.003_300_319_598_345_08).abs() < 1.0e-12);
+        assert!((normal.y - -0.055_035_013_629_625_89).abs() < 1.0e-12);
+        assert!((normal.z - 0.998_478_970_817_781_3).abs() < 1.0e-12);
+        let centroid = Vector4::new3(0.0, 0.0, 0.05);
+        assert!(
+            (warped.meshes[0].vertices[0].position - (centroid + normal.scale(-0.25))).length3d()
+                < 1.0e-12
+        );
+
         assert!(
             ring_meshes_snapshot_with(&mol, 0.2, [1.0; 4], Some(&[0, 1, 2, 3, 4]),)
                 .meshes
@@ -10445,6 +10488,55 @@ return cuemol.makeColor("#0000ff");
         assert!((secondary.to - Vector4::new3(1.4, 0.5, 0.0)).length3d() < 1.0e-6);
         assert_eq!(snapshot.atoms[0].center, secondary.from);
         assert_eq!(snapshot.atoms[1].center, secondary.to);
+    }
+
+    #[test]
+    fn ballstick_bonds_follow_endpoint_atom_colors() {
+        let mut molecule = MolCoord::with_atoms(vec![
+            sample_atom("C1", "C", 0.0, 0.0, 0.0),
+            sample_atom("O1", "O", 2.0, 0.0, 0.0),
+            sample_atom("C2", "C", 0.0, 1.0, 0.0),
+        ]);
+        molecule.add_bond(0, 1, BondOrder::Double);
+        molecule.add_bond(0, 2, BondOrder::Single);
+        let snapshot = molecule_render_snapshot(
+            &molecule,
+            &MoleculeRenderOptions {
+                draw_atoms: false,
+                bond_radius: 0.2,
+                atom_radius_abs: Some(0.3),
+                valence_bond_mode: ValenceBondMode::BallStickType1,
+                ..MoleculeRenderOptions::default()
+            },
+        );
+
+        assert_eq!(snapshot.bonds.len(), 5);
+        let carbon = rgb_spec(0.38, 0.38, 0.38).rgba8();
+        let oxygen = rgb_spec(0.92, 0.12, 0.12).rgba8();
+        assert_eq!(
+            snapshot.bonds[0].color.as_ref().and_then(ColorSpec::rgba8),
+            carbon
+        );
+        assert_eq!(
+            snapshot.bonds[1].color.as_ref().and_then(ColorSpec::rgba8),
+            oxygen
+        );
+        assert_eq!(
+            snapshot.bonds[2].color.as_ref().and_then(ColorSpec::rgba8),
+            carbon
+        );
+        assert_eq!(
+            snapshot.bonds[3].color.as_ref().and_then(ColorSpec::rgba8),
+            oxygen
+        );
+        assert_eq!(
+            snapshot.atoms[0].color.as_ref().and_then(ColorSpec::rgba8),
+            carbon
+        );
+        assert_eq!(
+            snapshot.atoms[1].color.as_ref().and_then(ColorSpec::rgba8),
+            oxygen
+        );
     }
 
     #[test]
@@ -10643,12 +10735,20 @@ return cuemol.makeColor("#0000ff");
         );
 
         assert_eq!(snapshot.atom_count(), 2);
-        assert_eq!(snapshot.bond_count(), 1);
+        assert_eq!(snapshot.bond_count(), 2);
         assert_eq!(snapshot.bounds, mol.bounding_box_for(None));
         assert_eq!(snapshot.atoms[0].object_uid, Some(7));
         assert!(!snapshot.atoms[0].selected);
         assert!(snapshot.atoms[1].selected);
-        assert!(snapshot.bonds[0].selected);
+        assert!(snapshot.bonds.iter().all(|bond| bond.selected));
+        assert_eq!(
+            snapshot.bonds[0].color.as_ref().and_then(ColorSpec::rgba8),
+            rgb_spec(0.38, 0.38, 0.38).rgba8()
+        );
+        assert_eq!(
+            snapshot.bonds[1].color.as_ref().and_then(ColorSpec::rgba8),
+            rgb_spec(0.20, 0.35, 0.95).rgba8()
+        );
 
         let atoms_only = molecule_render_snapshot(
             &mol,
@@ -10668,7 +10768,7 @@ return cuemol.makeColor("#0000ff");
             },
         );
         assert_eq!(bonds_only.atom_count(), 0);
-        assert_eq!(bonds_only.bond_count(), 1);
+        assert_eq!(bonds_only.bond_count(), 2);
     }
 
     fn ca_atom(res_id: i32, x: f64, y: f64, z: f64) -> Atom {
