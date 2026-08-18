@@ -933,6 +933,7 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
         if !object.is_visible() {
             continue;
         }
+        let mut object_rendered = RenderSceneSnapshot::empty();
         for renderer in object.renderers() {
             if !renderer.is_visible() {
                 continue;
@@ -941,6 +942,9 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
             // Skip internal/overlay renderers (e.g. "*selection") which carry no
             // standalone geometry — drawing them would spuriously dump all atoms.
             if rtype.starts_with('*') {
+                continue;
+            }
+            if matches!(rtype, "symm" | "unitcell") {
                 continue;
             }
             let mut options = molecule_render_options_for_renderer(rtype);
@@ -1087,9 +1091,18 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                 None => tessellate_snapshot(&snapshot),
             };
             merge_mesh(&mut combined, &mesh);
-            append_render_snapshot(&mut rendered, snapshot);
+            append_render_snapshot(&mut object_rendered, snapshot);
             renderer_count += 1;
         }
+        let crystal_base = object_rendered.clone();
+        for snapshot in molecule_crystal_snapshots(object, &crystal_base, &styles) {
+            total_atoms += snapshot.atom_count();
+            total_bonds += snapshot.bond_count();
+            merge_mesh(&mut combined, &tessellate_snapshot(&snapshot));
+            append_render_snapshot(&mut object_rendered, snapshot);
+            renderer_count += 1;
+        }
+        append_render_snapshot(&mut rendered, object_rendered);
     }
 
     for snapshot in loaded_surface_snapshots(scene, &styles)? {
@@ -1648,6 +1661,173 @@ fn append_render_snapshot(target: &mut RenderSceneSnapshot, source: RenderSceneS
             group.mesh_range.end += mesh_offset;
             group
         }));
+}
+
+fn molecule_crystal_snapshots(
+    object: &cuemol_molstr::MolObject,
+    base: &RenderSceneSnapshot,
+    styles: &cuemol_qsys::StyleManager,
+) -> Vec<RenderSceneSnapshot> {
+    let Some(cell) = object.mol().cell_params() else {
+        return Vec::new();
+    };
+    let Some(crystal) = cuemol_symm::CrystalInfo::from_cell_params(cell) else {
+        return Vec::new();
+    };
+    if crystal.a() < 0.1 || crystal.b() < 0.1 || crystal.c() < 0.1 {
+        return Vec::new();
+    }
+    let molecule_center = molecule_centroid(object.mol());
+    let symmetry = cuemol_symm::SymmOpManager::new();
+    let mut snapshots = Vec::new();
+    for renderer in object.renderers().iter().filter(|renderer| {
+        renderer.is_visible()
+            && matches!(
+                renderer.renderer_type(),
+                "*symm" | "symm" | "*unitcell" | "unitcell"
+            )
+    }) {
+        let renderer_type = renderer.renderer_type();
+        if matches!(renderer_type, "*unitcell" | "unitcell") {
+            let width = renderer
+                .resolved_attr("width", styles, DEFAULT_STYLE_SCOPE)
+                .and_then(|value| value.trim().parse::<f64>().ok())
+                .unwrap_or(1.0)
+                .max(0.1);
+            let color = renderer
+                .resolved_attr("color", styles, DEFAULT_STYLE_SCOPE)
+                .and_then(|value| qsc_color_rgba(&value, styles))
+                .unwrap_or(cuemol_gfx::Rgba8 {
+                    r: 255,
+                    g: 255,
+                    b: 0,
+                    a: 255,
+                });
+            let mut snapshot = RenderSceneSnapshot::empty();
+            for (from, to) in cuemol_symm::unit_cell_edges(&crystal) {
+                snapshot.bonds.push(cuemol_render::RenderBond {
+                    from,
+                    to,
+                    radius: (0.02 * width) as f32,
+                    color: Some(cuemol_gfx::ColorSpec {
+                        base: cuemol_gfx::ColorBase::Html {
+                            r: color.r,
+                            g: color.g,
+                            b: color.b,
+                            a: color.a,
+                        },
+                        modifiers: Vec::new(),
+                    }),
+                    end_color: None,
+                    object_uid: None,
+                    atom_indices: None,
+                    selected: false,
+                    screen_width: Some(width as f32),
+                    screen_stipple: false,
+                    screen_offset: [0.0, 0.0],
+                    screen_point: false,
+                    edge: None,
+                });
+            }
+            let xform = renderer.xform_matrix().mul_mat(object.xform_matrix());
+            if xform != Matrix4::IDENTITY {
+                snapshot.apply_xform(&xform);
+            }
+            let alpha = renderer
+                .resolved_attr("alpha", styles, DEFAULT_STYLE_SCOPE)
+                .and_then(|value| value.trim().parse::<f64>().ok())
+                .unwrap_or(1.0)
+                .clamp(0.0, 1.0);
+            let material = renderer
+                .resolved_attr("material", styles, DEFAULT_STYLE_SCOPE)
+                .unwrap_or_else(|| "default".to_string());
+            let name = if renderer.name().is_empty() {
+                "unitcell"
+            } else {
+                renderer.name()
+            };
+            apply_snapshot_renderer_properties(&mut snapshot, name, alpha, &material);
+            snapshots.push(snapshot);
+            continue;
+        }
+
+        if base.atoms.is_empty() && base.bonds.is_empty() && base.meshes.is_empty() {
+            continue;
+        }
+        let Some(center) = molecule_center else {
+            continue;
+        };
+        let Some(operators) = symmetry.symmetry_operators(crystal.space_group()) else {
+            continue;
+        };
+        let unitcell = renderer
+            .resolved_attr("unitcell", styles, DEFAULT_STYLE_SCOPE)
+            .as_deref()
+            .map(qsc_bool)
+            .unwrap_or(true);
+        let transforms = if unitcell {
+            cuemol_symm::symm_mates_by_cell(center, &crystal, operators)
+        } else {
+            let view_center = renderer
+                .resolved_attr("center", styles, DEFAULT_STYLE_SCOPE)
+                .as_deref()
+                .and_then(parse_qsc_vector3)
+                .unwrap_or(Vector4::ZERO);
+            let extent = renderer
+                .resolved_attr("extent", styles, DEFAULT_STYLE_SCOPE)
+                .and_then(|value| value.trim().parse::<f64>().ok())
+                .unwrap_or(50.0)
+                .max(0.1);
+            let max_ops = renderer
+                .resolved_attr("maxop", styles, DEFAULT_STYLE_SCOPE)
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(1000);
+            cuemol_symm::symm_mates_by_extent(
+                center,
+                view_center,
+                extent,
+                max_ops,
+                &crystal,
+                operators,
+            )
+        };
+        let mut snapshot = RenderSceneSnapshot::empty();
+        for transform in transforms {
+            if unitcell && transform_leaves_point_fixed(transform.matrix, center) {
+                continue;
+            }
+            let mut mate = base.clone();
+            mate.apply_xform(&renderer.xform_matrix().mul_mat(transform.matrix));
+            append_render_snapshot(&mut snapshot, mate);
+        }
+        if !snapshot.atoms.is_empty() || !snapshot.bonds.is_empty() || !snapshot.meshes.is_empty() {
+            snapshots.push(snapshot);
+        }
+    }
+    snapshots
+}
+
+fn molecule_centroid(molecule: &MolCoord) -> Option<Vector4> {
+    let atoms = molecule.atoms();
+    if atoms.is_empty() {
+        return None;
+    }
+    let (sx, sy, sz) = atoms.iter().fold((0.0, 0.0, 0.0), |sum, atom| {
+        (
+            sum.0 + atom.position.x,
+            sum.1 + atom.position.y,
+            sum.2 + atom.position.z,
+        )
+    });
+    let count = atoms.len() as f64;
+    Some(Vector4::new3(sx / count, sy / count, sz / count))
+}
+
+fn transform_leaves_point_fixed(matrix: Matrix4, point: Vector4) -> bool {
+    let mut moved = point;
+    matrix.xform3d(&mut moved);
+    let delta = moved - point;
+    delta.x * delta.x + delta.y * delta.y + delta.z * delta.z <= 1.0e-6
 }
 
 fn loaded_surface_snapshots(

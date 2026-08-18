@@ -305,3 +305,64 @@ fn render_qsc_exports_saved_lightweight_renderers() {
     std::fs::remove_file(obj_path).ok();
     std::fs::remove_file(mqo_path).ok();
 }
+
+#[test]
+fn render_qsc_exports_molecule_unit_cell_renderer() {
+    let qsc = "<scene>\n\
+               <object type=\"MolCoord\" name=\"crystal\" src=\"datachunk:00000\" srctype=\"pdb\">\n\
+               <renderer type=\"ballstick\" name=\"atoms\"/>\n\
+               <renderer type=\"symm\" name=\"mates\" unitcell=\"true\"/>\n\
+               <renderer type=\"unitcell\" name=\"cell\" width=\"1.5\" color=\"#abcdef\"/>\n\
+               </object>\n\
+               </scene>\n\
+               ========== End of XML ==========\n\
+               ==========START datachunk:00000==========\n\
+               CRYST1   10.000   10.000   10.000  90.00  90.00  90.00 P -1\n\
+               ATOM      1  CA  ALA A   1       1.000   1.000   1.000  1.00  0.00           C\n\
+               END\n\
+               ==========END datachunk:00000==========\n";
+    let stem = format!("cuemol_render_qsc_unitcell_{}", std::process::id());
+    let qsc_path = std::env::temp_dir().join(format!("{stem}.qsc"));
+    let obj_path = std::env::temp_dir().join(format!("{stem}.obj"));
+    let mqo_path = std::env::temp_dir().join(format!("{stem}.mqo"));
+    std::fs::write(&qsc_path, qsc).unwrap();
+
+    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+        .args([
+            "render-qsc",
+            qsc_path.to_str().unwrap(),
+            obj_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("export molecule unit cell to OBJ");
+    assert!(status.success());
+    let obj = std::fs::read_to_string(&obj_path).unwrap();
+    assert!(
+        obj.lines().filter(|line| line.starts_with("v ")).count() > 300,
+        "unit-cell cylinders were not exported"
+    );
+    let max_x = obj
+        .lines()
+        .filter_map(|line| line.strip_prefix("v "))
+        .filter_map(|line| line.split_whitespace().next())
+        .filter_map(|value| value.parse::<f64>().ok())
+        .fold(f64::NEG_INFINITY, f64::max);
+    assert!(max_x > 8.0, "symmetry mate was not exported: {max_x}");
+
+    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+        .args([
+            "render-qsc",
+            qsc_path.to_str().unwrap(),
+            mqo_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("export molecule unit cell to MQO");
+    assert!(status.success());
+    let mqo = std::fs::read_to_string(&mqo_path).unwrap();
+    assert!(mqo.contains("Object \"atoms\""));
+    assert!(mqo.contains("Object \"cell\""));
+
+    std::fs::remove_file(qsc_path).ok();
+    std::fs::remove_file(obj_path).ok();
+    std::fs::remove_file(mqo_path).ok();
+}
