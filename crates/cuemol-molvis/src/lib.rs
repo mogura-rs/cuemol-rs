@@ -3216,6 +3216,10 @@ impl RainbowColoring {
             (self.end_hue - self.start_hue) / total as f64
         };
         let hue = self.start_hue + index as f64 * del_hue;
+        self.color_for_hue(hue)
+    }
+
+    fn color_for_hue(&self, hue: f64) -> [f32; 4] {
         let color =
             SolidColor::create_hsb((hue / 360.0).rem_euclid(1.0), self.sat, self.bri, 1.0).rgba8();
         [
@@ -4930,19 +4934,10 @@ pub fn resolve_atom_colors(molecule: &MolCoord, options: &MoleculeRenderOptions)
         bfac.start_molecule(molecule);
         bfac
     });
-    // Rainbow on atoms needs each atom's residue ordinal (RBC_MOL: across the whole
-    // molecule). Map atom index -> residue ordinal once.
-    let rainbow_atoms = options.rainbow.as_ref().map(|rainbow| {
-        let summaries = molecule.residue_summaries();
-        let total = summaries.len();
-        let mut ordinal = std::collections::HashMap::new();
-        for (ord, summary) in summaries.iter().enumerate() {
-            for &atom_index in &summary.atom_indices {
-                ordinal.insert(atom_index, ord);
-            }
-        }
-        (rainbow.clone(), ordinal, total)
-    });
+    let rainbow_atoms = options
+        .rainbow
+        .as_ref()
+        .map(|rainbow| rainbow_atom_colors(molecule, rainbow));
     let object_carbon_color = |index: usize, atom: &Atom| -> Option<ColorSpec> {
         if !atom.element.eq_ignore_ascii_case("C") {
             return None;
@@ -4959,9 +4954,10 @@ pub fn resolve_atom_colors(molecule: &MolCoord, options: &MoleculeRenderOptions)
             }
         }
         // Object colour scheme precedence (same as the ribbon): Rainbow > Bfac > paint.
-        if let Some((rainbow, ordinal, total)) = &rainbow_atoms {
-            let ord = ordinal.get(&index).copied().unwrap_or(0);
-            return Some(rgba_to_spec(rainbow.color_for_index(ord, *total)));
+        if let Some(colors) = &rainbow_atoms {
+            if let Some(color) = colors.get(index).copied().flatten() {
+                return Some(rgba_to_spec(color));
+            }
         }
         if let Some(bfac) = &bfac_atoms {
             return Some(solid_color_to_spec(&bfac.color_for_atom(atom)));
@@ -5930,29 +5926,157 @@ fn ribbon_paint_colors(
         .collect()
 }
 
-/// Per-spline-sample rainbow colours for a ribbon chain: each sample takes its
-/// segment residue's hue along the molecule-wide gradient (`chain_offset` is this
-/// chain's global residue start, `total_residues` the molecule total).
+#[derive(Debug)]
+struct RainbowResidue {
+    chain: String,
+    res_id: i32,
+    ins_code: Option<char>,
+    atom_indices: Vec<usize>,
+    has_pivot: bool,
+    secondary: Secondary,
+}
+
+/// Build the residue-to-colour map used by C++ `RainbowColoring::start`.
+fn rainbow_atom_colors(molecule: &MolCoord, rainbow: &RainbowColoring) -> Vec<Option<[f32; 4]>> {
+    let mut residues = Vec::new();
+    let mut iter = ResidIterator::all(molecule);
+    iter.first();
+    while iter.has_more() {
+        if let Some(residue) = iter.get() {
+            let key = residue.key();
+            let secondary = residue
+                .atoms()
+                .first()
+                .map_or(Secondary::Coil, |atom| residue_secondary(molecule, atom));
+            residues.push(RainbowResidue {
+                chain: key.chain_id.clone(),
+                res_id: key.res_id,
+                ins_code: key.ins_code,
+                atom_indices: residue.atom_indices().to_vec(),
+                has_pivot: mainchain_pivot_point(molecule, residue, None).is_some(),
+                secondary,
+            });
+        }
+        iter.next();
+    }
+
+    let mut colors = vec![None; molecule.atoms().len()];
+    if rainbow.mode() == RainbowColoring::RBC_CHAIN {
+        let mut start = 0;
+        while start < residues.len() {
+            let chain = &residues[start].chain;
+            let mut end = start + 1;
+            while end < residues.len() && residues[end].chain == *chain {
+                end += 1;
+            }
+            assign_rainbow_scope(&residues[start..end], rainbow, &mut colors);
+            start = end;
+        }
+    } else {
+        assign_rainbow_scope(&residues, rainbow, &mut colors);
+    }
+    colors
+}
+
+fn assign_rainbow_scope(
+    residues: &[RainbowResidue],
+    rainbow: &RainbowColoring,
+    colors: &mut [Option<[f32; 4]>],
+) {
+    let markers = match rainbow.incr_mode() {
+        RainbowColoring::RBC_INCR_CHAIN => residues
+            .windows(2)
+            .enumerate()
+            .filter_map(|(index, pair)| (pair[0].chain != pair[1].chain).then_some(index))
+            .collect::<std::collections::BTreeSet<_>>(),
+        RainbowColoring::RBC_INCR_PROTSS => protss_increment_markers(residues),
+        _ => std::collections::BTreeSet::new(),
+    };
+    let increment_count = match rainbow.incr_mode() {
+        RainbowColoring::RBC_INCR_RESID => {
+            residues.iter().filter(|residue| residue.has_pivot).count()
+        }
+        RainbowColoring::RBC_INCR_CHAIN | RainbowColoring::RBC_INCR_PROTSS => markers.len(),
+        _ => 0,
+    };
+    let delta = if increment_count == 0 {
+        0.0
+    } else {
+        (rainbow.end_hue() - rainbow.start_hue()) / increment_count as f64
+    };
+    let mut color_index = 0;
+    for (index, residue) in residues.iter().enumerate() {
+        let color = rainbow.color_for_hue(rainbow.start_hue() + color_index as f64 * delta);
+        for &atom_index in &residue.atom_indices {
+            if let Some(slot) = colors.get_mut(atom_index) {
+                *slot = Some(color);
+            }
+        }
+        let increment = match rainbow.incr_mode() {
+            RainbowColoring::RBC_INCR_RESID => residue.has_pivot,
+            RainbowColoring::RBC_INCR_CHAIN | RainbowColoring::RBC_INCR_PROTSS => {
+                markers.contains(&index)
+            }
+            _ => false,
+        };
+        if increment {
+            color_index += 1;
+        }
+    }
+}
+
+fn protss_increment_markers(residues: &[RainbowResidue]) -> std::collections::BTreeSet<usize> {
+    let mut markers = std::collections::BTreeSet::new();
+    let mut chain_start = 0;
+    while chain_start < residues.len() {
+        let chain = &residues[chain_start].chain;
+        let mut chain_end = chain_start + 1;
+        while chain_end < residues.len() && residues[chain_end].chain == *chain {
+            chain_end += 1;
+        }
+
+        let mut ranges = Vec::<(usize, usize)>::new();
+        for index in chain_start..chain_end {
+            if residues[index].secondary == Secondary::Coil {
+                continue;
+            }
+            let extends_previous = ranges.last().is_some_and(|(_, end)| {
+                index == *end + 1
+                    && residues[index].res_id == residues[*end].res_id + 1
+                    && residues[index].ins_code == residues[*end].ins_code
+            });
+            if extends_previous {
+                ranges.last_mut().expect("range exists").1 = index;
+            } else {
+                ranges.push((index, index));
+            }
+        }
+        for pair in ranges.windows(2) {
+            let gap_start = pair[0].1 + 1;
+            let gap_end = pair[1].0;
+            markers.insert(gap_start + (gap_end - gap_start).div_ceil(2));
+        }
+        chain_start = chain_end;
+    }
+    markers
+}
+
+/// Per-spline-sample rainbow colours resolved from the molecule-wide map.
 fn ribbon_rainbow_colors(
     sample_count: usize,
-    chain_offset: usize,
-    total_residues: usize,
-    pivot_count: usize,
+    pivots: &[MainchainPoint],
     subdiv: usize,
-    rainbow: &RainbowColoring,
+    atom_colors: &[Option<[f32; 4]>],
 ) -> Vec<Option<[f32; 4]>> {
     let subdiv = subdiv.max(1);
-    // RBC_CHAIN: each chain gets its own full gradient (local index / chain length);
-    // RBC_MOL (default): one gradient across the whole molecule (global index).
-    let (offset, total) = if rainbow.mode() == RainbowColoring::RBC_CHAIN {
-        (0, pivot_count)
-    } else {
-        (chain_offset, total_residues)
-    };
     (0..sample_count)
         .map(|i| {
-            let seg = (i / subdiv).min(pivot_count.saturating_sub(1));
-            Some(rainbow.color_for_index(offset + seg, total))
+            let seg = (i / subdiv).min(pivots.len().saturating_sub(1));
+            pivots
+                .get(seg)
+                .and_then(|pivot| atom_colors.get(pivot.atom_index))
+                .copied()
+                .flatten()
         })
         .collect()
 }
@@ -6495,14 +6619,12 @@ pub fn ribbon_mesh_snapshot(
                 .into_iter()
                 .collect::<std::collections::BTreeSet<_>>()
         });
-    // RainbowColoring (when set) is the object's colour scheme and spans the whole
-    // molecule's residues (RBC_MOL default), so index pivots globally across chains.
-    let total_residues: usize = chains.iter().map(|chain| chain.len()).sum();
-    let mut residue_offset = 0usize;
+    let rainbow_colors = options
+        .rainbow
+        .as_ref()
+        .map(|rainbow| rainbow_atom_colors(molecule, rainbow));
     let mut meshes = Vec::new();
     for pivots in &chains {
-        let chain_offset = residue_offset;
-        residue_offset += pivots.len();
         if pivots.len() < 2 {
             continue;
         }
@@ -6542,14 +6664,12 @@ pub fn ribbon_mesh_snapshot(
                 property,
                 molecule,
             ))
-        } else if let Some(rainbow) = &options.rainbow {
+        } else if let Some(atom_colors) = &rainbow_colors {
             Some(ribbon_rainbow_colors(
                 samples.len(),
-                chain_offset,
-                total_residues,
-                pivots.len(),
+                pivots,
                 subdiv,
-                rainbow,
+                atom_colors,
             ))
         } else if let Some(bfac) = &bfac_coloring {
             Some(ribbon_bfac_colors(
@@ -8859,21 +8979,73 @@ mod tests {
         // RBC_CHAIN restarts at local index 0 -> blue; RBC_MOL continues at global
         // index 5 -> mid-gradient (not blue).
         let is_blue = |c: [f32; 4]| c[2] > 0.8 && c[0] < 0.2;
+        let atoms = (0..10)
+            .map(|index| {
+                let mut atom = ca_atom(index % 5 + 1, index as f64 * 3.8, 0.0, 0.0);
+                atom.serial = index + 1;
+                atom.chain_id = if index < 5 { "A" } else { "B" }.to_string();
+                atom
+            })
+            .collect();
+        let molecule = MolCoord::with_atoms(atoms);
         let mut rb = RainbowColoring::new();
         rb.set_mode(RainbowColoring::RBC_CHAIN);
-        let chain = ribbon_rainbow_colors(5, 5, 10, 5, 1, &rb);
+        let chain = rainbow_atom_colors(&molecule, &rb);
         assert!(
-            is_blue(chain[0].unwrap()),
+            is_blue(chain[5].unwrap()),
             "RBC_CHAIN: 2nd chain restarts blue, got {:?}",
-            chain[0]
+            chain[5]
         );
         rb.set_mode(RainbowColoring::RBC_MOL);
-        let mol = ribbon_rainbow_colors(5, 5, 10, 5, 1, &rb);
+        let mol = rainbow_atom_colors(&molecule, &rb);
         assert!(
-            !is_blue(mol[0].unwrap()),
+            !is_blue(mol[5].unwrap()),
             "RBC_MOL: 2nd chain continues the global gradient (not blue), got {:?}",
-            mol[0]
+            mol[5]
         );
+    }
+
+    #[test]
+    fn rainbow_increment_modes_match_chain_and_protein_ss_markers() {
+        let mut chain_atoms = Vec::new();
+        for chain_index in 0..3 {
+            for res_id in 1..=2 {
+                let mut atom = ca_atom(res_id, (chain_index * 10 + res_id) as f64, 0.0, 0.0);
+                atom.serial = chain_index * 2 + res_id;
+                atom.chain_id = char::from(b'A' + chain_index as u8).to_string();
+                chain_atoms.push(atom);
+            }
+        }
+        let molecule = MolCoord::with_atoms(chain_atoms);
+        let mut rainbow = RainbowColoring::new();
+        rainbow.set_incr_mode(RainbowColoring::RBC_INCR_CHAIN);
+        let colors = rainbow_atom_colors(&molecule, &rainbow);
+        assert!(colors[0].unwrap()[2] > 0.9, "first chain starts blue");
+        assert!(colors[2].unwrap()[1] > 0.9, "middle chain is green");
+        assert!(colors[4].unwrap()[0] > 0.9, "last chain reaches red");
+        assert_eq!(colors[0], colors[1]);
+        assert_eq!(colors[2], colors[3]);
+        assert_eq!(colors[4], colors[5]);
+
+        rainbow.set_mode(RainbowColoring::RBC_CHAIN);
+        let local = rainbow_atom_colors(&molecule, &rainbow);
+        assert!(local.iter().flatten().all(|color| color[2] > 0.9));
+
+        let mut protein = MolCoord::with_atoms(
+            (1..=8)
+                .map(|res_id| ca_atom(res_id, res_id as f64 * 3.8, 0.0, 0.0))
+                .collect(),
+        );
+        for res_id in [1, 2, 7, 8] {
+            protein
+                .set_residue_prop_str("A", &res_id.to_string(), "secondary", "helix")
+                .unwrap();
+        }
+        rainbow.set_mode(RainbowColoring::RBC_MOL);
+        rainbow.set_incr_mode(RainbowColoring::RBC_INCR_PROTSS);
+        let protss = rainbow_atom_colors(&protein, &rainbow);
+        assert!(protss[4].unwrap()[2] > 0.9, "marker residue keeps old hue");
+        assert!(protss[5].unwrap()[0] > 0.9, "hue changes after marker");
     }
 
     fn sample_atom(name: &str, element: &str, x: f64, y: f64, z: f64) -> Atom {
