@@ -13222,6 +13222,24 @@ impl DesktopAppState {
             camera.set_perspective(perspective);
         }
         let mut exporter = PovSceneExporter::new();
+        if let Some(scene) = self.scene_manager().scene(scene_uid) {
+            let styles = scene_style_manager(scene);
+            exporter.set_preamble(styles.get_config("pov", "preamble", scene_uid.get()));
+            let material_names = std::iter::once("default")
+                .chain(
+                    snapshot
+                        .transparency_groups
+                        .iter()
+                        .map(|group| group.material.as_str()),
+                )
+                .collect::<BTreeSet<_>>();
+            for material in material_names {
+                let definition = styles.get_material_string(material, "pov", scene_uid.get());
+                if !definition.is_empty() {
+                    exporter.set_material_definition(material, definition);
+                }
+            }
+        }
         exporter.set_use_clip_z(options.use_clip_z);
         exporter.set_use_post_blend(options.use_post_blend);
         exporter.set_show_edge_lines(options.show_edge_lines);
@@ -26735,12 +26753,34 @@ impl DesktopAppState {
                         ))
                     }
                 }
-                ScriptNativeSceneExporter::Pov(exporter) => exporter
-                    .write_snapshot_file_with_camera_background(
+                ScriptNativeSceneExporter::Pov(exporter) => {
+                    exporter.set_preamble(script_env::with(|env| {
+                        env.styles.get_config("pov", "preamble", scene_uid)
+                    }));
+                    exporter.clear_material_definitions();
+                    let material_names = std::iter::once("default")
+                        .chain(
+                            render_scene
+                                .snapshot
+                                .transparency_groups
+                                .iter()
+                                .map(|group| group.material.as_str()),
+                        )
+                        .collect::<BTreeSet<_>>();
+                    for material in material_names {
+                        let definition = script_env::with(|env| {
+                            env.styles.get_material_string(material, "pov", scene_uid)
+                        });
+                        if !definition.is_empty() {
+                            exporter.set_material_definition(material, definition);
+                        }
+                    }
+                    exporter.write_snapshot_file_with_camera_background(
                         &render_scene.snapshot,
                         &camera,
                         background,
-                    ),
+                    )
+                }
                 ScriptNativeSceneExporter::Mqo(exporter) => exporter
                     .write_snapshot_file_with_camera(&scene_name, &render_scene.snapshot, &camera),
                 ScriptNativeSceneExporter::Wbp(exporter) => exporter
@@ -52879,7 +52919,7 @@ mod tests {
 
     #[cfg(feature = "scripting")]
     #[test]
-    fn script_luxrender_export_uses_scoped_material_definition() {
+    fn script_ray_exports_use_scoped_style_definitions() {
         let dir = std::env::temp_dir().join(format!(
             "cuemol-script-lux-material-{}-{}",
             std::process::id(),
@@ -52890,6 +52930,7 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         let output = dir.join("scene.lxs");
+        let pov_output = dir.join("scene.pov");
         let mut app = DesktopAppState::new();
         let scene_uid = app.ensure_active_scene();
         let molecule = cuemol_molstr::read_pdb_str(
@@ -52924,19 +52965,31 @@ mod tests {
                 "lux",
                 "\"string type\" [\"matte\"]\n\"texture Kd\" [\"@COLOR@\"]\n\"float sigma\" [0.25]",
             ));
+        assert!(app
+            .script_styles
+            .get_style_set_mut(style_set)
+            .unwrap()
+            .put_material_string(
+                "custom-lux",
+                "pov",
+                "texture { finish { ambient 0.77 } pigment { color rgbt @COLOR@ } }",
+            ));
         assert!(
             app.script_styles.load_style_set_from_xml(
                 scene_uid.get(),
                 "lux-preamble-test",
-                "<styles><setting type=\"lux\"><preamble># scoped preamble</preamble><worldpreamble># scoped world preamble</worldpreamble></setting></styles>",
+                "<styles><setting type=\"lux\"><preamble># scoped preamble</preamble><worldpreamble># scoped world preamble</worldpreamble></setting><setting type=\"pov\"><preamble>// scoped pov preamble</preamble></setting></styles>",
                 false,
             ) > 0
         );
 
         app.run_script_js(&format!(
             "var e = cuemol.LuxRendSceneExporter(); e.attach(scene); \
-             e.setPath({:?}); e.write();",
-            output.to_string_lossy()
+             e.setPath({:?}); e.write(); \
+             var p = cuemol.PovSceneExporter(); p.attach(scene); \
+             p.setPath({:?}); p.write();",
+            output.to_string_lossy(),
+            pov_output.to_string_lossy(),
         ))
         .unwrap();
         let scene = fs::read_to_string(&output).unwrap();
@@ -52950,6 +53003,10 @@ mod tests {
             scene.find("# scoped world preamble").unwrap()
                 < scene.find("Texture \"utex\"").unwrap()
         );
+        let pov = fs::read_to_string(&pov_output).unwrap();
+        assert!(pov.contains("// scoped pov preamble"));
+        assert!(pov.contains("finish { ambient 0.77 }"));
+        assert!(pov.contains("pigment { color rgbt <"));
         fs::remove_dir_all(dir).unwrap();
     }
 

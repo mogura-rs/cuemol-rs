@@ -1028,6 +1028,8 @@ pub struct PovSceneExporter {
     use_pix_imgs: bool,
     img_file_names: String,
     pixel_images: Vec<PovPixelImage>,
+    material_definitions: BTreeMap<String, String>,
+    preamble: String,
 }
 
 impl PovSceneExporter {
@@ -1045,6 +1047,8 @@ impl PovSceneExporter {
             use_pix_imgs: false,
             img_file_names: String::new(),
             pixel_images: Vec::new(),
+            material_definitions: BTreeMap::new(),
+            preamble: String::new(),
         }
     }
 
@@ -1150,6 +1154,31 @@ impl PovSceneExporter {
 
     pub fn add_pixel_image(&mut self, image: PovPixelImage) {
         self.pixel_images.push(image);
+    }
+
+    pub fn set_material_definition(
+        &mut self,
+        material: impl Into<String>,
+        definition: impl Into<String>,
+    ) {
+        self.material_definitions
+            .insert(material.into(), definition.into());
+    }
+
+    pub fn clear_material_definitions(&mut self) {
+        self.material_definitions.clear();
+    }
+
+    pub fn set_preamble(&mut self, value: impl Into<String>) {
+        self.preamble = value.into();
+    }
+
+    fn material_definition(&self, material: &str) -> Option<&str> {
+        self.material_definitions
+            .get(material)
+            .or_else(|| self.material_definitions.get("default"))
+            .map(String::as_str)
+            .filter(|definition| !definition.trim().is_empty())
     }
 
     pub fn write(&mut self) {
@@ -1529,10 +1558,15 @@ impl PovSceneExporter {
         let persp = i32::from(perspective);
         let mut out = String::new();
         out.push_str("// CueMol POV-Ray scene\n");
-        out.push_str("#include \"colors.inc\"\n");
-        out.push_str("#include \"metals.inc\"\n");
-        out.push_str("#include \"woods.inc\"\n");
-        out.push_str("#include \"stones.inc\"\n");
+        if self.preamble.trim().is_empty() {
+            out.push_str("#include \"colors.inc\"\n");
+            out.push_str("#include \"metals.inc\"\n");
+            out.push_str("#include \"woods.inc\"\n");
+            out.push_str("#include \"stones.inc\"\n");
+        } else {
+            out.push_str(self.preamble.trim());
+            out.push('\n');
+        }
         writeln!(
             &mut out,
             "#declare _bgcolor = <{:.6},{:.6},{:.6}>;",
@@ -1669,7 +1703,16 @@ impl PovSceneExporter {
         out.push_str("  }\n");
         writeln!(&mut out, "  texture_list {{ {}", mat_keys.len()).unwrap();
         for c in &mat_keys {
-            writeln!(&mut out, "    {},", pov_material_texture(material, *c)).unwrap();
+            writeln!(
+                &mut out,
+                "    {},",
+                pov_material_texture_with_definition(
+                    material,
+                    *c,
+                    self.material_definition(material),
+                )
+            )
+            .unwrap();
         }
         out.push_str("  }\n");
         let tris = mesh.triangles();
@@ -4543,7 +4586,11 @@ fn face_material_table_with_grad_steps(
     (keys, face_materials)
 }
 
-fn pov_material_texture(material: &str, color: [u8; 4]) -> String {
+fn pov_material_texture_with_definition(
+    material: &str,
+    color: [u8; 4],
+    definition: Option<&str>,
+) -> String {
     let rgba = format!(
         "<{:.6}, {:.6}, {:.6}, {:.6}>",
         f32::from(color[0]) / 255.0,
@@ -4551,6 +4598,9 @@ fn pov_material_texture(material: &str, color: [u8; 4]) -> String {
         f32::from(color[2]) / 255.0,
         1.0 - f32::from(color[3]) / 255.0
     );
+    if let Some(definition) = definition {
+        return definition.trim().replace("@COLOR@", &rgba);
+    }
     match material.trim() {
         "spec_metal" => format!(
             "texture {{ finish {{ F_MetalD }} pigment {{ color rgbt {rgba} }} }}"
@@ -6987,7 +7037,7 @@ mod tests {
 
     #[test]
     fn pov_unknown_material_falls_back_to_default_finish() {
-        let texture = pov_material_texture("missing", [128, 64, 32, 255]);
+        let texture = pov_material_texture_with_definition("missing", [128, 64, 32, 255], None);
         assert!(texture.contains("ambient 0.2 diffuse 0.8"));
         assert!(texture.contains("specular 0.4 roughness 0.01"));
         assert!(texture.contains("rgbt <0.501961, 0.250980, 0.125490, 0.000000>"));
