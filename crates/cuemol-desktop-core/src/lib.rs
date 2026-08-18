@@ -26723,9 +26723,9 @@ impl DesktopAppState {
                 ScriptNativeSceneExporter::LuxCore(exporter) => {
                     let width = exporter.base().width();
                     let height = exporter.base().height();
-                    exporter.write_scene_files_with_camera(
+                    exporter.write_snapshot_files_with_camera(
                         &scene_name,
-                        &mesh,
+                        &render_scene.snapshot,
                         &camera,
                         width,
                         height,

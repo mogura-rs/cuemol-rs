@@ -1611,37 +1611,21 @@ fn merge_mesh(dst: &mut RenderMesh, src: &RenderMesh) {
 }
 
 /// LuxCore export — a multi-file scene: `<base>.cfg` (render config) +
-/// `<base>.scn` (scene: camera/lights/material/object) + `<base>.ply`
-/// (geometry), mirroring C++ `LuxCoreDisplayContext`'s split output.
+/// `<base>.scn` (scene: camera/lights/material/object) + renderer-sized PLY
+/// geometry files, mirroring C++ `LuxCoreDisplayContext`'s split output.
 fn export_luxcore(
     name: &str,
     output: &str,
     mesh: &RenderMesh,
     snapshot: &RenderSceneSnapshot,
 ) -> Result<(), String> {
-    let lux = LuxCoreSceneExporter::new();
+    let mut lux = LuxCoreSceneExporter::new();
     let camera = camera_for_snapshot(snapshot);
-    let base = output
-        .strip_suffix(".cfg")
-        .or_else(|| output.strip_suffix(".CFG"))
-        .unwrap_or(output);
-    let out_stem = std::path::Path::new(base)
-        .file_name()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("scene");
-    let ply_path = format!("{base}.ply");
-    let scn_path = format!("{base}.scn");
-    std::fs::write(&ply_path, lux.write_ply_string_with_camera(mesh, &camera))
-        .map_err(|err| err.to_string())?;
-    std::fs::write(
-        &scn_path,
-        lux.write_scn_string_with_camera(name, &format!("{out_stem}.ply"), &camera, 640, 480),
-    )
-    .map_err(|err| err.to_string())?;
-    std::fs::write(output, lux.write_cfg_string(out_stem, 640, 480))
+    lux.handler_mut().set_path(output);
+    lux.write_snapshot_files_with_camera(name, snapshot, &camera, 640, 480)
         .map_err(|err| err.to_string())?;
     eprintln!(
-        "exported {} atoms / {} bonds -> {} vertices / {} triangles to {output} (+ {scn_path} + {ply_path})",
+        "exported {} atoms / {} bonds -> {} vertices / {} triangles to {output} (+ SCN/PLY companions)",
         snapshot.atom_count(),
         snapshot.bond_count(),
         mesh.vertices.len(),

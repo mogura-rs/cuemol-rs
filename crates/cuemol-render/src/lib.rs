@@ -2790,32 +2790,8 @@ impl LuxCoreSceneExporter {
         width: i32,
         height: i32,
     ) -> String {
-        let width = width.max(1);
-        let height = height.max(1);
-        let zoom_y = camera.zoom().max(1.0e-6);
-        let zoom_x = zoom_y * f64::from(width) / f64::from(height);
-        let view_dist = camera.cam_dist().max(1.0e-6);
-        let fov_x = 2.0 * (zoom_x / (2.0 * view_dist)).atan().to_degrees();
-        let fov_y = 2.0 * (zoom_y / (2.0 * view_dist)).atan().to_degrees();
-        let fov = if height < width { fov_y } else { fov_x };
-        let perspective = camera.is_perspective() && fov >= 10.0;
-        let mut out = String::new();
-        out.push_str("scene.camera.up = 0 1 0\n");
-        out.push_str("scene.camera.lookat.target = 0 0 0\n");
-        if perspective {
-            out.push_str("scene.camera.type = \"perspective\"\n");
-            writeln!(&mut out, "scene.camera.lookat.orig = 0 0 {view_dist:.6}").unwrap();
-            writeln!(&mut out, "scene.camera.fieldofview = {fov:.6}").unwrap();
-        } else {
-            out.push_str("scene.camera.type = \"orthographic\"\n");
-            writeln!(
-                &mut out,
-                "scene.camera.lookat.orig = 0 0 {:.6}",
-                camera.slab_depth() / 2.0
-            )
-            .unwrap();
-        }
-        write_luxcore_scene_tail(&mut out, name, ply_filename, 1.0 / (zoom_x / 2.0));
+        let (mut out, scale) = write_luxcore_camera_header(camera, width, height);
+        write_luxcore_scene_tail(&mut out, name, ply_filename, scale);
         out
     }
 
@@ -2985,6 +2961,133 @@ impl LuxCoreSceneExporter {
         self.state.write();
         Ok(())
     }
+
+    /// Write one PLY file per renderer section, matching the reference
+    /// `LuxCoreDisplayContext::endSection` output model.
+    pub fn write_snapshot_files_with_camera(
+        &mut self,
+        fallback_name: &str,
+        snapshot: &RenderSceneSnapshot,
+        camera: &Camera,
+        width: i32,
+        height: i32,
+    ) -> Result<()> {
+        if self.handler().path().is_empty() {
+            return Err(CueMolError::invalid_argument(
+                "LuxCore output path is empty",
+            ));
+        }
+        let cfg_path = std::path::PathBuf::from(self.handler().path());
+        let scn_path = cfg_path.with_extension("scn");
+        let scene_base = cfg_path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("scene");
+        self.rel_output_base = scene_base.to_string();
+        self.abs_output_base = cfg_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(""))
+            .join(scene_base)
+            .to_string_lossy()
+            .into_owned();
+
+        let (mut scn, scale) = write_luxcore_camera_header(camera, width, height);
+        write_luxcore_lights(&mut scn);
+        let mut written_sections = 0usize;
+        let mut name_counts = BTreeMap::<String, usize>::new();
+        for (index, group) in snapshot.transparency_groups.iter().enumerate() {
+            let mesh = tessellate_luxcore_section(snapshot, group);
+            if mesh.triangle_count() == 0 {
+                continue;
+            }
+            let base_name = sanitize_luxcore_identifier(&group.name, index);
+            let count = name_counts.entry(base_name.clone()).or_default();
+            let name = if *count == 0 {
+                base_name
+            } else {
+                format!("{base_name}_{count}")
+            };
+            *count += 1;
+            let ply_path =
+                std::path::PathBuf::from(format!("{}{}.ply", self.abs_output_base, name));
+            std::fs::write(&ply_path, self.write_ply_string_with_camera(&mesh, camera))?;
+            write_luxcore_object(&mut scn, &name, &ply_path.to_string_lossy(), scale);
+            written_sections += 1;
+        }
+        if written_sections == 0 {
+            let mesh = tessellate_snapshot(snapshot);
+            let name = sanitize_luxcore_identifier(fallback_name, 0);
+            let ply_path = cfg_path.with_extension("ply");
+            let ply_filename = ply_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("scene.ply");
+            std::fs::write(&ply_path, self.write_ply_string_with_camera(&mesh, camera))?;
+            write_luxcore_object(&mut scn, &name, ply_filename, scale);
+        }
+        std::fs::write(&scn_path, scn)?;
+        self.handler().write_string(&self.write_cfg_string(
+            &self.rel_output_base,
+            width,
+            height,
+        ))?;
+        self.state.write();
+        Ok(())
+    }
+}
+
+fn tessellate_luxcore_section(
+    snapshot: &RenderSceneSnapshot,
+    group: &RenderTransparencyGroup,
+) -> RenderMesh {
+    let mut subset = RenderSceneSnapshot::empty();
+    let atom_start = group.atom_range.start.min(snapshot.atoms.len());
+    let atom_end = group
+        .atom_range
+        .end
+        .min(snapshot.atoms.len())
+        .max(atom_start);
+    subset
+        .atoms
+        .extend(snapshot.atoms[atom_start..atom_end].iter().cloned());
+    let bond_start = group.bond_range.start.min(snapshot.bonds.len());
+    let bond_end = group
+        .bond_range
+        .end
+        .min(snapshot.bonds.len())
+        .max(bond_start);
+    subset
+        .bonds
+        .extend(snapshot.bonds[bond_start..bond_end].iter().cloned());
+    let mesh_start = group.mesh_range.start.min(snapshot.meshes.len());
+    let mesh_end = group
+        .mesh_range
+        .end
+        .min(snapshot.meshes.len())
+        .max(mesh_start);
+    subset
+        .meshes
+        .extend(snapshot.meshes[mesh_start..mesh_end].iter().cloned());
+    tessellate_snapshot(&subset)
+}
+
+fn sanitize_luxcore_identifier(name: &str, index: usize) -> String {
+    let mut value = name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if value.is_empty() {
+        value = format!("section{index}");
+    } else if value.starts_with(|character: char| character.is_ascii_digit()) {
+        value.insert_str(0, "section_");
+    }
+    value
 }
 
 fn write_luxcore_ply(mesh: &RenderMesh, rotation: Option<Matrix4>, center: Vector4) -> String {
@@ -3045,7 +3148,41 @@ fn write_luxcore_ply(mesh: &RenderMesh, rotation: Option<Matrix4>, center: Vecto
     out
 }
 
+fn write_luxcore_camera_header(camera: &Camera, width: i32, height: i32) -> (String, f64) {
+    let width = width.max(1);
+    let height = height.max(1);
+    let zoom_y = camera.zoom().max(1.0e-6);
+    let zoom_x = zoom_y * f64::from(width) / f64::from(height);
+    let view_dist = camera.cam_dist().max(1.0e-6);
+    let fov_x = 2.0 * (zoom_x / (2.0 * view_dist)).atan().to_degrees();
+    let fov_y = 2.0 * (zoom_y / (2.0 * view_dist)).atan().to_degrees();
+    let fov = if height < width { fov_y } else { fov_x };
+    let perspective = camera.is_perspective() && fov >= 10.0;
+    let mut out = String::new();
+    out.push_str("scene.camera.up = 0 1 0\n");
+    out.push_str("scene.camera.lookat.target = 0 0 0\n");
+    if perspective {
+        out.push_str("scene.camera.type = \"perspective\"\n");
+        writeln!(&mut out, "scene.camera.lookat.orig = 0 0 {view_dist:.6}").unwrap();
+        writeln!(&mut out, "scene.camera.fieldofview = {fov:.6}").unwrap();
+    } else {
+        out.push_str("scene.camera.type = \"orthographic\"\n");
+        writeln!(
+            &mut out,
+            "scene.camera.lookat.orig = 0 0 {:.6}",
+            camera.slab_depth() / 2.0
+        )
+        .unwrap();
+    }
+    (out, 1.0 / (zoom_x / 2.0))
+}
+
 fn write_luxcore_scene_tail(out: &mut String, name: &str, ply_filename: &str, scale: f64) {
+    write_luxcore_lights(out);
+    write_luxcore_object(out, name, ply_filename, scale);
+}
+
+fn write_luxcore_lights(out: &mut String) {
     out.push_str("# Light1\n");
     out.push_str("scene.lights.il.type = constantinfinite\n");
     out.push_str("scene.lights.il.color = 1 1 1\n");
@@ -3056,6 +3193,9 @@ fn write_luxcore_scene_tail(out: &mut String, name: &str, ply_filename: &str, sc
     out.push_str("scene.lights.distl.gain = 20 20 20\n");
     out.push_str("scene.lights.distl.direction = 1 1 -1\n");
     out.push_str("scene.lights.distl.theta = 10\n");
+}
+
+fn write_luxcore_object(out: &mut String, name: &str, ply_filename: &str, scale: f64) {
     writeln!(out, "scene.textures.{name}.type = \"hitpointcolor\"").unwrap();
     writeln!(out, "scene.materials.{name}.type = matte").unwrap();
     writeln!(out, "scene.materials.{name}.kd = {name}").unwrap();
@@ -5515,6 +5655,75 @@ mod tests {
         assert!(narrow.contains("scene.camera.type = \"orthographic\""));
         assert!(narrow.contains("scene.camera.lookat.orig = 0 0 40.000000"));
         assert!(!narrow.contains("scene.camera.fieldofview"));
+    }
+
+    #[test]
+    fn luxcore_snapshot_export_writes_one_ply_per_renderer_section() {
+        let mut snapshot = RenderSceneSnapshot {
+            atoms: vec![
+                RenderAtom::new(Vector4::new3(-2.0, 0.0, 0.0), 0.5, None),
+                RenderAtom::new(Vector4::new3(2.0, 0.0, 0.0), 0.5, None),
+            ],
+            bonds: Vec::new(),
+            meshes: Vec::new(),
+            transparency_groups: Vec::new(),
+            bounds: None,
+        };
+        snapshot.transparency_groups = vec![
+            RenderTransparencyGroup {
+                name: "left renderer".to_string(),
+                alpha: 1.0,
+                material: "default".to_string(),
+                atom_range: 0..1,
+                bond_range: 0..0,
+                mesh_range: 0..0,
+            },
+            RenderTransparencyGroup {
+                name: "right/renderer".to_string(),
+                alpha: 1.0,
+                material: "default".to_string(),
+                atom_range: 1..2,
+                bond_range: 0..0,
+                mesh_range: 0..0,
+            },
+        ];
+        let dir = std::env::temp_dir().join(format!(
+            "cuemol-render-luxcore-sections-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("scene.cfg");
+        let mut exporter = LuxCoreSceneExporter::new();
+        exporter.handler_mut().set_path(cfg_path.to_string_lossy());
+        exporter
+            .write_snapshot_files_with_camera("fallback", &snapshot, &Camera::new(), 640, 480)
+            .unwrap();
+
+        let left_path = dir.join("sceneleft_renderer.ply");
+        let right_path = dir.join("sceneright_renderer.ply");
+        assert!(left_path.is_file());
+        assert!(right_path.is_file());
+        assert!(!dir.join("scene.ply").exists());
+        let left_ply = std::fs::read_to_string(&left_path).unwrap();
+        let section_vertex_count =
+            tessellate_luxcore_section(&snapshot, &snapshot.transparency_groups[0])
+                .vertices
+                .len();
+        assert!(left_ply.contains(&format!("element vertex {section_vertex_count}")));
+        assert!(!left_ply.contains(&format!(
+            "element vertex {}",
+            tessellate_snapshot(&snapshot).vertices.len()
+        )));
+        let scn = std::fs::read_to_string(dir.join("scene.scn")).unwrap();
+        assert!(scn.contains("scene.objects.left_renderer.shape = left_renderer"));
+        assert!(scn.contains("scene.objects.right_renderer.shape = right_renderer"));
+        assert!(scn.contains(&left_path.to_string_lossy().to_string()));
+        assert!(scn.contains(&right_path.to_string_lossy().to_string()));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
