@@ -333,6 +333,7 @@ fn tauri_main_menu_matches_the_reference_inventory() {
     assert!(HTML.contains("<button type=\"button\" data-background=\"white\">White</button>"));
     assert!(HTML.contains("<button type=\"button\" data-background=\"black\">Black</button>"));
     assert!(HTML.contains("<span>Center mark</span>"));
+    assert!(HTML.contains("class=\"checked\" data-projection=\"orthographic\""));
     assert!(HTML.contains("data-center-mark=\"cross\">Cross</button>"));
     assert!(HTML.contains("data-center-mark=\"axis\">Axis</button>"));
     assert!(HTML.contains("data-center-mark=\"none\">None</button>"));
