@@ -856,7 +856,7 @@ fn pixel_luma(pixel: &[u8]) -> f64 {
 
 fn scene_hits(snapshot: &RenderSceneSnapshot, ray: Ray) -> Vec<Hit> {
     let mut hits = Vec::new();
-    for atom in &snapshot.atoms {
+    for atom in snapshot.atoms.iter().filter(|atom| atom.hit.is_none()) {
         let main_hit = ray_sphere(ray, atom.center, f64::from(atom.radius));
         if let Some((distance, normal)) = main_hit {
             hits.push(Hit {

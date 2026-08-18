@@ -1302,6 +1302,7 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                                 selected: false,
                                 detail: Some(1),
                                 edge: None,
+                                hit: None,
                             });
                         }
                         total_atoms += snapshot.atom_count();

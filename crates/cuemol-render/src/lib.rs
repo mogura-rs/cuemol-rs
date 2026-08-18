@@ -25,6 +25,12 @@ pub struct RenderEdgeStyle {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct RenderHitData {
+    pub index: i32,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct RenderAtom {
     pub center: Vector4,
     pub radius: f32,
@@ -38,6 +44,8 @@ pub struct RenderAtom {
     pub detail: Option<u32>,
     /// Optional C++ `egtype`/`eglinew`/`egcolor` sphere outline.
     pub edge: Option<RenderEdgeStyle>,
+    /// Hidden point used only by the GUI hit-test pass.
+    pub hit: Option<RenderHitData>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -339,6 +347,7 @@ impl RenderAtom {
             selected: false,
             detail: None,
             edge: None,
+            hit: None,
         }
     }
 
@@ -362,6 +371,14 @@ impl RenderAtom {
 
     pub fn with_edge(mut self, edge: Option<RenderEdgeStyle>) -> Self {
         self.edge = edge;
+        self
+    }
+
+    pub fn with_hit(mut self, index: i32, message: impl Into<String>) -> Self {
+        self.hit = Some(RenderHitData {
+            index,
+            message: message.into(),
+        });
         self
     }
 }
@@ -435,7 +452,7 @@ impl RenderSceneSnapshot {
     }
 
     pub fn atom_count(&self) -> usize {
-        self.atoms.len()
+        self.atoms.iter().filter(|atom| atom.hit.is_none()).count()
     }
 
     pub fn bond_count(&self) -> usize {
@@ -509,7 +526,7 @@ impl RenderSceneSnapshot {
                 max = Some(p);
             }
         };
-        for atom in &self.atoms {
+        for atom in self.atoms.iter().filter(|atom| atom.hit.is_none()) {
             let r = f64::from(atom.radius + atom.edge.map_or(0.0, |edge| edge.width.max(0.0)));
             include(Vector4::new3(
                 atom.center.x - r,
@@ -2513,6 +2530,9 @@ pub fn pick_atom_by_ray(snapshot: &RenderSceneSnapshot, ray: &Ray) -> Option<usi
     let d = ray.dir;
     let mut best: Option<(f64, usize)> = None;
     for (i, atom) in snapshot.atoms.iter().enumerate() {
+        if atom.hit.is_some() {
+            continue;
+        }
         let ox = ray.origin.x - atom.center.x;
         let oy = ray.origin.y - atom.center.y;
         let oz = ray.origin.z - atom.center.z;
@@ -3126,7 +3146,7 @@ pub fn atom_intr_snapshot_with_options(
 
 pub fn tessellate_snapshot(snapshot: &RenderSceneSnapshot) -> RenderMesh {
     let mut mesh = RenderMesh::new();
-    for atom in &snapshot.atoms {
+    for atom in snapshot.atoms.iter().filter(|atom| atom.hit.is_none()) {
         if let Some(edge) = atom.edge.filter(|edge| edge.width > 0.0) {
             add_sphere_edge(
                 &mut mesh,
@@ -3201,7 +3221,7 @@ pub fn tessellate_snapshot(snapshot: &RenderSceneSnapshot) -> RenderMesh {
 pub fn tessellate_snapshot_with_detail(snapshot: &RenderSceneSnapshot, detail: u32) -> RenderMesh {
     let (rings, segs) = sphere_detail_to_rings_segs(detail);
     let mut mesh = RenderMesh::new();
-    for atom in &snapshot.atoms {
+    for atom in snapshot.atoms.iter().filter(|atom| atom.hit.is_none()) {
         if let Some(edge) = atom.edge.filter(|edge| edge.width > 0.0) {
             add_sphere_edge(
                 &mut mesh,
@@ -3284,6 +3304,7 @@ mod tests {
                 selected: false,
                 detail: None,
                 edge: None,
+                hit: None,
             }],
         );
         backend.end_frame(frame);
@@ -3341,6 +3362,7 @@ mod tests {
                 selected: false,
                 detail: None,
                 edge: None,
+                hit: None,
             }],
             bonds: vec![RenderBond::new(
                 Vector4::new3(1.0, 0.0, 0.0),
@@ -3717,6 +3739,27 @@ mod tests {
             &Ray::new(Vector4::new3(0.0, 0.0, 10.0), Vector4::new3(0.0, 0.0, 1.0)),
         );
         assert_eq!(away, None);
+    }
+
+    #[test]
+    fn hidden_hit_points_do_not_render_or_change_geometry_bounds() {
+        let mut snapshot = RenderSceneSnapshot::empty();
+        snapshot.atoms.push(
+            RenderAtom::new(Vector4::ZERO, 100.0, None)
+                .with_picking(Some(7), None, false)
+                .with_hit(3, "feature"),
+        );
+        snapshot.recompute_bounds();
+        assert_eq!(snapshot.atom_count(), 0);
+        assert_eq!(snapshot.bounds, None);
+        assert_eq!(tessellate_snapshot(&snapshot).triangle_count(), 0);
+        assert_eq!(
+            pick_atom_by_ray(
+                &snapshot,
+                &Ray::new(Vector4::new3(0.0, 0.0, 10.0), Vector4::new3(0.0, 0.0, -1.0),),
+            ),
+            None
+        );
     }
 
     #[test]

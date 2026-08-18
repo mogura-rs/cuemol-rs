@@ -5193,8 +5193,15 @@ impl GuiApplication {
         };
         // Resolve the picked atom up front so the menu closure stays self-borrow-free.
         let atom_info = menu.hit.and_then(|hit| {
-            let object_uid = cuemol_core::Uid::new(hit.object_uid);
-            let atom = self.state.atom_summary(object_uid, hit.atom_index).ok()?;
+            let PickHit::Atom {
+                object_uid,
+                atom_index,
+            } = hit
+            else {
+                return None;
+            };
+            let object_uid = cuemol_core::Uid::new(object_uid);
+            let atom = self.state.atom_summary(object_uid, atom_index).ok()?;
             let object_name = self
                 .state
                 .active_object_summaries()
@@ -5213,14 +5220,34 @@ impl GuiApplication {
                 .atoms
                 .iter()
                 .find(|a| {
-                    a.object_uid == Some(hit.object_uid) && a.atom_index == Some(hit.atom_index)
+                    a.object_uid == Some(object_uid.get()) && a.atom_index == Some(atom_index)
                 })
                 .map(|a| vec3_from_vector(a.center));
             Some((atom, center, object_name, renderer_label))
         });
+        let lightweight_info = menu.hit.and_then(|hit| {
+            let PickHit::Lightweight { snapshot_index } = hit else {
+                return None;
+            };
+            let atom = self.snapshot.atoms.get(snapshot_index)?;
+            let hit = atom.hit.as_ref()?;
+            let object_name = atom
+                .object_uid
+                .map(cuemol_core::Uid::new)
+                .and_then(|uid| self.state.lw_object_summary(uid))
+                .map(|object| object.name)
+                .unwrap_or_default();
+            Some((
+                format!("{object_name}: {}", hit.message),
+                vec3_from_vector(atom.center),
+            ))
+        });
 
         enum Choice {
-            Center(Vec3),
+            Center {
+                point: Vec3,
+                status: &'static str,
+            },
             Select {
                 object_uid: cuemol_core::Uid,
                 expression: String,
@@ -5279,7 +5306,10 @@ impl GuiApplication {
                         };
                         if let Some(center) = center {
                             if ui.button("Center at this atom").clicked() {
-                                chosen = Some(Choice::Center(*center));
+                                chosen = Some(Choice::Center {
+                                    point: *center,
+                                    status: "Centered at atom",
+                                });
                                 close = true;
                             }
                         }
@@ -5384,6 +5414,17 @@ impl GuiApplication {
                             });
                         }
                         ui.separator();
+                    } else if let Some((label, center)) = &lightweight_info {
+                        ui.label(egui::RichText::new(label).strong());
+                        ui.separator();
+                        if ui.button("Center at this point").clicked() {
+                            chosen = Some(Choice::Center {
+                                point: *center,
+                                status: "Centered at lightweight hit",
+                            });
+                            close = true;
+                        }
+                        ui.separator();
                     } else {
                         ui.label("(no atom under cursor)");
                         ui.separator();
@@ -5393,9 +5434,9 @@ impl GuiApplication {
 
         if let Some(choice) = chosen {
             match choice {
-                Choice::Center(center) => {
-                    camera.target = center;
-                    self.set_status("Centered at atom");
+                Choice::Center { point, status } => {
+                    camera.target = point;
+                    self.set_status(status);
                 }
                 Choice::Select {
                     object_uid,
@@ -31074,39 +31115,62 @@ impl GuiApplication {
         let Some(hit) = hit else {
             return false;
         };
-        let object_uid = cuemol_core::Uid::new(hit.object_uid);
-        match self.state.atom_summary(object_uid, hit.atom_index) {
-            Ok(atom) => {
-                if let Some(target) = picker_target {
-                    if Some(atom.object_uid) != self.bond_target_object_uid() {
-                        return false;
+        match hit {
+            PickHit::Atom {
+                object_uid,
+                atom_index,
+            } => {
+                let object_uid = cuemol_core::Uid::new(object_uid);
+                match self.state.atom_summary(object_uid, atom_index) {
+                    Ok(atom) => {
+                        if let Some(target) = picker_target {
+                            if Some(atom.object_uid) != self.bond_target_object_uid() {
+                                return false;
+                            }
+                            if target == 0 {
+                                self.bond_aid1 = atom.serial.to_string();
+                            } else {
+                                self.bond_aid2 = atom.serial.to_string();
+                            }
+                            self.set_status(format!("Picked atom {} for bond editor", atom.serial));
+                            return true;
+                        }
+                        let status = format!(
+                            "Selected atom {} {}{}:{}",
+                            atom.serial, atom.residue_name, atom.residue_id, atom.name
+                        );
+                        if self.apply_molecule_selection(
+                            atom.object_uid,
+                            atom.selection_text,
+                            "Selected atom",
+                        ) {
+                            self.set_status(status);
+                            true
+                        } else {
+                            false
+                        }
                     }
-                    if target == 0 {
-                        self.bond_aid1 = atom.serial.to_string();
-                    } else {
-                        self.bond_aid2 = atom.serial.to_string();
+                    Err(error) => {
+                        self.set_error(error);
+                        false
                     }
-                    self.set_status(format!("Picked atom {} for bond editor", atom.serial));
-                    return true;
-                }
-                let status = format!(
-                    "Selected atom {} {}{}:{}",
-                    atom.serial, atom.residue_name, atom.residue_id, atom.name
-                );
-                if self.apply_molecule_selection(
-                    atom.object_uid,
-                    atom.selection_text,
-                    "Selected atom",
-                ) {
-                    self.set_status(status);
-                    true
-                } else {
-                    false
                 }
             }
-            Err(error) => {
-                self.set_error(error);
-                false
+            PickHit::Lightweight { snapshot_index } => {
+                let Some(atom) = self.snapshot.atoms.get(snapshot_index) else {
+                    return false;
+                };
+                let Some(hit) = atom.hit.as_ref() else {
+                    return false;
+                };
+                let name = atom
+                    .object_uid
+                    .map(cuemol_core::Uid::new)
+                    .and_then(|uid| self.state.lw_object_summary(uid))
+                    .map(|object| object.name)
+                    .unwrap_or_default();
+                self.set_status(format!("LWObject [{name}], {}", hit.message));
+                true
             }
         }
     }
@@ -31135,13 +31199,16 @@ impl GuiApplication {
             .filter(|atoms| !atoms.is_empty())
             .unwrap_or_else(|| self.snapshot.atoms.clone());
         for atom in &atoms {
-            let object_uid = atom.object_uid?;
+            let (Some(object_uid), Some(atom_index)) = (atom.object_uid, atom.atom_index) else {
+                continue;
+            };
             if object_filter.is_some_and(|filter| filter.get() != object_uid) {
                 continue;
             }
-            let atom_index = atom.atom_index?;
             let center = vec3_from_vector(atom.center);
-            let (screen, depth) = camera.project_to_viewport(center, viewport)?;
+            let Some((screen, depth)) = camera.project_to_viewport(center, viewport) else {
+                continue;
+            };
             let radius = camera
                 .projected_radius(atom.radius, depth, viewport)
                 .max(self.state.view_input_config().hitprec() as f32);
@@ -31156,11 +31223,33 @@ impl GuiApplication {
             {
                 best = Some((
                     score,
-                    PickHit {
+                    PickHit::Atom {
                         object_uid,
                         atom_index,
                     },
                 ));
+            }
+        }
+        if object_filter.is_none() {
+            for (snapshot_index, atom) in self.snapshot.atoms.iter().enumerate() {
+                if atom.hit.is_none() || atom.object_uid.is_none() {
+                    continue;
+                }
+                let center = vec3_from_vector(atom.center);
+                let Some((screen, depth)) = camera.project_to_viewport(center, viewport) else {
+                    continue;
+                };
+                let distance = screen.distance(position);
+                if distance > self.state.view_input_config().hitprec() as f32 {
+                    continue;
+                }
+                let score = distance + depth * 0.001;
+                if best
+                    .as_ref()
+                    .is_none_or(|(best_score, _)| score < *best_score)
+                {
+                    best = Some((score, PickHit::Lightweight { snapshot_index }));
+                }
             }
         }
         best.map(|(_, hit)| hit)
@@ -31208,9 +31297,9 @@ struct CameraController {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PickHit {
-    object_uid: u64,
-    atom_index: usize,
+enum PickHit {
+    Atom { object_uid: u64, atom_index: usize },
+    Lightweight { snapshot_index: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34066,7 +34155,12 @@ impl GpuState {
     }
 
     fn prepare_snapshot(&mut self, snapshot: &RenderSceneSnapshot) {
-        let atoms = snapshot.atoms.iter().map(atom_instance).collect::<Vec<_>>();
+        let atoms = snapshot
+            .atoms
+            .iter()
+            .filter(|atom| atom.hit.is_none())
+            .map(atom_instance)
+            .collect::<Vec<_>>();
         self.atom_instance_count = atoms.len() as u32;
         self.atom_instance_buffer
             .upload(&self.device, &self.queue, &atoms);
@@ -39876,14 +39970,32 @@ mod tests {
             selected: false,
             detail: None,
             edge: None,
+            hit: None,
         });
         assert_eq!(
             app.pick_hit(&camera, egui::pos2(400.0, 300.0)),
-            Some(PickHit {
+            Some(PickHit::Atom {
                 object_uid: 7,
                 atom_index: 3,
             })
         );
+
+        let hit_position = Vector4::new3(3.0, 0.0, 0.0);
+        let (hit_screen, _) = camera
+            .project_to_viewport(vec3_from_vector(hit_position), viewport)
+            .expect("lightweight hit should project");
+        app.snapshot.atoms.push(
+            RenderAtom::new(hit_position, 0.0, None)
+                .with_picking(Some(9), None, false)
+                .with_hit(4, "lightweight feature"),
+        );
+        assert_eq!(app.snapshot.atom_count(), 1);
+        assert_eq!(
+            app.pick_hit(&camera, hit_screen),
+            Some(PickHit::Lightweight { snapshot_index: 1 })
+        );
+        assert!(app.pick_atom_at(&camera, hit_screen));
+        assert_eq!(app.status, "LWObject [], lightweight feature");
     }
 
     fn reference_pdb_path() -> Option<std::path::PathBuf> {
@@ -40202,7 +40314,7 @@ mod tests {
                 .expect("loaded molecule has a pickable atom");
             app.viewport_menu = Some(ViewportMenu {
                 pos: egui::pos2(100.0, 100.0),
-                hit: Some(PickHit {
+                hit: Some(PickHit::Atom {
                     object_uid: first.0,
                     atom_index: first.1,
                 }),
@@ -40578,6 +40690,7 @@ mod tests {
             selected: true,
             detail: None,
             edge: None,
+            hit: None,
         };
         // 3-4-5 right triangle legs → distance 5.
         app.snapshot.atoms = vec![atom(0.0, 0.0, 0.0), atom(3.0, 4.0, 0.0)];
@@ -42100,7 +42213,7 @@ mod tests {
                 atoms.into_iter().find_map(|atom| {
                     Some(ViewportMenu {
                         pos: egui::pos2(760.0, 180.0),
-                        hit: Some(PickHit {
+                        hit: Some(PickHit::Atom {
                             object_uid: atom.object_uid?,
                             atom_index: atom.atom_index?,
                         }),

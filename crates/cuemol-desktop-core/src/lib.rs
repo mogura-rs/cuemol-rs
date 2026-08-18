@@ -47838,6 +47838,22 @@ fn append_lw_object_snapshot(
         for element in object.draw_elements_for(data_id) {
             append_lw_draw_element(&mut snapshot, element);
         }
+        if let Some(hit_set) = object
+            .hit_index_sets()
+            .iter()
+            .find(|set| set.data_id() == data_id)
+        {
+            for &hit_index in hit_set.indices() {
+                let Some(hit) = object.hit_data(hit_index) else {
+                    continue;
+                };
+                snapshot.atoms.push(
+                    cuemol_render::RenderAtom::new(hit.position(), 0.0, None)
+                        .with_picking(Some(loaded.uid.get()), None, false)
+                        .with_hit(hit_index, hit.message()),
+                );
+            }
+        }
         if let Some(edge_style) = renderer_edge_style(
             resolved("egtype").as_deref(),
             resolved("eglinew").as_deref(),
@@ -57882,6 +57898,7 @@ end_header
             selected: false,
             detail: None,
             edge: None,
+            hit: None,
         }
     }
 
@@ -58511,6 +58528,7 @@ end_header
             selected: false,
             detail: None,
             edge: None,
+            hit: None,
         });
         snapshot.meshes.push(cuemol_render::RenderMesh {
             vertices: vec![cuemol_render::MeshVertex {
@@ -60020,6 +60038,12 @@ end_header
                 pixels,
             )),
         ));
+        object.add_point_hit(
+            42,
+            cuemol_core::Vector4::new3(0.75, 0.25, 0.0),
+            "lightweight feature",
+        );
+        object.set_hit_index_set(7, 0, vec![0]);
         let qdf0 = cuemol_lwview::write_qdf_lwobj_bytes(&object);
         let encoded = cuemol_qsys::encode_qdf0_bytes(&qdf0, 1, "13").unwrap();
         let encoded = String::from_utf8(encoded).unwrap();
@@ -60048,6 +60072,20 @@ end_header
             [32.0 / 255.0, 64.0 / 255.0, 128.0 / 255.0, 1.0]
         );
         assert_eq!(snapshot.atom_count(), 0);
+        assert_eq!(snapshot.atoms.len(), 1);
+        assert_eq!(
+            snapshot.atoms[0].center,
+            cuemol_core::Vector4::new3(0.75, 0.25, 0.0)
+        );
+        assert_eq!(
+            snapshot.atoms[0].object_uid,
+            Some(app.active_lw_object_summaries()[0].uid.get())
+        );
+        assert_eq!(snapshot.atoms[0].hit.as_ref().unwrap().index, 0);
+        assert_eq!(
+            snapshot.atoms[0].hit.as_ref().unwrap().message,
+            "lightweight feature"
+        );
         assert_eq!(snapshot.bond_count(), 4);
         let line = snapshot
             .bonds

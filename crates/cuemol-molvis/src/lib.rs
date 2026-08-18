@@ -3371,6 +3371,7 @@ pub fn simple_atom_primitives(
             selected: false,
             detail: None,
             edge: None,
+            hit: None,
         })
         .collect()
 }
