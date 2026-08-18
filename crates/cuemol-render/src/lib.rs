@@ -1139,7 +1139,17 @@ impl PovSceneExporter {
         snapshot: &RenderSceneSnapshot,
         camera: &Camera,
     ) -> Result<()> {
-        let output = self.write_snapshot_string_with_camera(snapshot, camera)?;
+        self.write_snapshot_file_with_camera_background(snapshot, camera, [0.0; 3])
+    }
+
+    pub fn write_snapshot_file_with_camera_background(
+        &mut self,
+        snapshot: &RenderSceneSnapshot,
+        camera: &Camera,
+        background: [f32; 3],
+    ) -> Result<()> {
+        let output =
+            self.write_snapshot_string_with_camera_background(snapshot, camera, background)?;
         self.handler().write_string(&output)?;
         self.state.write();
         Ok(())
@@ -1153,18 +1163,28 @@ impl PovSceneExporter {
         snapshot: &RenderSceneSnapshot,
         camera: &Camera,
     ) -> Result<String> {
+        self.write_snapshot_string_with_camera_background(snapshot, camera, [0.0; 3])
+    }
+
+    pub fn write_snapshot_string_with_camera_background(
+        &mut self,
+        snapshot: &RenderSceneSnapshot,
+        camera: &Camera,
+        background: [f32; 3],
+    ) -> Result<String> {
         if !self.use_post_blend {
             self.blend_table.clear();
             let sections = pov_snapshot_sections(snapshot, false)
                 .into_iter()
                 .filter_map(|section| section.mesh_section())
                 .collect::<Vec<_>>();
-            return self.write_pov_section_scene(&sections, camera);
+            return self.write_pov_section_scene_with_background(&sections, camera, background);
         }
 
         let plan = pov_post_blend_plan(snapshot);
         self.blend_table = plan.blend_table_json();
-        let mut output = self.write_pov_section_scene(&plan.background, camera)?;
+        let mut output =
+            self.write_pov_section_scene_with_background(&plan.background, camera, background)?;
         if plan.layers.is_empty() {
             return Ok(output);
         }
@@ -1192,17 +1212,27 @@ impl PovSceneExporter {
         Ok(output)
     }
 
-    fn write_pov_section_scene(
+    fn write_pov_section_scene_with_background(
         &self,
         sections: &[PovMaterialSection],
         camera: &Camera,
+        background: [f32; 3],
     ) -> Result<String> {
         let mut sections = sections.iter();
         let Some(first) = sections.next() else {
-            return self.write_scene_string_with_camera(&RenderMesh::new(), camera);
+            return self.write_scene_string_with_camera_material_background(
+                &RenderMesh::new(),
+                camera,
+                "default",
+                background,
+            );
         };
-        let mut output =
-            self.write_scene_string_with_camera_material(&first.mesh, camera, &first.material)?;
+        let mut output = self.write_scene_string_with_camera_material_background(
+            &first.mesh,
+            camera,
+            &first.material,
+            background,
+        )?;
         for section in sections {
             self.append_pov_section_geometry(&mut output, section, camera)?;
         }
@@ -1302,6 +1332,7 @@ impl PovSceneExporter {
             Vector4::new3(0.0, 1.0, 0.0),
             Vector4::new3(0.0, 0.0, -1.0),
             self.use_clip_z.then_some(size * 2.0),
+            [0.0; 3],
             "default",
         )
     }
@@ -1322,6 +1353,16 @@ impl PovSceneExporter {
         camera: &Camera,
         material: &str,
     ) -> Result<String> {
+        self.write_scene_string_with_camera_material_background(mesh, camera, material, [0.0; 3])
+    }
+
+    fn write_scene_string_with_camera_material_background(
+        &self,
+        mesh: &RenderMesh,
+        camera: &Camera,
+        material: &str,
+        background: [f32; 3],
+    ) -> Result<String> {
         let inverse_rotation = camera.rotation().inv()?.to_matrix();
         let right = inverse_rotation.mul_vec(Vector4::new4(1.0, 0.0, 0.0, 0.0));
         let up = inverse_rotation.mul_vec(Vector4::new4(0.0, 1.0, 0.0, 0.0));
@@ -1331,11 +1372,12 @@ impl PovSceneExporter {
             camera.center(),
             camera.cam_dist(),
             camera.zoom(),
-            camera.is_perspective(),
+            self.perspective,
             right,
             up,
             forward,
             self.use_clip_z.then_some(camera.slab_depth()),
+            background,
             material,
         ))
     }
@@ -1352,6 +1394,7 @@ impl PovSceneExporter {
         up: Vector4,
         forward: Vector4,
         slab_depth: Option<f64>,
+        background: [f32; 3],
         material: &str,
     ) -> String {
         let location = Vector4::new3(
@@ -1374,9 +1417,19 @@ impl PovSceneExporter {
         out.push_str("#include \"metals.inc\"\n");
         out.push_str("#include \"woods.inc\"\n");
         out.push_str("#include \"stones.inc\"\n");
-        out.push_str("#declare _bgcolor = <1,1,1>;\n");
+        writeln!(
+            &mut out,
+            "#declare _bgcolor = <{:.6},{:.6},{:.6}>;",
+            background[0], background[1], background[2]
+        )
+        .unwrap();
         out.push_str("#ifndef (_transpbg)\nbackground {color rgb _bgcolor}\n");
-        out.push_str("#else\nbackground {color rgbt <1,1,1,0.999>}\n#end\n");
+        writeln!(
+            &mut out,
+            "#else\nbackground {{color rgbt <{:.6},{:.6},{:.6},0.999>}}\n#end",
+            background[0], background[1], background[2]
+        )
+        .unwrap();
         writeln!(
             &mut out,
             "#declare _center = <{:.6},{:.6},{:.6}>;",
@@ -6036,8 +6089,11 @@ mod tests {
         let mut exporter = PovSceneExporter::new();
         exporter.set_use_post_blend(true);
         exporter.set_show_edge_lines(false);
+        exporter.set_perspective(false);
+        let mut camera = Camera::new();
+        camera.set_perspective(true);
         let source = exporter
-            .write_snapshot_string_with_camera(&snapshot, &Camera::new())
+            .write_snapshot_string_with_camera_background(&snapshot, &camera, [0.1, 0.2, 0.3])
             .unwrap();
 
         assert_eq!(
@@ -6050,6 +6106,9 @@ mod tests {
         assert!(source.contains("finish { ambient 0.3 }"));
         assert!(source.contains("texture { T_Chrome_4D }"));
         assert!(source.contains("phong 10000 phong_size 50"));
+        assert!(source.contains("#declare _perspective = 0;"));
+        assert!(source.contains("#declare _bgcolor = <0.100000,0.200000,0.300000>;"));
+        assert!(source.contains("rgbt <0.100000,0.200000,0.300000,0.999>"));
         assert!(!source.contains("0.498039"));
         assert!(!source.contains("0.050980"));
     }

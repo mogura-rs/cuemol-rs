@@ -848,9 +848,12 @@ fn export_scene(input: &str, output: &str) -> Result<(), String> {
     } else if lower.ends_with(".obj") {
         mesh.to_obj_string(name).into_bytes()
     } else if lower.ends_with(".pov") {
-        let (center, size) = scene_center_size(&snapshot);
-        PovSceneExporter::new()
-            .write_scene_string(&mesh, center, size, false)
+        let camera = camera_for_snapshot(&snapshot);
+        let mut exporter = PovSceneExporter::new();
+        exporter.set_perspective(false);
+        exporter
+            .write_snapshot_string_with_camera_background(&snapshot, &camera, [0.0; 3])
+            .map_err(|error| error.to_string())?
             .into_bytes()
     } else if lower.ends_with(".mqo") {
         let camera = camera_for_snapshot(&snapshot);

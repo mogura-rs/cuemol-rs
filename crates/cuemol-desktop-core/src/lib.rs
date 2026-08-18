@@ -26699,12 +26699,12 @@ impl DesktopAppState {
                         ))
                     }
                 }
-                ScriptNativeSceneExporter::Pov(exporter) => exporter.write_scene_file(
-                    &mesh,
-                    camera.center(),
-                    (camera.zoom() / 1.2).max(1.0),
-                    exporter.perspective(),
-                ),
+                ScriptNativeSceneExporter::Pov(exporter) => exporter
+                    .write_snapshot_file_with_camera_background(
+                        &render_scene.snapshot,
+                        &camera,
+                        background,
+                    ),
                 ScriptNativeSceneExporter::Mqo(exporter) => exporter
                     .write_snapshot_file_with_camera(&scene_name, &render_scene.snapshot, &camera),
                 ScriptNativeSceneExporter::Wbp(exporter) => exporter
@@ -52731,6 +52731,9 @@ mod tests {
             assert!(path.is_file(), "missing {}", path.display());
             assert!(fs::metadata(path).unwrap().len() > 0);
         }
+        let pov_scene = fs::read_to_string(dir.join("scene.pov")).unwrap();
+        assert!(pov_scene.contains("#declare _perspective = 1;"));
+        assert!(pov_scene.contains("#declare _bgcolor = <0.070588,0.203922,0.337255>;"));
         let lux_scene = fs::read_to_string(dir.join("scene.lxs")).unwrap();
         assert!(lux_scene.contains("\"string filename\" [\"scene\"]"));
         assert!(lux_scene.contains("\"color Kd\" [0.0706 0.2039 0.3373]"));
