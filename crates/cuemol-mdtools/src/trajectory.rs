@@ -187,7 +187,7 @@ impl Trajectory {
         self.blocks.push(block);
         self.recompute_block_layout();
         if self.blocks.len() == 1 && self.total_frames > 0 {
-            self.set_frame(0)?;
+            self.prime_initial_frame()?;
         }
         Ok(())
     }
@@ -199,9 +199,14 @@ impl Trajectory {
             ));
         }
         self.validate_block(&block)?;
+        let was_empty = self.blocks.is_empty();
         self.blocks.insert(index, block);
         self.recompute_block_layout();
-        self.refresh_current_frame()
+        if was_empty && self.total_frames > 0 {
+            self.prime_initial_frame()
+        } else {
+            self.refresh_current_frame()
+        }
     }
 
     pub fn remove_block(&mut self, index: usize) -> Result<TrajBlock> {
@@ -376,6 +381,13 @@ impl Trajectory {
             return Ok(());
         }
         self.set_frame(self.current_frame.min(self.total_frames - 1))
+    }
+
+    fn prime_initial_frame(&mut self) -> Result<()> {
+        self.set_frame(0)?;
+        self.molecule.apply_topology();
+        self.molecule.calc_prot_2ndry(-500.0, false);
+        Ok(())
     }
 
     fn frame_slice(&self, index: usize) -> Result<&[f32]> {
@@ -953,5 +965,56 @@ mod tests {
         let removed = trajectory.remove_block(0).unwrap();
         assert_eq!(removed.frame_count(), 1);
         assert_eq!(trajectory.frame_count(), 2);
+    }
+
+    #[test]
+    fn first_trajectory_block_primes_topology_and_secondary_structure() {
+        let mut molecule = MolCoord::new();
+        for (serial, name, element) in [(1, "N", "N"), (2, "CA", "C"), (3, "C", "C"), (4, "O", "O")]
+        {
+            let mut value = atom(serial);
+            value.name = name.to_string();
+            value.element = element.to_string();
+            value.res_name = "ALA".to_string();
+            molecule.push_atom(value);
+        }
+        let mut block = TrajBlock::new(4);
+        block
+            .append_frame(
+                vec![
+                    0.0, 0.0, 0.0, 1.45, 0.0, 0.0, 2.45, 0.0, 0.0, 3.45, 0.0, 0.0,
+                ],
+                None,
+            )
+            .unwrap();
+
+        let mut trajectory = Trajectory::new(molecule);
+        trajectory.append(block).unwrap();
+
+        assert!((trajectory.atoms()[1].position.x - 1.45).abs() < 1.0e-6);
+        assert_eq!(trajectory.bond_count(), 3);
+        assert_eq!(
+            trajectory
+                .get_residue_prop_str("A", "1", "secondary2")
+                .unwrap(),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn inserting_into_an_empty_trajectory_repeats_initial_priming() {
+        let mut molecule = MolCoord::new();
+        molecule.push_atom(atom(1));
+        molecule.push_atom(atom(2));
+        let mut block = TrajBlock::new(2);
+        block
+            .append_frame(vec![0.0, 0.0, 0.0, 1.4, 0.0, 0.0], None)
+            .unwrap();
+        let mut trajectory = Trajectory::new(molecule);
+
+        trajectory.insert_block(0, block).unwrap();
+
+        assert!((trajectory.atoms()[1].position.x - 1.4).abs() < 1.0e-6);
+        assert_eq!(trajectory.bond_count(), 1);
     }
 }
