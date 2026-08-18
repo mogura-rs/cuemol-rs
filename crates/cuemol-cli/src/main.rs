@@ -85,9 +85,9 @@ fn run() -> Result<(), String> {
             let input = args
                 .next()
                 .ok_or_else(|| "missing input .qsc path".to_string())?;
-            let output = args
-                .next()
-                .ok_or_else(|| "missing output path (.stl/.obj/.png)".to_string())?;
+            let output = args.next().ok_or_else(|| {
+                "missing output path (.stl/.obj/.pov/.png/.mqo/.lxs/.cfg/.wbp)".to_string()
+            })?;
             render_qsc_scene(&input, &output)
         }
         "mmcif-info" => {
@@ -722,7 +722,7 @@ fn print_usage() {
         "  cuemol export-scene <file.pdb|.cif|.sdf|.mol2> <out.stl|.obj|.pov|.png(Umbreon)|.mqo|.lxs|.cfg(LuxCore)|.wbp(Warabi)>"
     );
     eprintln!(
-        "  cuemol render-qsc <file.qsc> <out.stl|.obj|.png>   (renders the scene with resolved styles)"
+        "  cuemol render-qsc <file.qsc> <out.stl|.obj|.pov|.png|.mqo|.lxs|.cfg|.wbp>   (renders the scene with resolved styles)"
     );
 }
 
@@ -908,8 +908,8 @@ fn export_scene(input: &str, output: &str) -> Result<(), String> {
 }
 
 /// Render a loaded `.qsc` SCENE (objects + renderers, each with its `style="..."`
-/// presets resolved against the bundled default styles) into a single mesh and
-/// write it as STL/OBJ. Unlike `export-scene` (one molecule, default look), this
+/// presets resolved against the bundled default styles) and export it. Unlike
+/// `export-scene` (one molecule, default look), this
 /// honours every renderer's type AND its resolved style geometry (bondw/sphr/
 /// detail/axialdetail/ribbon cross-sections), so the exported mesh reflects the
 /// scene's actual styling — the production consumer of the style-resolution chain.
@@ -924,6 +924,7 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
 
     let styles = scene_style_manager(scene);
     let mut combined = RenderMesh::new();
+    let mut rendered = RenderSceneSnapshot::empty();
     let (mut total_atoms, mut total_bonds, mut renderer_count) = (0usize, 0usize, 0usize);
 
     for object in scene.objects() {
@@ -1065,6 +1066,20 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
             if xform != Matrix4::IDENTITY {
                 snapshot.apply_xform(&xform);
             }
+            let alpha = renderer
+                .resolved_attr("alpha", &styles, DEFAULT_STYLE_SCOPE)
+                .and_then(|value| value.trim().parse::<f64>().ok())
+                .unwrap_or(1.0)
+                .clamp(0.0, 1.0);
+            let material = renderer
+                .resolved_attr("material", &styles, DEFAULT_STYLE_SCOPE)
+                .unwrap_or_else(|| "default".to_string());
+            let renderer_name = if renderer.name().is_empty() {
+                rtype
+            } else {
+                renderer.name()
+            };
+            apply_snapshot_renderer_properties(&mut snapshot, renderer_name, alpha, &material);
             total_atoms += snapshot.atom_count();
             total_bonds += snapshot.bond_count();
             let mesh = match options.sphere_detail {
@@ -1072,6 +1087,7 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                 None => tessellate_snapshot(&snapshot),
             };
             merge_mesh(&mut combined, &mesh);
+            append_render_snapshot(&mut rendered, snapshot);
             renderer_count += 1;
         }
     }
@@ -1150,6 +1166,16 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                 "point" | "2" => MapSurfaceDrawMode::Point,
                 _ => MapSurfaceDrawMode::Fill,
             };
+            let renderer_name = qsc_node_attr(renderer_node, "name", &styles)
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| renderer_type.clone());
+            let alpha = qsc_node_attr(renderer_node, "alpha", &styles)
+                .and_then(|value| value.trim().parse::<f64>().ok())
+                .unwrap_or(1.0)
+                .clamp(0.0, 1.0);
+            let material = qsc_node_attr(renderer_node, "material", &styles)
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "default".to_string());
             let color_map =
                 if color_mode == MapColorMode::MultiGradient && !color_mapname.is_empty() {
                     if color_mapname == loaded.name {
@@ -1215,8 +1241,10 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                         edge: None,
                     });
                 }
+                apply_snapshot_renderer_properties(&mut snapshot, &renderer_name, alpha, &material);
                 total_bonds += snapshot.bond_count();
                 merge_mesh(&mut combined, &tessellate_snapshot(&snapshot));
+                append_render_snapshot(&mut rendered, snapshot);
             } else {
                 let mut renderer = MapSurfRenderer::new();
                 renderer.map_mut().set_siglevel(number("siglevel", 1.1));
@@ -1283,8 +1311,12 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                         modifiers: Vec::new(),
                     })
                 };
-                match drawmode {
-                    MapSurfaceDrawMode::Fill => merge_mesh(&mut combined, &mesh),
+                let mut snapshot = match drawmode {
+                    MapSurfaceDrawMode::Fill => {
+                        let mut snapshot = RenderSceneSnapshot::empty();
+                        snapshot.meshes.push(mesh);
+                        snapshot
+                    }
                     MapSurfaceDrawMode::Line => {
                         let mut snapshot = RenderSceneSnapshot::empty();
                         let mut edges = std::collections::BTreeSet::new();
@@ -1316,8 +1348,7 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                                 edge: None,
                             });
                         }
-                        total_bonds += snapshot.bond_count();
-                        merge_mesh(&mut combined, &tessellate_snapshot(&snapshot));
+                        snapshot
                     }
                     MapSurfaceDrawMode::Point => {
                         let mut snapshot = RenderSceneSnapshot::empty();
@@ -1334,10 +1365,14 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                                 hit: None,
                             });
                         }
-                        total_atoms += snapshot.atom_count();
-                        merge_mesh(&mut combined, &tessellate_snapshot(&snapshot));
+                        snapshot
                     }
-                }
+                };
+                apply_snapshot_renderer_properties(&mut snapshot, &renderer_name, alpha, &material);
+                total_atoms += snapshot.atom_count();
+                total_bonds += snapshot.bond_count();
+                merge_mesh(&mut combined, &tessellate_snapshot(&snapshot));
+                append_render_snapshot(&mut rendered, snapshot);
             }
             renderer_count += 1;
         }
@@ -1347,29 +1382,48 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
         return Err("scene has no visible renderers to render".to_string());
     }
 
-    let name = std::path::Path::new(input)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("cuemol");
+    rendered.recompute_bounds();
+    let camera = scene
+        .camera_by_name("__current")
+        .or_else(|| scene.cameras().first())
+        .cloned()
+        .unwrap_or_else(|| camera_for_snapshot(&rendered));
+    let background = scene
+        .scene_attribute("bgcolor")
+        .and_then(|value| qsc_color_rgba(value, &styles))
+        .map(|color| {
+            [
+                f32::from(color.r) / 255.0,
+                f32::from(color.g) / 255.0,
+                f32::from(color.b) / 255.0,
+            ]
+        })
+        .unwrap_or([0.0; 3]);
+    let name = if scene.name().is_empty() {
+        std::path::Path::new(input)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("cuemol")
+    } else {
+        scene.name()
+    };
     let lower = output.to_ascii_lowercase();
+    if lower.ends_with(".cfg") {
+        return export_luxcore_with_camera(name, output, &combined, &rendered, &camera);
+    }
+    if lower.ends_with(".wbp") {
+        return export_wbp_with_camera(name, output, &combined, &rendered, &camera, background);
+    }
     if lower.ends_with(".png") {
-        let mut snapshot = RenderSceneSnapshot {
-            atoms: Vec::new(),
-            bonds: Vec::new(),
-            meshes: vec![combined.clone()],
-            transparency_groups: Vec::new(),
-            bounds: None,
-        };
-        snapshot.recompute_bounds();
         let mut exporter = UmbreonSceneExporter::new();
         exporter.handler_mut().set_path(output);
         exporter.set_width(640);
         exporter.set_height(480);
         exporter
             .write_snapshot(
-                &snapshot,
-                &camera_for_snapshot(&snapshot),
-                [0.0, 0.0, 0.0, 1.0],
+                &rendered,
+                &camera,
+                [background[0], background[1], background[2], 1.0],
             )
             .map_err(|error| error.to_string())?;
         eprintln!(
@@ -1377,22 +1431,60 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
         );
         return Ok(());
     }
+    if lower.ends_with(".pov") {
+        let mut exporter = PovSceneExporter::new();
+        exporter.handler_mut().set_path(output);
+        exporter.handler_mut().set_sub_path(
+            "inc",
+            std::path::Path::new(output)
+                .with_extension("inc")
+                .to_string_lossy(),
+        );
+        exporter.set_preamble(styles.get_config("pov", "preamble", DEFAULT_STYLE_SCOPE));
+        for material in renderer_material_names(&rendered) {
+            let definition = styles.get_material_string(material, "pov", DEFAULT_STYLE_SCOPE);
+            if !definition.is_empty() {
+                exporter.set_material_definition(material, definition);
+            }
+        }
+        exporter
+            .write_snapshot_file_with_camera_background(&rendered, &camera, background)
+            .map_err(|error| error.to_string())?;
+        eprintln!(
+            "exported {renderer_count} renderers ({total_atoms} atoms / {total_bonds} bonds) to {output} (+ INC companion)"
+        );
+        return Ok(());
+    }
+    if lower.ends_with(".lxs") {
+        let mut exporter = LuxRendSceneExporter::new();
+        exporter.handler_mut().set_path(output);
+        exporter.set_preamble(styles.get_config("lux", "preamble", DEFAULT_STYLE_SCOPE));
+        exporter.set_world_preamble(styles.get_config("lux", "worldpreamble", DEFAULT_STYLE_SCOPE));
+        for material in renderer_material_names(&rendered) {
+            let definition = styles.get_material_string(material, "lux", DEFAULT_STYLE_SCOPE);
+            if !definition.is_empty() {
+                exporter.set_material_definition(material, definition);
+            }
+        }
+        exporter
+            .write_snapshot_file_with_camera(name, &rendered, &camera, background)
+            .map_err(|error| error.to_string())?;
+        eprintln!(
+            "exported {renderer_count} renderers ({total_atoms} atoms / {total_bonds} bonds) to {output}"
+        );
+        return Ok(());
+    }
     let bytes: Vec<u8> = if lower.ends_with(".stl") {
-        let mut snapshot = RenderSceneSnapshot {
-            atoms: Vec::new(),
-            bonds: Vec::new(),
-            meshes: vec![combined.clone()],
-            transparency_groups: Vec::new(),
-            bounds: None,
-        };
-        snapshot.recompute_bounds();
-        let camera = camera_for_snapshot(&snapshot);
         StlSceneExporter::new().write_binary_stl_bytes_with_camera(&combined, &camera)
     } else if lower.ends_with(".obj") {
         combined.to_obj_string(name).into_bytes()
+    } else if lower.ends_with(".mqo") {
+        MqoSceneExporter::new()
+            .write_snapshot_string_with_camera(name, &rendered, &camera)
+            .into_bytes()
     } else {
         return Err(format!(
-            "unsupported output format (use .stl/.obj/.png): {output}"
+            "unsupported output format (use .stl/.obj/.pov/.png/.mqo/.lxs/.cfg/.wbp): {output}"
         ));
     };
     std::fs::write(output, &bytes).map_err(|err| err.to_string())?;
@@ -1402,6 +1494,89 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
         combined.triangle_count()
     );
     Ok(())
+}
+
+fn renderer_material_names(snapshot: &RenderSceneSnapshot) -> std::collections::BTreeSet<&str> {
+    std::iter::once("default")
+        .chain(
+            snapshot
+                .transparency_groups
+                .iter()
+                .map(|group| group.material.as_str()),
+        )
+        .collect()
+}
+
+fn apply_snapshot_renderer_properties(
+    snapshot: &mut RenderSceneSnapshot,
+    name: &str,
+    alpha: f64,
+    material: &str,
+) {
+    snapshot.mark_named_renderer_section(
+        name,
+        alpha as f32,
+        if material.trim().is_empty() {
+            "default"
+        } else {
+            material.trim()
+        },
+    );
+    if alpha >= 1.0 {
+        return;
+    }
+    let apply_color = |color: &mut Option<cuemol_gfx::ColorSpec>| {
+        let Some(rgba) = color.as_ref().and_then(cuemol_gfx::ColorSpec::rgba8) else {
+            return;
+        };
+        *color = Some(cuemol_gfx::ColorSpec {
+            base: cuemol_gfx::ColorBase::Html {
+                r: rgba.r,
+                g: rgba.g,
+                b: rgba.b,
+                a: (f64::from(rgba.a) * alpha).round().clamp(0.0, 255.0) as u8,
+            },
+            modifiers: Vec::new(),
+        });
+    };
+    for atom in &mut snapshot.atoms {
+        apply_color(&mut atom.color);
+        if let Some(edge) = &mut atom.edge {
+            edge.color[3] *= alpha as f32;
+        }
+    }
+    for bond in &mut snapshot.bonds {
+        apply_color(&mut bond.color);
+        apply_color(&mut bond.end_color);
+        if let Some(edge) = &mut bond.edge {
+            edge.color[3] *= alpha as f32;
+        }
+    }
+    for mesh in &mut snapshot.meshes {
+        for vertex in &mut mesh.vertices {
+            vertex.color[3] *= alpha as f32;
+        }
+    }
+}
+
+fn append_render_snapshot(target: &mut RenderSceneSnapshot, source: RenderSceneSnapshot) {
+    let atom_offset = target.atoms.len();
+    let bond_offset = target.bonds.len();
+    let mesh_offset = target.meshes.len();
+    target.atoms.extend(source.atoms);
+    target.bonds.extend(source.bonds);
+    target.meshes.extend(source.meshes);
+    target
+        .transparency_groups
+        .extend(source.transparency_groups.into_iter().map(|mut group| {
+            group.atom_range.start += atom_offset;
+            group.atom_range.end += atom_offset;
+            group.bond_range.start += bond_offset;
+            group.bond_range.end += bond_offset;
+            group.mesh_range.start += mesh_offset;
+            group.mesh_range.end += mesh_offset;
+            group
+        }));
 }
 
 fn direct_surface_scene_snapshot(
@@ -1655,10 +1830,20 @@ fn export_luxcore(
     mesh: &RenderMesh,
     snapshot: &RenderSceneSnapshot,
 ) -> Result<(), String> {
-    let mut lux = LuxCoreSceneExporter::new();
     let camera = camera_for_snapshot(snapshot);
+    export_luxcore_with_camera(name, output, mesh, snapshot, &camera)
+}
+
+fn export_luxcore_with_camera(
+    name: &str,
+    output: &str,
+    mesh: &RenderMesh,
+    snapshot: &RenderSceneSnapshot,
+    camera: &Camera,
+) -> Result<(), String> {
+    let mut lux = LuxCoreSceneExporter::new();
     lux.handler_mut().set_path(output);
-    lux.write_snapshot_files_with_camera(name, snapshot, &camera, 640, 480)
+    lux.write_snapshot_files_with_camera(name, snapshot, camera, 640, 480)
         .map_err(|err| err.to_string())?;
     eprintln!(
         "exported {} atoms / {} bonds -> {} vertices / {} triangles to {output} (+ SCN/PLY companions)",
@@ -1679,16 +1864,27 @@ fn export_wbp(
     mesh: &RenderMesh,
     snapshot: &RenderSceneSnapshot,
 ) -> Result<(), String> {
+    let camera = camera_for_snapshot(snapshot);
+    export_wbp_with_camera(name, output, mesh, snapshot, &camera, [0.0; 3])
+}
+
+fn export_wbp_with_camera(
+    name: &str,
+    output: &str,
+    mesh: &RenderMesh,
+    snapshot: &RenderSceneSnapshot,
+    camera: &Camera,
+    background: [f32; 3],
+) -> Result<(), String> {
     let base = output
         .strip_suffix(".wbp")
         .or_else(|| output.strip_suffix(".WBP"))
         .unwrap_or(output);
     let mqo_path = format!("{base}.mqo");
-    let camera = camera_for_snapshot(snapshot);
     let mut exporter = WbpSceneExporter::new();
     exporter.handler_mut().set_path(output);
     exporter
-        .write_snapshot_files_with_camera(name, snapshot, &camera, [0.0; 3])
+        .write_snapshot_files_with_camera(name, snapshot, camera, background)
         .map_err(|err| err.to_string())?;
     eprintln!(
         "exported {} atoms / {} bonds -> {} vertices / {} triangles to {output} (+ {mqo_path})",

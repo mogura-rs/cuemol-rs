@@ -102,3 +102,67 @@ fn render_qsc_renders_saved_density_map_renderers() {
     std::fs::remove_file(qsc_path).ok();
     std::fs::remove_file(out).ok();
 }
+
+#[test]
+fn render_qsc_preserves_exporter_scene_context() {
+    let fixture = reference_dir().join("tests/test_data/number_chain_atomintr1.qsc");
+    if !fixture.exists() {
+        eprintln!("skipping: reference fixture absent ({})", fixture.display());
+        return;
+    }
+    let source = std::fs::read_to_string(&fixture).unwrap();
+    let source = source
+        .replacen("<scene>", "<scene bgcolor=\"#123456\">", 1)
+        .replacen(
+            "<renderer type=\"trace\" group=\"\" name=\"trace1\"",
+            "<renderer type=\"trace\" group=\"\" name=\"trace1\" alpha=\"0.5\"",
+            1,
+        )
+        .replacen(
+            "<renderer type=\"atomintr\" group=\"\" name=\"measure\"",
+            "<renderer type=\"atomintr\" group=\"\" name=\"measure\" material=\"metallic_chrome\"",
+            1,
+        );
+    let stem = format!("cuemol_render_qsc_context_{}", std::process::id());
+    let qsc_path = std::env::temp_dir().join(format!("{stem}.qsc"));
+    let pov_path = std::env::temp_dir().join(format!("{stem}.pov"));
+    let inc_path = std::env::temp_dir().join(format!("{stem}.inc"));
+    let mqo_path = std::env::temp_dir().join(format!("{stem}.mqo"));
+    std::fs::write(&qsc_path, source).unwrap();
+
+    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+        .args([
+            "render-qsc",
+            qsc_path.to_str().unwrap(),
+            pov_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("export QSC scene to POV-Ray");
+    assert!(status.success());
+    let pov = std::fs::read_to_string(&pov_path).unwrap();
+    let inc = std::fs::read_to_string(&inc_path).unwrap();
+    assert!(pov.contains("#declare _bgcolor = <0.070588,0.203922,0.337255>;"));
+    assert!(pov.contains("#declare _center = <7.278200,10.185700,6.874700>;"));
+    assert!(pov.contains("#declare _distance = 200.000000;"));
+    assert!(inc.contains("texture{ T_Chrome_4D }"));
+    assert!(inc.contains("0.498039"));
+
+    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+        .args([
+            "render-qsc",
+            qsc_path.to_str().unwrap(),
+            mqo_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("export QSC scene to MQO");
+    assert!(status.success());
+    let mqo = std::fs::read_to_string(&mqo_path).unwrap();
+    assert!(mqo.contains("Object \"trace1\""));
+    assert!(mqo.contains("Object \"measure\""));
+    assert!(mqo.contains("Object \"measure2\""));
+
+    std::fs::remove_file(qsc_path).ok();
+    std::fs::remove_file(pov_path).ok();
+    std::fs::remove_file(inc_path).ok();
+    std::fs::remove_file(mqo_path).ok();
+}
