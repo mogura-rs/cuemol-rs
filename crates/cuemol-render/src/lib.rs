@@ -997,13 +997,19 @@ const POV_LIGHTING: &str = concat!(
     "    texture { pigment { color rgb <1,1,1> } finish { diffuse 0 emission _light_inten*_amb_frac } }\n",
     "    hollow on no_shadow scale _distance*10\n",
     "  }\n",
-    "#end\n",
-    "\n",
-    "#ifndef (_light_inten)\n",
+    "  #ifdef (_no_fog)\n",
+    "    plane { _fog_back_normal, _fog_back_distance\n",
+    "      texture { pigment { color rgb _bgcolor } finish { diffuse 1 emission 0 } }\n",
+    "    }\n",
+    "  #end\n",
+    "#else\n",
+    "  #ifndef (_light_inten)\n",
     "    #declare _light_inten=1.3;\n",
     "    #declare _flash_frac=0.8/1.3;\n",
     "    #declare _amb_frac=0;\n",
+    "  #end\n",
     "#end\n",
+    "\n",
     "SpecLighting(_light_spread, _distance, _light_inten*(1-_amb_frac)*(1-_flash_frac), _shadow)\n",
     "FlashLighting(_light_inten*(1-_amb_frac)*_flash_frac)\n",
 );
@@ -1437,7 +1443,8 @@ impl PovSceneExporter {
             Vector4::new3(1.0, 0.0, 0.0),
             Vector4::new3(0.0, 1.0, 0.0),
             Vector4::new3(0.0, 0.0, -1.0),
-            self.use_clip_z.then_some(size * 2.0),
+            size * 2.0,
+            self.use_clip_z,
             [0.0; 3],
             "default",
         )
@@ -1482,7 +1489,8 @@ impl PovSceneExporter {
             right,
             up,
             forward,
-            self.use_clip_z.then_some(camera.slab_depth()),
+            camera.slab_depth(),
+            self.use_clip_z,
             background,
             material,
         ))
@@ -1499,7 +1507,8 @@ impl PovSceneExporter {
         right: Vector4,
         up: Vector4,
         forward: Vector4,
-        slab_depth: Option<f64>,
+        slab_depth: f64,
+        use_clip_z: bool,
         background: [f32; 3],
         material: &str,
     ) -> String {
@@ -1508,8 +1517,9 @@ impl PovSceneExporter {
             center.y - forward.y * distance,
             center.z - forward.z * distance,
         );
-        let clip_planes = slab_depth.map(|depth| {
-            let half_depth = depth.max(1.0e-3) * 0.5;
+        let slab_depth = slab_depth.max(1.0e-3);
+        let clip_planes = use_clip_z.then(|| {
+            let half_depth = slab_depth * 0.5;
             let front =
                 forward.x * center.x + forward.y * center.y + forward.z * center.z + half_depth;
             let back =
@@ -1532,7 +1542,7 @@ impl PovSceneExporter {
         out.push_str("#ifndef (_transpbg)\nbackground {color rgb _bgcolor}\n");
         writeln!(
             &mut out,
-            "#else\nbackground {{color rgbt <{:.6},{:.6},{:.6},0.999>}}\n#end",
+            "#else\nbackground {{color rgbt <{:.6},{:.6},{:.6},0.999>}}\n#declare _no_fog = 1;\n#end",
             background[0], background[1], background[2]
         )
         .unwrap();
@@ -1540,6 +1550,20 @@ impl PovSceneExporter {
             &mut out,
             "#declare _center = <{:.6},{:.6},{:.6}>;",
             center.x, center.y, center.z
+        )
+        .unwrap();
+        let fog_up = forward.scale(-1.0);
+        let fog_back_distance =
+            fog_up.x * center.x + fog_up.y * center.y + fog_up.z * center.z - distance * 2.0;
+        writeln!(
+            &mut out,
+            "#declare _fog_back_normal = <{:.6},{:.6},{:.6}>;",
+            fog_up.x, fog_up.y, fog_up.z
+        )
+        .unwrap();
+        writeln!(
+            &mut out,
+            "#declare _fog_back_distance = {fog_back_distance:.6};"
         )
         .unwrap();
         writeln!(
@@ -1614,6 +1638,22 @@ impl PovSceneExporter {
         out.push_str(" #end\n}\n");
         out.push_str("global_settings {\n  assumed_gamma 1.0\n}\n");
         out.push_str(POV_LIGHTING);
+        out.push_str("#ifndef (_no_fog)\nfog {\n");
+        writeln!(&mut out, "  distance {:.6}", slab_depth / 3.0).unwrap();
+        writeln!(
+            &mut out,
+            "  color rgbf <{:.6},{:.6},{:.6},0>",
+            background[0], background[1], background[2]
+        )
+        .unwrap();
+        out.push_str("  fog_type 2\n  fog_offset 0\n  fog_alt 1.0e-10\n");
+        writeln!(
+            &mut out,
+            "  up <{:.6},{:.6},{:.6}>",
+            fog_up.x, fog_up.y, fog_up.z
+        )
+        .unwrap();
+        out.push_str("}\n#end\n");
 
         let (mat_keys, face_mat) = face_material_table(mesh);
         out.push_str("mesh2 {\n");
@@ -6339,6 +6379,9 @@ mod tests {
         assert!(pov.contains("light_source {"));
         assert!(pov.contains("background {"));
         assert!(pov.contains("global_settings {"));
+        assert!(pov.contains("fog {"));
+        assert!(pov.contains("distance 2.666667"));
+        assert!(pov.contains("fog_type 2"));
         assert!(pov.contains("direction <0.000000,0.000000,-1.000000>"));
         assert!(pov.contains("#declare _camera_pos = <5.000000,5.000000,17.000000>"));
         // The camera frames the molecule centre, not the origin.
@@ -6359,6 +6402,7 @@ mod tests {
         camera.set_center(Vector4::new3(1.0, 2.0, 3.0));
         camera.set_cam_dist(10.0);
         camera.set_zoom(6.0);
+        camera.set_slab_depth(12.0);
         camera.set_perspective(true);
         camera.set_rotation(camera.rotation().rotate_y(90.0).unwrap());
 
@@ -6368,6 +6412,8 @@ mod tests {
         assert!(pov.contains("#declare _distance = 10.000000;"));
         assert!(pov.contains("#declare _zoomy = 6.000000;"));
         assert!(pov.contains("#declare _perspective = 1;"));
+        assert!(pov.contains("distance 4.000000"));
+        assert!(pov.contains("up <1.000000,-0.000000,0.000000>"), "{pov}");
         assert!(
             pov.contains("direction <-1.000000,0.000000,-0.000000>"),
             "{pov}"
@@ -6564,6 +6610,7 @@ mod tests {
         assert!(source.contains("#declare _perspective = 0;"));
         assert!(source.contains("#declare _bgcolor = <0.100000,0.200000,0.300000>;"));
         assert!(source.contains("rgbt <0.100000,0.200000,0.300000,0.999>"));
+        assert!(source.contains("#declare _no_fog = 1;"));
         assert!(!source.contains("0.498039"));
         assert!(!source.contains("0.050980"));
     }
