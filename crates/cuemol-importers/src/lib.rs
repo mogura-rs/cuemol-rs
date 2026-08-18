@@ -436,8 +436,16 @@ impl SdfMolWriter {
         self.selection()
     }
 
+    pub fn sel(&self) -> &Selector {
+        self.selection()
+    }
+
     pub fn set_selection(&mut self, value: Selector) {
         self.selection = value;
+    }
+
+    pub fn set_sel(&mut self, value: Selector) {
+        self.set_selection(value);
     }
 
     pub fn write_string(&self, mol: &cuemol_molstr::MolCoord) -> String {
@@ -882,10 +890,13 @@ mod tests {
 
     #[test]
     fn importers_writer_and_pse_reader_defaults_match_qif() {
-        let writer = SdfMolWriter::new();
+        let mut writer = SdfMolWriter::new();
         assert_eq!(writer.handler().name(), "sdf");
         assert_eq!(writer.handler().category(), InOutHandler::IOH_CAT_OBJWRITER);
         assert_eq!(writer.selection(), &Selector::All);
+        assert_eq!(writer.sel(), &Selector::All);
+        writer.set_sel(Selector::All);
+        assert_eq!(writer.get_selection(), &Selector::All);
 
         let mut pse = PseFileReader::new();
         assert_eq!(pse.handler().name(), "psefile");

@@ -1157,6 +1157,7 @@ pub struct MolSurfObj {
     mesh: SurfaceMesh,
     orig_mol: String,
     orig_sel: String,
+    orig_selector: Option<Selector>,
     orig_den: f64,
     orig_prad: f64,
     cut_planes: Vec<CutPlane>,
@@ -1257,6 +1258,7 @@ impl Default for MolSurfObj {
             mesh: SurfaceMesh::new(),
             orig_mol: String::new(),
             orig_sel: String::new(),
+            orig_selector: Some(Selector::All),
             orig_den: 0.0,
             orig_prad: 0.0,
             cut_planes: Vec::new(),
@@ -1410,12 +1412,21 @@ impl MolSurfObj {
         &self.orig_sel
     }
 
-    pub fn get_orig_sel(&self) -> &str {
-        self.orig_sel()
+    pub fn orig_selection(&self) -> Option<&Selector> {
+        self.orig_selector.as_ref()
+    }
+
+    pub fn get_orig_sel(&self) -> Option<&Selector> {
+        self.orig_selection()
     }
 
     pub fn set_orig_sel(&mut self, value: impl Into<String>) {
         self.orig_sel = value.into();
+        self.orig_selector = if self.orig_sel.trim().is_empty() {
+            Some(Selector::All)
+        } else {
+            parse_selector(&self.orig_sel).ok()
+        };
     }
 
     pub fn orig_den(&self) -> f64 {
@@ -1498,11 +1509,12 @@ impl MolSurfObj {
         let selection = selection.into_surface_selection_source();
         self.orig_mol = molecule.source_name();
         self.orig_sel = selection.source_text();
+        self.orig_selector = selection.selector();
         self.orig_den = density;
         self.orig_prad = probe_radius;
         self.mesh.clear();
         if let SurfaceMoleculeSource::Molecule(molecule) = molecule {
-            let selector = selection.selector().unwrap_or(Selector::All);
+            let selector = self.orig_selector.clone().unwrap_or(Selector::All);
             build_mol_surface(&mut self.mesh, molecule, &selector, density, probe_radius);
             self.source_molecule = Some(molecule.clone());
         } else {
@@ -3458,8 +3470,16 @@ impl HoleSurfBuilder {
         &self.target_mol
     }
 
-    pub fn get_target_mol(&self) -> &str {
+    pub fn target_mol_name(&self) -> &str {
         self.target_mol()
+    }
+
+    pub fn target_molecule(&self) -> Option<&MolCoord> {
+        self.target_molecule.as_ref()
+    }
+
+    pub fn get_target_mol(&self) -> Option<&MolCoord> {
+        self.target_molecule()
     }
 
     pub fn set_target_mol<'a, M>(&mut self, value: M)
@@ -3480,8 +3500,16 @@ impl HoleSurfBuilder {
         &self.target_sel
     }
 
-    pub fn get_target_sel(&self) -> &str {
+    pub fn target_sel_text(&self) -> &str {
         self.target_sel()
+    }
+
+    pub fn target_selection(&self) -> Option<&Selector> {
+        self.target_selection.as_ref()
+    }
+
+    pub fn get_target_sel(&self) -> Option<&Selector> {
+        self.target_selection()
     }
 
     pub fn set_target_sel<'a, S>(&mut self, value: S)
@@ -3590,6 +3618,7 @@ impl HoleSurfBuilder {
         hole_surface::build_hole_ses(result.mesh_mut(), &path, self.surf_den, self.surf_probe_r)?;
         result.orig_mol = self.target_mol.clone();
         result.orig_sel = self.target_sel.clone();
+        result.orig_selector = Some(selector);
         result.orig_den = self.surf_den;
         result.orig_prad = self.surf_probe_r;
         self.path = path;
@@ -3610,6 +3639,7 @@ mod tests {
         obj.create_ses_from_mol("mol1", "protein", 3.0, 1.4);
         assert_eq!(obj.orig_mol(), "mol1");
         assert_eq!(obj.orig_sel(), "protein");
+        assert!(obj.get_orig_sel().is_some());
         assert_eq!(obj.orig_den(), 3.0);
         assert_eq!(obj.orig_prad(), 1.4);
         obj.cut_by_plane(
@@ -4251,6 +4281,10 @@ attribute \"dep\" string \"positions\"
         assert_eq!(builder.surf_den(), 2.0);
         builder.set_target_mol(&molecule);
         builder.set_target_sel("*");
+        assert_eq!(builder.target_mol_name(), "MolCoord");
+        assert_eq!(builder.get_target_mol().unwrap().atom_count(), 60);
+        assert_eq!(builder.target_sel_text(), "*");
+        assert_eq!(builder.get_target_sel().unwrap().dump(), "*");
         builder.set_surf_den(2.0);
         builder.set_surf_probe_r(1.2);
         builder.doit().unwrap();

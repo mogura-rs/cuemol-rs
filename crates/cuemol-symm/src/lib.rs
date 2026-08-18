@@ -178,16 +178,12 @@ impl CrystalInfo {
         self.nsg
     }
 
-    pub fn spacegroup(&self) -> i32 {
+    pub fn space_group_id(&self) -> i32 {
         self.space_group()
     }
 
     pub fn set_space_group(&mut self, value: i32) {
         self.nsg = value;
-    }
-
-    pub fn set_spacegroup(&mut self, value: i32) {
-        self.set_space_group(value);
     }
 
     pub fn orth_mat(&self) -> Matrix4 {
@@ -277,6 +273,10 @@ impl CrystalInfo {
     }
 
     pub fn get_space_group_name(&self) -> String {
+        self.space_group_name()
+    }
+
+    pub fn spacegroup(&self) -> String {
         self.space_group_name()
     }
 
@@ -1447,6 +1447,8 @@ mod tests {
         assert_eq!(crystal.get_hm_space_group_name(), "P 1");
         assert_eq!(crystal.space_group_name(), "P1");
         assert_eq!(crystal.get_space_group_name(), "P1");
+        assert_eq!(crystal.spacegroup(), "P1");
+        assert_eq!(crystal.space_group_id(), 1);
 
         let orth = crystal.frac_to_orth(Vector4::new3(0.5, 0.25, 0.1));
         assert_eq!(orth, Vector4::new3(50.0, 25.0, 10.0));
