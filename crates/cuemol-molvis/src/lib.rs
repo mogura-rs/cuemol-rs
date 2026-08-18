@@ -928,7 +928,6 @@ pub struct AtomIntrRenderer {
     font_style: String,
     font_weight: String,
     defs: Vec<AtomIntrDef>,
-    next_def_id: i32,
 }
 
 impl Default for AtomIntrRenderer {
@@ -950,7 +949,6 @@ impl Default for AtomIntrRenderer {
             font_style: "normal".to_string(),
             font_weight: "normal".to_string(),
             defs: Vec::new(),
-            next_def_id: 1,
         }
     }
 }
@@ -964,6 +962,7 @@ pub struct AtomIntrDef {
     mol_ids: Vec<i32>,
     positions: Vec<Vector4>,
     show_message: bool,
+    active: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -974,12 +973,16 @@ pub enum AtomIntrDefKind {
 }
 
 impl AtomIntrDefKind {
-    fn as_str(self) -> &'static str {
+    fn mode(self) -> i32 {
         match self {
-            Self::Distance => "distance",
-            Self::Angle => "angle",
-            Self::Torsion => "torsion",
+            Self::Distance => 1,
+            Self::Angle => 2,
+            Self::Torsion => 3,
         }
+    }
+
+    fn point_count(self) -> usize {
+        self.mode() as usize + 1
     }
 }
 
@@ -1012,7 +1015,14 @@ impl AtomIntrDef {
         self.show_message
     }
 
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
     pub fn to_data(&self) -> AtomIntrData {
+        if !self.active {
+            return AtomIntrData::default();
+        }
         let mut data = AtomIntrData {
             mode: match self.kind {
                 AtomIntrDefKind::Distance => 1,
@@ -1394,8 +1404,32 @@ impl AtomIntrRenderer {
     /// Reference points of a definition: its fixed positions if any, else the
     /// positions of its atoms looked up by id in `mol`.
     fn def_points(&self, def: &AtomIntrDef, mol: &MolCoord) -> Option<Vec<Vector4>> {
+        if !def.active {
+            return None;
+        }
         if !def.positions.is_empty() {
             return Some(def.positions.clone());
+        }
+        if !def.selections.is_empty() {
+            let mut points = Vec::with_capacity(def.selections.len());
+            for selection in &def.selections {
+                let selector = parse_selector(selection).ok()?;
+                let selected = mol
+                    .atoms()
+                    .iter()
+                    .filter(|atom| selector.matches_in_molecule(atom, mol))
+                    .collect::<Vec<_>>();
+                if selected.is_empty() {
+                    return None;
+                }
+                let count = selected.len() as f64;
+                points.push(Vector4::new3(
+                    selected.iter().map(|atom| atom.position.x).sum::<f64>() / count,
+                    selected.iter().map(|atom| atom.position.y).sum::<f64>() / count,
+                    selected.iter().map(|atom| atom.position.z).sum::<f64>() / count,
+                ));
+            }
+            return Some(points);
         }
         let mut points = Vec::with_capacity(def.atom_ids.len());
         for &aid in &def.atom_ids {
@@ -1502,18 +1536,27 @@ impl AtomIntrRenderer {
     }
 
     pub fn append(&mut self, selection1: impl Into<String>, selection2: impl Into<String>) -> i32 {
+        let selection1 = selection1.into();
+        let selection2 = selection2.into();
+        if parse_selector(&selection1).is_err() || parse_selector(&selection2).is_err() {
+            return -1;
+        }
         self.push_def(AtomIntrDef {
             id: 0,
             kind: AtomIntrDefKind::Distance,
-            selections: vec![selection1.into(), selection2.into()],
+            selections: vec![selection1, selection2],
             atom_ids: Vec::new(),
-            mol_ids: Vec::new(),
+            mol_ids: vec![self.client_mol_id; 2],
             positions: Vec::new(),
             show_message: true,
+            active: true,
         })
     }
 
     pub fn append_by_id(&mut self, aid1: i32, mol_id2: i32, aid2: i32, show_message: bool) -> i32 {
+        if self.client_mol_id == mol_id2 && aid1 == aid2 {
+            return -1;
+        }
         self.push_def(AtomIntrDef {
             id: 0,
             kind: AtomIntrDefKind::Distance,
@@ -1522,6 +1565,7 @@ impl AtomIntrRenderer {
             mol_ids: vec![self.client_mol_id, mol_id2],
             positions: Vec::new(),
             show_message,
+            active: true,
         })
     }
 
@@ -1534,6 +1578,7 @@ impl AtomIntrRenderer {
             mol_ids: Vec::new(),
             positions: vec![v1, v2],
             show_message: true,
+            active: true,
         })
     }
 
@@ -1561,6 +1606,7 @@ impl AtomIntrRenderer {
             mol_ids: vec![self.client_mol_id, mol_id2, mol_id3],
             positions: Vec::new(),
             show_message: true,
+            active: true,
         })
     }
 
@@ -1583,30 +1629,50 @@ impl AtomIntrRenderer {
             mol_ids: vec![self.client_mol_id, mol_id2, mol_id3, mol_id4],
             positions: Vec::new(),
             show_message: true,
+            active: true,
         })
     }
 
     pub fn remove(&mut self, id: i32) -> bool {
-        let Some(index) = self.defs.iter().position(|def| def.id == id) else {
+        let Ok(index) = usize::try_from(id) else {
             return false;
         };
-        self.defs.remove(index);
+        let Some(def) = self.defs.get_mut(index) else {
+            return false;
+        };
+        def.active = false;
         true
     }
 
     pub fn get_defs_json(&self) -> String {
+        self.get_defs_json_impl(|_, atom_id| atom_id.to_string())
+    }
+
+    pub fn get_defs_json_with_molecule(&self, molecule: &MolCoord) -> String {
+        self.get_defs_json_impl(|molecule_id, atom_id| {
+            if molecule_id != self.client_mol_id {
+                return atom_id.to_string();
+            }
+            molecule
+                .get_atom_by_id(atom_id)
+                .map(Atom::format_msg)
+                .unwrap_or_else(|| atom_id.to_string())
+        })
+    }
+
+    fn get_defs_json_impl(&self, atom_label: impl Fn(i32, i32) -> String) -> String {
         let entries = self
             .defs
             .iter()
-            .map(atom_intr_def_json)
+            .filter(|def| def.active)
+            .map(|def| atom_intr_def_json(def, &atom_label))
             .collect::<Vec<_>>()
             .join(",");
         format!("[{entries}]")
     }
 
     fn push_def(&mut self, mut def: AtomIntrDef) -> i32 {
-        let id = self.next_def_id;
-        self.next_def_id += 1;
+        let id = i32::try_from(self.defs.len()).unwrap_or(i32::MAX);
         def.id = id;
         self.defs.push(def);
         id
@@ -3310,44 +3376,27 @@ impl PaintColoring {
     }
 }
 
-fn atom_intr_def_json(def: &AtomIntrDef) -> String {
+fn atom_intr_def_json(def: &AtomIntrDef, atom_label: &impl Fn(i32, i32) -> String) -> String {
+    let labels = (0..def.kind.point_count())
+        .map(|index| {
+            let label = if let Some(selection) = def.selections.get(index) {
+                selection.clone()
+            } else if let Some(position) = def.positions.get(index) {
+                format!("({:.2},{:.2},{:.2})", position.x, position.y, position.z)
+            } else {
+                let atom_id = def.atom_ids.get(index).copied().unwrap_or(-1);
+                let molecule_id = def.mol_ids.get(index).copied().unwrap_or_default();
+                atom_label(molecule_id, atom_id)
+            };
+            format!("\"a{index}\":\"{}\"", json_escape(&label))
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     format!(
-        "{{\"id\":{},\"type\":\"{}\",\"sels\":{},\"atoms\":{},\"mols\":{},\"positions\":{},\"showmsg\":{}}}",
+        "{{\"id\":{},\"mode\":{},{labels}}}",
         def.id,
-        def.kind.as_str(),
-        json_string_array(&def.selections),
-        json_i32_array(&def.atom_ids),
-        json_i32_array(&def.mol_ids),
-        json_vector_array(&def.positions),
-        def.show_message
+        def.kind.mode()
     )
-}
-
-fn json_string_array(values: &[String]) -> String {
-    let body = values
-        .iter()
-        .map(|value| format!("\"{}\"", json_escape(value)))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("[{body}]")
-}
-
-fn json_i32_array(values: &[i32]) -> String {
-    let body = values
-        .iter()
-        .map(i32::to_string)
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("[{body}]")
-}
-
-fn json_vector_array(values: &[Vector4]) -> String {
-    let body = values
-        .iter()
-        .map(|value| format!("[{},{},{}]", value.x, value.y, value.z))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("[{body}]")
 }
 
 fn json_escape(value: &str) -> String {
@@ -10139,6 +10188,32 @@ return cuemol.makeColor("#0000ff");
     }
 
     #[test]
+    fn atom_intr_selection_points_use_selected_atom_centroids() {
+        let mut n1 = intr_atom(1, 0.0, 0.0, 0.0);
+        n1.name = "N".to_string();
+        let mut n2 = intr_atom(2, 2.0, 0.0, 0.0);
+        n2.name = "N".to_string();
+        let mut ca1 = intr_atom(3, 1.0, 2.0, 0.0);
+        ca1.name = "CA".to_string();
+        let mut ca2 = intr_atom(4, 1.0, 4.0, 0.0);
+        ca2.name = "CA".to_string();
+        let mol = MolCoord::with_atoms(vec![n1, n2, ca1, ca2]);
+
+        let mut renderer = AtomIntrRenderer::new();
+        let id = renderer.append("name N", "name CA");
+        let def = &renderer.defs()[id as usize];
+        assert!((renderer.measure_value(def, &mol).unwrap() - 3.0).abs() < 1.0e-9);
+        assert_eq!(
+            renderer.measurement_lines(&mol),
+            vec![(Vector4::new3(1.0, 0.0, 0.0), Vector4::new3(1.0, 3.0, 0.0))]
+        );
+
+        let mut invalid = AtomIntrRenderer::new();
+        assert_eq!(invalid.append("(", "name CA"), -1);
+        assert!(invalid.defs().is_empty());
+    }
+
+    #[test]
     fn atom_intr_angle_arc_is_a_circular_sweep_at_the_vertex() {
         let mol = MolCoord::with_atoms(vec![
             intr_atom(1, 2.0, 0.0, 0.0), // arm 0 along +x
@@ -10948,10 +11023,29 @@ return cuemol.makeColor("#0000ff");
         atom_intr.set_client_mol_id(10);
         let angle_id = atom_intr.append_angle_by_id(1, 10, 2, 10, 3);
         let torsion_id = atom_intr.append_torsion_by_id(1, 10, 2, 10, 3, 10, 4);
+        assert_eq!((dist_id, angle_id, torsion_id), (0, 1, 2));
         assert_eq!(atom_intr.defs().len(), 3);
-        assert!(atom_intr.get_defs_json().contains("\"type\":\"torsion\""));
+        assert_eq!(
+            atom_intr.get_defs_json(),
+            "[{\"id\":0,\"mode\":1,\"a0\":\"name N\",\"a1\":\"name CA\"},{\"id\":1,\"mode\":2,\"a0\":\"1\",\"a1\":\"2\",\"a2\":\"3\"},{\"id\":2,\"mode\":3,\"a0\":\"1\",\"a1\":\"2\",\"a2\":\"3\",\"a3\":\"4\"}]"
+        );
         assert!(atom_intr.remove(angle_id));
-        assert!(!atom_intr.remove(angle_id));
+        assert!(atom_intr.remove(angle_id));
+        assert!(!atom_intr.remove(99));
+        assert!(!atom_intr.defs()[angle_id as usize].is_active());
+        assert_eq!(atom_intr.defs()[angle_id as usize].to_data().mode, 0);
+        assert_eq!(
+            atom_intr.get_defs_json(),
+            "[{\"id\":0,\"mode\":1,\"a0\":\"name N\",\"a1\":\"name CA\"},{\"id\":2,\"mode\":3,\"a0\":\"1\",\"a1\":\"2\",\"a2\":\"3\",\"a3\":\"4\"}]"
+        );
+        assert_eq!(
+            atom_intr.append_by_2vecs(Vector4::new3(1.0, 2.0, 3.0), Vector4::new3(4.0, 5.0, 6.0)),
+            3
+        );
+        assert!(atom_intr
+            .get_defs_json()
+            .contains("\"id\":3,\"mode\":1,\"a0\":\"(1.00,2.00,3.00)\""));
+        assert_eq!(atom_intr.append_by_id(7, 10, 7, true), -1);
         assert!(atom_intr.defs().iter().any(|def| def.id() == dist_id));
         assert!(atom_intr.defs().iter().any(|def| def.id() == torsion_id));
 
