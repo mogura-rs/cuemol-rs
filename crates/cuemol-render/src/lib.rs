@@ -2129,8 +2129,34 @@ impl LuxRendSceneExporter {
         size: f64,
         perspective: bool,
     ) -> String {
+        self.write_scene_string_with_background(mesh, center, size, perspective, [0.0; 3])
+    }
+
+    pub fn write_scene_string_with_background(
+        &self,
+        mesh: &RenderMesh,
+        center: Vector4,
+        size: f64,
+        perspective: bool,
+        background: [f32; 3],
+    ) -> String {
         let dist = (size * 3.0).max(1.0);
         let zoom = (size * 1.2).max(1.0);
+        let width = if self.state.base().width() > 0 {
+            self.state.base().width()
+        } else {
+            640
+        };
+        let height = if self.state.base().height() > 0 {
+            self.state.base().height()
+        } else {
+            480
+        };
+        let zoom_x = zoom * f64::from(width) / f64::from(height);
+        let fov_x = 2.0 * (zoom_x / (2.0 * dist)).atan().to_degrees();
+        let fov_y = 2.0 * (zoom / (2.0 * dist)).atan().to_degrees();
+        let fov = if height < width { fov_y } else { fov_x };
+        let perspective = perspective && fov >= 10.0;
         let mut out = String::new();
         out.push_str("# CueMol LuxRender exporter output\n\n");
         writeln!(
@@ -2145,30 +2171,71 @@ impl LuxRendSceneExporter {
         )
         .unwrap();
         if perspective {
-            out.push_str("Camera \"perspective\" \"float fov\" [45]\n");
+            writeln!(&mut out, "Camera \"perspective\" \"float fov\" [{fov:.6}]").unwrap();
+            writeln!(
+                &mut out,
+                "      \"float hither\" [{:.6}]",
+                (dist - size).max(0.0)
+            )
+            .unwrap();
         } else {
             writeln!(
                 &mut out,
                 "Camera \"orthographic\" \"float screenwindow\" [{:.6} {:.6} {:.6} {:.6}]",
-                -zoom / 2.0,
-                zoom / 2.0,
+                -zoom_x / 2.0,
+                zoom_x / 2.0,
                 -zoom / 2.0,
                 zoom / 2.0,
             )
             .unwrap();
         }
         out.push_str("Film \"fleximage\"\n");
-        out.push_str("     \"integer xresolution\" [640]\n");
-        out.push_str("     \"integer yresolution\" [480]\n");
+        writeln!(&mut out, "     \"integer xresolution\" [{width}]").unwrap();
+        writeln!(&mut out, "     \"integer yresolution\" [{height}]").unwrap();
+        if !self.output_base.is_empty() {
+            writeln!(
+                &mut out,
+                "     \"string filename\" [\"{}\"]",
+                self.output_base
+            )
+            .unwrap();
+        }
+        out.push_str("     \"bool premultiplyalpha\" [\"true\"]\n");
         out.push_str("     \"bool write_png\" [\"true\"]\n");
+        out.push_str("     \"bool write_exr\" [\"true\"]\n");
         out.push_str("     \"string write_png_channels\" [\"RGBA\"]\n");
-        writeln!(&mut out, "     \"integer haltspp\" [{}]", self.halt_spp()).unwrap();
-        out.push_str("PixelFilter \"mitchell\" \"float xwidth\" [2] \"float ywidth\" [2]\n");
+        out.push_str("     \"integer displayinterval\" [1]\n");
+        out.push_str("     \"integer writeinterval\" [60]\n");
+        if self.halt_spp > 0 {
+            writeln!(&mut out, "     \"integer haltspp\" [{}]", self.halt_spp).unwrap();
+        }
+        if !self.film_opts.is_empty() {
+            out.push_str(&self.film_opts);
+            if !self.film_opts.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+        out.push_str("PixelFilter \"mitchell\" \"float xwidth\" [2] \"float ywidth\" [2] \"bool supersample\" [\"true\"]\n");
         out.push_str("Sampler \"metropolis\"\n");
         out.push_str("\nWorldBegin\n\n");
-        out.push_str("AttributeBegin # Light\n");
-        out.push_str("LightSource \"distant\"\n  \"color L\" [1 1 1]\n");
-        out.push_str("AttributeEnd\n\n");
+        out.push_str("Texture \"utex\" \"float\" \"bilerp\"\n");
+        out.push_str("  \"float v00\" [0]\n");
+        out.push_str("  \"float v10\" [1]\n");
+        out.push_str("  \"float v01\" [0]\n");
+        out.push_str("  \"float v11\" [1]\n\n");
+        out.push_str("MakeNamedMaterial \"NullMat\" \"string type\" [\"null\"]\n\n");
+        write_lux_environment(
+            &mut out,
+            self.bg_mode,
+            mesh,
+            center,
+            size,
+            dist,
+            zoom_x,
+            zoom,
+            perspective,
+            background,
+        );
         out.push_str("Material \"matte\" \"color Kd\" [0.7 0.7 0.7]\n");
         out.push_str("AttributeBegin\n");
         out.push_str(&self.write_mesh_string(&mesh.positions(), &mesh.triangles()));
@@ -2261,11 +2328,224 @@ impl LuxRendSceneExporter {
         size: f64,
         perspective: bool,
     ) -> Result<()> {
-        let output = self.write_scene_string(mesh, center, size, perspective);
+        self.write_scene_file_with_background(mesh, center, size, perspective, [0.0; 3])
+    }
+
+    /// Write a complete LuxRender scene using the owning CueMol scene's
+    /// resolved background colour.
+    pub fn write_scene_file_with_background(
+        &mut self,
+        mesh: &RenderMesh,
+        center: Vector4,
+        size: f64,
+        perspective: bool,
+        background: [f32; 3],
+    ) -> Result<()> {
+        if self.output_base.is_empty() {
+            self.output_base = std::path::Path::new(self.handler().path())
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_owned();
+        }
+        let output =
+            self.write_scene_string_with_background(mesh, center, size, perspective, background);
         self.handler().write_string(&output)?;
         self.state.write();
         Ok(())
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_lux_environment(
+    out: &mut String,
+    mode: LuxBackgroundMode,
+    mesh: &RenderMesh,
+    center: Vector4,
+    size: f64,
+    view_dist: f64,
+    zoom_x: f64,
+    zoom_y: f64,
+    perspective: bool,
+    background: [f32; 3],
+) {
+    if mode != LuxBackgroundMode::Box {
+        out.push_str("AttributeBegin # Light\n");
+        out.push_str("LightSource \"distant\"\n");
+        out.push_str("  \"color L\" [1 1 1]\n");
+        out.push_str("  \"float gain\" [1000]\n");
+        out.push_str("  \"point from\" [-1 1 1]\n");
+        out.push_str("  \"point to\" [0 0 0]\n");
+        out.push_str("  \"float theta\" [20]\n");
+        out.push_str("AttributeEnd\n\n");
+    }
+    out.push_str("AttributeBegin # Infinite light\n");
+    out.push_str("LightSource \"infinite\" \"color L\" [1 1 1] \"float gain\" [0.1]\n");
+    out.push_str("AttributeEnd\n\n");
+
+    let slab_depth = size * 2.0;
+    let z_back = center.z - slab_depth;
+    if mode == LuxBackgroundMode::Wall {
+        let (half_x, half_y) = if perspective {
+            (
+                (slab_depth + view_dist) * zoom_x / (view_dist * 2.0),
+                (slab_depth + view_dist) * zoom_y / (view_dist * 2.0),
+            )
+        } else {
+            (zoom_x / 2.0, zoom_y / 2.0)
+        };
+        out.push_str("AttributeBegin # Background Wall\n");
+        out.push_str("Material \"matte\"\n");
+        writeln!(
+            out,
+            "    \"color Kd\" [{:.4} {:.4} {:.4}]",
+            background[0], background[1], background[2]
+        )
+        .unwrap();
+        write_lux_quad(
+            out,
+            [
+                [center.x - half_x, center.y + half_y, z_back],
+                [center.x - half_x, center.y - half_y, z_back],
+                [center.x + half_x, center.y - half_y, z_back],
+                [center.x + half_x, center.y + half_y, z_back],
+            ],
+        );
+        out.push_str("AttributeEnd\n\n");
+    }
+
+    if matches!(
+        mode,
+        LuxBackgroundMode::Transparent | LuxBackgroundMode::Wall
+    ) && !perspective
+    {
+        let scale = 10.0;
+        let half_x = zoom_x * scale / 2.0;
+        let half_z = slab_depth * scale;
+        let floor_y = center.y - zoom_y / 2.0;
+        out.push_str("AttributeBegin # Floor\n");
+        out.push_str("Material \"matte\"\n");
+        out.push_str("    \"color Kd\" [0.5 0.5 0.5]\n");
+        write_lux_quad(
+            out,
+            [
+                [center.x - half_x, floor_y, center.z - half_z],
+                [center.x - half_x, floor_y, center.z + half_z],
+                [center.x + half_x, floor_y, center.z + half_z],
+                [center.x + half_x, floor_y, center.z - half_z],
+            ],
+        );
+        out.push_str("AttributeEnd\n\n");
+    }
+
+    if mode != LuxBackgroundMode::Box {
+        return;
+    }
+
+    let mut start = Vector4::new3(center.x - size, center.y - size, center.z - size);
+    let mut end = Vector4::new3(center.x + size, center.y + size, center.z + size);
+    if let Some(first) = mesh.vertices.first() {
+        start = first.position;
+        end = first.position;
+        for vertex in &mesh.vertices[1..] {
+            let p = vertex.position;
+            start.x = start.x.min(p.x);
+            start.y = start.y.min(p.y);
+            start.z = start.z.min(p.z);
+            end.x = end.x.max(p.x);
+            end.y = end.y.max(p.y);
+            end.z = end.z.max(p.z);
+        }
+    }
+    let margin =
+        ((end.x - start.x).max(end.y - start.y).max(end.z - start.z) * 0.1).max(size * 0.01);
+    let z_back = start.z - margin;
+    let z_front = center.z;
+    let start_x = start.x - margin;
+    let start_y = start.y - margin;
+    let end_x = end.x + margin;
+    let end_y = end.y + margin;
+    let half_x = zoom_x / 2.0;
+    let half_y = zoom_y / 2.0;
+
+    out.push_str("AttributeBegin # Light\n");
+    out.push_str("LightSource \"distant\"\n");
+    out.push_str("  \"color L\" [1 1 1]\n");
+    out.push_str("  \"float gain\" [1]\n");
+    out.push_str("  \"point from\" [-1 1 1]\n");
+    out.push_str("  \"point to\" [0 0 0]\n");
+    out.push_str("  \"float theta\" [20]\n");
+    out.push_str("AttributeEnd\n\n");
+    out.push_str("AttributeBegin # SpotLight\n");
+    writeln!(
+        out,
+        "Translate {:.6} {:.6} {:.6}",
+        center.x,
+        center.y + half_y + margin,
+        center.z + size
+    )
+    .unwrap();
+    out.push_str("AreaLightSource \"area\" \"float gain\" [10000] \"color L\" [1 1 1]\n");
+    writeln!(out, "Shape \"sphere\" \"float radius\" [{margin:.6}]").unwrap();
+    out.push_str("AttributeEnd\n\n");
+
+    out.push_str("AttributeBegin # Background Box\n");
+    out.push_str("Material \"matte\"\n");
+    writeln!(
+        out,
+        "    \"color Kd\" [{:.4} {:.4} {:.4}]",
+        background[0], background[1], background[2]
+    )
+    .unwrap();
+    if !perspective {
+        let quads = [
+            [
+                [start_x, end_y, z_back],
+                [start_x, start_y, z_back],
+                [end_x, start_y, z_back],
+                [end_x, end_y, z_back],
+            ],
+            [
+                [start_x, end_y, z_back],
+                [end_x, end_y, z_back],
+                [center.x + half_x, center.y + half_y, z_front],
+                [center.x - half_x, center.y + half_y, z_front],
+            ],
+            [
+                [start_x, start_y, z_back],
+                [end_x, start_y, z_back],
+                [center.x + half_x, center.y - half_y, z_front],
+                [center.x - half_x, center.y - half_y, z_front],
+            ],
+            [
+                [start_x, end_y, z_back],
+                [start_x, start_y, z_back],
+                [center.x - half_x, center.y - half_y, z_front],
+                [center.x - half_x, center.y + half_y, z_front],
+            ],
+            [
+                [end_x, start_y, z_back],
+                [end_x, end_y, z_back],
+                [center.x + half_x, center.y + half_y, z_front],
+                [center.x + half_x, center.y - half_y, z_front],
+            ],
+        ];
+        for quad in quads {
+            write_lux_quad(out, quad);
+        }
+    }
+    out.push_str("AttributeEnd\n\n");
+}
+
+fn write_lux_quad(out: &mut String, points: [[f64; 3]; 4]) {
+    out.push_str("Shape \"mesh\"\n  \"point P\" [");
+    for (index, point) in points.iter().enumerate() {
+        if index > 0 {
+            out.push_str("  ");
+        }
+        writeln!(out, "{:.6} {:.6} {:.6}", point[0], point[1], point[2]).unwrap();
+    }
+    out.push_str("  ]\n  \"integer quadindices\" [0 1 2 3]\n");
 }
 
 impl Default for LuxRendSceneExporter {
@@ -4152,10 +4432,86 @@ mod tests {
         assert!(lxs.contains("Camera \"orthographic\""));
         assert!(lxs.contains("Film \"fleximage\""));
         assert!(lxs.contains("WorldBegin"));
+        assert!(lxs.contains("Texture \"utex\" \"float\" \"bilerp\""));
+        assert!(lxs.contains("MakeNamedMaterial \"NullMat\""));
         assert!(lxs.contains("LightSource \"distant\""));
         assert!(lxs.contains("Material \"matte\""));
         assert!(lxs.contains("Shape \"mesh\""));
         assert!(lxs.trim_end().ends_with("WorldEnd"));
+    }
+
+    #[test]
+    fn luxrender_scene_applies_film_and_background_settings() {
+        let center = Vector4::new3(2.0, 3.0, 4.0);
+        let snapshot = RenderSceneSnapshot {
+            atoms: vec![RenderAtom::new(center, 1.0, None)],
+            bonds: Vec::new(),
+            meshes: Vec::new(),
+            transparency_groups: Vec::new(),
+            bounds: None,
+        };
+        let mesh = tessellate_snapshot(&snapshot);
+        let mut exporter = LuxRendSceneExporter::new();
+        exporter.base_mut().set_width(800);
+        exporter.base_mut().set_height(400);
+        exporter.set_output_base("beauty");
+        exporter.set_film_opts("     \"bool write_resume_flm\" [\"true\"]");
+        exporter.set_halt_spp(0);
+
+        let transparent =
+            exporter.write_scene_string_with_background(&mesh, center, 4.0, true, [0.1, 0.2, 0.3]);
+        assert!(transparent.contains("\"integer xresolution\" [800]"));
+        assert!(transparent.contains("\"integer yresolution\" [400]"));
+        assert!(transparent.contains("\"string filename\" [\"beauty\"]"));
+        assert!(transparent.contains("\"bool write_resume_flm\" [\"true\"]"));
+        assert!(!transparent.contains("\"integer haltspp\""));
+        assert!(!transparent.contains("# Background Wall"));
+        assert!(!transparent.contains("# Background Box"));
+        assert!(!transparent.contains("# Floor"));
+
+        exporter.set_bg_mode(LuxBackgroundMode::Wall);
+        let wall =
+            exporter.write_scene_string_with_background(&mesh, center, 4.0, false, [0.1, 0.2, 0.3]);
+        assert!(wall.contains("# Background Wall"));
+        assert!(wall.contains("\"color Kd\" [0.1000 0.2000 0.3000]"));
+        assert!(wall.contains("# Floor"));
+        assert!(!wall.contains("# Background Box"));
+
+        exporter.set_bg_mode(LuxBackgroundMode::Box);
+        let boxed =
+            exporter.write_scene_string_with_background(&mesh, center, 4.0, false, [0.1, 0.2, 0.3]);
+        assert!(boxed.contains("# Background Box"));
+        assert!(boxed.contains("# SpotLight"));
+        assert_eq!(
+            boxed.matches("\"integer quadindices\" [0 1 2 3]").count(),
+            5
+        );
+        assert!(!boxed.contains("\"float gain\" [1000]\n"));
+    }
+
+    #[test]
+    fn luxrender_file_derives_output_base_from_scene_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "cuemol-render-lux-output-base-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("derived-name.lxs");
+        let mut exporter = LuxRendSceneExporter::new();
+        exporter.handler_mut().set_path(path.to_string_lossy());
+        exporter
+            .write_scene_file(&RenderMesh::new(), Vector4::ZERO, 4.0, false)
+            .unwrap();
+
+        assert_eq!(exporter.output_base(), "derived-name");
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("\"string filename\" [\"derived-name\"]"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

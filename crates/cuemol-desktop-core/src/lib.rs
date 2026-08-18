@@ -26578,33 +26578,56 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let id = native_scene_exporter_proxy_id(this, ctx)?;
-            let (render_scene, scene_name, camera) = script_env::with(|env| {
-                let exporter = env.native_scene_exporters.get(&id)?;
-                let scene_uid = exporter.base().client_scene()?.get();
-                let render_scene = env.render_scenes.get(&scene_uid)?.clone();
-                let camera_name = exporter.camera_name();
-                let camera = if camera_name.is_empty() {
-                    Some(render_scene.default_camera.clone())
-                } else {
-                    env.scenes
-                        .iter()
-                        .find(|scene| scene.uid == scene_uid)?
-                        .cameras
-                        .iter()
-                        .find(|camera| camera.name() == camera_name)
-                        .cloned()
-                }?;
-                let scene_name = env
-                    .scenes
-                    .iter()
-                    .find(|scene| scene.uid == scene_uid)
-                    .map(|scene| scene.name.clone())
-                    .unwrap_or_else(|| "scene".to_string());
-                Some((render_scene, scene_name, camera))
-            })
-            .ok_or_else(|| {
-                script_error("SceneExporter requires an attached scene and an available camera")
-            })?;
+            let (render_scene, scene_name, camera, scene_uid, background_spec) =
+                script_env::with(|env| {
+                    let exporter = env.native_scene_exporters.get(&id)?;
+                    let scene_uid = exporter.base().client_scene()?.get();
+                    let render_scene = env.render_scenes.get(&scene_uid)?.clone();
+                    let scene = env.scenes.iter().find(|scene| scene.uid == scene_uid);
+                    let camera_name = exporter.camera_name();
+                    let camera = if camera_name.is_empty() {
+                        Some(render_scene.default_camera.clone())
+                    } else {
+                        scene
+                            .as_ref()?
+                            .cameras
+                            .iter()
+                            .find(|camera| camera.name() == camera_name)
+                            .cloned()
+                    }?;
+                    let background_spec = if scene_uid == env.scene_uid {
+                        env.scene_attributes.get("bgcolor")
+                    } else {
+                        scene.and_then(|scene| scene.attributes.get("bgcolor"))
+                    }
+                    .cloned()
+                    .unwrap_or_else(|| "#000000".to_string());
+                    Some((
+                        render_scene,
+                        scene
+                            .map(|scene| scene.name.clone())
+                            .unwrap_or_else(|| "scene".to_string()),
+                        camera,
+                        scene_uid,
+                        background_spec,
+                    ))
+                })
+                .ok_or_else(|| {
+                    script_error("SceneExporter requires an attached scene and an available camera")
+                })?;
+            let background = resolve_script_color_in_scope(&background_spec, scene_uid).unwrap_or(
+                cuemol_gfx::Rgba8 {
+                    r: 0,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                },
+            );
+            let background = [
+                f32::from(background.r) / 255.0,
+                f32::from(background.g) / 255.0,
+                f32::from(background.b) / 255.0,
+            ];
             let mut exporter = script_env::with_mut(|env| env.native_scene_exporters.remove(&id))
                 .ok_or_else(|| script_error("SceneExporter is not available"))?;
             let mesh = cuemol_render::tessellate_snapshot(&render_scene.snapshot);
@@ -26689,12 +26712,14 @@ impl DesktopAppState {
                     exporter.write_scene_files(&scene_name, &mesh)
                 }
                 ScriptNativeSceneExporter::Stl(exporter) => exporter.write_mesh_file(&mesh),
-                ScriptNativeSceneExporter::LuxRend(exporter) => exporter.write_scene_file(
-                    &mesh,
-                    camera.center(),
-                    (camera.zoom() / 1.2).max(1.0),
-                    camera.is_perspective(),
-                ),
+                ScriptNativeSceneExporter::LuxRend(exporter) => exporter
+                    .write_scene_file_with_background(
+                        &mesh,
+                        camera.center(),
+                        (camera.zoom() / 1.2).max(1.0),
+                        camera.is_perspective(),
+                        background,
+                    ),
                 ScriptNativeSceneExporter::LuxCore(exporter) => exporter.write_scene_files(
                     &scene_name,
                     &mesh,
@@ -52645,10 +52670,15 @@ mod tests {
         let writes = paths
             .iter()
             .map(|(class_name, path)| {
+                let settings = if *class_name == "LuxRendSceneExporter" {
+                    "e.bgmode = 'wall';"
+                } else {
+                    ""
+                };
                 format!(
                     "var e = cuemol.{class_name}(); \
                      e.attach(scene); e.setPath({path:?}); \
-                     e.width = 320; e.height = 240; e.write();",
+                     e.width = 320; e.height = 240; {settings} e.write();",
                     path = path.to_string_lossy(),
                 )
             })
@@ -52674,6 +52704,7 @@ mod tests {
              var lux = cuemol.LuxCoreSceneExporter(); \
              lux.haltspp = 20; lux.filmopts = 'TONEMAP'; lux.bgmode = 'box'; \
              print('lux=' + lux.haltspp + ':' + lux.filmopts + ':' + lux.bgmode); \
+             scene.bgcolor = cuemol.makeColor('#123456'); \
              {writes}"
         );
         let mut app = DesktopAppState::new();
@@ -52690,6 +52721,9 @@ mod tests {
             assert!(path.is_file(), "missing {}", path.display());
             assert!(fs::metadata(path).unwrap().len() > 0);
         }
+        let lux_scene = fs::read_to_string(dir.join("scene.lxs")).unwrap();
+        assert!(lux_scene.contains("\"string filename\" [\"scene\"]"));
+        assert!(lux_scene.contains("\"color Kd\" [0.0706 0.2039 0.3373]"));
         assert!(dir.join("scene.scn").is_file());
         assert!(dir.join("scene.ply").is_file());
         fs::remove_dir_all(dir).unwrap();
