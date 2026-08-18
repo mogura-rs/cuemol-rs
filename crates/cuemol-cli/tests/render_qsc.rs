@@ -70,7 +70,7 @@ fn render_qsc_renders_saved_density_map_renderers() {
         String::from_utf8(cuemol_qsys::encode_qdf0_bytes(&qdf, 1, "13").unwrap()).unwrap();
     let qsc = format!(
         "<scene>\n\
-         <object type=\"DensityMap\" name=\"map\" src=\"datachunk:00000\" srctype=\"qdfmap\">\n\
+         <object type=\"DensityMap\" name=\"map\" src=\"datachunk:00000\" srctype=\"qdfmap\" xformMat=\"(1,0,0,0,0,1,0,0,0,0,1,0,20,0,0,1)\">\n\
          <renderer type=\"contour\" name=\"wire\" siglevel=\"0\"/>\n\
          <renderer type=\"isosurf\" name=\"solid\" siglevel=\"0\" color=\"#0000ff\" binning=\"2\" max_grids=\"77\" use_pbc=\"false\" colormode=\"multigrad\" color_mapname=\"map\">\n\
          <multi_grad><gradnode par=\"-1\"><col value=\"#ff0000\"/></gradnode><gradnode par=\"1\"><col value=\"#00ff00\"/></gradnode></multi_grad>\n\
@@ -99,6 +99,13 @@ fn render_qsc_renders_saved_density_map_renderers() {
     let obj = std::fs::read_to_string(&out).unwrap();
     assert!(obj.lines().any(|line| line.starts_with("v ")));
     assert!(obj.lines().any(|line| line.starts_with("f ")));
+    let min_x = obj
+        .lines()
+        .filter_map(|line| line.strip_prefix("v "))
+        .filter_map(|line| line.split_whitespace().next())
+        .filter_map(|value| value.parse::<f64>().ok())
+        .fold(f64::INFINITY, f64::min);
+    assert!(min_x > 4.0, "density transform was not applied: {min_x}");
     std::fs::remove_file(qsc_path).ok();
     std::fs::remove_file(out).ok();
 }

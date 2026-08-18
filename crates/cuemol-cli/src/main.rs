@@ -1113,6 +1113,15 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
         let Some(object_node) = loaded.qsc_node.as_ref() else {
             continue;
         };
+        if qsc_node_attr(object_node, "visible", &styles)
+            .as_deref()
+            .is_some_and(|value| !qsc_bool(value))
+        {
+            continue;
+        }
+        let object_xform = qsc_node_attr(object_node, "xformMat", &styles)
+            .and_then(|value| Matrix4::from_script_string(&value).ok())
+            .unwrap_or(Matrix4::IDENTITY);
         for renderer_node in object_node
             .children()
             .iter()
@@ -1192,6 +1201,10 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
             let material = qsc_node_attr(renderer_node, "material", &styles)
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "default".to_string());
+            let renderer_xform = qsc_node_attr(renderer_node, "xformMat", &styles)
+                .and_then(|value| Matrix4::from_script_string(&value).ok())
+                .unwrap_or(Matrix4::IDENTITY);
+            let xform = renderer_xform.mul_mat(object_xform);
             let color_map =
                 if color_mode == MapColorMode::MultiGradient && !color_mapname.is_empty() {
                     if color_mapname == loaded.name {
@@ -1256,6 +1269,9 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                         screen_point: false,
                         edge: None,
                     });
+                }
+                if xform != Matrix4::IDENTITY {
+                    snapshot.apply_xform(&xform);
                 }
                 apply_snapshot_renderer_properties(&mut snapshot, &renderer_name, alpha, &material);
                 total_bonds += snapshot.bond_count();
@@ -1384,6 +1400,9 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                         snapshot
                     }
                 };
+                if xform != Matrix4::IDENTITY {
+                    snapshot.apply_xform(&xform);
+                }
                 apply_snapshot_renderer_properties(&mut snapshot, &renderer_name, alpha, &material);
                 total_atoms += snapshot.atom_count();
                 total_bonds += snapshot.bond_count();
