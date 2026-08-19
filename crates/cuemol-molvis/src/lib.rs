@@ -6340,7 +6340,6 @@ fn mainchain_pivot_point(
     pivot_atom: Option<&str>,
 ) -> Option<(MainchainPoint, f64)> {
     let indices = residue.atom_indices();
-    let default_names = ["CA", "P", "C1'", "O5'"];
     let custom_name = pivot_atom.filter(|name| !name.trim().is_empty());
     let find_named = |name: &str| {
         for &index in indices {
@@ -6375,12 +6374,8 @@ fn mainchain_pivot_point(
     if let Some(name) = custom_name {
         return find_named(name);
     }
-    for name in default_names {
-        if let Some(point) = find_named(name) {
-            return Some(point);
-        }
-    }
-    None
+    let pivot = cuemol_molstr::toppar::TopoDB::global().pivot_atom(residue.name())?;
+    find_named(pivot)
 }
 
 const MAINCHAIN_PALETTE: [[f32; 4]; 6] = [
@@ -11254,6 +11249,23 @@ return cuemol.makeColor("#0000ff");
             collect_mainchain_pivots(&mol, None, Some("CB")).is_empty(),
             "an explicit missing pivot must not fall back to CA"
         );
+
+        let mut unknown = ca_atom(1, 0.0, 0.0, 0.0);
+        unknown.res_name = "UNK".to_string();
+        assert!(
+            collect_mainchain_pivots(&MolCoord::with_atoms(vec![unknown]), None, None).is_empty()
+        );
+
+        let mut nucleotide = Vec::new();
+        for (residue, x) in [(1, 0.0), (2, 6.0)] {
+            let mut phosphorus = sample_atom("P", "P", x, 0.0, 0.0);
+            phosphorus.res_name = "DA".to_string();
+            phosphorus.res_id = residue;
+            nucleotide.push(phosphorus);
+        }
+        let runs = collect_mainchain_pivots(&MolCoord::with_atoms(nucleotide), None, None);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].len(), 2);
 
         let mut no_pivot = sample_atom("CB", "C", 2.0, 0.0, 0.0);
         no_pivot.res_id = 2;
