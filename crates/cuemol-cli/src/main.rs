@@ -49,11 +49,15 @@ fn main() -> ExitCode {
 fn run() -> Result<(), String> {
     let mut args = env::args().skip(1);
     let Some(command) = args.next() else {
-        print_usage();
-        return Ok(());
+        return launch_default();
     };
 
     match command.as_str() {
+        "--help" | "-h" | "help" => {
+            print_usage();
+            Ok(())
+        }
+        "gui" => launch_gui(args.map(std::path::PathBuf::from).collect()),
         "pdb-info" => {
             let path = args.next().ok_or_else(|| "missing PDB path".to_string())?;
             let mol = read_pdb_file(path).map_err(|err| err.to_string())?;
@@ -673,6 +677,13 @@ fn run() -> Result<(), String> {
             println!("{}", selector.dump());
             Ok(())
         }
+        _ if is_input_path(&command) => {
+            let paths = std::iter::once(command)
+                .chain(args)
+                .map(std::path::PathBuf::from)
+                .collect();
+            launch_gui(paths)
+        }
         _ => {
             print_usage();
             Err(format!("unknown command: {command}"))
@@ -680,8 +691,37 @@ fn run() -> Result<(), String> {
     }
 }
 
+fn is_input_path(value: &str) -> bool {
+    let path = std::path::Path::new(value);
+    !value.starts_with('-')
+        && (path.exists() || path.components().count() > 1 || path.extension().is_some())
+}
+
+#[cfg(feature = "gui")]
+fn launch_default() -> Result<(), String> {
+    launch_gui(Vec::new())
+}
+
+#[cfg(not(feature = "gui"))]
+fn launch_default() -> Result<(), String> {
+    print_usage();
+    Ok(())
+}
+
+#[cfg(feature = "gui")]
+fn launch_gui(paths: Vec<std::path::PathBuf>) -> Result<(), String> {
+    cuemol_desktop::gui::run_with_paths(paths).map_err(|error| error.to_string())
+}
+
+#[cfg(not(feature = "gui"))]
+fn launch_gui(_: Vec<std::path::PathBuf>) -> Result<(), String> {
+    Err("GUI support is not enabled in this build".to_string())
+}
+
 fn print_usage() {
     eprintln!("Usage:");
+    eprintln!("  cuemol [file ...]");
+    eprintln!("  cuemol gui [file ...]");
     eprintln!("  cuemol pdb-info <file.pdb>");
     eprintln!("  cuemol qdfpdb-info <file.qdfpdb>");
     eprintln!("  cuemol pdb-write <file.pdb>");

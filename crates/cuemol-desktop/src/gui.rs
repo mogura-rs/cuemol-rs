@@ -177,11 +177,15 @@ const LEGACY_MENU_SURFACES: &[&str] = &[
 ];
 
 pub fn run() -> Result<()> {
+    run_with_paths(std::env::args_os().skip(1).map(PathBuf::from).collect())
+}
+
+pub fn run_with_paths(paths: Vec<PathBuf>) -> Result<()> {
     install_panic_hook();
     spawn_process_exit_timer_from_env();
     let event_loop = EventLoop::new().map_err(gui_error)?;
     event_loop.set_control_flow(ControlFlow::Wait);
-    let mut runner = NativeRunner::new(event_loop.create_proxy());
+    let mut runner = NativeRunner::new(event_loop.create_proxy(), paths);
     let run_result = event_loop.run_app(&mut runner).map_err(gui_error);
     let init_error = runner.init_error.take();
     std::mem::forget(runner);
@@ -271,12 +275,13 @@ struct NativeRunner {
     event_proxy: EventLoopProxy<()>,
     app: Option<GuiApplication>,
     init_error: Option<CueMolError>,
+    startup_paths: Vec<PathBuf>,
     started_at: Instant,
     exit_after: Option<Duration>,
 }
 
 impl NativeRunner {
-    fn new(event_proxy: EventLoopProxy<()>) -> Self {
+    fn new(event_proxy: EventLoopProxy<()>, startup_paths: Vec<PathBuf>) -> Self {
         Self {
             window: None,
             egui_ctx: egui::Context::default(),
@@ -287,6 +292,7 @@ impl NativeRunner {
             event_proxy,
             app: None,
             init_error: None,
+            startup_paths,
             started_at: Instant::now(),
             exit_after: exit_after_from_env(),
         }
@@ -575,6 +581,12 @@ impl NativeRunner {
     fn about_to_wait_impl(&mut self, event_loop: &ActiveEventLoop) {
         self.poll_gpu_init(event_loop);
         self.poll_config_init(event_loop);
+        if let (Some(app), Some(gpu)) = (&mut self.app, &mut self.gpu) {
+            for path in std::mem::take(&mut self.startup_paths) {
+                app.open_path = path.to_string_lossy().into_owned();
+                app.open_current_path(&mut gpu.camera);
+            }
+        }
         if self.should_exit_now() {
             event_loop.exit();
         }
@@ -5073,6 +5085,19 @@ impl GuiApplication {
             Err(error) => app.status = format!("Config load failed: {error}"),
         }
         app.load_command_history();
+        match crate::run_startup_script(&mut app.state) {
+            Ok(Some((log, selection))) => {
+                app.log_lines.extend(log.lines().map(str::to_string));
+                if let Some(selection) = selection {
+                    app.selection_text = selection;
+                }
+                app.rebuild_snapshot();
+            }
+            Ok(None) => {}
+            Err(error) => {
+                app.set_status(format!("Startup script error: {error}"));
+            }
+        }
         app
     }
 
@@ -34914,9 +34939,9 @@ fn sanitize_filename(value: &str) -> String {
 }
 
 fn default_user_dir(name: &str) -> String {
-    std::env::var("HOME")
-        .map(|home| format!("{home}/.cuemol2/{name}"))
-        .unwrap_or_else(|_| name.to_string())
+    crate::configuration_path(name)
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn list_directory_entries(directory: &str) -> std::io::Result<Vec<String>> {
@@ -35294,30 +35319,9 @@ fn validate_native_preferences(preferences: &NativePreferences) -> std::result::
 }
 
 fn default_config_path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("CUEMOL2_CONFIG_FILE") {
-        return Some(PathBuf::from(path));
-    }
-    if cfg!(target_os = "windows") {
-        return std::env::var_os("APPDATA")
-            .map(PathBuf::from)
-            .map(|path| path.join("CueMol2").join("config.tsv"));
-    }
-    if cfg!(target_os = "macos") {
-        return std::env::var_os("HOME").map(PathBuf::from).map(|path| {
-            path.join("Library")
-                .join("Application Support")
-                .join("CueMol2")
-                .join("config.tsv")
-        });
-    }
-    std::env::var_os("XDG_CONFIG_HOME")
+    std::env::var_os("CUEMOL2_CONFIG_FILE")
         .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .map(|path| path.join(".config"))
-        })
-        .map(|path| path.join("cuemol2").join("config.tsv"))
+        .or_else(|| Some(crate::configuration_path("config.tsv")))
 }
 
 #[cfg(test)]

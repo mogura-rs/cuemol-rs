@@ -1239,6 +1239,7 @@ name = "cuemol-cli"
 version = "0.1.0"
 dependencies = [
  "cuemol-core",
+ "cuemol-desktop",
  "cuemol-gfx",
  "cuemol-lwview",
  "cuemol-mdtools",

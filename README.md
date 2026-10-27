@@ -31,6 +31,23 @@ only.
 - `cuemol-node`: Node.js binding facade
 - `cuemol-py`: Python binding facade
 
+## Launch
+
+Build the unified command with the native wgpu interface:
+
+```sh
+cargo build -p cuemol-cli --features gui
+cargo run -p cuemol-cli --features gui -- example.pdb
+cargo run -p cuemol-cli -- --help
+```
+
+Without the `gui` feature the command provides the headless utilities only.
+The default configuration directory is `$XDG_CONFIG_HOME/cuemol`, or
+`~/.config/cuemol` when `XDG_CONFIG_HOME` is unset. `CUEMOL_CONFIG_DIR`
+overrides that directory. Place JavaScript commands in `startup.js` in that
+directory to run them in the embedded script engine when the GUI starts.
+Startup runs before command-line files are opened.
+
 ## Development
 
 ```sh

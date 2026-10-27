@@ -1710,6 +1710,14 @@ impl AppModel {
             }
         }
         desktop.ensure_active_scene();
+        let (startup_log, startup_selection) = match crate::run_startup_script(&mut desktop) {
+            Ok(Some((log, selection))) => (log, selection),
+            Ok(None) => (String::new(), None),
+            Err(error) => {
+                failures.push(format!("startup script: {error}"));
+                (String::new(), None)
+            }
+        };
         let mut loaded = 0usize;
         for path in open_paths {
             match desktop.open_path(&path) {
@@ -1736,7 +1744,7 @@ impl AppModel {
             mesh: None,
             screen_lines: Vec::new(),
             mesh_refit_pending: loaded > 0,
-            selection: String::new(),
+            selection: startup_selection.unwrap_or_default(),
             background: "black".to_string(),
             show_unit_cell: false,
             show_symmetry_mates: false,
@@ -1765,7 +1773,7 @@ impl AppModel {
             pov_render_job: None,
             pov_render_result: None,
             animation_render_job: None,
-            log_lines: Vec::new(),
+            log_lines: startup_log.lines().map(str::to_string).collect(),
             status,
         };
         model.apply_stored_preferences();
@@ -8800,30 +8808,9 @@ fn validate_shortcuts(shortcuts: &[ShortcutDto]) -> Result<(), String> {
 }
 
 fn default_config_path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("CUEMOL2_CONFIG_FILE") {
-        return Some(PathBuf::from(path));
-    }
-    if cfg!(target_os = "windows") {
-        return std::env::var_os("APPDATA")
-            .map(PathBuf::from)
-            .map(|path| path.join("CueMol2").join("config.tsv"));
-    }
-    if cfg!(target_os = "macos") {
-        return std::env::var_os("HOME").map(PathBuf::from).map(|path| {
-            path.join("Library")
-                .join("Application Support")
-                .join("CueMol2")
-                .join("config.tsv")
-        });
-    }
-    std::env::var_os("XDG_CONFIG_HOME")
+    std::env::var_os("CUEMOL2_CONFIG_FILE")
         .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .map(|path| path.join(".config"))
-        })
-        .map(|path| path.join("cuemol2").join("config.tsv"))
+        .or_else(|| Some(crate::configuration_path("config.tsv")))
 }
 
 fn vector3_array(value: Vector4) -> [f64; 3] {

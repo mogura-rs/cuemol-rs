@@ -215,32 +215,46 @@ pub(crate) fn normalize_pdb_id(value: &str) -> std::result::Result<String, Strin
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 fn configuration_path(filename: &str) -> PathBuf {
-    let root = std::env::var_os("CUEMOL2_CONFIG_DIR")
+    let root = std::env::var_os("CUEMOL_CONFIG_DIR")
+        .or_else(|| std::env::var_os("CUEMOL2_CONFIG_DIR"))
         .map(PathBuf::from)
         .or_else(|| {
-            if cfg!(target_os = "windows") {
-                std::env::var_os("APPDATA")
-                    .map(PathBuf::from)
-                    .map(|path| path.join("CueMol2"))
-            } else if cfg!(target_os = "macos") {
-                std::env::var_os("HOME").map(PathBuf::from).map(|path| {
-                    path.join("Library")
-                        .join("Application Support")
-                        .join("CueMol2")
+            std::env::var_os("XDG_CONFIG_HOME")
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+                .or_else(|| {
+                    std::env::var_os("HOME")
+                        .or_else(|| std::env::var_os("USERPROFILE"))
+                        .map(PathBuf::from)
+                        .map(|path| path.join(".config"))
                 })
-            } else {
-                std::env::var_os("XDG_CONFIG_HOME")
-                    .map(PathBuf::from)
-                    .map(|path| path.join("cuemol2"))
-                    .or_else(|| {
-                        std::env::var_os("HOME")
-                            .map(PathBuf::from)
-                            .map(|path| path.join(".config").join("cuemol2"))
-                    })
-            }
+                .map(|path| path.join("cuemol"))
         })
-        .unwrap_or_else(|| std::env::temp_dir().join("cuemol2"));
+        .unwrap_or_else(|| std::env::temp_dir().join("cuemol"));
     root.join(filename)
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+fn run_startup_script(
+    state: &mut DesktopAppState,
+) -> std::result::Result<Option<(String, Option<String>)>, String> {
+    run_startup_script_at(state, &configuration_path("startup.js"))
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+fn run_startup_script_at(
+    state: &mut DesktopAppState,
+    path: &Path,
+) -> std::result::Result<Option<(String, Option<String>)>, String> {
+    let source = match std::fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("{}: {error}", path.display())),
+    };
+    state
+        .run_script_js(&source)
+        .map(Some)
+        .map_err(|error| format!("{}: {error}", path.display()))
 }
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
@@ -930,6 +944,22 @@ pub mod tauri_app;
 mod download_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn startup_script_runs_and_reports_errors() {
+        let path =
+            std::env::temp_dir().join(format!("cuemol-startup-test-{}.js", std::process::id()));
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        assert!(run_startup_script_at(&mut app, &path).unwrap().is_none());
+        std::fs::write(&path, "cuemol.print('startup'); cuemol.select('chain A');").unwrap();
+        let (log, selection) = run_startup_script_at(&mut app, &path).unwrap().unwrap();
+        assert!(log.contains("startup"));
+        assert_eq!(selection.as_deref(), Some("chain A"));
+        std::fs::write(&path, "this is not javascript ((").unwrap();
+        assert!(run_startup_script_at(&mut app, &path).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn pdb_id_validation_matches_the_reference_dialog() {

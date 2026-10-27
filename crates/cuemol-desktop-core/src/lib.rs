@@ -11796,12 +11796,53 @@ impl DesktopAppState {
             .object(object_uid)
             .is_some_and(|object| object.renderers().is_empty())
         {
-            let _ = self.new_renderer(scene_uid, object_uid, "simple", "simple");
+            self.create_default_molecule_renderers(scene_uid, object_uid)?;
         }
         Ok(GuiLoadedPath::Object {
             scene_uid,
             object_uid,
         })
+    }
+
+    fn create_default_molecule_renderers(&mut self, scene_uid: Uid, object_uid: Uid) -> Result<()> {
+        let styles = [
+            ("ribbon", "protein", "rprop type=prot"),
+            ("nucl", "nucleic", "rprop type=nucl"),
+            (
+                "ballstick",
+                "other",
+                "!rprop type=prot and !rprop type=nucl",
+            ),
+        ];
+        let selections = styles
+            .iter()
+            .map(|(_, _, selection)| parse_selector(selection))
+            .collect::<Result<Vec<_>>>()?;
+        let present = {
+            let object = self
+                .scene_manager()
+                .object(object_uid)
+                .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+            selections
+                .iter()
+                .map(|selection| {
+                    object
+                        .mol()
+                        .atoms()
+                        .iter()
+                        .any(|atom| selection.matches_in_molecule(atom, object.mol()))
+                })
+                .collect::<Vec<_>>()
+        };
+        for ((renderer_type, name, selection), present) in styles.iter().zip(present) {
+            if present {
+                let uid = self
+                    .new_renderer(scene_uid, object_uid, *renderer_type, *name)?
+                    .result_renderer;
+                self.set_renderer_selection_text(object_uid, uid, selection)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn path_supports_molecule_renderer_setup(&self, path: impl AsRef<Path>) -> Result<bool> {
@@ -62007,6 +62048,37 @@ end_header
             restricted > 0 && restricted < full,
             "a sel'd trace should cover fewer residues: full={full} restricted={restricted}"
         );
+    }
+
+    #[test]
+    fn opening_molecules_creates_representation_by_residue_type() {
+        let Some(root) = reference_test_data_root() else {
+            return;
+        };
+        for (file, expected) in [
+            ("1CRN.pdb", "ribbon"),
+            ("1ehz_rna.pdb", "nucl"),
+            ("test1.sdf", "ballstick"),
+        ] {
+            let mut app = DesktopAppState::new();
+            let GuiLoadedPath::Object { object_uid, .. } = app.open_path(root.join(file)).unwrap()
+            else {
+                panic!("expected a molecule for {file}");
+            };
+            let object = app.scene_manager().object(object_uid).unwrap();
+            assert!(
+                object
+                    .renderers()
+                    .iter()
+                    .any(|renderer| renderer.renderer_type() == expected),
+                "{file}: {expected}"
+            );
+            let snapshot = app.active_render_snapshot("").unwrap();
+            assert!(
+                snapshot.atom_count() + snapshot.bond_count() > 0 || !snapshot.meshes.is_empty(),
+                "{file} has no visible geometry"
+            );
+        }
     }
 
     #[test]
