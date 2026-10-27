@@ -61110,8 +61110,8 @@ end_header
         // The GUI render snapshot must honour a renderer's `style="..."` preset,
         // not just its per-type defaults (the gap this closes — both front ends
         // route geometry through `active_render_snapshot`). Discriminator: a
-        // ballstick renderer draws bonds at the 0.08 type default until tagged with
-        // `DefaultBallStick`, whose bundled preset is bondw=0.2 / sphr=0.3.
+        // ballstick renderer draws bonds at the 0.2 type default until tagged with
+        // `ThickBallStick`, whose bundled preset is bondw=0.3 / sphr=0.5.
         let Some(root) = reference_test_data_root() else {
             return;
         };
@@ -61129,40 +61129,40 @@ end_header
         app.reset_renderer_property(object, renderer, "style")
             .unwrap();
 
-        // Before styling: the hardcoded per-type ballstick look (bond radius 0.08).
+        // Before styling: the hardcoded per-type ballstick look (bond radius 0.2).
         let before = app.active_render_snapshot("").unwrap();
         assert!(before.bond_count() > 0, "ballstick should draw bonds");
         assert!(
-            (before.bonds[0].radius - 0.08).abs() < 1e-6,
-            "unstyled ballstick bond radius should be the 0.08 default, got {}",
+            (before.bonds[0].radius - 0.2).abs() < 1e-6,
+            "unstyled ballstick bond radius should be the 0.2 default, got {}",
             before.bonds[0].radius
         );
 
-        // Tag the renderer with the bundled DefaultBallStick preset.
+        // Tag the renderer with the bundled ThickBallStick preset.
         app.scene_manager_mut()
             .object_mut(object)
             .unwrap()
             .renderer_mut(renderer)
             .unwrap()
-            .set_qsc_attr("style", "DefaultBallStick");
+            .set_qsc_attr("style", "ThickBallStick");
 
-        // After styling: every bond at the preset bondw=0.2 and every atom forced
-        // to the absolute sphr=0.3 (atom_radius_abs overrides the vdW-scaled radius).
+        // After styling: every bond at the preset bondw=0.3 and every atom forced
+        // to the absolute sphr=0.5 (atom_radius_abs overrides the vdW-scaled radius).
         let after = app.active_render_snapshot("").unwrap();
         assert!(
             after
                 .bonds
                 .iter()
-                .all(|bond| (bond.radius - 0.2).abs() < 1e-6),
-            "styled bonds should all be bondw=0.2, first was {}",
+                .all(|bond| (bond.radius - 0.3).abs() < 1e-6),
+            "styled bonds should all be bondw=0.3, first was {}",
             after.bonds[0].radius
         );
         assert!(
             after
                 .atoms
                 .iter()
-                .all(|atom| (atom.radius - 0.3).abs() < 1e-6),
-            "styled atoms should all be the absolute sphr=0.3, first was {}",
+                .all(|atom| (atom.radius - 0.5).abs() < 1e-6),
+            "styled atoms should all be the absolute sphr=0.5, first was {}",
             after.atoms[0].radius
         );
 
@@ -63049,7 +63049,9 @@ end_header
         }
         let mut pdb = String::new();
         for (resid, base_x) in [(1, 0.0), (2, 5.0)] {
-            let serial = (resid - 1) * 3;
+            let serial = (resid - 1) * 4;
+            pdb.push_str(&pdb_atom(serial + 4, "P", "G", resid, base_x, 0.0, 1.0));
+            pdb.push('\n');
             pdb.push_str(&pdb_atom(serial + 1, "C1'", "G", resid, base_x, 0.0, 0.0));
             pdb.push('\n');
             pdb.push_str(&pdb_atom(

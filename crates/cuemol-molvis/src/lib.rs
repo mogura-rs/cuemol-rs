@@ -3505,7 +3505,7 @@ pub struct MoleculeRenderOptions {
     pub cartoon_helix_ribbon: bool,
     pub cartoon_helix_width: f64,
     pub cartoon_helix_width_plus: f64,
-    /// Custom MainChainRenderer pivot atom name. `None` uses CA/P/C1'/O5'.
+    /// Custom MainChainRenderer pivot atom name. `None` uses the topology pivot.
     pub pivot_atom: Option<String>,
     /// Interpolate renderer colors along each spline interval.
     pub smooth_color: bool,
