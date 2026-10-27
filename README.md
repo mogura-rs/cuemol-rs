@@ -31,6 +31,19 @@ only.
 - `cuemol-node`: Node.js binding facade
 - `cuemol-py`: Python binding facade
 
+## Installation
+
+After a release is published, install the command on Linux or macOS with:
+
+```sh
+curl -LsSf https://raw.githubusercontent.com/mogura-rs/cuemol2-rs/main/install.sh | sh
+```
+
+The installer verifies the release checksum and installs to `~/.local/bin`.
+Set `CUEMOL_INSTALL_DIR` to change the destination. Run `cuemol self-upgrade`
+to update the installed Unix binary. Release artifacts also include a macOS
+application bundle and a Windows binary.
+
 ## Launch
 
 Build the unified command with the native wgpu interface:

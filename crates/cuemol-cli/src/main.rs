@@ -58,6 +58,11 @@ fn run() -> Result<(), String> {
             Ok(())
         }
         "gui" => launch_gui(args.map(std::path::PathBuf::from).collect()),
+        "--version" | "-V" => {
+            println!("cuemol {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
+        "self-upgrade" => self_upgrade(),
         "pdb-info" => {
             let path = args.next().ok_or_else(|| "missing PDB path".to_string())?;
             let mol = read_pdb_file(path).map_err(|err| err.to_string())?;
@@ -718,8 +723,48 @@ fn launch_gui(_: Vec<std::path::PathBuf>) -> Result<(), String> {
     Err("GUI support is not enabled in this build".to_string())
 }
 
+#[cfg(unix)]
+fn self_upgrade() -> Result<(), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let directory = executable
+        .parent()
+        .ok_or("cannot determine installation directory")?;
+    let mut command = Command::new("sh");
+    command
+        .arg("-s")
+        .env("CUEMOL_INSTALL_DIR", directory)
+        .stdin(Stdio::piped());
+    if std::env::var_os("CUEMOL_RELEASE_REPOSITORY").is_none() {
+        if let Some(repository) = option_env!("CUEMOL_RELEASE_REPOSITORY") {
+            command.env("CUEMOL_RELEASE_REPOSITORY", repository);
+        }
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to start installer: {error}"))?;
+    let mut input = child.stdin.take().ok_or("installer stdin is unavailable")?;
+    input
+        .write_all(include_bytes!("../../../install.sh"))
+        .map_err(|error| format!("failed to send installer: {error}"))?;
+    drop(input);
+    let status = child.wait().map_err(|error| error.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("self-upgrade failed: {status}"))
+    }
+}
+
+#[cfg(not(unix))]
+fn self_upgrade() -> Result<(), String> {
+    Err("self-upgrade is not available on this platform".to_string())
+}
+
 fn print_usage() {
     eprintln!("Usage:");
+    eprintln!("  cuemol self-upgrade");
     eprintln!("  cuemol [file ...]");
     eprintln!("  cuemol gui [file ...]");
     eprintln!("  cuemol pdb-info <file.pdb>");

@@ -1,0 +1,31 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Test core, trajectory, and CLI
+        run: cargo test --locked -p cuemol-core -p cuemol-mdtools -p cuemol-cli -p cuemol-desktop-core
+      - name: Test installer and self-upgrade
+        run: |
+          cargo build --locked -p cuemol-cli
+          scripts/test-install.sh target/debug/cuemol
