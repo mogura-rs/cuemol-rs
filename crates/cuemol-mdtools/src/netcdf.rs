@@ -1108,8 +1108,8 @@ mod tests {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct NetcdfFileLayout {
+#[derive(Debug, Clone)]
+pub struct NetcdfFileLayout {
     header: Netcdf3InStream<'static>,
     count: usize,
 }
@@ -1125,35 +1125,7 @@ impl NetcdfFileLayout {
             let mut header = Netcdf3InStream::new(&bytes);
             match header.parse_header() {
                 Ok(()) => {
-                    if header.convention() != "AMBER"
-                        || header.atom_count == 0
-                        || header.record_size == 0
-                    {
-                        return Err(CueMolError::parse("not an AMBER NetCDF trajectory"));
-                    }
-                    let start = header.record_data_start as u64;
-                    let size = header.record_size as u64;
-                    if len < start {
-                        return Err(CueMolError::parse("truncated NetCDF header"));
-                    }
-                    let available = (len - start) / size;
-                    let count = if header.streaming {
-                        available
-                    } else {
-                        header.record_count
-                    };
-                    if count > available
-                        || (header.streaming && !(len - start).is_multiple_of(size))
-                    {
-                        return Err(CueMolError::parse("truncated NetCDF records"));
-                    }
-                    let count = usize::try_from(count)
-                        .map_err(|_| CueMolError::parse("NetCDF frame count overflow"))?;
-                    let header = Netcdf3InStream {
-                        input: &[],
-                        ..header
-                    };
-                    return Ok(Self { header, count });
+                    return Self::from_header(&bytes, len);
                 }
                 Err(error) if n == 0 || bytes.len() >= 16 * 1024 * 1024 => return Err(error),
                 Err(_) => {}
@@ -1161,10 +1133,50 @@ impl NetcdfFileLayout {
         }
     }
 
-    pub(crate) fn atom_count(&self) -> usize {
+    pub fn from_header(bytes: &[u8], len: u64) -> Result<Self> {
+        let mut header = Netcdf3InStream::new(bytes);
+        header.parse_header()?;
+        if header.convention() != "AMBER" || header.atom_count == 0 || header.record_size == 0 {
+            return Err(CueMolError::parse("not an AMBER NetCDF trajectory"));
+        }
+        let start = header.record_data_start as u64;
+        let size = header.record_size as u64;
+        if len < start {
+            return Err(CueMolError::parse("truncated NetCDF header"));
+        }
+        let available = (len - start) / size;
+        let count = if header.streaming {
+            available
+        } else {
+            header.record_count
+        };
+        if count > available || (header.streaming && !(len - start).is_multiple_of(size)) {
+            return Err(CueMolError::parse("truncated NetCDF records"));
+        }
+        let count = usize::try_from(count)
+            .map_err(|_| CueMolError::parse("NetCDF frame count overflow"))?;
+        let header = Netcdf3InStream {
+            input: &[],
+            ..header
+        };
+        Ok(Self { header, count })
+    }
+
+    pub fn frame_span(&self, index: usize) -> Result<(u64, usize)> {
+        if index >= self.count {
+            return Err(CueMolError::invalid_argument("NetCDF frame out of range"));
+        }
+        let offset = (index as u64)
+            .checked_mul(self.header.record_size as u64)
+            .and_then(|n| n.checked_add(self.header.record_data_start as u64))
+            .ok_or_else(|| CueMolError::parse("NetCDF offset overflow"))?;
+        Ok((offset, self.header.record_size))
+    }
+
+    pub fn atom_count(&self) -> usize {
         self.header.atom_count
     }
-    pub(crate) fn frame_count(&self) -> usize {
+    pub fn frame_count(&self) -> usize {
         self.count
     }
 
@@ -1181,6 +1193,10 @@ impl NetcdfFileLayout {
         file.seek(SeekFrom::Start(offset))?;
         let mut bytes = vec![0; self.header.record_size];
         file.read_exact(&mut bytes)?;
+        self.decode_frame(&bytes)
+    }
+
+    pub fn decode_frame(&self, bytes: &[u8]) -> Result<crate::TrajectoryFrame> {
         let mut frame_reader = Netcdf3InStream {
             input: &bytes,
             record_data_start: 0,

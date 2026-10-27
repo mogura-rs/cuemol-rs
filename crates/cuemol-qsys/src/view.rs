@@ -1119,8 +1119,8 @@ impl fmt::Display for View {
 }
 
 fn current_time_millis() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    cuemol_core::clock::SystemTime::now()
+        .duration_since(cuemol_core::clock::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_millis() as i64)
 }
 

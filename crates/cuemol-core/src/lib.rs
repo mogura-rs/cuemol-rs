@@ -3,6 +3,8 @@ pub mod bsp_tree;
 pub mod byte_array;
 pub mod cell;
 pub mod cif;
+pub mod clock;
+pub mod compressed;
 pub mod data_source;
 pub mod dom;
 pub mod error;

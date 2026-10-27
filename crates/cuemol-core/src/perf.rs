@@ -1,6 +1,6 @@
+use crate::clock::{Duration, Instant};
 use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
 
 pub const PM_IDLE_TIMER: i32 = 0;
 pub const PM_DRAW_SCENE: i32 = 1;

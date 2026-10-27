@@ -26,3 +26,5 @@ crates/cuemol-desktop/gen/
 dist/
 web/pkg/
 web/node_modules/
+web/test-results/
+web/playwright-report/

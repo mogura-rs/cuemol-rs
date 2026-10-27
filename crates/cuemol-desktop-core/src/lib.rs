@@ -58,8 +58,11 @@ use std::sync::{Mutex, OnceLock};
 // Offscreen wgpu mesh renderer (verifiable headless; the wgpu 3D component every
 // front end composites). Behind the `offscreen` feature so the default build is
 // GPU-free; GUI crates that show a 3D view enable it.
+mod memory_io;
 #[cfg(feature = "offscreen")]
 pub mod offscreen;
+#[cfg(feature = "offscreen")]
+pub mod viewport;
 
 /// Public molecular renderer types shown by CueMol2's renderer setup dialog.
 /// Internal `*` renderers and test-only renderers are intentionally excluded.
@@ -402,18 +405,22 @@ impl GuiTrajectoryFrames {
         }
     }
 
-    fn frame(&self, index: usize) -> Result<Vec<Vector4>> {
+    fn frame_with_cell(&self, index: usize) -> Result<(Vec<Vector4>, Option<[f64; 6]>)> {
         match self {
             Self::Memory(frames) => frames
                 .get(index)
                 .cloned()
+                .map(|frame| (frame, None))
                 .ok_or_else(|| CueMolError::not_found("trajectory frame")),
-            Self::File(file) => Ok(file
-                .read_frame(index)?
-                .coordinates
-                .chunks_exact(3)
-                .map(|xyz| Vector4::new3(xyz[0] as f64, xyz[1] as f64, xyz[2] as f64))
-                .collect()),
+            Self::File(file) => {
+                let frame = file.read_frame(index)?;
+                let positions = frame
+                    .coordinates
+                    .chunks_exact(3)
+                    .map(|xyz| Vector4::new3(xyz[0] as f64, xyz[1] as f64, xyz[2] as f64))
+                    .collect();
+                Ok((positions, frame.cell))
+            }
         }
     }
 }
@@ -423,11 +430,11 @@ impl GuiTrajectoryData {
         self.blocks.iter().map(|block| block.frames.len()).sum()
     }
 
-    fn frame(&self, index: usize) -> Result<Vec<Vector4>> {
+    fn frame_with_cell(&self, index: usize) -> Result<(Vec<Vector4>, Option<[f64; 6]>)> {
         let mut remaining = index;
         for block in &self.blocks {
             if remaining < block.frames.len() {
-                return block.frames.frame(remaining);
+                return block.frames.frame_with_cell(remaining);
             }
             remaining -= block.frames.len();
         }
@@ -6855,7 +6862,7 @@ impl DesktopAppState {
         );
     }
 
-    /// Load a GROMACS topology and one or more DCD/XTC/TRR/NetCDF trajectory blocks.
+    /// Load a molecular topology and indexed DCD/XTC/TRR/NetCDF trajectory blocks.
     pub fn load_md_trajectory(
         &mut self,
         scene_uid: Uid,
@@ -6866,7 +6873,7 @@ impl DesktopAppState {
     ) -> Result<GuiTrajectorySummary> {
         let topology_path = topology_path.as_ref();
         let renderer_type = if renderer_type.trim().is_empty() {
-            "simple"
+            "auto"
         } else {
             renderer_type.trim()
         };
@@ -6915,10 +6922,11 @@ impl DesktopAppState {
                 "object, renderer type, and renderer name are required",
             ));
         }
-        if !self
-            .molecule_renderer_setup_options(scene_uid)?
-            .iter()
-            .any(|option| option.name == setup.renderer_type.trim())
+        if setup.renderer_type != "auto"
+            && !self
+                .molecule_renderer_setup_options(scene_uid)?
+                .iter()
+                .any(|option| option.name == setup.renderer_type.trim())
         {
             return Err(CueMolError::invalid_argument(format!(
                 "unsupported renderer setup type: {}",
@@ -6927,7 +6935,21 @@ impl DesktopAppState {
         }
 
         let topology_path = topology_path.as_ref();
-        let mut molecule = read_gro_file(topology_path)?;
+        let format = guess_path_format(topology_path, &self.stream_manager)?;
+        let mut molecule = match format {
+            "gro" => read_gro_file(topology_path)?,
+            "pdb" => cuemol_molstr::read_pdb_file(topology_path)?,
+            "mmcif" | "cif" => cuemol_molstr::read_mmcif_file(topology_path)?,
+            "psf" => read_psf_file(topology_path)?,
+            "amberprm" => read_amber_prmtop_file(topology_path)?,
+            "sdf" => cuemol_molstr::read_sdf_file(topology_path)?,
+            "mol2" => read_mol2_file(topology_path)?,
+            _ => {
+                return Err(CueMolError::invalid_argument(format!(
+                    "unsupported topology format: {format}"
+                )))
+            }
+        };
         let atom_count = molecule.atom_count();
         if atom_count == 0 {
             return Err(CueMolError::parse("trajectory topology contains no atoms"));
@@ -6937,13 +6959,16 @@ impl DesktopAppState {
         for path in trajectory_paths {
             blocks.push(self.read_trajectory_block(Path::new(path), nevery, atom_count)?);
         }
-        let first_frame = blocks
+        let (first_frame, cell) = blocks
             .first()
             .ok_or_else(|| CueMolError::parse("trajectory contains no coordinate frames"))?
             .frames
-            .frame(0)?;
+            .frame_with_cell(0)?;
         for (atom, position) in molecule.atoms_mut().iter_mut().zip(&first_frame) {
             atom.position = *position;
+        }
+        if let Some([a, b, c, alpha, beta, gamma]) = cell {
+            molecule.set_cell_params(cuemol_core::CellParams::new(a, b, c, alpha, beta, gamma));
         }
         molecule.fire_atoms_moved();
 
@@ -6954,7 +6979,7 @@ impl DesktopAppState {
                 .scene_mut(scene_uid)
                 .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
             let object_uid =
-                scene.add_molecule_with_source_type(object_name.clone(), molecule, "gro");
+                scene.add_molecule_with_source_type(object_name.clone(), molecule, format);
             let object = scene
                 .object_mut(object_uid)
                 .expect("trajectory object was just inserted");
@@ -6962,7 +6987,12 @@ impl DesktopAppState {
             object.set_modified(false);
             object_uid
         };
-        if let Err(error) = self.configure_molecule_renderer(scene_uid, object_uid, setup) {
+        let configured = if setup.renderer_type == "auto" {
+            self.create_default_molecule_renderers(scene_uid, object_uid)
+        } else {
+            self.configure_molecule_renderer(scene_uid, object_uid, setup)
+        };
+        if let Err(error) = configured {
             let _ = self.destroy_object(object_uid);
             return Err(error);
         }
@@ -7160,11 +7190,11 @@ impl DesktopAppState {
     }
 
     pub fn apply_trajectory_frame(&mut self, object_uid: Uid, index: usize) -> Result<()> {
-        let frame = self
+        let (frame, cell) = self
             .trajectories
             .get(&object_uid)
             .ok_or_else(|| CueMolError::not_found("trajectory"))?
-            .frame(index)?;
+            .frame_with_cell(index)?;
         let object = self
             .scene_manager_mut()
             .object_mut(object_uid)
@@ -7176,6 +7206,11 @@ impl DesktopAppState {
         }
         for (atom, position) in object.mol_mut().atoms_mut().iter_mut().zip(frame) {
             atom.position = position;
+        }
+        if let Some([a, b, c, alpha, beta, gamma]) = cell {
+            object
+                .mol_mut()
+                .set_cell_params(cuemol_core::CellParams::new(a, b, c, alpha, beta, gamma));
         }
         object.mol_mut().fire_atoms_moved();
         self.trajectories
@@ -11589,109 +11624,114 @@ impl DesktopAppState {
                 #[cfg(feature = "scripting")]
                 self.script_scene_undo.remove(&scene_uid.get());
             }
-            let styles = self
-                .scene_manager()
-                .scene(scene_uid)
-                .map(scene_style_manager)
-                .unwrap_or_default();
-            let maps = self
-                .scene_manager()
-                .scene(scene_uid)
-                .map(|scene| scene.loaded_density_maps().to_vec())
-                .unwrap_or_default();
-            let morph_objects = self
-                .scene_manager()
-                .scene(scene_uid)
-                .map(|scene| {
-                    scene
-                        .objects()
-                        .iter()
-                        .filter(|object| object.object_type() == "MorphMol")
-                        .cloned()
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            for (storage_index, loaded) in maps.into_iter().enumerate() {
-                let map = read_density_map_bytes(&loaded.raw_data, &loaded.srctype)?;
-                if loaded.srctype == "qdfpot" {
-                    self.surface_potential = Some(map.clone());
-                }
-                let uid = Uid::new(self.next_density_map_uid);
-                self.next_density_map_uid = self.next_density_map_uid.saturating_add(1).max(1);
-                let default_ui_order = self.next_workspace_ui_order(scene_uid);
-                let mut renderers = density_renderer_configs(loaded.qsc_node.as_ref(), &styles);
-                let renderer_groups = loaded
-                    .qsc_node
-                    .as_ref()
-                    .map(aux_renderer_group_nodes)
-                    .into_iter()
-                    .flatten()
-                    .cloned()
-                    .collect();
-                for renderer in &mut renderers {
-                    renderer.uid = self.next_density_renderer_uid();
-                }
-                self.density_maps.insert(
-                    uid,
-                    GuiDensityMapObject {
-                        uid,
-                        scene_uid,
-                        storage_index,
-                        name: loaded.name,
-                        class_name: loaded.object_type,
-                        format: loaded.srctype,
-                        visible: loaded
-                            .qsc_node
-                            .as_ref()
-                            .map(|node| node.str_attr("visible").to_string())
-                            .filter(|value| !value.is_empty())
-                            .is_none_or(|value| qsc_bool(&value)),
-                        locked: loaded
-                            .qsc_node
-                            .as_ref()
-                            .is_some_and(|node| qsc_bool(node.str_attr("locked").as_str())),
-                        ui_collapsed: loaded
-                            .qsc_node
-                            .as_ref()
-                            .is_some_and(|node| qsc_bool(node.str_attr("ui_collapsed").as_str())),
-                        ui_order: loaded
-                            .qsc_node
-                            .as_ref()
-                            .and_then(|node| node.str_attr("ui_order").as_str().parse().ok())
-                            .unwrap_or(default_ui_order),
-                        modified: false,
-                        source: loaded
-                            .qsc_node
-                            .as_ref()
-                            .map(|node| node.str_attr("src").to_string())
-                            .unwrap_or_default(),
-                        alt_source: loaded
-                            .qsc_node
-                            .as_ref()
-                            .map(|node| node.str_attr("alt_src").to_string())
-                            .unwrap_or_default(),
-                        xform: loaded
-                            .qsc_node
-                            .as_ref()
-                            .and_then(|node| {
-                                Matrix4::from_script_string(node.str_attr("xformMat").as_str()).ok()
-                            })
-                            .unwrap_or(Matrix4::IDENTITY),
-                        map,
-                        renderers,
-                        renderer_groups,
-                    },
-                );
-            }
-            for object in morph_objects {
-                self.morphs
-                    .insert(object.uid(), morph_from_qsc_object(&object)?);
-            }
+            self.restore_loaded_scene_data(scene_uid)?;
             if let Some(tree) = &qsc_xml {
                 self.restore_named_qsc_camera_visibility(scene_uid, tree.top())?;
             }
         }
         Ok(result.result_scene)
+    }
+
+    fn restore_loaded_scene_data(&mut self, scene_uid: Uid) -> Result<()> {
+        let styles = self
+            .scene_manager()
+            .scene(scene_uid)
+            .map(scene_style_manager)
+            .unwrap_or_default();
+        let maps = self
+            .scene_manager()
+            .scene(scene_uid)
+            .map(|scene| scene.loaded_density_maps().to_vec())
+            .unwrap_or_default();
+        let morph_objects = self
+            .scene_manager()
+            .scene(scene_uid)
+            .map(|scene| {
+                scene
+                    .objects()
+                    .iter()
+                    .filter(|object| object.object_type() == "MorphMol")
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for (storage_index, loaded) in maps.into_iter().enumerate() {
+            let map = read_density_map_bytes(&loaded.raw_data, &loaded.srctype)?;
+            if loaded.srctype == "qdfpot" {
+                self.surface_potential = Some(map.clone());
+            }
+            let uid = Uid::new(self.next_density_map_uid);
+            self.next_density_map_uid = self.next_density_map_uid.saturating_add(1).max(1);
+            let default_ui_order = self.next_workspace_ui_order(scene_uid);
+            let mut renderers = density_renderer_configs(loaded.qsc_node.as_ref(), &styles);
+            let renderer_groups = loaded
+                .qsc_node
+                .as_ref()
+                .map(aux_renderer_group_nodes)
+                .into_iter()
+                .flatten()
+                .cloned()
+                .collect();
+            for renderer in &mut renderers {
+                renderer.uid = self.next_density_renderer_uid();
+            }
+            self.density_maps.insert(
+                uid,
+                GuiDensityMapObject {
+                    uid,
+                    scene_uid,
+                    storage_index,
+                    name: loaded.name,
+                    class_name: loaded.object_type,
+                    format: loaded.srctype,
+                    visible: loaded
+                        .qsc_node
+                        .as_ref()
+                        .map(|node| node.str_attr("visible").to_string())
+                        .filter(|value| !value.is_empty())
+                        .is_none_or(|value| qsc_bool(&value)),
+                    locked: loaded
+                        .qsc_node
+                        .as_ref()
+                        .is_some_and(|node| qsc_bool(node.str_attr("locked").as_str())),
+                    ui_collapsed: loaded
+                        .qsc_node
+                        .as_ref()
+                        .is_some_and(|node| qsc_bool(node.str_attr("ui_collapsed").as_str())),
+                    ui_order: loaded
+                        .qsc_node
+                        .as_ref()
+                        .and_then(|node| node.str_attr("ui_order").as_str().parse().ok())
+                        .unwrap_or(default_ui_order),
+                    modified: false,
+                    source: loaded
+                        .qsc_node
+                        .as_ref()
+                        .map(|node| node.str_attr("src").to_string())
+                        .unwrap_or_default(),
+                    alt_source: loaded
+                        .qsc_node
+                        .as_ref()
+                        .map(|node| node.str_attr("alt_src").to_string())
+                        .unwrap_or_default(),
+                    xform: loaded
+                        .qsc_node
+                        .as_ref()
+                        .and_then(|node| {
+                            Matrix4::from_script_string(node.str_attr("xformMat").as_str()).ok()
+                        })
+                        .unwrap_or(Matrix4::IDENTITY),
+                    map,
+                    renderers,
+                    renderer_groups,
+                },
+            );
+        }
+        for object in morph_objects {
+            self.morphs
+                .insert(object.uid(), morph_from_qsc_object(&object)?);
+        }
+        Ok(())
     }
 
     pub fn active_scene_source_path(&self) -> Option<&Path> {
@@ -11783,7 +11823,7 @@ impl DesktopAppState {
     fn create_default_molecule_renderers(&mut self, scene_uid: Uid, object_uid: Uid) -> Result<()> {
         let styles = [
             ("ribbon", "protein", "rprop type=prot"),
-            ("nucl", "nucleic", "rprop type=nucl"),
+            ("cartoon", "nucleic", "rprop type=nucl"),
             (
                 "ballstick",
                 "other",
@@ -62033,7 +62073,7 @@ end_header
         };
         for (file, expected) in [
             ("1CRN.pdb", "ribbon"),
-            ("1ehz_rna.pdb", "nucl"),
+            ("1ehz_rna.pdb", "cartoon"),
             ("test1.sdf", "ballstick"),
         ] {
             let mut app = DesktopAppState::new();

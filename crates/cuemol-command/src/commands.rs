@@ -115,7 +115,7 @@ fn fit(
 fn scene_state(state: &DesktopAppState) -> Result<Value> {
     let id = scene(state)?;
     let objects: Vec<_> = state.object_summaries(id).into_iter().map(|object| {
-        let renderers: Vec<_> = state.renderer_summaries(object.uid).into_iter().map(|renderer| json!({
+        let renderers: Vec<_> = state.renderer_summaries(object.uid).into_iter().filter(|renderer|renderer.renderer_type != "*selection").map(|renderer| json!({
             "id":renderer.uid.get(),"name":renderer.name,"type":renderer.renderer_type,"visible":renderer.visible,"group":renderer.group
         })).collect();
         json!({"id":object.uid.get(),"name":object.name,"className":"MolCoord","visible":object.visible,
@@ -304,7 +304,7 @@ pub fn call_tool(
         "load_trajectory" => {
             if state.active_scene().is_none(){state.new_scene("Untitled",true);}
             let paths=args["paths"].as_array().unwrap().iter().map(|v|v.as_str().unwrap().to_string()).collect::<Vec<_>>();
-            let loaded=state.load_md_trajectory(scene(state)?,text(args,"topology")?,&paths,integer(args,"stride",1)?,"ribbon")?;
+            let loaded=state.load_md_trajectory(scene(state)?,text(args,"topology")?,&paths,integer(args,"stride",1)?,"auto")?;
             fit(state,camera,Some(loaded.object_uid),None,true)?;
             Ok(json!({"objectId":loaded.object_uid.get(),"frames":loaded.frame_count}))
         }

@@ -118,9 +118,9 @@ fn cannot_open(path: &Path) -> CueMolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::{SystemTime, UNIX_EPOCH};
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 

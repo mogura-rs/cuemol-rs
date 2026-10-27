@@ -19,6 +19,7 @@ members = [
   "crates/cuemol-desktop",
   "crates/cuemol-cli",
   "crates/cuemol-command",
+  "crates/cuemol-web",
   "crates/cuemol-node",
   "crates/cuemol-py",
 ]

@@ -328,12 +328,25 @@ fn load_renderer_setup_preferences_from(
 }
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+fn renderer_preferences_path(filename: &str) -> PathBuf {
+    #[cfg(test)]
+    {
+        thread_local! { static DIRECTORY: tempfile::TempDir = tempfile::tempdir().unwrap(); }
+        DIRECTORY.with(|directory| directory.path().join(filename))
+    }
+    #[cfg(not(test))]
+    {
+        configuration_path(filename)
+    }
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 pub(crate) fn load_renderer_setup_preferences() -> RendererSetupPreferences {
-    let path = configuration_path("renderer-setup-preferences.txt");
+    let path = renderer_preferences_path("renderer-setup-preferences.txt");
     if path.exists() {
         return load_renderer_setup_preferences_from(&path).unwrap_or_default();
     }
-    load_renderer_setup_preferences_from(&configuration_path("pdb-renderer-preferences.txt"))
+    load_renderer_setup_preferences_from(&renderer_preferences_path("pdb-renderer-preferences.txt"))
         .unwrap_or_default()
 }
 
@@ -368,7 +381,7 @@ pub(crate) fn save_renderer_setup_preferences(
     recenter: bool,
 ) -> std::result::Result<(), String> {
     save_renderer_setup_preferences_at(
-        &configuration_path("renderer-setup-preferences.txt"),
+        &renderer_preferences_path("renderer-setup-preferences.txt"),
         renderer_type,
         recenter,
     )

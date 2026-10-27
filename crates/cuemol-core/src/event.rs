@@ -1,8 +1,8 @@
+use crate::clock::Instant;
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::ThreadId;
-use std::time::Instant;
 
 pub use crate::time::TimeValue;
 pub type TimerId = u64;

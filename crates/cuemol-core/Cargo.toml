@@ -10,6 +10,10 @@ path = "src/lib.rs"
 
 [dependencies]
 flate2 = "1.1"
+bzip2 = "0.6"
 lzma-rs = "0.3"
 regex.workspace = true
 shlex.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1.1"

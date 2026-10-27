@@ -1,4 +1,5 @@
 mod runtime;
+mod web;
 use cuemol_core::{Matrix4, Vector4};
 use cuemol_mdtools::{
     read_amber_mdcrd_file, read_amber_netcdf_file_with_options, read_amber_prmtop_file,
@@ -65,6 +66,7 @@ fn run() -> Result<(), String> {
         }
         "self-upgrade" => self_upgrade(),
         "mcp" => runtime::mcp(args.collect()),
+        "web" => web::run(args.collect()),
         "config" => runtime::config(args.collect()),
         "run" | "-c" | "--eval" => runtime::script(&command, args.collect()),
         "exec" => runtime::execute(args.collect()),
@@ -770,6 +772,7 @@ fn self_upgrade() -> Result<(), String> {
 }
 
 fn print_usage() {
+    println!("  cuemol web build | serve [--port PORT] [--dir DIR]");
     println!("CueMol3: cuemol [FILE ...] | mcp | config | run SCRIPT.js | -c JAVASCRIPT | exec TOOL JSON | render INPUT OUTPUT | trajectory-info FILE [STRIDE]");
     eprintln!("Usage:");
     eprintln!("  cuemol self-upgrade");

@@ -1,10 +1,10 @@
+use cuemol_core::clock::Instant;
 use std::fs;
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, Ordering},
     Arc, Mutex,
 };
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
 
 use cuemol_core::{CueMolError, Result, Vector4};
 use cuemol_gfx::ColorSpec;

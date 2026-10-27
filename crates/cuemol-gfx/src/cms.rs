@@ -1,5 +1,6 @@
 use crate::rgba_code;
 use cuemol_core::{CueMolError, Result, Vector4};
+#[cfg(not(target_arch = "wasm32"))]
 use libloading::Library;
 use std::collections::BTreeMap;
 use std::ffi::{c_char, c_void, CStr, CString};
@@ -29,6 +30,7 @@ const FLAGS_SOFTPROOFING: u32 = 0x4000;
 const MAX_CHANNELS: usize = 16;
 
 struct LcmsApi {
+    #[cfg(not(target_arch = "wasm32"))]
     _library: Library,
     create_srgb_profile: CreateSrgbProfile,
     open_profile_from_file: OpenProfileFromFile,
@@ -41,6 +43,14 @@ struct LcmsApi {
 }
 
 impl LcmsApi {
+    #[cfg(target_arch = "wasm32")]
+    fn load() -> Result<Self> {
+        Err(CueMolError::not_found(
+            "ICC soft proofing requires a native LittleCMS build",
+        ))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn load() -> Result<Self> {
         let candidates = [
             "liblcms2.so.2",
@@ -67,6 +77,7 @@ impl LcmsApi {
         )))
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     unsafe fn from_library(library: Library) -> Result<Self> {
         unsafe fn symbol<T: Copy>(library: &Library, name: &[u8]) -> Result<T> {
             unsafe { library.get::<T>(name) }

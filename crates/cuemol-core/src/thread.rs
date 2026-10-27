@@ -1,7 +1,7 @@
+use crate::clock::{Duration, Instant};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
 
 pub struct LThread {
     task: Option<Box<dyn FnOnce() + Send>>,

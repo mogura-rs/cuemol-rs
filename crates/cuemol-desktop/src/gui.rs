@@ -15,9 +15,10 @@ use cuemol_core::{
 };
 use cuemol_gfx::Rgba8;
 use cuemol_qsys::{StereoMode, View};
+#[cfg(test)]
+use cuemol_render::{MeshVertex, RenderAtom, RenderBond};
 use cuemol_render::{
-    MeshVertex, PovSceneExporter, RenderAtom, RenderBond, RenderSceneSnapshot, UmbreonDenoiseMode,
-    UmbreonSceneExporter,
+    PovSceneExporter, RenderSceneSnapshot, UmbreonDenoiseMode, UmbreonSceneExporter,
 };
 use egui_wgpu::ScreenDescriptor;
 use glam::{Mat4, Quat, Vec3, Vec4 as GlamVec4};
@@ -37,7 +38,7 @@ use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
 
-const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
+use cuemol_desktop_core::viewport::*;
 const MAX_RECENT_PATHS: usize = 10;
 const MAX_SELECTION_HISTORY: usize = 10;
 const ANIMATION_NAME_COLUMN_DEFAULT_WIDTH: f32 = 110.0;
@@ -26265,7 +26266,7 @@ impl GuiApplication {
             return Err("view rotation must be a non-zero finite quaternion".to_string());
         }
         camera.name = draft.name.clone();
-        camera.ortho_scale = (1000.0 / draft.zoom) as f32;
+        camera.ortho_scale = (draft.zoom * 0.5) as f32;
         camera.distance = draft.distance as f32;
         camera.slab_depth = draft.slab as f32;
         camera.target = Vec3::new(
@@ -31869,11 +31870,11 @@ impl CameraController {
     }
 
     fn zoom(&self) -> f32 {
-        1000.0 / self.ortho_scale.max(0.1)
+        2.0 * self.ortho_scale.max(0.1)
     }
 
     fn set_zoom(&mut self, zoom: f32) {
-        self.ortho_scale = 1000.0 / zoom.max(0.01);
+        self.ortho_scale = zoom.max(0.01) * 0.5;
     }
 
     fn adjust_slab(&mut self, step: f32) {
@@ -31929,25 +31930,10 @@ impl CameraController {
     }
 
     fn view_projection(&self, aspect: f32) -> Mat4 {
-        let rotation = self.rotation();
-        let up = rotation * Vec3::Y;
-        let view = Mat4::look_at_rh(self.eye(), self.target, up);
-        let half_slab = self.slab_depth.max(0.1) * 0.5;
-        let near = (self.distance - half_slab).max(0.01);
-        let far = (self.distance + self.slab_depth.max(0.1)).max(near + 0.01);
-        let proj = if self.perspective {
-            Mat4::perspective_rh(45.0_f32.to_radians(), aspect, near, far)
-        } else {
-            Mat4::orthographic_rh(
-                -self.ortho_scale * aspect,
-                self.ortho_scale * aspect,
-                -self.ortho_scale,
-                self.ortho_scale,
-                near,
-                far,
-            )
-        };
-        proj * view
+        Mat4::from_cols_array_2d(&cuemol_desktop_core::offscreen::camera_mvp(
+            &self.to_qsys_camera("__current"),
+            aspect.max(0.01) as f64,
+        ))
     }
 
     fn project_to_viewport(&self, point: Vec3, viewport: egui::Rect) -> Option<(egui::Pos2, f32)> {
@@ -31967,7 +31953,7 @@ impl CameraController {
 
     fn projected_radius(&self, radius: f32, depth: f32, viewport: egui::Rect) -> f32 {
         if self.perspective {
-            let focal = 0.5 * viewport.height() / (45.0_f32.to_radians() * 0.5).tan();
+            let focal = 0.5 * viewport.height() * self.distance / self.ortho_scale.max(0.01);
             (radius * focal / depth.max(0.1)).clamp(2.0, 48.0)
         } else {
             (radius * viewport.height() / (self.ortho_scale * 2.0).max(0.1)).clamp(2.0, 48.0)
@@ -31987,6 +31973,12 @@ impl CameraController {
             right: [right.x, right.y, right.z, 0.0],
             up: [up.x, up.y, up.z, 0.0],
             light: [0.25, 0.45, 0.85, 0.0],
+            pixel_scale: [
+                self.zoom() / height,
+                self.distance,
+                if self.perspective { 1.0 } else { 0.0 },
+                0.0,
+            ],
         }
     }
 
@@ -32038,7 +32030,7 @@ center_mark\t{}\n",
         ));
         camera.set_cam_dist(self.distance as f64);
         camera.set_slab_depth(self.slab_depth as f64);
-        camera.set_zoom((1000.0 / self.ortho_scale.max(0.1)) as f64);
+        camera.set_zoom((2.0 * self.ortho_scale.max(0.1)) as f64);
         camera.set_perspective(self.perspective);
         camera.set_stereo_mode(self.stereo_mode);
         camera.set_stereo_distance(self.stereo_distance as f64);
@@ -32054,15 +32046,14 @@ center_mark\t{}\n",
 
     /// Build a controller from a saved `cuemol_qsys::Camera` (a `.qsc` view) —
     /// the exact inverse of [`to_qsys_camera`], so a save → load round-trips. The
-    /// drag/transient fields reset to defaults. (`ortho_scale` inverts the
-    /// `zoom = 1000 / ortho_scale` mapping; the orientation quaternion maps
-    /// component-wise — `q` and `-q` denote the same rotation.)
+    /// transient fields reset. CueMol zoom is the full view height. Its clockwise
+    /// quaternion matrix is the inverse of glam's matrix for the same components.
     fn from_qsys_camera(camera: &cuemol_qsys::Camera) -> Self {
         let q = camera.rotation();
         let zoom = camera.zoom();
         let defaults = Self::default();
         let ortho_scale = if zoom.abs() > 1.0e-9 {
-            (1000.0 / zoom) as f32
+            (zoom * 0.5) as f32
         } else {
             defaults.ortho_scale
         };
@@ -34211,46 +34202,6 @@ struct GpuSceneFrame<'a> {
     viewport: Option<egui::Rect>,
 }
 
-struct ReusableGpuBuffer {
-    buffer: wgpu::Buffer,
-    capacity: wgpu::BufferAddress,
-    label: &'static str,
-    usage: wgpu::BufferUsages,
-}
-
-impl ReusableGpuBuffer {
-    fn new(device: &wgpu::Device, label: &'static str, usage: wgpu::BufferUsages) -> Self {
-        Self {
-            buffer: create_scene_buffer(device, label, usage, MIN_SCENE_BUFFER_CAPACITY),
-            capacity: MIN_SCENE_BUFFER_CAPACITY,
-            label,
-            usage,
-        }
-    }
-
-    fn upload<T: bytemuck::Pod>(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        values: &[T],
-    ) {
-        let bytes = bytemuck::cast_slice(values);
-        if bytes.is_empty() {
-            return;
-        }
-        let required = bytes.len() as wgpu::BufferAddress;
-        if required > self.capacity {
-            self.capacity = scene_buffer_capacity(required);
-            self.buffer = create_scene_buffer(device, self.label, self.usage, self.capacity);
-        }
-        queue.write_buffer(&self.buffer, 0, bytes);
-    }
-
-    fn slice(&self) -> wgpu::BufferSlice<'_> {
-        self.buffer.slice(..)
-    }
-}
-
 struct GpuBootstrap {
     instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
@@ -34611,335 +34562,6 @@ impl GpuState {
     }
 }
 
-fn create_atom_pipeline(
-    device: &wgpu::Device,
-    shader: &wgpu::ShaderModule,
-    camera_layout: &wgpu::BindGroupLayout,
-    format: wgpu::TextureFormat,
-) -> wgpu::RenderPipeline {
-    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("atom-pipeline-layout"),
-        bind_group_layouts: &[camera_layout],
-        push_constant_ranges: &[],
-    });
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("atom-pipeline"),
-        layout: Some(&layout),
-        vertex: wgpu::VertexState {
-            module: shader,
-            entry_point: Some("atom_vs"),
-            buffers: &[atom_quad_layout(), atom_instance_layout()],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: shader,
-            entry_point: Some("atom_fs"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            cull_mode: None,
-            ..Default::default()
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: DEPTH_FORMAT,
-            depth_write_enabled: true,
-            depth_compare: wgpu::CompareFunction::Less,
-            stencil: Default::default(),
-            bias: Default::default(),
-        }),
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-        cache: None,
-    })
-}
-
-fn create_bond_pipeline(
-    device: &wgpu::Device,
-    shader: &wgpu::ShaderModule,
-    camera_layout: &wgpu::BindGroupLayout,
-    format: wgpu::TextureFormat,
-) -> wgpu::RenderPipeline {
-    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("bond-pipeline-layout"),
-        bind_group_layouts: &[camera_layout],
-        push_constant_ranges: &[],
-    });
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("bond-pipeline"),
-        layout: Some(&layout),
-        vertex: wgpu::VertexState {
-            module: shader,
-            entry_point: Some("bond_vs"),
-            buffers: &[atom_quad_layout(), bond_instance_layout()],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: shader,
-            entry_point: Some("bond_fs"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            cull_mode: None,
-            ..Default::default()
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: DEPTH_FORMAT,
-            depth_write_enabled: true,
-            depth_compare: wgpu::CompareFunction::Less,
-            stencil: Default::default(),
-            bias: Default::default(),
-        }),
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-        cache: None,
-    })
-}
-
-fn create_mesh_pipeline(
-    device: &wgpu::Device,
-    shader: &wgpu::ShaderModule,
-    camera_layout: &wgpu::BindGroupLayout,
-    format: wgpu::TextureFormat,
-) -> wgpu::RenderPipeline {
-    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("mesh-pipeline-layout"),
-        bind_group_layouts: &[camera_layout],
-        push_constant_ranges: &[],
-    });
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("mesh-pipeline"),
-        layout: Some(&layout),
-        vertex: wgpu::VertexState {
-            module: shader,
-            entry_point: Some("mesh_vs"),
-            buffers: &[mesh_vertex_layout()],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: shader,
-            entry_point: Some("mesh_fs"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            cull_mode: None,
-            ..Default::default()
-        },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: DEPTH_FORMAT,
-            depth_write_enabled: true,
-            depth_compare: wgpu::CompareFunction::Less,
-            stencil: Default::default(),
-            bias: Default::default(),
-        }),
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-        cache: None,
-    })
-}
-
-fn atom_quad_layout<'a>() -> wgpu::VertexBufferLayout<'a> {
-    wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<QuadVertex>() as wgpu::BufferAddress,
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &ATOM_QUAD_ATTRS,
-    }
-}
-
-fn atom_instance_layout<'a>() -> wgpu::VertexBufferLayout<'a> {
-    wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<AtomInstance>() as wgpu::BufferAddress,
-        step_mode: wgpu::VertexStepMode::Instance,
-        attributes: &ATOM_INSTANCE_ATTRS,
-    }
-}
-
-fn bond_instance_layout<'a>() -> wgpu::VertexBufferLayout<'a> {
-    wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<BondInstance>() as wgpu::BufferAddress,
-        step_mode: wgpu::VertexStepMode::Instance,
-        attributes: &BOND_INSTANCE_ATTRS,
-    }
-}
-
-fn mesh_vertex_layout<'a>() -> wgpu::VertexBufferLayout<'a> {
-    wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<MeshGpuVertex>() as wgpu::BufferAddress,
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &MESH_VERTEX_ATTRS,
-    }
-}
-
-fn create_depth_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
-    device
-        .create_texture(&wgpu::TextureDescriptor {
-            label: Some("depth-texture"),
-            size: wgpu::Extent3d {
-                width: width.max(1),
-                height: height.max(1),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        })
-        .create_view(&wgpu::TextureViewDescriptor::default())
-}
-
-const MIN_SCENE_BUFFER_CAPACITY: wgpu::BufferAddress = 256;
-
-fn snapshot_upload_required(uploaded: Option<u64>, current: u64) -> bool {
-    uploaded != Some(current)
-}
-
-fn scene_buffer_capacity(required: wgpu::BufferAddress) -> wgpu::BufferAddress {
-    required
-        .max(MIN_SCENE_BUFFER_CAPACITY)
-        .checked_next_power_of_two()
-        .unwrap_or(required)
-}
-
-fn create_scene_buffer(
-    device: &wgpu::Device,
-    label: &str,
-    usage: wgpu::BufferUsages,
-    capacity: wgpu::BufferAddress,
-) -> wgpu::Buffer {
-    device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some(label),
-        size: capacity.max(MIN_SCENE_BUFFER_CAPACITY),
-        usage: usage | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    })
-}
-
-fn atom_instance(atom: &RenderAtom) -> AtomInstance {
-    let color = atom_color(atom);
-    let edge = edge_gpu_style(atom.edge);
-    AtomInstance {
-        center_radius: [
-            atom.center.x as f32,
-            atom.center.y as f32,
-            atom.center.z as f32,
-            atom.radius.max(0.08),
-        ],
-        color,
-        selected: [if atom.selected { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
-        edge: [edge.0, edge.1, 0.0, 0.0],
-        edge_color: edge.2,
-    }
-}
-
-fn bond_instance(bond: &RenderBond) -> BondInstance {
-    let color = bond_color(bond);
-    let end_color = if bond.selected {
-        color
-    } else {
-        bond.end_color
-            .as_ref()
-            .and_then(cuemol_gfx::ColorSpec::rgba8)
-            .map_or(color, |rgba| rgba_to_float(Some(rgba)))
-    };
-    let edge = edge_gpu_style(bond.edge);
-    BondInstance {
-        from_radius: [
-            bond.from.x as f32,
-            bond.from.y as f32,
-            bond.from.z as f32,
-            bond.radius.max(0.0025),
-        ],
-        to_edge: [bond.to.x as f32, bond.to.y as f32, bond.to.z as f32, edge.0],
-        color,
-        end_color,
-        edge_color: edge.2,
-        edge_mode: [edge.1, 0.0, 0.0, 0.0],
-    }
-}
-
-fn edge_gpu_style(edge: Option<cuemol_render::RenderEdgeStyle>) -> (f32, f32, [f32; 4]) {
-    edge.filter(|edge| edge.width > 0.0)
-        .map_or((0.0, 0.0, [0.0, 0.0, 0.0, 1.0]), |edge| {
-            (
-                edge.width,
-                match edge.mode {
-                    cuemol_render::RenderEdgeMode::Edges => 1.0,
-                    cuemol_render::RenderEdgeMode::Silhouette => 2.0,
-                },
-                edge.color,
-            )
-        })
-}
-
-fn mesh_gpu_vertex(vertex: &MeshVertex) -> MeshGpuVertex {
-    MeshGpuVertex {
-        position: [
-            vertex.position.x as f32,
-            vertex.position.y as f32,
-            vertex.position.z as f32,
-        ],
-        normal: [
-            vertex.normal.x as f32,
-            vertex.normal.y as f32,
-            vertex.normal.z as f32,
-        ],
-        color: vertex.color,
-        cull_back_faces: vertex.normal.w as f32,
-    }
-}
-
-fn atom_color(atom: &RenderAtom) -> [f32; 4] {
-    let mut color = rgba_to_float(atom.color.as_ref().and_then(cuemol_gfx::ColorSpec::rgba8));
-    if atom.selected {
-        color[0] = (color[0] * 0.4 + 0.0 * 0.6).min(1.0);
-        color[1] = (color[1] * 0.4 + 0.95 * 0.6).min(1.0);
-        color[2] = (color[2] * 0.4 + 1.0 * 0.6).min(1.0);
-    }
-    color
-}
-
-fn bond_color(bond: &RenderBond) -> [f32; 4] {
-    if bond.selected {
-        [0.0, 0.90, 1.0, 1.0]
-    } else {
-        rgba_to_float(bond.color.as_ref().and_then(cuemol_gfx::ColorSpec::rgba8))
-    }
-}
-
-fn rgba_to_float(rgba: Option<Rgba8>) -> [f32; 4] {
-    let rgba = rgba.unwrap_or(Rgba8 {
-        r: 196,
-        g: 201,
-        b: 211,
-        a: 255,
-    });
-    [
-        f32::from(rgba.r) / 255.0,
-        f32::from(rgba.g) / 255.0,
-        f32::from(rgba.b) / 255.0,
-        f32::from(rgba.a) / 255.0,
-    ]
-}
-
 fn vec3_from_vector(value: Vector4) -> Vec3 {
     Vec3::new(value.x as f32, value.y as f32, value.z as f32)
 }
@@ -35132,279 +34754,6 @@ fn list_directory_entries(directory: &str) -> std::io::Result<Vec<String>> {
     entries.sort();
     Ok(entries)
 }
-
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct CameraUniform {
-    view_proj: [[f32; 4]; 4],
-    right: [f32; 4],
-    up: [f32; 4],
-    light: [f32; 4],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct QuadVertex {
-    corner: [f32; 2],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct AtomInstance {
-    center_radius: [f32; 4],
-    color: [f32; 4],
-    selected: [f32; 4],
-    edge: [f32; 4],
-    edge_color: [f32; 4],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct BondInstance {
-    from_radius: [f32; 4],
-    to_edge: [f32; 4],
-    color: [f32; 4],
-    end_color: [f32; 4],
-    edge_color: [f32; 4],
-    edge_mode: [f32; 4],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct MeshGpuVertex {
-    position: [f32; 3],
-    normal: [f32; 3],
-    color: [f32; 4],
-    cull_back_faces: f32,
-}
-
-const ATOM_QUAD_ATTRS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x2];
-const ATOM_INSTANCE_ATTRS: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
-    1 => Float32x4,
-    2 => Float32x4,
-    3 => Float32x4,
-    4 => Float32x4,
-    5 => Float32x4
-];
-const BOND_INSTANCE_ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
-    1 => Float32x4,
-    2 => Float32x4,
-    3 => Float32x4,
-    4 => Float32x4,
-    5 => Float32x4,
-    6 => Float32x4
-];
-const MESH_VERTEX_ATTRS: [wgpu::VertexAttribute; 4] =
-    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32];
-
-const ATOM_QUAD: [QuadVertex; 6] = [
-    QuadVertex {
-        corner: [-1.0, -1.0],
-    },
-    QuadVertex {
-        corner: [1.0, -1.0],
-    },
-    QuadVertex { corner: [1.0, 1.0] },
-    QuadVertex {
-        corner: [-1.0, -1.0],
-    },
-    QuadVertex { corner: [1.0, 1.0] },
-    QuadVertex {
-        corner: [-1.0, 1.0],
-    },
-];
-
-const MOLECULE_SHADER: &str = r#"
-struct Camera {
-    view_proj: mat4x4<f32>,
-    right: vec4<f32>,
-    up: vec4<f32>,
-    light: vec4<f32>,
-};
-
-@group(0) @binding(0)
-var<uniform> camera: Camera;
-
-struct AtomVsIn {
-    @location(0) corner: vec2<f32>,
-    @location(1) center_radius: vec4<f32>,
-    @location(2) color: vec4<f32>,
-    @location(3) selected: vec4<f32>,
-    @location(4) edge: vec4<f32>,
-    @location(5) edge_color: vec4<f32>,
-};
-
-struct AtomVsOut {
-    @builtin(position) position: vec4<f32>,
-    @location(0) local: vec2<f32>,
-    @location(1) color: vec4<f32>,
-    @location(2) selected: f32,
-    @location(3) edge_ratio: f32,
-    @location(4) edge_mode: f32,
-    @location(5) edge_color: vec4<f32>,
-};
-
-@vertex
-fn atom_vs(input: AtomVsIn) -> AtomVsOut {
-    let center = input.center_radius.xyz;
-    let radius = input.center_radius.w;
-    let outer_radius = radius + input.edge.x;
-    let world = center
-        + camera.right.xyz * input.corner.x * outer_radius
-        + camera.up.xyz * input.corner.y * outer_radius;
-    var output: AtomVsOut;
-    output.position = camera.view_proj * vec4<f32>(world, 1.0);
-    output.local = input.corner * (outer_radius / radius);
-    output.color = input.color;
-    output.selected = input.selected.x;
-    output.edge_ratio = outer_radius / radius;
-    output.edge_mode = input.edge.y;
-    output.edge_color = input.edge_color;
-    return output;
-}
-
-struct PrimitiveFsOut {
-    @location(0) color: vec4<f32>,
-    @builtin(frag_depth) depth: f32,
-};
-
-@fragment
-fn atom_fs(input: AtomVsOut) -> PrimitiveFsOut {
-    let d = dot(input.local, input.local);
-    if (d > input.edge_ratio * input.edge_ratio) {
-        discard;
-    }
-    var output: PrimitiveFsOut;
-    output.depth = input.position.z;
-    if (d > 1.0) {
-        output.color = input.edge_color;
-        if (input.edge_mode > 1.5) {
-            output.depth = 0.99;
-        }
-        return output;
-    }
-    let z = sqrt(max(0.0, 1.0 - d));
-    let normal = normalize(
-        camera.right.xyz * input.local.x + camera.up.xyz * input.local.y
-            + normalize(cross(camera.right.xyz, camera.up.xyz)) * z
-    );
-    let shade = 0.36 + 0.64 * max(dot(normal, normalize(camera.light.xyz)), 0.0);
-    output.color = vec4<f32>(input.color.rgb * shade, input.color.a);
-    if (input.selected > 0.5 && d > 0.62) {
-        output.color = vec4<f32>(0.0, 0.95, 1.0, 1.0);
-    }
-    return output;
-}
-
-struct BondVsIn {
-    @location(0) corner: vec2<f32>,
-    @location(1) from_radius: vec4<f32>,
-    @location(2) to_edge: vec4<f32>,
-    @location(3) color: vec4<f32>,
-    @location(4) end_color: vec4<f32>,
-    @location(5) edge_color: vec4<f32>,
-    @location(6) edge_mode: vec4<f32>,
-};
-
-struct BondVsOut {
-    @builtin(position) position: vec4<f32>,
-    @location(0) color: vec4<f32>,
-    @location(1) local_x: f32,
-    @location(2) edge_ratio: f32,
-    @location(3) edge_mode: f32,
-    @location(4) edge_color: vec4<f32>,
-    @location(5) perpendicular: vec3<f32>,
-};
-
-@vertex
-fn bond_vs(input: BondVsIn) -> BondVsOut {
-    let start = input.from_radius.xyz;
-    let finish = input.to_edge.xyz;
-    let radius = input.from_radius.w;
-    let outer_radius = radius + input.to_edge.w;
-    let axis = finish - start;
-    let screen_axis = vec2<f32>(dot(axis, camera.right.xyz), dot(axis, camera.up.xyz));
-    var perpendicular = camera.right.xyz;
-    if (length(screen_axis) > 0.000001) {
-        perpendicular = normalize(
-            camera.right.xyz * (-screen_axis.y) + camera.up.xyz * screen_axis.x
-        );
-    }
-    let t = (input.corner.y + 1.0) * 0.5;
-    let world = mix(start, finish, t) + perpendicular * input.corner.x * outer_radius;
-    var output: BondVsOut;
-    output.position = camera.view_proj * vec4<f32>(world, 1.0);
-    output.color = mix(input.color, input.end_color, t);
-    output.local_x = input.corner.x * (outer_radius / radius);
-    output.edge_ratio = outer_radius / radius;
-    output.edge_mode = input.edge_mode.x;
-    output.edge_color = input.edge_color;
-    output.perpendicular = perpendicular;
-    return output;
-}
-
-@fragment
-fn bond_fs(input: BondVsOut) -> PrimitiveFsOut {
-    if (abs(input.local_x) > input.edge_ratio) {
-        discard;
-    }
-    var output: PrimitiveFsOut;
-    output.depth = input.position.z;
-    if (abs(input.local_x) > 1.0) {
-        output.color = vec4<f32>(input.edge_color.rgb, input.color.a);
-        if (input.edge_mode > 1.5) {
-            output.depth = 0.99;
-        }
-        return output;
-    }
-    let z = sqrt(max(0.0, 1.0 - input.local_x * input.local_x));
-    let front = normalize(cross(camera.right.xyz, camera.up.xyz));
-    let normal = normalize(input.perpendicular * input.local_x + front * z);
-    let shade = 0.36 + 0.64 * max(dot(normal, normalize(camera.light.xyz)), 0.0);
-    output.color = vec4<f32>(input.color.rgb * shade, input.color.a);
-    return output;
-}
-
-struct MeshVsIn {
-    @location(0) position: vec3<f32>,
-    @location(1) normal: vec3<f32>,
-    @location(2) color: vec4<f32>,
-    @location(3) cull_back_faces: f32,
-};
-
-struct MeshVsOut {
-    @builtin(position) position: vec4<f32>,
-    @location(0) normal: vec3<f32>,
-    @location(1) color: vec4<f32>,
-    @location(2) @interpolate(flat) cull_back_faces: f32,
-};
-
-@vertex
-fn mesh_vs(input: MeshVsIn) -> MeshVsOut {
-    var output: MeshVsOut;
-    output.position = camera.view_proj * vec4<f32>(input.position, 1.0);
-    output.normal = input.normal;
-    output.color = input.color;
-    output.cull_back_faces = input.cull_back_faces;
-    return output;
-}
-
-@fragment
-fn mesh_fs(input: MeshVsOut, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
-    if (input.cull_back_faces > 0.5 && !front_facing) {
-        discard;
-    }
-    if (input.cull_back_faces > 1.5) {
-        return input.color;
-    }
-    let n = normalize(input.normal);
-    let l = normalize(camera.light.xyz);
-    // Two-sided lighting so tube ends and ribbon backs are not left black.
-    let diff = abs(dot(n, l));
-    let shade = 0.30 + 0.70 * diff;
-    return vec4<f32>(input.color.rgb * shade, input.color.a);
-}
-"#;
 
 fn nonempty_or(value: String, fallback: &str) -> String {
     if value.trim().is_empty() {
@@ -36918,11 +36267,31 @@ mod tests {
     }
 
     #[test]
+    fn saved_camera_uses_reference_view_height_and_world_rotation() {
+        let mut saved = cuemol_qsys::Camera::new();
+        saved.set_center(Vector4::new3(0.0, 0.0, 0.0));
+        saved.set_zoom(20.0);
+        saved.set_cam_dist(50.0);
+        saved.set_slab_depth(40.0);
+        saved.set_perspective(false);
+        let angle = std::f64::consts::FRAC_PI_4;
+        saved.set_rotation(cuemol_core::Quat::new(0.0, 0.0, angle.sin(), angle.cos()));
+        let controller = CameraController::from_qsys_camera(&saved);
+        assert!((controller.ortho_scale - 10.0).abs() < 1.0e-5);
+        let clip = controller.view_projection(1.0) * GlamVec4::new(5.0, 0.0, 0.0, 1.0);
+        let ndc = clip.truncate() / clip.w;
+        assert!(ndc.abs_diff_eq(Vec3::new(0.0, -0.5, 0.5), 1.0e-5));
+        let roundtrip = controller.to_qsys_camera("saved");
+        assert!((roundtrip.zoom() - 20.0).abs() < 1.0e-5);
+        assert!((roundtrip.rotation().z - saved.rotation().z).abs() < 1.0e-5);
+    }
+
+    #[test]
     fn native_view_fakedials_use_reference_relative_and_absolute_semantics() {
         let mut camera = CameraController::default();
-        assert!((camera.zoom() - 25.0).abs() < 1.0e-5);
+        assert!((camera.zoom() - 80.0).abs() < 1.0e-5);
         camera.set_zoom(50.0);
-        assert!((camera.ortho_scale - 20.0).abs() < 1.0e-5);
+        assert!((camera.ortho_scale - 25.0).abs() < 1.0e-5);
         camera.set_slab(500.0);
         assert_eq!(camera.slab_depth, 240.0);
         camera.set_distance(10.0);
@@ -37068,7 +36437,7 @@ mod tests {
 
         GuiApplication::apply_view_properties(&mut camera, &properties).unwrap();
         assert_eq!(camera.name, "edited view");
-        assert!((camera.ortho_scale - 16.0).abs() < 1.0e-5);
+        assert!((camera.ortho_scale - 31.25).abs() < 1.0e-5);
         assert_eq!(camera.distance, 160.0);
         assert_eq!(camera.slab_depth, 90.0);
         assert_eq!(camera.target, Vec3::new(1.0, -2.0, 3.5));
@@ -39457,12 +38826,12 @@ mod tests {
         app.selected_renderer = Some(renderer_uid);
         assert!(app.fit_workspace_selection(&mut camera).unwrap());
         assert!((camera.target.x - 5.0).abs() < 1.0e-5);
-        assert!((camera.ortho_scale - 1000.0 / 7.0).abs() < 1.0e-4);
+        assert!((camera.ortho_scale - 3.5).abs() < 1.0e-4);
 
         app.selected_renderer = None;
         assert!(app.fit_workspace_selection(&mut camera).unwrap());
         assert!((camera.target.x - 50.0).abs() < 1.0e-5);
-        assert!((camera.ortho_scale - 1000.0 / 70.0).abs() < 1.0e-4);
+        assert!((camera.ortho_scale - 35.0).abs() < 1.0e-4);
 
         let mut map = cuemol_xtal::DensityMap::new();
         map.set_map_byte_array(&[0, 255], [2, 1, 1], 0.0, 1.0, 0.5, 0.5);
@@ -39478,7 +38847,7 @@ mod tests {
         assert!(app.fit_workspace_selection(&mut camera).unwrap());
         assert!((camera.target.x - 10.0).abs() < 1.0e-5);
         assert!((camera.target.y - 5.0).abs() < 1.0e-5);
-        assert!((camera.ortho_scale - 100.0).abs() < 1.0e-4);
+        assert!((camera.ortho_scale - 5.0).abs() < 1.0e-4);
     }
 
     #[test]
@@ -40763,7 +40132,7 @@ mod tests {
         if let Some(pdb) = reference_pdb_path() {
             app.open_path = pdb.to_string_lossy().to_string();
             app.open_current_path(&mut camera);
-            assert!(app.snapshot.bond_count() > 0);
+            assert!(!app.snapshot.meshes.is_empty());
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     app.workspace_section(ui, &mut camera);
@@ -40980,6 +40349,15 @@ mod tests {
             .map(|object| object.uid)
             .expect("1CRN loads as one object");
 
+        app.state
+            .new_renderer(
+                app.state.active_scene().unwrap(),
+                object_uid,
+                "ballstick",
+                "ballstick",
+            )
+            .unwrap();
+        app.rebuild_snapshot();
         let distinct_colors = |app: &GuiApplication| -> usize {
             app.snapshot
                 .bonds
