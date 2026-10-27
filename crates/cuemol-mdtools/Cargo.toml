@@ -9,6 +9,10 @@ cuemol-core.workspace = true
 cuemol-molstr.workspace = true
 cuemol-qsys.workspace = true
 cuemol-symm.workspace = true
+flate2 = "1.1"
+bzip2 = "0.6"
+lzma-rs = "0.3"
+tempfile = { version = "3", default-features = false }
 
 [lib]
 name = "cuemol_mdtools"

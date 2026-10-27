@@ -1,6 +1,8 @@
 pub mod amber;
 mod fileio;
 pub mod gro;
+pub mod indexed;
+pub use indexed::{IndexedTrajectory, TrajectoryFrame};
 pub mod namd;
 pub mod netcdf;
 pub mod psf;

@@ -215,23 +215,7 @@ pub(crate) fn normalize_pdb_id(value: &str) -> std::result::Result<String, Strin
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 fn configuration_path(filename: &str) -> PathBuf {
-    let root = std::env::var_os("CUEMOL_CONFIG_DIR")
-        .or_else(|| std::env::var_os("CUEMOL2_CONFIG_DIR"))
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("XDG_CONFIG_HOME")
-                .filter(|path| !path.is_empty())
-                .map(PathBuf::from)
-                .or_else(|| {
-                    std::env::var_os("HOME")
-                        .or_else(|| std::env::var_os("USERPROFILE"))
-                        .map(PathBuf::from)
-                        .map(|path| path.join(".config"))
-                })
-                .map(|path| path.join("cuemol"))
-        })
-        .unwrap_or_else(|| std::env::temp_dir().join("cuemol"));
-    root.join(filename)
+    cuemol_command::config::directory().join(filename)
 }
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]

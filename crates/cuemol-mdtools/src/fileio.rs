@@ -1,9 +1,8 @@
 use cuemol_core::{CueMolError, Result};
-use std::fs;
 use std::fs::File;
 use std::io::Read;
+use std::io::{BufReader, Write};
 use std::path::Path;
-use std::process::Command;
 
 pub(crate) fn read_text_maybe_compressed(path: impl AsRef<Path>) -> Result<String> {
     let bytes = read_bytes_maybe_compressed(path)?;
@@ -12,12 +11,9 @@ pub(crate) fn read_text_maybe_compressed(path: impl AsRef<Path>) -> Result<Strin
 
 pub(crate) fn read_bytes_maybe_compressed(path: impl AsRef<Path>) -> Result<Vec<u8>> {
     let path = path.as_ref();
-    match detect_compression(path)? {
-        CompressionEncoding::Raw => Ok(fs::read(path)?),
-        CompressionEncoding::Gzip => decompress_with_command("gzip", path),
-        CompressionEncoding::Bzip2 => decompress_with_command("bzip2", path),
-        CompressionEncoding::Xz => decompress_with_command("xz", path),
-    }
+    let mut output = Vec::new();
+    decompress_to(path, &mut output)?;
+    Ok(output)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,13 +40,22 @@ pub(crate) fn detect_compression(path: &Path) -> Result<CompressionEncoding> {
     Ok(CompressionEncoding::Raw)
 }
 
-fn decompress_with_command(program: &str, path: &Path) -> Result<Vec<u8>> {
-    let output = Command::new(program).arg("-cd").arg(path).output()?;
-    if !output.status.success() {
-        return Err(CueMolError::invalid_argument(format!(
-            "failed to decompress {} with {program}",
-            path.display()
-        )));
+pub(crate) fn decompress_to(path: &Path, output: &mut impl Write) -> Result<()> {
+    let file = File::open(path)?;
+    match detect_compression(path)? {
+        CompressionEncoding::Raw => {
+            std::io::copy(&mut BufReader::new(file), output)?;
+        }
+        CompressionEncoding::Gzip => {
+            std::io::copy(&mut flate2::read::MultiGzDecoder::new(file), output)?;
+        }
+        CompressionEncoding::Bzip2 => {
+            std::io::copy(&mut bzip2::read::MultiBzDecoder::new(file), output)?;
+        }
+        CompressionEncoding::Xz => {
+            lzma_rs::xz_decompress(&mut BufReader::new(file), output)
+                .map_err(|error| CueMolError::parse(format!("XZ decompression failed: {error}")))?;
+        }
     }
-    Ok(output.stdout)
+    Ok(())
 }

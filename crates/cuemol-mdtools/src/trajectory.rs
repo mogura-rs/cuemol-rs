@@ -141,6 +141,10 @@ impl TrajBlock {
         self.frames.get(index).map(Vec::as_slice)
     }
 
+    pub fn take_frame(&mut self, index: usize) -> Option<Vec<f32>> {
+        self.frames.get_mut(index).map(std::mem::take)
+    }
+
     pub fn frame_mut(&mut self, index: usize) -> Option<&mut [f32]> {
         self.frames.get_mut(index).map(Vec::as_mut_slice)
     }

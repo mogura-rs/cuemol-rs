@@ -1,0 +1,1345 @@
+[
+  {
+    "name": "append_trajectory",
+    "description": "Append an indexed MD trajectory to a molecule.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        },
+        "stride": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "objId",
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "apply_camera",
+    "description": "Restore a saved camera.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "withVisibility": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "capture_view",
+    "description": "Return a PNG of the current view.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "longSide": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "center_view",
+    "description": "Center the camera on a molecular selection.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer"
+        },
+        "selection": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "zoom": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "objId",
+        "zoom"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "close_scene",
+    "description": "Close a scene. Explicitly set discardChanges to discard modified contents.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sceneId": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "discardChanges": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "count_selection",
+    "description": "Count atoms matching a CueMol selection.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer"
+        },
+        "selection": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "objId",
+        "selection"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "create_preset_renderer",
+    "description": "Create a group of renderers from a preset.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer"
+        },
+        "preset": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "centerView": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "objId",
+        "preset",
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "create_renderer",
+    "description": "Create a renderer for an object.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer"
+        },
+        "rendererType": {
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selection": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "centerView": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "objId",
+        "rendererType"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "create_scene",
+    "description": "Create and activate a scene.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "delete_camera",
+    "description": "Delete a saved camera.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "delete_node",
+    "description": "Delete a scene node.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "nodeId": {
+          "type": "integer"
+        },
+        "nodeType": {
+          "type": "string",
+          "enum": [
+            "object",
+            "renderer",
+            "rendGroup"
+          ]
+        }
+      },
+      "required": [
+        "nodeId",
+        "nodeType"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "execute_script",
+    "description": "Run JavaScript using the embedded Rust engine.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "fetch_pdb",
+    "description": "Download a structure from RCSB PDB.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "pdbId": {
+          "type": "string"
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "mmcif",
+            "pdb"
+          ]
+        },
+        "rendererType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selection": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rendererName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preset": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "centerView": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "mapCenterPolicy": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "pdbId",
+        "format"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": true
+    }
+  },
+  {
+    "name": "fetch_url",
+    "description": "Download and load a molecular file.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "reader": {
+          "type": "string"
+        },
+        "rendererType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selection": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rendererName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preset": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "centerView": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "mapCenterPolicy": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "url",
+        "reader"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": true
+    }
+  },
+  {
+    "name": "get_renderer_property",
+    "description": "Read a renderer property.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "rendId": {
+          "type": "integer"
+        },
+        "prop": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "rendId",
+        "prop"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "get_scene_state",
+    "description": "List objects and renderers in the active scene. Use their IDs in subsequent calls.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "get_screenshot",
+    "description": "Return a PNG of the current scene.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "width": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "height": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "get_view",
+    "description": "Read camera settings.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "list_cameras",
+    "description": "List saved cameras.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "list_chains",
+    "description": "List molecule chains.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "objId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "list_coloring_styles",
+    "description": "List supported coloring schemes.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "list_renderer_types",
+    "description": "List renderer types and presets for an object.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "objId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "list_residues",
+    "description": "List residues in a chain with pagination.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer"
+        },
+        "chain": {
+          "type": "string"
+        },
+        "offset": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "limit": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "objId",
+        "chain"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "list_scenes",
+    "description": "List open scenes and their identifiers.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "list_trajectories",
+    "description": "List loaded trajectory blocks and frame counts.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "load_camera_file",
+    "description": "Load a saved camera file.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "load_file",
+    "description": "Load a molecular structure, map, or CueMol scene from a file.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "rendererType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selection": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rendererName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preset": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "centerView": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "mapCenterPolicy": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "load_trajectory",
+    "description": "Load a topology and indexed MD trajectory files.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "topology": {
+          "type": "string"
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "stride": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "topology",
+        "paths"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "pan_view",
+    "description": "Translate the view in screen units.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "dx": {
+          "type": "number"
+        },
+        "dy": {
+          "type": "number"
+        },
+        "dz": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "dx",
+        "dy"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "redo",
+    "description": "Redo the last undone command.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "reload_camera",
+    "description": "Reload a camera from its source file.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "rename_node",
+    "description": "Rename a scene node.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "nodeId": {
+          "type": "integer"
+        },
+        "nodeType": {
+          "type": "string",
+          "enum": [
+            "object",
+            "renderer",
+            "rendGroup"
+          ]
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "nodeId",
+        "nodeType",
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "render_image",
+    "description": "Render PNG using the bundled Rust Umbreon renderer.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "fileName": {
+          "type": "string"
+        },
+        "width": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "height": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "style": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "gi",
+            "npr",
+            null
+          ]
+        }
+      },
+      "required": [
+        "fileName"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "rotate_view",
+    "description": "Rotate the view around a screen axis.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "axis": {
+          "type": "string",
+          "enum": [
+            "x",
+            "y",
+            "z"
+          ]
+        },
+        "angle": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "axis",
+        "angle"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "save_camera",
+    "description": "Save the current camera.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "withVisibility": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "save_camera_file",
+    "description": "Write a camera file.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "save_scene",
+    "description": "Save the active scene, including embedded structure data.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_frame",
+    "description": "Display an indexed trajectory frame (zero based).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer"
+        },
+        "frame": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "objId",
+        "frame"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_mol_selection",
+    "description": "Change the active selection in a molecule.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer"
+        },
+        "selection": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "objId",
+        "selection"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_projection",
+    "description": "Set perspective or orthographic projection; null reads current state.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "perspective": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_renderer_coloring",
+    "description": "Set renderer coloring.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "nodeId": {
+          "type": "integer"
+        },
+        "nodeType": {
+          "type": "string",
+          "enum": [
+            "renderer",
+            "object"
+          ]
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "paint-type-cpk",
+            "paint-type-rainbow",
+            "paint-type-bfac",
+            "paint-type-solid",
+            "paint-type-resetdef",
+            "paint-type-paint",
+            "paint-type-multigrad",
+            "style"
+          ]
+        },
+        "styleName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "nodeId",
+        "nodeType",
+        "mode"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_renderer_property",
+    "description": "Set a renderer property.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "rendId": {
+          "type": "integer"
+        },
+        "prop": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "rendId",
+        "prop",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_renderer_selection",
+    "description": "Set the atoms displayed by a renderer.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "rendId": {
+          "type": "integer"
+        },
+        "selection": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "rendId",
+        "selection"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_renderer_type",
+    "description": "Replace a renderer with a compatible representation.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "rendId": {
+          "type": "integer"
+        },
+        "rendererType": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "rendId",
+        "rendererType"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_view",
+    "description": "Set camera zoom, clipping slab, distance, or center.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "zoom": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "slab": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "distance": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "center": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number"
+          },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "fitSlab": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "objId": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_visible",
+    "description": "Show or hide a scene node.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "nodeId": {
+          "type": "integer"
+        },
+        "nodeType": {
+          "type": "string",
+          "enum": [
+            "object",
+            "renderer",
+            "rendGroup"
+          ]
+        },
+        "visible": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "nodeId",
+        "nodeType",
+        "visible"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "switch_scene",
+    "description": "Activate an existing scene.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sceneId": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "sceneId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "undo",
+    "description": "Undo the previous command.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  }
+]

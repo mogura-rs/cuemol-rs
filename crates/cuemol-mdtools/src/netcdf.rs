@@ -872,6 +872,25 @@ mod tests {
         output[position..position + 8].copy_from_slice(&value.to_be_bytes());
     }
 
+    #[test]
+    fn indexed_netcdf_matches_eager_versions_and_random_seeks() {
+        use std::io::Write;
+        for version in [1, 2] {
+            let bytes = amber_fixture(3, 7, version);
+            let eager = read_amber_netcdf_bytes(&bytes).unwrap();
+            let mut file = tempfile::NamedTempFile::new().unwrap();
+            file.write_all(&bytes).unwrap();
+            let indexed = crate::IndexedTrajectory::open(file.path(), 2, Some(3)).unwrap();
+            assert_eq!(indexed.frame_count(), 4);
+            assert_eq!(indexed.index_bytes(), 0);
+            for i in [3, 0, 2, 1] {
+                let frame = indexed.read_frame(i).unwrap();
+                assert_eq!(frame.coordinates, eager.frame(i * 2).unwrap());
+                assert_eq!(frame.cell, eager.cell(i * 2));
+            }
+        }
+    }
+
     fn amber_fixture(atom_count: usize, frame_count: usize, version: u8) -> Vec<u8> {
         amber_fixture_with_convention(atom_count, frame_count, version, "AMBER")
     }
@@ -961,6 +980,20 @@ mod tests {
             }
         }
         output
+    }
+
+    #[test]
+    fn indexed_cdf5_matches_eager() {
+        use std::io::Write;
+        let bytes = cdf5_fixture();
+        let expected = read_amber_netcdf_bytes(&bytes).unwrap();
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&bytes).unwrap();
+        let index = crate::IndexedTrajectory::open(file.path(), 1, Some(2)).unwrap();
+        assert_eq!(
+            index.read_frame(0).unwrap().coordinates,
+            expected.frame(0).unwrap()
+        );
     }
 
     fn cdf5_fixture() -> Vec<u8> {
@@ -1072,5 +1105,96 @@ mod tests {
 
         let restart = amber_fixture_with_convention(3, 2, 2, "AMBERRESTART");
         assert!(read_amber_netcdf_bytes(&restart).is_err());
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct NetcdfFileLayout {
+    header: Netcdf3InStream<'static>,
+    count: usize,
+}
+
+impl NetcdfFileLayout {
+    pub(crate) fn open(file: &mut std::fs::File) -> Result<Self> {
+        use std::io::{Read, Seek};
+        file.rewind()?;
+        let len = file.metadata()?.len();
+        let mut bytes = Vec::new();
+        loop {
+            let n = (&mut *file).take(4096).read_to_end(&mut bytes)?;
+            let mut header = Netcdf3InStream::new(&bytes);
+            match header.parse_header() {
+                Ok(()) => {
+                    if header.convention() != "AMBER"
+                        || header.atom_count == 0
+                        || header.record_size == 0
+                    {
+                        return Err(CueMolError::parse("not an AMBER NetCDF trajectory"));
+                    }
+                    let start = header.record_data_start as u64;
+                    let size = header.record_size as u64;
+                    if len < start {
+                        return Err(CueMolError::parse("truncated NetCDF header"));
+                    }
+                    let available = (len - start) / size;
+                    let count = if header.streaming {
+                        available
+                    } else {
+                        header.record_count
+                    };
+                    if count > available
+                        || (header.streaming && !(len - start).is_multiple_of(size))
+                    {
+                        return Err(CueMolError::parse("truncated NetCDF records"));
+                    }
+                    let count = usize::try_from(count)
+                        .map_err(|_| CueMolError::parse("NetCDF frame count overflow"))?;
+                    let header = Netcdf3InStream {
+                        input: &[],
+                        ..header
+                    };
+                    return Ok(Self { header, count });
+                }
+                Err(error) if n == 0 || bytes.len() >= 16 * 1024 * 1024 => return Err(error),
+                Err(_) => {}
+            }
+        }
+    }
+
+    pub(crate) fn atom_count(&self) -> usize {
+        self.header.atom_count
+    }
+    pub(crate) fn frame_count(&self) -> usize {
+        self.count
+    }
+
+    pub(crate) fn read_frame(
+        &self,
+        file: &mut std::fs::File,
+        index: usize,
+    ) -> Result<crate::TrajectoryFrame> {
+        use std::io::{Read, Seek, SeekFrom};
+        let offset = (index as u64)
+            .checked_mul(self.header.record_size as u64)
+            .and_then(|n| n.checked_add(self.header.record_data_start as u64))
+            .ok_or_else(|| CueMolError::parse("NetCDF offset overflow"))?;
+        file.seek(SeekFrom::Start(offset))?;
+        let mut bytes = vec![0; self.header.record_size];
+        file.read_exact(&mut bytes)?;
+        let mut frame_reader = Netcdf3InStream {
+            input: &bytes,
+            record_data_start: 0,
+            record_count: 1,
+            next_frame: 0,
+            streaming: false,
+            ..self.header.clone()
+        };
+        let frame = frame_reader
+            .read_frame()?
+            .ok_or_else(|| CueMolError::parse("missing NetCDF frame"))?;
+        Ok(crate::TrajectoryFrame {
+            coordinates: frame.coordinates,
+            cell: frame.cell,
+        })
     }
 }

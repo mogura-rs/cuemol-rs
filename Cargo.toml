@@ -18,6 +18,7 @@ members = [
   "crates/cuemol-desktop-core",
   "crates/cuemol-desktop",
   "crates/cuemol-cli",
+  "crates/cuemol-command",
   "crates/cuemol-node",
   "crates/cuemol-py",
 ]
@@ -29,6 +30,7 @@ license = "MIT"
 repository = "https://github.com/CueMol/cuemol2-rs"
 
 [workspace.dependencies]
+cuemol-command = { path = "crates/cuemol-command" }
 cuemol-core = { path = "crates/cuemol-core" }
 cuemol-gfx = { path = "crates/cuemol-gfx" }
 cuemol-qsys = { path = "crates/cuemol-qsys" }
@@ -51,3 +53,18 @@ regex = "1.12"
 shlex = "1.3"
 libloading = "0.8.9"
 lyon = "1.0"
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0
+
+[profile.release]
+lto = false
+codegen-units = 16
+strip = "debuginfo"
+
+[profile.web]
+inherits = "release"
+opt-level = "s"

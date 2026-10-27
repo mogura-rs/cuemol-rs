@@ -379,7 +379,7 @@ struct GuiTrajectoryBlockData {
     uid: u64,
     source: String,
     format: String,
-    frames: Vec<Vec<Vector4>>,
+    frames: GuiTrajectoryFrames,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -388,20 +388,50 @@ struct GuiTrajectoryData {
     current_frame: usize,
 }
 
+#[derive(Debug, Clone)]
+enum GuiTrajectoryFrames {
+    Memory(std::sync::Arc<Vec<Vec<Vector4>>>),
+    File(std::sync::Arc<cuemol_mdtools::IndexedTrajectory>),
+}
+
+impl GuiTrajectoryFrames {
+    fn len(&self) -> usize {
+        match self {
+            Self::Memory(frames) => frames.len(),
+            Self::File(file) => file.frame_count(),
+        }
+    }
+
+    fn frame(&self, index: usize) -> Result<Vec<Vector4>> {
+        match self {
+            Self::Memory(frames) => frames
+                .get(index)
+                .cloned()
+                .ok_or_else(|| CueMolError::not_found("trajectory frame")),
+            Self::File(file) => Ok(file
+                .read_frame(index)?
+                .coordinates
+                .chunks_exact(3)
+                .map(|xyz| Vector4::new3(xyz[0] as f64, xyz[1] as f64, xyz[2] as f64))
+                .collect()),
+        }
+    }
+}
+
 impl GuiTrajectoryData {
     fn frame_count(&self) -> usize {
         self.blocks.iter().map(|block| block.frames.len()).sum()
     }
 
-    fn frame(&self, index: usize) -> Option<&[Vector4]> {
+    fn frame(&self, index: usize) -> Result<Vec<Vector4>> {
         let mut remaining = index;
         for block in &self.blocks {
             if remaining < block.frames.len() {
-                return block.frames.get(remaining).map(Vec::as_slice);
+                return block.frames.frame(remaining);
             }
-            remaining = remaining.saturating_sub(block.frames.len());
+            remaining -= block.frames.len();
         }
-        None
+        Err(CueMolError::not_found("trajectory frame"))
     }
 }
 
@@ -6814,7 +6844,7 @@ impl DesktopAppState {
             uid: self.allocate_trajectory_block_uid(),
             source: String::new(),
             format: "SYNTHETIC".to_string(),
-            frames,
+            frames: GuiTrajectoryFrames::Memory(std::sync::Arc::new(frames)),
         });
         self.trajectories.insert(
             object_uid,
@@ -6909,9 +6939,10 @@ impl DesktopAppState {
         }
         let first_frame = blocks
             .first()
-            .and_then(|block| block.frames.first())
-            .ok_or_else(|| CueMolError::parse("trajectory contains no coordinate frames"))?;
-        for (atom, position) in molecule.atoms_mut().iter_mut().zip(first_frame) {
+            .ok_or_else(|| CueMolError::parse("trajectory contains no coordinate frames"))?
+            .frames
+            .frame(0)?;
+        for (atom, position) in molecule.atoms_mut().iter_mut().zip(&first_frame) {
             atom.position = *position;
         }
         molecule.fire_atoms_moved();
@@ -7075,7 +7106,7 @@ impl DesktopAppState {
                     uid: block_uid,
                     source: path.to_string_lossy().into_owned(),
                     format: effective_extension(path).to_ascii_uppercase(),
-                    frames,
+                    frames: GuiTrajectoryFrames::Memory(std::sync::Arc::new(frames)),
                 }],
                 current_frame: 0,
             },
@@ -7132,9 +7163,8 @@ impl DesktopAppState {
         let frame = self
             .trajectories
             .get(&object_uid)
-            .and_then(|trajectory| trajectory.frame(index))
-            .map(<[Vector4]>::to_vec)
-            .ok_or_else(|| CueMolError::not_found("trajectory frame"))?;
+            .ok_or_else(|| CueMolError::not_found("trajectory"))?
+            .frame(index)?;
         let object = self
             .scene_manager_mut()
             .object_mut(object_uid)
@@ -7184,67 +7214,13 @@ impl DesktopAppState {
         atom_count: usize,
     ) -> Result<GuiTrajectoryBlockData> {
         let format = effective_extension(path);
-        let block = match format.as_str() {
-            "dcd" => cuemol_mdtools::read_dcd_file_with_options(
-                path,
-                &cuemol_mdtools::DcdReadOptions {
-                    skip_no: nevery,
-                    expected_atom_count: Some(atom_count),
-                    atom_indices: None,
-                },
-            )?,
-            "xtc" => cuemol_mdtools::read_xtc_file_with_options(
-                path,
-                &cuemol_mdtools::XtcReadOptions {
-                    skip_no: nevery,
-                    expected_atom_count: Some(atom_count),
-                    atom_indices: None,
-                },
-            )?,
-            "trr" => cuemol_mdtools::read_trr_file_with_options(
-                path,
-                &cuemol_mdtools::TrrReadOptions {
-                    skip_no: nevery,
-                    expected_atom_count: Some(atom_count),
-                    atom_indices: None,
-                },
-            )?,
-            "nc" => cuemol_mdtools::read_amber_netcdf_file_with_options(
-                path,
-                &cuemol_mdtools::AmberNetCDFReadOptions {
-                    skip_no: nevery,
-                    expected_atom_count: Some(atom_count),
-                    atom_indices: None,
-                },
-            )?,
-            other => {
-                return Err(CueMolError::invalid_argument(format!(
-                    "unsupported trajectory format: {other}"
-                )));
-            }
-        };
-        if block.frame_count() == 0 {
-            return Err(CueMolError::parse(
-                "trajectory block contains no coordinate frames",
-            ));
-        }
-        let mut frames = Vec::with_capacity(block.frame_count());
-        for index in 0..block.frame_count() {
-            let coordinates = block
-                .frame(index)
-                .ok_or_else(|| CueMolError::parse("trajectory frame is unavailable"))?;
-            frames.push(
-                coordinates
-                    .chunks_exact(3)
-                    .map(|xyz| Vector4::new3(xyz[0] as f64, xyz[1] as f64, xyz[2] as f64))
-                    .collect::<Vec<_>>(),
-            );
-        }
+        let file = cuemol_mdtools::IndexedTrajectory::open(path, nevery, Some(atom_count))?;
+        file.read_frame(0)?;
         Ok(GuiTrajectoryBlockData {
             uid: self.allocate_trajectory_block_uid(),
             source: path.to_string_lossy().into_owned(),
             format: format.to_ascii_uppercase(),
-            frames,
+            frames: GuiTrajectoryFrames::File(std::sync::Arc::new(file)),
         })
     }
 

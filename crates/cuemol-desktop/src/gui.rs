@@ -188,6 +188,7 @@ pub fn run_with_paths(paths: Vec<PathBuf>) -> Result<()> {
     let mut runner = NativeRunner::new(event_loop.create_proxy(), paths);
     let run_result = event_loop.run_app(&mut runner).map_err(gui_error);
     let init_error = runner.init_error.take();
+    drop(runner.api.take());
     std::mem::forget(runner);
     run_result?;
     init_error.map_or(Ok(()), Err)
@@ -266,6 +267,8 @@ fn record_native_window_geometry(state: &mut DesktopAppState, window: &Window) {
 }
 
 struct NativeRunner {
+    api: Option<cuemol_command::transport::ApiServer>,
+    protocol: cuemol_command::Protocol,
     window: Option<Arc<Window>>,
     egui_ctx: egui::Context,
     egui_state: Option<egui_winit::State>,
@@ -283,6 +286,8 @@ struct NativeRunner {
 impl NativeRunner {
     fn new(event_proxy: EventLoopProxy<()>, startup_paths: Vec<PathBuf>) -> Self {
         Self {
+            api: None,
+            protocol: cuemol_command::Protocol::without_history(),
             window: None,
             egui_ctx: egui::Context::default(),
             egui_state: None,
@@ -360,7 +365,7 @@ impl NativeRunner {
             return;
         }
         let attributes = Window::default_attributes()
-            .with_title("CueMol2")
+            .with_title("CueMol3")
             .with_inner_size(PhysicalSize::new(1024, 768));
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
@@ -578,9 +583,89 @@ impl NativeRunner {
         }
     }
 
+    fn poll_commands(&mut self) {
+        let (Some(app), Some(gpu)) = (&mut self.app, &mut self.gpu) else {
+            return;
+        };
+        if self.api.is_none()
+            && std::env::var_os("CUEMOL_DISABLE_MCP").is_none()
+            && app.state.config_value("mcp:enabled") != "false"
+        {
+            let proxy = self.event_proxy.clone();
+            match cuemol_command::transport::ApiServer::start(
+                "127.0.0.1:0".parse().unwrap(),
+                move || {
+                    let _ = proxy.send_event(());
+                },
+            ) {
+                Ok(api) => self.api = Some(api),
+                Err(error) => {
+                    app.set_error(error);
+                    app.state.put_config_value("mcp:enabled", "false");
+                }
+            }
+        }
+        let Some(api) = &self.api else {
+            return;
+        };
+        while let Ok(request) = api.requests.try_recv() {
+            let name = request.message["params"]["name"].as_str().unwrap_or("");
+            let is_call = request.message["method"] == "tools/call";
+            if is_call && matches!(name, "undo" | "redo") {
+                let available = if name == "undo" {
+                    !app.undo_stack.is_empty()
+                } else {
+                    !app.redo_stack.is_empty()
+                };
+                if available {
+                    if name == "undo" {
+                        app.undo(&mut gpu.camera);
+                    } else {
+                        app.redo(&mut gpu.camera);
+                    }
+                }
+                let payload = if available {
+                    serde_json::json!({"ok":true,"result":{"changed":true}})
+                } else {
+                    serde_json::json!({"ok":false,"error":format!("Nothing to {name}")})
+                };
+                let response = serde_json::json!({"jsonrpc":"2.0","id":request.message["id"],"result":{
+                    "content":[{"type":"text","text":payload.to_string()}],"isError":!available}});
+                let _ = request.reply.send(Some(response));
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+                continue;
+            }
+            let mutating = is_call && cuemol_command::tool_is_mutating(name);
+            let undo = mutating.then(|| app.capture_undo());
+            let mut camera = gpu.camera.to_qsys_camera("__current");
+            let response = self
+                .protocol
+                .handle(request.message, &mut app.state, &mut camera);
+            let success = response.as_ref().is_some_and(|value| {
+                value.get("result").is_some() && value["result"]["isError"] != true
+            });
+            if mutating && success {
+                if let Some(undo) = undo {
+                    app.push_undo_snapshot(undo);
+                }
+                gpu.camera = CameraController::from_qsys_camera(&camera);
+                let _ = app.state.set_active_view_camera(&camera);
+                app.invalidate_molecule_panel_caches();
+                app.rebuild_snapshot();
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            let _ = request.reply.send(response);
+        }
+    }
+
     fn about_to_wait_impl(&mut self, event_loop: &ActiveEventLoop) {
         self.poll_gpu_init(event_loop);
         self.poll_config_init(event_loop);
+        self.poll_commands();
         if let (Some(app), Some(gpu)) = (&mut self.app, &mut self.gpu) {
             for path in std::mem::take(&mut self.startup_paths) {
                 app.open_path = path.to_string_lossy().into_owned();
@@ -1337,6 +1422,7 @@ struct GuiApplication {
     pixels_per_point: f32,
     shift_down: bool,
     ctrl_down: bool,
+    last_atom_click: Option<(Instant, egui::Pos2)>,
     rect_select_start: Option<egui::Pos2>,
     rect_select_current: Option<egui::Pos2>,
     viewport_menu: Option<ViewportMenu>,
@@ -4956,6 +5042,7 @@ impl GuiApplication {
             pixels_per_point: 1.0,
             shift_down: false,
             ctrl_down: false,
+            last_atom_click: None,
             rect_select_start: None,
             rect_select_current: None,
             viewport_menu: None,
@@ -5102,6 +5189,33 @@ impl GuiApplication {
     }
 
     fn ui(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
+        if !ctx.wants_keyboard_input() && self.pointer_in_viewport(camera.last_cursor) {
+            if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Home)) {
+                camera.fit_snapshot(&self.snapshot);
+            }
+            if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::C)) {
+                if let Some(uid) = self.target_object_uid() {
+                    if let Ok(Some(center)) = self.state.selected_molecule_center(uid) {
+                        camera.target = vec3_from_vector(center);
+                    }
+                }
+            }
+            if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F)) {
+                if let Some(uid) = self.target_object_uid() {
+                    if let Some(scene_uid) = self.state.active_scene() {
+                        let mut view = View::new(cuemol_core::Uid::new(1), scene_uid);
+                        view.set_camera(&camera.to_qsys_camera("__current"));
+                        if self
+                            .state
+                            .fit_selected_molecule_view(uid, &mut view)
+                            .unwrap_or(false)
+                        {
+                            *camera = CameraController::from_qsys_camera(&view.camera());
+                        }
+                    }
+                }
+            }
+        }
         self.poll_pdb_download(camera);
         self.poll_url_download(camera);
         self.poll_animation_render(camera);
@@ -31154,7 +31268,17 @@ impl GuiApplication {
                         && is_click;
                     if should_pick {
                         if let Some(position) = camera.last_cursor {
-                            self.pick_atom_at(camera, position);
+                            let double_click = self.last_atom_click.is_some_and(|(time, last)| {
+                                time.elapsed() < Duration::from_millis(400)
+                                    && last.distance(position) < 5.0
+                            });
+                            if double_click {
+                                self.center_at_pointer(camera, position);
+                                self.last_atom_click = None;
+                            } else {
+                                self.pick_atom_at(camera, position);
+                                self.last_atom_click = Some((Instant::now(), position));
+                            }
                         }
                     }
                     // Right-click (no drag) opens the atom context menu
@@ -31212,6 +31336,8 @@ impl GuiApplication {
                             CameraDragMode::Pan => camera.pan_by(dx, dy),
                             // Drag up to zoom in, down to zoom out.
                             CameraDragMode::Zoom => camera.zoom_by(-dy * 0.1),
+                            CameraDragMode::Slab => camera.adjust_slab(dy * 0.1),
+                            CameraDragMode::Depth => camera.translate_depth(dy * 0.05),
                         }
                         camera.drag_total += dx.abs() + dy.abs();
                         changed = dx != 0.0 || dy != 0.0;
@@ -31231,6 +31357,14 @@ impl GuiApplication {
                         (pos.x as f32, pos.y as f32, pos.y as f32 / 48.0)
                     }
                 };
+                if self.shift_down {
+                    camera.adjust_slab(step);
+                    return step != 0.0;
+                }
+                if self.ctrl_down {
+                    camera.translate_depth(step);
+                    return step != 0.0;
+                }
                 if self.state.view_input_config().style() == "TrackpadViewInConf"
                     && config_bool(&self.state, "cuemol2.ui.mouse-multitouch-pad", false)
                     && !self.ctrl_down
@@ -31246,6 +31380,12 @@ impl GuiApplication {
     }
 
     fn camera_drag_mode(&self, button: MouseButton) -> Option<CameraDragMode> {
+        if button == MouseButton::Right && self.shift_down {
+            return Some(CameraDragMode::Slab);
+        }
+        if button == MouseButton::Right && self.ctrl_down {
+            return Some(CameraDragMode::Depth);
+        }
         if button == MouseButton::Left
             && self.ctrl_down
             && config_bool(&self.state, "cuemol2.ui.mouse-emulate-rbutton", false)
@@ -31365,6 +31505,33 @@ impl GuiApplication {
         self.rebuild_snapshot();
         self.set_status(format!("Selected {total} atoms in rectangle"));
         total
+    }
+
+    fn center_at_pointer(&mut self, camera: &mut CameraController, position: egui::Pos2) -> bool {
+        let target = match self.pick_hit(camera, position) {
+            Some(PickHit::Atom {
+                object_uid,
+                atom_index,
+            }) => self
+                .state
+                .scene_manager()
+                .object(cuemol_core::Uid::new(object_uid))
+                .and_then(|object| object.mol().atoms().get(atom_index))
+                .map(|atom| vec3_from_vector(atom.position)),
+            Some(PickHit::Lightweight { snapshot_index }) => self
+                .snapshot
+                .atoms
+                .get(snapshot_index)
+                .map(|atom| vec3_from_vector(atom.center)),
+            None => None,
+        };
+        if let Some(target) = target {
+            camera.target = target;
+            self.set_status("Centered on picked atom");
+            true
+        } else {
+            false
+        }
     }
 
     fn pick_atom_at(&mut self, camera: &CameraController, position: egui::Pos2) -> bool {
@@ -31572,6 +31739,8 @@ enum CameraDragMode {
     Pan,
     /// Shift+left drag = zoom (CueMol2 default view-input preset).
     Zoom,
+    Slab,
+    Depth,
 }
 
 impl CameraDragMode {
@@ -31705,6 +31874,14 @@ impl CameraController {
 
     fn set_zoom(&mut self, zoom: f32) {
         self.ortho_scale = 1000.0 / zoom.max(0.01);
+    }
+
+    fn adjust_slab(&mut self, step: f32) {
+        self.set_slab(self.slab_depth * (step * 0.08).clamp(-4.0, 4.0).exp());
+    }
+
+    fn translate_depth(&mut self, step: f32) {
+        self.target += self.rotation() * Vec3::Z * step * self.slab_depth.max(1.0) * 0.05;
     }
 
     fn set_slab(&mut self, slab: f32) {
@@ -35319,7 +35496,8 @@ fn validate_native_preferences(preferences: &NativePreferences) -> std::result::
 }
 
 fn default_config_path() -> Option<PathBuf> {
-    std::env::var_os("CUEMOL2_CONFIG_FILE")
+    std::env::var_os("CUEMOL_CONFIG_FILE")
+        .or_else(|| std::env::var_os("CUEMOL2_CONFIG_FILE"))
         .map(PathBuf::from)
         .or_else(|| Some(crate::configuration_path("config.tsv")))
 }
