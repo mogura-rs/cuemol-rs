@@ -91,3 +91,56 @@ ATOM      9  CA  THR A   2      13.856  11.469   6.066  1.00  8.31           C
 ATOM     10  C   THR A   2      14.164  10.785   7.379  1.00  5.80           C
 END
 ";
+
+#[test]
+fn indexed_random_frames_match_external_mdtraj_coordinates() {
+    if Command::new("mdconvert").arg("--help").output().is_err() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let pdb = directory.path().join("models.pdb");
+    let mut models = String::new();
+    for frame in 0..9 {
+        models.push_str(&format!("MODEL     {:4}\n", frame + 1));
+        for line in TEN_ATOM_PDB.lines().filter(|l| l.starts_with("ATOM")) {
+            let x: f64 = line[30..38].trim().parse().unwrap();
+            models.push_str(&format!(
+                "{}{:8.3}{}\n",
+                &line[..30],
+                x + frame as f64 * 0.125,
+                &line[38..]
+            ));
+        }
+        models.push_str("ENDMDL\n");
+    }
+    fs::write(&pdb, models).unwrap();
+    for extension in ["dcd", "xtc", "trr", "nc"] {
+        let path = directory.path().join(format!("trajectory.{extension}"));
+        let output = Command::new("mdconvert")
+            .arg("-o")
+            .arg(&path)
+            .arg("-t")
+            .arg(&pdb)
+            .arg(&pdb)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let indexed = cuemol_mdtools::IndexedTrajectory::open(&path, 2, Some(10)).unwrap();
+        assert_eq!(indexed.frame_count(), 5);
+        for frame in [4, 0, 2, 1, 3] {
+            let actual = indexed.read_frame(frame).unwrap();
+            assert_eq!(actual.coordinates.len(), 30);
+            let expected = 17.047 + frame as f32 * 0.25;
+            let tolerance = if extension == "xtc" { 0.006 } else { 0.0001 };
+            assert!(
+                (actual.coordinates[0] - expected).abs() < tolerance,
+                "{extension} frame {frame}: {} != {expected}",
+                actual.coordinates[0]
+            );
+        }
+    }
+}

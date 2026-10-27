@@ -41,14 +41,23 @@ pub fn cache_directory() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("cuemol-cache"))
 }
 
-pub fn load(state: &mut DesktopAppState) -> Result<()> {
-    let path = std::env::var_os("CUEMOL_CONFIG_FILE")
+pub fn file_path() -> PathBuf {
+    std::env::var_os("CUEMOL_CONFIG_FILE")
         .or_else(|| std::env::var_os("CUEMOL2_CONFIG_FILE"))
         .map(PathBuf::from)
-        .unwrap_or_else(|| directory().join("config.tsv"));
+        .unwrap_or_else(|| directory().join("config.tsv"))
+}
+
+pub fn load_preferences(state: &mut DesktopAppState) -> Result<()> {
+    let path = file_path();
     if path.is_file() {
         state.load_config_file(path)?;
     }
+    Ok(())
+}
+
+pub fn load(state: &mut DesktopAppState) -> Result<()> {
+    load_preferences(state)?;
     let path = directory().join("startup.js");
     if path.is_file() {
         let source = std::fs::read_to_string(&path)?;

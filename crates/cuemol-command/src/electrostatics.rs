@@ -45,9 +45,14 @@ pub fn calculate(state: &mut DesktopAppState, args: &Value) -> Result<Value> {
     let executable = crate::external::resolve(state, "apbs")?;
     if method == GuiApbsChargeMethod::Pdb2pqr {
         let pdb2pqr = crate::external::resolve(state, "pdb2pqr")?;
+        let configured = state.config_value("apbs:force_field");
         let ff = args["forceField"]
             .as_str()
-            .unwrap_or("PARSE")
+            .unwrap_or(if configured.is_empty() {
+                "CHARMM"
+            } else {
+                &configured
+            })
             .to_ascii_uppercase();
         if !["AMBER", "CHARMM", "PARSE", "TYL06", "PEOEPB", "SWANSON"].contains(&ff.as_str()) {
             return Err(CueMolError::invalid_argument(

@@ -63,7 +63,7 @@ pub struct DensityMap {
     rmsd_density: f64,
     level_base: f64,
     level_step: f64,
-    bytes: Vec<u8>,
+    bytes: std::sync::Arc<Vec<u8>>,
     histogram: [u64; 256],
     map_type: u8,
     detected_map_type: u8,
@@ -84,7 +84,7 @@ impl Default for DensityMap {
             rmsd_density: 0.0,
             level_base: 0.0,
             level_step: 0.0,
-            bytes: Vec::new(),
+            bytes: std::sync::Arc::new(Vec::new()),
             histogram: [0; 256],
             map_type: 0,
             detected_map_type: 1,
@@ -153,7 +153,7 @@ impl DensityMap {
         self.counts = counts;
         self.intervals = intervals;
         self.delta = std::array::from_fn(|i| self.delta[i] * scale[i]);
-        self.bytes = bytes;
+        self.bytes = std::sync::Arc::new(bytes);
         self.rebuild_histogram();
         Ok(())
     }
@@ -198,7 +198,7 @@ impl DensityMap {
     }
     fn rebuild_histogram(&mut self) {
         self.histogram = [0; 256];
-        for value in &self.bytes {
+        for value in self.bytes.iter() {
             self.histogram[*value as usize] += 1;
         }
     }
@@ -284,10 +284,12 @@ impl DensityMap {
         self.cell = cell_from_delta(delta, intervals);
 
         self.update_stats(values);
-        self.bytes = values
-            .iter()
-            .map(|value| self.float_to_byte(*value))
-            .collect();
+        self.bytes = std::sync::Arc::new(
+            values
+                .iter()
+                .map(|value| self.float_to_byte(*value))
+                .collect(),
+        );
         self.pad_or_truncate_bytes();
         self.rebuild_histogram();
     }
@@ -308,7 +310,7 @@ impl DensityMap {
         self.rmsd_density = rmsd_density;
         self.level_base = min_density;
         self.level_step = (max_density - min_density) / 256.0;
-        self.bytes = bytes.to_vec();
+        self.bytes = std::sync::Arc::new(bytes.to_vec());
         self.pad_or_truncate_bytes();
         self.rebuild_histogram();
     }
@@ -485,7 +487,7 @@ impl DensityMap {
 
     fn pad_or_truncate_bytes(&mut self) {
         let expected = self.counts.iter().product::<usize>();
-        self.bytes.resize(expected, 0);
+        std::sync::Arc::make_mut(&mut self.bytes).resize(expected, 0);
     }
 
     fn flat_index(&self, col: isize, row: isize, sec: isize) -> Option<usize> {
@@ -2974,5 +2976,23 @@ attribute \"dep\" string \"positions\"
         assert_eq!(vol.max_extent(), 3.0);
         vol.set_xferfn_type(GlslMapVolRenderer::GLMV_AUTO2);
         assert_eq!(vol.xferfn_type(), GlslMapVolRenderer::GLMV_AUTO2);
+    }
+}
+
+#[cfg(test)]
+mod shared_storage_tests {
+    use super::DensityMap;
+    use std::sync::Arc;
+
+    #[test]
+    fn undo_snapshot_shares_voxels_until_grid_is_replaced() {
+        let mut map = DensityMap::new();
+        map.set_map_byte_array(&[0, 64, 128, 255], [4, 1, 1], 0., 1., 0.5, 0.3);
+        let saved = map.clone();
+        assert!(Arc::ptr_eq(&map.bytes, &saved.bytes));
+        map.subsample(2).unwrap();
+        assert!(!Arc::ptr_eq(&map.bytes, &saved.bytes));
+        assert_eq!(saved.bytes.as_slice(), &[0, 64, 128, 255]);
+        assert_eq!(map.bytes.len(), 2);
     }
 }

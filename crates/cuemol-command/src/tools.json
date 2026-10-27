@@ -1906,7 +1906,7 @@
             "string",
             "null"
           ],
-          "description": "Surface algorithm. Null or auto lets CueMol choose.",
+          "description": "Use auto for the Rust solvent-excluded surface backend. Legacy meshms and ball requests return an unsupported-backend error.",
           "enum": [
             "auto",
             "meshms",
@@ -2497,7 +2497,7 @@
             "string",
             "null"
           ],
-          "description": "Surface algorithm. Null or auto lets CueMol choose.",
+          "description": "Use auto for the Rust solvent-excluded surface backend. Legacy meshms and ball requests return an unsupported-backend error.",
           "enum": [
             "auto",
             "meshms",
@@ -2945,7 +2945,7 @@
   },
   {
     "name": "save_object",
-    "description": "Write one object to a file in the format its extension names (for a MolCoord object e.g. .pdb or .cif). Give a plain file name, which is saved to the desktop, or an absolute path where the caller allows one; the full path is reported back -- tell the user where it went.",
+    "description": "Write one object to a file in the format its extension names (for a MolCoord object e.g. .pdb or .cif). Relative filenames are resolved from the current working directory. The output path is reported back.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -3211,7 +3211,7 @@
   },
   {
     "name": "export_image",
-    "description": "Save a PNG of the current view to a file, only when the user asks for a file. To look at the view yourself, use capture_view, which saves nothing. Give a plain file name, which is saved to the desktop, or an absolute path where the caller allows one; the full path is reported back -- tell the user where it went.",
+    "description": "Save a PNG of the current view to a file, only when the user asks for a file. To look at the view yourself, use capture_view, which saves nothing. Relative filenames are resolved from the current working directory. The output path is reported back.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -3592,7 +3592,22 @@
             "string",
             "null"
           ],
-          "description": "pdb2pqr force field. Null uses the one in Settings."
+          "description": "pdb2pqr force field. Null uses the one in Settings.",
+          "enum": [
+            "AMBER",
+            "CHARMM",
+            "PARSE",
+            "TYL06",
+            "PEOEPB",
+            "SWANSON",
+            "amber",
+            "charmm",
+            "parse",
+            "tyl06",
+            "peoepb",
+            "swanson",
+            null
+          ]
         },
         "gridSpacing": {
           "type": [
@@ -4813,7 +4828,7 @@
   },
   {
     "name": "set_render_settings",
-    "description": "Change render settings the scene keeps (the Rendering window's settings, which render_image uses), as \"key=value; key=value\". Keys are those of the Rendering window, a block's with its prefix (e.g. \"width=1600; height=1200\").",
+    "description": "Set scene render parameters as key=value pairs separated by semicolons. Supported keys include width, height, unit, dpi, transparentBg, projection, clipPlane, edgeLines, and supported umbreon or umbreon_npr parameters. Unknown settings return an error.",
     "inputSchema": {
       "type": "object",
       "properties": {

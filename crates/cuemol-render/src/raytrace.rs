@@ -1,6 +1,8 @@
 mod bvh;
+mod npr;
 use bvh::RayIndex;
 use cuemol_core::clock::Instant;
+pub use npr::{render_umbreon_npr_snapshot, HatchRenderParams};
 use std::fs;
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, Ordering},
@@ -22,26 +24,21 @@ pub struct UmbreonSmokeResult {
     pub non_background_pixels: usize,
 }
 
-/// User-facing Umbreon denoise modes used by the Tritium render settings.
-///
-/// Umbreon exposes two independent low-level controls: `gi_denoise` applies
-/// OIDN to the indirect-irradiance buffer, while `denoiser` selects a
-/// full-frame post-pass. The UI composes those controls into these three
-/// mutually exclusive modes.
+/// Native image filters. Legacy OIDN preferences map to the bilateral filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UmbreonDenoiseMode {
     #[default]
-    Oidn,
+    Bilateral,
     Atrous,
     None,
 }
 
 impl UmbreonDenoiseMode {
-    pub const ALL: [Self; 3] = [Self::Oidn, Self::Atrous, Self::None];
+    pub const ALL: [Self; 3] = [Self::Bilateral, Self::Atrous, Self::None];
 
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Oidn => "OIDN",
+            Self::Bilateral => "Bilateral",
             Self::Atrous => "A-trous",
             Self::None => "None",
         }
@@ -49,14 +46,13 @@ impl UmbreonDenoiseMode {
 
     pub const fn exporter_settings(self) -> (bool, i32) {
         match self {
-            Self::Oidn => (true, 0),
+            Self::Bilateral => (true, 0),
             Self::Atrous => (false, 1),
             Self::None => (false, 0),
         }
     }
 
-    /// Parse a Tritium setting, falling back to OIDN like the reference
-    /// backend does for an absent or unknown value.
+    /// Import saved preferences, including the legacy OIDN label.
     pub fn from_label_or_default(value: &str) -> Self {
         Self::ALL
             .into_iter()
@@ -1067,6 +1063,10 @@ fn tangent_basis(normal: Vector4) -> (Vector4, Vector4) {
 }
 
 fn denoise_pixels(pixels: &mut [u8], width: usize, height: usize, components: usize, mode: i32) {
+    if mode > 0 {
+        denoise_atrous(pixels, width, height, components);
+        return;
+    }
     let source = pixels.to_vec();
     let radius = if mode >= 2 { 2_isize } else { 1_isize };
     for y in 0..height {
@@ -1099,6 +1099,46 @@ fn denoise_pixels(pixels: &mut [u8], width: usize, height: usize, components: us
                 for channel in 0..3 {
                     pixels[center_offset + channel] =
                         (sums[channel] / weight_sum).round().clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+    }
+}
+
+// Color-guided B3-spline filtering with increasing sample spacing.
+fn denoise_atrous(pixels: &mut [u8], width: usize, height: usize, components: usize) {
+    let kernel = [1.0, 4.0, 6.0, 4.0, 1.0];
+    let mut source = pixels.to_vec();
+    for step in [1_isize, 2, 4] {
+        source.copy_from_slice(pixels);
+        for y in 0..height {
+            for x in 0..width {
+                let center = (y * width + x) * components;
+                let luma = pixel_luma(&source[center..center + 3]);
+                let mut sums = [0.0; 3];
+                let mut total = 0.0;
+                for (ky, weight_y) in kernel.iter().enumerate() {
+                    for (kx, weight_x) in kernel.iter().enumerate() {
+                        let nx = (x as isize + (kx as isize - 2) * step)
+                            .clamp(0, width as isize - 1) as usize;
+                        let ny = (y as isize + (ky as isize - 2) * step)
+                            .clamp(0, height as isize - 1)
+                            as usize;
+                        let offset = (ny * width + nx) * components;
+                        if components == 4 && source[offset + 3] != source[center + 3] {
+                            continue;
+                        }
+                        let difference = pixel_luma(&source[offset..offset + 3]) - luma;
+                        let weight = weight_x * weight_y * (-difference.abs() / 24.0).exp();
+                        for channel in 0..3 {
+                            sums[channel] += f64::from(source[offset + channel]) * weight;
+                        }
+                        total += weight;
+                    }
+                }
+                for channel in 0..3 {
+                    pixels[center + channel] =
+                        (sums[channel] / total).round().clamp(0.0, 255.0) as u8;
                 }
             }
         }
@@ -1865,9 +1905,51 @@ mod tests {
     }
 
     #[test]
-    fn tritium_denoise_modes_compose_the_two_exporter_knobs() {
+    fn atrous_reduces_noise_without_blending_alpha_or_high_contrast_edges() {
+        let width = 32;
+        let mut pixels = Vec::new();
+        for y in 0..16 {
+            for x in 0..width {
+                let base = if x < 16 { 30_i32 } else { 220 };
+                let noise = if (x + y) % 2 == 0 { 9 } else { -9 };
+                let alpha = if y < 8 { 255 } else { 0 };
+                pixels.extend_from_slice(&[(base + noise) as u8; 3]);
+                pixels.push(alpha);
+            }
+        }
+        let original = pixels.clone();
+        denoise_atrous(&mut pixels, width, 16, 4);
+        let error = |data: &[u8]| -> i32 {
+            data.chunks_exact(4)
+                .enumerate()
+                .map(|(i, p)| {
+                    let base = if i % width < 16 { 30 } else { 220 };
+                    (i32::from(p[0]) - base).abs()
+                })
+                .sum()
+        };
+        assert!(error(&pixels) < error(&original) / 2);
+        for (i, (pixel, before)) in pixels
+            .chunks_exact(4)
+            .zip(original.chunks_exact(4))
+            .enumerate()
+        {
+            assert_eq!(pixel[3], before[3]);
+            assert!(if i % width < 16 {
+                pixel[0] < 50
+            } else {
+                pixel[0] > 200
+            });
+        }
+        let mut uniform = vec![123; width * 16 * 3];
+        denoise_atrous(&mut uniform, width, 16, 3);
+        assert!(uniform.iter().all(|v| *v == 123));
+    }
+
+    #[test]
+    fn native_denoise_modes_compose_the_two_exporter_knobs() {
         let expected = [
-            (UmbreonDenoiseMode::Oidn, "OIDN", true, 0),
+            (UmbreonDenoiseMode::Bilateral, "Bilateral", true, 0),
             (UmbreonDenoiseMode::Atrous, "A-trous", false, 1),
             (UmbreonDenoiseMode::None, "None", false, 0),
         ];
@@ -1881,7 +1963,7 @@ mod tests {
         }
         assert_eq!(
             UmbreonDenoiseMode::from_label_or_default("unknown"),
-            UmbreonDenoiseMode::Oidn
+            UmbreonDenoiseMode::Bilateral
         );
     }
 

@@ -15,11 +15,11 @@ use cuemol_core::{
 };
 use cuemol_gfx::Rgba8;
 use cuemol_qsys::{StereoMode, View};
-#[cfg(test)]
-use cuemol_render::{MeshVertex, RenderAtom, RenderBond};
 use cuemol_render::{
     PovSceneExporter, RenderSceneSnapshot, UmbreonDenoiseMode, UmbreonSceneExporter,
 };
+#[cfg(test)]
+use cuemol_render::{RenderAtom, RenderBond};
 use egui_wgpu::ScreenDescriptor;
 use glam::{Mat4, Quat, Vec3, Vec4 as GlamVec4};
 use std::fs;
@@ -265,6 +265,25 @@ fn record_native_window_geometry(state: &mut DesktopAppState, window: &Window) {
         state.put_config_value("window:x", position.x.to_string());
         state.put_config_value("window:y", position.y.to_string());
     }
+}
+
+fn send_native_tool_result(
+    request: cuemol_command::transport::ApiRequest,
+    outcome: std::result::Result<serde_json::Value, String>,
+) {
+    let error = outcome.is_err();
+    let (payload, image) = match outcome {
+        Ok(mut value) => {
+            let image = value.as_object_mut().and_then(|v| v.remove("_image"));
+            (serde_json::json!({"ok":true,"result":value}), image)
+        }
+        Err(error) => (serde_json::json!({"ok":false,"error":error}), None),
+    };
+    let mut content = vec![serde_json::json!({"type":"text","text":payload.to_string()})];
+    if let Some(image) = image {
+        content.push(serde_json::json!({"type":"image","mimeType":"image/png","data":image}));
+    }
+    let _ = request.reply.send(Some(serde_json::json!({"jsonrpc":"2.0","id":request.message["id"],"result":{"content":content,"isError":error}})));
 }
 
 struct NativeRunner {
@@ -612,6 +631,36 @@ impl NativeRunner {
         while let Ok(request) = api.requests.try_recv() {
             let name = request.message["params"]["name"].as_str().unwrap_or("");
             let is_call = request.message["method"] == "tools/call";
+            if is_call
+                && matches!(name, "render_image" | "get_screenshot" | "capture_view")
+                && self.protocol.initialized()
+            {
+                let args = &request.message["params"]["arguments"];
+                let camera = gpu.camera.to_qsys_camera("__current");
+                let prepared = cuemol_command::validate_args(name, args).and_then(|()| {
+                    cuemol_command::prepare_render(&app.state, &camera, name, args)
+                        .map_err(|e| e.to_string())
+                });
+                match prepared {
+                    Ok(prepared) => {
+                        std::thread::spawn(move || {
+                            send_native_tool_result(
+                                request,
+                                prepared.run().map_err(|e| e.to_string()),
+                            )
+                        });
+                    }
+                    Err(error) => send_native_tool_result(request, Err(error)),
+                }
+                continue;
+            }
+            if is_call && name == "calc_elepot" && self.protocol.initialized() {
+                app.start_apbs_command(request);
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+                continue;
+            }
             if is_call && matches!(name, "undo" | "redo") {
                 let available = if name == "undo" {
                     !app.undo_stack.is_empty()
@@ -1370,6 +1419,11 @@ struct GuiApplication {
     render_preset: String,
     render_backend: String,
     umbreon_denoise: UmbreonDenoiseMode,
+    ray_size: [u32; 2],
+    ray_hatching: bool,
+    ray_transparent: bool,
+    ray_samples: u32,
+    ray_job: Option<mpsc::Receiver<std::result::Result<serde_json::Value, String>>>,
     pov_render_settings: NativePovRenderSettings,
     pov_render_job: Option<NativePovRenderJob>,
     pov_render_result: Option<NativePovRenderResult>,
@@ -1719,7 +1773,7 @@ impl Default for AnimationRenderSettings {
             fps: 30,
             concurrency: default_animation_render_concurrency(),
             duplicate_last_frame: false,
-            backend: "POV-Ray".to_string(),
+            backend: "Umbreon".to_string(),
             povray_executable: "povray".to_string(),
             povray_include_dir: String::new(),
             pov_clip_plane: true,
@@ -1777,7 +1831,7 @@ fn load_animation_render_settings(state: &DesktopAppState) -> AnimationRenderSet
             defaults.duplicate_last_frame,
         ),
         backend: match backend.as_str() {
-            "Umbreon" => backend,
+            "Umbreon" | "POV-Ray" => backend,
             _ => defaults.backend,
         },
         povray_executable: nonempty_or(
@@ -2123,6 +2177,22 @@ struct NativeApbsJob {
     receiver: mpsc::Receiver<std::result::Result<ApbsProcessOutput, String>>,
     cancel: Arc<AtomicBool>,
     potential_name: String,
+    scene_uid: cuemol_core::Uid,
+    started: Instant,
+    command: Option<cuemol_command::transport::ApiRequest>,
+}
+
+impl NativeApbsJob {
+    fn reply(&mut self, outcome: std::result::Result<serde_json::Value, String>) {
+        if let Some(request) = self.command.take() {
+            let error = outcome.is_err();
+            let payload = match outcome {
+                Ok(value) => serde_json::json!({"ok":true,"result":value}),
+                Err(error) => serde_json::json!({"ok":false,"error":error}),
+            };
+            let _ = request.reply.send(Some(serde_json::json!({"jsonrpc":"2.0","id":request.message["id"],"result":{"content":[{"type":"text","text":payload.to_string()}],"isError":error}})));
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -4989,6 +5059,11 @@ impl GuiApplication {
             render_preset: RENDER_PRESETS[1].0.to_string(),
             render_backend: "POV-Ray".to_string(),
             umbreon_denoise: UmbreonDenoiseMode::default(),
+            ray_size: [1200, 900],
+            ray_hatching: false,
+            ray_transparent: false,
+            ray_samples: 8,
+            ray_job: None,
             pov_render_settings: NativePovRenderSettings::default(),
             pov_render_job: None,
             pov_render_result: None,
@@ -5181,6 +5256,7 @@ impl GuiApplication {
             Ok(None) => {}
             Err(error) => app.status = format!("Config load failed: {error}"),
         }
+        app.apply_stored_preferences();
         app.load_command_history();
         match crate::run_startup_script(&mut app.state) {
             Ok(Some((log, selection))) => {
@@ -5238,6 +5314,7 @@ impl GuiApplication {
         self.poll_animation_render(camera);
         self.poll_apbs_calculation();
         self.poll_pov_render();
+        self.poll_native_render();
         self.pixels_per_point = ctx.pixels_per_point();
         // UI theme (View menu): CueMol2's native XUL look is light by default.
         ctx.set_visuals(if self.light_theme {
@@ -5299,6 +5376,7 @@ impl GuiApplication {
             || self.animation_render_job.is_some()
             || self.apbs_job.is_some()
             || self.pov_render_job.is_some()
+            || self.ray_job.is_some()
         {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
@@ -5718,8 +5796,16 @@ impl GuiApplication {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(format!(
                         "{} atoms / {} bonds",
-                        self.snapshot.atom_count(),
-                        self.snapshot.bond_count()
+                        self.state
+                            .active_object_summaries()
+                            .iter()
+                            .map(|o| o.atom_count)
+                            .sum::<usize>(),
+                        self.state
+                            .active_object_summaries()
+                            .iter()
+                            .map(|o| o.bond_count)
+                            .sum::<usize>()
                     ));
                 });
             });
@@ -5858,6 +5944,10 @@ impl GuiApplication {
                     }
                 });
                 ui.menu_button("Rendering", |ui| {
+                    if ui.button("Render image...").clicked() {
+                        self.open_native_render();
+                        ui.close();
+                    }
                     if ui.button("POV-Ray rendering...").clicked() {
                         self.open_pov_render_tool();
                         ui.close();
@@ -17206,6 +17296,134 @@ impl GuiApplication {
         Ok(())
     }
 
+    fn open_native_render(&mut self) {
+        if let Ok(settings) = cuemol_command::render_settings(&self.state) {
+            let dpi = settings
+                .get("dpi")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(300.);
+            let scale = match settings
+                .get("unit")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("px")
+            {
+                "in" => dpi,
+                "cm" => dpi / 2.54,
+                "mm" => dpi / 25.4,
+                _ => 1.,
+            };
+            for (i, key) in ["width", "height"].iter().enumerate() {
+                if let Some(value) = settings.get(*key).and_then(serde_json::Value::as_f64) {
+                    self.ray_size[i] = (value * scale).round().clamp(1., 8192.) as u32;
+                }
+            }
+            self.ray_hatching = settings.get("backend").is_some_and(|v| v == "umbreon_npr");
+            self.ray_transparent = settings.get("transparentBg").is_some_and(|v| v == true);
+        }
+        if self.export_path.is_empty() || !self.export_path.ends_with(".png") {
+            self.export_path = "render.png".into();
+        }
+        self.tool_dialog = Some("Native rendering".into());
+    }
+
+    fn native_render_dialog(&mut self, ctx: &egui::Context, camera: &CameraController) {
+        if self.tool_dialog.as_deref() != Some("Native rendering") {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Render image")
+            .open(&mut open)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("PNG file");
+                    ui.text_edit_singleline(&mut self.export_path);
+                    if ui.button("Browse...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("PNG image", &["png"])
+                            .set_file_name("render.png")
+                            .save_file()
+                        {
+                            self.export_path = path.to_string_lossy().into_owned();
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Width");
+                    ui.add(egui::DragValue::new(&mut self.ray_size[0]).range(1..=8192));
+                    ui.label("Height");
+                    ui.add(egui::DragValue::new(&mut self.ray_size[1]).range(1..=8192));
+                });
+                ui.checkbox(&mut self.ray_hatching, "Hatched illustration");
+                ui.checkbox(&mut self.ray_transparent, "Transparent background");
+                ui.add_enabled_ui(!self.ray_hatching, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Lighting samples");
+                        ui.add(egui::DragValue::new(&mut self.ray_samples).range(1..=256));
+                    });
+                });
+                if self.ray_job.is_some() {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Rendering...");
+                    });
+                }
+                if ui.add_enabled(self.ray_job.is_none(), egui::Button::new("Render")).clicked() {
+                    let mut current = camera.to_qsys_camera("__current");
+                    let backend = if self.ray_hatching { "umbreon_npr" } else { "umbreon" };
+                    let settings = format!(
+                        "width={}; height={}; unit=px; transparentBg={}; backend={backend}; umbreon.giSamples={}",
+                        self.ray_size[0], self.ray_size[1], self.ray_transparent, self.ray_samples
+                    );
+                    let result = cuemol_command::call_tool(
+                        &mut self.state,
+                        &mut current,
+                        "set_render_settings",
+                        &serde_json::json!({"settings": settings}),
+                    ).and_then(|_| cuemol_command::prepare_render(
+                        &self.state,
+                        &current,
+                        "render_image",
+                        &serde_json::json!({
+                            "fileName": self.export_path,
+                            "width": self.ray_size[0],
+                            "height": self.ray_size[1],
+                            "style": if self.ray_hatching { "npr" } else { "gi" },
+                        }),
+                    ));
+                    match result {
+                        Ok(prepared) => {
+                            let (sender, receiver) = mpsc::channel();
+                            std::thread::spawn(move || {
+                                let _ = sender.send(prepared.run().map_err(|error| error.to_string()));
+                            });
+                            self.ray_job = Some(receiver);
+                            self.set_status("Rendering image...");
+                        }
+                        Err(error) => self.set_error(error),
+                    }
+                }
+            });
+        if !open {
+            self.tool_dialog = None;
+        }
+    }
+
+    fn poll_native_render(&mut self) {
+        let Some(receiver) = self.ray_job.take() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => self.ray_job = Some(receiver),
+            Err(mpsc::TryRecvError::Disconnected) => self.set_status("Render worker disconnected"),
+            Ok(Err(error)) => self.set_status(error),
+            Ok(Ok(value)) => self.set_status(format!(
+                "Rendered image: {}",
+                value["path"].as_str().unwrap_or("")
+            )),
+        }
+    }
+
     fn open_pov_render_tool(&mut self) {
         self.render_backend = "POV-Ray".to_string();
         self.pov_close_confirmation = false;
@@ -19749,6 +19967,47 @@ impl GuiApplication {
         }
     }
 
+    fn start_apbs_command(&mut self, request: cuemol_command::transport::ApiRequest) {
+        let args = &request.message["params"]["arguments"];
+        let validation = cuemol_command::validate_args("calc_elepot", args).and_then(|()| {
+            if self.apbs_job.is_some() {
+                Err("An APBS calculation is already running".into())
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(error) = validation {
+            let payload = serde_json::json!({"ok":false,"error":error});
+            let _ = request.reply.send(Some(serde_json::json!({"jsonrpc":"2.0","id":request.message["id"],"result":{"content":[{"type":"text","text":payload.to_string()}],"isError":true}})));
+            return;
+        }
+        self.apbs_target = args["objId"].as_u64().map(cuemol_core::Uid::new);
+        self.apbs_selection = args["selection"].as_str().unwrap_or("*").to_string();
+        self.apbs_use_selection = true;
+        self.apbs_name = args["name"].as_str().unwrap_or("").to_string();
+        self.apbs_charge_method = if args["method"] == "internal" {
+            GuiApbsChargeMethod::Internal
+        } else {
+            GuiApbsChargeMethod::Pdb2pqr
+        };
+        if let Some(value) = args["forceField"].as_str() {
+            self.apbs_force_field = value.to_string();
+        }
+        self.apbs_temperature = args["temperature"].as_f64().unwrap_or(298.15);
+        self.apbs_grid_spacing = args["gridSpacing"].as_f64().unwrap_or(1.);
+        self.apbs_water_dielectric = args["waterDielec"].as_f64().unwrap_or(78.54);
+        self.apbs_protein_dielectric = args["protDielec"].as_f64().unwrap_or(2.);
+        self.apbs_use_hydrogen = args["useHydrogen"] == true;
+        self.apbs_use_npbe = args["nonLinear"] == true;
+        self.start_apbs_calculation();
+        if let Some(job) = &mut self.apbs_job {
+            job.command = Some(request);
+        } else {
+            let payload = serde_json::json!({"ok":false,"error":self.status});
+            let _ = request.reply.send(Some(serde_json::json!({"jsonrpc":"2.0","id":request.message["id"],"result":{"content":[{"type":"text","text":payload.to_string()}],"isError":true}})));
+        }
+    }
+
     fn start_apbs_calculation(&mut self) {
         if self.apbs_job.is_some() {
             return;
@@ -19757,6 +20016,8 @@ impl GuiApplication {
             self.set_status("No APBS target selected");
             return;
         };
+        self.state
+            .put_config_value("apbs:force_field", self.apbs_force_field.clone());
         self.state.put_config_value(
             "cuemol2.ui.apbs-exe-path",
             self.apbs_executable.trim().to_string(),
@@ -19847,6 +20108,13 @@ impl GuiApplication {
             receiver,
             cancel,
             potential_name,
+            scene_uid: self
+                .state
+                .scene_manager()
+                .scene_uid_for_object(object_uid)
+                .unwrap(),
+            started: Instant::now(),
+            command: None,
         });
         self.set_status(format!(
             "APBS calculation started for {} atom(s)",
@@ -19879,23 +20147,30 @@ impl GuiApplication {
     }
 
     fn poll_apbs_calculation(&mut self) {
-        let Some(job) = self.apbs_job.take() else {
+        let Some(mut job) = self.apbs_job.take() else {
             return;
         };
         match job.receiver.try_recv() {
             Err(mpsc::TryRecvError::Empty) => self.apbs_job = Some(job),
             Err(mpsc::TryRecvError::Disconnected) => {
+                job.reply(Err("APBS worker disconnected".into()));
                 self.set_status("APBS worker disconnected");
             }
-            Ok(Err(error)) => self.set_status(error),
+            Ok(Err(error)) => {
+                job.reply(Err(error.clone()));
+                self.set_status(error);
+            }
             Ok(Ok(output)) => {
                 let undo = self.capture_undo();
-                let result = self
-                    .state
-                    .open_apbs_potential_path(&output.dx_path, &job.potential_name);
+                let result = self.state.open_apbs_potential_in_scene(
+                    job.scene_uid,
+                    &output.dx_path,
+                    &job.potential_name,
+                );
                 let _ = fs::remove_dir_all(&output.work_dir);
                 match result {
                     Ok(map_uid) => {
+                        job.reply(Ok(serde_json::json!({"objectId":map_uid.get(),"name":job.potential_name,"seconds":job.started.elapsed().as_secs_f64()})));
                         if !output.log.trim().is_empty() {
                             self.log_lines
                                 .extend(output.log.lines().map(|line| format!("APBS> {line}")));
@@ -19921,7 +20196,10 @@ impl GuiApplication {
                             job.potential_name
                         ));
                     }
-                    Err(error) => self.set_error(error),
+                    Err(error) => {
+                        job.reply(Err(error.to_string()));
+                        self.set_error(error);
+                    }
                 }
             }
         }
@@ -20518,6 +20796,7 @@ impl GuiApplication {
     }
 
     fn dialogs(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
+        self.native_render_dialog(ctx, camera);
         self.about_dialog(ctx);
         self.options_dialog(ctx);
         self.object_props_dialog(ctx);
@@ -21634,6 +21913,23 @@ impl GuiApplication {
         input.set_style(style);
         input.set_tbrad(tbrad);
         input.set_hitprec(hitprec);
+        if let Ok(path) = cuemol_command::external::resolve(&self.state, "apbs") {
+            self.apbs_executable = path.to_string_lossy().into_owned();
+        }
+        if let Ok(path) = cuemol_command::external::resolve(&self.state, "pdb2pqr") {
+            self.pdb2pqr_executable = path.to_string_lossy().into_owned();
+        }
+        if let Ok(path) = cuemol_command::external::resolve(&self.state, "povray") {
+            self.pov_render_settings.executable = path.to_string_lossy().into_owned();
+            self.animation_render_settings.povray_executable = path.to_string_lossy().into_owned();
+        }
+        if let Ok(path) = cuemol_command::external::resolve(&self.state, "ffmpeg") {
+            self.animation_render_settings.ffmpeg_executable = path.to_string_lossy().into_owned();
+        }
+        let force_field = self.state.config_value("apbs:force_field");
+        if !force_field.is_empty() {
+            self.apbs_force_field = force_field;
+        }
         let apbs_executable = self.state.config_value("cuemol2.ui.apbs-exe-path");
         if !apbs_executable.trim().is_empty() {
             self.apbs_executable = apbs_executable;
@@ -26670,6 +26966,9 @@ impl GuiApplication {
         let Some(title) = self.tool_dialog.clone() else {
             return;
         };
+        if title == "Native rendering" {
+            return;
+        }
         let mut open = true;
         let mut close = false;
         egui::Window::new(title.as_str())
@@ -26744,6 +27043,7 @@ impl GuiApplication {
         egui::ComboBox::from_label("Algorithm")
             .selected_text(match self.superpose_algorithm.as_str() {
                 "ssm" => "Secondary Structure Matching",
+                "usalign" => "USalign",
                 _ => "Least Square Fitting",
             })
             .show_ui(ui, |ui| {
@@ -26756,6 +27056,11 @@ impl GuiApplication {
                     &mut self.superpose_algorithm,
                     "ssm".to_string(),
                     "Secondary Structure Matching",
+                );
+                ui.selectable_value(
+                    &mut self.superpose_algorithm,
+                    "usalign".to_string(),
+                    "USalign",
                 );
             });
         egui::ComboBox::from_label("Reference molecule")

@@ -264,3 +264,78 @@ fn stored_render_size_background_and_transparency_are_applied() {
     decoder.next_frame(&mut bytes).unwrap();
     assert!(bytes.iter().all(|b| *b == 255));
 }
+
+#[test]
+fn prefixed_npr_settings_change_hatching_and_keep_alpha() {
+    use base64::Engine;
+    let mut state = DesktopAppState::new();
+    let mut camera = Camera::new();
+    let object = molecule(&mut state, &mut camera, "hatched", 0.);
+    call(
+        &mut state,
+        &mut camera,
+        "create_renderer",
+        json!({"objId":object,"rendererType":"cpk"}),
+    );
+    call(
+        &mut state,
+        &mut camera,
+        "center_view",
+        json!({"objId":object,"zoom":true}),
+    );
+    call(
+        &mut state,
+        &mut camera,
+        "set_render_settings",
+        json!({"settings":"backend=umbreon_npr; width=96; height=96; transparentBg=true; umbreon_npr.hatchDensity=0.3"}),
+    );
+    let first = call(&mut state, &mut camera, "get_screenshot", json!({}));
+    call(
+        &mut state,
+        &mut camera,
+        "set_render_settings",
+        json!({"settings":"umbreon_npr.hatchDensity=3"}),
+    );
+    let second = call(&mut state, &mut camera, "get_screenshot", json!({}));
+    assert_ne!(first["_image"], second["_image"]);
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(second["_image"].as_str().unwrap())
+        .unwrap();
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(png))
+        .read_info()
+        .unwrap();
+    let mut bytes = vec![0; decoder.output_buffer_size()];
+    let info = decoder.next_frame(&mut bytes).unwrap();
+    assert_eq!(info.color_type, png::ColorType::Rgba);
+    assert!(bytes.chunks_exact(4).any(|p| p[3] == 0));
+    assert!(bytes.chunks_exact(4).any(|p| p[3] == 255 && p[0] == 0));
+    assert!(bytes.chunks_exact(4).all(|p| p[0] == p[1] && p[1] == p[2]));
+}
+
+#[test]
+fn unsupported_render_engines_and_denoisers_do_not_change_settings() {
+    let mut state = DesktopAppState::new();
+    let mut camera = Camera::new();
+    call(&mut state, &mut camera, "create_scene", json!({}));
+    call(
+        &mut state,
+        &mut camera,
+        "set_render_settings",
+        json!({"settings":"width=24; denoise=Bilateral"}),
+    );
+    let before = cuemol_command::render_settings(&state).unwrap();
+    for setting in [
+        "width=96; backend=povray",
+        "denoise=OIDN",
+        "umbreon.width=96",
+    ] {
+        assert!(cuemol_command::call_tool(
+            &mut state,
+            &mut camera,
+            "set_render_settings",
+            &json!({"settings":setting})
+        )
+        .is_err());
+        assert_eq!(cuemol_command::render_settings(&state).unwrap(), before);
+    }
+}

@@ -9,8 +9,9 @@ use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 
 pub use raytrace::{
-    render_umbreon_smoke, render_umbreon_snapshot, UmbreonDenoiseMode, UmbreonFrame,
-    UmbreonRenderParams, UmbreonSceneExporter, UmbreonSmokeResult,
+    render_umbreon_npr_snapshot, render_umbreon_smoke, render_umbreon_snapshot, HatchRenderParams,
+    UmbreonDenoiseMode, UmbreonFrame, UmbreonRenderParams, UmbreonSceneExporter,
+    UmbreonSmokeResult,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

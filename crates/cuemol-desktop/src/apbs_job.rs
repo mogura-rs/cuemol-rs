@@ -60,17 +60,13 @@ fn run_apbs_process_inner(
             return Err("pdb2pqr executable path is required".to_string());
         }
         let force_field = task.force_field.trim().to_ascii_uppercase();
-        let mut args = if cfg!(target_os = "windows") {
-            vec![force_field]
-        } else {
-            vec![
-                "--keep-chain".to_string(),
-                "--nodebump".to_string(),
-                "--noopt".to_string(),
-                "--ff".to_string(),
-                force_field,
-            ]
-        };
+        let mut args = vec![
+            "--keep-chain".to_string(),
+            "--nodebump".to_string(),
+            "--noopt".to_string(),
+            "--ff".to_string(),
+            force_field,
+        ];
         args.push(task.paths.pdb_path.to_string_lossy().into_owned());
         args.push(task.paths.pqr_path.to_string_lossy().into_owned());
         log.push_str(&run_command_cancelable(
@@ -90,6 +86,18 @@ fn run_apbs_process_inner(
         &task.work_dir,
         cancel,
     )?);
+    if !task.paths.dx_path.is_file() {
+        let name = task
+            .paths
+            .dx_path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let parallel = task.paths.dx_path.with_file_name(format!("{name}-PE0.dx"));
+        if parallel.is_file() {
+            fs::rename(parallel, &task.paths.dx_path).map_err(|e| e.to_string())?;
+        }
+    }
     ensure_nonempty_file(
         &task.paths.dx_path,
         "APBS did not produce an electrostatic-potential map",
@@ -108,11 +116,14 @@ fn run_command_cancelable(
     work_dir: &std::path::Path,
     cancel: &Arc<AtomicBool>,
 ) -> Result<String, String> {
-    let mut child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .args(args)
         .current_dir(work_dir)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    cuemol_command::external::configure_command(&mut command, std::path::Path::new(executable));
+    let mut child = command
         .spawn()
         .map_err(|error| format!("failed to start {label} ({executable}): {error}"))?;
     let stdout = child
@@ -169,7 +180,14 @@ fn run_command_cancelable(
 
 fn read_process_stream(mut stream: impl Read) -> Vec<u8> {
     let mut output = Vec::new();
-    let _ = stream.read_to_end(&mut output);
+    let mut block = [0u8; 8192];
+    while let Ok(n) = stream.read(&mut block) {
+        if n == 0 {
+            break;
+        }
+        let keep = n.min((1024 * 1024usize).saturating_sub(output.len()));
+        output.extend_from_slice(&block[..keep]);
+    }
     output
 }
 

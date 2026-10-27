@@ -72,12 +72,51 @@ pub fn call_tool(
                     .ok_or_else(|| CueMolError::invalid_argument("expected key=value"))?;
                 let key = key.trim();
                 let value = value.trim();
-                if !RENDER_KEYS.contains(&key) {
+                let local_key = key
+                    .strip_prefix("umbreon.")
+                    .or_else(|| key.strip_prefix("umbreon_npr."))
+                    .unwrap_or(key);
+                if !RENDER_KEYS.contains(&local_key)
+                    || (key != local_key
+                        && matches!(
+                            local_key,
+                            "width" | "height" | "unit" | "dpi" | "backend" | "projection"
+                        ))
+                {
                     return Err(CueMolError::invalid_argument(format!(
                         "unknown render setting {key}"
                     )));
                 }
                 let parsed = serde_json::from_str::<Value>(value).unwrap_or_else(|_| json!(value));
+                let valid = match local_key {
+                    "backend" => parsed
+                        .as_str()
+                        .is_some_and(|v| matches!(v, "" | "umbreon" | "umbreon_npr")),
+                    "projection" => parsed
+                        .as_str()
+                        .is_some_and(|v| matches!(v, "perspective" | "orthographic")),
+                    "unit" => parsed
+                        .as_str()
+                        .is_some_and(|v| matches!(v, "px" | "in" | "cm" | "mm")),
+                    "denoise" => parsed
+                        .as_str()
+                        .is_some_and(|v| matches!(v, "Bilateral" | "A-trous" | "None")),
+                    "hatchInkColor" | "hatchPaperColor" | "hatchColoring" => parsed.is_string(),
+                    "transparent" | "transparentBg" | "perspective" | "useClipZ" | "clipPlane"
+                    | "shadows" | "showEdgeLines" | "edgeLines" | "useGi" | "useGI"
+                    | "giDenoise" | "aoEnabled" | "hatchCustomInk" | "hatchCustomPaper" => {
+                        parsed.is_boolean()
+                    }
+                    "width" | "height" | "dpi" | "hatchDensity" | "hatchWidthScale" => {
+                        parsed.as_f64().is_some_and(|n| n.is_finite() && n > 0.)
+                    }
+                    _ => parsed.as_f64().is_some_and(f64::is_finite),
+                };
+                if !valid {
+                    return Err(CueMolError::invalid_argument(format!(
+                        "invalid value for render setting {key}"
+                    )));
+                }
                 settings.insert(key.into(), parsed);
             }
             state
@@ -110,6 +149,21 @@ pub fn call_tool(
 }
 
 const RENDER_KEYS: &[&str] = &[
+    "backend",
+    "projection",
+    "transparentBg",
+    "clipPlane",
+    "edgeLines",
+    "useGI",
+    "denoise",
+    "aoEnabled",
+    "hatchDensity",
+    "hatchWidthScale",
+    "hatchInkColor",
+    "hatchPaperColor",
+    "hatchColoring",
+    "hatchCustomInk",
+    "hatchCustomPaper",
     "width",
     "height",
     "unit",

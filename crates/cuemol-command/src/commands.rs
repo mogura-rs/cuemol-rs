@@ -384,12 +384,12 @@ fn set_coloring(state: &mut DesktopAppState, args: &Value) -> Result<Value> {
     Ok(json!({"nodeId":id.get()}))
 }
 
-pub(crate) fn render(
+pub fn prepare_render(
     state: &DesktopAppState,
     camera: &Camera,
     name: &str,
     args: &Value,
-) -> Result<Value> {
+) -> Result<PreparedRender> {
     let settings = crate::properties::render_settings(state)?;
     let size = |key: &str, default: usize| -> Result<usize> {
         if !args[key].is_null() {
@@ -439,63 +439,166 @@ pub(crate) fn render(
         ));
     }
     let snapshot = state.active_render_snapshot("")?;
-    let number =
-        |key: &str, default: f64| settings.get(key).and_then(Value::as_f64).unwrap_or(default);
-    let flag = |key: &str, default: bool| {
+    let npr = args["style"]
+        .as_str()
+        .map(|style| style == "npr")
+        .unwrap_or(settings.get("backend").is_some_and(|v| v == "umbreon_npr"));
+    let prefix = if npr { "umbreon_npr" } else { "umbreon" };
+    let setting = |key: &str| {
         settings
-            .get(key)
-            .and_then(Value::as_bool)
-            .unwrap_or(default)
+            .get(&format!("{prefix}.{key}"))
+            .or_else(|| settings.get(key))
     };
+    let number = |key: &str, default: f64| setting(key).and_then(Value::as_f64).unwrap_or(default);
+    let flag = |key: &str, default: bool| setting(key).and_then(Value::as_bool).unwrap_or(default);
     let defaults = cuemol_render::UmbreonRenderParams::default();
     let params = cuemol_render::UmbreonRenderParams {
         width: width as i32,
         height: height as i32,
-        perspective: flag("perspective", camera.is_perspective()),
-        use_clip_z: flag("useClipZ", defaults.use_clip_z),
+        perspective: settings
+            .get("projection")
+            .and_then(Value::as_str)
+            .map(|p| p == "perspective")
+            .unwrap_or(flag("perspective", camera.is_perspective())),
+        use_clip_z: flag("clipPlane", flag("useClipZ", defaults.use_clip_z)),
         supersample: number("supersample", 1.).clamp(1., 4.) as i32,
-        ao_samples: number("aoSamples", 0.).clamp(0., 256.) as i32,
+        ao_samples: if flag("aoEnabled", setting("aoSamples").is_some()) {
+            number("aoSamples", 64.).clamp(0., 256.) as i32
+        } else {
+            0
+        },
         ao_distance: number("aoDistance", defaults.ao_distance),
         ao_intensity: number("aoIntensity", defaults.ao_intensity),
         shadows: flag("shadows", defaults.shadows),
         shadow_samples: number("shadowSamples", defaults.shadow_samples as f64).clamp(0., 256.)
             as i32,
         light_radius: number("lightRadius", defaults.light_radius),
-        show_edge_lines: flag("showEdgeLines", defaults.show_edge_lines),
+        show_edge_lines: flag("edgeLines", flag("showEdgeLines", defaults.show_edge_lines)),
         crease_limit: number("creaseLimit", defaults.crease_limit),
         edge_rise: number("edgeRise", defaults.edge_rise),
-        transparent_background: flag("transparent", false),
-        use_gi: flag("useGi", name == "render_image" && args["style"] != "npr"),
+        transparent_background: flag("transparentBg", flag("transparent", false)),
+        use_gi: flag("useGI", flag("useGi", name == "render_image" && !npr)),
         gi_samples: number("giSamples", 8.).clamp(1., 256.) as i32,
         gi_intensity: number("giIntensity", defaults.gi_intensity),
         gi_env_intensity: number("giEnvIntensity", defaults.gi_env_intensity),
-        gi_denoise: flag("giDenoise", defaults.gi_denoise),
-        denoiser: number("denoiser", defaults.denoiser as f64) as i32,
+        gi_denoise: setting("denoise")
+            .and_then(Value::as_str)
+            .map(|v| v == "Bilateral")
+            .unwrap_or(flag("giDenoise", defaults.gi_denoise)),
+        denoiser: setting("denoise")
+            .and_then(Value::as_str)
+            .map(|v| i32::from(v == "A-trous"))
+            .unwrap_or(number("denoiser", defaults.denoiser as f64) as i32),
     };
     let background = state.active_background_color()?;
-    let frame = cuemol_render::render_umbreon_snapshot(&snapshot, camera, background, &params)?;
-    let mut png = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut png, width as u32, height as u32);
-        encoder.set_color(if frame.components == 4 {
-            png::ColorType::Rgba
-        } else {
-            png::ColorType::Rgb
-        });
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder
-            .write_header()
-            .map_err(|e| CueMolError::Io(e.to_string()))?;
-        writer
-            .write_image_data(&frame.pixels)
-            .map_err(|e| CueMolError::Io(e.to_string()))?;
-    }
-    if name == "render_image" {
-        std::fs::write(text(args, "fileName")?, &png)?;
-        Ok(json!({"path":args["fileName"],"width":width,"height":height}))
+    let hatch = if npr {
+        let parse_color = |key: &str, default: [u8; 3]| -> Result<[u8; 3]> {
+            let Some(value) = setting(key).and_then(Value::as_str) else {
+                return Ok(default);
+            };
+            let hex = value.strip_prefix('#').unwrap_or(value);
+            if hex.len() != 6 {
+                return Err(CueMolError::invalid_argument("hatch color must be #rrggbb"));
+            }
+            let packed = u32::from_str_radix(hex, 16)
+                .map_err(|_| CueMolError::invalid_argument("invalid hatch color"))?;
+            Ok([(packed >> 16) as u8, (packed >> 8) as u8, packed as u8])
+        };
+        Some(cuemol_render::HatchRenderParams {
+            density: number("hatchDensity", 1.),
+            width_scale: number("hatchWidthScale", 1.),
+            ink: if flag("hatchCustomInk", true) {
+                parse_color("hatchInkColor", [0; 3])?
+            } else {
+                [0; 3]
+            },
+            paper: if flag("hatchCustomPaper", true) {
+                parse_color("hatchPaperColor", [255; 3])?
+            } else {
+                [255; 3]
+            },
+            colored: setting("hatchColoring")
+                .and_then(Value::as_str)
+                .is_some_and(|v| v.eq_ignore_ascii_case("colored")),
+        })
     } else {
-        Ok(
-            json!({"width":width,"height":height,"_image":base64::engine::general_purpose::STANDARD.encode(png)}),
-        )
+        None
+    };
+    let output = if name == "render_image" {
+        Some(text(args, "fileName")?.to_string())
+    } else {
+        None
+    };
+    Ok(PreparedRender {
+        snapshot,
+        camera: camera.clone(),
+        background,
+        params,
+        hatch,
+        output,
+    })
+}
+
+pub struct PreparedRender {
+    snapshot: cuemol_render::RenderSceneSnapshot,
+    camera: Camera,
+    background: [f32; 4],
+    params: cuemol_render::UmbreonRenderParams,
+    hatch: Option<cuemol_render::HatchRenderParams>,
+    output: Option<String>,
+}
+impl PreparedRender {
+    pub fn run(self) -> Result<Value> {
+        let width = self.params.width;
+        let height = self.params.height;
+        let frame = if let Some(hatch) = self.hatch {
+            cuemol_render::render_umbreon_npr_snapshot(
+                &self.snapshot,
+                &self.camera,
+                self.background,
+                &self.params,
+                &hatch,
+            )?
+        } else {
+            cuemol_render::render_umbreon_snapshot(
+                &self.snapshot,
+                &self.camera,
+                self.background,
+                &self.params,
+            )?
+        };
+        let mut png = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png, width as u32, height as u32);
+            encoder.set_color(if frame.components == 4 {
+                png::ColorType::Rgba
+            } else {
+                png::ColorType::Rgb
+            });
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder
+                .write_header()
+                .map_err(|e| CueMolError::Io(e.to_string()))?;
+            writer
+                .write_image_data(&frame.pixels)
+                .map_err(|e| CueMolError::Io(e.to_string()))?;
+        }
+        if let Some(path) = self.output {
+            std::fs::write(&path, &png)?;
+            Ok(json!({"path":path,"width":width,"height":height}))
+        } else {
+            Ok(
+                json!({"width":width,"height":height,"_image":base64::engine::general_purpose::STANDARD.encode(png)}),
+            )
+        }
     }
+}
+
+pub(crate) fn render(
+    state: &DesktopAppState,
+    camera: &Camera,
+    name: &str,
+    args: &Value,
+) -> Result<Value> {
+    prepare_render(state, camera, name, args)?.run()
 }

@@ -1,93 +1,227 @@
-# cuemol2-rs
+# CueMol3
 
 ![](cuemol-rs.png)
 
-Rust reimplementation of CueMol2.
+CueMol3 is a molecular graphics application built primarily in Rust, with a
+shared wgpu viewport for the native application and the browser. This workspace
+ports CueMol2's scene, selection, molecular-rendering, crystallography,
+trajectory, scripting, and command interfaces. The sibling `../cuemol2` checkout
+is an optional, read-only compatibility reference.
 
-This repository implements `../cuemol2` as a Rust-native workspace.
-The original C++ tree is used as a specification, fixture, and test reference
-only.
+## Install and launch
 
-## Current workspace
-
-- `cuemol-core`: errors, math, ranges, processes, streams, and shared primitives
-- `cuemol-gfx`: colors, meshes, shaders, materials, hit testing, text, and GPU primitives
-- `cuemol-qsys`: scenes, views, cameras, renderers, commands, styles, events, and I/O
-- `cuemol-molstr`: molecular models, selections, readers/writers, and renderers
-- `cuemol-importers`: external molecular-data import facades
-- `cuemol-molvis`: interaction, measurement, label, and molecular renderers
-- `cuemol-surface`: molecular-surface and grid-surface generation
-- `cuemol-symm`: crystallographic symmetry operations
-- `cuemol-xtal`: density maps, crystallographic readers, and map renderers
-- `cuemol-molanl`: molecular analysis, RMSD, and structural superposition
-- `cuemol-anim`: scene, camera, property, and renderer animation
-- `cuemol-mdtools`: GRO, NAMD, AMBER, PSF, DCD, XTC, TRR, and NetCDF trajectory readers
-- `cuemol-lwview`: lightweight scene viewer
-- `cuemol-molclient`: molecular client facade
-- `cuemol-render`: render snapshots, GPU/headless backends, and ray tracing
-- `cuemol-desktop-core`: shared desktop application state and offscreen rendering
-- `cuemol-desktop`: egui and Tauri desktop applications
-- `cuemol-cli`: command-line validation utility
-- `cuemol-node`: Node.js binding facade
-- `cuemol-py`: Python binding facade
-
-## Installation
-
-After a release is published, install the command on Linux or macOS with:
+After a release is published, install on Linux or macOS with:
 
 ```sh
 curl -LsSf https://raw.githubusercontent.com/mogura-rs/cuemol2-rs/main/install.sh | sh
+cuemol example.pdb
+cuemol self-upgrade
 ```
 
-The installer verifies the release checksum and installs to `~/.local/bin`.
-Set `CUEMOL_INSTALL_DIR` to change the destination. Run `cuemol self-upgrade`
-to update the installed Unix binary. Release artifacts also include a macOS
-application bundle and a Windows binary.
+The installer verifies `SHA256SUMS` and installs `cuemol` and `cuemol-tools/` in
+`~/.local/bin`. Add that directory to `PATH` if needed. Set `CUEMOL_INSTALL_DIR`
+to choose another location, or `CUEMOL_VERSION=vX.Y.Z` to select a release.
+The release includes Linux binaries, unsigned macOS application bundles and
+binaries, a Windows binary archive, and a browser archive. Windows installation:
 
-## Launch
+```powershell
+irm https://raw.githubusercontent.com/mogura-rs/cuemol2-rs/main/install.ps1 | iex
+```
 
-Build the unified command with the native wgpu interface:
+The Windows destination is `%LOCALAPPDATA%/CueMol/bin`. The same
+`cuemol self-upgrade` command updates an installed binary. A published release
+is required for network installation; a source checkout alone is insufficient.
+
+## Molecular viewing
+
+Open files on the command line, through the file dialog, or by drag and drop.
+The initial representation uses a protein ribbon, a nucleic-acid cartoon, and
+ball-and-stick geometry for other atoms. The renderer controls remain available
+for adding or changing representations, selections, coloring, and materials.
+The Rendering menu offers built-in GI and hatched PNG output. Animation
+rendering also defaults to the bundled Rust renderer. Maps, molecular surfaces,
+saved cameras, measurements, labels, and animation
+share the same application state and command API.
+
+| Input | Action |
+| --- | --- |
+| Left drag | Rotate |
+| Middle drag | Pan |
+| Wheel or right drag | Zoom |
+| Shift + wheel/right drag | Adjust slab thickness |
+| Ctrl + wheel/right drag | Move the view depth |
+| Double-click an atom | Center on the atom |
+| `C` | Center the selection |
+| `F` | Fit the selection |
+| `Home` | Fit the scene |
+
+Load an MD topology and trajectory through the MD dialog or `load_trajectory`.
+GRO, PDB, mmCIF, PSF, AMBER topology, SDF, and MOL2 topologies are accepted.
+DCD, XTC, TRR, and AMBER NetCDF trajectories retain a frame index and decode the
+requested frame. Coordinates and periodic cells update together. Undo history
+shares trajectory sources and map voxels, and frame playback does not add an
+undo snapshot per frame. Compressed trajectories spool to a temporary seekable
+file; this uses disk space proportional to the decompressed input. AMBER ASCII
+MDCRD retains the eager reader.
 
 ```sh
-cargo build -p cuemol-cli --features gui
-cargo run -p cuemol-cli --features gui -- example.pdb
-cargo run -p cuemol-cli -- --help
+cuemol trajectory-info trajectory.xtc
+cuemol trajectory-info trajectory.dcd 10
 ```
 
-Without the `gui` feature the command provides the headless utilities only.
-The default configuration directory is `$XDG_CONFIG_HOME/cuemol`, or
-`~/.config/cuemol` when `XDG_CONFIG_HOME` is unset. `CUEMOL_CONFIG_DIR`
-overrides that directory. Place JavaScript commands in `startup.js` in that
-directory to run them in the embedded script engine when the GUI starts.
-Startup runs before command-line files are opened.
+The optional second argument is the frame stride. Legacy `dcd-info`, `xtc-info`,
+`trr-info`, and `ambernetcdf-info` commands retain their diagnostic reader behavior.
 
-## Development
+## Commands, MCP, and configuration
+
+All installed entry points use `cuemol`; no separate JavaScript MCP launcher is
+needed. The running native GUI exposes an authenticated loopback MCP endpoint.
 
 ```sh
-cargo test --workspace --all-targets --all-features
-cargo clippy --workspace --all-targets --all-features
-cargo run -p cuemol-desktop --bin cuemol-desktop --features egui-gui
-cargo run -p cuemol-desktop --bin cuemol-desktop-tauri --features tauri-gui
-cargo run -p cuemol-cli -- select-dump "chain A and elem C"
-cargo run -p cuemol-cli -- pdb-info ../cuemol2/tests/test_data/1CRN.pdb
-cargo run -p cuemol-cli -- qdfpdb-info example.qdfpdb
-cargo run -p cuemol-cli -- qsc-info ../cuemol2/tests/test_data/number_chain_atomintr1.qsc
-cargo run -p cuemol-cli -- qsc-info ../cuemol2/tests/test_data/1crn_test1.qsc
-cargo run -p cuemol-cli -- mol-array-info pdb ../cuemol2/tests/test_data/1CRN.pdb crd
-cargo run -p cuemol-cli -- psf-info example.psf
-cargo run -p cuemol-cli -- amberprm-info example.prmtop
-cargo run -p cuemol-cli -- ambermdcrd-info example.mdcrd 327 box
-cargo run -p cuemol-cli -- trr-info example.trr
-cargo run -p cuemol-cli -- xtc-info example.xtc
-cargo run -p cuemol-cli -- ambernetcdf-info example.nc
-cargo run -p cuemol-cli -- opendx-info example.dx
-cargo run -p cuemol-cli -- mol-sel-array pdb ../cuemol2/tests/test_data/1CRN.pdb "chain A and name CA"
-cargo run -p cuemol-cli -- pdb-write ../cuemol2/tests/test_data/1CRN.pdb
-cargo run -p cuemol-cli -- mol-delete-info cif ../cuemol2/tests/test_data/1crn.cif "name CA"
-cargo run -p cuemol-cli -- mol-copy-info cif ../cuemol2/tests/test_data/1crn.cif "chain A and resi 1"
-cargo run -p cuemol-cli -- stream-info all
-cargo run -p cuemol-cli -- stream-search objreader ../cuemol2/tests/test_data/1CRN.pdb
+cuemol mcp config
+cuemol mcp status
+cuemol mcp connect
+cuemol mcp serve
+cuemol mcp serve --http 127.0.0.1:8081
+cuemol mcp tools
+cuemol mcp call get_scene_state '{}'
+cuemol mcp connect --upstream
 ```
 
-Git LFS pointer fixtures are detected and reported as metadata when the actual
-fixture payload is not present locally.
+`connect` bridges stdio to the running GUI. `serve` owns an independent headless
+scene, and `config --headless` prints the corresponding client configuration.
+`connect --upstream` bridges to CueMol2's existing local API. The native catalog
+includes all 124 operation names in the reference catalog used for this port,
+plus convenience operations. This is command coverage, not a claim that every
+parameter combination or rendering algorithm is identical; see the boundaries
+below. `mcp tools` is the authoritative schema for the installed build.
+
+```sh
+cuemol exec get_scene_state '{}'
+cuemol run commands.js
+cuemol -c 'print(21 * 2);'
+cuemol render example.pdb image.png --width 1200 --height 900
+cuemol render example.qsc illustration.png --style npr
+cuemol tools list
+cuemol tools run pdb2pqr --help
+cuemol tools run ffmpeg -version
+```
+
+`exec` starts a new headless scene; use a persistent MCP connection for a series
+of edits. Relative output filenames are resolved from the process's working
+directory. JavaScript runs in the embedded Boa engine and CueMol bindings, with
+no Node.js runtime requirement.
+
+Preferences are stored in `$XDG_CONFIG_HOME/cuemol`, falling back to
+`~/.config/cuemol`. `CUEMOL_CONFIG_DIR` overrides the directory, and
+`CUEMOL_CONFIG_FILE` overrides the TSV preference file. GUI preferences,
+`config.tsv`, `startup.js`, and the local API descriptor use this directory.
+Put startup JavaScript in `startup.js`; it runs before command-line files open.
+`cuemol config path`, `get KEY`, and `set KEY VALUE` inspect or edit preferences.
+Configuration inspection does not execute startup scripts. Download caches use
+`$XDG_CACHE_HOME/cuemol` or `~/.cache/cuemol`, with `CUEMOL_CACHE_DIR` as an override.
+
+Umbreon is implemented in Rust and uses a BVH for primary, shadow, AO, and GI
+rays. USalign is compiled from the vendored reference implementation; its source
+and license are retained. Release tool bundles contain APBS, PDB2PQR, and FFmpeg,
+including a private PDB2PQR runtime. They do not require a system Python install.
+Tool lookup checks configured paths, `CUEMOL_TOOLS_DIR`, the binary/application
+bundle, the cache, and `PATH`. POV-Ray remains an optional external backend.
+
+## Browser
+
+Release binaries embed the browser application:
+
+```sh
+cuemol web serve
+cuemol web serve --port 8080 --no-open
+cuemol web serve --dir web
+```
+
+Alternatively, serve the extracted `cuemol-web.zip` from an HTTPS host. WebGPU
+requires a secure context; localhost is supported. `?renderer=webgl` selects the
+WebGL2 fallback. Files stay in the browser. File selection, drag and drop,
+representations, properties, sequence, saved cameras, commands, undo, animation,
+PNG export, and embedded QSC download use the shared Rust core. Browser settings
+and startup scripts are stored in localStorage for that origin.
+
+Browser MD playback keeps a `File` handle and reads selected DCD/XTC/TRR/NetCDF
+frames with `File.slice`, without first loading the whole trajectory into JS
+memory. The browser cannot access arbitrary native paths or spawn external
+tools. APBS, USalign, and ICC soft proofing run in the native application. The browser
+can import APBS DX maps and offers native Rust LSQ/SSM superposition. Scenes with external
+file references must be saved with embedded data before transfer to the browser.
+
+## Build and check
+
+Rust, a C++17 compiler for vendored USalign, and the native platform's wgpu/winit
+system dependencies are required. The default workspace build is headless.
+Tauri is an optional alternate frontend and requires its platform SDKs.
+
+```sh
+cargo build --locked -p cuemol-cli --features gui
+cargo run --locked -p cuemol-cli --features gui -- example.pdb
+cargo run --locked -p cuemol-cli -- web build
+cargo build --locked --release -p cuemol-cli --features gui,bundled-web
+cargo run --locked -p cuemol-cli -- tools bundle
+
+cargo fmt --all -- --check
+cargo test --locked --workspace --exclude cuemol-desktop --exclude cuemol-web
+cargo test --locked -p cuemol-desktop --features egui-gui --lib
+scripts/test-install.sh target/debug/cuemol
+```
+
+`web build` installs the matching wasm-bindgen tool into the checkout cache when
+necessary. `tools bundle` uses `uv` with hashed dependency pins; ARM APBS builds
+also need CMake, SuiteSparse, BLAS, and platform compiler libraries. See the
+release workflow for platform dependencies. Generated builds, downloaded tools,
+browser packages, and test output are ignored.
+
+For browser regression checks, build the web target, then:
+
+```sh
+cd web
+npm ci
+npx playwright install chromium
+npm test
+```
+
+The development/test profiles omit debug information. Native release builds
+avoid LTO, while the browser uses a separate size-oriented profile. CI caches
+Cargo and wasm-bindgen and runs shared tests plus one browser build. Release
+builds reuse that single browser artifact, cache platform tool bundles, and
+package the native application for five targets. A version tag publishes the
+archives and checksums; manual runs only upload build artifacts.
+
+Compatibility tests may skip when the optional reference tree or external
+fixture generator is absent. Git LFS pointer fixtures are reported as missing
+payloads rather than being treated as molecular data. An explicit external
+trajectory check is:
+
+```sh
+uv run --no-project --with mdtraj --with netCDF4 \
+  cargo test --locked -p cuemol-mdtools --test gromacs_trajectory_compat
+```
+
+## Compatibility boundaries
+
+The wgpu frontends share scene behavior but use egui controls rather than
+replicating Tritium's React layout pixel for pixel. Rust surface generation uses
+its solvent-excluded surface implementation; explicit `meshms` or `ball`
+backend requests are rejected. NPR rendering provides a Rust hatching pass;
+upstream custom hatch-layer specifications and every upstream light setting
+are not implemented. Native denoising uses bilateral or color-guided A-trous
+filters. Intel OIDN is not bundled; old GUI preferences carrying that label
+migrate to the bilateral filter, and new MCP OIDN requests return an error.
+The A-trous implementation uses increasing B3-spline sample spacing, following
+the [wavelet filtering approach](https://doi.org/10.2312/EGGH/HPG10/067-075),
+with color and alpha guidance rather than the paper's additional geometry data.
+Unsupported settings return errors. Native MCP ray tracing and APBS run in
+background workers; the MCP call returns when its result is available.
+These boundaries remain relevant when comparing complex reference scenes.
+
+The workspace consists of foundation crates (`core`, `gfx`, `qsys`), molecular
+and domain crates, shared `desktop-core` and `command` crates, and the `desktop`,
+`web`, and `cli` applications. The Node.js and Python crates provide binding
+facades. See [CLAUDE.md](CLAUDE.md) for code organization and
+[validation.md](docs/validation.md) for measured checks and their scope.

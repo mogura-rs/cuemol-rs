@@ -103,17 +103,20 @@ pub fn config(args: Vec<String>) -> Result<()> {
             Ok(())
         }
         [cmd, key] if cmd == "get" => {
-            let (state, _) = state()?;
+            let mut state = DesktopAppState::new();
+            configuration::load_preferences(&mut state).map_err(|e| e.to_string())?;
             println!("{}", state.config_value(key));
             Ok(())
         }
         [cmd, key, value] if cmd == "set" => {
-            let (mut state, _) = state()?;
+            let mut state = DesktopAppState::new();
+            configuration::load_preferences(&mut state).map_err(|e| e.to_string())?;
             state.put_config_value(key, value);
-            std::fs::create_dir_all(configuration::directory()).map_err(|e| e.to_string())?;
-            state
-                .save_config_file(configuration::directory().join("config.tsv"))
-                .map_err(|e| e.to_string())
+            let path = configuration::file_path();
+            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            state.save_config_file(path).map_err(|e| e.to_string())
         }
         _ => Err("Usage: cuemol config path | get KEY | set KEY VALUE".into()),
     }

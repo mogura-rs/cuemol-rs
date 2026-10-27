@@ -139,6 +139,14 @@ pub fn call_tool(
             json!({"rendererId":state.create_renderer_group(uid(args,"objId")?,args["name"].as_str().unwrap_or("group"))?.get()}),
         ),
         "create_surface" => {
+            if args["backend"]
+                .as_str()
+                .is_some_and(|v| !matches!(v, "auto" | "rust"))
+            {
+                return Err(CueMolError::invalid_argument(
+                    "This build uses the Rust solvent-excluded surface backend; use backend=auto.",
+                ));
+            }
             let id = uid(args, "objId")?;
             let sid = scene(state)?;
             let label = args["name"]
@@ -155,6 +163,14 @@ pub fn call_tool(
             Ok(json!({"objectId":surf.get(),"name":label,"backend":"rust"}))
         }
         "recalc_surface" => {
+            if args["backend"]
+                .as_str()
+                .is_some_and(|v| !matches!(v, "auto" | "rust"))
+            {
+                return Err(CueMolError::invalid_argument(
+                    "This build uses the Rust solvent-excluded surface backend; use backend=auto.",
+                ));
+            }
             let id = uid(args, "surfId")?;
             let count = if let Some(density) = args["density"].as_f64() {
                 state.regenerate_surface_object_with_density(id, density)?

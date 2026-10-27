@@ -1,3 +1,4 @@
+mod external_tools;
 mod runtime;
 mod web;
 use cuemol_core::{Matrix4, Vector4};
@@ -67,6 +68,7 @@ fn run() -> Result<(), String> {
         "self-upgrade" => self_upgrade(),
         "mcp" => runtime::mcp(args.collect()),
         "web" => web::run(args.collect()),
+        "tools" => external_tools::run(args.collect()),
         "config" => runtime::config(args.collect()),
         "run" | "-c" | "--eval" => runtime::script(&command, args.collect()),
         "exec" => runtime::execute(args.collect()),
@@ -741,6 +743,16 @@ fn self_upgrade() -> Result<(), String> {
         .parent()
         .ok_or("cannot determine installation directory")?;
     let mut command = Command::new("sh");
+    if directory.file_name().is_some_and(|name| name == "MacOS") {
+        if let Some(contents) = directory.parent() {
+            if contents.join("Resources/cuemol-tools").is_dir() {
+                command.env(
+                    "CUEMOL_TOOLS_INSTALL_DIR",
+                    contents.join("Resources/cuemol-tools"),
+                );
+            }
+        }
+    }
     command
         .arg("-s")
         .env("CUEMOL_INSTALL_DIR", directory)
@@ -766,9 +778,39 @@ fn self_upgrade() -> Result<(), String> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn self_upgrade() -> Result<(), String> {
-    Err("self-upgrade is not available on this platform".to_string())
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut command = Command::new("powershell.exe");
+    command
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "-"])
+        .env(
+            "CUEMOL_INSTALL_DIR",
+            executable
+                .parent()
+                .ok_or("missing installation directory")?,
+        )
+        .stdin(Stdio::piped());
+    if std::env::var_os("CUEMOL_RELEASE_REPOSITORY").is_none() {
+        if let Some(repository) = option_env!("CUEMOL_RELEASE_REPOSITORY") {
+            command.env("CUEMOL_RELEASE_REPOSITORY", repository);
+        }
+    }
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    child
+        .stdin
+        .take()
+        .ok_or("installer stdin unavailable")?
+        .write_all(include_bytes!("../../../install.ps1"))
+        .map_err(|e| e.to_string())?;
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("self-upgrade failed: {status}"))
+    }
 }
 
 fn print_usage() {
@@ -776,6 +818,7 @@ fn print_usage() {
     println!("CueMol3: cuemol [FILE ...] | mcp | config | run SCRIPT.js | -c JAVASCRIPT | exec TOOL JSON | render INPUT OUTPUT | trajectory-info FILE [STRIDE]");
     eprintln!("Usage:");
     eprintln!("  cuemol self-upgrade");
+    eprintln!("  cuemol tools list | path NAME | run NAME [ARG ...] | bundle [--out DIR]");
     eprintln!("  cuemol [file ...]");
     eprintln!("  cuemol gui [file ...]");
     eprintln!("  cuemol pdb-info <file.pdb>");

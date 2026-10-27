@@ -3,12 +3,16 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
-
 permissions:
   contents: read
-
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
+  web:
+    uses: ./.github/workflows/web.yml
   build:
+    needs: web
     strategy:
       fail-fast: false
       matrix:
@@ -19,11 +23,12 @@ jobs:
             target: aarch64-unknown-linux-gnu
           - runner: macos-15
             target: aarch64-apple-darwin
-          - runner: macos-15
+          - runner: macos-15-intel
             target: x86_64-apple-darwin
           - runner: windows-2022
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -32,40 +37,58 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: scripts/tool-requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-assets
+          path: web
+      - uses: actions/cache@v4
+        id: tools
+        with:
+          path: .cache/bundled-tools
+          key: tools-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ hashFiles('scripts/bundle-tools.py', 'scripts/tool-requirements.txt') }}
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
-      - name: Build
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libsuitesparse-dev libopenblas-dev gfortran
+      - name: Install macOS source-build dependencies
+        if: runner.os == 'macOS' && runner.arch == 'ARM64' && steps.tools.outputs.cache-hit != 'true'
+        run: brew install suite-sparse openblas gettext libiconv libomp
+      - name: Build native tools
+        if: steps.tools.outputs.cache-hit != 'true'
+        run: uv run --no-project python scripts/bundle-tools.py
+      - name: Build application with browser assets
         env:
           CUEMOL_RELEASE_REPOSITORY: ${{ github.repository }}
-        run: cargo build --locked --release -p cuemol-cli --features gui --target ${{ matrix.target }}
-      - name: Package Unix binary
-        if: runner.os != 'Windows'
+        run: cargo build --locked --release -p cuemol-cli --features gui,bundled-web --target ${{ matrix.target }}
+      - name: Verify command-line entry points
         shell: bash
         env:
+          CUEMOL_CONFIG_DIR: ${{ runner.temp }}/cuemol-config
+          CUEMOL_TOOLS_DIR: ${{ github.workspace }}/.cache/bundled-tools
           TARGET: ${{ matrix.target }}
         run: |
-          mkdir -p dist
-          tar -czf "dist/cuemol-${TARGET}.tar.gz" -C "target/${TARGET}/release" cuemol
-          if [ "$RUNNER_OS" = macOS ]; then
-            scripts/package-macos-app.sh "target/${TARGET}/release/cuemol" "dist/CueMol.app"
-            plutil -lint dist/CueMol.app/Contents/Info.plist
-            ditto -c -k --sequesterRsrc --keepParent dist/CueMol.app "dist/CueMol-${TARGET}.zip"
-            rm -rf dist/CueMol.app
-          fi
-      - name: Package Windows binary
+          extension=""
+          if [ "$RUNNER_OS" = Windows ]; then extension=.exe; fi
+          binary="target/$TARGET/release/cuemol$extension"
+          "$binary" --version
+          "$binary" mcp tools > .cache/native-tools.json
+          "$binary" tools run pdb2pqr --version
+          "$binary" tools run ffmpeg -version
+      - name: Test Windows installer and self-upgrade
         if: runner.os == 'Windows'
         shell: pwsh
-        env:
-          TARGET: ${{ matrix.target }}
-        run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive -Path "target/$env:TARGET/release/cuemol.exe" -DestinationPath "dist/cuemol-$env:TARGET.zip"
+        run: scripts/test-install.ps1 -Binary target/${{ matrix.target }}/release/cuemol.exe
+      - name: Package distributions
+        run: uv run --no-project python scripts/package-release.py --target ${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
+          compression-level: 0
           retention-days: 7
   publish:
     if: startsWith(github.ref, 'refs/tags/')
@@ -79,12 +102,17 @@ jobs:
           pattern: release-*
           merge-multiple: true
           path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-assets
+          path: web
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
+          (cd web && zip -q -r ../dist/cuemol-web.zip .)
           cd dist
           sha256sum * > SHA256SUMS
           args=()

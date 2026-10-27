@@ -19,8 +19,9 @@ esac
 asset="cuemol-$target.tar.gz"
 work=$(mktemp -d "${TMPDIR:-/tmp}/cuemol-install.XXXXXXXX")
 staged=
+tools_replaced=false
 cleanup() {
-  if [ -n "$staged" ]; then rm -f "$staged"; fi
+  if [ -n "$staged" ]; then rm -rf "$staged"; fi
   rm -rf "$work"
 }
 trap cleanup EXIT
@@ -42,9 +43,36 @@ fi
 if [ "$actual" != "$expected" ]; then printf "Checksum mismatch for %s\n" "$asset" >&2; exit 1; fi
 install_dir=${CUEMOL_INSTALL_DIR:-"${HOME:?HOME is required}/.local/bin"}
 mkdir -p "$install_dir"
-staged=$(mktemp "$install_dir/.cuemol.XXXXXXXX")
-tar -xOzf "$work/$asset" cuemol > "$staged"
-chmod 755 "$staged"
-mv -f "$staged" "$install_dir/cuemol"
-staged=
+if [ -d "$install_dir/cuemol" ]; then
+  printf "Installation target is a directory: %s/cuemol\n" "$install_dir" >&2
+  exit 1
+fi
+staged=$(mktemp -d "$install_dir/.cuemol.XXXXXXXX")
+if tar -tzf "$work/$asset" | awk '
+  /(^\/|(^|\/)\.\.(\/|$))/ { bad = 1 }
+  $0 != "cuemol" && $0 !~ /^cuemol-tools(\/|$)/ { bad = 1 }
+  END { exit !bad }
+'; then
+  printf "Invalid release archive paths\n" >&2
+  exit 1
+fi
+tar -xzf "$work/$asset" -C "$staged"
+test -f "$staged/cuemol"
+chmod 755 "$staged/cuemol"
+if [ -d "$staged/cuemol-tools" ]; then
+  tools_dir=${CUEMOL_TOOLS_INSTALL_DIR:-"$install_dir/cuemol-tools"}
+  if [ -e "$tools_dir" ]; then mv "$tools_dir" "$staged/previous-tools"; fi
+  if ! mv "$staged/cuemol-tools" "$tools_dir"; then
+    if [ -d "$staged/previous-tools" ]; then mv "$staged/previous-tools" "$tools_dir"; fi
+    exit 1
+  fi
+  tools_replaced=true
+fi
+if ! mv -f "$staged/cuemol" "$install_dir/cuemol"; then
+  if [ "$tools_replaced" = true ]; then
+    rm -rf "$tools_dir"
+    if [ -d "$staged/previous-tools" ]; then mv "$staged/previous-tools" "$tools_dir"; fi
+  fi
+  exit 1
+fi
 printf "Installed cuemol in %s\n" "$install_dir"

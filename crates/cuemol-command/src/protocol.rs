@@ -103,6 +103,10 @@ impl Protocol {
             record_history: true,
         }
     }
+    pub fn initialized(&self) -> bool {
+        self.initialized
+    }
+
     pub fn without_history() -> Self {
         Self {
             record_history: false,

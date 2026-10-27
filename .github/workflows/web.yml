@@ -1,0 +1,35 @@
+name: Web build
+on:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  web:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/cache@v4
+        with:
+          path: .cache/web-tools
+          key: web-tools-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'scripts/prepare-web-tools.py') }}
+      - name: Prepare wasm-bindgen
+        run: uv run --no-project python scripts/prepare-web-tools.py
+      - name: Build browser application
+        run: cargo run --locked -p cuemol-cli -- web build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-assets
+          path: |
+            web/index.html
+            web/pkg/cuemol_web.js
+            web/pkg/cuemol_web_bg.wasm
+          if-no-files-found: error
+          retention-days: 7

@@ -12,19 +12,49 @@ case "$(uname -s)-$(uname -m)" in
   *) exit 1 ;;
 esac
 printf '#!/bin/sh\nprintf "installed\\n"\n' > "$work/input/cuemol"
-tar -czf "$work/release/cuemol-$target.tar.gz" -C "$work/input" cuemol
+mkdir -p "$work/input/cuemol-tools/apbs/bin"
+printf 'bundled\n' > "$work/input/cuemol-tools/apbs/bin/apbs"
+tar -czf "$work/release/cuemol-$target.tar.gz" -C "$work/input" cuemol cuemol-tools
 (cd "$work/release" && shasum -a 256 "cuemol-$target.tar.gz" > SHA256SUMS)
 CUEMOL_RELEASE_URL="file://$work/release" CUEMOL_INSTALL_DIR="$work/bin" sh "$root/install.sh"
 test "$("$work/bin/cuemol")" = installed
+test "$(cat "$work/bin/cuemol-tools/apbs/bin/apbs")" = bundled
 printf '%064d  cuemol-%s.tar.gz\n' 0 "$target" > "$work/release/SHA256SUMS"
 if CUEMOL_RELEASE_URL="file://$work/release" CUEMOL_INSTALL_DIR="$work/bin" sh "$root/install.sh"; then
   printf 'Installer accepted a bad checksum\n' >&2
   exit 1
 fi
 test "$("$work/bin/cuemol")" = installed
+test "$(cat "$work/bin/cuemol-tools/apbs/bin/apbs")" = bundled
+(cd "$work/release" && shasum -a 256 "cuemol-$target.tar.gz" > SHA256SUMS)
+real_mv=$(command -v mv)
+mkdir -p "$work/commands"
+cat > "$work/commands/mv" <<'SH'
+#!/bin/sh
+for argument do destination=$argument; done
+if [ "$destination" = "$CUEMOL_TEST_DESTINATION" ]; then exit 1; fi
+exec "$CUEMOL_TEST_MV" "$@"
+SH
+chmod 755 "$work/commands/mv"
+printf 'previous\n' > "$work/bin/cuemol-tools/apbs/bin/apbs"
+if PATH="$work/commands:$PATH" CUEMOL_TEST_MV="$real_mv" CUEMOL_TEST_DESTINATION="$work/bin/cuemol"   CUEMOL_RELEASE_URL="file://$work/release" CUEMOL_INSTALL_DIR="$work/bin" sh "$root/install.sh"; then
+  printf 'Installer accepted a failed binary replacement\n' >&2
+  exit 1
+fi
+test "$("$work/bin/cuemol")" = installed
+test "$(cat "$work/bin/cuemol-tools/apbs/bin/apbs")" = previous
+rm -rf "$work/bin/cuemol-tools"
+if PATH="$work/commands:$PATH" CUEMOL_TEST_MV="$real_mv" CUEMOL_TEST_DESTINATION="$work/bin/cuemol"   CUEMOL_RELEASE_URL="file://$work/release" CUEMOL_INSTALL_DIR="$work/bin" sh "$root/install.sh"; then
+  printf 'Installer accepted a failed fresh tool installation\n' >&2
+  exit 1
+fi
+test "$("$work/bin/cuemol")" = installed
+test ! -e "$work/bin/cuemol-tools"
+CUEMOL_RELEASE_URL="file://$work/release" CUEMOL_INSTALL_DIR="$work/bin" sh "$root/install.sh"
 if [ "$#" -gt 0 ]; then
   cp "$1" "$work/bin/cuemol"
   (cd "$work/release" && shasum -a 256 "cuemol-$target.tar.gz" > SHA256SUMS)
   CUEMOL_RELEASE_URL="file://$work/release" "$work/bin/cuemol" self-upgrade
   test "$("$work/bin/cuemol")" = installed
+  test "$(cat "$work/bin/cuemol-tools/apbs/bin/apbs")" = bundled
 fi

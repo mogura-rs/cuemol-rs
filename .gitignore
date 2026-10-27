@@ -30,3 +30,7 @@ web/test-results/
 web/playwright-report/
 
 /io.mc
+
+# Python build-helper bytecode
+__pycache__/
+*.py[cod]

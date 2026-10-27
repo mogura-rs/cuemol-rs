@@ -4,28 +4,30 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
-
 permissions:
   contents: read
-
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
   test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: core-tests
       - name: Check formatting
         run: cargo fmt --all -- --check
-      - name: Test core, trajectory, and CLI
-        run: cargo test --locked -p cuemol-core -p cuemol-mdtools -p cuemol-cli -p cuemol-desktop-core
+      - name: Test shared core and CLI
+        run: cargo test --locked --workspace --exclude cuemol-desktop --exclude cuemol-web
       - name: Test installer and self-upgrade
         run: |
           cargo build --locked -p cuemol-cli
           scripts/test-install.sh target/debug/cuemol
+  web:
+    uses: ./.github/workflows/web.yml

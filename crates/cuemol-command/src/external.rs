@@ -9,9 +9,9 @@ use std::{
 
 pub fn resolve(state: &DesktopAppState, tool: &str) -> Result<PathBuf> {
     let key = match tool {
-        "apbs" => "cuemol2.ui.apbs-path",
+        "apbs" => "cuemol2.ui.apbs-exe-path",
         "pdb2pqr" => "cuemol2.ui.pdb2pqr-py-path",
-        "povray" => "cuemol2.ui.povray-path",
+        "povray" => "cuemol2.ui.render.pov-exe-path",
         "ffmpeg" => "cuemol2.ui.ffmpeg-path",
         _ => return Err(CueMolError::invalid_argument("unknown external tool")),
     };
@@ -30,7 +30,9 @@ pub fn resolve(state: &DesktopAppState, tool: &str) -> Result<PathBuf> {
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
+            roots.push(dir.join("cuemol-tools"));
             roots.push(dir.join("tools"));
+            roots.push(dir.join("../Resources/cuemol-tools"));
             roots.push(dir.join("../Resources/tools"));
         }
     }
@@ -69,23 +71,7 @@ pub fn run(
         .current_dir(work)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if let Some(root) = executable.parent().and_then(Path::parent) {
-        let lib = root.join("lib");
-        if lib.is_dir() {
-            let key = if cfg!(target_os = "macos") {
-                "DYLD_LIBRARY_PATH"
-            } else {
-                "LD_LIBRARY_PATH"
-            };
-            let mut dirs = vec![lib];
-            dirs.extend(std::env::split_paths(
-                &std::env::var_os(key).unwrap_or_default(),
-            ));
-            if let Ok(paths) = std::env::join_paths(dirs) {
-                command.env(key, paths);
-            }
-        }
-    }
+    configure_command(&mut command, executable);
     let mut child = command
         .spawn()
         .map_err(|e| CueMolError::Io(format!("cannot start {}: {e}", executable.display())))?;
@@ -130,4 +116,24 @@ pub fn run(
         )));
     }
     Ok(text)
+}
+
+pub fn configure_command(command: &mut Command, executable: &Path) {
+    if let Some(root) = executable.parent().and_then(Path::parent) {
+        let lib = root.join("lib");
+        if lib.is_dir() {
+            let key = if cfg!(target_os = "macos") {
+                "DYLD_LIBRARY_PATH"
+            } else {
+                "LD_LIBRARY_PATH"
+            };
+            let mut dirs = vec![lib];
+            dirs.extend(std::env::split_paths(
+                &std::env::var_os(key).unwrap_or_default(),
+            ));
+            if let Ok(paths) = std::env::join_paths(dirs) {
+                command.env(key, paths);
+            }
+        }
+    }
 }

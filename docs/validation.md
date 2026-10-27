@@ -1,0 +1,73 @@
+# Validation evidence
+
+These measurements describe local validation of the implementation, not a
+published release or a complete CueMol2 equivalence claim. Generated inputs and
+logs are kept in the ignored checkout cache. No remote workflow was triggered.
+
+## Functional checks
+
+- The headless workspace suite passed 1,091 tests at the packaging checkpoint,
+  with optional compatibility tests subject to their documented skips. The final
+  denoiser and render-setting regressions passed in the affected crate suites.
+- The native egui library suite passed 157 tests, including wgpu shader and
+  primitive-pipeline validation against an available adapter. The installed GUI
+  also loaded 1CRN with its default ribbon and saved a 256 x 256 hatched PNG
+  through the Rendering menu; both the dialog and output were inspected.
+- Browser tests exercised visible molecular pixels, mouse zoom and slab control,
+  commands, undo/redo, embedded QSC and PNG export, frame seeking, startup scripts,
+  shared properties, and animation playback. Three tests passed under Chromium
+  with the WebGL2 fallback, including the browser assets embedded in an installed
+  release binary served from an otherwise empty directory. WebGPU was separately displayed and manipulated in
+  Chrome on Apple hardware; this does not establish support for every GPU driver.
+- APBS 3.4.1 produced a potential map for 1CRN through native MCP. Bundled
+  PDB2PQR 3.8.0 converted the same structure, and bundled FFmpeg encoded a short
+  generated video. The APBS source-build path also compiled on Linux x86_64.
+  Native mouse rotation and slab changes remained responsive while an MCP APBS
+  job ran through an intentionally delayed process fixture. An installed release
+  with empty GUI preferences detected its bundled PDB2PQR/APBS and produced the
+  same potential map without a tool-path environment override.
+- MDTraj wrote DCD, XTC, TRR and NetCDF trajectories with known coordinates.
+  Indexed reading with stride two and nonsequential seeks matched those
+  coordinates, using the XTC format's quantization tolerance.
+- Installer tests covered a local release archive, tool installation, checksum
+  rejection without replacing the previous executable, rollback when the final
+  binary replacement fails, and self-upgrade.
+
+## Trajectory memory and load time
+
+One synthetic little-endian DCD contained 20,000 atoms and 2,000 frames, occupying
+480,048,116 bytes. The same native debug executable was measured with GNU time
+on Linux x86_64. This is one run per command with no cold-cache guarantee.
+
+| Reader | Wall time | Maximum RSS |
+| --- | ---: | ---: |
+| Legacy eager `dcd-info` | 7.99 s | 492,128 KiB |
+| Indexed `trajectory-info` | 0.73 s | 22,052 KiB |
+
+The indexed command decoded the first frame and retained a 32,768-byte frame
+index. These numbers describe loading and inspection, not the GPU frame rate or
+memory use of every topology, compression format, and rendering representation.
+
+## Ray-intersection acceleration
+
+A 128 x 96 render of 1CRN took 15.548398 seconds before the BVH and 0.109634
+seconds after it in the debug build. RGB output matched exactly. Both runs used
+the then-current direct-lighting path; the later hatching pass was not included.
+A separate test compared BVH and brute-force intersections for 1,000 rays,
+including parallel rays, outline bounds, and multiple shadow-distance cutoffs.
+The single-scene timings should not be treated as a general speedup guarantee.
+
+## Packaging
+
+The final Linux x86_64 archive was approximately 123 MiB and included the native
+binary, embedded browser assets, and scientific tool bundle. Archive creation
+with gzip level three took 10.74 seconds in one local run. This excludes the
+native build and first-time tool downloads/builds.
+
+## Remaining verification scope
+
+Release workflows are configured for Linux x86_64/ARM64, macOS Intel/Apple
+Silicon, and Windows x86_64. Only the local Linux build and browser checks were
+executed during this work; the other native release targets and published
+installation must be verified when pushing and running Actions is authorized.
+The README lists implementation boundaries that also limit parity claims.

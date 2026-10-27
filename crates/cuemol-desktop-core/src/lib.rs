@@ -15192,6 +15192,19 @@ impl DesktopAppState {
         path: impl AsRef<Path>,
         name: impl Into<String>,
     ) -> Result<Uid> {
+        let scene_uid = self.ensure_active_scene();
+        self.open_apbs_potential_in_scene(scene_uid, path, name)
+    }
+
+    pub fn open_apbs_potential_in_scene(
+        &mut self,
+        scene_uid: Uid,
+        path: impl AsRef<Path>,
+        name: impl Into<String>,
+    ) -> Result<Uid> {
+        if self.scene_manager().scene(scene_uid).is_none() {
+            return Err(CueMolError::not_found("APBS target scene was removed"));
+        }
         let path = path.as_ref();
         let name = name.into();
         let name = name.trim();
@@ -15200,7 +15213,6 @@ impl DesktopAppState {
                 "an electrostatic-potential object name is required",
             ));
         }
-        let scene_uid = self.ensure_active_scene();
         let map_uid = self.load_density_map(scene_uid, path, name.to_string(), "apbs")?;
         let renderer_uid = self.add_density_renderer(map_uid, "*unitcell")?;
         let map = self

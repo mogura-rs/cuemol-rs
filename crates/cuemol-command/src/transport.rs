@@ -128,6 +128,7 @@ pub fn connect_stdio(path: &Path) -> Result<()> {
     stdio(|request| post(&info, &request))
 }
 
+#[derive(Debug)]
 pub struct ApiRequest {
     pub message: Value,
     pub reply: mpsc::SyncSender<Option<Value>>,
@@ -252,7 +253,7 @@ impl ApiServer {
                     continue;
                 }
                 wake();
-                match answer.recv_timeout(Duration::from_secs(120)) {
+                match answer.recv_timeout(Duration::from_secs(1250)) {
                     Ok(Some(response)) => {
                         let response = tiny_http::Response::from_string(response.to_string())
                             .with_header(
