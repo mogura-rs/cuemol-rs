@@ -405,6 +405,12 @@
         "reader": {
           "type": "string"
         },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "rendererType": {
           "type": [
             "string",
@@ -412,12 +418,6 @@
           ]
         },
         "selection": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "name": {
           "type": [
             "string",
             "null"
@@ -1339,6 +1339,3852 @@
     },
     "annotations": {
       "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "analyze_interactions",
+    "description": "Find close contacts around a selection and draw them as labelled dashed lines. Use it for hydrogen bonds and for what a ligand touches; by default only polar atoms (no carbon) are paired. This adds labels to the scene.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer",
+          "description": "Uid of the MolCoord object to measure within."
+        },
+        "selection": {
+          "type": "string",
+          "description": "Selection the contacts start from, for example a ligand."
+        },
+        "maxDist": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Longest contact to report, in angstroms. Null uses 4."
+        },
+        "includeCarbon": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "True also reports contacts that involve a carbon atom. Null or false leaves carbon out, so only atoms that can make hydrogen bonds or salt bridges (N, O, S, ...) are reported -- which is what \"interactions\" usually means."
+        },
+        "minDist": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Shortest contact to report, in angstroms. Null uses 0."
+        },
+        "maxLabels": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Most contacts to draw. Null uses 100."
+        },
+        "labelSet": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Name of the label renderer to draw into. Null uses \"measure\"."
+        },
+        "obj2Id": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Uid of a second MolCoord object: report only contacts between the two. Null stays within objId."
+        },
+        "selection2": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Report only contacts between selection and this selection (in obj2Id when given). Null pairs selection with anything."
+        }
+      },
+      "required": [
+        "objId",
+        "selection"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "rename_camera",
+    "description": "Rename a camera.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name of the camera, from list_cameras."
+        },
+        "newName": {
+          "type": "string",
+          "description": "Its new name."
+        }
+      },
+      "required": [
+        "name",
+        "newName"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "move_camera",
+    "description": "Move a camera to another place in the camera list (its number in list_cameras, from 1).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name of the camera, from list_cameras."
+        },
+        "by": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Places to move from where it is now: negative is up, positive down. Stops at either end."
+        },
+        "to": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "The number it should have, from 1."
+        },
+        "end": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Move it to the top or the bottom of the list.",
+          "enum": [
+            "top",
+            "bottom",
+            null
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_camera_visibility",
+    "description": "Set which objects and renderers a camera shows or hides when applied with its visibility (the camera's Edit visibility flags). Nodes left out are not touched by the camera.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name of the camera, from list_cameras."
+        },
+        "entries": {
+          "type": "string",
+          "description": "The nodes and their visibility, e.g. \"on 1crn; off 1crn/cartoon1\". Empty clears them."
+        }
+      },
+      "required": [
+        "name",
+        "entries"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "clear_camera_visibility",
+    "description": "Forget the visibility flags a camera keeps.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name of the camera, from list_cameras."
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "renumber_residues",
+    "description": "Change residue numbers of a MolCoord object (Edit > Change residue number): shift them by a value, or number them from a value. renumber numbers consecutively instead of keeping the gaps.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer",
+          "description": "Uid of the MolCoord object."
+        },
+        "mode": {
+          "type": "string",
+          "description": "shift: add value to each number; start: the first becomes value.",
+          "enum": [
+            "shift",
+            "start"
+          ]
+        },
+        "value": {
+          "type": "integer",
+          "description": "The shift, or the first number."
+        },
+        "selection": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Only these residues. Null changes them all."
+        },
+        "renumber": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Number consecutively, closing gaps. Null is false."
+        }
+      },
+      "required": [
+        "objId",
+        "mode",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_atom_label",
+    "description": "Show or hide the name label of one atom (a click with the navigate tool).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer",
+          "description": "Uid of the MolCoord object."
+        },
+        "atoms": {
+          "type": "array",
+          "description": "The atom, chain.resid.atom, e.g. A.20.CA.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "chain": {
+                "type": "string"
+              },
+              "resid": {
+                "type": "string"
+              },
+              "atomName": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "chain",
+              "resid",
+              "atomName"
+            ]
+          }
+        },
+        "on": {
+          "type": "boolean",
+          "description": "True shows the label, false hides it."
+        }
+      },
+      "required": [
+        "objId",
+        "atoms",
+        "on"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_atom_labels",
+    "description": "Label every atom of a selection with a format, or take their labels off (PyMOL's label).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer",
+          "description": "Uid of the MolCoord object."
+        },
+        "selection": {
+          "type": "string",
+          "description": "The atoms to label."
+        },
+        "format": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Label format, e.g. \"{resn}{resi}\"; \"\" uses the renderer's default. Null takes the labels off."
+        },
+        "rendererName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Name of the name label renderer; made when the object has none. Null is the unnamed one the navigate tool uses."
+        }
+      },
+      "required": [
+        "objId",
+        "selection"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "add_bond",
+    "description": "Add a bond between two atoms of a MolCoord object (the Add bond tool).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer",
+          "description": "Uid of the MolCoord object."
+        },
+        "atoms": {
+          "type": "array",
+          "description": "The two atoms, chain.resid.atom each, e.g. A.20.SG A.45.SG.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "chain": {
+                "type": "string"
+              },
+              "resid": {
+                "type": "string"
+              },
+              "atomName": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "chain",
+              "resid",
+              "atomName"
+            ]
+          }
+        }
+      },
+      "required": [
+        "objId",
+        "atoms"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "remove_bond",
+    "description": "Remove the bond between two atoms of a MolCoord object.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer",
+          "description": "Uid of the MolCoord object."
+        },
+        "atoms": {
+          "type": "array",
+          "description": "The two atoms, chain.resid.atom each, e.g. A.20.SG A.45.SG.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "chain": {
+                "type": "string"
+              },
+              "resid": {
+                "type": "string"
+              },
+              "atomName": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "chain",
+              "resid",
+              "atomName"
+            ]
+          }
+        }
+      },
+      "required": [
+        "objId",
+        "atoms"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_symmetry",
+    "description": "Set the crystal symmetry of a MolCoord object: the unit cell and the space group number.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer",
+          "description": "Uid of the MolCoord object."
+        },
+        "a": {
+          "type": "number",
+          "description": "Cell a, in angstroms."
+        },
+        "b": {
+          "type": "number",
+          "description": "Cell b, in angstroms."
+        },
+        "c": {
+          "type": "number",
+          "description": "Cell c, in angstroms."
+        },
+        "alpha": {
+          "type": "number",
+          "description": "Cell alpha, in degrees."
+        },
+        "beta": {
+          "type": "number",
+          "description": "Cell beta, in degrees."
+        },
+        "gamma": {
+          "type": "number",
+          "description": "Cell gamma, in degrees."
+        },
+        "spaceGroup": {
+          "type": "integer",
+          "description": "Space group number, e.g. 19 for P 21 21 21."
+        }
+      },
+      "required": [
+        "objId",
+        "a",
+        "b",
+        "c",
+        "alpha",
+        "beta",
+        "gamma",
+        "spaceGroup"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "create_group",
+    "description": "Make an empty renderer group on an object, to gather its renderers (New Group in the scene tree).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer",
+          "description": "Uid of the object."
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Name of the group. Null picks group1, group2, ..."
+        }
+      },
+      "required": [
+        "objId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "create_surface_from_map",
+    "description": "Turn the contour surface of a density map (an isosurf renderer) into a surface object of its own (Generate surface obj).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "rendId": {
+          "type": "integer",
+          "description": "Uid of the isosurf renderer."
+        }
+      },
+      "required": [
+        "rendId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "recalc_surface",
+    "description": "Compute a molecular surface object again from its molecule, optionally at another density.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "surfId": {
+          "type": "integer",
+          "description": "Uid of the surface object."
+        },
+        "density": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Points per angstrom. Null keeps the current density."
+        },
+        "backend": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Surface algorithm. Null or auto lets CueMol choose.",
+          "enum": [
+            "auto",
+            "meshms",
+            "ball",
+            null
+          ]
+        }
+      },
+      "required": [
+        "surfId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "list_interactions",
+    "description": "List the distances, angles and torsions an interaction renderer draws, numbered from 1.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "rendId": {
+          "type": "integer",
+          "description": "Uid of the interaction renderer."
+        }
+      },
+      "required": [
+        "rendId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "remove_interaction",
+    "description": "Remove one distance, angle or torsion from an interaction renderer, by its number in list_interactions.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "rendId": {
+          "type": "integer",
+          "description": "Uid of the interaction renderer."
+        },
+        "number": {
+          "type": "integer",
+          "description": "Its number in list_interactions (from 1)."
+        }
+      },
+      "required": [
+        "rendId",
+        "number"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "list_paint",
+    "description": "List the paint entries (selection and colour) of a renderer or an object, numbered from 1. An atom takes the colour of the first entry that matches it.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "nodeId": {
+          "type": "integer",
+          "description": "Uid of the renderer or object whose paint to list."
+        },
+        "nodeType": {
+          "type": "string",
+          "description": "What nodeId refers to: a renderer, or an object (the colouring its renderers take by default).",
+          "enum": [
+            "renderer",
+            "object"
+          ]
+        }
+      },
+      "required": [
+        "nodeId",
+        "nodeType"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_paint",
+    "description": "Change the selection or the colour of one paint entry.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "nodeId": {
+          "type": "integer",
+          "description": "Uid of the renderer or object the entry belongs to."
+        },
+        "nodeType": {
+          "type": "string",
+          "description": "What nodeId refers to: a renderer, or an object (the colouring its renderers take by default).",
+          "enum": [
+            "renderer",
+            "object"
+          ]
+        },
+        "number": {
+          "type": "integer",
+          "description": "The entry's number in list_paint (from 1)."
+        },
+        "selection": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "New selection. Null keeps it."
+        },
+        "color": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "New colour. Null keeps it."
+        }
+      },
+      "required": [
+        "nodeId",
+        "nodeType",
+        "number"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "add_paint_at",
+    "description": "Insert one paint entry at a position (the paint deck's Add and Paste). Unlike add_paint, it leaves the object's current selection as it is.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "nodeId": {
+          "type": "integer",
+          "description": "Uid of the renderer or object to paint."
+        },
+        "nodeType": {
+          "type": "string",
+          "description": "What nodeId refers to: a renderer, or an object (the colouring its renderers take by default).",
+          "enum": [
+            "renderer",
+            "object"
+          ]
+        },
+        "selection": {
+          "type": "string",
+          "description": "Which atoms the entry colours."
+        },
+        "color": {
+          "type": "string",
+          "description": "Colour of the entry."
+        },
+        "at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Insert before this entry of list_paint (from 1). Null appends at the end."
+        }
+      },
+      "required": [
+        "nodeId",
+        "nodeType",
+        "selection",
+        "color"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_multigrad_nodes",
+    "description": "Set the whole gradient of a renderer coloured by multigrad: each node a map value and the colour at it, as \"value colour; value colour; ...\".",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "rendId": {
+          "type": "integer",
+          "description": "Uid of the map or surface renderer coloured by multigrad."
+        },
+        "nodes": {
+          "type": "string",
+          "description": "The nodes, e.g. \"-1 blue; 0 white; 1 red\"."
+        }
+      },
+      "required": [
+        "rendId",
+        "nodes"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "remove_paint",
+    "description": "Remove one paint entry.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "nodeId": {
+          "type": "integer",
+          "description": "Uid of the renderer or object the entry belongs to."
+        },
+        "nodeType": {
+          "type": "string",
+          "description": "What nodeId refers to: a renderer, or an object (the colouring its renderers take by default).",
+          "enum": [
+            "renderer",
+            "object"
+          ]
+        },
+        "number": {
+          "type": "integer",
+          "description": "The entry's number in list_paint (from 1)."
+        }
+      },
+      "required": [
+        "nodeId",
+        "nodeType",
+        "number"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "move_paint",
+    "description": "Move a paint entry to another number in the list (an atom takes the colour of the first entry that matches it).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "nodeId": {
+          "type": "integer",
+          "description": "Uid of the renderer or object the entry belongs to."
+        },
+        "nodeType": {
+          "type": "string",
+          "description": "What nodeId refers to: a renderer, or an object (the colouring its renderers take by default).",
+          "enum": [
+            "renderer",
+            "object"
+          ]
+        },
+        "number": {
+          "type": "integer",
+          "description": "The entry's number in list_paint (from 1)."
+        },
+        "by": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Places to move from where it is now: negative is up, positive down. Stops at either end."
+        },
+        "to": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "The number it should have, from 1."
+        },
+        "end": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Move it to the top or the bottom of the list.",
+          "enum": [
+            "top",
+            "bottom",
+            null
+          ]
+        }
+      },
+      "required": [
+        "nodeId",
+        "nodeType",
+        "number"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_elepot_coloring",
+    "description": "Colour a molecular surface renderer by an electrostatic potential map (made by calc_elepot): red for negative, blue for positive, white between, as in the Coloring panel.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "rendId": {
+          "type": "integer",
+          "description": "Uid of the surface renderer."
+        },
+        "map": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Name of the potential map object. Null uses the one already set, or the first in the scene."
+        },
+        "low": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Potential (kT/e) drawn in the low colour. Null keeps it."
+        },
+        "high": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Potential (kT/e) drawn in the high colour. Null keeps it."
+        }
+      },
+      "required": [
+        "rendId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "recenter_map",
+    "description": "Redraw a density map's contour around the centre of the view (Re-centre in the map pane).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "rendId": {
+          "type": "integer",
+          "description": "Uid of the map renderer."
+        }
+      },
+      "required": [
+        "rendId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "list_map_contours",
+    "description": "List the contour renderers drawn from density maps, with their current level.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_map_contour",
+    "description": "Change how one map contour is drawn: its level (in sigma, or percent for an EM map), the extent of the box drawn around the view centre (angstroms), its colour and opacity. Give only what should change.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "rendId": {
+          "type": "integer",
+          "description": "Uid of the contour renderer, from list_map_contours."
+        },
+        "level": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Contour level in sigma (percent for an EM map). Null leaves it."
+        },
+        "extent": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Half-size of the drawn box in angstroms. Null leaves it."
+        },
+        "color": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Contour colour. Null leaves it."
+        },
+        "alpha": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Opacity, 0 to 1. Null leaves it."
+        }
+      },
+      "required": [
+        "rendId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "measure_geometry",
+    "description": "Measure between named atoms and return the number.\n\n- Two atoms give a distance in angstroms, three the angle at the middle atom in degrees, four the torsion about the middle bond in degrees.\n- Also draws the measurement in the 3D view as a labelled line, the same way the measure tool does.\n- Use `list_residues` to check a residue index first; the atom name is the PDB name, for example `CA`, `N`, `C`, `O`, `CB`.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer",
+          "description": "Uid of the MolCoord object the atoms belong to."
+        },
+        "atoms": {
+          "type": "array",
+          "description": "Two, three or four atoms, in order. Two give a distance, three the angle at the second atom, four the torsion about the second-to-third bond. Any other number is an error.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "chain": {
+                "type": "string"
+              },
+              "resid": {
+                "type": "string"
+              },
+              "atomName": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "chain",
+              "resid",
+              "atomName"
+            ]
+          }
+        },
+        "draw": {
+          "type": "boolean",
+          "description": "True also draws the labelled measurement in the 3D view; false only returns the number."
+        },
+        "label": {
+          "type": "string",
+          "description": "Name of the label set to draw into. Use \"measure\" unless the user asked for another."
+        },
+        "atomObjects": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "For a measurement across objects: the object of each atom after the first, by name, space separated. Null keeps every atom in objId."
+        }
+      },
+      "required": [
+        "objId",
+        "atoms",
+        "draw",
+        "label"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "measure_selections",
+    "description": "Measure between whole selections of one MolCoord object, each one point (the centre of what it matches), and draw it: two give a distance, three an angle, four a torsion.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer",
+          "description": "Uid of the MolCoord object."
+        },
+        "selections": {
+          "type": "string",
+          "description": "Two, three or four selections, separated by \";\", e.g. \"chain A; chain B\"."
+        },
+        "label": {
+          "type": "string",
+          "description": "Name of the label set to draw into. Use \"measure\" unless the user asked for another."
+        }
+      },
+      "required": [
+        "objId",
+        "selections",
+        "label"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "create_surface",
+    "description": "Compute the molecular (solvent excluded) surface of a MolCoord object, or of a selection of it, as a new surface object with a renderer. Returns the new object's uid.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer",
+          "description": "Uid of the MolCoord object."
+        },
+        "selection": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Only these atoms. Null uses the whole object."
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Name for the surface object. Null picks an unused one."
+        },
+        "probeRadius": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Probe radius in angstroms. Null uses 1.4."
+        },
+        "density": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Points per angstrom. Null uses 2; higher is finer and slower."
+        },
+        "backend": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Surface algorithm. Null or auto lets CueMol choose.",
+          "enum": [
+            "auto",
+            "meshms",
+            "ball",
+            null
+          ]
+        }
+      },
+      "required": [
+        "objId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "delete_atoms",
+    "description": "Delete the atoms a selection matches from a MolCoord object. Undoable, but only use it when the user asked to remove atoms.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer",
+          "description": "Uid of the MolCoord object."
+        },
+        "selection": {
+          "type": "string",
+          "description": "The atoms to delete, e.g. resn HOH."
+        }
+      },
+      "required": [
+        "objId",
+        "selection"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "rename_chain",
+    "description": "Change the chain name of the atoms a selection matches (e.g. a whole chain).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer",
+          "description": "Uid of the MolCoord object."
+        },
+        "selection": {
+          "type": "string",
+          "description": "The atoms to rename, e.g. chain A."
+        },
+        "chain": {
+          "type": "string",
+          "description": "The new chain name."
+        }
+      },
+      "required": [
+        "objId",
+        "selection",
+        "chain"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "merge_molecules",
+    "description": "Move (or copy) the atoms a selection matches from one MolCoord object into another, e.g. a ligand into the protein it binds.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "fromId": {
+          "type": "integer",
+          "description": "Uid of the MolCoord object the atoms come from."
+        },
+        "toId": {
+          "type": "integer",
+          "description": "Uid of the MolCoord object they go into."
+        },
+        "selection": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Which atoms. Null takes all of them."
+        },
+        "copy": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "True copies and leaves the source as it is; false (default) moves."
+        }
+      },
+      "required": [
+        "fromId",
+        "toId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_secondary_structure",
+    "description": "Recompute a protein's secondary structure from its coordinates (no selection given), or assign one type to the residues a selection matches.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer",
+          "description": "Uid of the MolCoord object."
+        },
+        "selection": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Residues to assign. Null recomputes the whole object."
+        },
+        "type": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "With a selection: the type to assign.",
+          "enum": [
+            "coil",
+            "strand",
+            "helix",
+            "helix310",
+            "helixpi",
+            null
+          ]
+        },
+        "ignoreBulge": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Recomputing: ignore beta bulges. Null is false."
+        },
+        "helixGapAngle": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Recomputing: fill gaps in a helix up to this angle in degrees (the dialog offers 120). Null or 0 does not fill."
+        }
+      },
+      "required": [
+        "objId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "show_symmetry",
+    "description": "For a crystal structure: draw its symmetry mates within a distance of the view centre, or fill the unit cell, and optionally the unit cell box.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer",
+          "description": "Uid of the MolCoord object (it must carry crystal information)."
+        },
+        "extent": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Draw mates within this many angstroms. Null fills the unit cell."
+        },
+        "unitCell": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "True also draws the unit cell box."
+        }
+      },
+      "required": [
+        "objId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "create_symmetry_copy",
+    "description": "Copy a MolCoord object as a new object moved by a 4x4 matrix (a symmetry mate made a real object, from the 3D view's Create SYMM mol), drawn with one renderer.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer",
+          "description": "Uid of the MolCoord object to copy."
+        },
+        "matrix": {
+          "type": "string",
+          "description": "The 4x4 transform, 16 numbers row by row."
+        },
+        "name": {
+          "type": "string",
+          "description": "Name of the new object."
+        },
+        "rendererType": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Renderer to draw it with. Null uses simple."
+        },
+        "selection": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Draw only this selection. Null draws everything."
+        },
+        "rendererName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Name of the renderer. Null uses <type>1."
+        },
+        "preset": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Draw it with this renderer preset (a group), instead of rendererType. Null leaves the choice to rendererType."
+        },
+        "centerView": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "True centres the view on the new object. Null or false leaves the view."
+        }
+      },
+      "required": [
+        "objId",
+        "matrix",
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "show_unit_cell",
+    "description": "For a crystal structure or map: draw its unit cell box (no symmetry mates). Does nothing when it is drawn already.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer",
+          "description": "Uid of the object (it must carry crystal information)."
+        }
+      },
+      "required": [
+        "objId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "list_renderer_styles",
+    "description": "List the named styles one renderer can take: type styles (a whole look, e.g. a ribbon width preset) and edge styles (outlines). Apply one with apply_renderer_style.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "rendId": {
+          "type": "integer",
+          "description": "Uid of the renderer."
+        }
+      },
+      "required": [
+        "rendId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "apply_renderer_style",
+    "description": "Apply a named style (from list_renderer_styles) to one renderer, replacing the style of the same kind it had.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "rendId": {
+          "type": "integer",
+          "description": "Uid of the renderer."
+        },
+        "style": {
+          "type": "string",
+          "description": "Style name, from list_renderer_styles."
+        }
+      },
+      "required": [
+        "rendId",
+        "style"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_renderer_styles",
+    "description": "Replace the whole ordered list of named styles a renderer has (what the Edit Style dialog does), e.g. \"DefaultCartoon EgLineThick\". Later styles override earlier ones. An empty list removes them all. To change one style, use apply_renderer_style.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "rendId": {
+          "type": "integer",
+          "description": "Uid of the renderer."
+        },
+        "styles": {
+          "type": "string",
+          "description": "Style names in order, separated by commas or spaces. Empty for none."
+        }
+      },
+      "required": [
+        "rendId",
+        "styles"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "clear_paint",
+    "description": "Remove every region painted with add_paint on one renderer or object.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "nodeId": {
+          "type": "integer",
+          "description": "Uid of the renderer or object to clear."
+        },
+        "nodeType": {
+          "type": "string",
+          "description": "What nodeId refers to: a renderer, or an object (the colouring its renderers take by default).",
+          "enum": [
+            "renderer",
+            "object"
+          ]
+        }
+      },
+      "required": [
+        "nodeId",
+        "nodeType"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_default_color",
+    "description": "Set the colour a painted renderer or object uses where no painted region applies (its base colour).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "nodeId": {
+          "type": "integer",
+          "description": "Uid of the renderer or object to set it on."
+        },
+        "nodeType": {
+          "type": "string",
+          "description": "What nodeId refers to: a renderer, or an object (the colouring its renderers take by default).",
+          "enum": [
+            "renderer",
+            "object"
+          ]
+        },
+        "color": {
+          "type": "string",
+          "description": "The colour, e.g. white or #c0c0c0."
+        }
+      },
+      "required": [
+        "nodeId",
+        "nodeType",
+        "color"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "save_object",
+    "description": "Write one object to a file in the format its extension names (for a MolCoord object e.g. .pdb or .cif). Give a plain file name, which is saved to the desktop, or an absolute path where the caller allows one; the full path is reported back -- tell the user where it went.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer",
+          "description": "Uid of the object."
+        },
+        "fileName": {
+          "type": "string",
+          "description": "The file, e.g. model.pdb."
+        }
+      },
+      "required": [
+        "objId",
+        "fileName"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_coloring_prop",
+    "description": "Set one property of the colouring a renderer or an object uses (what the CPK, Rainbow and B-factor sections of the Coloring panel change), e.g. col_C, start / end hue, mode, lowcol. A colouring still shared from a style is given its own copy first, so only this one changes.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "nodeId": {
+          "type": "integer",
+          "description": "Uid of the renderer or object whose colouring to change."
+        },
+        "nodeType": {
+          "type": "string",
+          "description": "What nodeId refers to: a renderer, or an object (the colouring its renderers take by default).",
+          "enum": [
+            "renderer",
+            "object"
+          ]
+        },
+        "prop": {
+          "type": "string",
+          "description": "Property name of the colouring scheme."
+        },
+        "value": {
+          "type": "string",
+          "description": "The value, as text: a colour, a number, or a mode name."
+        }
+      },
+      "required": [
+        "nodeId",
+        "nodeType",
+        "prop",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "add_paint",
+    "description": "Colour part of what one renderer (or every renderer of an object that follows its colouring) draws, leaving the rest as it is. Use this for \"make chain A red\" or \"colour the ligand yellow\" -- set_renderer_coloring replaces the whole renderer's colouring instead. Painting the same renderer again adds another colour on top, so several regions can be coloured one call at a time.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "nodeId": {
+          "type": "integer",
+          "description": "Uid of the renderer or object to paint."
+        },
+        "nodeType": {
+          "type": "string",
+          "description": "What nodeId refers to: a renderer, or an object (the colouring its renderers take by default).",
+          "enum": [
+            "renderer",
+            "object"
+          ]
+        },
+        "selection": {
+          "type": "string",
+          "description": "Which atoms to colour. Check it with count_selection first."
+        },
+        "color": {
+          "type": "string",
+          "description": "Colour as hex (\"#FF0000\"), a CueMol colour name (\"red\"), or hsb(h,s,b). Hex is the safest."
+        }
+      },
+      "required": [
+        "nodeId",
+        "nodeType",
+        "selection",
+        "color"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "cut_surface",
+    "description": "Cut a molecular surface object by the front clipping (slab) plane of the current view, as Tools > Mol surface cutter does. full keeps the surface and closes the cut with a cross section; separate puts the cross section in an object of its own; sect keeps only the cross section; body keeps the surface without one. Adjust the slab first (slab).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "surfId": {
+          "type": "integer",
+          "description": "Uid of the surface object."
+        },
+        "mode": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "What to keep. Null is full.",
+          "enum": [
+            "full",
+            "separate",
+            "sect",
+            "body",
+            null
+          ]
+        },
+        "density": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Cross-section mesh density per angstrom. Null uses 5."
+        }
+      },
+      "required": [
+        "surfId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "list_morph_frames",
+    "description": "List the frames of a morphing MolCoord object (made by add_morph_frame), in order.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer",
+          "description": "Uid of the MolCoord object."
+        }
+      },
+      "required": [
+        "objId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "add_morph_frame",
+    "description": "Add a frame (another conformation of the same object) to a morphing animation, from a PDB file or from another MolCoord object in the scene. A plain MolCoord object is first turned into a morphing one, which gives it a new uid (returned). Play it with a Mol morphing element in the Animation panel.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer",
+          "description": "Uid of the MolCoord object to morph."
+        },
+        "file": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "PDB file (.pdb, .ent, optionally .gz) to add. Null uses fromObjId."
+        },
+        "fromObjId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Uid of a MolCoord object whose coordinates to add. Null uses file."
+        },
+        "before": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Insert before this frame, by its number in list_morph_frames (from 1). Null appends."
+        }
+      },
+      "required": [
+        "objId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "remove_morph_frame",
+    "description": "Remove one frame from a morphing MolCoord object, by its number in list_morph_frames (from 1). The base frame, (this), cannot be removed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer",
+          "description": "Uid of the morphing MolCoord object."
+        },
+        "frame": {
+          "type": "integer",
+          "description": "The frame's number in list_morph_frames (from 1)."
+        }
+      },
+      "required": [
+        "objId",
+        "frame"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "convert_to_morph",
+    "description": "Turn a MolCoord object into a MorphMol (a morphing animation), its current coordinates the first frame. add_morph_frame does this by itself when it is needed.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer",
+          "description": "Uid of the MolCoord object."
+        }
+      },
+      "required": [
+        "objId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "export_image",
+    "description": "Save a PNG of the current view to a file, only when the user asks for a file. To look at the view yourself, use capture_view, which saves nothing. Give a plain file name, which is saved to the desktop, or an absolute path where the caller allows one; the full path is reported back -- tell the user where it went.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The file, e.g. overview.png."
+        },
+        "width": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Image width in pixels. Null uses the size of the view on screen."
+        },
+        "height": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Image height in pixels. Null uses the size of the view on screen."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "list_anims",
+    "description": "List the scene's animation: its length and settings, then each element with its type and times.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "add_anim",
+    "description": "Add an element to the animation: spin (rotate the view), camera (move to a camera), show / hide (a renderer), slidein / slideout, mol (morphing), wait (does nothing for a time). It follows the element before it; set what it acts on with set_anim_prop.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "What kind of element.",
+          "enum": [
+            "spin",
+            "camera",
+            "show",
+            "hide",
+            "slidein",
+            "slideout",
+            "mol",
+            "wait"
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Its name. Null picks one."
+        },
+        "before": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Insert before this element. Null appends. The element: its number in list_anims (from 1), #uid, or its name."
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "remove_anim",
+    "description": "Remove an element from the animation.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "element": {
+          "type": "string",
+          "description": "The element: its number in list_anims (from 1), #uid, or its name."
+        }
+      },
+      "required": [
+        "element"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "move_anim",
+    "description": "Move an element to another place in the list (its number in list_anims, from 1).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "element": {
+          "type": "string",
+          "description": "The element: its number in list_anims (from 1), #uid, or its name."
+        },
+        "by": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Places to move from where it is now: negative is up, positive down. Stops at either end."
+        },
+        "to": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "The number it should have, from 1."
+        },
+        "end": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Move it to the top or the bottom of the list.",
+          "enum": [
+            "top",
+            "bottom",
+            null
+          ]
+        }
+      },
+      "required": [
+        "element"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_anim_time",
+    "description": "Set when an element runs, in milliseconds, relative to the end of the element it follows (or to the start of the animation when it follows none).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "element": {
+          "type": "string",
+          "description": "The element: its number in list_anims (from 1), #uid, or its name."
+        },
+        "startMs": {
+          "type": "number",
+          "description": "Start, in milliseconds."
+        },
+        "endMs": {
+          "type": "number",
+          "description": "End, in milliseconds; after the start."
+        }
+      },
+      "required": [
+        "element",
+        "startMs",
+        "endMs"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_anim_prop",
+    "description": "Set one property of an element, as the inspector does: name, timeRefName (the element it follows; empty for none), disabled, quadric (easing); spin: angle, axis (\"0 1 0\"); camera: endcam and ignorerotate / ignorecenter / ignorezoom / ignoreslab; show / hide / slide: rend (the renderer), hide, fade, tgtAlpha, direction, distance; mol: mol, startValue, endValue.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "element": {
+          "type": "string",
+          "description": "The element: its number in list_anims (from 1), #uid, or its name."
+        },
+        "prop": {
+          "type": "string",
+          "description": "The property.",
+          "enum": [
+            "name",
+            "timeRefName",
+            "endcam",
+            "rend",
+            "mol",
+            "disabled",
+            "ignorerotate",
+            "ignorecenter",
+            "ignorezoom",
+            "ignoreslab",
+            "hide",
+            "fade",
+            "quadric",
+            "angle",
+            "tgtAlpha",
+            "direction",
+            "distance",
+            "startValue",
+            "endValue",
+            "axis"
+          ]
+        },
+        "value": {
+          "type": "string",
+          "description": "The new value, as text."
+        }
+      },
+      "required": [
+        "element",
+        "prop",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_anim_generic_prop",
+    "description": "Set any property of an element by its C++ name, as the inspector's generic tab does (set_anim_prop covers the usual ones by friendlier names).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "element": {
+          "type": "string",
+          "description": "The element: its number in list_anims (from 1), #uid, or its name."
+        },
+        "prop": {
+          "type": "string",
+          "description": "The property name, e.g. axis or tgt_alpha."
+        },
+        "value": {
+          "type": "string",
+          "description": "The new value, as text (a vector as \"x y z\")."
+        }
+      },
+      "required": [
+        "element",
+        "prop",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "reset_anim_prop",
+    "description": "Reset properties of an element to their defaults.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "element": {
+          "type": "string",
+          "description": "The element: its number in list_anims (from 1), #uid, or its name."
+        },
+        "props": {
+          "type": "string",
+          "description": "The property names (C++ names, as the generic tab lists them), comma separated."
+        }
+      },
+      "required": [
+        "element",
+        "props"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_anim_options",
+    "description": "Set whether the animation loops, and the camera it starts from (empty for none).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "loop": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Play it in a loop. Null leaves it."
+        },
+        "startCamera": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The camera it starts from; empty for none. Null leaves it."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "calc_elepot",
+    "description": "Calculate the electrostatic potential of a MolCoord object with APBS, as a new potential map object (to colour a surface by). Charges and radii come from pdb2pqr with a force field, or from CueMol itself (internal). Takes seconds to minutes. Returns the new object's uid.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer",
+          "description": "Uid of the MolCoord object."
+        },
+        "selection": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Only these atoms. Null uses the whole object."
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Name for the map object. Null picks pot_<object>."
+        },
+        "method": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Charge assignment. Null is pdb2pqr.",
+          "enum": [
+            "pdb2pqr",
+            "internal",
+            null
+          ]
+        },
+        "forceField": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "pdb2pqr force field. Null uses the one in Settings."
+        },
+        "gridSpacing": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Target grid spacing in angstroms. Null uses 1."
+        },
+        "nonLinear": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Solve the non-linear Poisson-Boltzmann equation. Null is false (linear)."
+        },
+        "useHydrogen": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Keep the hydrogen atoms of the object. Null is false (they are added or ignored by the charge method)."
+        },
+        "temperature": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Temperature in kelvin. Null uses 298.15."
+        },
+        "waterDielec": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Dielectric constant of the solvent. Null uses 78.54."
+        },
+        "protDielec": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Dielectric constant of the molecule. Null uses 2."
+        }
+      },
+      "required": [
+        "objId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "reset_prop",
+    "description": "Put a property back to its default, named by its path as set_prop takes it (1crn/cartoon1.width, bgcolor). End the path in .* to reset every changed property of the node at once (Reset all in the inspector).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The property, or node.* for all of them."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "clear_undo",
+    "description": "Forget the scene's undo and redo history (Edit > Clear undo data). Cannot be undone.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "export_scene",
+    "description": "Export the view or the scene to a file (File > Export): png (with transparency and a DPI if asked), pov (POV-Ray scene), stl or mqo (3D models).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The file to write."
+        },
+        "format": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Null takes it from the file extension, else png.",
+          "enum": [
+            "png",
+            "pov",
+            "stl",
+            "mqo",
+            null
+          ]
+        },
+        "width": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Width in pixels. Null uses the view's size."
+        },
+        "height": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Height in pixels. Null uses the view's size."
+        },
+        "transparent": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "png: a transparent background. Null is false."
+        },
+        "dpi": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "png: the resolution written in the file. Null leaves it out."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "load_pdb",
+    "description": "Open a PDB file with the reader options of the File Open dialog. Each option left null keeps the reader's default. load_file opens one with all the defaults.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The file to open."
+        },
+        "rendererType": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Renderer to create for it. Null draws a molecule with the PyMOL-like preset DefaultPymRendPreset (cartoon, ligand sticks, ion spheres, water lines) when no selection is given, and anything else with its own default renderer."
+        },
+        "selection": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Draw only this selection. Null draws everything."
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Name of the new object. Null uses the file name."
+        },
+        "rendererName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Name of the renderer. Null uses <type>1."
+        },
+        "preset": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Draw it with this renderer preset (a group), instead of rendererType. Null leaves the choice to rendererType."
+        },
+        "centerView": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "False leaves the view where it is. Null or true centres it on the new object."
+        },
+        "mapCenterPolicy": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "For a map: setMapCenter draws it around the view centre, moveViewCenter moves the view to the map. Null or auto picks by the map kind.",
+          "enum": [
+            "auto",
+            "setMapCenter",
+            "moveViewCenter",
+            null
+          ]
+        },
+        "loadModel": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Read every model of a multi-model file (NMR), not only the first."
+        },
+        "loadAnisou": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Read the anisotropic B-factors (ANISOU)."
+        },
+        "loadAltConf": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Read the alternative conformations."
+        },
+        "loadSegid": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Read the segment ids."
+        },
+        "build2ndry": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Compute the secondary structure instead of reading it from the file."
+        },
+        "autoTopology": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Build the bonds of residues the topology does not know."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "load_mmcif",
+    "description": "Open an mmCIF coordinate model with the reader options of the File Open dialog. Each option left null keeps the reader's default. Not for a structure-factor CIF: load_file or fetch_map reads that as a map.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The file to open."
+        },
+        "rendererType": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Renderer to create for it. Null draws a molecule with the PyMOL-like preset DefaultPymRendPreset (cartoon, ligand sticks, ion spheres, water lines) when no selection is given, and anything else with its own default renderer."
+        },
+        "selection": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Draw only this selection. Null draws everything."
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Name of the new object. Null uses the file name."
+        },
+        "rendererName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Name of the renderer. Null uses <type>1."
+        },
+        "preset": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Draw it with this renderer preset (a group), instead of rendererType. Null leaves the choice to rendererType."
+        },
+        "centerView": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "False leaves the view where it is. Null or true centres it on the new object."
+        },
+        "mapCenterPolicy": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "For a map: setMapCenter draws it around the view centre, moveViewCenter moves the view to the map. Null or auto picks by the map kind.",
+          "enum": [
+            "auto",
+            "setMapCenter",
+            "moveViewCenter",
+            null
+          ]
+        },
+        "loadModel": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Read every model of a multi-model file (NMR), not only the first."
+        },
+        "loadAnisou": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Read the anisotropic B-factors (ANISOU)."
+        },
+        "loadAltConf": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Read the alternative conformations."
+        },
+        "build2ndry": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Compute the secondary structure instead of reading it from the file."
+        },
+        "autoTopology": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Build the bonds of residues the topology does not know."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "load_mtz",
+    "description": "Open an MTZ file as a density map, choosing its columns and grid. Giving columnPhi or columnWeight also uses that column. Each option left null keeps the reader's default.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The file to open."
+        },
+        "rendererType": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Renderer to create for it. Null draws a molecule with the PyMOL-like preset DefaultPymRendPreset (cartoon, ligand sticks, ion spheres, water lines) when no selection is given, and anything else with its own default renderer."
+        },
+        "selection": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Draw only this selection. Null draws everything."
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Name of the new object. Null uses the file name."
+        },
+        "rendererName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Name of the renderer. Null uses <type>1."
+        },
+        "preset": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Draw it with this renderer preset (a group), instead of rendererType. Null leaves the choice to rendererType."
+        },
+        "centerView": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "False leaves the view where it is. Null or true centres it on the new object."
+        },
+        "mapCenterPolicy": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "For a map: setMapCenter draws it around the view centre, moveViewCenter moves the view to the map. Null or auto picks by the map kind.",
+          "enum": [
+            "auto",
+            "setMapCenter",
+            "moveViewCenter",
+            null
+          ]
+        },
+        "columnF": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The amplitude column, e.g. FWT or 2FOFCWT."
+        },
+        "columnPhi": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The phase column, e.g. PHWT. Giving it uses phases."
+        },
+        "columnWeight": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The weight column, e.g. FOM. Giving it uses weights."
+        },
+        "resolutionLimit": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "High resolution limit, in angstroms."
+        },
+        "gridSpacing": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Grid spacing, in angstroms."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "load_ccp4",
+    "description": "Open a CCP4 / MRC density map, with how its values are scaled and cut. Giving truncateMin or truncateMax also turns that truncation on. Each option left null keeps the reader's default.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The file to open."
+        },
+        "rendererType": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Renderer to create for it. Null draws a molecule with the PyMOL-like preset DefaultPymRendPreset (cartoon, ligand sticks, ion spheres, water lines) when no selection is given, and anything else with its own default renderer."
+        },
+        "selection": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Draw only this selection. Null draws everything."
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Name of the new object. Null uses the file name."
+        },
+        "rendererName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Name of the renderer. Null uses <type>1."
+        },
+        "preset": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Draw it with this renderer preset (a group), instead of rendererType. Null leaves the choice to rendererType."
+        },
+        "centerView": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "False leaves the view where it is. Null or true centres it on the new object."
+        },
+        "mapCenterPolicy": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "For a map: setMapCenter draws it around the view centre, moveViewCenter moves the view to the map. Null or auto picks by the map kind.",
+          "enum": [
+            "auto",
+            "setMapCenter",
+            "moveViewCenter",
+            null
+          ]
+        },
+        "normalize": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Normalise the values (in sigma)."
+        },
+        "truncateMin": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Cut the values below this."
+        },
+        "truncateMax": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Cut the values above this."
+        },
+        "mapType": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "What kind of map: auto (from the header), xtal (crystallographic) or em.",
+          "enum": [
+            "auto",
+            "xtal",
+            "em",
+            null
+          ]
+        },
+        "subsample": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Keep every n-th grid point on each axis."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "load_msms",
+    "description": "Open an MSMS surface: its .face file, and the .vert file beside it.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The file to open."
+        },
+        "rendererType": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Renderer to create for it. Null draws a molecule with the PyMOL-like preset DefaultPymRendPreset (cartoon, ligand sticks, ion spheres, water lines) when no selection is given, and anything else with its own default renderer."
+        },
+        "selection": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Draw only this selection. Null draws everything."
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Name of the new object. Null uses the file name."
+        },
+        "rendererName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Name of the renderer. Null uses <type>1."
+        },
+        "preset": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Draw it with this renderer preset (a group), instead of rendererType. Null leaves the choice to rendererType."
+        },
+        "centerView": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "False leaves the view where it is. Null or true centres it on the new object."
+        },
+        "mapCenterPolicy": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "For a map: setMapCenter draws it around the view centre, moveViewCenter moves the view to the map. Null or auto picks by the map kind.",
+          "enum": [
+            "auto",
+            "setMapCenter",
+            "moveViewCenter",
+            null
+          ]
+        },
+        "vertFile": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The .vert file. Null takes the one beside the .face file."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "load_namd",
+    "description": "Open NAMD coordinates (.coor) with the structure (.psf) that names their atoms.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The file to open."
+        },
+        "rendererType": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Renderer to create for it. Null draws a molecule with the PyMOL-like preset DefaultPymRendPreset (cartoon, ligand sticks, ion spheres, water lines) when no selection is given, and anything else with its own default renderer."
+        },
+        "selection": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Draw only this selection. Null draws everything."
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Name of the new object. Null uses the file name."
+        },
+        "rendererName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Name of the renderer. Null uses <type>1."
+        },
+        "preset": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Draw it with this renderer preset (a group), instead of rendererType. Null leaves the choice to rendererType."
+        },
+        "centerView": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "False leaves the view where it is. Null or true centres it on the new object."
+        },
+        "mapCenterPolicy": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "For a map: setMapCenter draws it around the view centre, moveViewCenter moves the view to the map. Null or auto picks by the map kind.",
+          "enum": [
+            "auto",
+            "setMapCenter",
+            "moveViewCenter",
+            null
+          ]
+        },
+        "psfFile": {
+          "type": "string",
+          "description": "The .psf file."
+        }
+      },
+      "required": [
+        "path",
+        "psfFile"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "load_amber",
+    "description": "Open an AMBER topology (prmtop), with a coordinate file (inpcrd / rst7) for its atoms.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The file to open."
+        },
+        "rendererType": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Renderer to create for it. Null draws a molecule with the PyMOL-like preset DefaultPymRendPreset (cartoon, ligand sticks, ion spheres, water lines) when no selection is given, and anything else with its own default renderer."
+        },
+        "selection": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Draw only this selection. Null draws everything."
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Name of the new object. Null uses the file name."
+        },
+        "rendererName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Name of the renderer. Null uses <type>1."
+        },
+        "preset": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Draw it with this renderer preset (a group), instead of rendererType. Null leaves the choice to rendererType."
+        },
+        "centerView": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "False leaves the view where it is. Null or true centres it on the new object."
+        },
+        "mapCenterPolicy": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "For a map: setMapCenter draws it around the view centre, moveViewCenter moves the view to the map. Null or auto picks by the map kind.",
+          "enum": [
+            "auto",
+            "setMapCenter",
+            "moveViewCenter",
+            null
+          ]
+        },
+        "coordFile": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The coordinate file. Null puts every atom at the origin."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "fetch_map",
+    "description": "Download the electron density map of a PDB entry (from its deposited structure factors) and add it to the scene with a contour. 2fofc is the usual map; fofc is the difference map, drawn at +/-3 sigma in two colours. Fetch the structure itself with fetch_pdb.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "pdbId": {
+          "type": "string",
+          "description": "Four-character PDB accession code."
+        },
+        "mapType": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Which map: 2fofc (usual) or fofc (difference). Null is 2fofc.",
+          "enum": [
+            "2fofc",
+            "fofc",
+            null
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Name for the map object. Null uses <pdbid>_<mapType>."
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Where from: RCSB_CIF (validation report coefficients) or EBI_MTZ (PDBe MTZ). Null is RCSB_CIF.",
+          "enum": [
+            "RCSB_CIF",
+            "EBI_MTZ",
+            null
+          ]
+        }
+      },
+      "required": [
+        "pdbId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "superpose",
+    "description": "Move one MolCoord object onto another by superposing selected atoms. USalign (the default) finds the structural alignment itself and handles proteins and nucleic acids (RNA/DNA); SSM matches by secondary structure (proteins only); LSQ fits the selected atoms in order, so the two selections must pair up atom for atom (e.g. the same residues' CA atoms). The moving object's coordinates change.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "movId": {
+          "type": "integer",
+          "description": "Uid of the MolCoord object to move."
+        },
+        "refId": {
+          "type": "integer",
+          "description": "Uid of the reference MolCoord object, which stays put."
+        },
+        "movSel": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Atoms of the moving object to fit. Null uses all (USalign, SSM) or CA atoms (LSQ)."
+        },
+        "refSel": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Atoms of the reference to fit. Null as movSel."
+        },
+        "algo": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "USalign (default), SSM or LSQ.",
+          "enum": [
+            "USalign",
+            "SSM",
+            "LSQ",
+            null
+          ]
+        },
+        "pivot": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "USalign only: the atom that represents each residue. Null or auto uses CA for amino acids and C3' for nucleotides."
+        },
+        "keepAsProperty": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "True keeps the fit as the object's transform (xformMat) and leaves the coordinates; null or false moves the coordinates."
+        }
+      },
+      "required": [
+        "movId",
+        "refId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "define_selection",
+    "description": "Give a selection expression a name, usable in any later selection (and listed by get_scene_state). The name stands for the expression, re-evaluated each time it is used.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The name, e.g. site1."
+        },
+        "selection": {
+          "type": "string",
+          "description": "The expression it stands for."
+        },
+        "styleSet": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Name of the style set to keep it in (the scene's own before a global one; made in the scene when there is none). Null uses the set named \"default\"."
+        }
+      },
+      "required": [
+        "name",
+        "selection"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "animate",
+    "description": "Control the scene's animation (made in the Animation panel): play it, pause it, stop it, or show the frame at a time.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "description": "play, pause (keep the time), stop, or seek to timeMs.",
+          "enum": [
+            "play",
+            "pause",
+            "stop",
+            "seek"
+          ]
+        },
+        "timeMs": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "With seek: the time to show, in milliseconds. Null otherwise."
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "focus_node",
+    "description": "Fit the view to one object or renderer (what double-clicking it in the scene tree does).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "nodeId": {
+          "type": "integer",
+          "description": "Uid of the object, renderer, or renderer group."
+        },
+        "nodeType": {
+          "type": "string",
+          "description": "What nodeId refers to.",
+          "enum": [
+            "object",
+            "renderer",
+            "rendGroup"
+          ]
+        }
+      },
+      "required": [
+        "nodeId",
+        "nodeType"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "list_node_props",
+    "description": "List the writable properties of one node with their current values and, for enumerated ones, the allowed values. The node may be a renderer, an object, the scene itself -- where the background colour, ambient occlusion, anti-aliasing and colour proofing live -- or the view (stereo, centre mark, mouse speeds). Read this before set_node_prop.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "nodeType": {
+          "type": "string",
+          "description": "What kind of node to address. \"scene\" is the scene as a whole; \"view\" is the current view; \"renderer\" also covers a renderer group.",
+          "enum": [
+            "scene",
+            "view",
+            "object",
+            "renderer"
+          ]
+        },
+        "nodeId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Uid of the object or renderer, from get_scene_state. Null for the scene and the view, which have no id of their own."
+        }
+      },
+      "required": [
+        "nodeType"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_node_prop",
+    "description": "Set one property of one node.\n\n- On the scene: the background colour (`bgcolor`), ambient occlusion (`aoEnabled`, `aoRadius`, `aoIntensity`, `aoSteps`), anti-aliasing (`aa_method`, `aaJitterLevel`), and CMYK colour proofing (`use_colproof`, `icc_filename`).\n- On the view: stereo (`stereoMode`, `stereoDist`, `swapStereoEyes`) and the centre mark (`centerMark`).\n- On a renderer: a width, a detail level, or a mode.\n\nCall `list_node_props` first: the property name, its type, and the allowed values all come from there.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "nodeType": {
+          "type": "string",
+          "description": "What kind of node to address. \"scene\" is the scene as a whole; \"view\" is the current view; \"renderer\" also covers a renderer group.",
+          "enum": [
+            "scene",
+            "view",
+            "object",
+            "renderer"
+          ]
+        },
+        "nodeId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Uid of the object or renderer, from get_scene_state. Null for the scene and the view, which have no id of their own."
+        },
+        "prop": {
+          "type": "string",
+          "description": "Property name, exactly as list_node_props reported it."
+        },
+        "value": {
+          "type": "string",
+          "description": "New value, written as text; it is converted to the property type. A colour is a name such as \"white\" or a hex code such as \"#204080\"."
+        }
+      },
+      "required": [
+        "nodeType",
+        "prop",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_prop",
+    "description": "Set one property, named by its path: obj/rend.prop for a renderer, obj.prop for an object, view.prop for the view, and a bare name for the scene.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The property, e.g. 1crn/cartoon1.width or bgcolor."
+        },
+        "value": {
+          "type": "string",
+          "description": "New value as text; converted by the property type."
+        }
+      },
+      "required": [
+        "path",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "get_prop",
+    "description": "Read one property, named by its path as set_prop takes it.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The property, e.g. 1crn/cartoon1.width or bgcolor."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_render_settings",
+    "description": "Change render settings the scene keeps (the Rendering window's settings, which render_image uses), as \"key=value; key=value\". Keys are those of the Rendering window, a block's with its prefix (e.g. \"width=1600; height=1200\").",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "settings": {
+          "type": "string",
+          "description": "The settings, e.g. \"width=1600; height=1200\"."
+        }
+      },
+      "required": [
+        "settings"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "move_node",
+    "description": "Move an object to a place in the scene tree, or a renderer (or renderer group) to a place among the renderers of its object. Places count from 1, top first.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "nodeId": {
+          "type": "integer",
+          "description": "Uid of the object, renderer, or renderer group."
+        },
+        "nodeType": {
+          "type": "string",
+          "description": "What nodeId refers to (a renderer group is a renderer here).",
+          "enum": [
+            "object",
+            "renderer"
+          ]
+        },
+        "by": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Places to move from where it is now: negative is up, positive down. Stops at either end."
+        },
+        "to": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "The number it should have, from 1."
+        },
+        "end": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Move it to the top or the bottom of the list.",
+          "enum": [
+            "top",
+            "bottom",
+            null
+          ]
+        }
+      },
+      "required": [
+        "nodeId",
+        "nodeType"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "paste_node",
+    "description": "Add an object, renderer, style set or camera from its CueMol XML (what Copy puts on the clipboard), renamed when its name is taken. A renderer goes onto the target object or group.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "description": "What the XML holds.",
+          "enum": [
+            "object",
+            "renderer",
+            "style",
+            "camera"
+          ]
+        },
+        "form": {
+          "type": "string",
+          "description": "single: one node; rendArray: a renderer group with its renderers.",
+          "enum": [
+            "single",
+            "rendArray"
+          ]
+        },
+        "xml": {
+          "type": "string",
+          "description": "The XML."
+        },
+        "target": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "For a renderer: the object or renderer group to add it to."
+        },
+        "targetType": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "What target refers to.",
+          "enum": [
+            "object",
+            "rendGroup",
+            null
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "form",
+        "xml"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "create_style_set",
+    "description": "Create an empty style set in the scene (scene tree > Styles > New).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name of the new set; not one the scene has."
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "delete_style_set",
+    "description": "Delete a style set.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "styleSet": {
+          "type": "string",
+          "description": "Name of the style set (the scene's own before a global one)."
+        }
+      },
+      "required": [
+        "styleSet"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_style_readonly",
+    "description": "Make a scene's style set read only, or writable again. A changed set cannot be made read only.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "styleSet": {
+          "type": "string",
+          "description": "Name of the style set (the scene's own before a global one)."
+        },
+        "readonly": {
+          "type": "boolean",
+          "description": "True makes it read only."
+        }
+      },
+      "required": [
+        "styleSet",
+        "readonly"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "load_style_file",
+    "description": "Load a style file into the scene as a read-only style set.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The style file (.xml)."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "save_style_file",
+    "description": "Save a style set to a file. Null path writes it back to the file it came from.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "styleSet": {
+          "type": "string",
+          "description": "Name of the style set (the scene's own before a global one)."
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Where to write it (.xml). Null uses its source file."
+        }
+      },
+      "required": [
+        "styleSet"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "define_color",
+    "description": "Give a colour a name in a style set (the Style Editor's Colors tab), usable wherever a colour is.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The colour's name."
+        },
+        "color": {
+          "type": "string",
+          "description": "The colour: hex (\"#FF0000\"), a colour name, or hsb(h,s,b)."
+        },
+        "styleSet": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The style set to keep it in (the scene's own before a global one; made in the scene when there is none). Null uses the set named \"default\"."
+        }
+      },
+      "required": [
+        "name",
+        "color"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "remove_color",
+    "description": "Remove a colour from a style set (the Style Editor).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "styleSet": {
+          "type": "string",
+          "description": "Name of the style set (the scene's own before a global one)."
+        },
+        "name": {
+          "type": "string",
+          "description": "The colour's name."
+        }
+      },
+      "required": [
+        "styleSet",
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "remove_selection",
+    "description": "Remove a named selection from a style set (the Style Editor).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "styleSet": {
+          "type": "string",
+          "description": "Name of the style set (the scene's own before a global one)."
+        },
+        "name": {
+          "type": "string",
+          "description": "The named selection's name."
+        }
+      },
+      "required": [
+        "styleSet",
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "remove_style",
+    "description": "Remove a style from a style set (the Style Editor).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "styleSet": {
+          "type": "string",
+          "description": "Name of the style set (the scene's own before a global one)."
+        },
+        "name": {
+          "type": "string",
+          "description": "The style's name."
+        }
+      },
+      "required": [
+        "styleSet",
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
       "openWorldHint": false
     }
   }

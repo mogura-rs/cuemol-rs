@@ -638,8 +638,14 @@ impl NativeRunner {
                 }
                 continue;
             }
-            let mutating = is_call && cuemol_command::tool_is_mutating(name);
-            let undo = mutating.then(|| app.capture_undo());
+            if is_call && name == "clear_undo" {
+                app.undo_stack.clear();
+                app.redo_stack.clear();
+            }
+            let mutating =
+                is_call && name != "clear_undo" && cuemol_command::tool_is_mutating(name);
+            let undo =
+                (is_call && cuemol_command::tool_records_history(name)).then(|| app.capture_undo());
             let mut camera = gpu.camera.to_qsys_camera("__current");
             let response = self
                 .protocol
@@ -653,6 +659,7 @@ impl NativeRunner {
                 }
                 gpu.camera = CameraController::from_qsys_camera(&camera);
                 let _ = app.state.set_active_view_camera(&camera);
+                app.sync_active_scene_properties();
                 app.invalidate_molecule_panel_caches();
                 app.rebuild_snapshot();
                 if let Some(window) = &self.window {
@@ -879,6 +886,7 @@ struct NativeMdTrajectoryDraft {
     trajectory_paths: Vec<String>,
     selected_path: Option<usize>,
     nevery: usize,
+    advanced_renderer: bool,
 }
 
 impl Default for NativeMdTrajectoryDraft {
@@ -888,6 +896,7 @@ impl Default for NativeMdTrajectoryDraft {
             trajectory_paths: Vec::new(),
             selected_path: None,
             nevery: 1,
+            advanced_renderer: false,
         }
     }
 }
@@ -5217,6 +5226,13 @@ impl GuiApplication {
                 }
             }
         }
+        let mut command_camera = camera.to_qsys_camera("__current");
+        if cuemol_command::advance_animation(&mut self.state, &mut command_camera).unwrap_or(false)
+        {
+            *camera = CameraController::from_qsys_camera(&command_camera);
+            self.rebuild_snapshot();
+            ctx.request_repaint();
+        }
         self.poll_pdb_download(camera);
         self.poll_url_download(camera);
         self.poll_animation_render(camera);
@@ -5303,8 +5319,16 @@ impl GuiApplication {
                         ui.label(
                             egui::RichText::new(format!(
                                 "{} atoms / {} bonds",
-                                self.snapshot.atom_count(),
-                                self.snapshot.bond_count()
+                                self.state
+                                    .active_object_summaries()
+                                    .iter()
+                                    .map(|o| o.atom_count)
+                                    .sum::<usize>(),
+                                self.state
+                                    .active_object_summaries()
+                                    .iter()
+                                    .map(|o| o.bond_count)
+                                    .sum::<usize>()
                             ))
                             .color(egui::Color32::from_rgba_unmultiplied(220, 226, 235, 180)),
                         );
@@ -18258,6 +18282,12 @@ impl GuiApplication {
             return;
         }
         match self.state.file_renderer_setup_for_path(&path) {
+            Ok(Some(file_setup))
+                if file_setup.target == crate::GuiFileRendererTarget::Molecule
+                    && file_setup.namd_coor_reader_options.is_none() =>
+            {
+                self.open_current_path(camera);
+            }
             Ok(Some(file_setup)) => {
                 let object_name = path
                     .file_name()
@@ -20509,7 +20539,7 @@ impl GuiApplication {
         self.get_pdb_dialog(ctx);
         self.pdb_download_progress_dialog(ctx);
         self.merge_molecule_dialog(ctx);
-        self.md_trajectory_dialog(ctx);
+        self.md_trajectory_dialog(ctx, camera);
         self.png_export_dialog(ctx);
         self.scene_save_options_dialog(ctx, camera);
         self.new_tab_dialog(ctx, camera);
@@ -28090,7 +28120,7 @@ impl GuiApplication {
         }
     }
 
-    fn md_trajectory_dialog(&mut self, ctx: &egui::Context) {
+    fn md_trajectory_dialog(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         let Some(mut draft) = self.md_trajectory_draft.take() else {
             return;
         };
@@ -28107,7 +28137,7 @@ impl GuiApplication {
                     .num_columns(2)
                     .spacing([8.0, 6.0])
                     .show(ui, |ui| {
-                        ui.label("Topology file (.gro):");
+                        ui.label("Topology file:");
                         ui.horizontal(|ui| {
                             ui.add_sized(
                                 [320.0, 22.0],
@@ -28129,6 +28159,10 @@ impl GuiApplication {
                         ui.end_row();
                     });
                 ui.separator();
+                ui.checkbox(
+                    &mut draft.advanced_renderer,
+                    "Configure representation before loading",
+                );
                 ui.strong("Trajectory files");
                 egui::ScrollArea::vertical()
                     .id_salt("md_trajectory_file_list")
@@ -28239,6 +28273,20 @@ impl GuiApplication {
                 .map(|name| name.to_string_lossy().into_owned())
                 .filter(|name| !name.trim().is_empty())
                 .unwrap_or_else(|| "trajectory".to_string());
+            if !draft.advanced_renderer {
+                self.load_md_trajectory_with_renderer_setup(
+                    request,
+                    crate::GuiRendererSetup {
+                        object_name: base_name,
+                        renderer_type: "auto".into(),
+                        renderer_name: "auto".into(),
+                        selection: None,
+                        recenter: true,
+                    },
+                    camera,
+                );
+                return;
+            }
             self.open_renderer_setup(
                 &base_name,
                 NativeRendererSetupAction::OpenTrajectory(request),
@@ -33285,8 +33333,10 @@ const PSF_OPEN_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
     extensions: &["psf"],
 }];
 const TRAJECTORY_TOPOLOGY_OPEN_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
-    label: "GROMACS topology",
-    extensions: &["gro"],
+    label: "Molecular topology",
+    extensions: &[
+        "gro", "pdb", "cif", "mmcif", "psf", "prmtop", "parm7", "sdf", "mol2",
+    ],
 }];
 const TRAJECTORY_BLOCK_OPEN_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
     label: "MD trajectory",
@@ -33384,7 +33434,7 @@ fn native_file_dialog_spec(dialog: NativeFileDialog) -> NativeFileDialogSpec {
             save: false,
         },
         NativeFileDialog::OpenTrajectoryTopology => NativeFileDialogSpec {
-            title: "Select GROMACS topology",
+            title: "Select molecular topology",
             filters: TRAJECTORY_TOPOLOGY_OPEN_FILTERS,
             default_extension: None,
             save: false,

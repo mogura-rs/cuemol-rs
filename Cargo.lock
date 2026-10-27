@@ -672,6 +672,7 @@ dependencies = [
  "thin-vec",
  "thiserror 2.0.18",
  "time",
+ "web-time",
 ]
 
 [[package]]
@@ -1308,11 +1309,15 @@ name = "cuemol-command"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "cuemol-anim",
  "cuemol-core",
  "cuemol-desktop-core",
+ "cuemol-gfx",
+ "cuemol-mdtools",
  "cuemol-molstr",
  "cuemol-qsys",
  "cuemol-render",
+ "cuemol-xtal",
  "getrandom 0.3.4",
  "png 0.17.16",
  "serde",
@@ -1449,6 +1454,7 @@ dependencies = [
 name = "cuemol-molanl"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "cuemol-core",
  "cuemol-molstr",
 ]
@@ -1547,6 +1553,7 @@ name = "cuemol-web"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "boa_engine",
  "cuemol-command",
  "cuemol-core",
  "cuemol-desktop-core",

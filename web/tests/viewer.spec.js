@@ -75,3 +75,27 @@ test('browser trajectory keeps a File and seeks individual frames',async({page},
   await page.screenshot({path:testInfo.outputPath('trajectory.png')});
   expect(errors).toEqual([]);
 });
+
+test('browser startup scripts, shared properties, and animation use the native command API',async({page})=>{
+  const errors=[];page.on('pageerror',e=>errors.push(e.message));
+  await page.addInitScript(()=>localStorage.setItem('cuemol.startup',"print('startup ' + (Date.now() > 0));"));
+  await ready(page);
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toContain('startup true');
+  await load(page,'scripted.pdb',Buffer.from(structure));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  const object=(await page.evaluate(()=>window.cuemol.status())).scene.objects[0].id;
+  let state=await call(page,'execute_script',{source:"print(21 * 2);"});expect(JSON.parse(state.message).log).toContain('42');
+  await call(page,'define_selection',{name:'carbon',selection:'elem C'});
+  state=await call(page,'count_selection',{objId:object,selection:'carbon'});expect(JSON.parse(state.message).atomCount).toBe(1);
+  await call(page,'set_node_prop',{nodeType:'object',nodeId:object,prop:'name',value:'renamed'});
+  state=await call(page,'get_scene_state');expect(state.scene.objects[0].name).toBe('renamed');
+  await call(page,'add_anim',{type:'spin',name:'turn'});
+  await call(page,'set_anim_time',{element:'turn',startMs:0,endMs:2000});
+  const before=(await page.evaluate(()=>window.cuemol.status())).view.rotation;
+  state=await call(page,'animate',{action:'seek',timeMs:1000});expect(state.view.rotation).not.toEqual(before);
+  await call(page,'animate',{action:'play'});
+  await page.waitForTimeout(200);
+  state=await call(page,'list_anims');expect(JSON.parse(state.message).mgr.elapsedMs).toBeGreaterThan(1000);
+  await call(page,'animate',{action:'stop'});
+  expect(errors).toEqual([]);
+});

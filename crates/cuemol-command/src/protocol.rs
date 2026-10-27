@@ -18,6 +18,10 @@ pub fn tool_is_mutating(name: &str) -> bool {
         .is_some_and(|tool| tool["annotations"]["readOnlyHint"] == false)
 }
 
+pub fn tool_records_history(name: &str) -> bool {
+    tool_is_mutating(name) && !matches!(name, "set_frame" | "animate" | "clear_undo")
+}
+
 pub fn validate_args(name: &str, args: &Value) -> Result<(), String> {
     let tool = tools_list()
         .iter()
@@ -195,6 +199,11 @@ impl Protocol {
         state: &mut DesktopAppState,
         camera: &mut Camera,
     ) -> Result<Value, String> {
+        if name == "clear_undo" {
+            self.undo.clear();
+            self.redo.clear();
+            return Ok(json!({"cleared":true}));
+        }
         if name == "undo" || name == "redo" {
             let (from, to) = if name == "undo" {
                 (&mut self.undo, &mut self.redo)
@@ -210,7 +219,8 @@ impl Protocol {
             ));
             return Ok(json!({"changed":true}));
         }
-        let before = tool_is_mutating(name).then(|| (state.clone(), camera.clone()));
+        crate::advance_animation(state, camera).map_err(|e| e.to_string())?;
+        let before = tool_records_history(name).then(|| (state.clone(), camera.clone()));
         match call_tool(state, camera, name, args) {
             Ok(value) => {
                 if let Some(before) = before.filter(|_| self.record_history) {

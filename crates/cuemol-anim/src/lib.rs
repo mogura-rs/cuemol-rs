@@ -1272,6 +1272,13 @@ impl AnimMotion {
 }
 
 fn read_common_motion_attrs(node: &LDom2Node, base: &mut AnimObj) -> Result<()> {
+    if let Ok(uid) = node.str_attr("uid").as_str().parse::<u64>() {
+        if uid == 0 || uid == u64::MAX {
+            return Err(CueMolError::parse("invalid animation uid"));
+        }
+        base.uid = Uid::new(uid);
+        NEXT_ANIM_UID.fetch_max(uid + 1, Ordering::Relaxed);
+    }
     base.set_name(node.str_attr("name").to_string());
     base.set_disabled(read_bool_attr(node, "disabled", false));
     base.set_time_ref_name(node.str_attr("timeRefName").to_string());
@@ -1282,6 +1289,7 @@ fn read_common_motion_attrs(node: &LDom2Node, base: &mut AnimObj) -> Result<()> 
 }
 
 fn write_common_motion_attrs(node: &mut LDom2Node, base: &AnimObj) {
+    node.set_str_attr("uid", base.uid().get().to_string());
     node.set_str_attr("name", base.name());
     node.set_str_attr("disabled", base.disabled().to_string());
     node.set_str_attr("timeRefName", base.time_ref_name());

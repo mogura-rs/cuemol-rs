@@ -449,7 +449,7 @@ impl<'a> QdfReader<'a> {
         Ok(())
     }
 
-    fn skip_field(&mut self, def: &QdfFieldDef) -> Result<()> {
+    pub fn skip_field(&mut self, def: &QdfFieldDef) -> Result<()> {
         let len = match def.type_tag {
             QDF_TYPE_UTF8STR => self.read_nonnegative_i32()? as usize,
             QDF_TYPE_FIXSTR8 | QDF_TYPE_FIXSTR16 | QDF_TYPE_FIXSTR32 => def.fixed_len,

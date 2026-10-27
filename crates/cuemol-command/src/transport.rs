@@ -350,17 +350,7 @@ pub(crate) fn fetch_structure(
             args["name"].as_str().unwrap_or("download").to_string(),
         )
     };
-    let directory = config::directory().join("downloads");
-    std::fs::create_dir_all(&directory)?;
-    let mut file = tempfile::Builder::new()
-        .suffix(&format!(".{format}"))
-        .tempfile_in(&directory)?;
-    let mut response = ureq::get(&url)
-        .call()
-        .map_err(|e| CueMolError::Io(e.to_string()))?;
-    std::io::copy(&mut response.body_mut().as_reader(), &mut file)?;
-    file.flush()?;
-    let (_file, path) = file.keep().map_err(|e| CueMolError::Io(e.to_string()))?;
+    let path = download(&url, &format)?;
     let mut input = args.clone();
     let map = input.as_object_mut().unwrap();
     map.remove("pdbId");
@@ -380,4 +370,19 @@ pub(crate) fn fetch_structure(
         let _ = std::fs::remove_file(&path);
     }
     result
+}
+
+pub(crate) fn download(url: &str, format: &str) -> Result<PathBuf> {
+    let directory = config::cache_directory().join("downloads");
+    std::fs::create_dir_all(&directory)?;
+    let mut file = tempfile::Builder::new()
+        .suffix(&format!(".{format}"))
+        .tempfile_in(&directory)?;
+    let mut response = ureq::get(url)
+        .call()
+        .map_err(|e| CueMolError::Io(e.to_string()))?;
+    std::io::copy(&mut response.body_mut().as_reader(), &mut file)?;
+    file.flush()?;
+    let (_, path) = file.keep().map_err(|e| CueMolError::Io(e.to_string()))?;
+    Ok(path)
 }

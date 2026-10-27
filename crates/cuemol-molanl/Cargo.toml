@@ -11,3 +11,6 @@ cuemol-molstr.workspace = true
 [lib]
 name = "cuemol_molanl"
 path = "src/lib.rs"
+
+[build-dependencies]
+cc = "1"

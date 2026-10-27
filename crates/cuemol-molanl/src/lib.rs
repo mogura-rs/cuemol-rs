@@ -1,3 +1,4 @@
+mod usalign;
 use cuemol_core::{CueMolError, Matrix4, Result, Uid, Vector4};
 use cuemol_molstr::mol_undo::{
     MolBondEditInfo, MolMergeEditInfo, MolUndoManager, ResiduePropsEdit, ResidueRelabelEdit,
@@ -9,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
+pub use usalign::{superpose_usalign, UsAlignResult};
 
 mod lm_minimizer;
 mod ssm;

@@ -1,24 +1,23 @@
 use base64::Engine;
 use cuemol_core::{CueMolError, Quat, Result, Uid, Vector4};
-use cuemol_desktop_core::{DesktopAppState, GuiLoadedPath, GuiRendererSetup, GuiSceneSaveOptions};
-use cuemol_molstr::parse_selector;
+use cuemol_desktop_core::{DesktopAppState, GuiLoadedPath, GuiSceneSaveOptions};
 use cuemol_qsys::{Camera, View};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
-fn text<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
+pub(crate) fn text<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args[key]
         .as_str()
         .ok_or_else(|| CueMolError::invalid_argument(format!("missing string: {key}")))
 }
-fn uid(args: &Value, key: &str) -> Result<Uid> {
+pub(crate) fn uid(args: &Value, key: &str) -> Result<Uid> {
     args[key]
         .as_u64()
         .filter(|id| *id > 0)
         .map(Uid::new)
         .ok_or_else(|| CueMolError::invalid_argument(format!("invalid identifier: {key}")))
 }
-fn integer(args: &Value, key: &str, default: usize) -> Result<usize> {
+pub(crate) fn integer(args: &Value, key: &str, default: usize) -> Result<usize> {
     if args[key].is_null() {
         return Ok(default);
     }
@@ -27,22 +26,46 @@ fn integer(args: &Value, key: &str, default: usize) -> Result<usize> {
         .and_then(|n| usize::try_from(n).ok())
         .ok_or_else(|| CueMolError::invalid_argument(format!("invalid nonnegative integer: {key}")))
 }
-fn scene(state: &DesktopAppState) -> Result<Uid> {
+pub(crate) fn scene(state: &DesktopAppState) -> Result<Uid> {
     state
         .active_scene()
         .ok_or_else(|| CueMolError::not_found("active scene"))
 }
-fn renderer_owner(state: &DesktopAppState, renderer: Uid) -> Result<Uid> {
-    let scene = state
+pub(crate) fn renderer_owner(state: &DesktopAppState, renderer: Uid) -> Result<Uid> {
+    let sid = scene(state)?;
+    let current = state
         .scene_manager()
-        .scene(scene(state)?)
+        .scene(sid)
         .ok_or_else(|| CueMolError::not_found("scene"))?;
-    scene
+    if let Some(object) = current
         .objects()
         .iter()
         .find(|object| object.renderer(renderer).is_some())
-        .map(|object| object.uid())
-        .ok_or_else(|| CueMolError::not_found("renderer in active scene"))
+    {
+        return Ok(object.uid());
+    }
+    for object in state.density_map_summaries(sid) {
+        if object.renderers.iter().any(|r| r.uid == renderer)
+            || object.renderer_groups.iter().any(|r| r.uid == renderer)
+        {
+            return Ok(object.uid);
+        }
+    }
+    for object in state.surface_summaries(sid) {
+        if object.renderers.iter().any(|r| r.uid == renderer)
+            || object.renderer_groups.iter().any(|r| r.uid == renderer)
+        {
+            return Ok(object.uid);
+        }
+    }
+    for object in state.lw_object_summaries(sid) {
+        if object.renderers.iter().any(|r| r.uid == renderer)
+            || object.renderer_groups.iter().any(|r| r.uid == renderer)
+        {
+            return Ok(object.uid);
+        }
+    }
+    Err(CueMolError::not_found("renderer in active scene"))
 }
 
 pub fn view_json(camera: &Camera) -> Value {
@@ -52,7 +75,7 @@ pub fn view_json(camera: &Camera) -> Value {
         "center":[center.x,center.y,center.z],"rotation":[q.x,q.y,q.z,q.w],"perspective":camera.is_perspective()})
 }
 
-fn fit(
+pub(crate) fn fit(
     state: &DesktopAppState,
     camera: &mut Camera,
     object: Option<Uid>,
@@ -66,7 +89,9 @@ fn fit(
             .map(|o| o.uid)
             .collect()
     });
-    let selector = selection.map(parse_selector).transpose()?;
+    let selector = selection
+        .map(|s| state.parse_scene_selector(scene(state)?, s))
+        .transpose()?;
     let mut min = [f64::INFINITY; 3];
     let mut max = [f64::NEG_INFINITY; 3];
     let mut found = false;
@@ -82,10 +107,8 @@ fn fit(
             {
                 continue;
             }
-            for (i, v) in [atom.position.x, atom.position.y, atom.position.z]
-                .into_iter()
-                .enumerate()
-            {
+            let position = object.xform_matrix().transform_point(atom.position);
+            for (i, v) in [position.x, position.y, position.z].into_iter().enumerate() {
                 min[i] = min[i].min(v);
                 max[i] = max[i].max(v);
             }
@@ -112,15 +135,16 @@ fn fit(
     Ok(())
 }
 
-fn scene_state(state: &DesktopAppState) -> Result<Value> {
+pub(crate) fn scene_state(state: &DesktopAppState) -> Result<Value> {
     let id = scene(state)?;
-    let objects: Vec<_> = state.object_summaries(id).into_iter().map(|object| {
+    let mut objects: Vec<_> = state.object_summaries(id).into_iter().map(|object| {
         let renderers: Vec<_> = state.renderer_summaries(object.uid).into_iter().filter(|renderer|renderer.renderer_type != "*selection").map(|renderer| json!({
             "id":renderer.uid.get(),"name":renderer.name,"type":renderer.renderer_type,"visible":renderer.visible,"group":renderer.group
         })).collect();
         json!({"id":object.uid.get(),"name":object.name,"className":"MolCoord","visible":object.visible,
             "atoms":object.atom_count,"residues":object.residue_count,"bonds":object.bond_count,"renderers":renderers})
     }).collect();
+    objects.extend(crate::nodes::extra_scene_objects(state)?);
     let maps: Vec<_> = state
         .density_map_summaries(id)
         .into_iter()
@@ -129,7 +153,7 @@ fn scene_state(state: &DesktopAppState) -> Result<Value> {
     Ok(json!({"sceneId":id.get(),"objects":objects,"maps":maps,"namedSelections":[]}))
 }
 
-fn loaded_result(loaded: GuiLoadedPath) -> Value {
+pub(crate) fn loaded_result(loaded: GuiLoadedPath) -> Value {
     match loaded {
         GuiLoadedPath::Object {
             scene_uid,
@@ -150,6 +174,7 @@ pub fn call_tool(
 ) -> Result<Value> {
     crate::protocol::validate_args(name, args).map_err(CueMolError::invalid_argument)?;
     match name {
+        "clear_undo" => Ok(json!({"cleared":true})),
         "list_scenes" => Ok(json!(state.scene_summaries().into_iter().map(|s| json!({"sceneId":s.uid.get(),"name":s.name,"active":s.active,"objects":s.object_count,"tabs":1})).collect::<Vec<_>>())),
         "create_scene" => {
             let made=state.new_scene(args["name"].as_str().unwrap_or("Untitled"),true);
@@ -172,24 +197,7 @@ pub fn call_tool(
             Ok(json!({"closed":id.get()}))
         }
         "get_scene_state" => scene_state(state),
-        "load_file" => {
-            let path=text(args,"path")?;
-            let loaded=if let Some(kind)=args["preset"].as_str().or_else(|| args["rendererType"].as_str()) {
-                let fallback=std::path::Path::new(path).file_stem().and_then(|s|s.to_str()).unwrap_or("molecule");
-                state.open_path_with_renderer_setup(path,&GuiRendererSetup {
-                    object_name:args["name"].as_str().unwrap_or(fallback).into(), renderer_type:kind.into(),
-                    renderer_name:args["rendererName"].as_str().unwrap_or(kind).into(),
-                    selection:args["selection"].as_str().map(str::to_string), recenter:args["centerView"] != false,
-                })?
-            } else { state.open_path(path)? };
-            if let GuiLoadedPath::Object {object_uid,..} = &loaded {
-                if let Some(name)=args["name"].as_str() {
-                    state.scene_manager_mut().object_mut(*object_uid).unwrap().set_name(name);
-                }
-                if args["centerView"] != false { fit(state,camera,Some(*object_uid),args["selection"].as_str(),true)?; }
-            } else if let Some(saved)=state.active_view_camera() { *camera=saved; }
-            Ok(loaded_result(loaded))
-        }
+        "load_file" => crate::file_commands::load_file(state,camera,name,args),
         "fetch_pdb" | "fetch_url" => {
             #[cfg(not(target_arch="wasm32"))]
             { return crate::transport::fetch_structure(state,camera,name,args); }
@@ -221,28 +229,11 @@ pub fn call_tool(
             state.set_renderer_selection_text(object,id,text(args,"selection")?)?;
             Ok(json!({"rendererId":id.get()}))
         }
-        "set_visible" | "delete_node" | "rename_node" => {
-            let id=uid(args,"nodeId")?;let kind=text(args,"nodeType")?;
-            if kind=="object" {
-                match name {
-                    "set_visible" => {state.set_object_visible(id,args["visible"]==true)?;}
-                    "delete_node" => {if !state.destroy_object(id)? {return Err(CueMolError::not_found("object"));}}
-                    _ => {let object=state.scene_manager_mut().object_mut(id).ok_or_else(||CueMolError::not_found("object"))?;object.set_name(text(args,"name")?);object.set_modified(true);}
-                }
-            } else {
-                let object=renderer_owner(state,id)?;
-                match name {
-                    "set_visible" => {state.set_renderer_visible(object,id,args["visible"]==true)?;}
-                    "delete_node" => {state.destroy_renderer_in_object(object,id)?;}
-                    _ => {state.scene_manager_mut().object_mut(object).unwrap().renderer_mut(id).unwrap().set_name(text(args,"name")?);}
-                }
-            }
-            Ok(json!({"nodeId":id.get()}))
-        }
+        "set_visible" | "delete_node" | "rename_node" => crate::nodes::edit_node(state,name,args),
         "count_selection" | "list_chains" | "list_residues" => {
             let object=state.scene_manager().object(uid(args,"objId")?).ok_or_else(||CueMolError::not_found("molecule"))?;
             match name {
-                "count_selection" => Ok(json!({"count":object.mol().select_indices(&parse_selector(text(args,"selection")?)?).len()})),
+                "count_selection" => {let count=object.mol().select_indices(&state.parse_scene_selector(scene(state)?,text(args,"selection")?)?).len();Ok(json!({"valid":true,"atomCount":count,"count":count}))},
                 "list_chains" => Ok(json!({"chains":object.mol().chain_ids()})),
                 _ => {
                     let chain=text(args,"chain")?;let offset=integer(args,"offset",0)?;let limit=integer(args,"limit",100)?.min(1000);
@@ -296,7 +287,7 @@ pub fn call_tool(
         "render_image" | "get_screenshot" | "capture_view" => render(state,camera,name,args),
         "execute_script" => {
             #[cfg(feature="scripting")]
-            {let (log,selection)=state.run_script_js(text(args,"source")?)?;Ok(json!({"log":log,"selection":selection}))}
+            {state.set_active_view_camera(camera)?;let (log,selection)=state.run_script_js(text(args,"source")?)?;if let Some(updated)=state.active_view_camera(){*camera=updated;}Ok(json!({"log":log,"selection":selection}))}
             #[cfg(not(feature="scripting"))]
             {Err(CueMolError::invalid_argument("This build does not include the scripting feature"))}
         }
@@ -311,13 +302,13 @@ pub fn call_tool(
         "append_trajectory" => {let result=state.append_trajectory_block(uid(args,"objId")?,text(args,"path")?,integer(args,"stride",1)?)?;Ok(json!({"objectId":result.object_uid.get(),"frames":result.frame_count}))}
         "set_frame" => {state.apply_trajectory_frame(uid(args,"objId")?,integer(args,"frame",0)?)?;Ok(json!({"frame":args["frame"]}))}
         "get_renderer_property" | "set_renderer_property" => {
-            let id=uid(args,"rendId")?;let object=renderer_owner(state,id)?;let prop=text(args,"prop")?;
-            if name=="set_renderer_property" {state.set_renderer_property(object,id,prop,text(args,"value")?)?;}
-            Ok(json!({"prop":prop,"value":state.renderer_property(object,id,prop)}))
+            let id=uid(args,"rendId")?;let prop=text(args,"prop")?;
+            if name=="set_renderer_property" {crate::nodes::set_renderer_property(state,id,prop,text(args,"value")?)?;}
+            Ok(json!({"prop":prop,"value":crate::nodes::renderer_properties(state,id)?.get(prop)}))
         }
         "list_coloring_styles" => Ok(json!({"styles":["DefaultCPKColoring","DefaultHSCPaint","DefaultRainbowColoring","DefaultBfacColoring"]})),
         "set_renderer_coloring" => set_coloring(state,args),
-        _ => Err(CueMolError::not_found(format!("tool {name}"))),
+        _ => crate::advanced::call_tool(state,camera,name,args),
     }
 }
 
@@ -332,6 +323,32 @@ fn set_coloring(state: &mut DesktopAppState, args: &Value) -> Result<Value> {
         "solid" => Some("SolidColoring"),
         "paint" => Some("PaintColoring"),
         "resetdef" => None,
+        "multigrad" => {
+            let object = renderer_owner(state, id)?;
+            let nodes = vec![
+                (-1.0, "blue".into()),
+                (0.0, "white".into()),
+                (1.0, "red".into()),
+            ];
+            if state.density_map_summary(object).is_some() {
+                state.set_density_renderer_coloring(
+                    object,
+                    id,
+                    "multigrad",
+                    &BTreeMap::new(),
+                    &nodes,
+                )?;
+            } else {
+                state.set_surface_renderer_coloring(
+                    object,
+                    id,
+                    "multigrad",
+                    &BTreeMap::new(),
+                    &nodes,
+                )?;
+            }
+            return Ok(json!({"nodeId":id.get()}));
+        }
         "style" => {
             if target != "renderer" {
                 return Err(CueMolError::invalid_argument(
@@ -339,7 +356,7 @@ fn set_coloring(state: &mut DesktopAppState, args: &Value) -> Result<Value> {
                 ));
             }
             let object = renderer_owner(state, id)?;
-            state.set_renderer_property(object, id, "style", text(args, "styleName")?)?;
+            state.apply_renderer_style_option(object, id, text(args, "styleName")?, "coloring")?;
             return Ok(json!({"nodeId":id.get()}));
         }
         _ => {
@@ -367,16 +384,49 @@ fn set_coloring(state: &mut DesktopAppState, args: &Value) -> Result<Value> {
     Ok(json!({"nodeId":id.get()}))
 }
 
-fn render(state: &DesktopAppState, camera: &Camera, name: &str, args: &Value) -> Result<Value> {
+pub(crate) fn render(
+    state: &DesktopAppState,
+    camera: &Camera,
+    name: &str,
+    args: &Value,
+) -> Result<Value> {
+    let settings = crate::properties::render_settings(state)?;
+    let size = |key: &str, default: usize| -> Result<usize> {
+        if !args[key].is_null() {
+            return integer(args, key, default);
+        }
+        let value = settings
+            .get(key)
+            .and_then(Value::as_f64)
+            .unwrap_or(default as f64);
+        let dpi = settings.get("dpi").and_then(Value::as_f64).unwrap_or(300.);
+        let scale = match settings.get("unit").and_then(Value::as_str).unwrap_or("px") {
+            "px" => 1.,
+            "in" => dpi,
+            "cm" => dpi / 2.54,
+            "mm" => dpi / 25.4,
+            _ => {
+                return Err(CueMolError::invalid_argument(
+                    "render unit must be px, in, cm, or mm",
+                ))
+            }
+        };
+        if !value.is_finite() || value <= 0. || !scale.is_finite() || scale <= 0. {
+            return Err(CueMolError::invalid_argument(
+                "render dimensions and DPI must be positive",
+            ));
+        }
+        Ok((value * scale).round() as usize)
+    };
     let width = if name == "capture_view" {
-        integer(args, "longSide", 640)?.clamp(64, 2048)
+        integer(args, "longSide", 1024)?.clamp(256, 1568)
     } else {
-        integer(args, "width", 640)?
+        size("width", 640)?
     };
     let height = if name == "capture_view" {
         width * 3 / 4
     } else {
-        integer(args, "height", 480)?
+        size("height", 480)?
     };
     if width == 0
         || height == 0
@@ -389,17 +439,41 @@ fn render(state: &DesktopAppState, camera: &Camera, name: &str, args: &Value) ->
         ));
     }
     let snapshot = state.active_render_snapshot("")?;
+    let number =
+        |key: &str, default: f64| settings.get(key).and_then(Value::as_f64).unwrap_or(default);
+    let flag = |key: &str, default: bool| {
+        settings
+            .get(key)
+            .and_then(Value::as_bool)
+            .unwrap_or(default)
+    };
+    let defaults = cuemol_render::UmbreonRenderParams::default();
     let params = cuemol_render::UmbreonRenderParams {
         width: width as i32,
         height: height as i32,
-        perspective: camera.is_perspective(),
-        supersample: 1,
-        use_gi: args["style"] == "gi",
-        gi_samples: 8,
-        ..Default::default()
+        perspective: flag("perspective", camera.is_perspective()),
+        use_clip_z: flag("useClipZ", defaults.use_clip_z),
+        supersample: number("supersample", 1.).clamp(1., 4.) as i32,
+        ao_samples: number("aoSamples", 0.).clamp(0., 256.) as i32,
+        ao_distance: number("aoDistance", defaults.ao_distance),
+        ao_intensity: number("aoIntensity", defaults.ao_intensity),
+        shadows: flag("shadows", defaults.shadows),
+        shadow_samples: number("shadowSamples", defaults.shadow_samples as f64).clamp(0., 256.)
+            as i32,
+        light_radius: number("lightRadius", defaults.light_radius),
+        show_edge_lines: flag("showEdgeLines", defaults.show_edge_lines),
+        crease_limit: number("creaseLimit", defaults.crease_limit),
+        edge_rise: number("edgeRise", defaults.edge_rise),
+        transparent_background: flag("transparent", false),
+        use_gi: flag("useGi", name == "render_image" && args["style"] != "npr"),
+        gi_samples: number("giSamples", 8.).clamp(1., 256.) as i32,
+        gi_intensity: number("giIntensity", defaults.gi_intensity),
+        gi_env_intensity: number("giEnvIntensity", defaults.gi_env_intensity),
+        gi_denoise: flag("giDenoise", defaults.gi_denoise),
+        denoiser: number("denoiser", defaults.denoiser as f64) as i32,
     };
-    let frame =
-        cuemol_render::render_umbreon_snapshot(&snapshot, camera, [0., 0., 0., 1.], &params)?;
+    let background = state.active_background_color()?;
+    let frame = cuemol_render::render_umbreon_snapshot(&snapshot, camera, background, &params)?;
     let mut png = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut png, width as u32, height as u32);

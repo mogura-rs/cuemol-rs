@@ -10,9 +10,8 @@
 //! - `bmap` (`nx*ny*nz` records): one `int8` per voxel, the quantized byte map
 //!   in column-fastest order (`i + nx*(j + ny*k)`).
 //!
-//! The map origin / per-axis deltas are NOT stored — they are reconstructed from
-//! the cell and intervals (origin at the cell origin), matching the
-//! crystallographic convention C++ uses.
+//! The optional map-kind and origin fields match current CueMol2 files.
+//! Older MAP1 headers remain readable. MAP2 splits samples into section chunks.
 
 use std::path::Path;
 
@@ -51,11 +50,31 @@ const HDR_RECORD: &[(&str, i8)] = &[
     ("rsig", QDF_TYPE_FLOAT32),
 ];
 
+const MAP_KIND_RECORD: &[(&str, i8)] = &[
+    ("mtype", QDF_TYPE_INT8),
+    ("orgx", QDF_TYPE_FLOAT32),
+    ("orgy", QDF_TYPE_FLOAT32),
+    ("orgz", QDF_TYPE_FLOAT32),
+];
+
 const BMAP_RECORD: &[(&str, i8)] = &[("v", QDF_TYPE_INT8)];
 
 /// Serialize a `DensityMap` to a QDF `MAP1` byte stream.
 pub fn write_qdf_denmap_bytes(map: &DensityMap) -> Vec<u8> {
-    let mut w = QdfWriter::new("MAP1");
+    write_map_chunks(map, i32::MAX as usize, true)
+}
+
+fn write_map_chunks(map: &DensityMap, limit: usize, kind_fields: bool) -> Vec<u8> {
+    let (nx, ny, nz) = (map.col_no(), map.row_no(), map.sec_no());
+    let slice = nx.saturating_mul(ny);
+    assert!(
+        slice <= limit,
+        "one density-map section exceeds the QDF record limit"
+    );
+    let sections = (limit / slice.max(1)).max(1).min(nz.max(1));
+    let chunks = nz.div_ceil(sections).max(1);
+    let split = chunks > 1;
+    let mut w = QdfWriter::new(if split { "MAP2" } else { "MAP1" });
     let cell = map.cell();
 
     // xtal block
@@ -73,7 +92,14 @@ pub fn write_qdf_denmap_bytes(map: &DensityMap) -> Vec<u8> {
     let (nx, ny, nz) = (map.col_no(), map.row_no(), map.sec_no());
     let intervals = map.intervals();
     w.data_def("hdr", 1);
-    w.record_def(HDR_RECORD);
+    let mut fields = HDR_RECORD.to_vec();
+    if kind_fields {
+        fields.extend_from_slice(MAP_KIND_RECORD);
+    }
+    if split {
+        fields.extend([("nchk", QDF_TYPE_INT32), ("csec", QDF_TYPE_INT32)]);
+    }
+    w.record_def(&fields);
     w.i8(1); // mode 1 = byte map
     w.i32(nx as i32);
     w.i32(ny as i32);
@@ -88,14 +114,26 @@ pub fn write_qdf_denmap_bytes(map: &DensityMap) -> Vec<u8> {
     w.f32(map.den_max() as f32);
     w.f32(map.den_mean() as f32);
     w.f32(map.den_sigma() as f32);
+    if kind_fields {
+        w.i8(map.detected_map_type() as i8);
+        let origin = map.origin();
+        w.f32(origin.x as f32);
+        w.f32(origin.y as f32);
+        w.f32(origin.z as f32);
+    }
+    if split {
+        w.i32(chunks as i32);
+        w.i32(sections as i32);
+    }
 
-    // bmap block: the quantized voxel bytes, column-fastest (matches the C++
-    // k/j/i loop and DensityMap's flat layout `i + nx*(j + ny*k)`).
-    let nsize = nx.saturating_mul(ny).saturating_mul(nz);
-    w.data_def("bmap", nsize);
-    w.record_def(BMAP_RECORD);
-    for &b in map.byte_values().iter().take(nsize) {
-        w.i8(b as i8);
+    for chunk in 0..chunks {
+        let start = chunk * sections * slice;
+        let end = ((chunk + 1) * sections).min(nz) * slice;
+        w.data_def("bmap", end - start);
+        w.record_def(BMAP_RECORD);
+        for &value in &map.byte_values()[start..end] {
+            w.i8(value as i8);
+        }
     }
 
     w.finish()
@@ -106,7 +144,10 @@ pub fn read_qdf_denmap_bytes(input: &[u8]) -> Result<DensityMap> {
     use cuemol_core::CueMolError;
 
     let mut r = QdfReader::from_bytes(input)?;
-    r.expect_file_type("MAP1")?;
+    let split = r.file_type() == "MAP2";
+    if !split {
+        r.expect_file_type("MAP1")?;
+    }
 
     // xtal block
     if r.read_data_def("xtal")? != 1 {
@@ -125,7 +166,15 @@ pub fn read_qdf_denmap_bytes(input: &[u8]) -> Result<DensityMap> {
     if r.read_data_def("hdr")? != 1 {
         return Err(CueMolError::parse("QDF map hdr block length must be 1"));
     }
-    r.expect_record_def(HDR_RECORD)?;
+    let fields = r.read_record_def()?;
+    if fields.len() < HDR_RECORD.len()
+        || fields
+            .iter()
+            .zip(HDR_RECORD)
+            .any(|(field, (name, kind))| field.name != *name || field.type_tag != *kind)
+    {
+        return Err(CueMolError::parse("invalid QDF map header schema"));
+    }
     let mode = r.read_i8()?;
     if mode != 1 {
         return Err(CueMolError::parse(
@@ -149,19 +198,47 @@ pub fn read_qdf_denmap_bytes(input: &[u8]) -> Result<DensityMap> {
     let rmax = r.read_f32()? as f64;
     let rmea = r.read_f32()? as f64;
     let rsig = r.read_f32()? as f64;
+    let mut map_type = 1;
+    let mut origin = cuemol_core::Vector4::ZERO;
+    let mut chunks = 1;
+    let mut sections = nz;
+    for field in &fields[HDR_RECORD.len()..] {
+        match (field.name.as_str(), field.type_tag) {
+            ("mtype", QDF_TYPE_INT8) => map_type = r.read_i8()? as u8,
+            ("orgx", QDF_TYPE_FLOAT32) => origin.x = r.read_f32()? as f64,
+            ("orgy", QDF_TYPE_FLOAT32) => origin.y = r.read_f32()? as f64,
+            ("orgz", QDF_TYPE_FLOAT32) => origin.z = r.read_f32()? as f64,
+            ("nchk", QDF_TYPE_INT32) => chunks = r.read_nonnegative_i32()? as usize,
+            ("csec", QDF_TYPE_INT32) => sections = r.read_nonnegative_i32()? as usize,
+            _ => r.skip_field(field)?,
+        }
+    }
+    if split && (chunks == 0 || sections == 0 || chunks != nz.div_ceil(sections)) {
+        return Err(CueMolError::parse("inconsistent MAP2 section chunks"));
+    }
 
     // bmap block
     let nsize = nx
         .checked_mul(ny)
         .and_then(|n| n.checked_mul(nz))
         .ok_or_else(|| CueMolError::parse("QDF map grid is too large"))?;
-    if r.read_data_def("bmap")? != nsize {
-        return Err(CueMolError::parse("QDF map byte count mismatch"));
-    }
-    r.expect_record_def(BMAP_RECORD)?;
-    let mut bytes = Vec::with_capacity(nsize);
-    for _ in 0..nsize {
-        bytes.push(r.read_i8()? as u8);
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(nsize)
+        .map_err(|e| CueMolError::parse(format!("cannot allocate QDF map: {e}")))?;
+    for chunk in 0..chunks {
+        let count = if split {
+            nx * ny * (nz - chunk * sections).min(sections)
+        } else {
+            nsize
+        };
+        if r.read_data_def("bmap")? != count {
+            return Err(CueMolError::parse("QDF map byte count mismatch"));
+        }
+        r.expect_record_def(BMAP_RECORD)?;
+        for _ in 0..count {
+            bytes.push(r.read_i8()? as u8);
+        }
     }
 
     // Reconstruct: stats+bytes, then start/intervals, then cell-derived deltas,
@@ -171,6 +248,8 @@ pub fn read_qdf_denmap_bytes(input: &[u8]) -> Result<DensityMap> {
     map.set_map_params(start, intervals);
     map.set_xtal_params(a, b, c, alpha, beta, gamma);
     map.set_space_group(sg);
+    map.set_detected_map_type(map_type);
+    map.set_origin(origin);
     Ok(map)
 }
 
@@ -322,8 +401,8 @@ mod tests {
         // The byte map itself (exact).
         assert_eq!(dst.byte_values(), src.byte_values());
 
-        // Grid geometry the Increment-9 isosurface depends on: QDF stores no
-        // delta/origin, so they are reconstructed from cell+intervals. With
+        // Grid geometry the isosurface depends on: QDF stores no
+        // deltas, so they are reconstructed from cell+intervals. With
         // intervals [8,10,12] != counts, the spacing is non-trivial
         // (col_grid_size = a/intx = 40/8 = 5.0), so pin it and a transformed node
         // to guard against a map that loads at the wrong scale.
@@ -343,6 +422,75 @@ mod tests {
         // A POT1-typed stream is a valid QDF container but the wrong object type.
         let bytes = QdfWriter::new("POT1").finish();
         assert!(read_qdf_denmap_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn em_origin_and_chunked_maps_roundtrip_without_periodic_wrapping() {
+        let mut map = sample_map();
+        map.set_space_group(0);
+        map.set_origin(Vector4::new3(12., -4., 2.5));
+        for limit in [40, usize::MAX] {
+            let bytes = write_map_chunks(&map, limit, true);
+            let restored = read_qdf_denmap_bytes(&bytes).unwrap();
+            assert!(restored.is_em());
+            assert!(!restored.is_periodic_grid());
+            assert_eq!(restored.origin(), map.origin());
+            assert_eq!(restored.byte_values(), map.byte_values());
+            assert_eq!(
+                restored.conv_to_orth(Vector4::new3(1., 2., 3.)),
+                map.conv_to_orth(Vector4::new3(1., 2., 3.))
+            );
+        }
+        let legacy =
+            read_qdf_denmap_bytes(&write_map_chunks(&sample_map(), usize::MAX, false)).unwrap();
+        assert_eq!(legacy.origin(), Vector4::ZERO);
+        assert!(!legacy.is_em());
+    }
+
+    #[test]
+    fn subsampling_preserves_cell_and_saved_grid_positions() {
+        let mut map = sample_map();
+        map.set_map_params([1, -2, 3], [9, 11, 13]);
+        map.set_xtal_params(45., 55., 65., 90., 90., 90.);
+        map.set_origin(Vector4::new3(4., 5., 6.));
+        let first = map.conv_to_orth(Vector4::ZERO);
+        let cell = map.cell();
+        map.subsample(2).unwrap();
+        assert_eq!(map.cell(), cell);
+        assert!((map.conv_to_orth(Vector4::ZERO) - first).length3d() < 1e-10);
+        let restored = read_qdf_denmap_bytes(&write_qdf_denmap_bytes(&map)).unwrap();
+        for position in [Vector4::ZERO, Vector4::new3(1., 2., 1.)] {
+            assert!(
+                (restored.conv_to_orth(position) - map.conv_to_orth(position)).length3d() < 1e-6
+            );
+        }
+    }
+
+    #[test]
+    fn em_percent_levels_use_density_quantiles() {
+        let mut map = DensityMap::new();
+        map.set_map_byte_array(
+            &(0u8..=255).collect::<Vec<_>>(),
+            [256, 1, 1],
+            0.,
+            256.,
+            127.5,
+            73.9,
+        );
+        map.set_map_params([0; 3], [256, 1, 1]);
+        map.set_xtal_params(256., 1., 1., 90., 90., 90.);
+        map.set_space_group(0);
+        let mut renderer = crate::MapRenderer::new();
+        renderer.attach_client_scalar(&map);
+        renderer.set_siglevel(25.);
+        assert_eq!(map.level_at_top_fraction(0.25), 192.);
+        assert_eq!(renderer.level(), 192.);
+        assert_eq!(renderer.level_from(&map), 192.);
+        renderer.set_level(128.);
+        assert_eq!(renderer.siglevel(), 50.);
+        map.set_map_type("xtal").unwrap();
+        assert!(map.is_periodic_grid());
+        assert!((renderer.level_from(&map) - 50. * 73.9).abs() < 1e-6);
     }
 
     #[test]

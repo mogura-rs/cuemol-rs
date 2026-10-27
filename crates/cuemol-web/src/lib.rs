@@ -1,4 +1,5 @@
 #![cfg(target_arch = "wasm32")]
+mod panels;
 mod trajectory;
 use cuemol_core::{Uid, Vector4};
 use cuemol_desktop_core::{viewport::ViewportRenderer, DesktopAppState, GuiLoadedPath};
@@ -124,6 +125,14 @@ struct App {
     show_console: bool,
     show_help: bool,
     dark: bool,
+    show_settings: bool,
+    show_timeline: bool,
+    settings_text: String,
+    startup_text: String,
+    tool_filter: String,
+    form_tool: String,
+    form_values: std::collections::BTreeMap<String, String>,
+    properties: Option<(String, Option<u64>, Vec<(String, String)>)>,
 }
 impl App {
     fn new(
@@ -154,11 +163,23 @@ impl App {
         } else {
             egui::Visuals::light()
         });
+        let startup_text = storage
+            .as_ref()
+            .and_then(|s| s.get_item("cuemol.startup").ok().flatten())
+            .unwrap_or_default();
+        let mut message = "Open a structure or enter a PDB ID.".to_string();
+        if !startup_text.trim().is_empty() {
+            match state.run_script_js(&startup_text) {
+                Ok((log, _)) => message = log,
+                Err(e) => message = format!("Startup script: {e}"),
+            }
+        }
+        let camera = state.active_view_camera().unwrap_or_default();
         CONTEXT.with(|ctx| *ctx.borrow_mut() = Some(cc.egui_ctx.clone()));
         let renderer = ViewportRenderer::new(&gpu.device, wgpu::TextureFormat::Rgba8Unorm);
         Ok(Self {
             state,
-            camera: Camera::new(),
+            camera,
             gpu,
             renderer,
             target: None,
@@ -171,7 +192,7 @@ impl App {
             pdb_id: String::new(),
             console_tool: "get_scene_state".into(),
             console_args: "{}".into(),
-            message: "Open a structure or enter a PDB ID.".into(),
+            message,
             history: Vec::new(),
             future: Vec::new(),
             trajectory: None,
@@ -183,6 +204,14 @@ impl App {
             show_console: false,
             show_help: false,
             dark,
+            show_settings: false,
+            show_timeline: false,
+            settings_text: String::new(),
+            startup_text,
+            tool_filter: String::new(),
+            form_tool: String::new(),
+            form_values: Default::default(),
+            properties: None,
         })
     }
     fn checkpoint(&mut self) {
@@ -225,8 +254,15 @@ impl App {
             }
             return;
         }
+        if name == "clear_undo" {
+            self.history.clear();
+            self.future.clear();
+            self.message = "Undo history cleared.".into();
+            return;
+        }
         let mutating = cuemol_command::tool_is_mutating(name);
-        if mutating {
+        let record_history = cuemol_command::tool_records_history(name);
+        if record_history {
             self.checkpoint();
         }
         match cuemol_command::call_tool(&mut self.state, &mut self.camera, name, &args) {
@@ -235,7 +271,7 @@ impl App {
                 self.dirty |= mutating;
             }
             Err(e) => {
-                if mutating {
+                if record_history {
                     if let Some((state, camera)) = self.history.pop() {
                         self.state = state;
                         self.camera = camera;
@@ -460,6 +496,11 @@ impl App {
                     self.call("redo", json!({}));
                 }
                 ui.toggle_value(&mut self.show_console, "Commands");
+                ui.toggle_value(&mut self.show_timeline, "Animation");
+                if ui.button("Settings").clicked() {
+                    self.settings_text = self.state.config_text();
+                    self.show_settings = true;
+                }
                 ui.toggle_value(&mut self.show_help, "Help");
                 if ui.checkbox(&mut self.dark, "Dark").changed() {
                     ctx.set_theme(if self.dark {
@@ -493,16 +534,29 @@ impl App {
                     for object in self.state.object_summaries(scene){
                         ui.horizontal(|ui|{let mut visible=object.visible;if ui.checkbox(&mut visible,"").changed(){self.call("set_visible",json!({"nodeId":object.uid.get(),"nodeType":"object","visible":visible}));}
                             if ui.selectable_label(self.selected==Some(object.uid),format!("{} · {} atoms",object.name,object.atom_count)).clicked(){self.selected=Some(object.uid);}
+                            if ui.small_button("…").clicked(){self.open_properties("object",Some(object.uid.get()));}
                         });
-                        ui.indent(object.uid.get(),|ui|{for renderer in self.state.renderer_summaries(object.uid){
+                        ui.indent(object.uid.get(),|ui|{for renderer in self.state.renderer_summaries(object.uid).into_iter().filter(|r|r.renderer_type!="*selection"){
                             ui.horizontal(|ui|{let mut visible=renderer.visible;if ui.checkbox(&mut visible,&renderer.name).changed(){self.call("set_visible",json!({"nodeId":renderer.uid.get(),"nodeType":"renderer","visible":visible}));}
-                                ui.label(&renderer.renderer_type);if ui.small_button("×").clicked(){self.call("delete_node",json!({"nodeId":renderer.uid.get(),"nodeType":"renderer"}));}
+                                ui.label(&renderer.renderer_type);if ui.small_button("…").clicked(){self.open_properties("renderer",Some(renderer.uid.get()));}if ui.small_button("×").clicked(){self.call("delete_node",json!({"nodeId":renderer.uid.get(),"nodeType":"renderer"}));}
                             });
                         }});
                     }
-                    for map in self.state.density_map_summaries(scene){ui.horizontal(|ui|{let mut visible=map.visible;if ui.checkbox(&mut visible,&map.name).changed(){if let Err(e)=self.state.set_density_map_visible(map.uid,visible){self.message=e.to_string();}self.dirty=true;}ui.label("density");});}
+                    let data=cuemol_command::call_tool(&mut self.state,&mut self.camera,"get_scene_state",&json!({})).unwrap_or(Value::Null);
+                    for object in data["objects"].as_array().into_iter().flatten().filter(|o|o["className"]!="MolCoord"){
+                        let id=object["id"].as_u64().unwrap();let name=object["name"].as_str().unwrap_or("object");
+                        ui.horizontal(|ui|{let mut visible=object["visible"]==true;if ui.checkbox(&mut visible,name).changed(){self.call("set_visible",json!({"nodeId":id,"nodeType":"object","visible":visible}));}
+                            if ui.small_button("Fit").clicked(){self.call("focus_node",json!({"nodeId":id,"nodeType":"object"}));}
+                            if ui.small_button("…").clicked(){self.open_properties("object",Some(id));}
+                        });
+                        ui.indent(id,|ui|{for renderer in object["renderers"].as_array().into_iter().flatten(){let id=renderer["id"].as_u64().unwrap();ui.horizontal(|ui|{
+                            let mut visible=renderer["visible"]==true;if ui.checkbox(&mut visible,renderer["name"].as_str().unwrap_or("renderer")).changed(){self.call("set_visible",json!({"nodeId":id,"nodeType":"renderer","visible":visible}));}
+                            if ui.small_button("…").clicked(){self.open_properties("renderer",Some(id));}
+                        });}});
+                    }
                 }
             });
+            ui.horizontal(|ui|{if ui.button("New scene").clicked(){self.call("create_scene",json!({}));}if ui.button("Scene properties").clicked(){self.open_properties("scene",None);}});
             ui.separator();ui.label("Selection");
             if ui.add(egui::TextEdit::singleline(&mut self.selection).hint_text("chain A and resi 10:30")).changed(){self.dirty=true;}
             ui.horizontal(|ui|{if ui.button("Center").clicked(){if let Some(id)=self.selected{self.call("center_view",json!({"objId":id.get(),"selection":if self.selection.is_empty(){"*"}else{&self.selection},"zoom":false}));}}
@@ -514,7 +568,9 @@ impl App {
             ui.separator();
             let mut perspective=self.camera.is_perspective();if ui.checkbox(&mut perspective,"Perspective").changed(){self.camera.set_perspective(perspective);}
             let mut slab=self.camera.slab_depth();if ui.add(egui::Slider::new(&mut slab,0.1..=self.camera.cam_dist()*2.0).text("Slab").logarithmic(true)).changed(){self.camera.set_slab_depth(slab);}
-            ui.collapsing("Sequence",|ui|{if let Some(id)=self.selected{if let Some(object)=self.state.scene_manager().object(id){let chains=object.mol().chain_ids();for chain in chains{if ui.button(format!("Chain {chain}")).clicked(){self.selection=format!("chain {chain}");self.dirty=true;}}}}});
+            ui.collapsing("Sequence",|ui|{for row in self.state.active_sequence_summaries(){ui.horizontal_wrapped(|ui|{if ui.button(format!("{} / {}",row.object_name,row.chain_id)).clicked(){self.selected=Some(row.object_uid);self.selection=format!("chain {}",row.chain_id);self.dirty=true;}ui.monospace(row.sequence);});}});
+            ui.collapsing("Cameras",|ui|{let cameras=cuemol_command::call_tool(&mut self.state,&mut self.camera,"list_cameras",&json!({})).unwrap_or(Value::Null);for camera in cameras.as_array().or_else(||cameras["cameras"].as_array()).into_iter().flatten(){if let Some(name)=camera["name"].as_str(){if ui.button(name).clicked(){self.call("apply_camera",json!({"name":name}));}}}if ui.button("Save current camera…").clicked(){self.select_tool("save_camera");}});
+
         });
     }
     fn export_png(&mut self) {
@@ -605,20 +661,15 @@ impl App {
         self.mouse(ui, &response);
         let target = self.target.as_ref().unwrap();
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
-        let background = if self.dark {
-            wgpu::Color {
-                r: 0.018,
-                g: 0.026,
-                b: 0.045,
-                a: 1.0,
-            }
-        } else {
-            wgpu::Color {
-                r: 0.92,
-                g: 0.94,
-                b: 0.96,
-                a: 1.0,
-            }
+        let rgba = self
+            .state
+            .active_background_color()
+            .unwrap_or([0., 0., 0., 1.]);
+        let background = wgpu::Color {
+            r: rgba[0] as f64,
+            g: rgba[1] as f64,
+            b: rgba[2] as f64,
+            a: rgba[3] as f64,
         };
         self.renderer.render(
             &mut encoder,
@@ -753,6 +804,10 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.events();
+        if cuemol_command::advance_animation(&mut self.state, &mut self.camera).unwrap_or(false) {
+            self.dirty = true;
+            ctx.request_repaint();
+        }
         self.toolbar(ctx);
         self.workspace(ctx);
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
@@ -778,25 +833,6 @@ impl eframe::App for App {
                     }
                 });
             }
-            if self.show_console {
-                ui.horizontal(|ui| {
-                    egui::ComboBox::from_id_salt("tool")
-                        .selected_text(&self.console_tool)
-                        .show_ui(ui, |ui| {
-                            for tool in cuemol_command::tools_list() {
-                                let name = tool["name"].as_str().unwrap();
-                                ui.selectable_value(&mut self.console_tool, name.into(), name);
-                            }
-                        });
-                    ui.text_edit_singleline(&mut self.console_args);
-                    if ui.button("Run").clicked() {
-                        match serde_json::from_str(&self.console_args) {
-                            Ok(args) => self.call(&self.console_tool.clone(), args),
-                            Err(e) => self.message = e.to_string(),
-                        }
-                    }
-                });
-            }
             egui::ScrollArea::vertical()
                 .max_height(if self.show_console { 150.0 } else { 45.0 })
                 .show(ui, |ui| {
@@ -815,6 +851,10 @@ impl eframe::App for App {
         if self.playing {
             ctx.request_repaint_after(std::time::Duration::from_secs_f32(1.0 / self.fps));
         }
+        self.settings_ui(ctx);
+        self.tools_ui(ctx);
+        self.properties_ui(ctx);
+        self.timeline_ui(ctx);
         self.rebuild();
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)

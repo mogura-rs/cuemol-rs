@@ -6,6 +6,49 @@ use cuemol_surface::{build_grid_isosurface_masked, MolSurfObj, ScalarField, Surf
 use cuemol_symm::CrystalInfo;
 use std::sync::Arc;
 
+fn fraction_level(
+    hist: &[u64; 256],
+    base: f64,
+    step: f64,
+    min: f64,
+    max: f64,
+    fraction: f64,
+) -> f64 {
+    let count = hist.iter().sum::<u64>();
+    if count == 0 {
+        return 0.;
+    }
+    if fraction <= 0. {
+        return max;
+    }
+    if fraction >= 1. {
+        return min;
+    }
+    let target = (count as f64 * fraction - 1e-6).ceil() as u64;
+    let mut sum = 0;
+    for i in (0..256).rev() {
+        sum += hist[i];
+        if sum >= target {
+            return i as f64 * step + base;
+        }
+    }
+    min
+}
+fn level_fraction(hist: &[u64; 256], base: f64, step: f64, level: f64) -> f64 {
+    let count = hist.iter().sum::<u64>();
+    if count == 0 {
+        return 0.;
+    }
+    if step <= 0. {
+        return if level <= base { 1. } else { 0. };
+    }
+    let lower = ((level - base) / step + 1e-6).floor();
+    if lower > 255. {
+        return 0.;
+    }
+    hist[lower.max(0.) as usize..].iter().sum::<u64>() as f64 / count as f64
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct DensityMap {
     counts: [usize; 3],
@@ -21,6 +64,9 @@ pub struct DensityMap {
     level_base: f64,
     level_step: f64,
     bytes: Vec<u8>,
+    histogram: [u64; 256],
+    map_type: u8,
+    detected_map_type: u8,
 }
 
 impl Default for DensityMap {
@@ -39,6 +85,9 @@ impl Default for DensityMap {
             level_base: 0.0,
             level_step: 0.0,
             bytes: Vec::new(),
+            histogram: [0; 256],
+            map_type: 0,
+            detected_map_type: 1,
         }
     }
 }
@@ -46,6 +95,125 @@ impl Default for DensityMap {
 impl DensityMap {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn subsample(&mut self, stride: usize) -> cuemol_core::Result<()> {
+        if stride == 0 {
+            return Err(cuemol_core::CueMolError::invalid_argument(
+                "subsample must be positive",
+            ));
+        }
+        if stride == 1 {
+            return Ok(());
+        }
+        let old = self.counts;
+        let counts = old.map(|n| n.div_ceil(stride));
+        let intervals = self.intervals.map(|n| n.max(1).div_ceil(stride));
+        let scale: [f64; 3] =
+            std::array::from_fn(|i| self.intervals[i].max(1) as f64 / intervals[i] as f64);
+        let mut bytes = Vec::with_capacity(counts.iter().product());
+        for z in 0..counts[2] {
+            for y in 0..counts[1] {
+                for x in 0..counts[0] {
+                    let position = [
+                        x as f64 * scale[0],
+                        y as f64 * scale[1],
+                        z as f64 * scale[2],
+                    ];
+                    let lower = position.map(|v| v.floor() as usize);
+                    let mut value = 0.;
+                    for dz in 0..=1 {
+                        for dy in 0..=1 {
+                            for dx in 0..=1 {
+                                let side = [dx, dy, dz];
+                                let mut weight = 1.;
+                                let mut index = [0; 3];
+                                for i in 0..3 {
+                                    let frac = position[i] - lower[i] as f64;
+                                    weight *= if side[i] == 0 { 1. - frac } else { frac };
+                                    index[i] = (lower[i] + side[i]).min(old[i].saturating_sub(1));
+                                }
+                                value += weight
+                                    * f64::from(
+                                        self.bytes
+                                            [(index[2] * old[1] + index[1]) * old[0] + index[0]],
+                                    );
+                            }
+                        }
+                    }
+                    bytes.push(value.round().clamp(0., 255.) as u8);
+                }
+            }
+        }
+        self.origin = self.origin
+            + self.delta[0] * self.start[0] as f64
+            + self.delta[1] * self.start[1] as f64
+            + self.delta[2] * self.start[2] as f64;
+        self.start = [0; 3];
+        self.counts = counts;
+        self.intervals = intervals;
+        self.delta = std::array::from_fn(|i| self.delta[i] * scale[i]);
+        self.bytes = bytes;
+        self.rebuild_histogram();
+        Ok(())
+    }
+
+    pub fn set_map_type(&mut self, value: &str) -> cuemol_core::Result<()> {
+        self.map_type = match value {
+            "auto" => 0,
+            "xtal" => 1,
+            "em" => 2,
+            _ => {
+                return Err(cuemol_core::CueMolError::invalid_argument(
+                    "map type must be auto, xtal, or em",
+                ))
+            }
+        };
+        Ok(())
+    }
+    pub fn map_type(&self) -> &str {
+        match self.map_type {
+            1 => "xtal",
+            2 => "em",
+            _ => "auto",
+        }
+    }
+    pub fn is_em(&self) -> bool {
+        if self.map_type == 0 {
+            self.detected_map_type == 2
+        } else {
+            self.map_type == 2
+        }
+    }
+    pub fn detected_map_type(&self) -> u8 {
+        self.detected_map_type
+    }
+    pub fn set_detected_map_type(&mut self, value: u8) {
+        if value == 1 || value == 2 {
+            self.detected_map_type = value;
+        }
+    }
+    pub fn set_origin(&mut self, value: Vector4) {
+        self.origin = value;
+    }
+    fn rebuild_histogram(&mut self) {
+        self.histogram = [0; 256];
+        for value in &self.bytes {
+            self.histogram[*value as usize] += 1;
+        }
+    }
+    pub fn level_at_top_fraction(&self, fraction: f64) -> f64 {
+        fraction_level(
+            &self.histogram,
+            self.level_base,
+            self.level_step,
+            self.min_density,
+            self.max_density,
+            fraction,
+        )
+    }
+    pub fn top_fraction_at_level(&self, level: f64) -> f64 {
+        level_fraction(&self.histogram, self.level_base, self.level_step, level)
     }
 
     pub fn type_name(&self) -> &'static str {
@@ -121,6 +289,7 @@ impl DensityMap {
             .map(|value| self.float_to_byte(*value))
             .collect();
         self.pad_or_truncate_bytes();
+        self.rebuild_histogram();
     }
 
     pub fn set_map_byte_array(
@@ -141,6 +310,7 @@ impl DensityMap {
         self.level_step = (max_density - min_density) / 256.0;
         self.bytes = bytes.to_vec();
         self.pad_or_truncate_bytes();
+        self.rebuild_histogram();
     }
 
     pub fn set_map_params(&mut self, start: [isize; 3], intervals: [usize; 3]) {
@@ -168,6 +338,7 @@ impl DensityMap {
     /// map from a QDF stream (which stores the space group separately).
     pub fn set_space_group(&mut self, sg: i32) {
         self.cell.set_space_group(sg);
+        self.detected_map_type = if sg == 0 { 2 } else { 1 };
     }
 
     pub fn den_min(&self) -> f64 {
@@ -428,6 +599,10 @@ fn delta_from_cell(
 }
 
 impl ScalarObject for DensityMap {
+    fn percent_level_histogram(&self) -> Option<[u64; 256]> {
+        self.is_em().then_some(self.histogram)
+    }
+
     fn col_no(&self) -> usize {
         self.counts[0]
     }
@@ -536,7 +711,7 @@ impl ScalarObject for DensityMap {
     }
 
     fn is_periodic_grid(&self) -> bool {
-        self.counts == self.intervals && self.counts.iter().all(|count| *count > 0)
+        !self.is_em() && self.counts == self.intervals && self.counts.iter().all(|count| *count > 0)
     }
 }
 
@@ -564,11 +739,17 @@ struct MapClientInfo {
     max_density: f64,
     counts: [usize; 3],
     grid_sizes: [f64; 3],
+    histogram: Option<[u64; 256]>,
+    level_base: f64,
+    level_step: f64,
 }
 
 impl MapClientInfo {
     fn from_scalar(scalar: &impl ScalarObject) -> Self {
         Self {
+            histogram: scalar.percent_level_histogram(),
+            level_base: scalar.level_base(),
+            level_step: scalar.level_step(),
             rmsd_density: scalar.rmsd_density(),
             min_density: scalar.min_density(),
             max_density: scalar.max_density(),
@@ -852,12 +1033,37 @@ impl MapRenderer {
     }
 
     pub fn level(&self) -> f64 {
-        self.client_info
-            .map_or(0.0, |client| self.siglevel * client.rmsd_density)
+        self.client_info.map_or(0.0, |client| {
+            client
+                .histogram
+                .as_ref()
+                .map_or(self.siglevel * client.rmsd_density, |hist| {
+                    fraction_level(
+                        hist,
+                        client.level_base,
+                        client.level_step,
+                        client.min_density,
+                        client.max_density,
+                        self.siglevel / 100.,
+                    )
+                })
+        })
     }
 
     pub fn level_from(&self, scalar: &impl ScalarObject) -> f64 {
-        self.siglevel * scalar.rmsd_density()
+        scalar.percent_level_histogram().as_ref().map_or(
+            self.siglevel * scalar.rmsd_density(),
+            |hist| {
+                fraction_level(
+                    hist,
+                    scalar.level_base(),
+                    scalar.level_step(),
+                    scalar.min_density(),
+                    scalar.max_density(),
+                    self.siglevel / 100.,
+                )
+            },
+        )
     }
 
     pub fn get_level(&self) -> f64 {
@@ -865,6 +1071,14 @@ impl MapRenderer {
     }
 
     pub fn set_level(&mut self, value: f64) {
+        if let Some(client) = self.client_info {
+            if let Some(hist) = client.histogram {
+                self.set_siglevel(
+                    level_fraction(&hist, client.level_base, client.level_step, value) * 100.,
+                );
+                return;
+            }
+        }
         let rmsd = self.client_info.map_or(0.0, |client| client.rmsd_density);
         self.set_siglevel(if rmsd.abs() < 1.0e-12 {
             0.0
@@ -874,6 +1088,12 @@ impl MapRenderer {
     }
 
     pub fn set_level_from(&mut self, scalar: &impl ScalarObject, value: f64) {
+        if let Some(hist) = scalar.percent_level_histogram() {
+            self.set_siglevel(
+                level_fraction(&hist, scalar.level_base(), scalar.level_step(), value) * 100.,
+            );
+            return;
+        }
         let rmsd = scalar.rmsd_density();
         self.set_siglevel(if rmsd.abs() < 1.0e-12 {
             0.0
@@ -883,6 +1103,9 @@ impl MapRenderer {
     }
 
     pub fn max_level(&self) -> f64 {
+        if self.client_info.is_some_and(|c| c.histogram.is_some()) {
+            return 100.;
+        }
         self.client_info.map_or(0.0, |client| {
             if client.rmsd_density.abs() < 1.0e-12 {
                 0.0
@@ -893,6 +1116,9 @@ impl MapRenderer {
     }
 
     pub fn max_level_from(&self, scalar: &impl ScalarObject) -> f64 {
+        if scalar.percent_level_histogram().is_some() {
+            return 100.;
+        }
         let rmsd = scalar.rmsd_density();
         if rmsd.abs() < 1.0e-12 {
             0.0
@@ -906,6 +1132,9 @@ impl MapRenderer {
     }
 
     pub fn min_level(&self) -> f64 {
+        if self.client_info.is_some_and(|c| c.histogram.is_some()) {
+            return 0.;
+        }
         self.client_info.map_or(0.0, |client| {
             if client.rmsd_density.abs() < 1.0e-12 {
                 0.0
@@ -916,6 +1145,9 @@ impl MapRenderer {
     }
 
     pub fn min_level_from(&self, scalar: &impl ScalarObject) -> f64 {
+        if scalar.percent_level_histogram().is_some() {
+            return 0.;
+        }
         let rmsd = scalar.rmsd_density();
         if rmsd.abs() < 1.0e-12 {
             0.0

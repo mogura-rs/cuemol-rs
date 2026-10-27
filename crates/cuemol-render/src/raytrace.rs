@@ -1,3 +1,5 @@
+mod bvh;
+use bvh::RayIndex;
 use cuemol_core::clock::Instant;
 use std::fs;
 use std::sync::{
@@ -552,24 +554,24 @@ fn render_umbreon_snapshot_impl(
         .ok_or_else(|| CueMolError::invalid_argument("umbreon height must be positive"))?;
     let samples = params.supersample.clamp(1, 8) as usize;
     let components = if params.transparent_background { 4 } else { 3 };
-    let mut pixels = vec![0_u8; width * height * components];
+    let length = width
+        .checked_mul(height)
+        .and_then(|n| n.checked_mul(components))
+        .ok_or_else(|| CueMolError::invalid_argument("render dimensions overflow"))?;
+    let mut pixels = Vec::new();
+    pixels
+        .try_reserve_exact(length)
+        .map_err(|e| CueMolError::invalid_argument(format!("cannot allocate render: {e}")))?;
+    pixels.resize(length, 0u8);
     let started = Instant::now();
     let aspect = width as f64 / height as f64;
     let half_h = camera.zoom() * 0.5;
     let half_w = half_h * aspect;
     let inverse_rotation = camera.rotation().inv()?.to_matrix();
     let camera_center = camera.center();
+    let index = RayIndex::new(snapshot);
 
-    for y in 0..height {
-        if async_state.is_some_and(|(_, cancel)| cancel.load(Ordering::Relaxed)) {
-            return Ok(UmbreonFrame {
-                width: params.width,
-                height: params.height,
-                components: components as i32,
-                pixels: Vec::new(),
-                render_seconds: started.elapsed().as_secs_f64(),
-            });
-        }
+    let render_row = |y: usize, row: &mut [u8]| {
         for x in 0..width {
             let mut accumulated = [0.0_f64; 4];
             for sy in 0..samples {
@@ -593,6 +595,7 @@ fn render_umbreon_snapshot_impl(
                     let direction = normalize(transform_direction(inverse_rotation, eye_direction));
                     let sample = trace_sample(
                         snapshot,
+                        &index,
                         Ray { origin, direction },
                         camera,
                         background,
@@ -604,18 +607,63 @@ fn render_umbreon_snapshot_impl(
                 }
             }
             let divisor = (samples * samples) as f64;
-            let offset = (y * width + x) * components;
+            let offset = x * components;
             for index in 0..components {
-                pixels[offset + index] =
+                row[offset + index] =
                     ((accumulated[index] / divisor).clamp(0.0, 1.0) * 255.0).round() as u8;
             }
         }
-        if let Some((progress, _)) = async_state {
-            progress.store(
-                (((y + 1) as f64 / height as f64) * 1_000_000.0).round() as u32,
-                Ordering::Relaxed,
-            );
+    };
+    let completed = std::sync::atomic::AtomicUsize::new(0);
+    let row_bytes = width * components;
+    let render_rows = |start: usize, rows: &mut [u8]| {
+        for (i, row) in rows.chunks_mut(row_bytes).enumerate() {
+            if async_state.is_some_and(|(_, cancel)| cancel.load(Ordering::Relaxed)) {
+                break;
+            }
+            render_row(start + i, row);
+            let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+            if let Some((progress, _)) = async_state {
+                progress.fetch_max(
+                    ((done as f64 / height as f64) * 1_000_000.).round() as u32,
+                    Ordering::Relaxed,
+                );
+            }
         }
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let workers = if width * height < 65536 {
+            1
+        } else {
+            std::thread::available_parallelism()
+                .map(usize::from)
+                .unwrap_or(1)
+                .min(16)
+                .min(height)
+        };
+        if workers == 1 {
+            render_rows(0, &mut pixels);
+        } else {
+            let rows = height.div_ceil(workers);
+            std::thread::scope(|scope| {
+                for (i, chunk) in pixels.chunks_mut(rows * row_bytes).enumerate() {
+                    let render = &render_rows;
+                    scope.spawn(move || render(i * rows, chunk));
+                }
+            });
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    render_rows(0, &mut pixels);
+    if async_state.is_some_and(|(_, cancel)| cancel.load(Ordering::Relaxed)) {
+        return Ok(UmbreonFrame {
+            width: params.width,
+            height: params.height,
+            components: components as i32,
+            pixels: Vec::new(),
+            render_seconds: started.elapsed().as_secs_f64(),
+        });
     }
 
     if params.denoiser > 0 || (params.use_gi && params.gi_denoise) {
@@ -639,6 +687,7 @@ struct Ray {
 
 #[derive(Clone, Copy)]
 struct Hit {
+    order: usize,
     distance: f64,
     position: Vector4,
     normal: Vector4,
@@ -751,33 +800,36 @@ fn named_material(name: &str) -> MaterialPreset {
 
 fn trace_sample(
     snapshot: &RenderSceneSnapshot,
+    index: &RayIndex<'_>,
     ray: Ray,
     camera: &Camera,
     background: [f32; 4],
     params: &UmbreonRenderParams,
 ) -> [f64; 4] {
-    let translucent_groups = snapshot
-        .transparency_groups
-        .iter()
-        .enumerate()
-        .filter(|(_, group)| group.alpha < 1.0 - 1.0e-4)
-        .collect::<Vec<_>>();
+    let translucent_groups = &index.translucent_groups;
     if translucent_groups.is_empty() {
-        return trace_sample_pass(snapshot, ray, camera, background, params, None);
+        return trace_sample_pass(snapshot, index, ray, camera, background, params, None);
     }
 
     let alpha_sum = translucent_groups
         .iter()
-        .map(|(_, group)| f64::from(group.alpha))
+        .map(|(_, alpha)| *alpha)
         .sum::<f64>();
-    let background_pass = trace_sample_pass(snapshot, ray, camera, background, params, None);
+    let background_pass = trace_sample_pass(snapshot, index, ray, camera, background, params, None);
     let mut out = background_pass.map(|channel| channel * (1.0 - alpha_sum));
-    for (index, group) in translucent_groups {
-        let alpha = f64::from(group.alpha);
+    for &(group_index, alpha) in translucent_groups {
         if alpha <= 0.0 {
             continue;
         }
-        let pass = trace_sample_pass(snapshot, ray, camera, background, params, Some(index));
+        let pass = trace_sample_pass(
+            snapshot,
+            index,
+            ray,
+            camera,
+            background,
+            params,
+            Some(group_index),
+        );
         for channel in 0..4 {
             out[channel] += pass[channel] * alpha;
         }
@@ -787,13 +839,14 @@ fn trace_sample(
 
 fn trace_sample_pass(
     snapshot: &RenderSceneSnapshot,
+    index: &RayIndex<'_>,
     ray: Ray,
     camera: &Camera,
     background: [f32; 4],
     params: &UmbreonRenderParams,
     visible_group: Option<usize>,
 ) -> [f64; 4] {
-    let mut hits = scene_hits(snapshot, ray, visible_group);
+    let mut hits = index.hits(ray, visible_group);
     if params.use_clip_z {
         let rotation = camera.rotation().to_matrix();
         let half_slab = camera.slab_depth() * 0.5;
@@ -802,7 +855,11 @@ fn trace_sample_pass(
             (-half_slab..=half_slab).contains(&eye.z)
         });
     }
-    hits.sort_by(|left, right| left.distance.total_cmp(&right.distance));
+    hits.sort_by(|left, right| {
+        left.distance
+            .total_cmp(&right.distance)
+            .then(left.order.cmp(&right.order))
+    });
     let mut out = if params.transparent_background {
         [0.0, 0.0, 0.0, 0.0]
     } else {
@@ -824,7 +881,7 @@ fn trace_sample_pass(
                 };
             }
         }
-        let shaded = shade_hit(snapshot, *hit, ray, camera, params, visible_group);
+        let shaded = shade_hit(snapshot, index, *hit, ray, camera, params, visible_group);
         let alpha = hit.color[3].clamp(0.0, 1.0);
         for channel in 0..3 {
             out[channel] = shaded[channel] * alpha + out[channel] * (1.0 - alpha);
@@ -836,6 +893,7 @@ fn trace_sample_pass(
 
 fn shade_hit(
     snapshot: &RenderSceneSnapshot,
+    index: &RayIndex<'_>,
     hit: Hit,
     ray: Ray,
     camera: &Camera,
@@ -901,6 +959,7 @@ fn shade_hit(
     if params.use_gi && !matches!(material, Some(MaterialPreset::Toon { .. })) {
         let openness = hemisphere_visibility(
             snapshot,
+            index,
             hit,
             params.gi_samples.clamp(1, 64) as usize,
             f64::INFINITY,
@@ -919,7 +978,7 @@ fn shade_hit(
                 origin: hit.position + hit.normal * 1.0e-4,
                 direction,
             };
-            if !has_occluder(snapshot, shadow_ray, f64::INFINITY, visible_group) {
+            if !index.occluded(shadow_ray, f64::INFINITY, visible_group) {
                 visible += 1;
             }
         }
@@ -933,6 +992,7 @@ fn shade_hit(
     if params.ao_samples > 0 {
         let openness = hemisphere_visibility(
             snapshot,
+            index,
             hit,
             params.ao_samples.clamp(1, 64) as usize,
             params.ao_distance.max(0.0),
@@ -958,7 +1018,8 @@ fn shade_hit(
 }
 
 fn hemisphere_visibility(
-    snapshot: &RenderSceneSnapshot,
+    _snapshot: &RenderSceneSnapshot,
+    index: &RayIndex<'_>,
     hit: Hit,
     sample_count: usize,
     max_distance: f64,
@@ -970,22 +1031,11 @@ fn hemisphere_visibility(
             origin: hit.position + hit.normal * 1.0e-4,
             direction: hemisphere_sample(hit.normal, sample, sample_count),
         };
-        if !has_occluder(snapshot, ray, max_distance, visible_group) {
+        if !index.occluded(ray, max_distance, visible_group) {
             visible += 1;
         }
     }
     visible as f64 / sample_count as f64
-}
-
-fn has_occluder(
-    snapshot: &RenderSceneSnapshot,
-    ray: Ray,
-    max_distance: f64,
-    visible_group: Option<usize>,
-) -> bool {
-    scene_hits(snapshot, ray, visible_group).iter().any(|hit| {
-        hit.distance > 1.0e-4 && (!max_distance.is_finite() || hit.distance <= max_distance)
-    })
 }
 
 fn hemisphere_sample(normal: Vector4, sample: usize, sample_count: usize) -> Vector4 {
@@ -1059,6 +1109,7 @@ fn pixel_luma(pixel: &[u8]) -> f64 {
     0.2126 * f64::from(pixel[0]) + 0.7152 * f64::from(pixel[1]) + 0.0722 * f64::from(pixel[2])
 }
 
+#[cfg(test)]
 fn scene_hits(snapshot: &RenderSceneSnapshot, ray: Ray, visible_group: Option<usize>) -> Vec<Hit> {
     let mut hits = Vec::new();
     for (atom_index, atom) in snapshot
@@ -1077,6 +1128,7 @@ fn scene_hits(snapshot: &RenderSceneSnapshot, ray: Ray, visible_group: Option<us
         let main_hit = ray_sphere(ray, atom.center, f64::from(atom.radius));
         if let Some((distance, normal)) = main_hit {
             hits.push(Hit {
+                order: 0,
                 distance,
                 position: ray.origin + ray.direction * distance,
                 normal,
@@ -1113,6 +1165,7 @@ fn scene_hits(snapshot: &RenderSceneSnapshot, ray: Ray, visible_group: Option<us
         };
         if let Some((distance, normal)) = main_hit {
             hits.push(Hit {
+                order: 0,
                 distance,
                 position: ray.origin + ray.direction * distance,
                 normal,
@@ -1173,6 +1226,7 @@ fn scene_hits(snapshot: &RenderSceneSnapshot, ray: Ray, visible_group: Option<us
                         + f64::from(v2.color[channel]) * v;
                 }
                 hits.push(Hit {
+                    order: 0,
                     distance,
                     position: ray.origin + ray.direction * distance,
                     normal: if normal.dot3d(ray.direction) > 0.0 {
@@ -1187,6 +1241,9 @@ fn scene_hits(snapshot: &RenderSceneSnapshot, ray: Ray, visible_group: Option<us
             }
         }
     }
+    for (order, hit) in hits.iter_mut().enumerate() {
+        hit.order = order;
+    }
     hits
 }
 
@@ -1199,6 +1256,7 @@ fn primitive_edge_hit(
 ) -> Hit {
     let position = ray.origin + ray.direction * distance;
     Hit {
+        order: 0,
         distance: if edge.mode == crate::RenderEdgeMode::Silhouette {
             f64::MAX
         } else {
@@ -1262,7 +1320,8 @@ fn ray_cylinder(ray: Ray, start: Vector4, end: Vector4, radius: f64) -> Option<(
     let a = direction_perp.dot3d(direction_perp);
     let b = 2.0 * direction_perp.dot3d(origin_perp);
     let c = origin_perp.dot3d(origin_perp) - radius * radius;
-    let mut candidates = Vec::new();
+    let mut candidates = [None; 4];
+    let mut count = 0;
     let discriminant = b * b - 4.0 * a * c;
     if a > 1.0e-12 && discriminant >= 0.0 {
         let root = discriminant.sqrt();
@@ -1271,7 +1330,8 @@ fn ray_cylinder(ray: Ray, start: Vector4, end: Vector4, radius: f64) -> Option<(
             if distance > 1.0e-6 && (0.0..=length).contains(&along) {
                 let point = ray.origin + ray.direction * distance;
                 let closest = start + axis * along;
-                candidates.push((distance, normalize(point - closest)));
+                candidates[count] = Some((distance, normalize(point - closest)));
+                count += 1;
             }
         }
     }
@@ -1281,12 +1341,15 @@ fn ray_cylinder(ray: Ray, start: Vector4, end: Vector4, radius: f64) -> Option<(
             let distance = (center - ray.origin).dot3d(axis) / denominator;
             let point = ray.origin + ray.direction * distance;
             if distance > 1.0e-6 && (point - center).length3d() <= radius {
-                candidates.push((distance, normal));
+                candidates[count] = Some((distance, normal));
+                count += 1;
             }
         }
     }
-    candidates
-        .into_iter()
+    candidates[..count]
+        .iter()
+        .flatten()
+        .copied()
         .min_by(|left, right| left.0.total_cmp(&right.0))
 }
 
@@ -1544,6 +1607,7 @@ mod tests {
         assert_eq!(
             shade_hit(
                 &snapshot,
+                &RayIndex::new(&snapshot),
                 hits[0],
                 ray,
                 &test_camera(),

@@ -10,6 +10,10 @@ scripting = ["cuemol-desktop-core/scripting"]
 
 [dependencies]
 cuemol-core.workspace = true
+cuemol-gfx.workspace = true
+cuemol-anim.workspace = true
+cuemol-mdtools.workspace = true
+cuemol-xtal.workspace = true
 cuemol-desktop-core.workspace = true
 cuemol-molstr.workspace = true
 cuemol-qsys.workspace = true

@@ -1,3 +1,6 @@
+mod command_support;
+pub mod property_catalog;
+pub use command_support::GuiPastedNode;
 use cuemol_anim::{AnimMgr, MorphFrame, MorphMol};
 #[cfg(feature = "scripting")]
 use cuemol_anim::{
@@ -447,6 +450,7 @@ pub struct DesktopAppState {
     command_manager: MolCommandManager,
     stream_manager: StreamManager,
     config: cuemol_qsys::SysConfig,
+    runtime: BTreeMap<String, String>,
     active_scene: Option<Uid>,
     last_qsc_status: Option<QscLoadStatus>,
     morphs: BTreeMap<Uid, MorphMol>,
@@ -1625,6 +1629,7 @@ impl Default for DesktopAppState {
             command_manager: MolCommandManager::new(),
             stream_manager: StreamManager::new(),
             config: default_desktop_config(),
+            runtime: BTreeMap::new(),
             active_scene: None,
             last_qsc_status: None,
             morphs: BTreeMap::new(),
@@ -2095,6 +2100,13 @@ impl DesktopAppState {
         &self.stream_manager
     }
 
+    pub fn runtime_value(&self, key: &str) -> &str {
+        self.runtime.get(key).map(String::as_str).unwrap_or("")
+    }
+    pub fn put_runtime_value(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.runtime.insert(key.into(), value.into());
+    }
+
     pub fn config_value(&self, key: &str) -> String {
         self.config.get(key).to_string()
     }
@@ -2191,6 +2203,14 @@ impl DesktopAppState {
             .join("\n");
         fs::write(path, output)?;
         Ok(())
+    }
+
+    pub fn config_text(&self) -> String {
+        self.config_entries()
+            .into_iter()
+            .map(|entry| format!("{}\t{}", entry.key, entry.value.replace('\n', "\\n")))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     pub fn load_config_file(&mut self, path: impl AsRef<Path>) -> Result<usize> {
@@ -8632,6 +8652,11 @@ impl DesktopAppState {
         selection: &str,
     ) -> Result<()> {
         let selection = selection.trim();
+        let scene_uid = self
+            .scene_manager()
+            .scene_uid_for_object(object_uid)
+            .ok_or_else(|| CueMolError::not_found("molecule"))?;
+        let selector = self.parse_scene_selector(scene_uid, selection)?;
         let object = self
             .scene_manager_mut()
             .object_mut(object_uid)
@@ -8648,11 +8673,6 @@ impl DesktopAppState {
                 renderer_uid.get()
             )));
         }
-        let selector = if selection.is_empty() || selection == "*" {
-            Selector::All
-        } else {
-            parse_selector(selection)?
-        };
         renderer.set_selection(selector);
         renderer.set_qsc_attr("sel", if selection.is_empty() { "*" } else { selection });
         Ok(())
@@ -11656,7 +11676,15 @@ impl DesktopAppState {
             })
             .unwrap_or_default();
         for (storage_index, loaded) in maps.into_iter().enumerate() {
-            let map = read_density_map_bytes(&loaded.raw_data, &loaded.srctype)?;
+            let mut map = read_density_map_bytes(&loaded.raw_data, &loaded.srctype)?;
+            if let Some(kind) = loaded
+                .qsc_node
+                .as_ref()
+                .map(|n| n.str_attr("map_type"))
+                .filter(|s| !s.is_empty())
+            {
+                map.set_map_type(kind.as_str())?;
+            }
             if loaded.srctype == "qdfpot" {
                 self.surface_potential = Some(map.clone());
             }
@@ -12097,6 +12125,26 @@ impl DesktopAppState {
             .collect::<Vec<_>>();
         for renderer_uid in renderer_uids {
             self.destroy_renderer_in_object(object_uid, renderer_uid)?;
+        }
+        if renderer_type == "auto" {
+            self.create_default_molecule_renderers(scene_uid, object_uid)?;
+            if let Some(selection) = &setup.selection {
+                for renderer in self
+                    .renderer_summaries(object_uid)
+                    .into_iter()
+                    .filter(|r| r.renderer_type != "*selection")
+                {
+                    let previous = self
+                        .renderer_property(object_uid, renderer.uid, "sel")
+                        .unwrap_or_else(|| "*".into());
+                    self.set_renderer_selection_text(
+                        object_uid,
+                        renderer.uid,
+                        &format!("({previous}) and ({selection})"),
+                    )?;
+                }
+            }
+            return Ok(());
         }
         self.set_object_coloring_details(
             object_uid,
@@ -13332,6 +13380,21 @@ impl DesktopAppState {
             return Err(CueMolError::NotFound(format!("scene {}", scene_uid.get())));
         }
         Ok(self.active_scene)
+    }
+
+    pub fn active_background_color(&self) -> Result<[f32; 4]> {
+        let scene = self
+            .active_scene
+            .and_then(|id| self.scene_manager().scene(id))
+            .ok_or_else(|| CueMolError::not_found("scene"))?;
+        let value = scene.scene_attribute("bgcolor").unwrap_or("black");
+        let styles = scene_style_manager(scene);
+        let color = styles
+            .get_color(value, scene.uid().get())
+            .map(|c| c.rgba8())
+            .or_else(|| resolve_qsc_color(value, &styles))
+            .ok_or_else(|| CueMolError::invalid_argument("unresolved background color"))?;
+        Ok(rgba8_render_color(color))
     }
 
     pub fn active_sequence_summaries(&self) -> Vec<GuiSequenceSummary> {
@@ -14820,6 +14883,27 @@ impl DesktopAppState {
         algorithm: &str,
         use_property: bool,
     ) -> Result<String> {
+        self.superpose_objects_with_pivot(
+            reference_object,
+            reference_selection,
+            moving_object,
+            moving_selection,
+            algorithm,
+            use_property,
+            "auto",
+        )
+    }
+
+    pub fn superpose_objects_with_pivot(
+        &mut self,
+        reference_object: Uid,
+        reference_selection: &str,
+        moving_object: Uid,
+        moving_selection: &str,
+        algorithm: &str,
+        use_property: bool,
+        pivot: &str,
+    ) -> Result<String> {
         if reference_object == moving_object {
             return Err(CueMolError::invalid_argument(
                 "reference and moving objects must differ",
@@ -14845,6 +14929,16 @@ impl DesktopAppState {
             .mol()
             .clone();
         let matrix = match algorithm.trim().to_ascii_lowercase().as_str() {
+            "usalign" => {
+                cuemol_molanl::superpose_usalign(
+                    &reference,
+                    &reference_selector,
+                    &moving,
+                    &moving_selector,
+                    pivot,
+                )?
+                .matrix
+            }
             "ssm" => manager.superpose_ssm_matrix(
                 &reference,
                 &reference_selector,
@@ -32599,288 +32693,9 @@ impl DesktopAppState {
             EdgeWidth,
             EdgeColor,
         }
-        #[derive(Clone, Copy)]
-        enum RendererAttrKind {
-            Boolean,
-            Integer,
-            Real,
-            String,
-            Color,
-            Selection,
-            Vector,
-        }
-        #[derive(Clone, Copy)]
-        struct RendererAttrProperty {
-            name: &'static str,
-            key: &'static str,
-            kind: RendererAttrKind,
-            default: &'static str,
-            writable: bool,
-        }
-        fn renderer_attr_properties(renderer_type: &str) -> Vec<RendererAttrProperty> {
-            use RendererAttrKind::{
-                Boolean, Color, Integer, Real, Selection, String as Text, Vector,
-            };
-
-            let mut properties = Vec::new();
-            let mut add = |name, kind, default| {
-                properties.push(RendererAttrProperty {
-                    name,
-                    key: name,
-                    kind,
-                    default,
-                    writable: true,
-                });
-            };
-            if matches!(
-                renderer_type,
-                "simple"
-                    | "ballstick"
-                    | "cpk"
-                    | "trace"
-                    | "spline"
-                    | "tube"
-                    | "ribbon"
-                    | "cartoon"
-                    | "nucl"
-                    | "anisou"
-                    | "disorder"
-                    | "*selection"
-                    | "selection"
-                    | "dsurface"
-                    | "directsurf"
-                    | "dsurf2"
-                    | "ms2test"
-            ) {
-                add("sel", Selection, "");
-                add("defaultcolor", Color, "#ffffff");
-            }
-            match renderer_type {
-                "test" => add("color1", Color, "#00ffff"),
-                "simple" => {
-                    add("width", Real, "1.2");
-                    add("valbond", Boolean, "true");
-                    add("vb_scl1", Real, "0.1");
-                    add("vb_scl2", Real, "0");
-                }
-                "trace" => {
-                    add("pivotatom", Text, "");
-                    add("width", Real, "1.2");
-                }
-                "*namelabel" | "name_label" => {
-                    add("maxlabel", Integer, "50");
-                    add("dispx", Real, "0");
-                    add("dispy", Real, "0");
-                    add("color", Color, "#ffff00");
-                    add("font_size", Real, "12");
-                    add("font_name", Text, "sans-serif");
-                    add("font_style", Text, "normal");
-                    add("font_weight", Text, "normal");
-                }
-                "*selection" | "selection" => {
-                    add("linew", Real, "3");
-                    add("dispx", Real, "3");
-                    add("dispy", Real, "3");
-                    add("color", Color, "rgba(0,255,255,0.5)");
-                    add("mode", Text, "stick");
-                    if let Some(selection) = properties
-                        .iter_mut()
-                        .find(|property| property.name == "sel")
-                    {
-                        selection.writable = false;
-                    }
-                }
-                "ballstick" | "anisou" => {
-                    add("bondw", Real, "0.2");
-                    add("sphr", Real, "0.3");
-                    add("detail", Integer, "3");
-                    add("ring", Boolean, "false");
-                    add("thickness", Real, "0.2");
-                    add("ringcolor", Color, "#ffffbf");
-                    add("valbond_mode", Text, "off");
-                    add("glrender_mode", Text, "default");
-                    if renderer_type == "anisou" {
-                        add("drawdisc", Boolean, "true");
-                        add("discscale", Real, "1.1");
-                        add("discthick", Real, "0.1");
-                        add("maxverts", Integer, "1000000");
-                    }
-                }
-                "cpk" => {
-                    for (name, default) in [
-                        ("vdwr_H", "1.2"),
-                        ("vdwr_C", "1.7"),
-                        ("vdwr_N", "1.55"),
-                        ("vdwr_O", "1.52"),
-                        ("vdwr_S", "1.8"),
-                        ("vdwr_P", "1.8"),
-                        ("vdwr_X", "1.7"),
-                    ] {
-                        add(name, Real, default);
-                    }
-                    add("detail", Integer, "10");
-                    add("glrender_mode", Text, "default");
-                }
-                "spline" | "tube" | "ribbon" | "nucl" => {
-                    add("pivotatom", Text, "");
-                    add("axialdetail", Integer, "6");
-                    add("smooth", Real, "0");
-                    add("smoothcolor", Boolean, "true");
-                    add("line_width", Real, "1.2");
-                    add("start_captype", Text, "sphere");
-                    add("end_captype", Text, "sphere");
-                    add("segend_fade", Boolean, "false");
-                    if matches!(renderer_type, "tube" | "nucl") {
-                        add("putty_mode", Text, "none");
-                        add("putty_tgt", Text, "bfac");
-                        add("putty_hiscl", Real, "3");
-                        add("putty_loscl", Real, "3");
-                    }
-                    if renderer_type == "ribbon" {
-                        add("helix_smooth", Real, "0");
-                        add("sheet_smooth", Real, "0.5");
-                        add("coil_smooth", Real, "0");
-                        add("helix_usebackcol", Boolean, "false");
-                        add("helix_backcol", Color, "#ffffff");
-                        add("sheet_usesidecol", Boolean, "false");
-                        add("sheet_sidecol", Color, "#ffffff");
-                    }
-                    if renderer_type == "nucl" {
-                        add("show_tube", Boolean, "true");
-                        add("show_basepair", Boolean, "true");
-                        add("base_size", Real, "0.5");
-                        add("base_detail", Integer, "3");
-                        add("base_thick", Real, "0.5");
-                        add("base_type", Text, "basepair");
-                    }
-                }
-                "cartoon" => {
-                    add("pivotatom", Text, "");
-                    add("axialdetail", Integer, "8");
-                    add("smoothcolor", Boolean, "false");
-                    add("anchor_sel", Selection, "");
-                    add("anchor_weight", Real, "10");
-                    add("helix_ribbon", Boolean, "false");
-                    add("helix_smooth", Real, "3");
-                    add("helix_width_mode", Text, "average");
-                    add("helix_width", Real, "2.3");
-                    add("helix_extend", Real, "0.5");
-                    add("helix_wsmooth", Real, "5");
-                    add("helix_wplus", Real, "0.2");
-                    add("helix_waver", Boolean, "false");
-                    add("sheet_smooth", Real, "2");
-                    add("sheet_wsmooth", Real, "5");
-                    add("coil_smooth", Real, "-1");
-                    add("start_captype", Text, "flat");
-                    add("end_captype", Text, "flat");
-                    add("segend_fade", Boolean, "false");
-                    add("dump_curvature", Boolean, "false");
-                }
-                "atomintr" => {
-                    add("mode", Text, "fancy");
-                    add("showlabel", Boolean, "false");
-                    add("detail", Integer, "5");
-                    for (name, default) in [
-                        ("stipple0", "1"),
-                        ("stipple1", "1"),
-                        ("stipple2", "-1"),
-                        ("stipple3", "-1"),
-                        ("stipple4", "-1"),
-                        ("stipple5", "-1"),
-                    ] {
-                        add(name, Real, default);
-                    }
-                    add("width", Real, "0.1");
-                    add("color", Color, "#ffff00");
-                    add("captype_start", Text, "sphere");
-                    add("captype_end", Text, "sphere");
-                    add("arrowheight", Real, "1");
-                    add("arrowwidth", Real, "2");
-                    add("font_size", Real, "12");
-                    add("font_name", Text, "sans-serif");
-                    add("font_style", Text, "normal");
-                    add("font_weight", Text, "normal");
-                }
-                "disorder" => {
-                    add("detail", Integer, "5");
-                    add("width", Real, "0.3");
-                    add("dotsep", Real, "1");
-                    add("loopsize", Real, "2");
-                    add("loopsize2", Real, "-1");
-                    add("target", Text, "");
-                }
-                "dsurface" | "directsurf" | "dsurf2" => {
-                    add("colormode", Text, "molecule");
-                    add("target", Text, "");
-                    add("detail", Integer, "6");
-                    add("proberad", Real, "1.4");
-                    add("surftype", Text, "ses");
-                    if renderer_type != "dsurf2" {
-                        add("surfalgor", Text, "edtsurf");
-                    }
-                    add("cullface", Boolean, "false");
-                    add("drawmode", Text, "fill");
-                    add("width", Real, "1.2");
-                    add("showsel", Selection, "");
-                    for (name, default) in [
-                        ("vdwr_H", "1.2"),
-                        ("vdwr_C", "1.7"),
-                        ("vdwr_N", "1.55"),
-                        ("vdwr_O", "1.52"),
-                        ("vdwr_S", "1.8"),
-                        ("vdwr_P", "1.8"),
-                        ("vdwr_X", "1.7"),
-                    ] {
-                        add(name, Real, default);
-                    }
-                    add("elepot", Text, "");
-                    add("lowpar", Real, "-10");
-                    add("midpar", Real, "0");
-                    add("highpar", Real, "10");
-                    add("highcol", Color, "#0000ff");
-                    add("midcol", Color, "#ffffff");
-                    add("lowcol", Color, "#ff0000");
-                    add("ramp_above", Boolean, "false");
-                    add("ramp_value", Real, "1.4");
-                }
-                "molsurf" => {
-                    add("defaultcolor", Color, "#c0c0ff");
-                    add("cullface", Boolean, "false");
-                    add("drawmode", Text, "fill");
-                    add("colormode", Text, "solid");
-                    add("target", Text, "");
-                    add("width", Real, "1.2");
-                    add("elepot", Text, "");
-                    add("lowpar", Real, "-10");
-                    add("midpar", Real, "0");
-                    add("highpar", Real, "10");
-                    add("highcol", Color, "#0000ff");
-                    add("midcol", Color, "#ffffff");
-                    add("lowcol", Color, "#ff0000");
-                    add("color_mapname", Text, "");
-                    add("ramp_above", Boolean, "false");
-                    add("ramp_value", Real, "1.4");
-                    add("sel", Selection, "");
-                    add("showsel", Selection, "");
-                }
-                "symm" => {
-                    add("maxop", Integer, "1000");
-                    add("extent", Real, "50");
-                    add("unitcell", Boolean, "true");
-                    add("autoupdate", Boolean, "false");
-                    add("center", Vector, "(0,0,0,0)");
-                }
-                "unitcell" => {
-                    add("width", Real, "1");
-                    add("color", Color, "#ffff00");
-                    add("labelcolor", Color, "#ff0000");
-                }
-                "lwrend" => add("data_id", Integer, "0"),
-                "*group" => add("ui_collapsed", Boolean, "false"),
-                _ => {}
-            }
-            properties
-        }
+        use crate::property_catalog::{
+            renderer_attr_properties, RendererAttrKind, RendererAttrProperty,
+        };
         fn pending_renderer_attr_key(property: RendererAttrProperty) -> JsString {
             JsString::from(format!("_pending_{}", property.key))
         }
@@ -48431,6 +48246,7 @@ fn density_map_qsc_node(
     node.set_tag_name("object");
     node.set_type_name(object.class_name.clone());
     node.set_str_attr("name", object.name.clone());
+    node.set_str_attr("map_type", object.map.map_type());
     node.set_str_attr("src", source);
     node.set_str_attr("srctype", source_type);
     if !object.alt_source.is_empty() {
@@ -62124,7 +61940,7 @@ end_header
             .unwrap();
         assert_eq!(
             renderer.selection(),
-            &cuemol_molstr::parse_selector("protein").unwrap()
+            &app.parse_scene_selector(scene_uid, "protein").unwrap()
         );
         assert_eq!(renderer.qsc_attr("sel"), Some("protein"));
         assert!(app

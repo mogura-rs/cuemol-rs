@@ -26,6 +26,10 @@ impl ScalarHistogram {
 }
 
 pub trait ScalarObject {
+    fn percent_level_histogram(&self) -> Option<[u64; 256]> {
+        None
+    }
+
     fn col_no(&self) -> usize;
     fn row_no(&self) -> usize;
     fn sec_no(&self) -> usize;
