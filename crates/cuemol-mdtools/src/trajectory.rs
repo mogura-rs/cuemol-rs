@@ -7,6 +7,7 @@
 use cuemol_core::{CueMolError, Result, Vector4};
 use cuemol_molstr::MolCoord;
 use cuemol_qsys::{InOutHandler, ObjReader};
+use std::io::{BufReader, Cursor, Read};
 use std::path::Path;
 
 /// Shared trajectory-reader properties exposed by the C++ `TrajBlockReader`.
@@ -752,8 +753,16 @@ pub fn read_dcd_file_with_options(
     path: impl AsRef<Path>,
     options: &DcdReadOptions,
 ) -> Result<TrajBlock> {
-    let input = crate::fileio::read_bytes_maybe_compressed(path)?;
-    read_dcd_bytes_with_options(&input, options)
+    let path = path.as_ref();
+    match crate::fileio::detect_compression(path)? {
+        crate::fileio::CompressionEncoding::Raw => {
+            read_dcd_stream_with_options(std::fs::File::open(path)?, options)
+        }
+        _ => {
+            let input = crate::fileio::read_bytes_maybe_compressed(path)?;
+            read_dcd_bytes_with_options(&input, options)
+        }
+    }
 }
 
 pub fn read_dcd_bytes(input: &[u8]) -> Result<TrajBlock> {
@@ -761,15 +770,24 @@ pub fn read_dcd_bytes(input: &[u8]) -> Result<TrajBlock> {
 }
 
 pub fn read_dcd_bytes_with_options(input: &[u8], options: &DcdReadOptions) -> Result<TrajBlock> {
+    read_dcd_stream_with_options(Cursor::new(input), options)
+}
+
+fn read_dcd_stream_with_options(input: impl Read, options: &DcdReadOptions) -> Result<TrajBlock> {
     if options.skip_no == 0 {
         return Err(CueMolError::invalid_argument(
             "DCD frame skip must be at least one",
         ));
     }
-    let endian = detect_endian(input)?;
-    let mut records = FortranRecords::new(input, endian);
+    let mut input = BufReader::new(input);
+    let mut marker = [0; 4];
+    input
+        .read_exact(&mut marker)
+        .map_err(|_| CueMolError::parse("DCD input is truncated"))?;
+    let endian = detect_endian(&marker)?;
+    let mut records = FortranRecords::new(Cursor::new(marker).chain(input), endian);
 
-    let header = records.next_record()?;
+    let header = records.next_record(Some(84))?;
     if header.len() != 84 {
         return Err(CueMolError::parse(format!(
             "DCD invalid header length {} != 84",
@@ -785,8 +803,8 @@ pub fn read_dcd_bytes_with_options(input: &[u8], options: &DcdReadOptions) -> Re
     }
     let has_cell = decode_i32(&header[44..48], endian) != 0;
 
-    let _title = records.next_record()?;
-    let atom_record = records.next_record()?;
+    let _title = records.next_record(None)?;
+    let atom_record = records.next_record(Some(4))?;
     if atom_record.len() != 4 {
         return Err(CueMolError::parse(format!(
             "DCD invalid NATOM record length {} != 4",
@@ -826,7 +844,7 @@ pub fn read_dcd_bytes_with_options(input: &[u8], options: &DcdReadOptions) -> Re
         .ok_or_else(|| CueMolError::parse("DCD coordinate record size overflow"))?;
     for frame_index in 0..frame_count as usize {
         let cell = if has_cell {
-            let record = records.next_record()?;
+            let record = records.next_record(Some(48))?;
             if record.len() != 48 {
                 return Err(CueMolError::parse(format!(
                     "DCD invalid cell record length {} != 48",
@@ -842,29 +860,24 @@ pub fn read_dcd_bytes_with_options(input: &[u8], options: &DcdReadOptions) -> Re
             None
         };
 
-        let mut axes = [Vec::new(), Vec::new(), Vec::new()];
-        for values in &mut axes {
-            let record = records.next_record()?;
-            if record.len() != coordinate_bytes {
-                return Err(CueMolError::parse(format!(
-                    "DCD invalid coordinate record length {} != {coordinate_bytes}",
-                    record.len()
-                )));
-            }
-            values.reserve(atom_count);
-            for value in record.chunks_exact(4) {
-                values.push(decode_f32(value, endian));
+        let keep = frame_index % options.skip_no == 0;
+        let mut coordinates = if keep {
+            vec![0.0; atom_indices.len() * 3]
+        } else {
+            Vec::new()
+        };
+        for axis in 0..3 {
+            let record = records.next_record(Some(coordinate_bytes))?;
+            if keep {
+                for (output_index, &atom_index) in atom_indices.iter().enumerate() {
+                    let offset = atom_index * 4;
+                    coordinates[output_index * 3 + axis] =
+                        decode_f32(&record[offset..offset + 4], endian);
+                }
             }
         }
-
-        if frame_index % options.skip_no != 0 {
+        if !keep {
             continue;
-        }
-        let mut coordinates = Vec::with_capacity(atom_indices.len() * 3);
-        for &atom_index in &atom_indices {
-            coordinates.push(axes[0][atom_index]);
-            coordinates.push(axes[1][atom_index]);
-            coordinates.push(axes[2][atom_index]);
         }
         block.append_frame(coordinates, cell)?;
     }
@@ -890,47 +903,57 @@ fn detect_endian(input: &[u8]) -> Result<Endian> {
     }
 }
 
-struct FortranRecords<'a> {
-    input: &'a [u8],
-    cursor: usize,
+struct FortranRecords<R> {
+    input: R,
     endian: Endian,
+    buffer: Vec<u8>,
 }
 
-impl<'a> FortranRecords<'a> {
-    fn new(input: &'a [u8], endian: Endian) -> Self {
+impl<R: Read> FortranRecords<R> {
+    fn new(input: R, endian: Endian) -> Self {
         Self {
             input,
-            cursor: 0,
             endian,
+            buffer: Vec::new(),
         }
     }
 
-    fn next_record(&mut self) -> Result<&'a [u8]> {
-        let marker = self
-            .input
-            .get(self.cursor..self.cursor + 4)
-            .ok_or_else(|| CueMolError::parse("DCD record marker is truncated"))?;
-        let size = decode_u32(marker, self.endian) as usize;
-        let payload_start = self.cursor + 4;
-        let payload_end = payload_start
-            .checked_add(size)
-            .ok_or_else(|| CueMolError::parse("DCD record size overflow"))?;
-        let payload = self
-            .input
-            .get(payload_start..payload_end)
-            .ok_or_else(|| CueMolError::parse("DCD record payload is truncated"))?;
-        let trailing = self
-            .input
-            .get(payload_end..payload_end + 4)
-            .ok_or_else(|| CueMolError::parse("DCD trailing record marker is truncated"))?;
-        let trailing_size = decode_u32(trailing, self.endian) as usize;
+    fn next_record(&mut self, expected: Option<usize>) -> Result<&[u8]> {
+        let mut marker = [0; 4];
+        self.input
+            .read_exact(&mut marker)
+            .map_err(|_| CueMolError::parse("DCD record marker is truncated"))?;
+        let size = decode_u32(&marker, self.endian) as usize;
+        if let Some(expected) = expected {
+            if size != expected {
+                return Err(CueMolError::parse(format!(
+                    "DCD invalid record length {size} != {expected}"
+                )));
+            }
+            self.buffer.resize(size, 0);
+            self.input
+                .read_exact(&mut self.buffer)
+                .map_err(|_| CueMolError::parse("DCD record payload is truncated"))?;
+        } else {
+            let copied = std::io::copy(
+                &mut (&mut self.input).take(size as u64),
+                &mut std::io::sink(),
+            )?;
+            if copied != size as u64 {
+                return Err(CueMolError::parse("DCD record payload is truncated"));
+            }
+            self.buffer.clear();
+        }
+        self.input
+            .read_exact(&mut marker)
+            .map_err(|_| CueMolError::parse("DCD trailing record marker is truncated"))?;
+        let trailing_size = decode_u32(&marker, self.endian) as usize;
         if trailing_size != size {
             return Err(CueMolError::parse(format!(
                 "DCD Fortran record marker mismatch {size} != {trailing_size}"
             )));
         }
-        self.cursor = payload_end + 4;
-        Ok(payload)
+        Ok(&self.buffer)
     }
 }
 
@@ -1066,6 +1089,34 @@ mod tests {
         );
         assert_eq!(block.cell(0), Some([10.0, 0.0, 11.0, 0.0, 0.0, 12.0]));
         assert_eq!(block.cell(1), Some([12.0, 0.0, 11.0, 0.0, 0.0, 12.0]));
+    }
+
+    #[test]
+    fn dcd_stream_handles_short_reads_and_matches_byte_reader() {
+        struct OneByte<R>(R);
+        impl<R: Read> Read for OneByte<R> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let len = buf.len().min(1);
+                self.0.read(&mut buf[..len])
+            }
+        }
+        for endian in [Endian::Little, Endian::Big] {
+            let input = dcd_fixture(endian, true);
+            let options = DcdReadOptions {
+                skip_no: 2,
+                atom_indices: Some(vec![2, 0, 2]),
+                ..DcdReadOptions::default()
+            };
+            let expected = read_dcd_bytes_with_options(&input, &options).unwrap();
+            let actual =
+                read_dcd_stream_with_options(OneByte(Cursor::new(&input)), &options).unwrap();
+            assert_eq!(actual, expected);
+            assert!(read_dcd_stream_with_options(
+                OneByte(Cursor::new(&input[..input.len() - 1])),
+                &options
+            )
+            .is_err());
+        }
     }
 
     #[test]

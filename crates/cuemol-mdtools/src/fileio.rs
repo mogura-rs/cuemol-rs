@@ -21,14 +21,14 @@ pub(crate) fn read_bytes_maybe_compressed(path: impl AsRef<Path>) -> Result<Vec<
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CompressionEncoding {
+pub(crate) enum CompressionEncoding {
     Raw,
     Gzip,
     Bzip2,
     Xz,
 }
 
-fn detect_compression(path: &Path) -> Result<CompressionEncoding> {
+pub(crate) fn detect_compression(path: &Path) -> Result<CompressionEncoding> {
     let mut file = File::open(path)?;
     let mut magic = [0_u8; 6];
     let nread = file.read(&mut magic)?;
