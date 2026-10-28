@@ -24,6 +24,27 @@ pub struct Atom {
 }
 
 impl Atom {
+    fn apply_undo_changes(&mut self, from: &Self, to: &Self) {
+        use cuemol_core::snapshot::{apply_map_changes, apply_value_change};
+        apply_value_change(&mut self.name, &from.name, &to.name);
+        apply_value_change(&mut self.alt_loc, &from.alt_loc, &to.alt_loc);
+        apply_value_change(&mut self.res_name, &from.res_name, &to.res_name);
+        apply_value_change(&mut self.chain_id, &from.chain_id, &to.chain_id);
+        apply_value_change(&mut self.res_id, &from.res_id, &to.res_id);
+        apply_value_change(&mut self.ins_code, &from.ins_code, &to.ins_code);
+        apply_value_change(&mut self.position, &from.position, &to.position);
+        apply_value_change(&mut self.occupancy, &from.occupancy, &to.occupancy);
+        apply_value_change(&mut self.b_factor, &from.b_factor, &to.b_factor);
+        apply_value_change(&mut self.element, &from.element, &to.element);
+        apply_value_change(
+            &mut self.formal_charge,
+            &from.formal_charge,
+            &to.formal_charge,
+        );
+        apply_map_changes(&mut self.int_props, &from.int_props, &to.int_props);
+        apply_map_changes(&mut self.real_props, &from.real_props, &to.real_props);
+    }
+
     pub fn format_msg(&self) -> String {
         let mut residue_id = self.res_id.to_string();
         if let Some(ins_code) = self.ins_code {
@@ -181,6 +202,40 @@ impl Default for MolCoord {
 }
 
 impl MolCoord {
+    pub fn apply_undo_changes(&mut self, from: &Self, to: &Self) {
+        use cuemol_core::snapshot::apply_value_change;
+        apply_value_change(&mut self.bonds, &from.bonds, &to.bonds);
+        apply_value_change(&mut self.selection, &from.selection, &to.selection);
+        apply_value_change(
+            &mut self.selection_text,
+            &from.selection_text,
+            &to.selection_text,
+        );
+        apply_value_change(&mut self.coloring, &from.coloring, &to.coloring);
+        apply_value_change(
+            &mut self.default_color,
+            &from.default_color,
+            &to.default_color,
+        );
+        apply_value_change(&mut self.cell_params, &from.cell_params, &to.cell_params);
+        cuemol_core::snapshot::apply_sequence_changes(
+            &mut self.atoms,
+            &from.atoms,
+            &to.atoms,
+            |atom| atom.serial,
+            Atom::apply_undo_changes,
+        );
+        cuemol_core::snapshot::apply_map_changes_with(
+            &mut self.residue_props,
+            &from.residue_props,
+            &to.residue_props,
+            cuemol_core::snapshot::apply_map_changes,
+        );
+        if from.atoms != to.atoms {
+            self.atoms_moved_generation = self.atoms_moved_generation.wrapping_add(1);
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             atoms: Vec::new(),

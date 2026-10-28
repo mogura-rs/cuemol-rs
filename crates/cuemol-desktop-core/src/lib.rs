@@ -398,7 +398,7 @@ const SCRIPT_RUNTIME_CLASS_PARENTS: &[(&str, &str)] = &[
     ("XtcTrajReader", "ObjReader"),
 ];
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct GuiTrajectoryBlockData {
     stride: usize,
     uid: u64,
@@ -407,7 +407,7 @@ struct GuiTrajectoryBlockData {
     frames: GuiTrajectoryFrames,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 struct GuiTrajectoryData {
     blocks: Vec<GuiTrajectoryBlockData>,
     current_frame: usize,
@@ -427,6 +427,28 @@ enum GuiTrajectoryFrames {
         source: std::sync::Arc<GuiTrajectoryFrames>,
         indices: std::sync::Arc<Vec<usize>>,
     },
+}
+
+impl PartialEq for GuiTrajectoryFrames {
+    fn eq(&self, other: &Self) -> bool {
+        use std::sync::Arc;
+        match (self, other) {
+            (Self::Memory(a), Self::Memory(b)) => Arc::ptr_eq(a, b),
+            (Self::File(a), Self::File(b)) => Arc::ptr_eq(a, b),
+            (Self::Owned(a), Self::Owned(b)) => Arc::ptr_eq(a, b),
+            (
+                Self::Selected {
+                    source: a,
+                    indices: ai,
+                },
+                Self::Selected {
+                    source: b,
+                    indices: bi,
+                },
+            ) => Arc::ptr_eq(a, b) && ai == bi,
+            _ => false,
+        }
+    }
 }
 
 impl GuiTrajectoryFrames {
@@ -638,39 +660,34 @@ pub struct DesktopAppState {
     script_view_input_config: cuemol_qsys::ViewInputConfig,
     #[cfg(feature = "scripting")]
     script_scene_undo: BTreeMap<u64, ScriptSceneUndoState>,
+    #[cfg(feature = "scripting")]
+    script_next_runtime_uid: u64,
 }
 
 #[cfg(feature = "scripting")]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct DesktopSceneSnapshot {
-    command_manager: MolCommandManager,
-    active_scene: Option<Uid>,
-    last_qsc_status: Option<QscLoadStatus>,
+    scene: MolScene,
+    views: Vec<View>,
     morphs: BTreeMap<Uid, MorphMol>,
     density_maps: BTreeMap<Uid, GuiDensityMapObject>,
-    next_density_map_uid: u64,
-    next_density_renderer_uid: u64,
     trajectories: BTreeMap<Uid, GuiTrajectoryData>,
-    next_trajectory_block_uid: u64,
-    surface_potential: Option<DensityMap>,
-    potential_scale: Option<f64>,
-    script_styles: StyleManager,
-    script_view_input_config: cuemol_qsys::ViewInputConfig,
+    styles: Vec<cuemol_qsys::StyleSet>,
 }
 
 #[cfg(feature = "scripting")]
 #[derive(Debug, Clone)]
 struct ScriptSceneUndoEntry {
     description: String,
-    before: DesktopSceneSnapshot,
-    after: DesktopSceneSnapshot,
+    before: std::sync::Arc<DesktopSceneSnapshot>,
+    after: std::sync::Arc<DesktopSceneSnapshot>,
 }
 
 #[cfg(feature = "scripting")]
 #[derive(Debug, Clone)]
 struct ScriptSceneUndoActive {
     description: String,
-    before: DesktopSceneSnapshot,
+    before: std::sync::Arc<DesktopSceneSnapshot>,
     nesting: usize,
 }
 
@@ -1830,6 +1847,8 @@ impl Default for DesktopAppState {
             script_view_input_config: cuemol_qsys::ViewInputConfig::new(),
             #[cfg(feature = "scripting")]
             script_scene_undo: BTreeMap::new(),
+            #[cfg(feature = "scripting")]
+            script_next_runtime_uid: 1_900_000_000,
         }
     }
 }
@@ -16233,7 +16252,7 @@ impl DesktopAppState {
     ///
     /// Returns the printed log + the last `select(...)` expression. A real engine (not the
     /// load+preview fallback). Native objects are command-backed proxies, so mutations are
-    /// applied in source order after successful evaluation.
+    /// synchronized at transaction boundaries and committed after successful evaluation.
     #[cfg(feature = "scripting")]
     pub fn run_script_js(&mut self, source: &str) -> Result<(String, Option<String>)> {
         use boa_engine::object::{builtins::JsArray, FunctionObjectBuilder};
@@ -28881,7 +28900,6 @@ impl DesktopAppState {
                         .get(),
                     undo_descriptions: Vec::new(),
                     redo_descriptions: Vec::new(),
-                    undo_active: None,
                 });
                 let view_uid = create_view.then(|| {
                     let uid = env
@@ -38408,33 +38426,44 @@ impl DesktopAppState {
             }
             Ok(())
         }
+        fn with_flushed_script_app<R>(
+            ctx: &mut Context,
+            detach_camera_refs: Option<u64>,
+            operation: impl FnOnce(&mut DesktopAppState) -> R,
+        ) -> JsResult<R> {
+            sync_camera_references(ctx)?;
+            let mut env = script_env::take();
+            let update = env.runtime_update();
+            let mut app = env.live_app.take().expect("script app is available");
+            let result =
+                app.apply_script_batch(update, script_cmds::drain())
+                    .map(|(log, selection)| {
+                        env.committed_log.push_str(&log);
+                        if selection.is_some() {
+                            env.committed_selection = selection;
+                        }
+                        operation(&mut app)
+                    });
+            env.refresh_scene_data(app.build_script_env());
+            if result.is_ok() {
+                if let Some(scene_uid) = detach_camera_refs {
+                    env.camera_refs.retain(|(uid, _, _)| *uid != scene_uid);
+                }
+            }
+            env.live_app = Some(app);
+            script_env::set(env);
+            result.map_err(|error| script_error(error.to_string()))
+        }
         fn js_scene_start_undo(
             this: &JsValue,
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            let scene_uid = scene_proxy_uid(this, ctx)?;
+            let scene_uid = Uid::new(scene_proxy_uid(this, ctx)?);
             let description = arg0(args, ctx);
-            script_env::with_mut(|env| {
-                if let Some(scene) = env.scenes.iter_mut().find(|scene| scene.uid == scene_uid) {
-                    if let Some((_, nesting)) = scene.undo_active.as_mut() {
-                        *nesting = nesting.saturating_add(1);
-                    } else {
-                        scene.undo_active = Some((description.clone(), 1));
-                    }
-                }
-            });
-            let app_data = script_env::with(|env| {
-                env.scenes
-                    .iter()
-                    .map(|scene| (scene.uid, scene.app_data.clone()))
-                    .collect()
-            });
-            script_cmds::push(ScriptCmd::StartUndoTxn {
-                scene_uid,
-                description,
-                app_data,
-            });
+            with_flushed_script_app(ctx, None, |app| {
+                app.script_scene_start_undo(scene_uid, description)
+            })?;
             Ok(JsValue::undefined())
         }
         fn js_scene_commit_undo(
@@ -38443,23 +38472,10 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let scene_uid = scene_proxy_uid(this, ctx)?;
-            let changed = script_env::with_mut(|env| {
-                let Some(scene) = env.scenes.iter_mut().find(|scene| scene.uid == scene_uid) else {
-                    return false;
-                };
-                let Some((description, nesting)) = scene.undo_active.take() else {
-                    return false;
-                };
-                if nesting > 1 {
-                    scene.undo_active = Some((description, nesting - 1));
-                } else {
-                    scene.undo_descriptions.insert(0, description);
-                    scene.redo_descriptions.clear();
-                }
-                true
-            });
+            let changed = with_flushed_script_app(ctx, None, |app| {
+                app.script_scene_commit_undo(Uid::new(scene_uid))
+            })?;
             if changed {
-                script_cmds::push(ScriptCmd::CommitUndoTxn { scene_uid });
                 fire_scene_script_event_for(
                     scene_uid,
                     cuemol_qsys::SceneEvent::SCE_SCENE_UNDOINFO,
@@ -38475,22 +38491,10 @@ impl DesktopAppState {
             _args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            let scene_uid = scene_proxy_uid(this, ctx)?;
-            let changed = script_env::with_mut(|env| {
-                let Some(scene) = env.scenes.iter_mut().find(|scene| scene.uid == scene_uid) else {
-                    return false;
-                };
-                let Some((description, nesting)) = scene.undo_active.take() else {
-                    return false;
-                };
-                if nesting > 1 {
-                    scene.undo_active = Some((description, nesting - 1));
-                }
-                true
-            });
-            if changed {
-                script_cmds::push(ScriptCmd::RollbackUndoTxn { scene_uid });
-            }
+            let scene_uid = Uid::new(scene_proxy_uid(this, ctx)?);
+            with_flushed_script_app(ctx, Some(scene_uid.get()), |app| {
+                app.script_scene_rollback_undo(scene_uid)
+            })?;
             Ok(JsValue::undefined())
         }
         fn js_scene_is_undoable(
@@ -38596,7 +38600,7 @@ impl DesktopAppState {
             })))
         }
         fn js_scene_undo(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
-            let scene_uid = scene_proxy_uid(this, ctx)?;
+            let scene_uid = Uid::new(scene_proxy_uid(this, ctx)?);
             let index = args
                 .first()
                 .cloned()
@@ -38605,27 +38609,13 @@ impl DesktopAppState {
             if index < 0 {
                 return Ok(JsValue::new(false));
             }
-            let index = index as usize;
-            let changed = script_env::with_mut(|env| {
-                let Some(scene) = env.scenes.iter_mut().find(|scene| scene.uid == scene_uid) else {
-                    return false;
-                };
-                if scene.undo_descriptions.len() <= index {
-                    return false;
-                }
-                for _ in 0..=index {
-                    let description = scene.undo_descriptions.remove(0);
-                    scene.redo_descriptions.insert(0, description);
-                }
-                true
-            });
-            if changed {
-                script_cmds::push(ScriptCmd::UndoScene { scene_uid, index });
-            }
+            let changed = with_flushed_script_app(ctx, Some(scene_uid.get()), |app| {
+                app.script_scene_undo(scene_uid, index as usize)
+            })?;
             Ok(JsValue::new(changed))
         }
         fn js_scene_redo(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
-            let scene_uid = scene_proxy_uid(this, ctx)?;
+            let scene_uid = Uid::new(scene_proxy_uid(this, ctx)?);
             let index = args
                 .first()
                 .cloned()
@@ -38634,23 +38624,9 @@ impl DesktopAppState {
             if index < 0 {
                 return Ok(JsValue::new(false));
             }
-            let index = index as usize;
-            let changed = script_env::with_mut(|env| {
-                let Some(scene) = env.scenes.iter_mut().find(|scene| scene.uid == scene_uid) else {
-                    return false;
-                };
-                if scene.redo_descriptions.len() <= index {
-                    return false;
-                }
-                for _ in 0..=index {
-                    let description = scene.redo_descriptions.remove(0);
-                    scene.undo_descriptions.insert(0, description);
-                }
-                true
-            });
-            if changed {
-                script_cmds::push(ScriptCmd::RedoScene { scene_uid, index });
-            }
+            let changed = with_flushed_script_app(ctx, Some(scene_uid.get()), |app| {
+                app.script_scene_redo(scene_uid, index as usize)
+            })?;
             Ok(JsValue::new(changed))
         }
         fn js_scene_clear_undo(
@@ -38659,17 +38635,14 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let scene_uid = scene_proxy_uid(this, ctx)?;
-            let changed = script_env::with_mut(|env| {
-                let Some(scene) = env.scenes.iter_mut().find(|scene| scene.uid == scene_uid) else {
-                    return false;
-                };
-                let changed =
-                    !scene.undo_descriptions.is_empty() || !scene.redo_descriptions.is_empty();
-                scene.undo_descriptions.clear();
-                scene.redo_descriptions.clear();
+            let changed = with_flushed_script_app(ctx, None, |app| {
+                let changed = app
+                    .script_scene_undo
+                    .get(&scene_uid)
+                    .is_some_and(|state| !state.undo.is_empty() || !state.redo.is_empty());
+                app.script_scene_clear_undo(Uid::new(scene_uid));
                 changed
-            });
-            script_cmds::push(ScriptCmd::ClearUndoData { scene_uid });
+            })?;
             if changed {
                 fire_scene_script_event_for(
                     scene_uid,
@@ -40077,7 +40050,6 @@ impl DesktopAppState {
                     next_object_uid: cuemol_molstr::MolScene::first_object_uid(Uid::new(uid)).get(),
                     undo_descriptions: Vec::new(),
                     redo_descriptions: Vec::new(),
-                    undo_active: None,
                 });
                 uid
             });
@@ -45047,8 +45019,9 @@ impl DesktopAppState {
 
         let _ = script_cmds::drain(); // clear any stale buffer
         script_errors::clear();
-        let script_run_start = self.capture_script_scene_snapshot();
-        script_env::set(self.build_script_env());
+        let mut environment = self.build_script_env();
+        environment.live_app = Some(Box::new(self.clone()));
+        script_env::set(environment);
         let mut context = Context::default();
         let scene_manager_getter = FunctionObjectBuilder::new(
             context.realm(),
@@ -45334,42 +45307,39 @@ impl DesktopAppState {
                 )));
             }
         }
-        let updated_runtime = outcome.as_ref().ok().map(|_| {
-            script_env::with(|env| {
-                let mut scenes = env.scenes.clone();
-                if let Some(scene) = scenes.iter_mut().find(|scene| scene.uid == env.scene_uid) {
-                    scene.name = env.scene_name.clone();
-                    scene.attributes = env.scene_attributes.clone();
-                    scene.cameras = env.cameras.clone();
-                    scene.animation = env.animation.clone();
-                }
-                (
-                    env.scene_uid,
-                    env.views.clone(),
-                    env.cameras.clone(),
-                    env.molecules.clone(),
-                    env.morphs.clone(),
-                    env.objects.clone(),
-                    env.scene_name.clone(),
-                    env.scene_attributes.clone(),
-                    env.styles.clone(),
-                    env.view_input_config.clone(),
-                    scenes,
-                )
-            })
-        });
-        script_env::clear();
+        let mut environment = script_env::take();
+        let commands = script_cmds::drain();
         outcome.map_err(|error| CueMolError::invalid_argument(format!("script error: {error}")))?;
+        let updated_runtime = environment.runtime_update();
+        let mut app = environment
+            .live_app
+            .take()
+            .expect("script app is available");
+        let (log, selection) = app.apply_script_batch(updated_runtime, commands)?;
+        environment.committed_log.push_str(&log);
+        if selection.is_some() {
+            environment.committed_selection = selection;
+        }
+        *self = *app;
+        Ok((environment.committed_log, environment.committed_selection))
+    }
 
+    #[cfg(feature = "scripting")]
+    fn apply_script_batch(
+        &mut self,
+        updated_runtime: ScriptRuntimeUpdate,
+        commands: Vec<ScriptCmd>,
+    ) -> Result<(String, Option<String>)> {
         let existing_scene_uids = self
             .scene_manager()
             .scenes()
             .iter()
             .map(|scene| scene.uid().get())
             .collect::<Vec<_>>();
-        let mut updated_scene_states = Vec::new();
-        if let Some((
+        let updated_scene_states;
+        let (
             _runtime_scene_uid,
+            next_runtime_uid,
             updated_views,
             _cameras,
             molecules,
@@ -45380,8 +45350,9 @@ impl DesktopAppState {
             styles,
             view_input_config,
             scene_states,
-        )) = updated_runtime
+        ) = updated_runtime;
         {
+            self.script_next_runtime_uid = self.script_next_runtime_uid.max(next_runtime_uid);
             updated_scene_states = scene_states;
             for state in &updated_scene_states {
                 if existing_scene_uids.contains(&state.uid) {
@@ -45392,7 +45363,12 @@ impl DesktopAppState {
                         scene.set_active_renderer_uid(state.active_renderer_uid.map(Uid::new));
                         scene.set_active_view_uid(state.active_view_uid.map(Uid::new));
                         scene.replace_cameras(state.cameras.clone());
-                        scene.set_animation_node(Some(state.animation.to_ldom2_node()))?;
+                        if scene.animation_node().is_some()
+                            || state.animation.size() > 0
+                            || state.animation.length() > 0
+                        {
+                            scene.set_animation_node(Some(state.animation.to_ldom2_node()))?;
+                        }
                     }
                 }
             }
@@ -45492,7 +45468,7 @@ impl DesktopAppState {
 
         let mut log = String::new();
         let mut selection = None;
-        for cmd in script_cmds::drain() {
+        for cmd in commands {
             match cmd {
                 ScriptCmd::Print(message) => {
                     log.push_str(&message);
@@ -46734,38 +46710,6 @@ impl DesktopAppState {
                         );
                     }
                 }
-                ScriptCmd::StartUndoTxn {
-                    scene_uid,
-                    description,
-                    app_data,
-                } => {
-                    let mut before = script_run_start.clone();
-                    for (sid, data) in app_data {
-                        if let Some(scene) = before
-                            .command_manager
-                            .scene_manager_mut()
-                            .scene_mut(Uid::new(sid))
-                        {
-                            *scene.app_data_mut() = data;
-                        }
-                    }
-                    self.script_scene_start_undo(Uid::new(scene_uid), description, before);
-                }
-                ScriptCmd::CommitUndoTxn { scene_uid } => {
-                    self.script_scene_commit_undo(Uid::new(scene_uid));
-                }
-                ScriptCmd::RollbackUndoTxn { scene_uid } => {
-                    self.script_scene_rollback_undo(Uid::new(scene_uid));
-                }
-                ScriptCmd::UndoScene { scene_uid, index } => {
-                    self.script_scene_undo(Uid::new(scene_uid), index);
-                }
-                ScriptCmd::RedoScene { scene_uid, index } => {
-                    self.script_scene_redo(Uid::new(scene_uid), index);
-                }
-                ScriptCmd::ClearUndoData { scene_uid } => {
-                    self.script_scene_clear_undo(Uid::new(scene_uid));
-                }
                 ScriptCmd::CreateScene {
                     expected_uid,
                     name,
@@ -46845,71 +46789,82 @@ impl DesktopAppState {
         Ok((log, selection))
     }
 
-    /// Build the read-only [`ScriptEnv`] snapshot the `cuemol` query functions read
-    /// during `eval` (molecule objects are class `MolCoord`, density maps `DensityMap`;
-    /// each object carries its renderer name+type list). Frozen structural data only —
-    /// no live handles.
     #[cfg(feature = "scripting")]
-    fn capture_script_scene_snapshot(&self) -> DesktopSceneSnapshot {
-        DesktopSceneSnapshot {
-            command_manager: self.command_manager.clone(),
-            active_scene: self.active_scene,
-            last_qsc_status: self.last_qsc_status.clone(),
-            morphs: self.morphs.clone(),
-            density_maps: self.density_maps.clone(),
-            next_density_map_uid: self.next_density_map_uid,
-            next_density_renderer_uid: self.next_density_renderer_uid,
-            trajectories: self.trajectories.clone(),
-            next_trajectory_block_uid: self.next_trajectory_block_uid,
-            surface_potential: self.surface_potential.clone(),
-            potential_scale: self.potential_scale,
-            script_styles: self.script_styles.clone(),
-            script_view_input_config: self.script_view_input_config.clone(),
-        }
+    fn capture_script_scene_snapshot(&self, scene_uid: Uid) -> Option<DesktopSceneSnapshot> {
+        let scene = self.scene_manager().scene(scene_uid)?;
+        let object_uids: BTreeSet<_> = scene.objects().iter().map(MolObject::uid).collect();
+        Some(DesktopSceneSnapshot {
+            scene: scene.clone(),
+            views: self
+                .command_manager()
+                .views()
+                .iter()
+                .filter(|view| view.scene_uid() == scene_uid)
+                .cloned()
+                .collect(),
+            morphs: self
+                .morphs
+                .iter()
+                .filter(|(uid, _)| object_uids.contains(uid))
+                .map(|(uid, value)| (*uid, value.clone()))
+                .collect(),
+            density_maps: self
+                .density_maps
+                .iter()
+                .filter(|(_, map)| map.scene_uid == scene_uid)
+                .map(|(uid, value)| (*uid, value.clone()))
+                .collect(),
+            trajectories: self
+                .trajectories
+                .iter()
+                .filter(|(uid, _)| object_uids.contains(uid))
+                .map(|(uid, value)| (*uid, value.clone()))
+                .collect(),
+            styles: self.script_styles.style_sets(scene_uid.get()).to_vec(),
+        })
     }
 
     #[cfg(feature = "scripting")]
-    fn restore_script_scene_snapshot(&mut self, snapshot: &DesktopSceneSnapshot) {
-        self.command_manager = snapshot.command_manager.clone();
-        self.active_scene = snapshot.active_scene;
-        self.last_qsc_status = snapshot.last_qsc_status.clone();
-        self.morphs = snapshot.morphs.clone();
-        self.density_maps = snapshot.density_maps.clone();
-        self.next_density_map_uid = snapshot.next_density_map_uid;
-        self.next_density_renderer_uid = snapshot.next_density_renderer_uid;
-        self.trajectories = snapshot.trajectories.clone();
-        self.next_trajectory_block_uid = snapshot.next_trajectory_block_uid;
-        self.surface_potential = snapshot.surface_potential.clone();
-        self.potential_scale = snapshot.potential_scale;
-        self.script_styles = snapshot.script_styles.clone();
-        self.script_view_input_config = snapshot.script_view_input_config.clone();
-    }
-
-    #[cfg(feature = "scripting")]
-    fn script_scene_snapshot_changed(
-        before: &DesktopSceneSnapshot,
-        after: &DesktopSceneSnapshot,
-    ) -> bool {
-        format!("{before:?}") != format!("{after:?}")
-    }
-
-    #[cfg(feature = "scripting")]
-    fn script_scene_start_undo(
+    fn apply_script_scene_snapshot_changes(
         &mut self,
-        scene_uid: Uid,
-        description: String,
-        run_start: DesktopSceneSnapshot,
-    ) -> bool {
+        from: &DesktopSceneSnapshot,
+        to: &DesktopSceneSnapshot,
+    ) {
+        use cuemol_core::snapshot::{apply_map_changes, apply_sequence_changes};
+        let scene_uid = to.scene.uid();
+        let Some(scene) = self.scene_manager_mut().scene_mut(scene_uid) else {
+            return;
+        };
+        scene.apply_undo_changes(&from.scene, &to.scene);
+        let mut views = self.command_manager().views().to_vec();
+        apply_sequence_changes(
+            &mut views,
+            &from.views,
+            &to.views,
+            View::uid,
+            View::apply_undo_changes,
+        );
+        self.command_manager_mut().replace_views(views);
+        apply_map_changes(&mut self.morphs, &from.morphs, &to.morphs);
+        apply_map_changes(&mut self.density_maps, &from.density_maps, &to.density_maps);
+        apply_map_changes(&mut self.trajectories, &from.trajectories, &to.trajectories);
+        self.script_styles
+            .apply_scope_undo_changes(scene_uid.get(), &from.styles, &to.styles);
+    }
+
+    #[cfg(feature = "scripting")]
+    fn script_scene_start_undo(&mut self, scene_uid: Uid, description: String) -> bool {
         if self.scene_manager().scene(scene_uid).is_none() {
             return false;
         }
+        let before = self.capture_script_scene_snapshot(scene_uid).unwrap();
         let state = self.script_scene_undo.entry(scene_uid.get()).or_default();
         if let Some(active) = state.active.as_mut() {
             active.nesting = active.nesting.saturating_add(1);
         } else {
             state.active = Some(ScriptSceneUndoActive {
                 description,
-                before: run_start,
+                before: std::sync::Arc::new(before),
                 nesting: 1,
             });
         }
@@ -46936,13 +46891,13 @@ impl DesktopAppState {
             return true;
         }
 
-        let after = self.capture_script_scene_snapshot();
+        let after = self.capture_script_scene_snapshot(scene_uid).unwrap();
         state.redo.clear();
-        if Self::script_scene_snapshot_changed(&active.before, &after) {
+        if *active.before != after {
             state.undo.push(ScriptSceneUndoEntry {
                 description: active.description,
                 before: active.before,
-                after,
+                after: std::sync::Arc::new(after),
             });
         }
         self.script_scene_undo.insert(key, state);
@@ -46966,7 +46921,8 @@ impl DesktopAppState {
             active.nesting -= 1;
             state.active = Some(active);
         } else {
-            self.restore_script_scene_snapshot(&active.before);
+            let current = self.capture_script_scene_snapshot(scene_uid).unwrap();
+            self.apply_script_scene_snapshot_changes(&current, &active.before);
         }
         self.script_scene_undo.insert(key, state);
         true
@@ -46986,7 +46942,7 @@ impl DesktopAppState {
                 self.script_scene_undo.insert(key, state);
                 return false;
             };
-            self.restore_script_scene_snapshot(&entry.before);
+            self.apply_script_scene_snapshot_changes(&entry.after, &entry.before);
             state.redo.push(entry);
         }
         self.script_scene_undo.insert(key, state);
@@ -47007,7 +46963,7 @@ impl DesktopAppState {
                 self.script_scene_undo.insert(key, state);
                 return false;
             };
-            self.restore_script_scene_snapshot(&entry.after);
+            self.apply_script_scene_snapshot_changes(&entry.before, &entry.after);
             state.undo.push(entry);
         }
         self.script_scene_undo.insert(key, state);
@@ -47269,9 +47225,6 @@ impl DesktopAppState {
                                 .collect()
                         })
                         .unwrap_or_default(),
-                    undo_active: undo_state
-                        .and_then(|state| state.active.as_ref())
-                        .map(|active| (active.description.clone(), active.nesting)),
                 }
             })
             .collect();
@@ -47312,13 +47265,16 @@ impl DesktopAppState {
             allocated_runtime_uids.extend(object.renderers.iter().map(|renderer| renderer.uid));
         }
         ScriptEnv {
+            live_app: None,
+            committed_log: String::new(),
+            committed_selection: None,
             scene_uid,
             scene_name,
             scene_attributes,
             scenes,
             next_scene_uid: self.scene_manager().next_scene_uid_hint().get(),
             next_command_uid: 9_000_000_000_000,
-            next_runtime_uid: 1_900_000_000,
+            next_runtime_uid: self.script_next_runtime_uid,
             allocated_runtime_uids,
             objects,
             molecules,
@@ -47724,28 +47680,6 @@ enum ScriptCmd {
         selection: String,
         secondary_type: i32,
     },
-    StartUndoTxn {
-        scene_uid: u64,
-        description: String,
-        app_data: Vec<(u64, cuemol_qsys::SceneAppData)>,
-    },
-    CommitUndoTxn {
-        scene_uid: u64,
-    },
-    RollbackUndoTxn {
-        scene_uid: u64,
-    },
-    UndoScene {
-        scene_uid: u64,
-        index: usize,
-    },
-    RedoScene {
-        scene_uid: u64,
-        index: usize,
-    },
-    ClearUndoData {
-        scene_uid: u64,
-    },
     CreateScene {
         expected_uid: u64,
         name: String,
@@ -47853,12 +47787,14 @@ fn resolve_script_color_in_scope(spec: &str, scope_id: u64) -> Option<cuemol_gfx
     script_env::with(|env| resolve_script_color_with_styles(spec, &env.styles, scope_id))
 }
 
-/// Read-only snapshot of the active scene handed to the `cuemol` script queries
-/// (`getScene`/`getObject`/...). Populated once before `eval`; boa's native closures
-/// read it (they can't borrow `&self`), mirroring the [`ScriptCmd`] mutation bridge.
+/// Script working state, synchronized with the native model at transaction boundaries.
+/// JavaScript handles and detached objects remain alive when scene data is refreshed.
 #[cfg(feature = "scripting")]
 #[derive(Default)]
 struct ScriptEnv {
+    live_app: Option<Box<DesktopAppState>>,
+    committed_log: String,
+    committed_selection: Option<String>,
     scene_uid: u64,
     scene_name: String,
     scene_attributes: BTreeMap<String, String>,
@@ -47868,9 +47804,6 @@ struct ScriptEnv {
     next_runtime_uid: u64,
     allocated_runtime_uids: BTreeSet<u64>,
     objects: Vec<ScriptObj>,
-    /// Clones of the active scene's molecules — enough for `cuemol.measure(sel)` to
-    /// evaluate an arbitrary selector and compute a distance/angle/torsion LIVE during
-    /// eval (the frozen structural snapshot alone can't). Read-only; cloned once per run.
     molecules: Vec<ScriptMol>,
     modified_molecule_uids: BTreeSet<u64>,
     morphs: BTreeMap<u64, MorphMol>,
@@ -47908,6 +47841,86 @@ struct ScriptEnv {
     scene_listeners: BTreeMap<i32, (u64, boa_engine::JsObject)>,
     next_scene_listener_id: i32,
     event_listener: Option<boa_engine::JsObject>,
+}
+
+#[cfg(feature = "scripting")]
+type ScriptRuntimeUpdate = (
+    u64,
+    u64,
+    Vec<View>,
+    Vec<Camera>,
+    Vec<ScriptMol>,
+    BTreeMap<u64, MorphMol>,
+    Vec<ScriptObj>,
+    String,
+    BTreeMap<String, String>,
+    StyleManager,
+    cuemol_qsys::ViewInputConfig,
+    Vec<ScriptSceneInfo>,
+);
+
+#[cfg(feature = "scripting")]
+impl ScriptEnv {
+    fn runtime_update(&self) -> ScriptRuntimeUpdate {
+        let mut scenes = self.scenes.clone();
+        if let Some(scene) = scenes.iter_mut().find(|scene| scene.uid == self.scene_uid) {
+            scene.name = self.scene_name.clone();
+            scene.attributes = self.scene_attributes.clone();
+            scene.cameras = self.cameras.clone();
+            scene.animation = self.animation.clone();
+        }
+        (
+            self.scene_uid,
+            self.next_runtime_uid,
+            self.views.clone(),
+            self.cameras.clone(),
+            self.molecules.clone(),
+            self.morphs.clone(),
+            self.objects.clone(),
+            self.scene_name.clone(),
+            self.scene_attributes.clone(),
+            self.styles.clone(),
+            self.view_input_config.clone(),
+            scenes,
+        )
+    }
+
+    fn refresh_scene_data(&mut self, fresh: Self) {
+        let detached_uids: BTreeSet<_> = self
+            .molecules
+            .iter()
+            .filter(|entry| entry.scene_uid == 0)
+            .map(|entry| entry.uid)
+            .collect();
+        self.molecules
+            .retain(|entry| detached_uids.contains(&entry.uid));
+        self.molecules.extend(fresh.molecules);
+        self.morphs.retain(|uid, _| detached_uids.contains(uid));
+        self.morphs.extend(fresh.morphs);
+        self.trajectories
+            .retain(|uid, _| detached_uids.contains(uid));
+        self.trajectories.extend(fresh.trajectories);
+        self.trajectory_blocks.extend(fresh.trajectory_blocks);
+        self.lw_objects.retain(|uid, _| detached_uids.contains(uid));
+        self.lw_objects.extend(fresh.lw_objects);
+        self.scene_uid = fresh.scene_uid;
+        self.scene_name = fresh.scene_name;
+        self.scene_attributes = fresh.scene_attributes;
+        self.scenes = fresh.scenes;
+        self.objects = fresh.objects;
+        self.views = fresh.views;
+        self.cameras = fresh.cameras;
+        self.animation = fresh.animation;
+        self.styles = fresh.styles;
+        self.view_input_config = fresh.view_input_config;
+        self.render_scenes = fresh.render_scenes;
+        self.modified_molecule_uids.clear();
+        self.next_scene_uid = self.next_scene_uid.max(fresh.next_scene_uid);
+        self.next_runtime_uid = self.next_runtime_uid.max(fresh.next_runtime_uid);
+        self.next_density_map_uid = self.next_density_map_uid.max(fresh.next_density_map_uid);
+        self.allocated_runtime_uids
+            .extend(fresh.allocated_runtime_uids);
+    }
 }
 
 #[cfg(feature = "scripting")]
@@ -48039,7 +48052,6 @@ struct ScriptSceneInfo {
     next_object_uid: u64,
     undo_descriptions: Vec<String>,
     redo_descriptions: Vec<String>,
-    undo_active: Option<(String, usize)>,
 }
 
 #[cfg(feature = "scripting")]
@@ -48495,8 +48507,11 @@ mod script_env {
     pub(super) fn set(env: ScriptEnv) {
         ENV.with(|cell| *cell.borrow_mut() = env);
     }
+    pub(super) fn take() -> ScriptEnv {
+        ENV.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
+    }
     pub(super) fn clear() {
-        ENV.with(|cell| *cell.borrow_mut() = ScriptEnv::default());
+        let _ = take();
     }
     pub(super) fn with<R>(f: impl FnOnce(&ScriptEnv) -> R) -> R {
         ENV.with(|cell| f(&cell.borrow()))
@@ -59346,6 +59361,174 @@ end_header
                 .map(|label| label.str_attr("aid").to_string()),
             Some("A.1.CA".to_string())
         );
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_undo_boundaries_update_live_queries_and_preserve_preceding_edits() {
+        let mut app = DesktopAppState::new();
+        let created = app.new_scene("original", true);
+        let molecule = read_pdb_str(
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n",
+        )
+        .unwrap();
+        app.scene_manager_mut()
+            .scene_mut(created.result_scene)
+            .unwrap()
+            .add_molecule("mol", molecule);
+        let (log, _) = app.run_script_js(r#"
+            var m=cuemol.getObject('mol'), atom=m.getAtomByID(1);
+            scene.setName('before-first');
+            atom.pos=cuemol.Vector("(3,0,0)");
+            var transform=cuemol.Matrix();transform.setAt(1,4,5);m.xformMat=transform;
+            var camera=cuemol.Camera(); camera.zoom=60;scene.setCamera('test',camera);
+            var heldCamera=scene.getCameraRef('test');
+            var settings=scene.getCreateAppData('render','RenderSettings');settings.width=120;
+            scene.startUndoTxn('first');
+            scene.setName('first'); atom.pos=cuemol.Vector("(8,0,0)");
+            transform.setAt(1,4,2);m.xformMat=transform; heldCamera.zoom=80;settings.width=200;
+            scene.commitUndoTxn();
+            print('first='+scene.name+':'+atom.pos.x+':'+m.xformMat.getAt(1,4)+':'+scene.getCamera('test').zoom+':'+settings.width);
+            scene.startUndoTxn('second'); scene.setName('second'); atom.pos=cuemol.Vector("(11,0,0)");scene.commitUndoTxn();
+            print('size='+scene.getUndoSize());
+            scene.undo(0);print('undo2='+scene.name+':'+atom.pos.x);
+            scene.undo(0);print('undo1='+scene.name+':'+atom.pos.x+':'+m.xformMat.getAt(1,4)+':'+scene.getCamera('test').zoom+':'+settings.width);
+            heldCamera.zoom=999;
+            scene.redo(0);print('redo1='+scene.name+':'+atom.pos.x+':'+scene.getCamera('test').zoom);
+            scene.redo(0);print('redo2='+scene.name+':'+atom.pos.x);
+            scene.startUndoTxn('outer');scene.setName('outer');
+            scene.startUndoTxn('inner');atom.pos=cuemol.Vector("(20,0,0)");scene.commitUndoTxn();
+            scene.rollbackUndoTxn();print('rollback='+scene.name+':'+atom.pos.x+':'+scene.getUndoSize());
+            print('overshoot='+scene.undo(10)+':'+scene.name+':'+scene.getUndoSize());scene.redo(1);
+        "#).unwrap();
+        assert_eq!(log, "first=first:8:2:80:200\nsize=2\nundo2=first:8\nundo1=before-first:3:5:60:120\nredo1=first:8:80\nredo2=second:11\nrollback=second:11:2\novershoot=false:before-first:0\n");
+        assert_eq!(
+            app.scene_manager()
+                .scene(created.result_scene)
+                .unwrap()
+                .name(),
+            "second"
+        );
+        assert_eq!(
+            app.scene_manager()
+                .scene(created.result_scene)
+                .unwrap()
+                .objects()[0]
+                .mol()
+                .atoms()[0]
+                .position
+                .x,
+            11.
+        );
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_undo_refresh_preserves_detached_objects_and_error_atomicity() {
+        let mut app = DesktopAppState::new();
+        let sid = app.new_scene("original", true).result_scene;
+        let (log, _) = app.run_script_js(r#"
+            var detached=cuemol.MolCoord();detached.name='pending';
+            var renderer=detached.createRenderer('cpk');renderer.name='balls';renderer.detail=12;
+            scene.startUndoTxn('attach'); scene.addObject(detached);scene.commitUndoTxn();
+            var uid=detached.uid;
+            print('attached='+scene.getObject(uid).name+':'+scene.getObject(uid).getRendererByName('balls').detail);
+            scene.undo(0);print('removed='+(scene.getObject(uid)===null));
+            scene.redo(0);print('restored='+scene.getObject(uid).name);
+        "#).unwrap();
+        assert_eq!(log, "attached=pending:12\nremoved=true\nrestored=pending\n");
+        let size = app.script_scene_undo[&sid.get()].undo.len();
+        assert!(app.run_script_js("scene.startUndoTxn('discard');scene.setName('discard');scene.commitUndoTxn();throw new Error('abort')").is_err());
+        assert_eq!(app.scene_manager().scene(sid).unwrap().name(), "original");
+        assert_eq!(app.script_scene_undo[&sid.get()].undo.len(), size);
+        assert_eq!(
+            app.run_script_js("print(scene.name+':'+scene.getUndoSize())")
+                .unwrap()
+                .0,
+            "original:1\n"
+        );
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_undo_preserves_other_scenes_views_styles_and_camera_references() {
+        let mut app = DesktopAppState::new();
+        let first = app.new_scene("first", true);
+        let second = app.new_scene("second", true);
+        let (log, _) = app.run_script_js(&format!(r#"
+            var a=cuemol.getScene({a}), b=cuemol.getScene({b});
+            var av=cuemol.getView({av}),bv=cuemol.getView({bv});
+            var styles=cuemol.getService('StyleManager');
+            var camera=cuemol.Camera();b.setCamera('camera',camera);var ref=b.getCameraRef('camera');
+            a.startUndoTxn('first-edit');a.setName('changed-first');av.zoom=75;
+            styles.createStyleSet('first-style',a.uid);a.commitUndoTxn();
+            b.startUndoTxn('second-edit');b.setName('changed-second');bv.zoom=90;
+            styles.createStyleSet('second-style',b.uid);b.commitUndoTxn();
+            a.undo(0);ref.zoom=110;
+            print('undo='+a.name+':'+b.name+':'+bv.zoom+':'+b.getCamera('camera').zoom+':'+b.getUndoSize());
+            print('styles='+styles.getStyleSetsJSON(a.uid)+':'+styles.getStyleSetsJSON(b.uid));
+            a.redo(0);print('redo='+a.name+':'+av.zoom+':'+b.name+':'+bv.zoom);
+            a.startUndoTxn('empty');b.setName('outside-first');a.commitUndoTxn();
+            print('empty='+a.getUndoSize()+':'+b.name);
+        "#,a=first.result_scene.get(),b=second.result_scene.get(),av=first.result_view.unwrap().get(),bv=second.result_view.unwrap().get())).unwrap();
+        assert_eq!(log, "undo=first:changed-second:90:110:1\nstyles=[]:[\"second-style\"]\nredo=changed-first:75:changed-second:90\nempty=1:outside-first\n");
+        assert_eq!(app.active_scene(), Some(second.result_scene));
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_undo_deleted_objects_and_renderers_restore_distinct_identities() {
+        let mut app = DesktopAppState::new();
+        app.new_scene("identity", true);
+        let (log,_)=app.run_script_js(r#"
+            var molecule=cuemol.MolCoord();molecule.name='mol';scene.addObject(molecule);
+            var renderer=molecule.createRenderer('cpk');renderer.name='first';renderer.detail=15;
+            var oid=molecule.uid,rid=renderer.uid;
+            scene.startUndoTxn('delete renderer');molecule.destroyRenderer(rid);scene.commitUndoTxn();
+            scene.undo(0);print('renderer='+molecule.getRendererByName('first').detail+':'+(molecule.getRendererByName('first').uid===rid));
+            scene.startUndoTxn('delete object');scene.destroyObject(oid);scene.commitUndoTxn();
+            scene.undo(0);print('object='+scene.getObject(oid).name+':'+scene.getObject(oid).getRendererByName('first').detail);
+            scene.redo(0);scene.clearUndoData();
+            var second=cuemol.MolCoord();second.name='second';scene.addObject(second);
+            var next=second.createRenderer('cpk');print('unique='+(second.uid!==oid)+':'+(next.uid!==rid));
+        "#).unwrap();
+        assert_eq!(log, "renderer=15:true\nobject=mol:15\nunique=true:true\n");
+        let before = app.script_next_runtime_uid;
+        app.run_script_js("scene.startUndoTxn('new');cuemol.getObject('second').createRenderer('simple');scene.commitUndoTxn();scene.undo(0)").unwrap();
+        assert!(app.script_next_runtime_uid > before);
+        let next = app.script_next_runtime_uid;
+        let (log, _) = app
+            .run_script_js("print(cuemol.getObject('second').createRenderer('simple').uid)")
+            .unwrap();
+        assert!(log.trim().parse::<u64>().unwrap() >= next);
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_undo_preserves_unrecorded_edits_to_other_properties_in_the_same_scene() {
+        let mut app = DesktopAppState::new();
+        let created = app.new_scene("original", true);
+        let molecule = read_pdb_str(
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C\nATOM      2  CA  ALA A   2       1.000   0.000   0.000  1.00 10.00           C\nEND\n"
+        ).unwrap();
+        app.scene_manager_mut()
+            .scene_mut(created.result_scene)
+            .unwrap()
+            .add_molecule("mol", molecule);
+        let (log,_) = app.run_script_js(&format!(r#"
+            var m=cuemol.getObject('mol'),a=m.getAtomByID(1),b=m.getAtomByID(2),v=cuemol.getView({view});
+            var r=m.createRenderer('cpk');r.name='balls';r.detail=5;
+            var settings=scene.getCreateAppData('render','RenderSettings');settings.width=120;
+            scene.startUndoTxn('recorded');scene.setName('changed');a.pos=cuemol.Vector('(5,0,0)');
+            r.detail=8;v.zoom=75;settings.width=200;scene.commitUndoTxn();
+            b.pos=cuemol.Vector('(9,0,0)');a.bfac=99;r.alpha=0.3;v.slab=33;settings.height=300;
+            var extra=m.createRenderer('simple');extra.name='extra';
+            scene.undo(0);
+            print('undo='+scene.name+':'+a.pos.x+':'+b.pos.x+':'+a.bfac+':'+r.detail+':'+r.alpha.toFixed(1)+':'+v.zoom+':'+v.slab+':'+settings.width+':'+settings.height+':'+m.getRendCount());
+            scene.redo(0);
+            print('redo='+scene.name+':'+a.pos.x+':'+b.pos.x+':'+a.bfac+':'+r.detail+':'+r.alpha.toFixed(1)+':'+v.zoom+':'+v.slab+':'+settings.width+':'+settings.height+':'+m.getRendCount());
+        "#,view=created.result_view.unwrap().get())).unwrap();
+        assert_eq!(log,"undo=original:0:9:99:5:0.3:50:33:120:300:2\nredo=changed:5:9:99:8:0.3:75:33:200:300:2\n");
     }
 
     #[cfg(feature = "scripting")]

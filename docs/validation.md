@@ -732,4 +732,36 @@ tests, 14 command compatibility tests and the molecule-analysis suite passed.
 The browser US-align test also passed with the updated kernel and all three
 script methods. These tests exposed a separate issue: queries immediately after
 Undo within one script evaluation still see the prior environment. The shared
-script transaction bridge requires a follow-up correction.
+script transaction correction below resolves that case.
+
+
+## Live script transactions
+
+Script transaction boundaries now synchronize the working scene before capturing
+history or applying Undo, Redo and Rollback. Queries through existing atom,
+object, renderer, scene and application-data handles observe the restored state
+within the same evaluation. Edits preceding `startUndoTxn` remain outside the
+transaction, and multiple and nested transactions retain their own boundaries.
+Uncaught script errors discard the evaluation's scene changes and history.
+
+History stores the receiver scene and applies the properties changed by that
+transaction. It preserves other scenes, unrelated objects and later changes to
+other atom, renderer, view and render-setting properties. Recreated objects keep
+their IDs, while new script objects use a monotonic allocation counter. Camera
+replacements detach old camera references only in the restored scene.
+Indexed trajectory sources remain shared; immutable history snapshots also use
+shared ownership instead of being copied with each script environment.
+
+Five new application regressions cover immediate queries, transformations,
+cameras, app data, preceding edits, multiple/nested transactions, object and
+renderer deletion, unrelated changes, detached objects and error atomicity.
+All 209 shared application tests passed on Linux and macOS, excluding the seven
+separate QIF audits. The molecule, scene-system and core suites passed on Linux
+with the reference checkout available. Earlier comments describing the script
+environment as read-only were inconsistent with its mutation APIs and have been
+corrected. The reference's oversized `undo(n)` behavior is preserved: it applies
+available entries and returns false when the requested count exceeds history.
+
+All 165 native GUI tests, 14 command compatibility tests and 37 browser tests
+passed. The browser regression checks immediate coordinate queries across two
+transactions, Rollback, a second scene and a later script evaluation.

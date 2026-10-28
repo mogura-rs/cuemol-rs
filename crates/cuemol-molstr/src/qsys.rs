@@ -230,6 +230,30 @@ pub enum QscLoadStatus {
 pub type MolView = View;
 
 impl MolRenderer {
+    fn apply_undo_changes(&mut self, from: &Self, to: &Self) {
+        use cuemol_core::snapshot::{apply_map_changes, apply_value_change};
+        apply_value_change(&mut self.name, &from.name, &to.name);
+        apply_value_change(
+            &mut self.renderer_type,
+            &from.renderer_type,
+            &to.renderer_type,
+        );
+        apply_value_change(&mut self.qsc_children, &from.qsc_children, &to.qsc_children);
+        apply_value_change(
+            &mut self.atom_intr_lines,
+            &from.atom_intr_lines,
+            &to.atom_intr_lines,
+        );
+        apply_value_change(&mut self.selection, &from.selection, &to.selection);
+        apply_value_change(&mut self.coloring, &from.coloring, &to.coloring);
+        apply_value_change(
+            &mut self.default_color,
+            &from.default_color,
+            &to.default_color,
+        );
+        apply_map_changes(&mut self.qsc_attrs, &from.qsc_attrs, &to.qsc_attrs);
+    }
+
     pub fn uid(&self) -> Uid {
         self.uid
     }
@@ -668,6 +692,68 @@ pub struct MolObject {
 }
 
 impl MolObject {
+    fn apply_undo_changes(&mut self, from: &Self, to: &Self) {
+        use cuemol_core::snapshot::{apply_map_changes, apply_value_change};
+        apply_value_change(&mut self.name, &from.name, &to.name);
+        apply_value_change(&mut self.object_type, &from.object_type, &to.object_type);
+        apply_value_change(&mut self.source_type, &from.source_type, &to.source_type);
+        apply_value_change(&mut self.source, &from.source, &to.source);
+        apply_value_change(&mut self.alt_source, &from.alt_source, &to.alt_source);
+        apply_value_change(&mut self.modified, &from.modified, &to.modified);
+        apply_value_change(&mut self.ui_locked, &from.ui_locked, &to.ui_locked);
+        apply_value_change(&mut self.ui_collapsed, &from.ui_collapsed, &to.ui_collapsed);
+        apply_value_change(&mut self.ui_order, &from.ui_order, &to.ui_order);
+        apply_value_change(
+            &mut self.paint_coloring,
+            &from.paint_coloring,
+            &to.paint_coloring,
+        );
+        apply_value_change(
+            &mut self.coloring_type,
+            &from.coloring_type,
+            &to.coloring_type,
+        );
+        apply_value_change(
+            &mut self.qsc_coloring_node,
+            &from.qsc_coloring_node,
+            &to.qsc_coloring_node,
+        );
+        apply_value_change(
+            &mut self.qsc_extension_nodes,
+            &from.qsc_extension_nodes,
+            &to.qsc_extension_nodes,
+        );
+        apply_value_change(&mut self.xform, &from.xform, &to.xform);
+        apply_value_change(&mut self.visible, &from.visible, &to.visible);
+        apply_map_changes(
+            &mut self.coloring_attrs,
+            &from.coloring_attrs,
+            &to.coloring_attrs,
+        );
+        apply_map_changes(
+            &mut self.qsc_extra_attrs,
+            &from.qsc_extra_attrs,
+            &to.qsc_extra_attrs,
+        );
+        apply_map_changes(
+            &mut self.qsc_extra_data,
+            &from.qsc_extra_data,
+            &to.qsc_extra_data,
+        );
+        self.mol.apply_undo_changes(&from.mol, &to.mol);
+        cuemol_core::snapshot::apply_sequence_changes(
+            &mut self.renderers,
+            &from.renderers,
+            &to.renderers,
+            MolRenderer::uid,
+            MolRenderer::apply_undo_changes,
+        );
+        self.next_renderer_uid = self
+            .next_renderer_uid
+            .max(to.next_renderer_uid)
+            .max(from.next_renderer_uid);
+    }
+
     pub fn uid(&self) -> Uid {
         self.uid
     }
@@ -1697,6 +1783,102 @@ impl MolScene {
 
     pub fn next_object_uid_hint(&self) -> Uid {
         Uid::new(self.next_object_uid)
+    }
+
+    pub fn apply_undo_changes(&mut self, from: &Self, to: &Self) {
+        use cuemol_core::snapshot::{apply_map_changes, apply_value_change};
+        apply_value_change(&mut self.name, &from.name, &to.name);
+        apply_value_change(&mut self.source, &from.source, &to.source);
+        apply_value_change(&mut self.source_type, &from.source_type, &to.source_type);
+        apply_value_change(&mut self.base_path, &from.base_path, &to.base_path);
+        apply_value_change(
+            &mut self.skipped_qsc_objects,
+            &from.skipped_qsc_objects,
+            &to.skipped_qsc_objects,
+        );
+        apply_value_change(
+            &mut self.active_object_uid,
+            &from.active_object_uid,
+            &to.active_object_uid,
+        );
+        apply_value_change(
+            &mut self.active_renderer_uid,
+            &from.active_renderer_uid,
+            &to.active_renderer_uid,
+        );
+        apply_value_change(
+            &mut self.active_view_uid,
+            &from.active_view_uid,
+            &to.active_view_uid,
+        );
+        apply_value_change(
+            &mut self.scene_extension_nodes,
+            &from.scene_extension_nodes,
+            &to.scene_extension_nodes,
+        );
+        apply_value_change(&mut self.qsc_options, &from.qsc_options, &to.qsc_options);
+        apply_value_change(
+            &mut self.animation_node,
+            &from.animation_node,
+            &to.animation_node,
+        );
+        apply_map_changes(
+            &mut self.scene_attributes,
+            &from.scene_attributes,
+            &to.scene_attributes,
+        );
+        use cuemol_core::snapshot::apply_sequence_changes;
+        apply_sequence_changes(
+            &mut self.objects,
+            &from.objects,
+            &to.objects,
+            MolObject::uid,
+            MolObject::apply_undo_changes,
+        );
+        apply_sequence_changes(
+            &mut self.cameras,
+            &from.cameras,
+            &to.cameras,
+            |camera| camera.name().to_string(),
+            Camera::apply_undo_changes,
+        );
+        apply_sequence_changes(
+            &mut self.loaded_surfaces,
+            &from.loaded_surfaces,
+            &to.loaded_surfaces,
+            |object| object.uid,
+            apply_value_change,
+        );
+        apply_value_change(
+            &mut self.loaded_density_maps,
+            &from.loaded_density_maps,
+            &to.loaded_density_maps,
+        );
+        apply_sequence_changes(
+            &mut self.loaded_lw_objects,
+            &from.loaded_lw_objects,
+            &to.loaded_lw_objects,
+            |object| object.uid,
+            apply_value_change,
+        );
+        apply_value_change(
+            &mut self.loaded_qsc_objects,
+            &from.loaded_qsc_objects,
+            &to.loaded_qsc_objects,
+        );
+        apply_sequence_changes(
+            &mut self.loaded_styles,
+            &from.loaded_styles,
+            &to.loaded_styles,
+            |style| style.node.str_attr("id").to_string(),
+            apply_value_change,
+        );
+        self.app_data
+            .apply_undo_changes(&from.app_data, &to.app_data);
+        self.next_object_uid = self
+            .next_object_uid
+            .max(to.next_object_uid)
+            .max(from.next_object_uid);
     }
 
     pub fn uid(&self) -> Uid {
@@ -3410,12 +3592,14 @@ impl MolCommandManager {
     }
 
     pub fn replace_views(&mut self, views: Vec<MolView>) {
-        self.next_view_uid = views
-            .iter()
-            .map(|view| view.uid().get())
-            .max()
-            .unwrap_or(VIEW_UID_BASE)
-            .saturating_add(1);
+        self.next_view_uid = self.next_view_uid.max(
+            views
+                .iter()
+                .map(|view| view.uid().get())
+                .max()
+                .unwrap_or(VIEW_UID_BASE)
+                .saturating_add(1),
+        );
         self.views = views;
     }
 

@@ -97,6 +97,18 @@ pub struct StyleInfo {
 }
 
 impl StyleSet {
+    pub fn apply_undo_changes(&mut self, from: &Self, to: &Self) {
+        use cuemol_core::snapshot::{apply_map_changes, apply_value_change};
+        apply_value_change(&mut self.source, &from.source, &to.source);
+        apply_value_change(&mut self.name, &from.name, &to.name);
+        apply_value_change(&mut self.read_only, &from.read_only, &to.read_only);
+        apply_value_change(&mut self.modified, &from.modified, &to.modified);
+        apply_map_changes(&mut self.colors, &from.colors, &to.colors);
+        apply_map_changes(&mut self.strings, &from.strings, &to.strings);
+        apply_map_changes(&mut self.styles, &from.styles, &to.styles);
+        apply_map_changes(&mut self.materials, &from.materials, &to.materials);
+    }
+
     pub fn new(uid: u64, name: impl Into<String>) -> Self {
         Self {
             uid,
@@ -440,6 +452,18 @@ impl Default for StyleManager {
 }
 
 impl StyleManager {
+    pub fn apply_scope_undo_changes(&mut self, scope: u64, from: &[StyleSet], to: &[StyleSet]) {
+        cuemol_core::snapshot::apply_sequence_changes(
+            self.scopes.entry(scope).or_default(),
+            from,
+            to,
+            StyleSet::uid,
+            StyleSet::apply_undo_changes,
+        );
+        self.pending_events
+            .retain(|(event_scope, _)| *event_scope != scope);
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

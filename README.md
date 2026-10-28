@@ -161,6 +161,10 @@ cuemol tools run ffmpeg -version
 of edits. Relative output filenames are resolved from the process's working
 directory. JavaScript runs in the embedded Boa engine and CueMol bindings, with
 no Node.js runtime requirement.
+Scene Undo, Redo and Rollback update script queries immediately. Transactions
+preserve edits made before they start, changes in other scenes and later changes
+to unrelated properties. An uncaught script error discards that evaluation's
+scene edits and history.
 
 Preferences are stored in `$XDG_CONFIG_HOME/cuemol`, falling back to
 `~/.config/cuemol`. `CUEMOL_CONFIG_DIR` overrides the directory, and

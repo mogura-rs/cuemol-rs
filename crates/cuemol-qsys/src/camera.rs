@@ -66,6 +66,28 @@ impl Default for Camera {
 }
 
 impl Camera {
+    pub fn apply_undo_changes(&mut self, from: &Self, to: &Self) {
+        use cuemol_core::snapshot::{apply_map_changes, apply_value_change};
+        apply_value_change(&mut self.name, &from.name, &to.name);
+        apply_value_change(&mut self.ui_order, &from.ui_order, &to.ui_order);
+        apply_value_change(&mut self.source, &from.source, &to.source);
+        apply_value_change(&mut self.alt_source, &from.alt_source, &to.alt_source);
+        apply_value_change(&mut self.zoom, &from.zoom, &to.zoom);
+        apply_value_change(&mut self.slab_depth, &from.slab_depth, &to.slab_depth);
+        apply_value_change(&mut self.cam_dist, &from.cam_dist, &to.cam_dist);
+        apply_value_change(
+            &mut self.stereo_distance,
+            &from.stereo_distance,
+            &to.stereo_distance,
+        );
+        apply_value_change(&mut self.stereo_mode, &from.stereo_mode, &to.stereo_mode);
+        apply_value_change(&mut self.perspective, &from.perspective, &to.perspective);
+        apply_value_change(&mut self.center_mark, &from.center_mark, &to.center_mark);
+        apply_value_change(&mut self.center, &from.center, &to.center);
+        apply_value_change(&mut self.rotation, &from.rotation, &to.rotation);
+        apply_map_changes(&mut self.visibility, &from.visibility, &to.visibility);
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

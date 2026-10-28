@@ -27,6 +27,7 @@ pub mod regex;
 pub mod scene;
 pub mod script_compat;
 pub mod serialization;
+pub mod snapshot;
 pub mod streams;
 pub mod string;
 pub mod table;

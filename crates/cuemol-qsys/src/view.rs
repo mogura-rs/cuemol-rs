@@ -73,6 +73,46 @@ pub struct View {
 }
 
 impl View {
+    pub fn apply_undo_changes(&mut self, from: &Self, to: &Self) {
+        use cuemol_core::snapshot::{apply_map_changes, apply_value_change};
+        apply_value_change(&mut self.name, &from.name, &to.name);
+        apply_value_change(&mut self.active, &from.active, &to.active);
+        apply_value_change(&mut self.zoom, &from.zoom, &to.zoom);
+        apply_value_change(&mut self.view_dist, &from.view_dist, &to.view_dist);
+        apply_value_change(&mut self.slab_depth, &from.slab_depth, &to.slab_depth);
+        apply_value_change(&mut self.rot_quat, &from.rot_quat, &to.rot_quat);
+        apply_value_change(&mut self.center, &from.center, &to.center);
+        apply_value_change(&mut self.perspective, &from.perspective, &to.perspective);
+        apply_value_change(&mut self.trans_mms, &from.trans_mms, &to.trans_mms);
+        apply_value_change(&mut self.rot_mms, &from.rot_mms, &to.rot_mms);
+        apply_value_change(&mut self.stereo_mode, &from.stereo_mode, &to.stereo_mode);
+        apply_value_change(
+            &mut self.stereo_distance,
+            &from.stereo_distance,
+            &to.stereo_distance,
+        );
+        apply_value_change(
+            &mut self.swap_stereo_eyes,
+            &from.swap_stereo_eyes,
+            &to.swap_stereo_eyes,
+        );
+        apply_value_change(&mut self.center_mark, &from.center_mark, &to.center_mark);
+        apply_value_change(&mut self.width, &from.width, &to.width);
+        apply_value_change(&mut self.height, &from.height, &to.height);
+        apply_value_change(&mut self.scale_factor, &from.scale_factor, &to.scale_factor);
+        apply_value_change(&mut self.style_names, &from.style_names, &to.style_names);
+        apply_value_change(
+            &mut self.hit_precision,
+            &from.hit_precision,
+            &to.hit_precision,
+        );
+        apply_map_changes(&mut self.draw_objs, &from.draw_objs, &to.draw_objs);
+        self.camera_template
+            .apply_undo_changes(&from.camera_template, &to.camera_template);
+        self.projection_changed = true;
+        self.jitter_reset_requested = true;
+    }
+
     pub fn new(uid: Uid, scene_uid: Uid) -> Self {
         Self {
             uid,

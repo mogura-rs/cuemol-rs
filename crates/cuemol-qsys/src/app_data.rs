@@ -317,6 +317,27 @@ pub struct SceneAppData {
 }
 
 impl SceneAppData {
+    pub fn apply_undo_changes(&mut self, from: &Self, to: &Self) {
+        use cuemol_core::snapshot::{apply_map_changes, apply_map_changes_with};
+        apply_map_changes_with(
+            &mut self.entries,
+            &from.entries,
+            &to.entries,
+            |current, before, after| {
+                if let (
+                    AppDataEntry::Render(current),
+                    AppDataEntry::Render(before),
+                    AppDataEntry::Render(after),
+                ) = (&mut *current, before, after)
+                {
+                    apply_map_changes(&mut current.overrides, &before.overrides, &after.overrides);
+                } else {
+                    current.clone_from(after);
+                }
+            },
+        );
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (&str, &RenderSettings)> {
         self.entries.iter().filter_map(|(id, entry)| match entry {
             AppDataEntry::Render(settings) => Some((id.as_str(), settings)),

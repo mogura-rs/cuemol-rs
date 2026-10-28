@@ -137,6 +137,27 @@ test('browser startup scripts, shared properties, and animation use the native c
   expect(errors).toEqual([]);
 });
 
+test('script transactions restore live coordinates and keep other scenes intact',async({page})=>{
+  await ready(page);await load(page,'transactions.pdb',Buffer.from(structure));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  const object=(await page.evaluate(()=>window.cuemol.status())).scene.objects[0].id;
+  const state=await call(page,'execute_script',{source:`
+    var s=cuemol.getScene(),m=cuemol.getObject(${object}),atom=m.getAtomByID(1);
+    atom.pos=cuemol.Vector('(3,0,0)');
+    s.startUndoTxn('first');atom.pos=cuemol.Vector('(8,0,0)');s.commitUndoTxn();
+    s.startUndoTxn('second');atom.pos=cuemol.Vector('(11,0,0)');s.commitUndoTxn();
+    s.undo(0);print('undo2='+atom.pos.x);s.undo(0);print('undo1='+atom.pos.x);
+    s.redo(0);print('redo1='+atom.pos.x);s.redo(0);print('redo2='+atom.pos.x);
+    s.startUndoTxn('rollback');atom.pos=cuemol.Vector('(20,0,0)');s.rollbackUndoTxn();
+    print('rollback='+atom.pos.x+':'+s.getUndoSize());
+    var other=cuemol.sceMgr.createScene();other.setName('other');
+    s.undo(0);print('scoped='+other.name+':'+atom.pos.x);
+  `});
+  expect(JSON.parse(state.message).log).toBe('undo2=8\nundo1=3\nredo1=8\nredo2=11\nrollback=11:2\nscoped=other:8\n');
+  const after=await call(page,'execute_script',{source:`print(cuemol.getObject(${object}).getAtomByID(1).pos.x);`});
+  expect(JSON.parse(after.message).log).toBe('8\n');
+});
+
 test('AMBER ASCII frames and periodic cells are read through browser slices',async({page})=>{
   await ready(page);await load(page,'topology.pdb',Buffer.from(structure));
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
