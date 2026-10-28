@@ -22,6 +22,23 @@ async function call(page,name,args={}){
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().busy),{timeout:60000}).toBe(false);
   return page.evaluate(()=>window.cuemol.status());
 }
+test('default WebGPU viewport presents colored geometry',async({page},testInfo)=>{
+  const errors=[];page.on('pageerror',error=>errors.push(error.message));
+  await page.goto('./');
+  await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId),{timeout:60000}).toBeGreaterThan(0);
+  expect(await page.evaluate(()=>window.cuemol.backend)).toBe('webgpu');
+  await load(page,'webgpu.pdb',Buffer.from(structure));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  const rect=await page.evaluate(()=>window.cuemol.status().ui.rects.Viewport);
+  await expect.poll(async()=>{
+    const png=PNG.sync.read(await page.screenshot({clip:{x:rect[0],y:rect[1],width:rect[2],height:rect[3]}}));
+    let colored=0;
+    for(let i=0;i<png.data.length;i+=4)if(Math.max(...png.data.subarray(i,i+3))-Math.min(...png.data.subarray(i,i+3))>40)colored++;
+    return colored;
+  }).toBeGreaterThan(500);
+  await page.screenshot({path:testInfo.outputPath('webgpu.png')});
+  expect(errors).toEqual([]);
+});
 function dcd(frames){
   const chunks=[];
   const record=data=>{const n=Buffer.alloc(4);n.writeInt32LE(data.length);chunks.push(n,data,n);};
