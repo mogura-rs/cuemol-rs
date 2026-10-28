@@ -51329,13 +51329,13 @@ pub fn pick_atom_screen(
                 clip[i] += mvp[col][i] * v[col];
             }
         }
-        if clip[3].abs() < 1.0e-6 {
+        if clip[3] <= 1.0e-6 {
             continue;
         }
         let ndc_x = (clip[0] / clip[3]) as f64;
         let ndc_y = (clip[1] / clip[3]) as f64;
         let ndc_z = (clip[2] / clip[3]) as f64;
-        if !(-1.0..=1.0).contains(&ndc_z) {
+        if !(0.0..=1.0).contains(&ndc_z) {
             continue; // outside the depth slab (behind camera / clipped)
         }
         let sx = (ndc_x + 1.0) / 2.0 * vp_px.0;
@@ -51376,13 +51376,13 @@ pub fn atoms_in_screen_rect(
                 clip[row] += mvp[col][row] * vector[col];
             }
         }
-        if clip[3].abs() < 1.0e-6 {
+        if clip[3] <= 1.0e-6 {
             continue;
         }
         let ndc_x = f64::from(clip[0] / clip[3]);
         let ndc_y = f64::from(clip[1] / clip[3]);
         let ndc_z = f64::from(clip[2] / clip[3]);
-        if !(-1.0..=1.0).contains(&ndc_z) {
+        if !(0.0..=1.0).contains(&ndc_z) {
             continue;
         }
         let screen_x = (ndc_x + 1.0) * 0.5 * vp_px.0;
@@ -58116,7 +58116,8 @@ end_header
         let atoms = vec![
             pick_atom_fixture(7, 0, 0.0, 0.0, 0.0), // -> pixel (50, 50)
             pick_atom_fixture(7, 1, 0.4, 0.0, 0.0), // -> pixel (70, 50)
-            pick_atom_fixture(9, 9, 0.0, 0.0, 2.0), // ndc_z=2 -> outside slab, skipped
+            pick_atom_fixture(9, 9, 0.0, 0.0, 2.0),
+            pick_atom_fixture(9, 10, 0.0, 0.0, -0.5),
         ];
         // Click near the centre atom.
         assert_eq!(
@@ -58165,6 +58166,7 @@ end_header
             pick_atom_fixture(7, 0, 0.0, 0.0, 0.0),
             pick_atom_fixture(7, 1, 0.4, 0.0, 0.0),
             pick_atom_fixture(7, 2, 0.0, 0.4, 0.0),
+            pick_atom_fixture(7, 3, 0.0, 0.0, -0.5),
         ];
         assert_eq!(
             atoms_in_screen_rect(&atoms, mvp, (44.0, 44.0), (56.0, 56.0), (100.0, 100.0)),

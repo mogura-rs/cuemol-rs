@@ -198,47 +198,11 @@ impl App {
         self.show_console = true;
     }
     pub(super) fn open_properties(&mut self, kind: &str, id: Option<u64>) {
-        match cuemol_command::call_tool(
-            &mut self.state,
-            &mut self.camera,
-            "list_node_props",
-            &json!({"nodeType":kind,"nodeId":id}),
-        ) {
-            Ok(data) => {
-                let rows = data["properties"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|p| {
-                        (
-                            p["key"].as_str().unwrap_or("").into(),
-                            p["value"].as_str().unwrap_or("").into(),
-                        )
-                    })
-                    .collect();
-                self.properties = Some((kind.into(), id, rows));
-            }
-            Err(e) => self.message = e.to_string(),
-        }
-    }
-    pub(super) fn properties_ui(&mut self, ctx: &egui::Context) {
-        let Some((kind, id, mut rows)) = self.properties.take() else {
-            return;
-        };
-        let mut open = true;
-        egui::Window::new(format!("{kind} properties")).id(egui::Id::new("properties")).open(&mut open).default_width(460.).show(ctx,|ui|{
-            egui::ScrollArea::vertical().max_height(480.).show(ui,|ui|{
-                egui::Grid::new("property-grid").striped(true).show(ui,|ui|{for (key,value) in &mut rows {
-                    ui.label(key.as_str());
-                    let changed=if value=="true"||value=="false"{let mut flag=value=="true";let changed=ui.checkbox(&mut flag,"").changed();if changed{*value=flag.to_string();}changed}else{ui.text_edit_singleline(value);false};
-                    if ui.small_button("Apply").clicked()||changed{self.call("set_node_prop",json!({"nodeType":kind,"nodeId":id,"prop":key,"value":value}));}
-                    ui.end_row();
-                }});
-            });
+        self.inspector_target = Some(cuemol_ui::InspectorTarget {
+            kind: kind.into(),
+            id,
         });
-        if open {
-            self.properties = Some((kind, id, rows));
-        }
+        self.inspector.visible = true;
     }
     pub(super) fn settings_ui(&mut self, ctx: &egui::Context) {
         let mut open = self.show_settings;
@@ -473,51 +437,50 @@ impl App {
             .open(&mut open)
             .default_width(500.)
             .show(ctx, |ui| {
-                let data = cuemol_command::call_tool(
-                    &mut self.state,
-                    &mut self.camera,
-                    "list_anims",
-                    &json!({}),
-                )
-                .unwrap_or(Value::Null);
-                ui.horizontal(|ui| {
-                    for action in ["play", "pause", "stop"] {
-                        if ui.button(action).clicked() {
-                            self.call("animate", json!({"action":action}));
-                        }
-                    }
-                    if ui.button("Add element…").clicked() {
-                        self.select_tool("add_anim");
-                    }
-                });
-                let duration = data["mgr"]["lengthMs"].as_f64().unwrap_or(0.);
-                let mut time = data["mgr"]["elapsedMs"].as_f64().unwrap_or(0.);
-                if ui
-                    .add(egui::Slider::new(&mut time, 0.0..=duration.max(1.)).suffix(" ms"))
-                    .changed()
-                {
-                    self.call("animate", json!({"action":"seek","timeMs":time}));
-                }
-                for motion in data["elements"].as_array().into_iter().flatten() {
-                    ui.horizontal(|ui| {
-                        ui.label(format!(
-                            "{}  {}–{} ms",
-                            motion["name"].as_str().unwrap_or(""),
-                            motion["absStartMs"],
-                            motion["absEndMs"]
-                        ));
-                        if ui.small_button("Time…").clicked() {
-                            self.select_tool("set_anim_time");
-                        }
-                        if ui.small_button("×").clicked() {
-                            self.call(
-                                "remove_anim",
-                                json!({"element":format!("#{}",motion["uid"])}),
-                            );
-                        }
-                    });
-                }
+                self.timeline_contents(ui);
             });
         self.show_timeline = open;
+    }
+    pub(super) fn timeline_contents(&mut self, ui: &mut egui::Ui) {
+        let data =
+            cuemol_command::call_tool(&mut self.state, &mut self.camera, "list_anims", &json!({}))
+                .unwrap_or(Value::Null);
+        ui.horizontal(|ui| {
+            for action in ["play", "pause", "stop"] {
+                if ui.button(action).clicked() {
+                    self.call("animate", json!({"action":action}));
+                }
+            }
+            if ui.button("Add element…").clicked() {
+                self.select_tool("add_anim");
+            }
+        });
+        let duration = data["mgr"]["lengthMs"].as_f64().unwrap_or(0.);
+        let mut time = data["mgr"]["elapsedMs"].as_f64().unwrap_or(0.);
+        if ui
+            .add(egui::Slider::new(&mut time, 0.0..=duration.max(1.)).suffix(" ms"))
+            .changed()
+        {
+            self.call("animate", json!({"action":"seek","timeMs":time}));
+        }
+        for motion in data["elements"].as_array().into_iter().flatten() {
+            ui.horizontal(|ui| {
+                ui.label(format!(
+                    "{}  {}–{} ms",
+                    motion["name"].as_str().unwrap_or(""),
+                    motion["absStartMs"],
+                    motion["absEndMs"]
+                ));
+                if ui.small_button("Time…").clicked() {
+                    self.select_tool("set_anim_time");
+                }
+                if ui.small_button("×").clicked() {
+                    self.call(
+                        "remove_anim",
+                        json!({"element":format!("#{}",motion["uid"])}),
+                    );
+                }
+            });
+        }
     }
 }

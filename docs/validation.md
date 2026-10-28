@@ -165,3 +165,15 @@ background APBS execution and rejection of late APBS output after a manual edit.
 The shared render suite passed 68 tests, including cancellation before output
 creation. These checks establish the integration contract; live model behavior
 and platform credential stores require their respective services.
+
+
+## Tritium interface
+
+The native layout has interaction checks for activity switching, sidebar collapse,
+property editing and undo. The browser suite exercises Inspector text editing,
+toolbar undo, rectangle selection and right-drag zoom alongside the existing
+trajectory, rendering, color-management and agent tests. All 17 browser checks
+passed; the native suite passed 162 unit and 69 shell compatibility checks.
+The native offscreen interface snapshot covers the panels and controls, while
+browser screenshots include the live wgpu viewport. This does not make the
+offscreen interface snapshot a native-window rendering test.

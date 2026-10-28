@@ -37,7 +37,8 @@ test('wgpu structure display, mouse controls, commands, undo, and embedded scene
   let state=await page.evaluate(()=>window.cuemol.status());
   expect(state.scene.objects[0].atoms).toBe(3);
   expect(state.scene.objects[0].renderers[0].type).toBe('ballstick');
-  const png=PNG.sync.read(await page.screenshot({clip:{x:80,y:80,width:700,height:650}}));
+  const viewport=await page.evaluate(()=>window.cuemol.status().ui.rects.Viewport);
+  const png=PNG.sync.read(await page.screenshot({clip:{x:viewport[0],y:viewport[1],width:viewport[2],height:viewport[3]}}));
   let colored=0;for(let i=0;i<png.data.length;i+=4){if(Math.max(...png.data.subarray(i,i+3))-Math.min(...png.data.subarray(i,i+3))>40)colored++;}
   expect(colored).toBeGreaterThan(500);
   const object=state.scene.objects[0].id;
@@ -55,7 +56,7 @@ test('wgpu structure display, mouse controls, commands, undo, and embedded scene
   state=await call(page,'get_screenshot',{width:32,height:32});
   const screenshot=JSON.parse(state.message);expect(Buffer.from(screenshot._image,'base64').subarray(1,4).toString()).toBe('PNG');
   await page.screenshot({path:testInfo.outputPath('viewer.png')});
-  const download=page.waitForEvent('download');await page.mouse.click(173,15);const saved=await download;
+  const download=page.waitForEvent('download');const button=await page.evaluate(()=>window.cuemol.status().ui.rects['Save Scene']);await page.mouse.click(button[0]+button[2]/2,button[1]+button[3]/2);const saved=await download;
   const stream=await saved.createReadStream();const chunks=[];for await(const chunk of stream)chunks.push(chunk);
   await load(page,'roundtrip.qsc',Buffer.concat(chunks));
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Loaded roundtrip.qsc');
@@ -371,4 +372,39 @@ test('browser agent seeks an indexed trajectory and undo restores the previous c
   expect((await page.evaluate(()=>window.cuemol.status())).agent.messages.some(m=>m.role==='Error')).toBe(false);
   expect((await call(page,'undo')).frame).toBe(0);
   expect((await call(page,'redo')).frame).toBe(4);
+});
+
+test('Tritium Inspector edits the selected object and toolbar undo restores it',async({page},testInfo)=>{
+  await ready(page);await load(page,'inspector.pdb',Buffer.from(structure));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  const object=(await page.evaluate(()=>window.cuemol.status())).scene.objects[0];
+  const clickRect=async key=>{const r=await page.evaluate(key=>window.cuemol.status().ui.rects[key],key);await page.mouse.click(r[0]+r[2]/2,r[1]+r[3]/2);};
+  await clickRect(`object:${object.id}`);
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().ui.inspector.name?.length)).toBe(4);
+  const field=await page.evaluate(()=>window.cuemol.status().ui.inspector.name);
+  await page.mouse.click(field[0]+field[2]/2,field[1]+field[3]/2);
+  await page.keyboard.press('ControlOrMeta+a');await page.keyboard.type('Inspector edit');
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  await page.keyboard.press('Tab');
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects[0].name)).toBe('Inspector edit');
+  await clickRect('Undo');
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects[0].name)).toBe(object.name);
+  await page.screenshot({path:testInfo.outputPath('tritium-inspector.png')});
+});
+
+test('Tritium viewport selection and right-drag zoom match the native controls',async({page})=>{
+  await ready(page);await load(page,'selection.pdb',Buffer.from(structure));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  const rect=await page.evaluate(()=>window.cuemol.status().ui.rects.Viewport);
+  const selection=await page.evaluate(()=>window.cuemol.status().ui.rects['Rect Select']);
+  await page.mouse.click(selection[0]+selection[2]/2,selection[1]+selection[3]/2);
+  await page.mouse.move(rect[0]+80,rect[1]+20);await page.mouse.down();
+  await page.mouse.move(rect[0]+rect[2]-20,rect[1]+rect[3]-20,{steps:12});await page.mouse.up();
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().selection)).toMatch(/^aid /);
+  await call(page,'undo');
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().selection)).toBe('');
+  const before=await page.evaluate(()=>window.cuemol.status().view.zoom);
+  await page.mouse.move(rect[0]+rect[2]/2,rect[1]+rect[3]/2);await page.mouse.down({button:'right'});
+  await page.mouse.move(rect[0]+rect[2]/2,rect[1]+rect[3]/2+80,{steps:8});await page.mouse.up({button:'right'});
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().view.zoom)).not.toBe(before);
 });

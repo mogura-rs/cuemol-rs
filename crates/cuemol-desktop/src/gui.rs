@@ -1,3 +1,5 @@
+#[path = "tritium.rs"]
+mod tritium;
 #[path = "updates.rs"]
 mod updates;
 
@@ -123,7 +125,7 @@ const DENSITY_RENDERER_TYPES: &[&str] = &["contour", "isosurf", "gpu_mapmesh", "
 const SURFACE_RENDERER_TYPES: &[&str] = &["molsurf"];
 const LIGHTWEIGHT_RENDERER_TYPES: &[&str] = &["lwrend"];
 const LEGACY_MENU_SURFACES: &[&str] = &[
-    "About CueMol2",
+    "About CueMol3",
     "Preferences...",
     "New Window",
     "New Tab",
@@ -1381,8 +1383,11 @@ struct GuiApplication {
     show_hbonds: bool,
     /// Light vs dark UI theme (CueMol2's native XUL look is light by default).
     light_theme: bool,
+    activity: Option<cuemol_ui::shell::Activity>,
+    inspector: cuemol_ui::Inspector,
     /// Force every left-dock accordion section open (an "expand all panels" aid, also
     /// used to snapshot the bodies inside the REAL narrow dock for layout review).
+    #[cfg(test)]
     force_open_all_panels: bool,
     /// Rainbow coloring hue endpoints (degrees) edited in the Coloring panel; the
     /// classic N→C blue→red gradient by default (start 240° = blue, end 0° = red).
@@ -1435,9 +1440,7 @@ struct GuiApplication {
     pov_preview_texture: Option<AnimationPreviewTexture>,
     pov_preview_zoom: u32,
     pov_close_confirmation: bool,
-    ribbon_tab: RibbonTab,
     interaction_mode: InteractionMode,
-    measure_mode: MeasureMode,
     show_toolbar: bool,
     show_workspace: bool,
     left_panel_visible: [bool; LeftPanel::ALL.len()],
@@ -1447,7 +1450,6 @@ struct GuiApplication {
     left_panel_drag_start_heights: [Option<f32>; LeftPanel::ALL.len()],
     left_panel_width: f32,
     reset_left_panel_layout: bool,
-    show_inspector: bool,
     object_properties_draft: Option<NativeObjectProperties>,
     renderer_properties_draft: Option<NativeRendererProperties>,
     renderer_group_rename_draft: Option<NativeRendererGroupRenameDraft>,
@@ -2314,6 +2316,8 @@ enum CenterMark {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BottomTab {
+    Console,
+    Animation,
     Output,
     Sequence,
     Trajectory,
@@ -2322,6 +2326,8 @@ enum BottomTab {
 impl BottomTab {
     fn config_name(self) -> &'static str {
         match self {
+            Self::Console => "console",
+            Self::Animation => "animation",
             Self::Output => "output",
             Self::Sequence => "sequence",
             Self::Trajectory => "trajectory",
@@ -2330,6 +2336,8 @@ impl BottomTab {
 
     fn from_config(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
+            "console" | "" => Self::Console,
+            "animation" => Self::Animation,
             "sequence" => Self::Sequence,
             "trajectory" => Self::Trajectory,
             _ => Self::Output,
@@ -2649,14 +2657,6 @@ fn native_renderer_supports_coloring(renderer_type: &str) -> bool {
     )
 }
 
-/// Ribbon toolbar tabs mirroring CueMol2's base ribbon plus `anim-ribbon.xul`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RibbonTab {
-    Home,
-    Measure,
-    Animation,
-}
-
 /// Home-tab interaction mode radio group (CueMol2 `navi-toolribbon.js`):
 /// Rotate (default) vs rectangle select.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2756,12 +2756,6 @@ struct NativeFileDialogSpec {
 }
 
 /// Measure-tab radio group (CueMol2 `measure-toolribbon.js`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MeasureMode {
-    Distance,
-    Angle,
-    Torsion,
-}
 
 /// Pending viewport right-click context menu (CueMol2 `navi-ctxtmenu-atom`).
 #[derive(Debug, Clone, Copy)]
@@ -4875,14 +4869,14 @@ impl GuiApplication {
         let left_panel_width = state
             .config_value("left_panel:width")
             .parse::<f32>()
-            .unwrap_or(250.0)
-            .clamp(220.0, 360.0);
+            .unwrap_or(260.0)
+            .clamp(180.0, 620.0);
         let bottom_tab = BottomTab::from_config(&state.config_value("bottom_panel:tab"));
         let bottom_panel_height = state
             .config_value("bottom_panel:height")
             .parse::<f32>()
-            .unwrap_or(150.0)
-            .clamp(80.0, 600.0);
+            .unwrap_or(200.0)
+            .clamp(100.0, 600.0);
         let show_bottom_panel = config_bool(&state, "bottom_panel:visible", true);
         let sequence_name_width = state
             .config_value("sequence_panel:name_width")
@@ -5040,7 +5034,10 @@ impl GuiApplication {
             mesh_import_path: String::new(),
             show_labels: false,
             show_hbonds: false,
-            light_theme: true,
+            light_theme: false,
+            activity: Some(cuemol_ui::shell::Activity::Explorer),
+            inspector: Default::default(),
+            #[cfg(test)]
             force_open_all_panels: false,
             coloring_start_hue: 240.0,
             coloring_end_hue: 0.0,
@@ -5091,9 +5088,7 @@ impl GuiApplication {
             pov_preview_texture: None,
             pov_preview_zoom: 100,
             pov_close_confirmation: false,
-            ribbon_tab: RibbonTab::Home,
             interaction_mode: InteractionMode::Rotate,
-            measure_mode: MeasureMode::Distance,
             show_toolbar,
             show_workspace: true,
             left_panel_visible,
@@ -5104,7 +5099,6 @@ impl GuiApplication {
             left_panel_width,
             reset_left_panel_layout: false,
             // CueMol2 opens properties on demand (no docked inspector); start closed.
-            show_inspector: false,
             object_properties_draft: None,
             renderer_properties_draft: None,
             renderer_group_rename_draft: None,
@@ -5452,12 +5446,8 @@ impl GuiApplication {
         self.poll_pov_render();
         self.poll_native_render();
         self.pixels_per_point = ctx.pixels_per_point();
-        // UI theme (View menu): CueMol2's native XUL look is light by default.
-        ctx.set_visuals(if self.light_theme {
-            egui::Visuals::light()
-        } else {
-            egui::Visuals::dark()
-        });
+        cuemol_ui::shell::theme(ctx, self.light_theme);
+        self.agent.docked = true;
         // Animation playback: drive the camera from the timeline objects (or a simple
         // spin when the list is empty). Keep requesting repaints so it animates.
         if self.animation_playing {
@@ -5481,30 +5471,7 @@ impl GuiApplication {
             }
             self.rebuild_snapshot();
         }
-        // CueMol2 window order (uxp_gui `cuemol2.xul`):
-        // menu bar (top) -> ribbon (top) -> [ left dock | tabbed view | bottom dock ]
-        // -> status bar (very bottom). There is no right dock; properties open modally.
-        self.menu_bar(ctx, camera);
-        if self.show_toolbar {
-            self.ribbon_bar(ctx, camera);
-        }
-        // Register the status bar before the bottom dock so it sits at the very bottom.
-        self.status_bar(ctx);
-        if self.show_bottom_panel {
-            self.bottom_panel(ctx, camera);
-        } else {
-            self.collapsed_bottom_panel(ctx);
-        }
-        if self.show_workspace && self.left_panel_visible.iter().any(|visible| *visible) {
-            self.left_panel(ctx, camera);
-        }
-        // Scene-tab strip registered after the side/bottom docks, so it is confined to
-        // the central content column (above the 3D view), like CueMol2's `tabmolview`.
-        self.scene_tab_strip(ctx, camera);
-        self.central_view(ctx, camera);
-        if self.show_inspector {
-            self.properties_window(ctx, camera);
-        }
+        self.tritium_layout(ctx, camera);
         self.updates.show(ctx);
         self.dialogs(ctx, camera);
         self.keyboard_shortcuts(ctx, camera);
@@ -5927,26 +5894,38 @@ impl GuiApplication {
 
     /// One-line status bar pinned to the very bottom (CueMol2 `<statusbar>`).
     fn status_bar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(&self.status);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(format!(
-                        "{} atoms / {} bonds",
-                        self.state
-                            .active_object_summaries()
-                            .iter()
-                            .map(|o| o.atom_count)
-                            .sum::<usize>(),
-                        self.state
-                            .active_object_summaries()
-                            .iter()
-                            .map(|o| o.bond_count)
-                            .sum::<usize>()
-                    ));
+        egui::TopBottomPanel::bottom("status_bar")
+            .exact_height(24.)
+            .frame(
+                egui::Frame::NONE
+                    .fill(if self.light_theme {
+                        egui::Color32::from_rgb(41, 121, 181)
+                    } else {
+                        egui::Color32::from_rgb(26, 58, 92)
+                    })
+                    .inner_margin(egui::Margin::symmetric(8, 4)),
+            )
+            .show(ctx, |ui| {
+                ui.visuals_mut().override_text_color = Some(egui::Color32::from_gray(230));
+                ui.horizontal(|ui| {
+                    ui.label(&self.status);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(format!(
+                            "{} atoms / {} bonds",
+                            self.state
+                                .active_object_summaries()
+                                .iter()
+                                .map(|o| o.atom_count)
+                                .sum::<usize>(),
+                            self.state
+                                .active_object_summaries()
+                                .iter()
+                                .map(|o| o.bond_count)
+                                .sum::<usize>()
+                        ));
+                    });
                 });
             });
-        });
     }
 
     fn menu_bar(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
@@ -6244,11 +6223,11 @@ impl GuiApplication {
                         }
                     });
                     ui.menu_button("Windows", |ui| {
-                        let _ = ui.radio(true, "CueMol2");
+                        let _ = ui.radio(true, "CueMol3");
                     });
                 });
                 ui.menu_button("Help", |ui| {
-                    if ui.button("About CueMol2").clicked() {
+                    if ui.button("About CueMol3").clicked() {
                         self.show_about = true;
                         ui.close();
                     }
@@ -6284,88 +6263,6 @@ impl GuiApplication {
 
     /// Ribbon toolbar (CueMol2 base ribbon + `anim-ribbon.xul`): Home, Measure,
     /// and Animation tabs sitting directly below the menu bar.
-    fn ribbon_bar(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
-        egui::TopBottomPanel::top("ribbon").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.ribbon_tab, RibbonTab::Home, "Home");
-                ui.selectable_value(&mut self.ribbon_tab, RibbonTab::Measure, "Measure");
-                ui.selectable_value(&mut self.ribbon_tab, RibbonTab::Animation, "Animation");
-            });
-            ui.separator();
-            match self.ribbon_tab {
-                RibbonTab::Home => self.ribbon_home(ui, camera),
-                RibbonTab::Measure => self.ribbon_measure(ui),
-                RibbonTab::Animation => self.ribbon_animation(ui, camera),
-            }
-        });
-    }
-
-    fn ribbon_home(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
-        ui.horizontal(|ui| {
-            if ui.button("New Tab").on_hover_text("New scene").clicked() {
-                self.open_new_tab_dialog();
-            }
-            if ui.button("Open").on_hover_text("Open file").clicked() {
-                self.choose_open_file(camera);
-            }
-            if ui.button("Save As").on_hover_text("Save file as").clicked() {
-                self.choose_save_selected_object();
-            }
-            ui.separator();
-            if ui.button("Open Scene").clicked() {
-                self.choose_open_scene(camera);
-            }
-            if ui.button("Reload").on_hover_text("Reload scene").clicked() {
-                self.reload_current_path(camera);
-            }
-            if ui.button("Save Scene").clicked() {
-                self.save_current_scene(camera);
-            }
-            ui.separator();
-            if ui.button("Get PDB").clicked() {
-                self.show_get_pdb = true;
-            }
-            ui.separator();
-            if ui.button("Undo").clicked() {
-                self.undo(camera);
-            }
-            if ui.button("Redo").clicked() {
-                self.redo(camera);
-            }
-            ui.separator();
-            // Interaction-mode radio (CueMol2 Home tab: Rotate / Rect select).
-            ui.selectable_value(
-                &mut self.interaction_mode,
-                InteractionMode::Rotate,
-                "Rotate",
-            );
-            ui.selectable_value(
-                &mut self.interaction_mode,
-                InteractionMode::RectSelect,
-                "Rect select",
-            );
-            ui.separator();
-            if ui.button("Fit").clicked() {
-                camera.fit_snapshot(&self.snapshot);
-            }
-        });
-    }
-
-    fn ribbon_measure(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label("Measure:");
-            ui.selectable_value(&mut self.measure_mode, MeasureMode::Distance, "Distance");
-            ui.selectable_value(&mut self.measure_mode, MeasureMode::Angle, "Angle");
-            ui.selectable_value(&mut self.measure_mode, MeasureMode::Torsion, "Torsion");
-            ui.separator();
-            // Measure the current selection: 2 atoms → distance, 3 → angle, 4 → torsion
-            // (CueMol2 AtomIntr distance/angle/torsion, computed from the picked atoms).
-            match self.measure_selection() {
-                Some(result) => ui.strong(result),
-                None => ui.weak("select 2 / 3 / 4 atoms to measure distance / angle / torsion"),
-            };
-        });
-    }
 
     /// Distance / angle / torsion of the currently selected atoms (in atom-index order),
     /// the CueMol2 AtomIntr measurement computed over a 2 / 3 / 4-atom selection.
@@ -6402,7 +6299,7 @@ impl GuiApplication {
         }
     }
 
-    fn ribbon_animation(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
+    fn animation_playback_controls(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
         let total = self.animation_duration() as f32;
         ui.horizontal(|ui| {
             let play_label = if self.animation_playing {
@@ -6472,6 +6369,7 @@ impl GuiApplication {
     /// Left dock: a vertical accordion of CueMol2's eight side panels
     /// (`cuemol2-panels.js` / `sidepanelholder`). Each is an independently
     /// collapsible `CollapsingHeader`.
+    #[cfg(test)]
     fn left_panel(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         let response = egui::SidePanel::left("left_dock")
             .resizable(true)
@@ -6603,6 +6501,7 @@ impl GuiApplication {
         }
     }
 
+    #[cfg(test)]
     fn move_left_panel(&mut self, source: LeftPanel, target: LeftPanel, after: bool) {
         if source == target {
             return;
@@ -6630,6 +6529,7 @@ impl GuiApplication {
         self.set_status(format!("Moved {} panel", source.title()));
     }
 
+    #[cfg(test)]
     fn left_panel_resize_handle(&mut self, ui: &mut egui::Ui, panel: LeftPanel, body_height: f32) {
         let index = panel.index();
         let (rect, response) =
@@ -15147,599 +15047,7 @@ impl GuiApplication {
         }
     }
 
-    /// Properties — CueMol2 opens object/renderer properties as a modal dialog
-    /// (no right dock). Interim floating window; promoted to per-renderer modals in M3.
-    fn properties_window(&mut self, ctx: &egui::Context, camera: &CameraController) {
-        let mut open = self.show_inspector;
-        egui::Window::new("Properties")
-            .open(&mut open)
-            .resizable(true)
-            .default_width(320.0)
-            .show(ctx, |ui| {
-                ui.heading("Properties");
-                ui.separator();
-                ui.label("Selection");
-                let response = ui.add_sized(
-                    [ui.available_width(), 72.0],
-                    egui::TextEdit::multiline(&mut self.selection_text)
-                        .hint_text("name CA")
-                        .font(egui::TextStyle::Monospace),
-                );
-                if response.changed() {
-                    self.rebuild_snapshot();
-                }
-                let selected_count = self
-                    .snapshot
-                    .atoms
-                    .iter()
-                    .filter(|atom| atom.selected)
-                    .count();
-                ui.label(format!("Selected atoms: {selected_count}"));
-                if ui.button("Clear Selection").clicked() {
-                    self.selection_text.clear();
-                    self.rebuild_snapshot();
-                }
-
-                ui.separator();
-                ui.label("Scene");
-                if let Some(scene) = self.state.active_scene_summary() {
-                    ui.monospace(format!("uid: {}", scene.uid.get()));
-                    ui.label(format!("objects: {}", scene.object_count));
-                    ui.label(format!("cameras: {}", scene.camera_count));
-                }
-                if let Some(object_uid) = self.selected_object {
-                    ui.separator();
-                    ui.label("Object");
-                    if let Some(object) = self
-                        .state
-                        .active_object_summaries()
-                        .into_iter()
-                        .find(|object| object.uid == object_uid)
-                    {
-                        ui.monospace(format!("uid: {}", object.uid.get()));
-                        ui.label(format!("name: {}", object.name));
-                        ui.label(format!("atoms: {}", object.atom_count));
-                        ui.label(format!("residues: {}", object.residue_count));
-                        ui.label(format!("bonds: {}", object.bond_count));
-                        if ui.button("Add Renderer").clicked() {
-                            self.open_renderer_dialog(object.uid);
-                        }
-                    }
-                }
-                if let Some(renderer_uid) = self.selected_renderer {
-                    ui.separator();
-                    ui.label("Renderer");
-                    for object in self.state.active_object_summaries() {
-                        if let Some(renderer) = self
-                            .state
-                            .renderer_summaries(object.uid)
-                            .into_iter()
-                            .find(|renderer| renderer.uid == renderer_uid)
-                        {
-                            ui.monospace(format!("uid: {}", renderer.uid.get()));
-                            ui.label(format!("name: {}", renderer.name));
-                            ui.label(format!("type: {}", renderer.renderer_type));
-                            if let Some(group) = renderer.group.as_deref() {
-                                ui.label(format!("group: {group}"));
-                            }
-                            if let Some(style) = renderer.style.as_deref() {
-                                ui.label(format!("style: {style}"));
-                            }
-                            let mut visible = renderer.visible;
-                            if ui.checkbox(&mut visible, "Visible").changed() {
-                                self.set_renderer_visibility(object.uid, renderer.uid, visible);
-                            }
-                            if matches!(
-                                renderer.renderer_type.as_str(),
-                                "*namelabel" | "name_label"
-                            ) {
-                                let mut max_labels = self
-                                    .state
-                                    .renderer_property(object.uid, renderer.uid, "maxlabel")
-                                    .and_then(|value| value.parse::<i32>().ok())
-                                    .unwrap_or(50);
-                                ui.horizontal(|ui| {
-                                    ui.label("Maximum labels");
-                                    if ui
-                                        .add(
-                                            egui::DragValue::new(&mut max_labels)
-                                                .speed(1)
-                                                .range(0..=1_000_000),
-                                        )
-                                        .changed()
-                                    {
-                                        let _ = self.state.set_renderer_property(
-                                            object.uid,
-                                            renderer.uid,
-                                            "maxlabel",
-                                            max_labels.to_string(),
-                                        );
-                                    }
-                                });
-                                for (property, label, default, speed, range) in [
-                                    ("dispx", "X displacement", 0.0_f32, 0.5, -100.0..=100.0),
-                                    ("dispy", "Y displacement", 0.0, 0.5, -100.0..=100.0),
-                                    ("font_size", "Font size", 12.0, 0.5, 1.0..=512.0),
-                                ] {
-                                    let mut value = self
-                                        .state
-                                        .renderer_property(object.uid, renderer.uid, property)
-                                        .and_then(|value| value.parse::<f32>().ok())
-                                        .unwrap_or(default);
-                                    ui.horizontal(|ui| {
-                                        ui.label(label);
-                                        if ui
-                                            .add(
-                                                egui::DragValue::new(&mut value)
-                                                    .speed(speed)
-                                                    .range(range),
-                                            )
-                                            .changed()
-                                        {
-                                            let _ = self.state.set_renderer_property(
-                                                object.uid,
-                                                renderer.uid,
-                                                property,
-                                                format!("{value:.3}"),
-                                            );
-                                            self.rebuild_snapshot();
-                                        }
-                                    });
-                                }
-                                for (property, label, default) in [
-                                    ("color", "Color", "#ffff00"),
-                                    ("font_name", "Font family", "sans-serif"),
-                                    ("font_style", "Font style", "normal"),
-                                    ("font_weight", "Font weight", "normal"),
-                                ] {
-                                    let mut value = self
-                                        .state
-                                        .renderer_property(object.uid, renderer.uid, property)
-                                        .unwrap_or_else(|| default.to_string());
-                                    ui.horizontal(|ui| {
-                                        ui.label(label);
-                                        if ui.text_edit_singleline(&mut value).changed() {
-                                            let _ = self.state.set_renderer_property(
-                                                object.uid,
-                                                renderer.uid,
-                                                property,
-                                                value,
-                                            );
-                                            self.rebuild_snapshot();
-                                        }
-                                    });
-                                }
-                            } else if matches!(
-                                renderer.renderer_type.as_str(),
-                                "*selection" | "selection"
-                            ) {
-                                let mut mode = self
-                                    .state
-                                    .renderer_property(object.uid, renderer.uid, "mode")
-                                    .unwrap_or_else(|| "stick".to_string());
-                                let previous_mode = mode.clone();
-                                egui::ComboBox::from_id_salt(("selection-mode", renderer.uid))
-                                    .selected_text(&mode)
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(
-                                            &mut mode,
-                                            "stick".to_string(),
-                                            "Stick",
-                                        );
-                                        ui.selectable_value(
-                                            &mut mode,
-                                            "point".to_string(),
-                                            "Point",
-                                        );
-                                    });
-                                if mode != previous_mode {
-                                    let _ = self.state.set_renderer_property(
-                                        object.uid,
-                                        renderer.uid,
-                                        "mode",
-                                        mode,
-                                    );
-                                    self.rebuild_snapshot();
-                                }
-                                for (property, label, default) in [
-                                    ("linew", "Line width", 3.0_f32),
-                                    ("dispx", "X displacement", 3.0),
-                                    ("dispy", "Y displacement", 3.0),
-                                ] {
-                                    let mut value = self
-                                        .state
-                                        .renderer_property(object.uid, renderer.uid, property)
-                                        .and_then(|value| value.parse::<f32>().ok())
-                                        .unwrap_or(default);
-                                    ui.horizontal(|ui| {
-                                        ui.label(label);
-                                        if ui
-                                            .add(egui::DragValue::new(&mut value).speed(0.2))
-                                            .changed()
-                                        {
-                                            let _ = self.state.set_renderer_property(
-                                                object.uid,
-                                                renderer.uid,
-                                                property,
-                                                format!("{value:.3}"),
-                                            );
-                                            self.rebuild_snapshot();
-                                        }
-                                    });
-                                }
-                                let mut color = self
-                                    .state
-                                    .renderer_property(object.uid, renderer.uid, "color")
-                                    .unwrap_or_else(|| "rgba(0,255,255,0.5)".to_string());
-                                ui.horizontal(|ui| {
-                                    ui.label("Color");
-                                    if ui.text_edit_singleline(&mut color).changed() {
-                                        let _ = self.state.set_renderer_property(
-                                            object.uid,
-                                            renderer.uid,
-                                            "color",
-                                            color,
-                                        );
-                                        self.rebuild_snapshot();
-                                    }
-                                });
-                            } else if renderer.renderer_type == "disorder" {
-                                ui.label("Disorder");
-                                let mut target = self
-                                    .state
-                                    .renderer_property(object.uid, renderer.uid, "target")
-                                    .unwrap_or_default();
-                                let previous_target = target.clone();
-                                egui::ComboBox::from_id_salt(("disorder-target", renderer.uid))
-                                    .selected_text(if target.is_empty() {
-                                        "(none)"
-                                    } else {
-                                        &target
-                                    })
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(&mut target, String::new(), "(none)");
-                                        for candidate in self
-                                            .state
-                                            .renderer_summaries(object.uid)
-                                            .into_iter()
-                                            .filter(|candidate| {
-                                                matches!(
-                                                    candidate.renderer_type.as_str(),
-                                                    "tube" | "ribbon" | "cartoon" | "nucl"
-                                                )
-                                            })
-                                        {
-                                            ui.selectable_value(
-                                                &mut target,
-                                                candidate.name.clone(),
-                                                candidate.name,
-                                            );
-                                        }
-                                    });
-                                if target != previous_target {
-                                    let result = if target.is_empty() {
-                                        self.state.reset_renderer_property(
-                                            object.uid,
-                                            renderer.uid,
-                                            "target",
-                                        )
-                                    } else {
-                                        self.state.set_renderer_property(
-                                            object.uid,
-                                            renderer.uid,
-                                            "target",
-                                            target,
-                                        )
-                                    };
-                                    if result.is_ok() {
-                                        self.rebuild_snapshot();
-                                    }
-                                }
-                                let mut detail = self
-                                    .state
-                                    .renderer_property(object.uid, renderer.uid, "detail")
-                                    .and_then(|value| value.parse::<i32>().ok())
-                                    .unwrap_or(5);
-                                ui.horizontal(|ui| {
-                                    ui.label("Detail");
-                                    if ui
-                                        .add(
-                                            egui::DragValue::new(&mut detail)
-                                                .speed(1)
-                                                .range(2..=20),
-                                        )
-                                        .changed()
-                                    {
-                                        let result = if detail == 5 {
-                                            self.state.reset_renderer_property(
-                                                object.uid,
-                                                renderer.uid,
-                                                "detail",
-                                            )
-                                        } else {
-                                            self.state.set_renderer_property(
-                                                object.uid,
-                                                renderer.uid,
-                                                "detail",
-                                                detail.to_string(),
-                                            )
-                                        };
-                                        if result.is_ok() {
-                                            self.rebuild_snapshot();
-                                        }
-                                    }
-                                });
-                                for (property, label, default, minimum, maximum) in [
-                                    ("width", "Dot size", 0.3_f32, 0.0, 3.0),
-                                    ("dotsep", "Dot separation", 1.0, 0.0, 3.0),
-                                    ("loopsize", "Loop size", 2.0, 0.0, 10.0),
-                                    ("loopsize2", "Loop size 2", -1.0, -1.0, 10.0),
-                                ] {
-                                    let mut value = self
-                                        .state
-                                        .renderer_property(object.uid, renderer.uid, property)
-                                        .and_then(|value| value.parse::<f32>().ok())
-                                        .unwrap_or(default);
-                                    ui.horizontal(|ui| {
-                                        ui.label(label);
-                                        if ui
-                                            .add(
-                                                egui::DragValue::new(&mut value)
-                                                    .speed(0.1)
-                                                    .range(minimum..=maximum),
-                                            )
-                                            .changed()
-                                        {
-                                            let result = if (value - default).abs() < f32::EPSILON {
-                                                self.state.reset_renderer_property(
-                                                    object.uid,
-                                                    renderer.uid,
-                                                    property,
-                                                )
-                                            } else {
-                                                self.state.set_renderer_property(
-                                                    object.uid,
-                                                    renderer.uid,
-                                                    property,
-                                                    format!("{value:.3}"),
-                                                )
-                                            };
-                                            if result.is_ok() {
-                                                self.rebuild_snapshot();
-                                            }
-                                        }
-                                    });
-                                }
-                                let mut color = self
-                                    .state
-                                    .renderer_property(object.uid, renderer.uid, "defaultcolor")
-                                    .unwrap_or_else(|| "#ffffff".to_string());
-                                ui.horizontal(|ui| {
-                                    ui.label("Color");
-                                    if ui.text_edit_singleline(&mut color).changed()
-                                        && self
-                                            .state
-                                            .set_renderer_property(
-                                                object.uid,
-                                                renderer.uid,
-                                                "defaultcolor",
-                                                color,
-                                            )
-                                            .is_ok()
-                                    {
-                                        self.rebuild_snapshot();
-                                    }
-                                });
-                            } else if renderer.renderer_type == "cpk" {
-                                ui.label("Atom radii");
-                                for (property, label, default) in [
-                                    ("vdwr_C", "Carbon", 1.7_f32),
-                                    ("vdwr_N", "Nitrogen", 1.55),
-                                    ("vdwr_O", "Oxygen", 1.52),
-                                    ("vdwr_S", "Sulfur", 1.8),
-                                    ("vdwr_P", "Phosphorus", 1.8),
-                                    ("vdwr_H", "Hydrogen", 1.2),
-                                    ("vdwr_X", "Others", 1.7),
-                                ] {
-                                    let mut value = self
-                                        .state
-                                        .renderer_property(object.uid, renderer.uid, property)
-                                        .and_then(|value| value.parse::<f32>().ok())
-                                        .unwrap_or(default);
-                                    ui.horizontal(|ui| {
-                                        ui.label(label);
-                                        if ui
-                                            .add(
-                                                egui::DragValue::new(&mut value)
-                                                    .speed(0.01)
-                                                    .range(0.0..=3.0),
-                                            )
-                                            .changed()
-                                        {
-                                            let result = if (value - default).abs() < f32::EPSILON {
-                                                self.state.reset_renderer_property(
-                                                    object.uid,
-                                                    renderer.uid,
-                                                    property,
-                                                )
-                                            } else {
-                                                self.state.set_renderer_property(
-                                                    object.uid,
-                                                    renderer.uid,
-                                                    property,
-                                                    format!("{value:.3}"),
-                                                )
-                                            };
-                                            if result.is_ok() {
-                                                self.rebuild_snapshot();
-                                            }
-                                        }
-                                    });
-                                }
-                                let mut detail = self
-                                    .state
-                                    .renderer_property(object.uid, renderer.uid, "detail")
-                                    .and_then(|value| value.parse::<i32>().ok())
-                                    .unwrap_or(10);
-                                ui.horizontal(|ui| {
-                                    ui.label("Detail");
-                                    if ui
-                                        .add(
-                                            egui::DragValue::new(&mut detail)
-                                                .speed(1)
-                                                .range(2..=20),
-                                        )
-                                        .changed()
-                                    {
-                                        let result = if detail == 10 {
-                                            self.state.reset_renderer_property(
-                                                object.uid,
-                                                renderer.uid,
-                                                "detail",
-                                            )
-                                        } else {
-                                            self.state.set_renderer_property(
-                                                object.uid,
-                                                renderer.uid,
-                                                "detail",
-                                                detail.to_string(),
-                                            )
-                                        };
-                                        if result.is_ok() {
-                                            self.rebuild_snapshot();
-                                        }
-                                    }
-                                });
-                                let mut render_mode = self
-                                    .state
-                                    .renderer_property(object.uid, renderer.uid, "glrender_mode")
-                                    .unwrap_or_else(|| "default".to_string());
-                                let previous_mode = render_mode.clone();
-                                egui::ComboBox::from_id_salt(("cpk-render-mode", renderer.uid))
-                                    .selected_text(&render_mode)
-                                    .show_ui(ui, |ui| {
-                                        for (value, caption) in [
-                                            ("default", "Default"),
-                                            ("shader", "Shader"),
-                                            ("vbo", "VBO"),
-                                            ("glu", "GLU"),
-                                        ] {
-                                            ui.selectable_value(
-                                                &mut render_mode,
-                                                value.to_string(),
-                                                caption,
-                                            );
-                                        }
-                                    });
-                                if render_mode != previous_mode {
-                                    let result = if render_mode == "default" {
-                                        self.state.reset_renderer_property(
-                                            object.uid,
-                                            renderer.uid,
-                                            "glrender_mode",
-                                        )
-                                    } else {
-                                        self.state.set_renderer_property(
-                                            object.uid,
-                                            renderer.uid,
-                                            "glrender_mode",
-                                            render_mode,
-                                        )
-                                    };
-                                    if result.is_ok() {
-                                        self.rebuild_snapshot();
-                                    }
-                                }
-                            } else {
-                                // Editable geometry overrides (CueMol2 renderer
-                                // property dialog). The inline attr wins over style.
-                                let mut bondw = self
-                                    .state
-                                    .renderer_property(object.uid, renderer.uid, "bondw")
-                                    .and_then(|value| value.parse::<f32>().ok())
-                                    .unwrap_or(0.18);
-                                ui.horizontal(|ui| {
-                                    ui.label("Bond radius");
-                                    if ui
-                                        .add(egui::DragValue::new(&mut bondw).speed(0.01))
-                                        .changed()
-                                    {
-                                        bondw = bondw.clamp(0.01, 2.0);
-                                        let _ = self.state.set_renderer_property(
-                                            object.uid,
-                                            renderer.uid,
-                                            "bondw",
-                                            format!("{bondw:.3}"),
-                                        );
-                                        self.rebuild_snapshot();
-                                    }
-                                });
-                                let mut sphr = self
-                                    .state
-                                    .renderer_property(object.uid, renderer.uid, "sphr")
-                                    .and_then(|value| value.parse::<f32>().ok())
-                                    .unwrap_or(0.30);
-                                ui.horizontal(|ui| {
-                                    ui.label("Sphere radius");
-                                    if ui
-                                        .add(egui::DragValue::new(&mut sphr).speed(0.01))
-                                        .changed()
-                                    {
-                                        sphr = sphr.clamp(0.05, 3.0);
-                                        let _ = self.state.set_renderer_property(
-                                            object.uid,
-                                            renderer.uid,
-                                            "sphr",
-                                            format!("{sphr:.3}"),
-                                        );
-                                        self.rebuild_snapshot();
-                                    }
-                                });
-                            }
-                            if ui.button("Delete Renderer").clicked() {
-                                self.delete_renderer(object.uid, renderer.uid);
-                            }
-                            break;
-                        }
-                    }
-                }
-
-                ui.separator();
-                ui.label("Scene Save");
-                ui.add_sized(
-                    [ui.available_width(), 22.0],
-                    egui::TextEdit::singleline(&mut self.save_path),
-                );
-                if ui.button("Save QSC").clicked() {
-                    let path = PathBuf::from(self.save_path.trim());
-                    self.save_current_scene_to_path(camera, &path);
-                }
-                ui.separator();
-                ui.label("Object Save");
-                ui.add_sized(
-                    [ui.available_width(), 22.0],
-                    egui::TextEdit::singleline(&mut self.object_save_path),
-                );
-                if ui.button("Save Object").clicked() {
-                    self.save_selected_object();
-                }
-                ui.separator();
-                ui.label("View / Export");
-                ui.add_sized(
-                    [ui.available_width(), 22.0],
-                    egui::TextEdit::singleline(&mut self.view_save_path),
-                );
-                ui.add_sized(
-                    [ui.available_width(), 22.0],
-                    egui::TextEdit::singleline(&mut self.export_path),
-                );
-                if ui.button("Export POV").clicked() {
-                    self.export_current_scene(camera);
-                }
-            });
-        self.show_inspector = open;
-    }
-
+    #[cfg(test)]
     fn bottom_panel(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         let mut collapse = false;
         let response = egui::TopBottomPanel::bottom("bottom_panel")
@@ -15759,7 +15067,8 @@ impl GuiApplication {
                     content_size,
                     egui::Layout::top_down(egui::Align::LEFT),
                     |ui| match self.bottom_tab {
-                        BottomTab::Output => self.output_tab(ui),
+                        BottomTab::Output | BottomTab::Console => self.output_tab(ui),
+                        BottomTab::Animation => self.animation_section(ui, camera),
                         BottomTab::Sequence => self.sequence_tab(ui, camera),
                         BottomTab::Trajectory => self.trajectory_tab(ui),
                     },
@@ -15795,40 +15104,6 @@ impl GuiApplication {
             self.state
                 .put_config_value("bottom_panel:visible", "false".to_string());
         }
-    }
-
-    fn collapsed_bottom_panel(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::bottom("bottom_panel_collapsed")
-            .exact_height(28.0)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    let previous = self.bottom_tab;
-                    let mut expand = ui
-                        .small_button("▴")
-                        .on_hover_text("Expand bottom panel")
-                        .clicked();
-                    expand |= ui
-                        .selectable_value(&mut self.bottom_tab, BottomTab::Output, "Output")
-                        .clicked();
-                    expand |= ui
-                        .selectable_value(&mut self.bottom_tab, BottomTab::Sequence, "Sequence")
-                        .clicked();
-                    expand |= ui
-                        .selectable_value(&mut self.bottom_tab, BottomTab::Trajectory, "Trajectory")
-                        .clicked();
-                    if self.bottom_tab != previous {
-                        self.state.put_config_value(
-                            "bottom_panel:tab",
-                            self.bottom_tab.config_name().to_string(),
-                        );
-                    }
-                    if expand {
-                        self.show_bottom_panel = true;
-                        self.state
-                            .put_config_value("bottom_panel:visible", "true".to_string());
-                    }
-                });
-            });
     }
 
     fn output_tab(&mut self, ui: &mut egui::Ui) {
@@ -19352,20 +18627,6 @@ impl GuiApplication {
         }
     }
 
-    fn save_selected_object(&mut self) {
-        let Some(object_uid) = self.target_object_uid() else {
-            self.set_status("No object selected");
-            return;
-        };
-        match self
-            .state
-            .save_object_as(object_uid, self.object_save_path.trim())
-        {
-            Ok(()) => self.set_status(format!("Saved object {}", self.object_save_path.trim())),
-            Err(error) => self.set_error(error),
-        }
-    }
-
     fn save_current_view(&mut self, camera: &CameraController) {
         match fs::write(self.view_save_path.trim(), camera.to_view_data()) {
             Ok(()) => self.set_status(format!("Saved view {}", self.view_save_path.trim())),
@@ -21624,7 +20885,7 @@ impl GuiApplication {
         }
         let mut open = self.show_about;
         let mut close = false;
-        egui::Window::new("About CueMol2")
+        egui::Window::new("About CueMol3")
             .open(&mut open)
             .collapsible(false)
             .show(ctx, |ui| {
@@ -21975,6 +21236,13 @@ impl GuiApplication {
     }
 
     fn apply_stored_preferences(&mut self) {
+        let activity = self.state.config_value("layout:activity");
+        self.activity = if activity.is_empty() {
+            Some(cuemol_ui::shell::Activity::Explorer)
+        } else {
+            cuemol_ui::shell::Activity::parse(&activity)
+        };
+        self.light_theme = self.state.config_value("layout:theme") == "light";
         self.show_toolbar = !config_bool(&self.state, "cuemol2.ui.ribbon.collapsed", false);
         self.left_panel_visible = LeftPanel::ALL.map(|panel| {
             !matches!(
@@ -22003,15 +21271,15 @@ impl GuiApplication {
             .state
             .config_value("left_panel:width")
             .parse::<f32>()
-            .unwrap_or(250.0)
-            .clamp(220.0, 360.0);
+            .unwrap_or(260.0)
+            .clamp(180.0, 620.0);
         self.bottom_tab = BottomTab::from_config(&self.state.config_value("bottom_panel:tab"));
         self.bottom_panel_height = self
             .state
             .config_value("bottom_panel:height")
             .parse::<f32>()
-            .unwrap_or(150.0)
-            .clamp(80.0, 600.0);
+            .unwrap_or(200.0)
+            .clamp(100.0, 600.0);
         self.show_bottom_panel = config_bool(&self.state, "bottom_panel:visible", true);
         self.sequence_name_width = self
             .state
@@ -36264,11 +35532,10 @@ mod tests {
         let mut app = GuiApplication::new();
         let initial = app.state.scene_summaries().len();
         let ctx = egui::Context::default();
-        let mut camera = CameraController::default();
         let mut before = cuemol_qsys::Camera::new();
         before.set_zoom(17.);
         before.set_center(Vector4::new3(3., 4., 5.));
-        camera = CameraController::from_qsys_camera(&before);
+        let mut camera = CameraController::from_qsys_camera(&before);
         let before = cuemol_command::view_json(&camera.to_qsys_camera("__current"));
 
         app.agent.settings = cuemol_agent::Settings {
@@ -36399,7 +35666,7 @@ mod tests {
         assert!(LEGACY_MENU_SURFACES.contains(&"Mol surface generation..."));
         assert!(LEGACY_MENU_SURFACES.contains(&"Restore default panel location"));
         assert!(LEGACY_MENU_SURFACES.contains(&"Hardware stereo"));
-        assert!(LEGACY_MENU_SURFACES.contains(&"About CueMol2"));
+        assert!(LEGACY_MENU_SURFACES.contains(&"About CueMol3"));
         assert!(!LEGACY_MENU_SURFACES.contains(&"About CueMol3-tritium"));
         assert!(RENDERER_TYPES.contains(&"ballstick"));
         assert!(RENDERER_TYPES.contains(&"disorder"));
@@ -36492,7 +35759,7 @@ mod tests {
                 .is_empty());
         }
         assert!(app.reset_left_panel_layout);
-        assert!(!app.show_inspector);
+        assert!(!app.inspector.visible);
         app.persist_config_state().expect("save restored session");
         let input = fs::read_to_string(&path).expect("read restored session");
         assert!(input.contains("left_panel:Workspace:visible\ttrue"));
@@ -42407,7 +41674,8 @@ mod tests {
             let mut harness = egui_kittest::Harness::builder()
                 .with_size(egui::vec2(1100.0, 980.0))
                 .build(|ctx| {
-                    app.ui(ctx, &mut camera);
+                    app.left_panel(ctx, &mut camera);
+                    app.bottom_panel(ctx, &mut camera);
                 });
             harness.run();
             save_harness(&mut harness, &out_dir.join("dock.png"));

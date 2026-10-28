@@ -12,3 +12,11 @@ pub use lighting::lighting_controls;
 mod agent;
 #[cfg(feature = "egui")]
 pub use agent::{AgentCall, AgentPanel};
+
+#[cfg(feature = "egui")]
+pub mod shell;
+
+#[cfg(feature = "egui")]
+mod inspector;
+#[cfg(feature = "egui")]
+pub use inspector::{Inspector, InspectorTarget};

@@ -36,6 +36,10 @@ is required for network installation; a source checkout alone is insufficient.
 
 ## Molecular viewing
 
+The native and browser interfaces use Tritium's activity bar, Explorer,
+scene tabs, right-hand Inspector, viewport tools, and bottom panels for console,
+output, animation, sequence and trajectories. Both support light and dark themes.
+
 Open files on the command line, through the file dialog, or by drag and drop.
 The initial representation uses a protein ribbon, a nucleic-acid cartoon, and
 ball-and-stick geometry for other atoms. The renderer controls remain available
@@ -262,8 +266,8 @@ uv run --no-project --with mdtraj --with netCDF4 \
 
 ## Compatibility boundaries
 
-The wgpu frontends share scene behavior but use egui controls rather than
-replicating Tritium's React layout pixel for pixel. Molecular surfaces support
+The wgpu frontends implement Tritium's layout with Rust egui controls.
+The optional Tauri shell retains the older CueMol2 layout. Molecular surfaces support
 the MeshMS and BALL engines on native and browser targets, with `auto` selecting
 MeshMS and BALL as its fallback. The `rust` backend retains grid-based SES.
 The generation backend, density, and probe radius survive embedded scene saves. NPR rendering includes the nine reference styles and editable line, dot, and

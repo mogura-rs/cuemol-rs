@@ -25,6 +25,7 @@ struct PendingDownload {
 
 pub struct AgentPanel {
     pub visible: bool,
+    pub docked: bool,
     pub settings: Settings,
     pub revision: u64,
     pub changed_scene: bool,
@@ -53,6 +54,7 @@ impl Default for AgentPanel {
     fn default() -> Self {
         Self {
             visible: false,
+            docked: false,
             settings: Settings::default(),
             revision: 0,
             changed_scene: false,
@@ -303,9 +305,20 @@ impl AgentPanel {
         None
     }
     pub fn show(&mut self, ctx: &Context) -> Option<String> {
-        if !self.visible {
+        if !self.visible || self.docked {
             return None;
         }
+        let mut open = self.visible;
+        let mut prompt = None;
+        egui::Window::new("AI Agent")
+            .open(&mut open)
+            .default_size([440., 560.])
+            .show(ctx, |ui| prompt = self.show_docked(ui));
+        self.visible = open;
+        prompt
+    }
+    pub fn show_docked(&mut self, ui: &mut egui::Ui) -> Option<String> {
+        let ctx = ui.ctx().clone();
         if let Some(result) = self.model_job.as_ref().and_then(ModelJob::poll) {
             self.model_job = None;
             match result {
@@ -322,73 +335,151 @@ impl AgentPanel {
             .model_spec()
             .ok()
             .map(|(provider, _)| provider);
-        let mut open = self.visible;
-        let mut send = false;
-        egui::Window::new("AI Agent").open(&mut open).default_size([440.,560.]).show(ctx,|ui| {
-            ui.collapsing("Agent settings",|ui| {
-                ui.checkbox(&mut self.settings.enabled,"Enable AI Agent");
-                ui.label("Messages and scene data are sent to the selected provider when you press Send.");
-                ui.add_enabled_ui(!self.running(),|ui| {
-                    ui.label("Model (provider:model)");
-                    ui.text_edit_singleline(&mut self.settings.model);
-                    if ui.add_enabled(self.model_job.is_none(),egui::Button::new("Refresh available models")).clicked() {
-                        let key = if !self.key.is_empty() { Ok(self.key.clone()) } else {
-                            #[cfg(not(target_arch="wasm32"))]
-                            { self.settings.model_spec().and_then(|(p,_)|cuemol_agent::credentials::load(p)) }
-                            #[cfg(target_arch="wasm32")]
-                            { Err("Enter the provider API key first.".to_string()) }
-                        };
-                        match key { Ok(key)=>{let ctx=ctx.clone();self.model_job=Some(ModelJob::start(self.settings.clone(),key,Box::new(move ||ctx.request_repaint())));},Err(error)=>self.status=error }
+        ui.collapsing("Agent settings", |ui| {
+            ui.checkbox(&mut self.settings.enabled, "Enable AI Agent");
+            ui.label(
+                "Messages and scene data are sent to the selected provider when you press Send.",
+            );
+            ui.add_enabled_ui(!self.running(), |ui| {
+                ui.label("Model (provider:model)");
+                ui.text_edit_singleline(&mut self.settings.model);
+                if ui
+                    .add_enabled(
+                        self.model_job.is_none(),
+                        egui::Button::new("Refresh available models"),
+                    )
+                    .clicked()
+                {
+                    let key = if !self.key.is_empty() {
+                        Ok(self.key.clone())
+                    } else {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            self.settings
+                                .model_spec()
+                                .and_then(|(p, _)| cuemol_agent::credentials::load(p))
+                        }
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            Err("Enter the provider API key first.".to_string())
+                        }
+                    };
+                    match key {
+                        Ok(key) => {
+                            let ctx = ctx.clone();
+                            self.model_job = Some(ModelJob::start(
+                                self.settings.clone(),
+                                key,
+                                Box::new(move || ctx.request_repaint()),
+                            ));
+                        }
+                        Err(error) => self.status = error,
                     }
-                    if !self.models.is_empty() {
-                        egui::ComboBox::from_label("Available models").selected_text(&self.settings.model).show_ui(ui,|ui| {
-                            for model in &self.models { ui.selectable_value(&mut self.settings.model,model.clone(),model); }
-                        });
-                    }
-                    egui::ComboBox::from_label("Reasoning").selected_text(&self.settings.reasoning).show_ui(ui,|ui| {
-                        for value in ["default","low","medium","high"] { ui.selectable_value(&mut self.settings.reasoning,value.into(),value); }
-                    });
-                    ui.checkbox(&mut self.settings.enter_sends,"Enter sends; Shift+Enter adds a line");
-                    ui.label("API key");
-                    ui.add(egui::TextEdit::singleline(&mut *self.key).password(true));
-                    #[cfg(not(target_arch="wasm32"))]
-                    ui.horizontal(|ui| {
-                        if ui.button("Save in OS keychain").clicked() {
-                            match self.settings.model_spec().and_then(|(p,_)|cuemol_agent::credentials::save(p,&self.key)) {
-                                Ok(()) => { self.key.zeroize(); self.status = "API key saved in the OS keychain.".into(); },
-                                Err(error) => self.status = error,
+                }
+                if !self.models.is_empty() {
+                    egui::ComboBox::from_label("Available models")
+                        .selected_text(&self.settings.model)
+                        .show_ui(ui, |ui| {
+                            for model in &self.models {
+                                ui.selectable_value(&mut self.settings.model, model.clone(), model);
                             }
-                        }
-                        if ui.button("Delete stored key").clicked() {
-                            self.status = self.settings.model_spec().and_then(|(p,_)|cuemol_agent::credentials::delete(p)).map(|()|"Stored key deleted.".into()).unwrap_or_else(|e|e);
+                        });
+                }
+                egui::ComboBox::from_label("Reasoning")
+                    .selected_text(&self.settings.reasoning)
+                    .show_ui(ui, |ui| {
+                        for value in ["default", "low", "medium", "high"] {
+                            ui.selectable_value(&mut self.settings.reasoning, value.into(), value);
                         }
                     });
-                    #[cfg(target_arch="wasm32")]
-                    ui.label("The key is kept only in this tab's memory.");
-                    ui.collapsing("Custom API endpoint",|ui| { ui.text_edit_singleline(&mut self.settings.endpoint); });
+                ui.checkbox(
+                    &mut self.settings.enter_sends,
+                    "Enter sends; Shift+Enter adds a line",
+                );
+                ui.label("API key");
+                ui.add(egui::TextEdit::singleline(&mut *self.key).password(true));
+                #[cfg(not(target_arch = "wasm32"))]
+                ui.horizontal(|ui| {
+                    if ui.button("Save in OS keychain").clicked() {
+                        match self
+                            .settings
+                            .model_spec()
+                            .and_then(|(p, _)| cuemol_agent::credentials::save(p, &self.key))
+                        {
+                            Ok(()) => {
+                                self.key.zeroize();
+                                self.status = "API key saved in the OS keychain.".into();
+                            }
+                            Err(error) => self.status = error,
+                        }
+                    }
+                    if ui.button("Delete stored key").clicked() {
+                        self.status = self
+                            .settings
+                            .model_spec()
+                            .and_then(|(p, _)| cuemol_agent::credentials::delete(p))
+                            .map(|()| "Stored key deleted.".into())
+                            .unwrap_or_else(|e| e);
+                    }
+                });
+                #[cfg(target_arch = "wasm32")]
+                ui.label("The key is kept only in this tab's memory.");
+                ui.collapsing("Custom API endpoint", |ui| {
+                    ui.text_edit_singleline(&mut self.settings.endpoint);
                 });
             });
-            ui.separator();
-            egui::ScrollArea::vertical().max_height(330.).stick_to_bottom(true).show(ui,|ui| {
+        });
+        ui.separator();
+        egui::ScrollArea::vertical()
+            .max_height(330.)
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
                 for message in &self.messages {
                     ui.strong(&message.role);
                     ui.add(egui::Label::new(&message.text).wrap().selectable(true));
-                    if let Some(image) = &message.image { ui.add(egui::Image::new((image.id(),image.size_vec2())).max_size(egui::vec2(360.,270.))); }
+                    if let Some(image) = &message.image {
+                        ui.add(
+                            egui::Image::new((image.id(), image.size_vec2()))
+                                .max_size(egui::vec2(360., 270.)),
+                        );
+                    }
                 }
             });
-            let composer_id=ui.make_persistent_id("agent-composer");
-            let enter = self.settings.enter_sends
-                && ui.memory(|m|m.has_focus(composer_id)) && ui.input_mut(|input|input.consume_key(egui::Modifiers::NONE,egui::Key::Enter));
-            let response = ui.add(egui::TextEdit::multiline(&mut self.draft).id(composer_id).hint_text("Describe the scene change…").desired_rows(3).desired_width(f32::INFINITY));
-            send = enter && response.has_focus();
-            ui.horizontal(|ui| {
-                send |= ui.add_enabled(!self.running() && self.settings.enabled && !self.draft.trim().is_empty(),egui::Button::new("Send")).clicked();
-                if ui.add_enabled(self.running(),egui::Button::new("Cancel")).clicked() { self.cancel("Cancelled; completed edits are kept."); }
-                if ui.add_enabled(!self.running(),egui::Button::new("New conversation")).clicked() { self.history = History::default(); self.messages.clear(); self.status.clear(); }
-            });
-            ui.label(&self.status);
+        let composer_id = ui.make_persistent_id("agent-composer");
+        let enter = self.settings.enter_sends
+            && ui.memory(|m| m.has_focus(composer_id))
+            && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        let response = ui.add(
+            egui::TextEdit::multiline(&mut self.draft)
+                .id(composer_id)
+                .hint_text("Describe the scene change…")
+                .desired_rows(3)
+                .desired_width(f32::INFINITY),
+        );
+        let mut send = enter && response.has_focus();
+        ui.horizontal(|ui| {
+            send |= ui
+                .add_enabled(
+                    !self.running() && self.settings.enabled && !self.draft.trim().is_empty(),
+                    egui::Button::new("Send"),
+                )
+                .clicked();
+            if ui
+                .add_enabled(self.running(), egui::Button::new("Cancel"))
+                .clicked()
+            {
+                self.cancel("Cancelled; completed edits are kept.");
+            }
+            if ui
+                .add_enabled(!self.running(), egui::Button::new("New conversation"))
+                .clicked()
+            {
+                self.history = History::default();
+                self.messages.clear();
+                self.status.clear();
+            }
         });
-        self.visible = open;
+        ui.label(&self.status);
         if previous_provider
             != self
                 .settings

@@ -1,6 +1,7 @@
 #![cfg(target_arch = "wasm32")]
 mod panels;
 mod trajectory;
+mod tritium;
 use base64::Engine;
 use cuemol_core::{Uid, Vector4};
 use cuemol_desktop_core::{viewport::ViewportRenderer, DesktopAppState, GuiLoadedPath};
@@ -130,6 +131,7 @@ struct Target {
     size: [u32; 2],
 }
 struct HistoryEntry {
+    selection: String,
     state: DesktopAppState,
     camera: Camera,
     trajectory: Option<(Uid, Rc<BrowserTrajectory>)>,
@@ -138,6 +140,19 @@ struct HistoryEntry {
 }
 struct App {
     agent: cuemol_ui::AgentPanel,
+    activity: Option<cuemol_ui::shell::Activity>,
+    inspector: cuemol_ui::Inspector,
+    rectangle_select: bool,
+    rectangle_start: Option<egui::Pos2>,
+    inspector_target: Option<cuemol_ui::InspectorTarget>,
+    bottom_tab: String,
+    bottom_open: bool,
+    console_source: String,
+    logs: Vec<String>,
+    last_log: String,
+    last_scene: Option<(String, Vec<u8>)>,
+    show_get_pdb: bool,
+    ui_rects: std::collections::BTreeMap<String, [f32; 4]>,
     revision: u64,
     state: DesktopAppState,
     camera: Camera,
@@ -179,7 +194,6 @@ struct App {
     tool_filter: String,
     form_tool: String,
     form_values: std::collections::BTreeMap<String, String>,
-    properties: Option<(String, Option<u64>, Vec<(String, String)>)>,
 }
 impl App {
     fn new(
@@ -247,6 +261,23 @@ impl App {
         }
         Ok(Self {
             agent,
+            activity: storage
+                .as_ref()
+                .and_then(|s| s.get_item("cuemol.activity").ok().flatten())
+                .map(|s| cuemol_ui::shell::Activity::parse(&s))
+                .unwrap_or(Some(cuemol_ui::shell::Activity::Explorer)),
+            inspector: Default::default(),
+            rectangle_select: false,
+            rectangle_start: None,
+            inspector_target: None,
+            bottom_tab: "Console".into(),
+            bottom_open: true,
+            console_source: String::new(),
+            logs: Vec::new(),
+            last_log: String::new(),
+            last_scene: None,
+            show_get_pdb: false,
+            ui_rects: Default::default(),
             revision: 0,
             state,
             camera,
@@ -289,11 +320,11 @@ impl App {
             tool_filter: String::new(),
             form_tool: String::new(),
             form_values: Default::default(),
-            properties: None,
         })
     }
     fn capture_history(&self) -> HistoryEntry {
         HistoryEntry {
+            selection: self.selection.clone(),
             state: self.state.clone(),
             camera: self.camera.clone(),
             trajectory: self.trajectory.clone(),
@@ -302,6 +333,7 @@ impl App {
         }
     }
     fn restore_history(&mut self, snapshot: HistoryEntry) {
+        self.selection = snapshot.selection;
         self.state = snapshot.state;
         self.camera = snapshot.camera;
         self.trajectory = snapshot.trajectory;
@@ -506,6 +538,9 @@ impl App {
                     }
                 }
                 Event::Data(name, bytes) => {
+                    if name.to_lowercase().ends_with(".qsc") {
+                        self.last_scene = Some((name.clone(), bytes.clone()));
+                    }
                     if name.rsplit('.').next().is_some_and(|ext| {
                         matches!(ext.to_ascii_lowercase().as_str(), "icc" | "icm")
                     }) {
@@ -697,152 +732,6 @@ impl App {
             }
         });
     }
-    fn toolbar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("menu").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.strong("CueMol3");
-                ui.separator();
-                if ui.button("Open…").clicked() {
-                    choose_file();
-                }
-                if ui.button("Save scene").clicked() {
-                    let result = self
-                        .state
-                        .set_active_view_camera(&self.camera)
-                        .and_then(|_| self.state.active_scene_bytes());
-                    match result {
-                        Ok(bytes) => {
-                            if let Err(e) =
-                                download("scene.qsc", &bytes, "application/octet-stream")
-                            {
-                                self.message = js_error(e);
-                            }
-                        }
-                        Err(e) => self.message = e.to_string(),
-                    }
-                }
-                if ui.button("PNG").clicked() {
-                    self.export_png();
-                }
-                if ui.button("Render").clicked() {
-                    if let Ok(settings) = cuemol_command::render_settings(&self.state) {
-                        self.render_hatching =
-                            settings.get("backend").is_some_and(|v| v == "umbreon_npr");
-                        if let Ok(params) = cuemol_command::rendering_params(
-                            &settings,
-                            if self.render_hatching {
-                                "umbreon_npr"
-                            } else {
-                                "umbreon"
-                            },
-                        ) {
-                            self.render_lighting = params;
-                        }
-                        self.render_transparent =
-                            settings.get("transparentBg").is_some_and(|v| v == true);
-                        if let Ok(hatch) = cuemol_command::hatch_params(&settings, "umbreon_npr") {
-                            self.render_hatch = hatch;
-                        }
-                    }
-                    self.show_render = true;
-                }
-                ui.separator();
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.pdb_id)
-                        .hint_text("PDB ID")
-                        .desired_width(65.0),
-                );
-                if ui.button("Fetch").clicked() {
-                    self.fetch();
-                }
-                if ui.button("Fit").clicked() {
-                    self.fit(false);
-                }
-                if ui.button("Undo").clicked() {
-                    self.call("undo", json!({}));
-                }
-                if ui.button("Redo").clicked() {
-                    self.call("redo", json!({}));
-                }
-                ui.toggle_value(&mut self.agent.visible, "AI Agent");
-                ui.toggle_value(&mut self.show_console, "Commands");
-                ui.toggle_value(&mut self.show_timeline, "Animation");
-                if ui.button("Settings").clicked() {
-                    self.settings_text = self.state.config_text();
-                    self.show_settings = true;
-                }
-                ui.toggle_value(&mut self.show_help, "Help");
-                if ui.checkbox(&mut self.dark, "Dark").changed() {
-                    ctx.set_theme(if self.dark {
-                        egui::ThemePreference::Dark
-                    } else {
-                        egui::ThemePreference::Light
-                    });
-                    ctx.set_visuals(if self.dark {
-                        egui::Visuals::dark()
-                    } else {
-                        egui::Visuals::light()
-                    });
-                    if let Some(s) =
-                        web_sys::window().and_then(|w| w.local_storage().ok().flatten())
-                    {
-                        let _ =
-                            s.set_item("cuemol.theme", if self.dark { "dark" } else { "light" });
-                    }
-                }
-            });
-        });
-    }
-    fn workspace(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::right("workspace").default_width(280.0).show(ctx,|ui|{
-            ui.heading("Workspace");
-            egui::ScrollArea::vertical().id_salt("objects").max_height(ui.available_height()*0.52).show(ui,|ui|{
-                for scene in self.state.scene_summaries(){
-                    if ui.selectable_label(scene.active,&scene.name).clicked(){self.call("switch_scene",json!({"sceneId":scene.uid.get()}));}
-                }
-                if let Some(scene)=self.state.active_scene(){
-                    for object in self.state.object_summaries(scene){
-                        ui.horizontal(|ui|{let mut visible=object.visible;if ui.checkbox(&mut visible,"").changed(){self.call("set_visible",json!({"nodeId":object.uid.get(),"nodeType":"object","visible":visible}));}
-                            if ui.selectable_label(self.selected==Some(object.uid),format!("{} · {} atoms",object.name,object.atom_count)).clicked(){self.selected=Some(object.uid);}
-                            if ui.small_button("…").clicked(){self.open_properties("object",Some(object.uid.get()));}
-                        });
-                        ui.indent(object.uid.get(),|ui|{for renderer in self.state.renderer_summaries(object.uid).into_iter().filter(|r|r.renderer_type!="*selection"){
-                            ui.horizontal(|ui|{let mut visible=renderer.visible;if ui.checkbox(&mut visible,&renderer.name).changed(){self.call("set_visible",json!({"nodeId":renderer.uid.get(),"nodeType":"renderer","visible":visible}));}
-                                ui.label(&renderer.renderer_type);if ui.small_button("…").clicked(){self.open_properties("renderer",Some(renderer.uid.get()));}if ui.small_button("×").clicked(){self.call("delete_node",json!({"nodeId":renderer.uid.get(),"nodeType":"renderer"}));}
-                            });
-                        }});
-                    }
-                    let data=cuemol_command::call_tool(&mut self.state,&mut self.camera,"get_scene_state",&json!({})).unwrap_or(Value::Null);
-                    for object in data["objects"].as_array().into_iter().flatten().filter(|o|o["className"]!="MolCoord"){
-                        let id=object["id"].as_u64().unwrap();let name=object["name"].as_str().unwrap_or("object");
-                        ui.horizontal(|ui|{let mut visible=object["visible"]==true;if ui.checkbox(&mut visible,name).changed(){self.call("set_visible",json!({"nodeId":id,"nodeType":"object","visible":visible}));}
-                            if ui.small_button("Fit").clicked(){self.call("focus_node",json!({"nodeId":id,"nodeType":"object"}));}
-                            if ui.small_button("…").clicked(){self.open_properties("object",Some(id));}
-                        });
-                        ui.indent(id,|ui|{for renderer in object["renderers"].as_array().into_iter().flatten(){let id=renderer["id"].as_u64().unwrap();ui.horizontal(|ui|{
-                            let mut visible=renderer["visible"]==true;if ui.checkbox(&mut visible,renderer["name"].as_str().unwrap_or("renderer")).changed(){self.call("set_visible",json!({"nodeId":id,"nodeType":"renderer","visible":visible}));}
-                            if ui.small_button("…").clicked(){self.open_properties("renderer",Some(id));}
-                        });}});
-                    }
-                }
-            });
-            ui.horizontal(|ui|{if ui.button("New scene").clicked(){self.call("create_scene",json!({}));}if ui.button("Scene properties").clicked(){self.open_properties("scene",None);}});
-            ui.separator();ui.label("Selection");
-            if ui.add(egui::TextEdit::singleline(&mut self.selection).hint_text("chain A and resi 10:30")).changed(){self.dirty=true;}
-            ui.horizontal(|ui|{if ui.button("Center").clicked(){if let Some(id)=self.selected{self.call("center_view",json!({"objId":id.get(),"selection":if self.selection.is_empty(){"*"}else{&self.selection},"zoom":false}));}}
-                if ui.button("Fit selection").clicked(){self.fit(true);}if ui.button("Clear").clicked(){self.selection.clear();self.dirty=true;}});
-            egui::ComboBox::from_label("Representation").selected_text(&self.representation).show_ui(ui,|ui|{for kind in cuemol_desktop_core::MOLECULE_RENDERER_TYPES{ui.selectable_value(&mut self.representation,kind.to_string(),*kind);}});
-            if ui.button("Add representation").clicked(){if let Some(id)=self.selected{self.call("create_renderer",json!({"objId":id.get(),"rendererType":self.representation,"selection":if self.selection.is_empty(){"*"}else{&self.selection}}));}}
-            egui::ComboBox::from_label("Color").selected_text(&self.coloring).show_ui(ui,|ui|{for kind in ["cpk","rainbow","bfac"]{ui.selectable_value(&mut self.coloring,kind.into(),kind);}});
-            if ui.button("Apply color").clicked(){if let Some(id)=self.selected{self.call("set_renderer_coloring",json!({"nodeId":id.get(),"nodeType":"object","mode":format!("paint-type-{}",self.coloring)}));}}
-            ui.separator();
-            let mut perspective=self.camera.is_perspective();if ui.checkbox(&mut perspective,"Perspective").changed(){self.camera.set_perspective(perspective);}
-            let mut slab=self.camera.slab_depth();if ui.add(egui::Slider::new(&mut slab,0.1..=self.camera.cam_dist()*2.0).text("Slab").logarithmic(true)).changed(){self.camera.set_slab_depth(slab);}
-            ui.collapsing("Sequence",|ui|{for row in self.state.active_sequence_summaries(){ui.horizontal_wrapped(|ui|{if ui.button(format!("{} / {}",row.object_name,row.chain_id)).clicked(){self.selected=Some(row.object_uid);self.selection=format!("chain {}",row.chain_id);self.dirty=true;}ui.monospace(row.sequence);});}});
-            ui.collapsing("Cameras",|ui|{let cameras=cuemol_command::call_tool(&mut self.state,&mut self.camera,"list_cameras",&json!({})).unwrap_or(Value::Null);for camera in cameras.as_array().or_else(||cameras["cameras"].as_array()).into_iter().flatten(){if let Some(name)=camera["name"].as_str(){if ui.button(name).clicked(){self.call("apply_camera",json!({"name":name}));}}}if ui.button("Save current camera…").clicked(){self.select_tool("save_camera");}});
-
-        });
-    }
     fn render_async(&mut self, name: &str, args: &Value, download: Option<String>) {
         if self.busy {
             self.message = "Wait for the current operation to finish.".into();
@@ -931,6 +820,15 @@ impl App {
         let target = self.target.as_ref().unwrap();
         let response =
             ui.add(egui::Image::new((target.id, size)).sense(egui::Sense::click_and_drag()));
+        self.ui_rects.insert(
+            "Viewport".into(),
+            [
+                response.rect.min.x,
+                response.rect.min.y,
+                response.rect.width(),
+                response.rect.height(),
+            ],
+        );
         self.mouse(ui, &response);
         let target = self.target.as_ref().unwrap();
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
@@ -956,7 +854,34 @@ impl App {
         self.gpu.queue.submit([encoder.finish()]);
     }
     fn mouse(&mut self, ui: &egui::Ui, response: &egui::Response) {
-        if !(response.hovered() || response.dragged()) {
+        if !(response.hovered() || response.dragged() || response.drag_stopped()) {
+            return;
+        }
+        if !ui.ctx().wants_keyboard_input() {
+            if ui.input(|i| i.key_pressed(egui::Key::B)) {
+                self.rectangle_select = true;
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::N)) {
+                self.rectangle_select = false;
+            }
+        }
+        if self.rectangle_select && response.drag_started_by(egui::PointerButton::Primary) {
+            self.rectangle_start = ui.input(|i| i.pointer.press_origin());
+        }
+        if let Some(start) = self.rectangle_start {
+            if let Some(current) = ui.input(|i| i.pointer.interact_pos()) {
+                let rect = egui::Rect::from_two_pos(start, current).intersect(response.rect);
+                ui.painter().rect_stroke(
+                    rect,
+                    0.,
+                    egui::Stroke::new(1., egui::Color32::LIGHT_BLUE),
+                    egui::StrokeKind::Inside,
+                );
+                if response.drag_stopped_by(egui::PointerButton::Primary) {
+                    self.rectangle_start = None;
+                    self.select_screen_rect(response.rect, rect);
+                }
+            }
             return;
         }
         let (delta, modifiers, scrolls) = ui.input(|input| {
@@ -985,8 +910,11 @@ impl App {
         } else if response.dragged_by(egui::PointerButton::Secondary) && modifiers.ctrl {
             target += rotation * glam::Vec3::Z * delta.y * self.camera.zoom() as f32
                 / response.rect.height();
-        } else if response.dragged_by(egui::PointerButton::Secondary)
-            || response.dragged_by(egui::PointerButton::Middle)
+        } else if response.dragged_by(egui::PointerButton::Secondary) {
+            self.camera.set_zoom(
+                (self.camera.zoom() * (delta.y as f64 * 0.008).exp()).clamp(0.1, 100000.),
+            );
+        } else if response.dragged_by(egui::PointerButton::Middle)
             || (response.dragged() && modifiers.shift)
         {
             target +=
@@ -1023,6 +951,11 @@ impl App {
             rotation.z as f64,
             rotation.w as f64,
         ));
+        if response.clicked() && !response.double_clicked() {
+            if let Some(position) = response.interact_pointer_pos() {
+                self.pick_screen_atom(response.rect, position);
+            }
+        }
         if response.double_clicked() {
             if let (Some(pos), Some(snapshot)) = (response.interact_pointer_pos(), &self.snapshot) {
                 let mvp =
@@ -1082,45 +1015,7 @@ impl eframe::App for App {
             self.dirty = true;
             ctx.request_repaint();
         }
-        self.toolbar(ctx);
-        self.workspace(ctx);
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            if self.render_cancel.is_some() {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    if ui.button("Cancel render").clicked() {
-                        self.call("cancel_render", json!({}));
-                    }
-                });
-            }
-            if let Some((_, trajectory)) = &self.trajectory {
-                let frames = trajectory.frames;
-                ui.horizontal(|ui| {
-                    let label = if self.playing { "Pause" } else { "Play" };
-                    ui.toggle_value(&mut self.playing, label);
-                    let mut frame = self.frame;
-                    if ui
-                        .add(egui::Slider::new(&mut frame, 0..=frames - 1).text("Frame"))
-                        .changed()
-                    {
-                        self.request_frame(frame);
-                    }
-                    ui.add(
-                        egui::DragValue::new(&mut self.fps)
-                            .range(1.0..=120.0)
-                            .suffix(" fps"),
-                    );
-                    if self.busy {
-                        ui.spinner();
-                    }
-                });
-            }
-            egui::ScrollArea::vertical()
-                .max_height(if self.show_console { 150.0 } else { 45.0 })
-                .show(ui, |ui| {
-                    ui.monospace(&self.message);
-                });
-        });
+        self.shell(ctx);
         if self.playing && !self.busy {
             let now = ctx.input(|i| i.time);
             if now >= self.next_frame {
@@ -1136,13 +1031,13 @@ impl eframe::App for App {
         self.settings_ui(ctx);
         self.render_ui(ctx);
         self.tools_ui(ctx);
-        self.properties_ui(ctx);
         self.timeline_ui(ctx);
         self.rebuild();
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ctx, |ui| self.viewport(ui));
-        egui::Window::new("Mouse and keyboard").open(&mut self.show_help).show(ctx,|ui|{ui.label("Drag: rotate\nRight or middle drag: pan\nWheel: zoom\nShift + wheel or right drag: slab\nCtrl + wheel or right drag: view depth\nDouble-click atom: center\nHome: fit scene · F: fit selection · C: center selection\nDrop structure files onto the window. Load a topology before a trajectory.\nCommands use the same tool names and JSON arguments as cuemol exec and MCP.");});
+        self.viewport_palette(ctx);
+        egui::Window::new("Mouse and keyboard").open(&mut self.show_help).show(ctx,|ui|{ui.label("Drag: rotate\nMiddle drag: pan · Right drag: zoom\nWheel: zoom\nShift + wheel or right drag: slab\nCtrl + wheel or right drag: view depth\nDouble-click atom: center\nHome: fit scene · F: fit selection · C: center selection\nDrop structure files onto the window. Load a topology before a trajectory.\nCommands use the same tool names and JSON arguments as cuemol exec and MCP.");});
         for file in ctx.input(|i| i.raw.dropped_files.clone()) {
             if let Some(bytes) = file.bytes {
                 enqueue(Event::Data(file.name, bytes.to_vec()));
@@ -1155,6 +1050,6 @@ impl eframe::App for App {
             &json!({}),
         )
         .unwrap_or(Value::Null);
-        STATUS.with(|status|*status.borrow_mut()=json!({"scene":state,"view":cuemol_command::view_json(&self.camera),"message":self.message,"frame":self.frame,"busy":self.busy,"agent":self.agent.status()}).to_string());
+        STATUS.with(|status|*status.borrow_mut()=json!({"scene":state,"selection":self.selection,"view":cuemol_command::view_json(&self.camera),"message":self.message,"frame":self.frame,"busy":self.busy,"agent":self.agent.status(),"ui":{"rects":self.ui_rects,"activity":self.activity.map(cuemol_ui::shell::Activity::key),"bottom":self.bottom_tab,"inspector":self.inspector.rects}}).to_string());
     }
 }
