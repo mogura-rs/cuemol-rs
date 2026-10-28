@@ -28,6 +28,15 @@ thread_local! {
     static STATUS: RefCell<String> = RefCell::new(String::new());
 }
 enum Event {
+    AgentStart(String, cuemol_agent::Settings, String),
+    AgentCancel,
+    AgentFrame(
+        Uid,
+        usize,
+        Result<cuemol_mdtools::TrajectoryFrame, String>,
+        cuemol_agent::ToolReply,
+        u64,
+    ),
     Source(web_sys::File),
     Data(String, Vec<u8>),
     Error(String),
@@ -56,6 +65,17 @@ pub fn command(name: String, arguments: String) -> Result<(), JsValue> {
     let args = serde_json::from_str(&arguments).map_err(|e| JsValue::from_str(&e.to_string()))?;
     enqueue(Event::Command(name, args));
     Ok(())
+}
+#[wasm_bindgen]
+pub fn agent_turn(prompt: String, settings: String, api_key: String) -> Result<(), JsValue> {
+    let settings = serde_json::from_str(&settings)
+        .map_err(|e| JsValue::from_str(&format!("Invalid agent settings: {e}")))?;
+    enqueue(Event::AgentStart(prompt, settings, api_key));
+    Ok(())
+}
+#[wasm_bindgen]
+pub fn agent_cancel() {
+    enqueue(Event::AgentCancel);
 }
 #[wasm_bindgen]
 pub fn status() -> String {
@@ -109,7 +129,16 @@ struct Target {
     id: egui::TextureId,
     size: [u32; 2],
 }
+struct HistoryEntry {
+    state: DesktopAppState,
+    camera: Camera,
+    trajectory: Option<(Uid, Rc<BrowserTrajectory>)>,
+    frame: usize,
+    selected: Option<Uid>,
+}
 struct App {
+    agent: cuemol_ui::AgentPanel,
+    revision: u64,
     state: DesktopAppState,
     camera: Camera,
     gpu: egui_wgpu::RenderState,
@@ -125,8 +154,8 @@ struct App {
     console_tool: String,
     console_args: String,
     message: String,
-    history: Vec<(DesktopAppState, Camera)>,
-    future: Vec<(DesktopAppState, Camera)>,
+    history: Vec<HistoryEntry>,
+    future: Vec<HistoryEntry>,
     trajectory: Option<(Uid, Rc<BrowserTrajectory>)>,
     frame: usize,
     busy: bool,
@@ -209,7 +238,16 @@ impl App {
         let camera = state.active_view_camera().unwrap_or_default();
         CONTEXT.with(|ctx| *ctx.borrow_mut() = Some(cc.egui_ctx.clone()));
         let renderer = ViewportRenderer::new(&gpu.device, wgpu::TextureFormat::Rgba8Unorm);
+        let mut agent = cuemol_ui::AgentPanel::default();
+        if let Some(text) = storage
+            .as_ref()
+            .and_then(|s| s.get_item("cuemol.agent").ok().flatten())
+        {
+            agent.load_settings(&text);
+        }
         Ok(Self {
+            agent,
+            revision: 0,
             state,
             camera,
             gpu,
@@ -254,8 +292,27 @@ impl App {
             properties: None,
         })
     }
+    fn capture_history(&self) -> HistoryEntry {
+        HistoryEntry {
+            state: self.state.clone(),
+            camera: self.camera.clone(),
+            trajectory: self.trajectory.clone(),
+            frame: self.frame,
+            selected: self.selected,
+        }
+    }
+    fn restore_history(&mut self, snapshot: HistoryEntry) {
+        self.state = snapshot.state;
+        self.camera = snapshot.camera;
+        self.trajectory = snapshot.trajectory;
+        self.frame = snapshot.frame;
+        self.selected = snapshot.selected;
+        self.playing = false;
+        self.dirty = true;
+    }
     fn checkpoint(&mut self) {
-        self.history.push((self.state.clone(), self.camera.clone()));
+        self.revision = self.revision.wrapping_add(1);
+        self.history.push(self.capture_history());
         if self.history.len() > 12 {
             self.history.remove(0);
         }
@@ -301,17 +358,20 @@ impl App {
             }
         }
         if name == "undo" || name == "redo" {
-            let (source, target) = if name == "undo" {
-                (&mut self.history, &mut self.future)
+            self.revision = self.revision.wrapping_add(1);
+            let snapshot = if name == "undo" {
+                self.history.pop()
             } else {
-                (&mut self.future, &mut self.history)
+                self.future.pop()
             };
-            if let Some((state, camera)) = source.pop() {
-                target.push((
-                    std::mem::replace(&mut self.state, state),
-                    std::mem::replace(&mut self.camera, camera),
-                ));
-                self.dirty = true;
+            if let Some(snapshot) = snapshot {
+                let current = self.capture_history();
+                if name == "undo" {
+                    self.future.push(current);
+                } else {
+                    self.history.push(current);
+                }
+                self.restore_history(snapshot);
             }
             return;
         }
@@ -333,9 +393,8 @@ impl App {
             }
             Err(e) => {
                 if record_history {
-                    if let Some((state, camera)) = self.history.pop() {
-                        self.state = state;
-                        self.camera = camera;
+                    if let Some(snapshot) = self.history.pop() {
+                        self.restore_history(snapshot);
                     }
                 }
                 self.message = e.to_string();
@@ -357,6 +416,59 @@ impl App {
         let events = EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()));
         for event in events {
             match event {
+                Event::AgentCancel => self.agent.cancel("Cancelled; completed edits are kept."),
+                Event::AgentFrame(id, index, result, reply, revision) => {
+                    if reply.is_closed() {
+                        continue;
+                    }
+                    if revision != self.revision {
+                        let _ =
+                            reply.try_send(Err("Scene changed before the frame was loaded".into()));
+                        continue;
+                    }
+                    let undo = (!self.agent.changed_scene).then(|| self.capture_history());
+                    let result = result.and_then(|frame| {
+                        self.state
+                            .apply_coordinate_frame(id, &frame)
+                            .map_err(|e| e.to_string())
+                    });
+                    if result.is_ok() {
+                        if let Some(undo) = undo {
+                            self.history.push(undo);
+                            self.future.clear();
+                            if self.history.len() > 12 {
+                                self.history.remove(0);
+                            }
+                        }
+                        self.frame = index;
+                        self.dirty = true;
+                        self.agent.changed_scene = true;
+                        self.revision = self.revision.wrapping_add(1);
+                        self.agent.revision = self.revision;
+                    }
+                    let _ =
+                        reply.try_send(result.map(|()| json!({"objectId":id.get(),"frame":index})));
+                }
+                Event::AgentStart(prompt, settings, key) => {
+                    if self.agent.running() {
+                        self.message = "An agent turn is already running.".into();
+                        continue;
+                    }
+                    self.agent.settings = settings;
+                    self.agent.set_session_key(key);
+                    self.agent.visible = true;
+                    CONTEXT.with(|ctx| {
+                        if let Some(ctx) = ctx.borrow().as_ref() {
+                            self.agent.start(
+                                &mut self.state,
+                                &mut self.camera,
+                                prompt,
+                                ctx,
+                                self.revision,
+                            );
+                        }
+                    });
+                }
                 Event::Source(file) => {
                     let name = file.name();
                     let extension = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
@@ -452,9 +564,8 @@ impl App {
                             self.message = format!("Loaded {name}");
                         }
                         Err(e) => {
-                            let (state, camera) = self.history.pop().unwrap();
-                            self.state = state;
-                            self.camera = camera;
+                            let snapshot = self.history.pop().unwrap();
+                            self.restore_history(snapshot);
                             self.message = e.to_string();
                         }
                     }
@@ -485,6 +596,7 @@ impl App {
                     self.request_frame(0);
                 }
                 Event::Frame(id, index, frame) => {
+                    self.revision = self.revision.wrapping_add(1);
                     self.busy = false;
                     match self.state.apply_coordinate_frame(id, &frame) {
                         Ok(()) => {
@@ -652,6 +764,7 @@ impl App {
                 if ui.button("Redo").clicked() {
                     self.call("redo", json!({}));
                 }
+                ui.toggle_value(&mut self.agent.visible, "AI Agent");
                 ui.toggle_value(&mut self.show_console, "Commands");
                 ui.toggle_value(&mut self.show_timeline, "Animation");
                 if ui.button("Settings").clicked() {
@@ -964,6 +1077,7 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.events();
+        self.agent_ui(ctx);
         if cuemol_command::advance_animation(&mut self.state, &mut self.camera).unwrap_or(false) {
             self.dirty = true;
             ctx.request_repaint();
@@ -1041,6 +1155,6 @@ impl eframe::App for App {
             &json!({}),
         )
         .unwrap_or(Value::Null);
-        STATUS.with(|status|*status.borrow_mut()=json!({"scene":state,"view":cuemol_command::view_json(&self.camera),"message":self.message,"frame":self.frame,"busy":self.busy}).to_string());
+        STATUS.with(|status|*status.borrow_mut()=json!({"scene":state,"view":cuemol_command::view_json(&self.camera),"message":self.message,"frame":self.frame,"busy":self.busy,"agent":self.agent.status()}).to_string());
     }
 }

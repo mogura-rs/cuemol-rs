@@ -582,6 +582,39 @@ pub fn render_umbreon_snapshot(
     render_umbreon_snapshot_impl(snapshot, camera, background, params, None)
 }
 
+pub fn render_umbreon_snapshot_with_cancel(
+    snapshot: &RenderSceneSnapshot,
+    camera: &Camera,
+    background: [f32; 4],
+    params: &UmbreonRenderParams,
+    hatch: Option<&HatchRenderParams>,
+    cancel: &AtomicBool,
+) -> Result<UmbreonFrame> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(CueMolError::invalid_argument("Render cancelled"));
+    }
+    let resolved = hatch
+        .map(|p| npr::ResolvedHatch::new(p, params.supersample))
+        .transpose()?;
+    let (params, background) = resolved
+        .as_ref()
+        .map(|r| r.render_settings(params, background))
+        .unwrap_or_else(|| (params.clone(), background));
+    let progress = AtomicU32::new(0);
+    let frame = render_with_hatch(
+        snapshot,
+        camera,
+        background,
+        &params,
+        Some((&progress, cancel)),
+        resolved.as_ref(),
+    )?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err(CueMolError::invalid_argument("Render cancelled"));
+    }
+    Ok(frame)
+}
+
 fn render_umbreon_snapshot_impl(
     snapshot: &RenderSceneSnapshot,
     camera: &Camera,
@@ -723,6 +756,9 @@ fn render_float_region(
 
     let render_row = |y: usize, row: &mut [f32]| {
         for x in 0..width {
+            if async_state.is_some_and(|(_, cancel)| cancel.load(Ordering::Relaxed)) {
+                return;
+            }
             let cache = lighting::PixelCache::new(camera.zoom() / height as f64);
             let mut accumulated = [0.0_f64; 4];
             for sy in 0..samples {

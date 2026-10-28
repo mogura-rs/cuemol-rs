@@ -155,3 +155,14 @@ Use `cargo fmt --all`, the affected shared tests, and native GUI tests for GUI
 changes. Run browser tests locally after web changes. CI remains focused on
 shared tests and builds; avoid adding browser downloads to every native matrix
 job. Release builds consume one web artifact and cached platform tool bundles.
+
+`cuemol-agent` owns the optional streaming provider adapters and turn loop. It
+uses the shared command schemas and enables specialized groups lazily. Network
+workers exchange tool requests with the UI; scene objects never cross threads.
+Keep real API keys out of settings, logs, serialized status, and test fixtures. Test
+with loopback mock providers and dummy keys; do not call paid APIs in tests.
+Native keys use the OS credential store and browser keys stay in tab memory.
+One turn owns one GUI undo entry. Cancellation keeps visible edits but must not
+apply queued calls or late asynchronous downloads/APBS output. Manual edits
+invalidate an active turn. Preserve opaque provider reasoning and signature
+fields when replaying history.

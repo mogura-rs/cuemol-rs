@@ -1,6 +1,43 @@
 use super::*;
 
 impl DesktopAppState {
+    pub fn configure_loaded_bytes(
+        &mut self,
+        loaded: &GuiLoadedPath,
+        setup: &GuiRendererSetup,
+        map_center: Option<Vector4>,
+    ) -> Result<()> {
+        match *loaded {
+            GuiLoadedPath::Object {
+                scene_uid,
+                object_uid,
+            } => {
+                self.set_object_common_properties(
+                    object_uid,
+                    setup.object_name.trim(),
+                    true,
+                    false,
+                )?;
+                self.configure_molecule_renderer(scene_uid, object_uid, setup)
+            }
+            GuiLoadedPath::Map { map_uid, .. } => {
+                self.rename_density_map(map_uid, &setup.object_name)?;
+                let renderers = self.density_map_summary(map_uid).unwrap().renderers;
+                for renderer in renderers {
+                    self.destroy_density_renderer(map_uid, renderer.uid)?;
+                }
+                let uid = self.add_density_renderer(map_uid, &setup.renderer_type)?;
+                let map = self.density_maps.get_mut(&map_uid).unwrap();
+                let center = map.map.fit_view_center_and_radius().0;
+                let renderer = map.renderers.iter_mut().find(|r| r.uid == uid).unwrap();
+                renderer.name = setup.renderer_name.clone();
+                renderer.center = map_center.unwrap_or(center);
+                Ok(())
+            }
+            GuiLoadedPath::Scene { .. } => Ok(()),
+        }
+    }
+
     /// Load a browser file or an in-memory download through the native readers.
     pub fn open_bytes(&mut self, name: &str, bytes: &[u8]) -> Result<GuiLoadedPath> {
         if [".gz", ".bz2", ".xz"]

@@ -1250,6 +1250,7 @@ struct NativeFileReaderOptions<'a> {
 
 #[derive(Debug)]
 struct GuiApplication {
+    agent: cuemol_ui::AgentPanel,
     state: DesktopAppState,
     open_path: String,
     save_path: String,
@@ -1601,6 +1602,7 @@ struct GuiApplication {
 
 #[derive(Debug, Clone)]
 struct GuiUndoSnapshot {
+    camera: Option<cuemol_qsys::Camera>,
     state: DesktopAppState,
     selected_object: Option<cuemol_core::Uid>,
     selected_renderer: Option<cuemol_core::Uid>,
@@ -2182,10 +2184,14 @@ struct NativeApbsJob {
     scene_uid: cuemol_core::Uid,
     started: Instant,
     command: Option<cuemol_command::transport::ApiRequest>,
+    agent_reply: Option<cuemol_agent::ToolReply>,
 }
 
 impl NativeApbsJob {
     fn reply(&mut self, outcome: std::result::Result<serde_json::Value, String>) {
+        if let Some(reply) = self.agent_reply.take() {
+            let _ = reply.try_send(outcome.clone());
+        }
         if let Some(request) = self.command.take() {
             let error = outcome.is_err();
             let payload = match outcome {
@@ -4932,7 +4938,14 @@ impl GuiApplication {
             .parse::<f32>()
             .unwrap_or(MORPH_NAME_COLUMN_DEFAULT_WIDTH)
             .clamp(MORPH_COLUMN_MIN_WIDTH, 600.0);
+        let mut agent = cuemol_ui::AgentPanel::default();
+        if let Ok(text) =
+            std::fs::read_to_string(cuemol_command::config::directory().join("agent.json"))
+        {
+            agent.load_settings(&text);
+        }
         Self {
+            agent,
             state,
             open_path: "../cuemol2/tests/test_data/1CRN.pdb".to_string(),
             save_path: "scene.qsc".to_string(),
@@ -5279,7 +5292,120 @@ impl GuiApplication {
         app
     }
 
+    fn agent_ui(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
+        if self.agent.running() && self.agent.revision != self.snapshot_revision {
+            self.agent
+                .cancel("Scene changed outside the agent; turn cancelled.");
+        }
+        while let Some(cuemol_ui::AgentCall {
+            name,
+            arguments,
+            reply,
+            download,
+        }) = self.agent.poll(ctx)
+        {
+            if reply.is_closed() {
+                continue;
+            }
+            let mut view = camera.to_qsys_camera("__current");
+            if matches!(
+                name.as_str(),
+                "render_image" | "get_screenshot" | "capture_view"
+            ) {
+                match cuemol_command::validate_args(&name, &arguments).and_then(|()| {
+                    cuemol_command::prepare_render(&self.state, &view, &name, &arguments)
+                        .map_err(|e| e.to_string())
+                }) {
+                    Ok(render) => {
+                        let cancel = self.agent.operation_cancel();
+                        std::thread::spawn(move || {
+                            let result = render.run_with_cancel(&cancel).map_err(|e| e.to_string());
+                            let _ = reply.send_blocking(result);
+                        });
+                    }
+                    Err(error) => {
+                        let _ = reply.try_send(Err(error));
+                    }
+                }
+                continue;
+            }
+            if name == "calc_elepot" {
+                if self.apbs_job.is_some() {
+                    let _ = reply.try_send(Err("An APBS calculation is already running".into()));
+                    continue;
+                }
+                let (sender, receiver) = mpsc::sync_channel(1);
+                self.start_apbs_command(cuemol_command::transport::ApiRequest {message:serde_json::json!({"jsonrpc":"2.0","id":0,"method":"tools/call","params":{"name":name,"arguments":arguments}}),reply:sender});
+                if let Some(job) = &mut self.apbs_job {
+                    job.command = None;
+                    job.agent_reply = Some(reply);
+                } else {
+                    let error = receiver
+                        .try_recv()
+                        .ok()
+                        .flatten()
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| self.status.clone());
+                    let _ = reply.try_send(Err(error));
+                }
+                continue;
+            }
+            let mutating = cuemol_command::tool_is_mutating(&name);
+            let undo = (mutating && !self.agent.changed_scene).then(|| {
+                let mut undo = self.capture_undo();
+                undo.camera = Some(view.clone());
+                undo
+            });
+            let result = if let Some(download) = download {
+                download.and_then(|data| {
+                    cuemol_command::load_fetched(
+                        &mut self.state,
+                        &mut view,
+                        &data.plan,
+                        &data.bytes,
+                    )
+                    .map_err(|e| e.to_string())
+                })
+            } else {
+                cuemol_command::call_tool(&mut self.state, &mut view, &name, &arguments)
+                    .map_err(|e| e.to_string())
+            };
+            if result.is_ok() && mutating {
+                if let Some(undo) = undo {
+                    self.push_undo_snapshot(undo);
+                }
+                self.agent.changed_scene = true;
+                *camera = CameraController::from_qsys_camera(&view);
+                let _ = self.state.set_active_view_camera(&view);
+                self.sync_active_scene_properties();
+                self.invalidate_molecule_panel_caches();
+                self.rebuild_snapshot();
+                self.agent.revision = self.snapshot_revision;
+            }
+            let _ = reply.try_send(result);
+        }
+        if let Some(prompt) = self.agent.show(ctx) {
+            self.agent.start(
+                &mut self.state,
+                &mut camera.to_qsys_camera("__current"),
+                prompt,
+                ctx,
+                self.snapshot_revision,
+            );
+        }
+        if self.agent.take_settings_changed() {
+            let directory = cuemol_command::config::directory();
+            let result = std::fs::create_dir_all(&directory).and_then(|()| {
+                std::fs::write(directory.join("agent.json"), self.agent.settings_json())
+            });
+            if let Err(error) = result {
+                self.set_error(error.into());
+            }
+        }
+    }
+
     fn ui(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
+        self.agent_ui(ctx, camera);
         if !ctx.wants_keyboard_input() && self.pointer_in_viewport(camera.last_cursor) {
             if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Home)) {
                 camera.fit_snapshot(&self.snapshot);
@@ -6023,6 +6149,10 @@ impl GuiApplication {
                     }
                 });
                 ui.menu_button("Tools", |ui| {
+                    if ui.button("AI Agent...").clicked() {
+                        self.agent.visible = true;
+                        ui.close();
+                    }
                     for label in [
                         "Molecular superposition...",
                         "Mol bond editor...",
@@ -20153,6 +20283,7 @@ impl GuiApplication {
                 .unwrap(),
             started: Instant::now(),
             command: None,
+            agent_reply: None,
         });
         self.set_status(format!(
             "APBS calculation started for {} atom(s)",
@@ -20188,6 +20319,12 @@ impl GuiApplication {
         let Some(mut job) = self.apbs_job.take() else {
             return;
         };
+        let is_agent = job.agent_reply.is_some();
+        let cancelled_agent = job.agent_reply.as_ref().is_some_and(|r| r.is_closed())
+            || (is_agent && self.agent.revision != self.snapshot_revision);
+        if cancelled_agent {
+            job.cancel.store(true, Ordering::Relaxed);
+        }
         match job.receiver.try_recv() {
             Err(mpsc::TryRecvError::Empty) => self.apbs_job = Some(job),
             Err(mpsc::TryRecvError::Disconnected) => {
@@ -20199,7 +20336,17 @@ impl GuiApplication {
                 self.set_status(error);
             }
             Ok(Ok(output)) => {
-                let undo = self.capture_undo();
+                if cancelled_agent {
+                    let _ = fs::remove_dir_all(&output.work_dir);
+                    job.reply(Err("Cancelled".into()));
+                    return;
+                }
+
+                let mut undo = self.capture_undo();
+                if is_agent {
+                    undo.camera = Some(self.agent.initial_camera().clone());
+                }
+
                 let result = self.state.open_apbs_potential_in_scene(
                     job.scene_uid,
                     &output.dx_path,
@@ -20218,7 +20365,10 @@ impl GuiApplication {
                             .density_map_summary(map_uid)
                             .expect("APBS potential was just inserted")
                             .scene_uid;
-                        self.push_undo_snapshot(undo);
+                        if !is_agent || !self.agent.changed_scene {
+                            self.push_undo_snapshot(undo);
+                        }
+
                         self.modified_scenes.insert(scene_uid);
                         self.selected_object = None;
                         self.selected_renderer = None;
@@ -20229,6 +20379,11 @@ impl GuiApplication {
                         });
                         self.tool_dialog = None;
                         self.rebuild_snapshot();
+                        if is_agent {
+                            self.agent.changed_scene = true;
+                            self.agent.revision = self.snapshot_revision;
+                        }
+
                         self.set_status(format!(
                             "APBS calculation complete: {}",
                             job.potential_name
@@ -30162,6 +30317,7 @@ impl GuiApplication {
             self.rebuild_snapshot();
         }
         GuiUndoSnapshot {
+            camera: None,
             state: self.state.clone(),
             selected_object: self.selected_object,
             selected_renderer: self.selected_renderer,
@@ -30206,8 +30362,13 @@ impl GuiApplication {
     }
 
     fn restore_undo_snapshot(&mut self, snapshot: GuiUndoSnapshot, camera: &mut CameraController) {
+        let view = snapshot.camera.clone();
         self.restore_gui_undo_state(snapshot);
-        camera.fit_snapshot(&self.snapshot);
+        if let Some(view) = view {
+            *camera = CameraController::from_qsys_camera(&view);
+        } else {
+            camera.fit_snapshot(&self.snapshot);
+        }
     }
 
     fn undo(&mut self, camera: &mut CameraController) {
@@ -30215,7 +30376,10 @@ impl GuiApplication {
             self.set_status("Nothing to undo");
             return;
         };
-        let redo = self.capture_undo();
+        let mut redo = self.capture_undo();
+        if snapshot.camera.is_some() {
+            redo.camera = Some(camera.to_qsys_camera("__current"));
+        }
         self.restore_undo_snapshot(snapshot, camera);
         self.redo_stack.push(redo);
         self.set_status("Undo");
@@ -30226,7 +30390,10 @@ impl GuiApplication {
             self.set_status("Nothing to redo");
             return;
         };
-        let undo = self.capture_undo();
+        let mut undo = self.capture_undo();
+        if snapshot.camera.is_some() {
+            undo.camera = Some(camera.to_qsys_camera("__current"));
+        }
         self.restore_undo_snapshot(snapshot, camera);
         self.undo_stack.push(undo);
         self.set_status("Redo");
@@ -36057,6 +36224,81 @@ mod tests {
         );
         assert_eq!(app.selection_history, ["chain A", "name CA"]);
         assert_eq!(app.status, "Loaded config preloaded.conf");
+    }
+
+    #[test]
+    fn native_agent_applies_one_undo_transaction() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", server.server_addr());
+        let worker = std::thread::spawn(move || {
+            for round in 0..2 {
+                let request = server
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap()
+                    .unwrap();
+                let output = if round == 0 {
+                    serde_json::json!([
+                        {"type":"function_call","call_id":"one","name":"create_scene","arguments":"{\"name\":\"Agent A\"}"},
+                        {"type":"function_call","call_id":"two","name":"create_scene","arguments":"{\"name\":\"Agent B\"}"}
+                    ])
+                } else {
+                    serde_json::json!([])
+                };
+                let event = serde_json::json!({"type":"response.completed","response":{"status":"completed","output":output}});
+                request
+                    .respond(
+                        tiny_http::Response::from_string(format!("data: {event}\n\n")).with_header(
+                            tiny_http::Header::from_bytes("Content-Type", "text/event-stream")
+                                .unwrap(),
+                        ),
+                    )
+                    .unwrap();
+            }
+        });
+        let mut app = GuiApplication::new();
+        let initial = app.state.scene_summaries().len();
+        let ctx = egui::Context::default();
+        let mut camera = CameraController::default();
+        let mut before = cuemol_qsys::Camera::new();
+        before.set_zoom(17.);
+        before.set_center(Vector4::new3(3., 4., 5.));
+        camera = CameraController::from_qsys_camera(&before);
+        let before = cuemol_command::view_json(&camera.to_qsys_camera("__current"));
+
+        app.agent.settings = cuemol_agent::Settings {
+            enabled: true,
+            model: "openai:test-model".into(),
+            reasoning: "default".into(),
+            endpoint,
+            ..Default::default()
+        };
+        app.agent.set_session_key("mock-key".into());
+        app.agent.start(
+            &mut app.state,
+            &mut camera.to_qsys_camera("__current"),
+            "Create two scenes".into(),
+            &ctx,
+            app.snapshot_revision,
+        );
+        let started = Instant::now();
+        while app.agent.running() {
+            assert!(started.elapsed() < Duration::from_secs(5));
+            app.agent_ui(&ctx, &mut camera);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(app.state.scene_summaries().len(), initial + 2);
+        assert_eq!(app.undo_stack.len(), 1);
+        assert!(!app.agent.settings_json().contains("mock-key"));
+        app.undo(&mut camera);
+        assert_eq!(
+            cuemol_command::view_json(&camera.to_qsys_camera("__current")),
+            before
+        );
+
+        assert_eq!(app.state.scene_summaries().len(), initial);
+        app.redo(&mut camera);
+        assert_eq!(app.state.scene_summaries().len(), initial + 2);
+        worker.join().unwrap();
     }
 
     #[test]
@@ -42926,3 +43168,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "agent_tests.rs"]
+mod agent_tests;

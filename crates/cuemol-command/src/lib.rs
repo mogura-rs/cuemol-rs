@@ -2,10 +2,12 @@
 mod advanced;
 mod animation;
 mod commands;
+mod downloads;
 mod electrostatics;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod external;
 mod file_commands;
+pub use downloads::{load_fetched, prepare_fetch, FetchPlan};
 mod nodes;
 mod properties;
 pub use animation::advance_animation;

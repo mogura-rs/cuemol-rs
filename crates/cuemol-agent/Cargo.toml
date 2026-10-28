@@ -1,0 +1,28 @@
+[package]
+name = "cuemol-agent"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cuemol-command.workspace = true
+cuemol-desktop-core.workspace = true
+cuemol-qsys.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-channel = "2"
+futures-util = "0.3"
+zeroize = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+tokio = { version = "1", features = ["rt", "time", "net"] }
+keyring = { version = "4.2", default-features = false, features = ["v1"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+wasm-bindgen-futures = "0.4"
+gloo-timers = { version = "0.3", features = ["futures"] }
+
+[dev-dependencies]
+tiny_http = "0.12"

@@ -344,6 +344,9 @@ fn prepare_with_direct(
     let half_h = camera.zoom() * 0.5;
     let half_w = half_h * width as f64 / height as f64;
     for y in 0..height {
+        if async_state.is_some_and(|(_, cancel)| cancel.load(Ordering::Relaxed)) {
+            return Err(CueMolError::invalid_argument("Render cancelled"));
+        }
         for x in 0..width {
             let eye_x = ((x as f64 + 0.5) / width as f64 * 2. - 1.) * half_w;
             let eye_y = (1. - (y as f64 + 0.5) / height as f64 * 2.) * half_h;

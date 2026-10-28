@@ -277,3 +277,98 @@ test('browser rendering yields to mouse input and can be cancelled',async({page}
   const image=JSON.parse((await call(page,'get_screenshot',{width:32,height:32})).message)._image;
   expect(PNG.sync.read(Buffer.from(image,'base64')).width).toBe(32);
 });
+
+function agentSse(output,text='') {
+  return [
+    {type:'response.output_text.delta',delta:text},
+    {type:'response.completed',response:{status:'completed',output,usage:{input_tokens:20,output_tokens:5}}},
+  ].map(value=>`data: ${JSON.stringify(value)}\n\n`).join('');
+}
+const agentCall=(name,args,id)=>({type:'function_call',call_id:id,name,arguments:JSON.stringify(args)});
+async function startAgent(page,prompt) {
+  await page.evaluate(prompt=>window.cuemol.agent.start(prompt,{enabled:true,model:'openai:test-model',reasoning:'default',endpoint:`${location.origin}/mock-api`},'mock-browser-key'),prompt);
+}
+test('browser agent streams, downloads structures, sees rendered images, and groups undo',async({page},testInfo)=>{
+  const errors=[];page.on('pageerror',e=>errors.push(e.message));
+  let round=0, imageSeen=false;
+  await page.route('**/agent-structure.pdb',route=>route.fulfill({contentType:'text/plain',body:structure}));
+  await page.route('**/mock-api/responses',async route=>{
+    const request=route.request().postDataJSON();
+    expect(route.request().headers().authorization).toBe('Bearer mock-browser-key');
+    round++;
+    let output;
+    if(round===1) output=[agentCall('enable_toolsets',{toolsets:['files']},'enable'),agentCall('fetch_url',{url:new URL('/agent-structure.pdb',route.request().url()).href,reader:'pdb',name:'Agent ligand',rendererType:'cpk',selection:'elem C'},'fetch')];
+    else if(round===2) output=[agentCall('capture_view',{longSide:256},'image')];
+    else {
+      imageSeen=JSON.stringify(request.input).includes('data:image/png;base64,');
+      await new Promise(resolve=>setTimeout(resolve,350));
+      output=[{type:'message',role:'assistant',content:[{type:'output_text',text:'Prepared the ligand.',annotations:[]}]}];
+    }
+    await route.fulfill({contentType:'text/event-stream',body:agentSse(output,round===3?'Prepared the ligand.':'Working. ')});
+  });
+  await ready(page);
+  const before=(await page.evaluate(()=>window.cuemol.status())).view.zoom;
+  await startAgent(page,'Download the structure, show carbon atoms as spheres, and check the image.');
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  await page.mouse.move(1000,650);await page.mouse.wheel(0,-120);
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().agent.running)).toBe(false);
+  const state=await page.evaluate(()=>window.cuemol.status());
+  expect(state.view.zoom).not.toBe(before);
+  expect(state.scene.objects[0].name).toBe('Agent ligand');
+  expect(state.scene.objects[0].renderers).toHaveLength(1);
+  expect(state.scene.objects[0].renderers[0].type).toBe('cpk');
+  expect(state.agent.messages.some(m=>m.image)).toBe(true);
+  expect(state.agent.messages.some(m=>m.text.includes('Prepared the ligand.'))).toBe(true);
+  expect(imageSeen).toBe(true);
+  expect(await page.evaluate(()=>JSON.stringify(localStorage))).not.toContain('mock-browser-key');
+  await page.screenshot({path:testInfo.outputPath('agent.png')});
+  expect((await call(page,'undo')).scene.objects).toHaveLength(0);
+  expect((await call(page,'redo')).scene.objects).toHaveLength(1);
+  expect(errors).toEqual([]);
+});
+
+test('browser agent cancellation keeps completed edits and rejects late tool calls',async({page})=>{
+  await ready(page);await load(page,'ligand.pdb',Buffer.from(structure));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  const object=(await page.evaluate(()=>window.cuemol.status())).scene.objects[0].id;
+  let round=0, release;
+  const pending=new Promise(resolve=>{release=resolve;});
+  await page.route('**/mock-api/responses',async route=>{
+    round++;
+    if(round===1) await route.fulfill({contentType:'text/event-stream',body:agentSse([agentCall('set_node_prop',{nodeType:'object',nodeId:object,prop:'name',value:'Completed edit'},'first')])});
+    else {
+      await pending;
+      try {await route.fulfill({contentType:'text/event-stream',body:agentSse([agentCall('delete_node',{nodeType:'object',nodeId:object},'late')])});}catch{}
+    }
+  });
+  await startAgent(page,'Edit this object.');
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects[0].name)).toBe('Completed edit');
+  await expect.poll(()=>round).toBe(2);
+  await page.evaluate(()=>window.cuemol.agent.cancel());
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().agent.running)).toBe(false);
+  release();await page.waitForTimeout(150);
+  let state=await page.evaluate(()=>window.cuemol.status());
+  expect(state.scene.objects).toHaveLength(1);expect(state.scene.objects[0].name).toBe('Completed edit');
+  state=await call(page,'undo');expect(state.scene.objects[0].name).not.toBe('Completed edit');
+});
+
+test('browser agent seeks an indexed trajectory and undo restores the previous coordinates',async({page})=>{
+  await ready(page);await load(page,'topology.pdb',Buffer.from(structure));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  await load(page,'agent.dcd',dcd(5));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toContain('Indexed 5 frames');
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().busy)).toBe(false);
+  const object=(await page.evaluate(()=>window.cuemol.status())).scene.objects[0].id;
+  let round=0;
+  await page.route('**/mock-api/responses',route=>{
+    round++;
+    const output=round===1?[agentCall('enable_toolsets',{toolsets:['trajectory']},'enable'),agentCall('set_frame',{objId:object,frame:4},'frame')]:[];
+    return route.fulfill({contentType:'text/event-stream',body:agentSse(output)});
+  });
+  await startAgent(page,'Show frame 4.');
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().frame)).toBe(4);
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().agent.running)).toBe(false);
+  expect((await page.evaluate(()=>window.cuemol.status())).agent.messages.some(m=>m.role==='Error')).toBe(false);
+  expect((await call(page,'undo')).frame).toBe(0);
+  expect((await call(page,'redo')).frame).toBe(4);
+});

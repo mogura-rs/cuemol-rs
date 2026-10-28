@@ -21,6 +21,7 @@ members = [
   "crates/cuemol-command",
   "crates/cuemol-web",
   "crates/cuemol-ui",
+  "crates/cuemol-agent",
   "crates/cuemol-node",
   "crates/cuemol-py",
 ]
@@ -32,6 +33,7 @@ license = "MIT"
 repository = "https://github.com/CueMol/cuemol2-rs"
 
 [workspace.dependencies]
+cuemol-agent = { path = "crates/cuemol-agent" }
 cuemol-ui = { path = "crates/cuemol-ui" }
 cuemol-command = { path = "crates/cuemol-command" }
 cuemol-core = { path = "crates/cuemol-core" }

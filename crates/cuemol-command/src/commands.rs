@@ -664,6 +664,21 @@ pub struct PreparedRender {
     output: Option<String>,
 }
 impl PreparedRender {
+    pub fn run_with_cancel(self, cancel: &std::sync::atomic::AtomicBool) -> Result<Value> {
+        let frame = cuemol_render::render_umbreon_snapshot_with_cancel(
+            &self.snapshot,
+            &self.camera,
+            self.background,
+            &self.params,
+            self.hatch.as_ref(),
+            cancel,
+        )?;
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(CueMolError::invalid_argument("Render cancelled"));
+        }
+        self.encode(frame)
+    }
+
     pub fn run(self) -> Result<Value> {
         let frame = if let Some(hatch) = &self.hatch {
             cuemol_render::render_umbreon_npr_snapshot(

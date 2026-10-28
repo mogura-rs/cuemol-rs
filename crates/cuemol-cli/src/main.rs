@@ -1,3 +1,4 @@
+mod agent;
 mod external_tools;
 mod runtime;
 mod web;
@@ -67,6 +68,7 @@ fn run() -> Result<(), String> {
         }
         "self-upgrade" => self_upgrade(),
         "mcp" => runtime::mcp(args.collect()),
+        "agent" => agent::run(args.collect()),
         "web" => web::run(args.collect()),
         "tools" => external_tools::run(args.collect()),
         "config" => runtime::config(args.collect()),

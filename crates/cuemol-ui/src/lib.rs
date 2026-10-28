@@ -7,3 +7,8 @@ pub use hatch::hatch_controls;
 mod lighting;
 #[cfg(feature = "egui")]
 pub use lighting::lighting_controls;
+
+#[cfg(feature = "egui")]
+mod agent;
+#[cfg(feature = "egui")]
+pub use agent::{AgentCall, AgentPanel};

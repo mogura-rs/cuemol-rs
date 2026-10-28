@@ -130,6 +130,46 @@ including a private PDB2PQR runtime. They do not require a system Python install
 Tool lookup checks configured paths, `CUEMOL_TOOLS_DIR`, the binary/application
 bundle, the cache, and `PATH`. POV-Ray remains an optional external backend.
 
+## AI Agent
+
+Open **Tools > AI Agent** in the native application or **AI Agent** in the
+browser. Enable it, choose `openai:model`, `anthropic:model`, or `google:model`,
+and enter that provider's API key. The model field accepts arbitrary model IDs;
+**Refresh available models** queries the provider's catalog. Settings are saved
+in `agent.json` beside the other configuration files. Native keys can be stored
+in the OS credential store, with `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or
+`GEMINI_API_KEY` as a fallback. Browser keys remain in the current tab's memory.
+
+Sending a message shares the prompt, scene description, tool results, and any
+captured images with the selected provider. Replies stream into the panel.
+Specialized tool groups are enabled as needed; the full MCP catalog remains
+available through those groups. Each turn is limited to 16 model rounds and
+creates one undo entry for its successful scene edits. Cancel keeps edits
+already shown. A manual scene edit cancels the pending turn, and late download
+or APBS results are discarded. Network requests, image rendering, and native
+APBS calculation run without blocking the panel. Browser filesystem and external
+process restrictions still apply.
+
+```sh
+cuemol agent run example.pdb --prompt 'Show chain A as a ribbon' --save result.qsc
+cuemol agent models --model openai:gpt-5.6
+cuemol agent key set openai < key.txt
+cuemol agent key delete openai
+```
+
+`key set` reads standard input. `run` and `models` also accept `--api-key-stdin`
+for a session key, `--endpoint URL` for a compatible API server, and
+`--reasoning default|low|medium|high`. `default` leaves reasoning settings to the
+provider. Model availability, reasoning support, and API charges depend on the
+provider and account. Conversation history stays in memory; **New conversation**
+clears it.
+
+The Rust adapters use [OpenAI Responses streaming](https://developers.openai.com/api/docs/guides/streaming-responses),
+[Anthropic Messages streaming](https://platform.claude.com/docs/en/build-with-claude/streaming),
+and [Google streaming generation](https://ai.google.dev/api/generate-content).
+Provider-specific reasoning data and signatures are preserved between tool
+rounds. Switching providers carries over only the user and assistant text.
+
 ## Browser
 
 Release binaries embed the browser application:
@@ -142,7 +182,7 @@ cuemol web serve --dir web
 
 Alternatively, serve the extracted `cuemol-web.zip` from an HTTPS host. WebGPU
 requires a secure context; localhost is supported. `?renderer=webgl` selects the
-WebGL2 fallback. Files stay in the browser. File selection, drag and drop,
+WebGL2 fallback. Local file data stays in the browser unless shared through the optional AI Agent. File selection, drag and drop,
 representations, properties, sequence, saved cameras, commands, undo, animation,
 PNG export, and embedded QSC download use the shared Rust core. Image rendering
 yields between row batches so the viewport remains interactive, and can be

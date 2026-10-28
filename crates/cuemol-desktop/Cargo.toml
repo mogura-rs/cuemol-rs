@@ -6,6 +6,7 @@ license.workspace = true
 build = "build.rs"
 
 [dependencies]
+cuemol-agent.workspace = true
 cuemol-ui = { workspace = true, optional = true, features = ["egui"] }
 cuemol-command.workspace = true
 serde_json = "1"
@@ -85,6 +86,7 @@ tauri-gui = [
 # Pinned to egui's exact minor (0.33.x) — a mismatch would drag a second egui copy
 # into the tree and break `egui::Context` type identity. Only used by egui-gui tests.
 [dev-dependencies]
+tiny_http = "0.12"
 tempfile = { version = "3", default-features = false }
 egui_kittest = { version = "0.33.3", features = ["wgpu"] }
 

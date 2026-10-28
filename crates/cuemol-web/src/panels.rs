@@ -1,6 +1,141 @@
 use super::*;
 
 impl App {
+    pub(super) fn agent_ui(&mut self, ctx: &egui::Context) {
+        if self.agent.running() && self.agent.revision != self.revision {
+            self.agent
+                .cancel("Scene changed outside the agent; turn cancelled.");
+        }
+        while let Some(cuemol_ui::AgentCall {
+            name,
+            arguments,
+            reply,
+            download,
+        }) = self.agent.poll(ctx)
+        {
+            if reply.is_closed() {
+                continue;
+            }
+            if let Err(error) = cuemol_command::validate_args(&name, &arguments) {
+                let _ = reply.try_send(Err(error));
+                continue;
+            }
+            if let Some((id, trajectory)) = &self.trajectory {
+                if name == "list_trajectories" {
+                    let _=reply.try_send(Ok(json!({"trajectories":[{"objectId":id.get(),"frames":trajectory.frames,"frame":self.frame}]})));
+                    continue;
+                }
+                if name == "set_frame" && arguments["objId"].as_u64() == Some(id.get()) {
+                    let frame = arguments["frame"].as_u64().unwrap_or(u64::MAX);
+                    if frame >= trajectory.frames as u64 {
+                        let _ = reply.try_send(Err("Frame out of range".into()));
+                        continue;
+                    }
+                    let (id, trajectory, revision) = (*id, trajectory.clone(), self.revision);
+                    spawn_local(async move {
+                        let result = trajectory.frame(frame as usize).await.map_err(js_error);
+                        enqueue(Event::AgentFrame(
+                            id,
+                            frame as usize,
+                            result,
+                            reply,
+                            revision,
+                        ));
+                    });
+                    continue;
+                }
+            }
+            if matches!(
+                name.as_str(),
+                "render_image" | "get_screenshot" | "capture_view"
+            ) {
+                match cuemol_command::validate_args(&name, &arguments).and_then(|()| {
+                    cuemol_command::prepare_render(&self.state, &self.camera, &name, &arguments)
+                        .map_err(|e| e.to_string())
+                }) {
+                    Ok(render) => {
+                        let cancel = self.agent.operation_cancel();
+                        let filename = (name == "render_image").then(|| {
+                            arguments["fileName"]
+                                .as_str()
+                                .unwrap_or("cuemol.png")
+                                .to_string()
+                        });
+                        spawn_local(async move {
+                            let mut result = render
+                                .run_async_with_cancel(Some(&cancel))
+                                .await
+                                .map_err(|e| e.to_string());
+                            if reply.is_closed() {
+                                return;
+                            }
+                            if let (Some(filename), Ok(value)) = (filename, result.as_ref()) {
+                                result = base64::engine::general_purpose::STANDARD
+                                    .decode(value["_image"].as_str().unwrap_or(""))
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|bytes| {
+                                        super::download(&filename, &bytes, "image/png")
+                                            .map_err(js_error)
+                                    })
+                                    .map(|()| value.clone());
+                            }
+                            let _ = reply.send(result).await;
+                        });
+                    }
+                    Err(error) => {
+                        let _ = reply.try_send(Err(error));
+                    }
+                }
+                continue;
+            }
+            let mutating = cuemol_command::tool_is_mutating(&name);
+            let undo = (mutating && !self.agent.changed_scene).then(|| self.capture_history());
+            let result = if let Some(download) = download {
+                download.and_then(|data| {
+                    cuemol_command::load_fetched(
+                        &mut self.state,
+                        &mut self.camera,
+                        &data.plan,
+                        &data.bytes,
+                    )
+                    .map_err(|e| e.to_string())
+                })
+            } else {
+                cuemol_command::call_tool(&mut self.state, &mut self.camera, &name, &arguments)
+                    .map_err(|e| e.to_string())
+            };
+            if result.is_ok() && mutating {
+                if let Some(undo) = undo {
+                    self.history.push(undo);
+                    self.future.clear();
+                    if self.history.len() > 12 {
+                        self.history.remove(0);
+                    }
+                }
+                self.agent.changed_scene = true;
+                self.dirty = true;
+                self.revision = self.revision.wrapping_add(1);
+                self.agent.revision = self.revision;
+            }
+            let _ = reply.try_send(result);
+        }
+        if let Some(prompt) = self.agent.show(ctx) {
+            self.agent.start(
+                &mut self.state,
+                &mut self.camera,
+                prompt,
+                ctx,
+                self.revision,
+            );
+        }
+        if self.agent.take_settings_changed() {
+            if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten())
+            {
+                let _ = storage.set_item("cuemol.agent", &self.agent.settings_json());
+            }
+        }
+    }
+
     pub(super) fn render_ui(&mut self, ctx: &egui::Context) {
         if !self.show_render {
             return;

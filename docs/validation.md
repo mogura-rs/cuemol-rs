@@ -67,7 +67,7 @@ native build and first-time tool downloads/builds.
 ## Remaining verification scope
 
 Release workflows are configured for Linux x86_64/ARM64, macOS Intel/Apple
-Silicon, and Windows x86_64. Only the local Linux build and browser checks were
+Silicon, and Windows x86_64. Local Linux and Apple Silicon builds plus browser checks were
 executed during this work; the other native release targets and published
 installation must be verified when pushing and running Actions is authorized.
 The README lists implementation boundaries that also limit parity claims.
@@ -147,3 +147,21 @@ to yield between calculations. All 12 browser tests passed, including camera
 zoom during a large GI render, cancellation, and successful rendering afterwards.
 OIDN cancellation also closes the pending browser render operation. The native
 OIDN quality and alpha tests passed on Apple Silicon with its bundled CPU runtime.
+
+
+## Optional AI Agent
+
+Loopback mock providers exercised OpenAI Responses, Anthropic Messages, and
+Google streaming generation with tool calls, images, opaque reasoning data,
+usage accounting, model catalogs, malformed streams, and cancellation. No paid
+provider requests or real credentials were used. The CLI regression supplied a
+session key through standard input, edited a molecule, and saved the result as
+an embedded scene without writing the key to configuration.
+
+All 15 browser tests passed. Agent regressions cover streamed replies, downloaded
+structures, rendered images, one undo entry per turn, cancellation after visible
+edits, and indexed trajectory seeking with undo/redo. Native tests also cover
+background APBS execution and rejection of late APBS output after a manual edit.
+The shared render suite passed 68 tests, including cancellation before output
+creation. These checks establish the integration contract; live model behavior
+and platform credential stores require their respective services.

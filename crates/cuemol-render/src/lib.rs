@@ -10,9 +10,9 @@ use std::path::{Component, Path, PathBuf};
 
 pub use raytrace::{
     hatch_style_spec, prepare_oidn_render, render_umbreon_npr_snapshot, render_umbreon_smoke,
-    render_umbreon_snapshot, validate_hatch_params, HatchLayer, HatchLayerKind, HatchLook,
-    HatchRenderParams, OidnRender, UmbreonDenoiseMode, UmbreonFrame, UmbreonRenderParams,
-    UmbreonSceneExporter, UmbreonSmokeResult, HATCH_STYLES,
+    render_umbreon_snapshot, render_umbreon_snapshot_with_cancel, validate_hatch_params,
+    HatchLayer, HatchLayerKind, HatchLook, HatchRenderParams, OidnRender, UmbreonDenoiseMode,
+    UmbreonFrame, UmbreonRenderParams, UmbreonSceneExporter, UmbreonSmokeResult, HATCH_STYLES,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

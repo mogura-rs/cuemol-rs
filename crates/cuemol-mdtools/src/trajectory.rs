@@ -1,8 +1,8 @@
 //! Molecular-dynamics trajectory blocks and DCD reader.
 //!
 //! This ports the block-centric `mdtools::Trajectory`, `TrajBlock`, and
-//! `DCDTrajReader` path. DCD frames are read eagerly, matching the current C++
-//! implementation.
+//! `DCDTrajReader` path. Indexed trajectory sources decode frames on demand;
+//! the owned-frame readers also support callers that need an in-memory trajectory.
 
 use cuemol_core::{CueMolError, Result, Vector4};
 use cuemol_molstr::MolCoord;
