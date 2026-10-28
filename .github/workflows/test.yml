@@ -1,0 +1,43 @@
+name: Shared tests
+on:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: core-tests
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - uses: actions/cache@v6
+        with:
+          path: .cache/bundled-tools/oidn
+          key: oidn-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/bundle-oidn.py') }}
+        id: oidn
+      - name: Prepare OIDN runtime
+        if: steps.oidn.outputs.cache-hit != 'true'
+        run: uv run --no-project python scripts/bundle-oidn.py
+      - name: Verify distribution helpers
+        run: uv run --no-project python scripts/test-distributions.py
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Install native GUI dependencies
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      - name: Test shared core and CLI
+        run: cargo test --locked --workspace --exclude cuemol-desktop --exclude cuemol-web
+      - name: Test native interface
+        run: cargo test --locked -p cuemol-desktop --features egui-gui
+      - name: Test installer and self-upgrade
+        run: |
+          cargo build --locked -p cuemol-cli
+          scripts/test-install.sh target/debug/cuemol

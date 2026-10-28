@@ -12,9 +12,10 @@ case "$(uname -s)-$(uname -m)" in
   *) exit 1 ;;
 esac
 printf '#!/bin/sh\nprintf "installed\\n"\n' > "$work/input/cuemol"
+printf '{"version":"test"}\n' > "$work/input/build-info.json"
 mkdir -p "$work/input/cuemol-tools/apbs/bin"
 printf 'bundled\n' > "$work/input/cuemol-tools/apbs/bin/apbs"
-tar -czf "$work/release/cuemol-$target.tar.gz" -C "$work/input" cuemol cuemol-tools
+tar -czf "$work/release/cuemol-$target.tar.gz" -C "$work/input" cuemol cuemol-tools build-info.json
 (cd "$work/release" && shasum -a 256 "cuemol-$target.tar.gz" > SHA256SUMS)
 CUEMOL_RELEASE_URL="file://$work/release" CUEMOL_INSTALL_DIR="$work/bin" sh "$root/install.sh"
 test "$("$work/bin/cuemol")" = installed

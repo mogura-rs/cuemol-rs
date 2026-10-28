@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Package the native binary, browser assets and bundled scientific tools."""
 import argparse
+import json
+import os
 from pathlib import Path
 import platform
 import shutil
@@ -23,6 +25,9 @@ package = root / '.cache/package' / args.target
 shutil.rmtree(package, ignore_errors=True)
 package.mkdir(parents=True)
 shutil.copy2(binary, package / binary.name)
+revision = os.environ.get('GITHUB_SHA') or subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
+version = subprocess.check_output([str(binary), '--version'], text=True).strip().removeprefix('cuemol ')
+(package / 'build-info.json').write_text(json.dumps({'commit': revision, 'target': args.target, 'version': version}, indent=2) + '\n')
 shutil.copytree(tools, package / 'cuemol-tools')
 licenses = package / 'cuemol-tools/licenses'
 shutil.copy2(root / 'crates/cuemol-molanl/vendor/usalign/LICENSE', licenses / 'USalign.txt')
@@ -47,5 +52,6 @@ else:
 if platform.system() == 'Darwin':
     app = package / 'CueMol.app'
     subprocess.run(['sh', str(root / 'scripts/package-macos-app.sh'), str(binary), str(app), str(package / 'cuemol-tools')], check=True)
+    shutil.copy2(package / 'build-info.json', app / 'Contents/Resources/build-info.json')
     subprocess.run(['plutil', '-lint', str(app / 'Contents/Info.plist')], check=True)
     subprocess.run(['ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', str(app), str(dist / f'CueMol-{args.target}.zip')], check=True)

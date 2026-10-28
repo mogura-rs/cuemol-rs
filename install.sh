@@ -50,7 +50,7 @@ fi
 staged=$(mktemp -d "$install_dir/.cuemol.XXXXXXXX")
 if tar -tzf "$work/$asset" | awk '
   /(^\/|(^|\/)\.\.(\/|$))/ { bad = 1 }
-  $0 != "cuemol" && $0 !~ /^cuemol-tools(\/|$)/ { bad = 1 }
+  $0 != "cuemol" && $0 != "build-info.json" && $0 !~ /^cuemol-tools(\/|$)/ { bad = 1 }
   END { exit !bad }
 '; then
   printf "Invalid release archive paths\n" >&2

@@ -177,3 +177,17 @@ passed; the native suite passed 162 unit and 69 shell compatibility checks.
 The native offscreen interface snapshot covers the panels and controls, while
 browser screenshots include the live wgpu viewport. This does not make the
 offscreen interface snapshot a native-window rendering test.
+
+
+## Release and Pages workflows
+
+Distribution helpers validate all five native targets, both macOS applications,
+and the browser archive before creating checksums. Six local tests cover missing
+platforms, source and checksum mismatches, stale macOS applications, draft retry,
+and refusal to overwrite a published release. The Linux distribution passed
+installation, self-upgrade, bundled PDB2PQR and image-rendering checks. A browser
+smoke test passed with the staged assets served below a repository-style subpath.
+The release build embeds the isolated, verified browser artifact through
+`CUEMOL_WEB_DIR`; source-tree test files are not part of that artifact.
+All five workflow files pass actionlint. GitHub-hosted release and Pages runs
+remain unexecuted because these changes have not been pushed.

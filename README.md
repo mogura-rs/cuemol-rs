@@ -249,10 +249,26 @@ npm test
 
 The development/test profiles omit debug information. Native release builds
 avoid LTO, while the browser uses a separate size-oriented profile. CI caches
-Cargo and wasm-bindgen and runs shared tests plus one browser build. Release
-builds reuse that single browser artifact, cache platform tool bundles, and
-package the native application for five targets. A version tag publishes the
-archives and checksums; manual runs only upload build artifacts.
+Cargo, wasm-bindgen, Emscripten, scientific kernels and Chromium. Shared and
+native interface tests run once; browser tests run once against the shared web
+build. Release jobs reuse that browser artifact and cache platform tool bundles
+for five native targets. A version tag publishes eight archives and checksums
+only after every target succeeds. Failed uploads leave a draft that can be
+resumed; an already published version is never overwritten. Manual release runs
+build artifacts by default; select a version tag and enable `publish` to publish.
+
+The Pages workflow deploys the browser artifact from successful `main` CI runs,
+verifies its source commit, and skips superseded automatic builds. It does not
+rebuild WASM or execute code from pull-request artifacts. Enable GitHub Actions
+as the Pages source in repository settings before the first deployment. A manual
+Pages run accepts a successful `main` push CI run ID, which also supports rollback.
+After deployment, the workflow checks the live `build-info.json` commit. Relative
+asset URLs work at both a domain root and a repository subpath.
+
+The workflow implementation follows the official
+[Pages deployment action](https://github.com/actions/deploy-pages) and
+[cross-workflow artifact download](https://github.com/actions/download-artifact)
+interfaces. Local validation does not publish a release or a Pages deployment.
 
 Compatibility tests may skip when the optional reference tree or external
 fixture generator is absent. Git LFS pointer fixtures are reported as missing

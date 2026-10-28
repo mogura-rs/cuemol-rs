@@ -36,6 +36,13 @@ fn main() {
         ("pkg/kernels/LittleCMS-LICENSE", "text/plain; charset=utf-8"),
         ("pkg/kernels/USalign-LICENSE", "text/plain; charset=utf-8"),
     ];
+    println!(
+        "cargo:rerun-if-changed={}",
+        root.join("build-info.json").display()
+    );
+    if root.join("build-info.json").is_file() {
+        assets.push(("build-info.json", "application/json"));
+    }
     assets.sort_unstable();
     for (index, (name, mime)) in assets.into_iter().enumerate() {
         let path = root.join(name);

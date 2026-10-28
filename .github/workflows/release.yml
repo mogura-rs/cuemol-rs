@@ -3,16 +3,41 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish when running against a version tag
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Validate version tag
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then
+            [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]
+          elif [ "$PUBLISH" = true ]; then
+            echo "Select a version tag to publish a release." >&2
+            exit 1
+          fi
+  test:
+    needs: validate
+    uses: ./.github/workflows/test.yml
   web:
+    needs: validate
     uses: ./.github/workflows/web.yml
   build:
-    needs: web
+    needs: [test, web]
     strategy:
       fail-fast: false
       matrix:
@@ -30,22 +55,24 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
           cache-dependency-glob: scripts/tool-requirements.txt
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: web-assets
-          path: web
-      - uses: actions/cache@v4
+          path: .cache/web-artifact
+      - uses: actions/cache@v6
         id: tools
         with:
           path: .cache/bundled-tools
@@ -59,8 +86,12 @@ jobs:
       - name: Build native tools
         if: steps.tools.outputs.cache-hit != 'true'
         run: uv run --no-project python scripts/bundle-tools.py
+      - name: Verify browser artifact
+        shell: bash
+        run: uv run --no-project python scripts/prepare-web-dist.py --verify .cache/web-artifact --revision "$GITHUB_SHA"
       - name: Build application with browser assets
         env:
+          CUEMOL_WEB_DIR: ${{ github.workspace }}/.cache/web-artifact
           CUEMOL_RELEASE_REPOSITORY: ${{ github.repository }}
           CUEMOL_RELEASE_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
         run: cargo build --locked --release -p cuemol-cli --features gui,bundled-web --target ${{ matrix.target }}
@@ -78,13 +109,19 @@ jobs:
           "$binary" mcp tools > .cache/native-tools.json
           "$binary" tools run pdb2pqr --version
           "$binary" tools run ffmpeg -version
+      - name: Test Unix installer and self-upgrade
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: scripts/test-install.sh "target/$TARGET/release/cuemol"
       - name: Test Windows installer and self-upgrade
         if: runner.os == 'Windows'
         shell: pwsh
         run: scripts/test-install.ps1 -Binary target/${{ matrix.target }}/release/cuemol.exe
       - name: Package distributions
         run: uv run --no-project python scripts/package-release.py --target ${{ matrix.target }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.target }}
           path: dist/*
@@ -92,30 +129,31 @@ jobs:
           compression-level: 0
           retention-days: 7
   publish:
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') && (github.event_name == 'push' || inputs.publish)
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - uses: actions/download-artifact@v8
         with:
           pattern: release-*
           merge-multiple: true
           path: dist
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: web-assets
-          path: web
-      - name: Create release
+          path: .cache/web-artifact
+      - name: Verify complete distribution matrix
+        run: uv run --no-project python scripts/prepare-release.py --web .cache/web-artifact --revision "$GITHUB_SHA"
+      - name: Publish complete release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          (cd web && zip -q -r ../dist/cuemol-web.zip .)
-          cd dist
-          sha256sum * > SHA256SUMS
-          args=()
-          if [[ "$RELEASE_TAG" == *-* ]]; then args+=(--prerelease); fi
-          gh release create "$RELEASE_TAG" --verify-tag --generate-notes "${args[@]}" ./*
+        run: scripts/publish-release.sh dist

@@ -1,0 +1,103 @@
+name: Deploy WASM to Pages
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Successful main-branch CI run to deploy
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+jobs:
+  prepare:
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      deploy: ${{ steps.source.outputs.deploy }}
+      commit: ${{ steps.source.outputs.commit }}
+    steps:
+      - name: Validate source run
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_RUN: ${{ github.event.workflow_run.id || inputs.run_id }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          [[ "$SOURCE_RUN" =~ ^[0-9]+$ ]]
+          gh api "repos/$GH_REPO/actions/runs/$SOURCE_RUN" > run.json
+          jq -e --arg repo "$GH_REPO" '
+            .conclusion == "success" and .event == "push" and
+            .head_branch == "main" and .head_repository.full_name == $repo and
+            .path == ".github/workflows/ci.yml"' run.json
+          commit=$(jq -r .head_sha run.json)
+          latest=$(gh api "repos/$GH_REPO/commits/main" --jq .sha)
+          if [ "$EVENT" = workflow_run ] && [ "$commit" != "$latest" ]; then
+            echo "Skipping a superseded main-branch build."
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "deploy=true" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v8
+        if: steps.source.outputs.deploy == 'true'
+        with:
+          name: web-assets
+          path: web
+          run-id: ${{ github.event.workflow_run.id || inputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify artifact identity
+        if: steps.source.outputs.deploy == 'true'
+        env:
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+        run: |
+          jq -e --arg commit "$SOURCE_COMMIT" --arg repo "$SOURCE_REPOSITORY" \
+            '.commit == $commit and .repository == $repo' web/build-info.json
+          test -s web/index.html
+          test -s web/pkg/cuemol_web_bg.wasm
+          test -s web/pkg/kernels/usalign.wasm
+          test -s web/pkg/oidn/rt_hdr_calb_cnrm.tza
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.source.outputs.deploy == 'true'
+        with:
+          path: web
+  deploy:
+    needs: prepare
+    if: needs.prepare.outputs.deploy == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v5
+      - uses: actions/deploy-pages@v4
+        id: deployment
+      - name: Verify deployed source
+        env:
+          SITE_URL: ${{ steps.deployment.outputs.page_url }}
+          SOURCE_COMMIT: ${{ needs.prepare.outputs.commit }}
+        run: |
+          for attempt in {1..12}; do
+            if curl --fail --silent --show-error --max-time 20 \
+                "${SITE_URL%/}/build-info.json?commit=$SOURCE_COMMIT" > deployed.json &&
+                jq -e --arg commit "$SOURCE_COMMIT" '.commit == $commit' deployed.json; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "The deployed manifest did not match the tested commit." >&2
+          exit 1

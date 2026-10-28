@@ -9,7 +9,7 @@ CONECT    2    3
 END
 `;
 async function ready(page){
-  await page.goto('/?renderer=webgl');
+  await page.goto('./?renderer=webgl');
   await expect.poll(()=>page.evaluate(()=>!!window.cuemol),{timeout:60000}).toBe(true);
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.sceneId)).toBeGreaterThan(0);
 }

@@ -6,21 +6,27 @@ permissions:
 jobs:
   web:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
           key: wasm
-      - uses: astral-sh/setup-uv@v6
-      - uses: actions/cache@v4
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - uses: actions/cache@v6
+        with:
+          path: .cache/emsdk
+          key: emsdk-${{ runner.os }}-${{ hashFiles('scripts/build-web-kernels.py') }}
+      - uses: actions/cache@v6
         with:
           path: |
             .cache/web-tools
-            .cache/emsdk
             .cache/web-kernels
             .cache/oidn-packages
           key: web-tools-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'scripts/prepare-web-tools.py', 'scripts/build-web-kernels.py', 'scripts/bundle-oidn.py', 'crates/cuemol-molanl/vendor/**', 'crates/cuemol-gfx/vendor/**', 'crates/cuemol-surface/vendor/**') }}
@@ -28,13 +34,33 @@ jobs:
         run: uv run --no-project python scripts/prepare-web-tools.py
       - name: Build browser application
         run: cargo run --locked -p cuemol-cli -- web build
-      - uses: actions/upload-artifact@v4
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --prefix web
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: chromium-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
+      - name: Prepare Chromium
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+      - name: Test browser application
+        working-directory: web
+        run: npm test
+      - name: Stage portable browser assets
+        run: uv run --no-project python scripts/prepare-web-dist.py --revision "$GITHUB_SHA"
+      - uses: actions/upload-artifact@v7
         with:
           name: web-assets
-          path: |
-            web/index.html
-            web/kernels.js
-            web/oidn.js
-            web/pkg/
+          path: dist/web/
           if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: browser-test-results
+          path: web/test-results/
           retention-days: 7
