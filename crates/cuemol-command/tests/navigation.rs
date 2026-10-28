@@ -415,3 +415,74 @@ fn measurement_labels_and_geometry_apply_object_transforms_once() {
     assert!((lines[0].x1 - 55.).abs() < 1e-5);
     assert!((lines[0].x2 - 65.).abs() < 1e-5);
 }
+
+#[test]
+fn backbone_picking_uses_visible_residue_pivots_and_renderer_transforms() {
+    use cuemol_core::{Matrix4, Vector4};
+    let (mut state, id) = fixture();
+    let object = state.scene_manager_mut().object_mut(id).unwrap();
+    for (atom, name) in object
+        .mol_mut()
+        .atoms_mut()
+        .iter_mut()
+        .zip(["CA", "CB", "CA", "CA", "CA", "CB"])
+    {
+        atom.name = name.into();
+        atom.res_name = "ALA".into();
+    }
+    for renderer in object
+        .renderers()
+        .iter()
+        .map(|r| r.uid())
+        .collect::<Vec<_>>()
+    {
+        object.renderer_mut(renderer).unwrap().set_visible(false);
+    }
+    let renderer = object.add_renderer("ribbon", "backbone");
+    object.set_xform_matrix(Matrix4::make_trans_mat(Vector4::new3(1., 0., 0.)));
+    object.renderer_mut(renderer).unwrap().set_qsc_attr(
+        "xformMat",
+        &Matrix4::make_trans_mat(Vector4::new3(2., 0., 0.)).to_script_string(),
+    );
+    let atoms = state.active_pick_atoms("").unwrap();
+    assert_eq!(
+        atoms
+            .iter()
+            .filter_map(|a| a.atom_index)
+            .collect::<Vec<_>>(),
+        [0, 2, 3, 4]
+    );
+    assert_eq!(atoms[0].center.x, 3.);
+    let object = state.scene_manager_mut().object_mut(id).unwrap();
+    object
+        .renderer_mut(renderer)
+        .unwrap()
+        .set_selection(cuemol_molstr::parse_selector("name CB").unwrap());
+    assert_eq!(
+        state
+            .active_pick_atoms("")
+            .unwrap()
+            .iter()
+            .filter_map(|a| a.atom_index)
+            .collect::<Vec<_>>(),
+        [0, 4]
+    );
+    let object = state.scene_manager_mut().object_mut(id).unwrap();
+    object
+        .renderer_mut(renderer)
+        .unwrap()
+        .set_selection(cuemol_molstr::parse_selector("*").unwrap());
+    object
+        .renderer_mut(renderer)
+        .unwrap()
+        .set_qsc_attr("pivotatom", "CB");
+    assert_eq!(
+        state
+            .active_pick_atoms("")
+            .unwrap()
+            .iter()
+            .filter_map(|a| a.atom_index)
+            .collect::<Vec<_>>(),
+        [1, 2, 3, 5]
+    );
+}

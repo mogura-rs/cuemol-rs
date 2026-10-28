@@ -31541,7 +31541,7 @@ impl CameraController {
             return None;
         }
         let ndc = clip.truncate() / clip.w;
-        if ndc.x.abs() > 1.2 || ndc.y.abs() > 1.2 {
+        if ndc.x.abs() > 1.2 || ndc.y.abs() > 1.2 || !(0.0..=1.0).contains(&ndc.z) {
             return None;
         }
         let x = viewport.left() + (ndc.x + 1.0) * 0.5 * viewport.width();
@@ -39536,6 +39536,8 @@ mod tests {
         );
         assert!(app.pick_atom_at(&camera, hit_screen));
         assert_eq!(app.status, "LWObject [], lightweight feature");
+        app.pick_atoms[0].center.z = 10000.;
+        assert_eq!(app.pick_hit(&camera, egui::pos2(400., 300.)), None);
     }
 
     fn reference_pdb_path() -> Option<std::path::PathBuf> {

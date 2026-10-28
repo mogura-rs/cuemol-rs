@@ -354,16 +354,26 @@ pub fn feedback(
     state: &DesktopAppState,
     navigation: &Navigation,
     hover: Option<AtomHit>,
+    atoms: &[cuemol_render::RenderAtom],
     mvp: [[f32; 4]; 4],
     rect: Rect,
 ) {
+    let pointer = ui.input(|i| i.pointer.hover_pos()).unwrap_or(rect.center());
     let screen = |hit: AtomHit| {
-        let p = navigation::project(
-            mvp,
-            hit.position(state)?,
-            [rect.width() as f64, rect.height() as f64],
-        )?;
-        Some(rect.min + egui::vec2(p[0] as f32, p[1] as f32))
+        atoms
+            .iter()
+            .filter(|atom| {
+                atom.object_uid == Some(hit.object.get()) && atom.atom_index == Some(hit.index)
+            })
+            .filter_map(|atom| {
+                navigation::project(
+                    mvp,
+                    atom.center,
+                    [rect.width() as f64, rect.height() as f64],
+                )
+            })
+            .map(|p| rect.min + egui::vec2(p[0] as f32, p[1] as f32))
+            .min_by(|a, b| a.distance_sq(pointer).total_cmp(&b.distance_sq(pointer)))
     };
     let painter = ui.painter();
     for hit in &navigation.picks {

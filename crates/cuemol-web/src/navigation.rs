@@ -171,6 +171,7 @@ impl App {
             &self.state,
             &self.navigation,
             self.hover_hit,
+            &self.pick_atoms,
             mvp,
             rect,
         );

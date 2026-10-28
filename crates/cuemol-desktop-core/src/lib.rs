@@ -14067,26 +14067,9 @@ impl DesktopAppState {
             .scene(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
         let selector = parse_gui_selector(selection_text)?;
+        let styles = scene_style_manager(scene);
         let mut atoms = Vec::new();
-        for object in scene.objects().iter().filter(|object| {
-            object.is_visible()
-                && (object.renderers().is_empty()
-                    || object.renderers().iter().any(|renderer| {
-                        renderer.is_visible()
-                            && !renderer.renderer_type().starts_with('*')
-                            && !matches!(renderer.renderer_type(), "selection" | "atomintr")
-                    }))
-        }) {
-            let mut visible = vec![object.renderers().is_empty(); object.mol().atom_count()];
-            for renderer in object.renderers().iter().filter(|renderer| {
-                renderer.is_visible()
-                    && !renderer.renderer_type().starts_with('*')
-                    && !matches!(renderer.renderer_type(), "selection" | "atomintr")
-            }) {
-                for index in object.mol().select_indices(renderer.selection()) {
-                    visible[index] = true;
-                }
-            }
+        for object in scene.objects().iter().filter(|object| object.is_visible()) {
             let selected = if object.mol().selection_text().is_empty() {
                 selector
                     .as_ref()
@@ -14105,23 +14088,65 @@ impl DesktopAppState {
                     .into_iter()
                     .collect()
             };
-            atoms.extend(
-                object
-                    .mol()
-                    .atoms()
-                    .iter()
-                    .enumerate()
-                    .filter(|(index, _)| visible[*index])
-                    .map(|(index, atom)| {
-                        let mut position = atom.position;
-                        object.xform_matrix().xform3d(&mut position);
-                        cuemol_render::RenderAtom::new(position, 0.0, None).with_picking(
-                            Some(object.uid().get()),
-                            Some(index),
-                            selected.contains(&index),
-                        )
-                    }),
-            );
+            let mut append =
+                |indices: Vec<usize>, xform: Matrix4, seen: &mut BTreeSet<(usize, [u64; 3])>| {
+                    for index in indices {
+                        let mut position = object.mol().atoms()[index].position;
+                        xform.xform3d(&mut position);
+                        let key = (
+                            index,
+                            [
+                                position.x.to_bits(),
+                                position.y.to_bits(),
+                                position.z.to_bits(),
+                            ],
+                        );
+                        if seen.insert(key) {
+                            atoms.push(
+                                cuemol_render::RenderAtom::new(position, 0.0, None).with_picking(
+                                    Some(object.uid().get()),
+                                    Some(index),
+                                    selected.contains(&index),
+                                ),
+                            );
+                        }
+                    }
+                };
+            let mut seen = BTreeSet::new();
+            if object.renderers().is_empty() {
+                append(
+                    (0..object.mol().atom_count()).collect(),
+                    object.xform_matrix(),
+                    &mut seen,
+                );
+            }
+            for renderer in object.renderers().iter().filter(|renderer| {
+                renderer.is_visible()
+                    && !renderer.renderer_type().starts_with('*')
+                    && !matches!(
+                        renderer.renderer_type(),
+                        "selection" | "atomintr" | "symm" | "unitcell"
+                    )
+            }) {
+                let indices = if matches!(
+                    renderer.renderer_type(),
+                    "trace" | "ribbon" | "cartoon" | "tube" | "spline" | "nucl"
+                ) {
+                    let pivot = renderer.resolved_attr("pivotatom", &styles, scene_uid.get());
+                    cuemol_molvis::mainchain_pick_indices(
+                        object.mol(),
+                        renderer.selection(),
+                        pivot.as_deref(),
+                    )
+                } else {
+                    object.mol().select_indices(renderer.selection())
+                };
+                append(
+                    indices,
+                    renderer.xform_matrix().mul_mat(object.xform_matrix()),
+                    &mut seen,
+                );
+            }
         }
         Ok(atoms)
     }
@@ -51480,7 +51505,7 @@ pub fn pick_atom_screen(
     vp_px: (f64, f64),
     radius_px: f64,
 ) -> Option<(u64, usize)> {
-    let mut best: Option<(f64, u64, usize)> = None;
+    let mut best: Option<((f64, f64), u64, usize)> = None;
     for atom in atoms {
         let (Some(object_uid), Some(atom_index)) = (atom.object_uid, atom.atom_index) else {
             continue;
@@ -51508,8 +51533,9 @@ pub fn pick_atom_screen(
         let dx = sx - cursor_px.0;
         let dy = sy - cursor_px.1;
         let dist = (dx * dx + dy * dy).sqrt();
-        if dist <= radius_px && best.is_none_or(|(b, _, _)| dist < b) {
-            best = Some((dist, object_uid, atom_index));
+        let score = (dist, ndc_z);
+        if dist <= radius_px && best.is_none_or(|(b, _, _)| score < b) {
+            best = Some((score, object_uid, atom_index));
         }
     }
     best.map(|(_, object_uid, atom_index)| (object_uid, atom_index))
@@ -58293,6 +58319,14 @@ end_header
         assert_eq!(
             pick_atom_screen(&atoms, mvp, (69.0, 50.0), vp, 10.0),
             Some((7, 1))
+        );
+        let overlapping = [
+            pick_atom_fixture(7, 4, 0., 0., 0.8),
+            pick_atom_fixture(7, 5, 0., 0., 0.2),
+        ];
+        assert_eq!(
+            pick_atom_screen(&overlapping, mvp, (50., 50.), vp, 10.),
+            Some((7, 5))
         );
         // Click far from any projected atom -> nothing.
         assert_eq!(pick_atom_screen(&atoms, mvp, (50.0, 95.0), vp, 10.0), None);

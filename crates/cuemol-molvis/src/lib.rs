@@ -6346,6 +6346,20 @@ fn residue_secondary(molecule: &MolCoord, atom: &Atom) -> Secondary {
     }
 }
 
+/// Atom identities used by the backbone renderers' point-selection pass.
+pub fn mainchain_pick_indices(
+    molecule: &MolCoord,
+    selection: &cuemol_molstr::Selector,
+    pivot_atom: Option<&str>,
+) -> Vec<usize> {
+    let selected = molecule.select_indices(selection).into_iter().collect();
+    collect_mainchain_pivots(molecule, Some(&selected), pivot_atom)
+        .into_iter()
+        .flatten()
+        .map(|point| point.atom_index)
+        .collect()
+}
+
 /// Collect each chain's backbone pivots (position + secondary structure) in
 /// residue order, split into contiguous runs to be splined/traced.
 ///
@@ -6492,8 +6506,8 @@ fn mainchain_pivot_point(
         }
         None
     };
-    if let Some(name) = custom_name {
-        return find_named(name);
+    if let Some(point) = custom_name.and_then(find_named) {
+        return Some(point);
     }
     let pivot = cuemol_molstr::toppar::TopoDB::global().pivot_atom(residue.name())?;
     find_named(pivot)
@@ -11470,10 +11484,16 @@ return cuemol.makeColor("#0000ff");
         let runs = collect_mainchain_pivots(&mol, None, None);
         assert_eq!(runs.len(), 1, "a contiguous Ca-only chain is one run");
         assert_eq!(runs[0].len(), 5);
-        assert!(
-            collect_mainchain_pivots(&mol, None, Some("CB")).is_empty(),
-            "an explicit missing pivot must not fall back to CA"
+        let fallback = collect_mainchain_pivots(&mol, None, Some("CB"));
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(
+            fallback[0].iter().map(|p| p.atom_index).collect::<Vec<_>>(),
+            (0..5).collect::<Vec<_>>()
         );
+        assert!(fallback[0]
+            .iter()
+            .zip(&runs[0])
+            .all(|(a, b)| a.pos == b.pos));
 
         let mut unknown = ca_atom(1, 0.0, 0.0, 0.0);
         unknown.res_name = "UNK".to_string();
@@ -11700,7 +11720,16 @@ return cuemol.makeColor("#0000ff");
         assert!((first_center.y - 2.0).abs() < 1.0e-6);
 
         options.pivot_atom = Some("MISSING".to_string());
-        assert!(ribbon_mesh_snapshot(&molecule, &options).meshes.is_empty());
+        let fallback = ribbon_mesh_snapshot(&molecule, &options);
+        assert_eq!(fallback.meshes[0].triangle_count(), mesh.triangle_count());
+        let first_center = fallback.meshes[0].vertices[..9]
+            .iter()
+            .fold(Vector4::ZERO, |sum, v| sum + v.position)
+            / 9.;
+        assert!(
+            first_center.y.abs() < 1.0e-6,
+            "a missing custom pivot falls back to the residue's CA"
+        );
     }
 
     #[test]

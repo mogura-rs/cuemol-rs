@@ -394,3 +394,24 @@ macOS, and all 27 browser tests passed. The added browser case saves and reloads
 a cross-molecule measurement, then changes its transform again and checks the
 visible value. Earlier documentation of atom-only native annotations did not
 cover measurement values; the implementation and its comments now include both.
+
+Picking now follows each visible renderer's selection and display transform.
+Backbone renderers expose their residue pivots rather than hidden side-chain
+atoms, and hover markers use the same projected positions. Both interfaces
+exclude points outside the depth slab; overlapping projected points resolve to
+the nearer depth. The new browser regression checks hidden side chains, renderer
+translation, hover placement and depth clipping.
+
+The reference's `MainChainRenderer::findPivotAtom` falls back to the residue's
+normal pivot when a custom name is absent. Two older Rust tests and their comments
+incorrectly required empty geometry in that case. They now check the fallback
+coordinates and mesh. Running the C++ oracle on the reference protein produced
+identical positions and normals for all 8,166 vertices with the default pivot
+and with an absent custom pivot.
+
+The resulting shared suite passed 1,158 tests, the scripting-enabled navigation
+suite passed ten, native GUI suites passed 164 on Linux and macOS, and all 28
+browser tests passed. The actual Linux window checks also passed again; distance,
+angle and torsion values were visible alongside atom labels in the inspected
+viewport. These are local checks and do not establish untested parameter
+combinations or public distribution availability.

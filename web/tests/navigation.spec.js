@@ -149,3 +149,34 @@ test('cross-molecule measurement values follow transforms and survive scene relo
   await expect.poll(async()=>(await status(page)).ui.navigation.measurementLabels).toEqual(['7.00']);
   await page.screenshot({path:testInfo.outputPath('live-measurements.png')});
 });
+
+test('backbone hover ignores hidden sidechains and follows renderer transforms',async({page},testInfo)=>{
+  await page.goto('./?renderer=webgl');
+  await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId),{timeout:60000}).toBeGreaterThan(0);
+  const protein=`ATOM      1  CA  ALA A   1      -4.000   0.000   0.000  1.00 10.00           C
+ATOM      2  CB  ALA A   1      -4.000   3.000   0.000  1.00 10.00           C
+ATOM      3  CA  ALA A   2       0.000   0.000   0.000  1.00 10.00           C
+ATOM      4  CB  ALA A   2       0.000   3.000   0.000  1.00 10.00           C
+ATOM      5  CA  ALA A   3       4.000   0.000   0.000  1.00 10.00           C
+ATOM      6  CB  ALA A   3       4.000   3.000   0.000  1.00 10.00           C
+END
+`;
+  await page.locator('#files').setInputFiles({name:'backbone.pdb',mimeType:'application/octet-stream',buffer:Buffer.from(protein)});
+  await expect.poll(async()=>(await status(page)).scene.objects.length).toBe(1);
+  await command(page,'set_projection',{perspective:false});
+  await command(page,'set_view',{center:[0,0,0],zoom:20,distance:200,slab:50});
+  const state=await status(page),r=state.ui.rects.Viewport,renderer=state.scene.objects[0].renderers.find(r=>r.type==='ribbon');
+  const point=(x,y)=>[r[0]+r[2]/2+x*r[3]/20,r[1]+r[3]/2-y*r[3]/20];
+  await page.mouse.move(...point(-4,0));
+  await expect.poll(async()=>(await status(page)).ui.navigation.hover?.index).toBe(0);
+  await page.mouse.move(...point(-4,3));
+  await expect.poll(async()=>(await status(page)).ui.navigation.hover).toBeNull();
+  await command(page,'set_node_prop',{nodeType:'renderer',nodeId:renderer.id,prop:'xformMat',value:'(1,0,0,0,0,1,0,0,0,0,1,0,2,0,0,1)'});
+  await page.mouse.move(...point(-4,0));
+  await expect.poll(async()=>(await status(page)).ui.navigation.hover).toBeNull();
+  await page.mouse.move(...point(-2,0));
+  await expect.poll(async()=>(await status(page)).ui.navigation.hover?.index).toBe(0);
+  await page.screenshot({path:testInfo.outputPath('transformed-backbone-pick.png')});
+  await command(page,'set_node_prop',{nodeType:'renderer',nodeId:renderer.id,prop:'xformMat',value:'(1,0,0,0,0,1,0,0,0,0,1,0,2,0,100,1)'});
+  await expect.poll(async()=>(await status(page)).ui.navigation.hover).toBeNull();
+});
