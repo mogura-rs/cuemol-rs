@@ -18,8 +18,11 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - uses: actions/cache@v4
         with:
-          path: .cache/web-tools
-          key: web-tools-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'scripts/prepare-web-tools.py') }}
+          path: |
+            .cache/web-tools
+            .cache/emsdk
+            .cache/web-kernels
+          key: web-tools-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'scripts/prepare-web-tools.py', 'scripts/build-web-kernels.py', 'crates/cuemol-molanl/vendor/**') }}
       - name: Prepare wasm-bindgen
         run: uv run --no-project python scripts/prepare-web-tools.py
       - name: Build browser application
@@ -29,7 +32,7 @@ jobs:
           name: web-assets
           path: |
             web/index.html
-            web/pkg/cuemol_web.js
-            web/pkg/cuemol_web_bg.wasm
+            web/kernels.js
+            web/pkg/
           if-no-files-found: error
           retention-days: 7

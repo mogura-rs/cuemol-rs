@@ -150,8 +150,9 @@ and startup scripts are stored in localStorage for that origin.
 Browser MD playback keeps a `File` handle and reads selected DCD/XTC/TRR/NetCDF/MDCRD
 frames with `File.slice`, without first loading the whole trajectory into JS
 memory. The browser cannot access arbitrary native paths or spawn external
-tools. APBS, USalign, and ICC soft proofing run in the native application. The browser
-can import APBS DX maps and offers native Rust LSQ/SSM superposition. Scenes with external
+tools. USalign uses the same vendored calculation kernel as the native application,
+compiled into a companion WebAssembly module. LSQ and SSM remain shared Rust code.
+APBS and ICC soft proofing run in the native application; the browser can import APBS DX maps. Scenes with external
 file references must be saved with embedded data before transfer to the browser.
 
 ## Build and check
@@ -174,7 +175,10 @@ scripts/test-install.sh target/debug/cuemol
 ```
 
 `web build` installs the matching wasm-bindgen tool into the checkout cache when
-necessary. `tools bundle` uses `uv` with hashed dependency pins; ARM APBS builds
+necessary. It also builds the vendored browser kernels with Emscripten, using
+`EMXX`, an installed `em++`, or a pinned SDK installed in the checkout cache.
+The kernel build requires `uv`; compiled kernels and the SDK are cached in CI.
+`tools bundle` uses `uv` with hashed dependency pins; ARM APBS builds
 also need CMake, SuiteSparse, BLAS, and platform compiler libraries. See the
 release workflow for platform dependencies. Generated builds, downloaded tools,
 browser packages, and test output are ignored.

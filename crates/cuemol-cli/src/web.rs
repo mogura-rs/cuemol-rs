@@ -138,9 +138,23 @@ fn build(args: &[String]) -> Result<()> {
             .args(["--target", "web", "--no-typescript", "--out-dir"])
             .arg(out.join("pkg")),
     )?;
+    run_command(
+        Command::new("uv")
+            .current_dir(&root)
+            .args([
+                "run",
+                "--no-project",
+                "python",
+                "scripts/build-web-kernels.py",
+                "--out-dir",
+            ])
+            .arg(out.join("pkg/kernels")),
+    )?;
     if out != root.join("web") {
-        std::fs::copy(root.join("web/index.html"), out.join("index.html"))
-            .map_err(|e| e.to_string())?;
+        for name in ["index.html", "kernels.js"] {
+            std::fs::copy(root.join("web").join(name), out.join(name))
+                .map_err(|e| e.to_string())?;
+        }
     }
     println!("Built {}", out.display());
     Ok(())

@@ -1457,6 +1457,7 @@ dependencies = [
  "cc",
  "cuemol-core",
  "cuemol-molstr",
+ "wasm-bindgen",
 ]
 
 [[package]]

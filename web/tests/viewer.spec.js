@@ -116,3 +116,31 @@ test('AMBER ASCII frames and periodic cells are read through browser slices',asy
     await expect.poll(()=>page.evaluate(()=>window.cuemol.status().frame)).toBe(frame);
   }
 });
+
+test('USalign fits rotated browser molecules with the native calculation kernel',async({page})=>{
+  const errors=[];page.on('pageerror',e=>errors.push(e.message));
+  await ready(page);
+  const points=Array.from({length:12},(_,i)=>[Math.cos(i*.8)*4,Math.sin(i*.8)*4,i*1.5]);
+  const moving=points.map(([x,y,z])=>[-y+8,x-3,z+2]);
+  const pdb=xyz=>xyz.map(([x,y,z],i)=>'ATOM  '+String(i+1).padStart(5)+'  CA  ALA A'+String(i+1).padStart(4)+'    '+[x,y,z].map(v=>v.toFixed(3).padStart(8)).join('')+'  1.00 10.00           C  ').join('\n')+'\nEND\n';
+  await load(page,'reference.pdb',Buffer.from(pdb(points)));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  await load(page,'moving.pdb',Buffer.from(pdb(moving)));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(2);
+  const objects=(await page.evaluate(()=>window.cuemol.status())).scene.objects;
+  const state=await call(page,'superpose',{refId:objects[0].id,movId:objects[1].id,algo:'USalign'});
+  const result=JSON.parse(state.message);
+  expect(result.algorithm).toBe('USalign');
+  const matrix=result.matrix.slice(1,-1).split(',').map(Number);
+  expect(matrix).toHaveLength(16);
+  for(let i=0;i<points.length;i++)for(let row=0;row<3;row++){
+    const value=moving[i].reduce((sum,x,col)=>sum+matrix[col*4+row]*x,matrix[12+row]);
+    expect(value).toBeCloseTo(points[i][row],3);
+  }
+  const values=await page.evaluate(([moving,reference])=>Array.from(window.cuemolKernels.usalign(
+    new Float64Array(moving.flat()),new TextEncoder().encode('ALA'.repeat(moving.length)),
+    new Float64Array(reference.flat()),new TextEncoder().encode('ALA'.repeat(reference.length)),'CA')),[moving,points]);
+  expect(values[12]).toBeCloseTo(1,7);expect(values[13]).toBeCloseTo(1,7);
+  expect(values[14]).toBeCloseTo(0,5);expect(values[15]).toBe(12);
+  expect(errors).toEqual([]);
+});

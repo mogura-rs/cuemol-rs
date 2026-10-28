@@ -137,7 +137,7 @@ must not create full undo copies. Density-map voxels are shared immutable storag
 until replacement. Prefer bounded decoding and reusable GPU buffers.
 
 Native USalign uses the vendored C++17 implementation and retains its license;
-its build is disabled on wasm. APBS, PDB2PQR and FFmpeg are packaged as separate
+the browser calls a companion Emscripten module built from the same sources. APBS, PDB2PQR and FFmpeg are packaged as separate
 executables using `cuemol tools bundle`. Keep generated downloads and runtimes in
 the ignored cache, and preserve their license/provenance files in distributions.
 

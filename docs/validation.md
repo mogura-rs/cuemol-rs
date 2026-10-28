@@ -71,3 +71,11 @@ Silicon, and Windows x86_64. Only the local Linux build and browser checks were
 executed during this work; the other native release targets and published
 installation must be verified when pushing and running Actions is authorized.
 The README lists implementation boundaries that also limit parity claims.
+
+## Browser numerical kernels
+
+USalign also runs in the browser through the same vendored C++ kernel used by
+the native application. Five browser tests passed after adding this integration.
+The alignment regression applies a known rotation and translation to twelve
+noncoplanar C-alpha coordinates, checks the recovered transform through the
+shared command API, and verifies unit TM scores and near-zero RMSD.

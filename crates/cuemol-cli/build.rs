@@ -12,14 +12,17 @@ fn main() {
         });
     let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
     let mut source = String::from("static BUNDLED_WEB: &[(&str, &str, &[u8])] = &[\n");
-    for (index, (name, mime)) in [
+    let mut assets = vec![
         ("index.html", "text/html; charset=utf-8"),
         ("pkg/cuemol_web.js", "text/javascript; charset=utf-8"),
         ("pkg/cuemol_web_bg.wasm", "application/wasm"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+        ("kernels.js", "text/javascript; charset=utf-8"),
+        ("pkg/kernels/usalign.js", "text/javascript; charset=utf-8"),
+        ("pkg/kernels/usalign.wasm", "application/wasm"),
+        ("pkg/kernels/USalign-LICENSE", "text/plain; charset=utf-8"),
+    ];
+    assets.sort_unstable();
+    for (index, (name, mime)) in assets.into_iter().enumerate() {
         let path = root.join(name);
         println!("cargo:rerun-if-changed={}", path.display());
         let bytes = std::fs::read(path)

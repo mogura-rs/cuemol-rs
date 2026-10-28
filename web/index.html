@@ -4,9 +4,10 @@
 <body><canvas id="viewport" aria-label="CueMol3 molecular viewer"></canvas><div id="loading">Loading CueMol3…</div><input id="files" type="file" multiple>
 <script type="module">
 import init, {start, open_file, command, status} from './pkg/cuemol_web.js';
+import {initKernels} from './kernels.js';
 const loading=document.getElementById('loading');
 try {
-  await init();
+  await Promise.all([init(), initKernels()]);
   document.addEventListener('dragover',e=>{e.preventDefault();e.stopImmediatePropagation();},true);
   document.addEventListener('drop',e=>{e.preventDefault();e.stopImmediatePropagation();for(const file of e.dataTransfer.files)open_file(file);},true);
   let webgpu=false;
