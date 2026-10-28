@@ -845,3 +845,40 @@ The CCP4 oracle passed 80 cases including local sampling and quantization steps.
 Shared-core tests passed 210 cases and native GUI tests passed 165 cases.
 A skew-cell regression checks coordinate sampling, gradient components, and
 histogram counts independently of the reference reader.
+
+### Continuous potentials and live scalar-map properties
+
+OpenDX and QDF potentials now retain immutable, shared float32 samples through
+native loading, in-memory loading, script readers, rendering and embedded scene
+export. Their `den_quant_step` is zero. Display-only byte samples do not replace
+the original values. Potential sampling uses trilinear interpolation and the
+C++ boundary convention. Saving uses `qdfpot`; the former shared GUI path
+converted potentials to byte density maps and lost their `ElePotMap` class when
+loading browser files. Both faults are corrected.
+
+The density API now exposes read-only `origin`, `den_quant_step`, and
+`map_type_resolved`, plus `getLevelAtTopFraction` and writable `map_type`.
+Detached handles continue to observe the attached object's state. Changes
+survive undo/redo and QSC round trips; invalid map kinds are rejected.
+The scalar histogram properties are live read-only getters for both detached
+and attached objects, rather than loader-updated snapshots.
+
+`check-reference-scalars.py` compares float samples, byte conversion,
+interpolation, statistics and histograms against a separately compiled C++
+`ElePotMap`. Cases cover variable values, uniform values, a wide-range outlier,
+exact binary fractions and very small nonzero values. For the uniform nonzero
+case, the reference computes a slightly negative variance and returns NaN for
+RMS (and invalid JSON for that histogram field). Rust deliberately clamps the
+variance to zero. The comparison records this single exception explicitly.
+The small-value case also catches the former absolute epsilon that collapsed
+valid byte-conversion scales to zero.
+
+Native/shared regressions cover potential identity, exact stored values,
+interpolation, shared memory, held handles, map-kind validation, undo and
+embedded QSC reload. Browser tests cover potential display and export/reload,
+and CCP4 map-kind/origin/quantization/top-fraction metadata.
+
+Validation passed: five C++ oracle cases, 211 shared-core tests, 165 native
+GUI tests, and three rebuilt-browser tests (structure/scene export, CCP4
+metadata, and potential display/scene export). The remaining QIF audit is tracked
+separately; these checks establish the scalar-data changes only.

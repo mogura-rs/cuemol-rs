@@ -160,38 +160,42 @@ pub trait ScalarObject {
     }
 
     fn base_histogram(&self) -> (f64, f64, f64, Vec<f64>) {
-        let min = self.min_density();
-        let max = self.max_density();
-        let range = max - min;
-        let requested_width = self.rmsd_density() / 1000.0;
-        let count = if range > 0.0 && requested_width > 0.0 {
-            (range / requested_width).floor().clamp(1.0, 65536.0) as usize
-        } else {
-            1
-        };
-        let width = if range > 0.0 {
-            range / count as f64
-        } else {
-            1.0
-        };
-        let mut histogram = vec![0.0; count];
-        for col in 0..self.col_no() {
-            for row in 0..self.row_no() {
-                for sec in 0..self.sec_no() {
-                    let value = self.at_float(col as isize, row as isize, sec as isize);
-                    let index = ((value - min) / width).floor() as isize;
-                    if (0..count as isize).contains(&index) {
-                        histogram[index as usize] += 1.0;
-                    }
-                }
-            }
-        }
-        (min, max, width, histogram)
+        scan_scalar_histogram(self)
     }
 
     fn get_histogram_json(&self, min: f64, max: f64, bins: usize) -> String {
         self.histogram_json(min, max, bins)
     }
+}
+
+pub fn scan_scalar_histogram<S: ScalarObject + ?Sized>(scalar: &S) -> (f64, f64, f64, Vec<f64>) {
+    let min = scalar.min_density();
+    let max = scalar.max_density();
+    let range = max - min;
+    let requested_width = scalar.rmsd_density() / 1000.0;
+    let count = if range > 0.0 && requested_width > 0.0 {
+        (range / requested_width).floor().clamp(1.0, 65536.0) as usize
+    } else {
+        1
+    };
+    let width = if range > 0.0 {
+        range / count as f64
+    } else {
+        1.0
+    };
+    let mut histogram = vec![0.0; count];
+    for sec in 0..scalar.sec_no() {
+        for row in 0..scalar.row_no() {
+            for col in 0..scalar.col_no() {
+                let value = scalar.at_float(col as isize, row as isize, sec as isize);
+                let index = ((value - min) / width).floor() as isize;
+                if (0..count as isize).contains(&index) {
+                    histogram[index as usize] += 1.0;
+                }
+            }
+        }
+    }
+    (min, max, width, histogram)
 }
 
 #[cfg(test)]

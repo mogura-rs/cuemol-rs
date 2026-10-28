@@ -65,6 +65,7 @@ pub struct DensityMap {
     level_step: f64,
     bytes: std::sync::Arc<Vec<u8>>,
     histogram: [u64; 256],
+    continuous_values: Option<Arc<[f32]>>,
     map_type: u8,
     detected_map_type: u8,
 }
@@ -86,6 +87,7 @@ impl Default for DensityMap {
             level_step: 0.0,
             bytes: std::sync::Arc::new(Vec::new()),
             histogram: [0; 256],
+            continuous_values: None,
             map_type: 0,
             detected_map_type: 1,
         }
@@ -112,6 +114,10 @@ impl DensityMap {
         let scale: [f64; 3] =
             std::array::from_fn(|i| self.intervals[i].max(1) as f64 / intervals[i] as f64);
         let mut bytes = Vec::with_capacity(counts.iter().product());
+        let mut continuous = self
+            .continuous_values
+            .as_ref()
+            .map(|_| Vec::with_capacity(counts.iter().product()));
         for z in 0..counts[2] {
             for y in 0..counts[1] {
                 for x in 0..counts[0] {
@@ -122,6 +128,7 @@ impl DensityMap {
                     ];
                     let lower = position.map(|v| v.floor() as usize);
                     let mut value = 0.;
+                    let mut potential = 0.;
                     for dz in 0..=1 {
                         for dy in 0..=1 {
                             for dx in 0..=1 {
@@ -138,10 +145,18 @@ impl DensityMap {
                                         self.bytes
                                             [(index[2] * old[1] + index[1]) * old[0] + index[0]],
                                     );
+                                if let Some(values) = &self.continuous_values {
+                                    potential += weight
+                                        * values[(index[2] * old[1] + index[1]) * old[0] + index[0]]
+                                            as f64;
+                                }
                             }
                         }
                     }
                     bytes.push(value.round().clamp(0., 255.) as u8);
+                    if let Some(values) = &mut continuous {
+                        values.push(potential as f32);
+                    }
                 }
             }
         }
@@ -154,6 +169,7 @@ impl DensityMap {
         self.intervals = intervals;
         self.delta = std::array::from_fn(|i| self.delta[i] * scale[i]);
         self.bytes = std::sync::Arc::new(bytes);
+        self.continuous_values = continuous.map(Arc::from);
         self.rebuild_histogram();
         Ok(())
     }
@@ -238,6 +254,32 @@ impl DensityMap {
         map
     }
 
+    pub fn from_continuous_grid(mut grid: GridMap) -> Self {
+        for value in &mut grid.values {
+            *value = (*value as f32) as f64;
+        }
+        let mut map = Self::new();
+        map.set_map_float_array(
+            &grid.values,
+            grid.counts,
+            [0; 3],
+            grid.counts.map(|n| n.max(1)),
+            grid.origin,
+            grid.delta,
+        );
+        map.continuous_values = Some(grid.values.into_iter().map(|v| v as f32).collect());
+        map.level_step = if map.level_step > 0. {
+            map.level_step
+        } else {
+            1.
+        };
+        map
+    }
+
+    pub fn continuous_values(&self) -> Option<&[f32]> {
+        self.continuous_values.as_deref()
+    }
+
     /// Build a crystallographic map while preserving its file-header grid
     /// start, unit-cell intervals, cell, and space group.
     pub fn from_crystallographic_grid(
@@ -276,6 +318,7 @@ impl DensityMap {
         origin: Vector4,
         delta: [Vector4; 3],
     ) {
+        self.continuous_values = None;
         self.counts = counts;
         self.start = start;
         self.intervals = intervals;
@@ -303,6 +346,7 @@ impl DensityMap {
         mean_density: f64,
         rmsd_density: f64,
     ) {
+        self.continuous_values = None;
         self.counts = counts;
         self.min_density = min_density;
         self.max_density = max_density;
@@ -328,6 +372,7 @@ impl DensityMap {
         base: f64,
         step: f64,
     ) {
+        self.continuous_values = None;
         self.counts = counts;
         self.min_density = stats.min;
         self.max_density = stats.max;
@@ -498,7 +543,7 @@ impl DensityMap {
     }
 
     fn float_to_byte(&self, value: f64) -> u8 {
-        if self.level_step.abs() < 1.0e-12 {
+        if self.level_step <= 0.0 || !self.level_step.is_finite() {
             return 0;
         }
         ((value - self.level_base) / self.level_step).clamp(0.0, 255.0) as u8
@@ -619,10 +664,17 @@ fn delta_from_cell(
 
 impl ScalarObject for DensityMap {
     fn quant_step(&self) -> f64 {
-        self.level_step
+        if self.continuous_values.is_some() {
+            0.
+        } else {
+            self.level_step
+        }
     }
 
     fn base_histogram(&self) -> (f64, f64, f64, Vec<f64>) {
+        if self.continuous_values.is_some() {
+            return cuemol_qsys::scalar_object::scan_scalar_histogram(self);
+        }
         (
             self.level_base,
             self.level_base + self.level_step * 256.,
@@ -636,7 +688,7 @@ impl ScalarObject for DensityMap {
     }
 
     fn percent_level_histogram(&self) -> Option<[u64; 256]> {
-        self.is_em().then_some(self.histogram)
+        (self.continuous_values.is_none() && self.is_em()).then_some(self.histogram)
     }
 
     fn col_no(&self) -> usize {
@@ -712,6 +764,37 @@ impl ScalarObject for DensityMap {
     }
 
     fn value_at(&self, position: Vector4) -> f64 {
+        if self.continuous_values.is_some() {
+            let Some(inverse) = inverse_grid_basis(self.delta) else {
+                return 0.;
+            };
+            let index = inverse.mul_vec(position - self.conv_to_orth(Vector4::ZERO));
+            let coord = [index.x, index.y, index.z];
+            let base = coord.map(|v| v.trunc() as isize);
+            if (0..3).any(|i| base[i] < 0 || base[i] >= self.counts[i] as isize - 1) {
+                return 0.;
+            }
+            let mut value = 0.;
+            for z in 0..2 {
+                for y in 0..2 {
+                    for x in 0..2 {
+                        let side = [x, y, z];
+                        let weight = (0..3)
+                            .map(|i| {
+                                let t = coord[i] - base[i] as f64;
+                                if side[i] == 0 {
+                                    1. - t
+                                } else {
+                                    t
+                                }
+                            })
+                            .product::<f64>();
+                        value += weight * self.at_float(base[0] + x, base[1] + y, base[2] + z);
+                    }
+                }
+            }
+            return value;
+        }
         let [col, row, sec] = self.index_from_position(position);
         if self.is_in_boundary(col, row, sec) {
             self.at_float(col, row, sec)
@@ -736,6 +819,13 @@ impl ScalarObject for DensityMap {
     }
 
     fn at_float(&self, col: isize, row: isize, sec: isize) -> f64 {
+        if let Some(values) = &self.continuous_values {
+            return self
+                .flat_index(col, row, sec)
+                .and_then(|i| values.get(i))
+                .copied()
+                .unwrap_or(0.) as f64;
+        }
         f64::from(self.at_byte(col, row, sec)) * self.level_step + self.level_base
     }
 
@@ -747,7 +837,10 @@ impl ScalarObject for DensityMap {
     }
 
     fn is_periodic_grid(&self) -> bool {
-        !self.is_em() && self.counts == self.intervals && self.counts.iter().all(|count| *count > 0)
+        self.continuous_values.is_none()
+            && !self.is_em()
+            && self.counts == self.intervals
+            && self.counts.iter().all(|count| *count > 0)
     }
 }
 
@@ -2379,6 +2472,44 @@ impl_map_renderer_deref!(
 mod tests {
     use super::*;
     use cuemol_molstr::{parse_selector, read_opendx_str};
+
+    #[test]
+    fn continuous_map_preserves_samples_interpolation_and_shared_storage() {
+        let values = (0..27).map(|i| i as f64 / 7. - 1.25).collect::<Vec<_>>();
+        let mut map = DensityMap::from_continuous_grid(GridMap {
+            counts: [3; 3],
+            origin: Vector4::new3(1., 2., 3.),
+            delta: [
+                Vector4::new3(0.5, 0., 0.),
+                Vector4::new3(0., 2., 0.),
+                Vector4::new3(0., 0., 3.),
+            ],
+            values: values.clone(),
+        });
+        for (i, v) in values.iter().enumerate() {
+            assert_eq!(
+                map.at_float((i % 3) as isize, (i / 3 % 3) as isize, (i / 9) as isize),
+                (*v as f32) as f64
+            );
+        }
+        assert_eq!(map.quant_step(), 0.);
+        assert_eq!(
+            map.clone().continuous_values().unwrap().as_ptr(),
+            map.continuous_values().unwrap().as_ptr()
+        );
+        assert!(!map.is_periodic_grid());
+        let expected = [0, 1, 3, 4, 9, 10, 12, 13]
+            .map(|i| values[i] as f32 as f64)
+            .iter()
+            .sum::<f64>()
+            / 8.;
+        assert!((map.value_at(Vector4::new3(1.25, 3., 4.5)) - expected).abs() < 1e-12);
+        assert_eq!(map.value_at(Vector4::new3(2., 6., 9.)), 0.);
+        assert_eq!(map.base_histogram().3.iter().sum::<f64>(), 26.);
+        map.set_map_byte_array(&[127], [1; 3], -1., 1., 0., 1.);
+        assert!(map.continuous_values().is_none());
+        assert_eq!(map.quant_step(), 2. / 256.);
+    }
 
     #[test]
     fn skew_cell_scalar_sampling_and_gradients_use_local_grid_indices() {

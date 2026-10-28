@@ -725,12 +725,13 @@ test('browser CCP4 header quantization survives embedded scene export',async({pa
   for(let i=0;i<64;i++)bytes.writeUInt16LE(half[i%8],1024+i*2);
   await load(page,'density.mrc',bytes);
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Loaded density.mrc');
-  const source=id=>`var map=cuemol.getObject(${id}); print(map.den_min+':'+map.den_max+':'+map.den_mean); print(map.getHistogramJSON(0,8,8));`;
+  const source=id=>`var map=cuemol.getObject(${id}); print(map.den_min+':'+map.den_max+':'+map.den_mean); print(map.getHistogramJSON(0,8,8)); print(map.map_type+':'+map.map_type_resolved+':'+map.origin.x+':'+map.den_quant_step+':'+map.getLevelAtTopFraction(0.5));`;
   let mapId=await page.evaluate(()=>window.cuemol.status().scene.maps[0].id);
   let result=await call(page,'execute_script',{source:source(mapId)});
   expect(result.message).toMatch(/^\{/);
   const before=JSON.parse(result.message).log;
   expect(before).toContain('0:7:3.5');
+  expect(before).toContain('auto:em:8:0.15625:3.90625');
   const download=page.waitForEvent('download');
   const button=await page.evaluate(()=>window.cuemol.status().ui.rects['Save Scene']);
   await page.mouse.click(button[0]+button[2]/2,button[1]+button[3]/2);
@@ -741,5 +742,45 @@ test('browser CCP4 header quantization survives embedded scene export',async({pa
   mapId=await page.evaluate(()=>window.cuemol.status().scene.maps[0].id);
   const after=JSON.parse((await call(page,'execute_script',{source:source(mapId)})).message).log;
   expect(after).toBe(before);
+  expect(errors).toEqual([]);
+});
+
+test('browser potential keeps floating samples and scalar metadata through scene export',async({page})=>{
+  const errors=[];page.on('pageerror',error=>errors.push(error.message));
+  await ready(page);
+  const dx=`object 1 class gridpositions counts 3 3 3
+origin -1 -1 -1
+delta 1 0 0
+delta 0 1 0
+delta 0 0 1
+object 2 class gridconnections counts 3 3 3
+object 3 class array type double rank 0 items 27 data follows
+${Array.from({length:27},(_,i)=>i*0.125-1.625).join(' ')}
+`;
+  await load(page,'potential.dx',Buffer.from(dx));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Loaded potential.dx');
+  const source=id=>`var p=cuemol.getObject(${id}); print(cuemol.getClassName(p)+':'+p.den_quant_step+':'+p.den_min+':'+p.den_max); print(p.getHistogramJSON(-2,2,32));`;
+  let uid=await page.evaluate(()=>window.cuemol.status().scene.maps[0].id);
+  let state=await call(page,'execute_script',{source:source(uid)});
+  const before=JSON.parse(state.message).log;
+  expect(before).toContain('ElePotMap:0:-1.625:1.625');
+  await call(page,'execute_script',{source:`var p=cuemol.getObject(${uid}); var r=p.createRenderer('isosurf'); r.siglevel=0; r.color=cuemol.makeColor('cyan');`});
+  const rect=await page.evaluate(()=>window.cuemol.status().ui.rects.Viewport);
+  await expect.poll(async()=>{
+    const png=PNG.sync.read(await page.screenshot({clip:{x:rect[0],y:rect[1],width:rect[2],height:rect[3]}}));
+    let colored=0;
+    for(let i=0;i<png.data.length;i+=4)if(png.data[i+1]>png.data[i]+30&&png.data[i+2]>png.data[i]+30)colored++;
+    return colored;
+  }).toBeGreaterThan(20);
+  const download=page.waitForEvent('download');
+  const button=await page.evaluate(()=>window.cuemol.status().ui.rects['Save Scene']);
+  await page.mouse.click(button[0]+button[2]/2,button[1]+button[3]/2);
+  const saved=await download;const stream=await saved.createReadStream();const chunks=[];
+  for await(const chunk of stream)chunks.push(chunk);
+  await load(page,'potential.qsc',Buffer.concat(chunks));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Loaded potential.qsc');
+  uid=await page.evaluate(()=>window.cuemol.status().scene.maps[0].id);
+  state=await call(page,'execute_script',{source:source(uid)});
+  expect(JSON.parse(state.message).log).toBe(before);
   expect(errors).toEqual([]);
 });

@@ -7180,15 +7180,23 @@ impl DesktopAppState {
         name: impl Into<String>,
         map: DensityMap,
     ) -> Uid {
+        let class_name = if map.continuous_values().is_some() {
+            "ElePotMap"
+        } else {
+            "DensityMap"
+        };
+        if class_name == "ElePotMap" {
+            self.surface_potential = Some(map.clone());
+        }
         let name = name.into();
         let ui_order = self.next_workspace_ui_order(scene_uid);
         let storage_index = if let Some(scene) = self.scene_manager_mut().scene_mut(scene_uid) {
             let index = scene.loaded_density_maps().len();
-            let raw_data = cuemol_xtal::write_qdf_denmap_bytes(&map);
+            let raw_data = write_scalar_map(&map);
             scene.add_loaded_density_map(LoadedDensityMap {
                 name: name.clone(),
-                object_type: "DensityMap".to_string(),
-                srctype: "qdfmap".to_string(),
+                object_type: class_name.to_string(),
+                srctype: scalar_map_storage_type(&map).to_string(),
                 data: String::new(),
                 raw_data: raw_data.into(),
                 qsc_node: None,
@@ -7208,7 +7216,7 @@ impl DesktopAppState {
                 scene_uid,
                 storage_index,
                 name,
-                class_name: "DensityMap".to_string(),
+                class_name: class_name.to_string(),
                 format: "synthetic".to_string(),
                 visible: true,
                 locked: false,
@@ -12996,7 +13004,7 @@ impl DesktopAppState {
         format: &str,
         map: DensityMap,
     ) -> Result<Uid> {
-        let raw_data = cuemol_xtal::write_qdf_denmap_bytes(&map);
+        let raw_data = write_scalar_map(&map);
         self.store_density_map_with_raw_data(scene_uid, path, map_name, format, map, raw_data)
     }
 
@@ -13055,7 +13063,7 @@ impl DesktopAppState {
                 } else {
                     "DensityMap".to_string()
                 },
-                srctype: "qdfmap".to_string(),
+                srctype: scalar_map_storage_type(&object.map).to_string(),
                 data: String::new(),
                 raw_data: raw_data.into(),
                 qsc_node: Some(qsc_node),
@@ -32087,6 +32095,10 @@ impl DesktopAppState {
             Min,
             Max,
             Mean,
+            QuantStep,
+            MapType,
+            ResolvedType,
+            Origin,
         }
         fn scalar_map_property_get(
             property: ScalarMapProperty,
@@ -32094,17 +32106,132 @@ impl DesktopAppState {
             _args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            let uid = object_proxy_uid(this, ctx)?;
-            let object = script_object(uid)?;
-            let map = object
-                .scalar_map
-                .ok_or_else(|| script_error(format!("Scalar object {uid} is not available")))?;
-            Ok(JsValue::new(match property {
-                ScalarMapProperty::Sigma => map.den_sigma(),
-                ScalarMapProperty::Min => map.den_min(),
-                ScalarMapProperty::Max => map.den_max(),
-                ScalarMapProperty::Mean => map.den_mean(),
-            }))
+            let map = script_target_density_map(this, ctx)?;
+            Ok(match property {
+                ScalarMapProperty::Sigma => map.den_sigma().into(),
+                ScalarMapProperty::Min => map.den_min().into(),
+                ScalarMapProperty::Max => map.den_max().into(),
+                ScalarMapProperty::Mean => map.den_mean().into(),
+                ScalarMapProperty::QuantStep => map.quant_step().into(),
+                ScalarMapProperty::MapType => JsString::from(map.map_type()).into(),
+                ScalarMapProperty::ResolvedType => {
+                    js_string!(if map.is_em() { "em" } else { "xtal" }).into()
+                }
+                ScalarMapProperty::Origin => make_vector(map.origin(), ctx),
+            })
+        }
+        fn js_scalar_map_type_set(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let value = args
+                .first()
+                .cloned()
+                .unwrap_or_default()
+                .to_string(ctx)?
+                .to_std_string_escaped();
+            let mut map = script_target_density_map(this, ctx)?;
+            map.set_map_type(&value)
+                .map_err(|error| script_error(error.to_string()))?;
+            let object = iterator_object(this)?;
+            let pending = object
+                .get(js_string!("_pending_map_id"), ctx)?
+                .as_number()
+                .map(|v| v as u64);
+            let uid = object
+                .get(js_string!("uid"), ctx)?
+                .as_number()
+                .map(|v| v as u64);
+            let attached = script_env::with_mut(|env| {
+                if let Some(id) = pending {
+                    env.pending_density_maps.insert(id, map.clone());
+                }
+                if let Some(object) = env
+                    .objects
+                    .iter_mut()
+                    .find(|object| Some(object.uid) == uid && object.scalar_map.is_some())
+                {
+                    object.scalar_map = Some(map);
+                    object.modified = true;
+                    Some(object.uid)
+                } else {
+                    None
+                }
+            });
+            if let Some(uid) = attached {
+                script_cmds::push(ScriptCmd::SetDensityMapType { uid, value });
+            }
+            Ok(JsValue::undefined())
+        }
+        fn js_scalar_map_top_fraction(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let fraction = args.first().cloned().unwrap_or_default().to_number(ctx)?;
+            if !fraction.is_finite() {
+                return Err(script_error("fraction must be finite"));
+            }
+            Ok(script_target_density_map(this, ctx)?
+                .level_at_top_fraction(fraction)
+                .into())
+        }
+        fn install_scalar_map_api(value: &JsValue, class_name: &str, ctx: &mut Context) {
+            let Some(object) = value.as_object() else {
+                return;
+            };
+            let mut properties = vec![
+                ("den_sigma", ScalarMapProperty::Sigma, false),
+                ("den_min", ScalarMapProperty::Min, false),
+                ("den_max", ScalarMapProperty::Max, false),
+                ("den_mean", ScalarMapProperty::Mean, false),
+                ("den_quant_step", ScalarMapProperty::QuantStep, false),
+            ];
+            if class_name == "DensityMap" {
+                properties.extend([
+                    ("map_type", ScalarMapProperty::MapType, true),
+                    ("map_type_resolved", ScalarMapProperty::ResolvedType, false),
+                    ("origin", ScalarMapProperty::Origin, false),
+                ]);
+                install_script_function(
+                    value,
+                    "getLevelAtTopFraction",
+                    1,
+                    js_scalar_map_top_fraction,
+                    ctx,
+                );
+            }
+            for (name, property, writable) in properties {
+                let getter = FunctionObjectBuilder::new(
+                    ctx.realm(),
+                    NativeFunction::from_copy_closure(move |this, args, ctx| {
+                        scalar_map_property_get(property, this, args, ctx)
+                    }),
+                )
+                .name(JsString::from(format!("get {name}")))
+                .constructor(false)
+                .build();
+                let setter = writable.then(|| {
+                    FunctionObjectBuilder::new(
+                        ctx.realm(),
+                        NativeFunction::from_fn_ptr(js_scalar_map_type_set),
+                    )
+                    .name(JsString::from(format!("set {name}")))
+                    .length(1)
+                    .constructor(false)
+                    .build()
+                });
+                let _ = object.define_property_or_throw(
+                    JsString::from(name),
+                    PropertyDescriptor::builder()
+                        .get(getter)
+                        .maybe_set(setter)
+                        .enumerable(true)
+                        .configurable(true),
+                    ctx,
+                );
+            }
         }
         fn js_scalar_map_histogram(
             this: &JsValue,
@@ -32129,11 +32256,7 @@ impl DesktopAppState {
             if bins <= 0 {
                 return Err(script_error("Histogram bin count must be positive"));
             }
-            let uid = object_proxy_uid(this, ctx)?;
-            let object = script_object(uid)?;
-            let map = object
-                .scalar_map
-                .ok_or_else(|| script_error(format!("Scalar object {uid} is not available")))?;
+            let map = script_target_density_map(this, ctx)?;
             Ok(JsString::from(map.get_histogram_json(min, max, bins as usize)).into())
         }
         fn js_scalar_map_fit_view(
@@ -32165,43 +32288,6 @@ impl DesktopAppState {
         ) -> JsResult<JsValue> {
             Ok(js_string!("contour,gpu_mapmesh,gpu_mapvol,isosurf").into())
         }
-        fn pending_density_map(this: &JsValue, ctx: &mut Context) -> JsResult<DensityMap> {
-            let id = object_number_prop(this, "_pending_map_id", ctx)? as u64;
-            script_env::with(|env| env.pending_density_maps.get(&id).cloned())
-                .ok_or_else(|| script_error("pending DensityMap is not available"))
-        }
-        fn js_pending_density_histogram(
-            this: &JsValue,
-            args: &[JsValue],
-            ctx: &mut Context,
-        ) -> JsResult<JsValue> {
-            let min = args
-                .first()
-                .cloned()
-                .unwrap_or(JsValue::undefined())
-                .to_number(ctx)?;
-            let max = args
-                .get(1)
-                .cloned()
-                .unwrap_or(JsValue::undefined())
-                .to_number(ctx)?;
-            let bins = args
-                .get(2)
-                .cloned()
-                .unwrap_or(JsValue::undefined())
-                .to_i32(ctx)?;
-            if bins <= 0 {
-                return Err(script_error("Histogram bin count must be positive"));
-            }
-            Ok(
-                JsString::from(pending_density_map(this, ctx)?.get_histogram_json(
-                    min,
-                    max,
-                    bins as usize,
-                ))
-                .into(),
-            )
-        }
         fn js_pending_density_get_uid(
             this: &JsValue,
             _args: &[JsValue],
@@ -32214,10 +32300,6 @@ impl DesktopAppState {
                 let id = env.next_pending_density_map_id.max(1);
                 env.next_pending_density_map_id = id.saturating_add(1);
                 env.pending_density_maps.insert(id, DensityMap::new());
-                if class_name == "ElePotMap" {
-                    env.pending_potential_maps
-                        .insert(id, cuemol_surface::ElePotMap::new());
-                }
                 id
             });
             let value = ObjectInitializer::new(ctx)
@@ -32239,10 +32321,6 @@ impl DesktopAppState {
                     Attribute::all(),
                 )
                 .property(js_string!("_source"), js_string!(""), Attribute::all())
-                .property(js_string!("den_sigma"), 0.0, Attribute::all())
-                .property(js_string!("den_min"), 0.0, Attribute::all())
-                .property(js_string!("den_max"), 0.0, Attribute::all())
-                .property(js_string!("den_mean"), 0.0, Attribute::all())
                 .function(
                     NativeFunction::from_fn_ptr(js_object_set_name),
                     js_string!("setName"),
@@ -32264,13 +32342,14 @@ impl DesktopAppState {
                     0,
                 )
                 .function(
-                    NativeFunction::from_fn_ptr(js_pending_density_histogram),
+                    NativeFunction::from_fn_ptr(js_scalar_map_histogram),
                     js_string!("getHistogramJSON"),
                     3,
                 )
                 .build()
                 .into();
             install_pending_object_api(&value, class_name, ctx);
+            install_scalar_map_api(&value, class_name, ctx);
             install_script_function(&value, "fitView", 2, js_scalar_map_fit_view, ctx);
             value
         }
@@ -32351,22 +32430,6 @@ impl DesktopAppState {
                 });
                 (getter, setter)
             }
-            fn scalar_accessor(
-                ctx: &mut Context,
-                name: &'static str,
-                property: ScalarMapProperty,
-            ) -> boa_engine::object::builtins::JsFunction {
-                FunctionObjectBuilder::new(
-                    ctx.realm(),
-                    NativeFunction::from_copy_closure(move |this, args, ctx| {
-                        scalar_map_property_get(property, this, args, ctx)
-                    }),
-                )
-                .name(JsString::from(format!("get {name}")))
-                .length(0)
-                .constructor(false)
-                .build()
-            }
             let renderer_names = JsArray::from_iter(
                 object
                     .renderers
@@ -32392,15 +32455,6 @@ impl DesktopAppState {
                 let (getter, setter) = object_accessor(ctx, name, property, writable);
                 (name, getter, setter)
             })
-            .collect::<Vec<_>>();
-            let scalar_properties = [
-                ("den_sigma", ScalarMapProperty::Sigma),
-                ("den_min", ScalarMapProperty::Min),
-                ("den_max", ScalarMapProperty::Max),
-                ("den_mean", ScalarMapProperty::Mean),
-            ]
-            .into_iter()
-            .map(|(name, property)| (name, scalar_accessor(ctx, name, property)))
             .collect::<Vec<_>>();
             let mut proxy = ObjectInitializer::new(ctx);
             proxy
@@ -32428,10 +32482,7 @@ impl DesktopAppState {
             for (name, getter, setter) in object_properties {
                 proxy.accessor(JsString::from(name), Some(getter), setter, Attribute::all());
             }
-            for (name, getter) in scalar_properties {
-                proxy.accessor(JsString::from(name), Some(getter), None, Attribute::all());
-            }
-            proxy
+            let value = proxy
                 .function(
                     NativeFunction::from_fn_ptr(js_object_set_name_live),
                     js_string!("setName"),
@@ -32528,7 +32579,9 @@ impl DesktopAppState {
                     2,
                 )
                 .build()
-                .into()
+                .into();
+            install_scalar_map_api(&value, &object.class, ctx);
+            value
         }
         #[derive(Clone, Copy)]
         enum MorphProperty {
@@ -40734,15 +40787,6 @@ impl DesktopAppState {
                     script_env::with_mut(|env| {
                         env.pending_density_maps.insert(map_id, map.clone());
                     });
-                    let object = value.as_object().expect("DensityMap proxy is an object");
-                    for (name, number) in [
-                        ("den_sigma", map.den_sigma()),
-                        ("den_min", map.den_min()),
-                        ("den_max", map.den_max()),
-                        ("den_mean", map.den_mean()),
-                    ] {
-                        object.set(JsString::from(name), number, true, ctx)?;
-                    }
                     Ok(value)
                 }
                 cuemol_molstr::AsyncLoadedObject::Buffered { reader_type, data } => {
@@ -41008,25 +41052,6 @@ impl DesktopAppState {
             }
             Ok(target)
         }
-        fn density_map_from_electrostatic_map(map: &cuemol_surface::ElePotMap) -> DensityMap {
-            let counts = [map.col_no(), map.row_no(), map.sec_no()];
-            let intervals = counts.map(|count| count.max(1));
-            let delta = [
-                Vector4::new3(map.col_grid_size(), 0.0, 0.0),
-                Vector4::new3(0.0, map.row_grid_size(), 0.0),
-                Vector4::new3(0.0, 0.0, map.sec_grid_size()),
-            ];
-            let mut density = DensityMap::new();
-            density.set_map_float_array(
-                map.values(),
-                counts,
-                [0, 0, 0],
-                intervals,
-                map.origin(),
-                delta,
-            );
-            density
-        }
         fn js_ccp4_probe_header(
             _this: &JsValue,
             args: &[JsValue],
@@ -41059,7 +41084,6 @@ impl DesktopAppState {
                     .read_bytes()
                     .map_err(|error| script_error(error.to_string()))?
             };
-            let mut potential_map = None;
             let map = match class_name {
                 "BrixMapReader" => BrixMapReader::new().read_density_map_bytes(&bytes),
                 "CCP4MapReader" => {
@@ -41127,10 +41151,9 @@ impl DesktopAppState {
                     })?;
                     let mut reader = cuemol_surface::OpenDxPotReader::new();
                     reader.set_smooth(handler_f64_prop(this, "smooth", -1.0, ctx)?);
-                    reader.read_str(input).map(|map| {
-                        potential_map = Some(map.clone());
-                        density_map_from_electrostatic_map(&map)
-                    })
+                    reader
+                        .read_str(input)
+                        .map(|map| density_map_from_electrostatic_map(&map))
                 }
                 "XplorMapReader" => {
                     let input = std::str::from_utf8(&bytes).map_err(|error| {
@@ -41139,14 +41162,9 @@ impl DesktopAppState {
                     XplorMapReader::new().read_density_map_str(input)
                 }
                 "QdfDenMapReader" => QdfDenMapReader::new().read_bytes(&bytes),
-                "QdfPotReader" => {
-                    cuemol_surface::QdfPotReader::new()
-                        .read_bytes(&bytes)
-                        .map(|map| {
-                            potential_map = Some(map.clone());
-                            density_map_from_electrostatic_map(&map)
-                        })
-                }
+                "QdfPotReader" => cuemol_surface::QdfPotReader::new()
+                    .read_bytes(&bytes)
+                    .map(|map| density_map_from_electrostatic_map(&map)),
                 _ => unreachable!(),
             }
             .map_err(|error| script_error(error.to_string()))?;
@@ -41154,21 +41172,10 @@ impl DesktopAppState {
             let map_id = object_number_prop(&target, "_pending_map_id", ctx)? as u64;
             script_env::with_mut(|env| {
                 env.pending_density_maps.insert(map_id, map.clone());
-                if let Some(potential_map) = potential_map {
-                    env.pending_potential_maps.insert(map_id, potential_map);
-                }
             });
             let target = target
                 .as_object()
                 .ok_or_else(|| script_error("map reader target is not an object"))?;
-            for (name, value) in [
-                ("den_sigma", map.den_sigma()),
-                ("den_min", map.den_min()),
-                ("den_max", map.den_max()),
-                ("den_mean", map.den_mean()),
-            ] {
-                target.set(JsString::from(name), value, true, ctx)?;
-            }
             target.set(
                 js_string!("_format"),
                 JsString::from(this_string_prop(this, "name", ctx)),
@@ -41577,17 +41584,6 @@ impl DesktopAppState {
             let object = target
                 .as_object()
                 .ok_or_else(|| script_error("density-map target is not an object"))?;
-            if let Some(map_id) = object
-                .get(js_string!("_pending_map_id"), ctx)?
-                .as_number()
-                .map(|value| value as u64)
-            {
-                if let Some(map) =
-                    script_env::with(|env| env.pending_density_maps.get(&map_id).cloned())
-                {
-                    return Ok(map);
-                }
-            }
             if let Some(uid) = object
                 .get(js_string!("uid"), ctx)?
                 .as_number()
@@ -41602,26 +41598,23 @@ impl DesktopAppState {
                     return Ok(map);
                 }
             }
-            Err(script_error("density-map target is unavailable"))
-        }
-        fn script_target_potential_map(
-            target: &JsValue,
-            ctx: &mut Context,
-        ) -> JsResult<cuemol_surface::ElePotMap> {
-            let object = target
-                .as_object()
-                .ok_or_else(|| script_error("electrostatic-map target is not an object"))?;
             if let Some(map_id) = object
                 .get(js_string!("_pending_map_id"), ctx)?
                 .as_number()
                 .map(|value| value as u64)
             {
                 if let Some(map) =
-                    script_env::with(|env| env.pending_potential_maps.get(&map_id).cloned())
+                    script_env::with(|env| env.pending_density_maps.get(&map_id).cloned())
                 {
                     return Ok(map);
                 }
             }
+            Err(script_error("density-map target is unavailable"))
+        }
+        fn script_target_potential_map(
+            target: &JsValue,
+            ctx: &mut Context,
+        ) -> JsResult<cuemol_surface::ElePotMap> {
             Ok(electrostatic_map_from_density_map(
                 &script_target_density_map(target, ctx)?,
             ))
@@ -46242,6 +46235,14 @@ impl DesktopAppState {
                         }
                     }
                 }
+                ScriptCmd::SetDensityMapType { uid, value } => {
+                    let object = self
+                        .density_maps
+                        .get_mut(&Uid::new(uid))
+                        .ok_or_else(|| CueMolError::NotFound(format!("density map {uid}")))?;
+                    object.map.set_map_type(&value)?;
+                    object.modified = true;
+                }
                 ScriptCmd::CreateDensityMap {
                     target_scene,
                     expected_uid,
@@ -46280,7 +46281,7 @@ impl DesktopAppState {
                             })
                         {
                             loaded.object_type = class_name.clone();
-                            loaded.srctype = "qdfmap".to_string();
+                            loaded.srctype = scalar_map_storage_type(&map).to_string();
                         }
                     }
                     if class_name == "ElePotMap" {
@@ -47384,7 +47385,6 @@ impl DesktopAppState {
             next_detached_animation_manager_id: 8_000_000_000_000,
             pending_animations: BTreeMap::new(),
             pending_density_maps: BTreeMap::new(),
-            pending_potential_maps: BTreeMap::new(),
             next_density_map_uid: self.next_density_map_uid,
             next_pending_density_map_id: 1,
             pending_atom_intr_lines: BTreeMap::new(),
@@ -47631,6 +47631,10 @@ enum ScriptCmd {
         class_name: String,
         name: String,
         molecule: MolCoord,
+    },
+    SetDensityMapType {
+        uid: u64,
+        value: String,
     },
     CreateDensityMap {
         target_scene: u64,
@@ -47884,7 +47888,6 @@ struct ScriptEnv {
     next_detached_animation_manager_id: u64,
     pending_animations: BTreeMap<u64, AnimMotion>,
     pending_density_maps: BTreeMap<u64, DensityMap>,
-    pending_potential_maps: BTreeMap<u64, cuemol_surface::ElePotMap>,
     next_density_map_uid: u64,
     next_pending_density_map_id: u64,
     pending_atom_intr_lines: BTreeMap<u64, Vec<AtomIntrLine>>,
@@ -50361,7 +50364,9 @@ fn density_map_qsc_node(
     node.set_tag_name("object");
     node.set_type_name(object.class_name.clone());
     node.set_str_attr("name", object.name.clone());
-    node.set_str_attr("map_type", object.map.map_type());
+    if object.class_name == "DensityMap" {
+        node.set_str_attr("map_type", object.map.map_type());
+    }
     node.set_str_attr("src", source);
     node.set_str_attr("srctype", source_type);
     if !object.alt_source.is_empty() {
@@ -52825,6 +52830,35 @@ fn validate_mtz_map_reader_options(options: &GuiMtzMapReaderOptions) -> Result<(
     Ok(())
 }
 
+fn density_map_from_electrostatic_map(map: &cuemol_surface::ElePotMap) -> DensityMap {
+    DensityMap::from_continuous_grid(cuemol_molstr::GridMap {
+        counts: [map.col_no(), map.row_no(), map.sec_no()],
+        origin: map.origin(),
+        delta: [
+            Vector4::new3(map.col_grid_size(), 0., 0.),
+            Vector4::new3(0., map.row_grid_size(), 0.),
+            Vector4::new3(0., 0., map.sec_grid_size()),
+        ],
+        values: map.values().to_vec(),
+    })
+}
+
+fn scalar_map_storage_type(map: &DensityMap) -> &'static str {
+    if map.continuous_values().is_some() {
+        "qdfpot"
+    } else {
+        "qdfmap"
+    }
+}
+
+fn write_scalar_map(map: &DensityMap) -> Vec<u8> {
+    if map.continuous_values().is_some() {
+        cuemol_surface::qdf::write_qdf_potential_bytes(&electrostatic_map_from_density_map(map))
+    } else {
+        cuemol_xtal::write_qdf_denmap_bytes(map)
+    }
+}
+
 fn electrostatic_map_from_density_map(map: &DensityMap) -> cuemol_surface::ElePotMap {
     let counts = [map.col_no(), map.row_no(), map.sec_no()];
     let mut values = Vec::with_capacity(
@@ -52864,26 +52898,10 @@ fn read_density_map(path: &Path, format: &str) -> Result<DensityMap> {
     }
     if format == "qdfpot" {
         let potential = cuemol_surface::qdf::read_qdf_potential_bytes(&fs::read(path)?)?;
-        let counts = [potential.col_no(), potential.row_no(), potential.sec_no()];
-        let intervals = counts.map(|count| count.max(1));
-        let delta = [
-            Vector4::new3(potential.col_grid_size(), 0.0, 0.0),
-            Vector4::new3(0.0, potential.row_grid_size(), 0.0),
-            Vector4::new3(0.0, 0.0, potential.sec_grid_size()),
-        ];
-        let mut map = DensityMap::new();
-        map.set_map_float_array(
-            potential.values(),
-            counts,
-            [0, 0, 0],
-            intervals,
-            potential.origin(),
-            delta,
-        );
-        return Ok(map);
+        return Ok(density_map_from_electrostatic_map(&potential));
     }
     match format {
-        "apbs" => Ok(DensityMap::from_grid_map(read_opendx_file(path)?)),
+        "apbs" => Ok(DensityMap::from_continuous_grid(read_opendx_file(path)?)),
         "ccp4map" => Ccp4MapReader::new().read_density_map_file(path),
         "xplormap" => XplorMapReader::new().read_density_map_file(path),
         "brix" => BrixMapReader::new().read_density_map_file(path),
@@ -52905,26 +52923,10 @@ fn read_density_map_bytes(bytes: &[u8], format: &str) -> Result<DensityMap> {
     }
     if format == "qdfpot" {
         let potential = cuemol_surface::qdf::read_qdf_potential_bytes(bytes)?;
-        let counts = [potential.col_no(), potential.row_no(), potential.sec_no()];
-        let intervals = counts.map(|count| count.max(1));
-        let delta = [
-            Vector4::new3(potential.col_grid_size(), 0.0, 0.0),
-            Vector4::new3(0.0, potential.row_grid_size(), 0.0),
-            Vector4::new3(0.0, 0.0, potential.sec_grid_size()),
-        ];
-        let mut map = DensityMap::new();
-        map.set_map_float_array(
-            potential.values(),
-            counts,
-            [0, 0, 0],
-            intervals,
-            potential.origin(),
-            delta,
-        );
-        return Ok(map);
+        return Ok(density_map_from_electrostatic_map(&potential));
     }
     match format {
-        "apbs" => Ok(DensityMap::from_grid_map(read_opendx_str(
+        "apbs" => Ok(DensityMap::from_continuous_grid(read_opendx_str(
             std::str::from_utf8(bytes)
                 .map_err(|error| CueMolError::parse(format!("OpenDX map is not UTF-8: {error}")))?,
         )?)),
@@ -53062,7 +53064,7 @@ fn prepare_pdb_path(
     } else {
         read_density_map(&path, format)?
     };
-    let raw_data = cuemol_xtal::write_qdf_denmap_bytes(&map);
+    let raw_data = write_scalar_map(&map);
     Ok(entries
         .into_iter()
         .map(|(index, kind)| PreparedPdbFile {
@@ -67859,6 +67861,74 @@ attribute \"dep\" string \"positions\"
             let _ = std::fs::remove_file(path);
         }
         let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    #[cfg(feature = "scripting")]
+    fn scalar_map_kind_handles_and_continuous_potential_roundtrip() {
+        let dx = b"object 1 class gridpositions counts 2 2 2\norigin -1 -2 -3\ndelta 0.5 0 0\ndelta 0 1 0\ndelta 0 0 2\nobject 2 class gridconnections counts 2 2 2\nobject 3 class array type double rank 0 items 8 data follows\n-0.125 0.125 0.375 0.625 0.875 1.125 1.375 1.625\n";
+        let mut app = DesktopAppState::new();
+        app.open_bytes("potential.dx", dx).unwrap();
+        let uid = *app.density_maps.keys().next().unwrap();
+        let map = &app.density_maps[&uid].map;
+        assert_eq!(map.quant_step(), 0.);
+        assert_eq!(map.at_float(1, 1, 1), 1.625);
+        assert_eq!(map.value_at(Vector4::new3(-0.75, -1.5, -2.)), 0.75);
+        assert_eq!(map.value_at(Vector4::new3(-0.5, -1., -1.)), 0.);
+        let expected_values = map.continuous_values().unwrap().to_vec();
+        assert_eq!(map.at_float(1, 0, 0), 0.875);
+        let values = map.continuous_values().unwrap().as_ptr();
+        assert_eq!(
+            values,
+            app.clone().density_maps[&uid]
+                .map
+                .continuous_values()
+                .unwrap()
+                .as_ptr()
+        );
+        let log = app.run_script_js("var s=cuemol.getScene(); s.startUndoTxn('create map'); var d=cuemol.DensityMap(); d.name='kind'; d.map_type='em'; s.addObject(d); var live=cuemol.getObject('kind'); live.map_type='xtal'; print(d.map_type+':'+d.map_type_resolved); d.map_type='auto'; print(live.map_type+':'+live.map_type_resolved); d.map_type='em'; print(live.map_type+':'+live.map_type_resolved); var invalid=false; try{d.map_type='bad'}catch(e){invalid=true}; print(invalid+':'+d.map_type+':'+d.origin.x); s.commitUndoTxn();").unwrap().0;
+        assert_eq!(log, "xtal:xtal\nauto:xtal\nem:em\ntrue:em:0\n");
+        let kind_uid = app
+            .density_maps
+            .values()
+            .find(|m| m.name == "kind")
+            .unwrap()
+            .uid;
+        assert!(app.density_maps[&kind_uid].map.is_em());
+        let log = app.run_script_js(&format!("var m=cuemol.getObject({}); print(m.den_quant_step+':'+m.den_max); var s=cuemol.getScene(); s.startUndoTxn('kind'); cuemol.getObject('kind').map_type='xtal'; s.commitUndoTxn(); s.undo(0); print(cuemol.getObject('kind').map_type);", uid.get())).unwrap().0;
+        assert_eq!(log, "0:1.625\nem\n");
+        let bytes = app.active_scene_bytes().unwrap();
+        let mut loaded = DesktopAppState::new();
+        loaded.open_bytes("potential.qsc", &bytes).unwrap();
+        let potential = loaded
+            .density_maps
+            .values()
+            .find(|m| m.class_name == "ElePotMap")
+            .unwrap();
+        assert_eq!(potential.map.continuous_values().unwrap(), expected_values);
+        assert_eq!(potential.map.quant_step(), 0.);
+        assert_eq!(
+            potential.map.value_at(Vector4::new3(-0.75, -1.5, -2.)),
+            0.75
+        );
+        assert_eq!(
+            loaded
+                .density_maps
+                .values()
+                .find(|m| m.name == "kind")
+                .unwrap()
+                .map
+                .map_type(),
+            "em"
+        );
+        let stored = &loaded
+            .scene_manager()
+            .scene(loaded.active_scene().unwrap())
+            .unwrap()
+            .loaded_density_maps()[0];
+        assert_eq!(stored.srctype, "qdfpot");
+        let log = loaded.run_script_js("var d=cuemol.getObject('kind'); cuemol.resetProp(d,'map_type'); print(d.map_type);").unwrap().0;
+        assert_eq!(log, "auto\n");
     }
 
     #[test]

@@ -108,6 +108,10 @@ voxel limits through `CCP4MapReader` and the desktop file dialogs. Native reads
 use a row buffer and quantized voxel storage; compressed files spool to a
 temporary seekable file. MRC origins and crystallographic/EM map-kind evidence
 are preserved. QDF/QSC saves retain the reader's quantization range.
+OpenDX and QDF electrostatic potentials retain shared 32-bit floating-point
+samples and trilinear sampling; embedded scenes use `qdfpot` for these objects.
+Scripts expose the quantization step, map origin, top-fraction density levels,
+and an editable `map_type` with its resolved crystallographic or EM kind.
 
 Load an MD topology and trajectory through the MD dialog or `load_trajectory`.
 GRO, PDB, mmCIF, PSF, AMBER topology, SDF, and MOL2 topologies are accepted.

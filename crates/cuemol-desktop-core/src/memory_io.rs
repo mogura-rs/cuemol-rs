@@ -88,6 +88,7 @@ impl DesktopAppState {
             let map = read_density_map_bytes(bytes, format)?;
             let scene_uid = self.ensure_active_scene();
             let map_uid = self.add_density_map(scene_uid, name, map);
+            self.density_maps.get_mut(&map_uid).unwrap().format = format.to_string();
             self.add_density_renderer(map_uid, "contour")?;
             return Ok(GuiLoadedPath::Map { scene_uid, map_uid });
         }
