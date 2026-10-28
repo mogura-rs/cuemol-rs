@@ -168,8 +168,8 @@ fn reference_mesh(
     let executable = std::env::var("CUEMOL_BACKBONE_ORACLE").unwrap();
     let config = std::env::var("CUEMOL_BACKBONE_CONFIG").unwrap();
     let output = std::env::temp_dir().join(format!(
-        "cuemol-backbone-{}-geometry.txt",
-        std::process::id()
+        "cuemol-backbone-{}-{mode}-{kind}-geometry.txt",
+        std::process::id(),
     ));
     let status = Command::new(executable)
         .arg(config)
@@ -192,6 +192,131 @@ fn reference_mesh(
 
 fn cell(point: Vector4) -> [i64; 3] {
     [point.x, point.y, point.z].map(|v| (v / 1.0e-4).floor() as i64)
+}
+
+#[test]
+fn spline_lines_match_cpp_for_partial_selection_colors_and_picking() {
+    if std::env::var_os("CUEMOL_BACKBONE_ORACLE").is_none() {
+        eprintln!(
+            "Skipping C++ spline oracle: set CUEMOL_BACKBONE_ORACLE and CUEMOL_BACKBONE_CONFIG"
+        );
+        return;
+    }
+    let reference = std::env::var_os("CUEMOL2_REF_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../cuemol2")
+        });
+    let pdb = reference.join("tests/test_data/1CRN.pdb");
+    let cases: &[&[&str]] = &[
+        &[],
+        &["sel=A.7:17.*"],
+        &["sel=A.7:8.*"],
+        &["sel=A.7.*"],
+        &["sel=A.2:4,8:10.*"],
+        &["sel=A.7:17.*", "smoothcolor=false"],
+        &["smooth=0.5"],
+        &["smooth=2"],
+        &["smooth=0.00001"],
+        &["sel=A.7:8.*", "smooth=0.5"],
+        &["sel=A.7:17.*", "segend_fade=true"],
+        &["sel=A.7:17.*", "segend_fade=true", "smoothcolor=false"],
+        &["sel=A.7:8.*", "segend_fade=true"],
+        &["sel=A.7:17.N", "segend_fade=true"],
+        &["pivotatom=N", "sel=A.7:17.*"],
+    ];
+    let styles = default_style_manager();
+    for settings in cases {
+        for detail in [3, 6, 11] {
+            let molecule = cuemol_molstr::read_pdb_file(&pdb).unwrap();
+            let mut manager = cuemol_molstr::MolSceneManager::new();
+            let scene = manager.new_scene("oracle");
+            let object = manager
+                .scene_mut(scene)
+                .unwrap()
+                .add_molecule("protein", molecule);
+            let object = manager
+                .scene_mut(scene)
+                .unwrap()
+                .object_mut(object)
+                .unwrap();
+            let renderer_uid = object.add_renderer("spline", "spline");
+            let renderer = object.renderer_mut(renderer_uid).unwrap();
+            renderer.set_qsc_attr("style", "WoodyHSCPaint");
+            renderer.set_qsc_attr("axialdetail", detail.to_string());
+            for setting in *settings {
+                let (key, value) = setting.split_once('=').unwrap();
+                renderer.set_qsc_attr(key, value);
+            }
+            let mut options = molecule_render_options_for_renderer("spline");
+            apply_renderer_styles(&mut options, renderer, &styles, scene.get());
+            let smoothing = renderer
+                .qsc_attr("smooth")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.);
+            let selection = renderer.qsc_attr("sel").map(str::to_owned);
+            apply_molecular_coloring(
+                &mut options,
+                object,
+                object.renderer(renderer_uid).unwrap(),
+                &styles,
+                scene.get(),
+            );
+            if let Some(selection) = selection {
+                options.draw_indices = Some(
+                    object
+                        .mol()
+                        .select_indices(&cuemol_molstr::parse_selector(&selection).unwrap()),
+                );
+            }
+            let actual = mainchain_line_snapshot(
+                object.mol(),
+                &options,
+                MainchainLineMode::Spline,
+                1.2,
+                detail,
+                smoothing,
+                options.smooth_color,
+            );
+            let detail_setting = format!("axialdetail={detail}");
+            let mut parameters = settings.to_vec();
+            parameters.push(&detail_setting);
+            let expected = reference_mesh("line", &pdb, "spline", "WoodyHSCPaint", &parameters);
+            let expected = expected.chunks_exact(16).collect::<Vec<_>>();
+            assert_eq!(actual.bonds.len(), expected.len(), "{parameters:?}");
+            for (index, (bond, row)) in actual.bonds.iter().zip(expected).enumerate() {
+                for (endpoint, position) in [bond.from, bond.to].into_iter().enumerate() {
+                    let offset = endpoint * 3;
+                    let reference = Vector4::new3(row[offset], row[offset + 1], row[offset + 2]);
+                    assert!(
+                        (position - reference).length3d() < 5.0e-6,
+                        "position {parameters:?} {index}/{endpoint}: {position:?} != {reference:?}"
+                    );
+                }
+                for (endpoint, color) in [&bond.color, &bond.end_color].into_iter().enumerate() {
+                    let color = color.as_ref().unwrap().rgba8().unwrap();
+                    for (channel, value) in
+                        [color.r, color.g, color.b, color.a].into_iter().enumerate()
+                    {
+                        assert!(
+                            (value as f64 - row[6 + 4 * endpoint + channel]).abs() <= 1.,
+                            "color {parameters:?} {index}/{endpoint}/{channel}: {value} != {}",
+                            row[6 + 4 * endpoint + channel]
+                        );
+                    }
+                }
+                assert_eq!(
+                    bond.atom_indices,
+                    Some((row[14] as usize, row[15] as usize)),
+                    "owners {parameters:?} {index}"
+                );
+            }
+            eprintln!(
+                "C++ spline {parameters:?}: {} line segments",
+                actual.bonds.len()
+            );
+        }
+    }
 }
 
 fn in_neighbors<'a, T>(

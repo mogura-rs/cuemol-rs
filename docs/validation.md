@@ -1155,3 +1155,22 @@ of attempting unsupported thread creation. Rebuilt browser checks exercise this
 guard along with exporter settings, adaptive AA/AO, lighting and NPR output.
 Public workflows and release installation remain unexecuted because these
 changes have not been pushed.
+
+### Partial spline selections
+
+Spline geometry now derives its coefficients from the complete linked chain and
+draws only the selected intervals. Previously it recomputed the curve using the
+selected residues and omitted a selection containing exactly two residues.
+An isolated selected residue and a whole chain of fewer than three residues still
+produce no spline, matching C++. Pivot selection and end fading now reach the
+line renderer, and smoothing uses the reference near-zero threshold.
+
+The independent C++ oracle compares 45 cases covering full, partial, disjoint and
+single-residue selections, three tessellation levels, smoothing, pivot changes,
+stepped/interpolated colors, alpha fades and atom identities. Every line endpoint,
+color and owner passes. The existing 48 ribbon/tube/cartoon geometry and ownership
+cases also pass. The molecular-renderer suite passes 76 tests; shared scripting
+passes 225 and native GUI passes 167. A browser pixel regression verifies that
+two selected residues remain visible on the full-chain curve and that a single
+selected residue disappears. An obsolete helper comment calling the natural
+cubic interpolator Catmull-Rom was corrected to match its implementation.

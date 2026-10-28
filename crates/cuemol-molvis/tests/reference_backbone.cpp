@@ -4,6 +4,7 @@
 #include <iostream>
 #include <string>
 #include <map>
+#include <gfx/DisplayList.hpp>
 #include <modules/molstr/AtomIterator.hpp>
 #include <libcuemol2_api/loader.hpp>
 #include <modules/molstr/MolCoord.hpp>
@@ -12,8 +13,49 @@
 #include <modules/molvis/RibbonRenderer.hpp>
 #include <modules/molvis/Ribbon2Renderer.hpp>
 #include <modules/molvis/TubeRenderer.hpp>
+#include <modules/molvis/SplineRenderer.hpp>
 #include <modules/molvis/TubeMeshBuilder.hpp>
 #include <modules/molvis/smospl/SmoothSpline.hpp>
+
+class LineContext : public gfx::DisplayList {
+    std::ostream &out;
+    std::map<int, int> atom_indices;
+    qlib::Vector4D previous;
+    quint32 current_color = 0, previous_color = 0;
+    int current_name = -1, previous_name = -1;
+    bool have_previous = false;
+public:
+    LineContext(std::ostream &stream, molstr::MolCoordPtr mol) : out(stream) {
+        molstr::AtomIterator atoms(mol);
+        int ordinal = 0;
+        for (atoms.first(); atoms.hasMore(); atoms.next()) atom_indices[atoms.getID()] = ordinal++;
+    }
+    void startLineStrip() override { have_previous = false; }
+    void end() override { have_previous = false; }
+    void loadName(int name) override { current_name = name; }
+    void color(const gfx::ColorPtr &value) override { current_color = value->getCode(); }
+    void vertex(const qlib::Vector4D &position) override {
+        if (have_previous && (previous - position).length() > 1.0e-8) {
+            for (const auto &p : {previous, position}) out << p.x() << ' ' << p.y() << ' ' << p.z() << ' ';
+            for (auto c : {previous_color, current_color})
+                out << int(gfx::getRCode(c)) << ' ' << int(gfx::getGCode(c)) << ' '
+                    << int(gfx::getBCode(c)) << ' ' << int(gfx::getACode(c)) << ' ';
+            for (int name : {previous_name, current_name})
+                out << (atom_indices.count(name) ? atom_indices.at(name) : -1) << ' ';
+            out << '\n';
+        }
+        previous = position; previous_color = current_color; previous_name = current_name;
+        have_previous = true;
+    }
+};
+
+class LineOracle : public molvis::SplineRenderer {
+public:
+    void write(std::ostream &out, bool, bool, bool) {
+        LineContext context(out, getClientMol());
+        render(&context);
+    }
+};
 
 template<class Base> class MeshOracle : public Base {
 public:
@@ -100,7 +142,7 @@ int main(int argc, char **argv) {
     std::ofstream out(argv[3]);
     out << std::setprecision(17);
     const std::string mode(argv[2]);
-    if ((mode == "mesh" || mode == "faces" || mode == "color" || mode == "pick") && argc >= 7) {
+    if ((mode == "mesh" || mode == "faces" || mode == "color" || mode == "pick" || mode == "line") && argc >= 7) {
         molstr::MolCoordPtr mol(new molstr::MolCoord());
         molstr::PDBFileReader reader;
         reader.resetAllProps();
@@ -109,7 +151,22 @@ int main(int argc, char **argv) {
         static_cast<qsys::ObjReader &>(reader).read();
         reader.detach();
         const std::string kind(argv[5]);
-        if (kind == "ribbon") mesh<molvis::RibbonRenderer>(mol, argv[6], out, argc, argv);
+        if (kind == "spline") {
+            auto *renderer = new LineOracle();
+            renderer->resetAllProps();
+            mol->attachRenderer(qsys::RendererPtr(renderer));
+            renderer->applyStyles(argv[6]);
+            for (int i = 7; i < argc; ++i) {
+                const std::string setting(argv[i]);
+                const auto split = setting.find('=');
+                qlib::LVariant value;
+                value.setStringValue(setting.substr(split + 1).c_str());
+                if (!renderer->setNestedProperty(setting.substr(0, split).c_str(), value))
+                    throw std::runtime_error("Unknown property: " + setting);
+            }
+            renderer->write(out, false, false, false);
+        }
+        else if (kind == "ribbon") mesh<molvis::RibbonRenderer>(mol, argv[6], out, argc, argv);
         else if (kind == "cartoon") mesh<molvis::Ribbon2Renderer>(mol, argv[6], out, argc, argv);
         else mesh<molvis::TubeRenderer>(mol, argv[6], out, argc, argv);
     } else if (mode == "profile") {

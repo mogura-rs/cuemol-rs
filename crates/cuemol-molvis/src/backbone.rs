@@ -482,7 +482,7 @@ fn selected_ranges(points: &[MainchainPoint]) -> Vec<std::ops::Range<usize>> {
     ranges
 }
 
-fn segment_end(par: f64, points: &[MainchainPoint]) -> (f64, bool, bool) {
+pub(super) fn segment_end(par: f64, points: &[MainchainPoint]) -> (f64, bool, bool) {
     let low = par.floor() as isize;
     let high = par.ceil() as isize;
     let at = |i: isize| usize::try_from(i).ok().and_then(|i| points.get(i));

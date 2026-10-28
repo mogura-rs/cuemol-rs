@@ -4417,6 +4417,14 @@ pub fn apply_renderer_styles(
     match renderer.renderer_type() {
         "ribbon" => apply_ribbon_renderer_styles(options, renderer, styles, scope_id),
         "cartoon" => apply_cartoon_renderer_styles(options, renderer, styles, scope_id),
+        "spline" | "trace" | "tracestick" => apply_mainchain_renderer_styles(
+            options,
+            renderer,
+            styles,
+            scope_id,
+            true,
+            TubeCapType::Sphere,
+        ),
         _ => {}
     }
 }
@@ -5492,7 +5500,12 @@ pub fn mainchain_line_snapshot(
             .copied()
             .collect::<std::collections::BTreeSet<_>>()
     });
-    let chains = collect_mainchain_pivots(molecule, draw.as_ref(), options.pivot_atom.as_deref());
+    let chains = collect_mainchain_pivots_with_context(
+        molecule,
+        draw.as_ref(),
+        options.pivot_atom.as_deref(),
+        mode == MainchainLineMode::Spline,
+    );
     let colors = resolve_atom_colors(molecule, options);
     let mut bonds = Vec::new();
     let width = width.max(0.0);
@@ -5537,7 +5550,7 @@ pub fn mainchain_line_snapshot(
             axial_detail.max(1) as usize
         };
         let mut positions = pivots.iter().map(|point| point.pos).collect::<Vec<_>>();
-        if mode == MainchainLineMode::Spline && positions.len() >= 3 && smoothing > 0.0 {
+        if mode == MainchainLineMode::Spline && positions.len() >= 3 && smoothing >= 1.0e-4 {
             let original = positions.clone();
             let weight = smoothing.clamp(0.0, 1.0);
             for index in 1..original.len() - 1 {
@@ -5550,28 +5563,54 @@ pub fn mainchain_line_snapshot(
         } else {
             cubic_spline_samples(&positions, subdiv)
         };
-        let mut sample_colors = Vec::with_capacity(samples.len());
-        for segment in 0..pivots.len() - 1 {
-            let lhs = &colors[pivots[segment].atom_index];
-            let rhs = &colors[pivots[segment + 1].atom_index];
-            for step in 0..subdiv {
-                let fraction = step as f64 / subdiv as f64;
-                sample_colors.push(if smooth_color || mode == MainchainLineMode::Trace {
-                    interpolate_color(lhs, rhs, fraction)
+        let sample_colors = (0..samples.len())
+            .map(|sample| {
+                let par = sample as f64 / subdiv as f64;
+                let mut lhs = colors[pivots[par.floor() as usize].atom_index].clone();
+                let mut rhs = colors[pivots[par.ceil() as usize].atom_index].clone();
+                let mut fraction = par.fract();
+                if mode == MainchainLineMode::Spline && options.segment_end_fade {
+                    let (rho, first, second) = backbone::segment_end(par, pivots);
+                    fraction = rho;
+                    let transparent = |color: &ColorSpec| {
+                        let rgba = color.rgba8().unwrap_or(cuemol_gfx::Rgba8 {
+                            r: 255,
+                            g: 255,
+                            b: 255,
+                            a: 255,
+                        });
+                        rgba_to_spec([
+                            rgba.r as f32 / 255.,
+                            rgba.g as f32 / 255.,
+                            rgba.b as f32 / 255.,
+                            0.,
+                        ])
+                    };
+                    if first {
+                        lhs = transparent(&lhs);
+                    }
+                    if second {
+                        rhs = transparent(&rhs);
+                    }
+                }
+                if smooth_color || mode == MainchainLineMode::Trace {
+                    interpolate_color(&lhs, &rhs, fraction)
                 } else if fraction > 0.5 {
-                    rhs.clone()
+                    rhs
                 } else {
-                    lhs.clone()
-                });
-            }
-        }
-        sample_colors.push(colors[pivots.last().expect("non-empty pivots").atom_index].clone());
+                    lhs
+                }
+            })
+            .collect::<Vec<_>>();
         let owner_at = |sample: usize| {
             let pivot = sample / subdiv + usize::from((sample % subdiv) * 2 > subdiv);
             pivots[pivot.min(pivots.len() - 1)].atom_index
         };
         for index in 0..samples.len().saturating_sub(1) {
             let pivot_segment = (index / subdiv).min(pivots.len() - 2);
+            if !pivots[pivot_segment].selected || !pivots[pivot_segment + 1].selected {
+                continue;
+            }
             let start_index = pivots[pivot_segment].atom_index;
             let end_index = pivots[pivot_segment + 1].atom_index;
             let start_color = sample_colors[index].clone();
@@ -5855,7 +5894,7 @@ fn bounds_of_atoms(
 /// Build a smooth round main-chain trace snapshot.
 ///
 /// This helper gathers each chain's pivot atoms (CA for proteins, P/C1' for
-/// nucleic acids), interpolates them with a Catmull-Rom spline, and emits round
+/// nucleic acids), interpolates them with a natural cubic spline, and emits round
 /// primitives along the backbone. Ribbon and cartoon renderers use
 /// [`ribbon_mesh_snapshot`] for their secondary-structure triangle meshes.
 pub fn mainchain_trace_snapshot(
@@ -11438,6 +11477,53 @@ return cuemol.makeColor("#0000ff");
             .bonds
             .iter()
             .all(|primitive| primitive.screen_point && primitive.from == primitive.to));
+    }
+
+    #[test]
+    fn spline_selection_keeps_full_chain_coefficients_and_fades_boundaries() {
+        let molecule = MolCoord::with_atoms(vec![
+            ca_atom(1, 0., 0., 0.),
+            ca_atom(2, 3., 2., 0.),
+            ca_atom(3, 6., 0., 1.),
+            ca_atom(4, 9., 1., 0.),
+            ca_atom(5, 12., 0., 0.),
+        ]);
+        let draw = |options: &MoleculeRenderOptions| {
+            mainchain_line_snapshot(
+                &molecule,
+                options,
+                MainchainLineMode::Spline,
+                1.2,
+                6,
+                0.5,
+                true,
+            )
+        };
+        let full = draw(&MoleculeRenderOptions::default());
+        let mut options = MoleculeRenderOptions {
+            draw_indices: Some(vec![1, 2]),
+            ..Default::default()
+        };
+        let partial = draw(&options);
+        assert_eq!(partial.bonds.len(), 6);
+        assert_eq!(partial.bonds, full.bonds[6..12]);
+        options.segment_end_fade = true;
+        let faded = draw(&options);
+        assert_eq!(faded.bonds[0].color.as_ref().unwrap().rgba8().unwrap().a, 0);
+        assert_eq!(
+            faded.bonds[5]
+                .end_color
+                .as_ref()
+                .unwrap()
+                .rgba8()
+                .unwrap()
+                .a,
+            0
+        );
+        options.draw_indices = Some(vec![1]);
+        assert!(draw(&options).bonds.is_empty());
+        options.draw_indices = Some(vec![1, 3]);
+        assert!(draw(&options).bonds.is_empty());
     }
 
     #[test]

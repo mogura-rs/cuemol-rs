@@ -992,3 +992,29 @@ test('scripted SES backends regenerate through saved scene objects',async({page}
   state=await call(page,'execute_script',{source:`var surf=cuemol.getObject('scripted-ses');print(surf.sesbackend);surf.regenerateSES1(3);print(surf.orig_den);cuemol.resetProp(surf,'sesbackend');print(surf.sesbackend);`});
   expect(JSON.parse(state.message).log).toBe('ball\n3\nauto\n');
 });
+
+test('partial spline selection keeps the full-chain curve and draws two residues',async({page},testInfo)=>{
+  await ready(page);
+  const protein=[[0,0,0],[3,2,0],[6,0,1],[9,1,0],[12,0,0]].map((p,i)=>
+    `ATOM  ${String(i+1).padStart(5)}  CA  ALA A${String(i+1).padStart(4)}    ${p.map(v=>v.toFixed(3).padStart(8)).join('')}  1.00 10.00           C`).join('\n')+'\nEND\n';
+  await load(page,'spline.pdb',Buffer.from(protein));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  const id=(await page.evaluate(()=>window.cuemol.status())).scene.objects[0].id;
+  await call(page,'execute_script',{source:`var m=cuemol.getObject(${id});m.rend_uids.split(',').filter(Boolean).forEach(id=>cuemol.getRenderer(Number(id)).visible=false);var r=m.createRenderer('spline');r.name='curve';r.defaultcolor=cuemol.Color('#ff00ff');r.line_width=6;r.smooth=0.5;r.axialdetail=6;`});
+  await call(page,'set_projection',{perspective:false});
+  await call(page,'set_view',{center:[6,1,0],zoom:16,distance:200,slab:50});
+  const rect=await page.evaluate(()=>window.cuemol.status().ui.rects.Viewport);
+  const capture=async()=>PNG.sync.read(await page.screenshot({clip:{x:rect[0],y:rect[1],width:rect[2],height:rect[3]}}));
+  const mask=png=>Array.from({length:png.width*png.height},(_,i)=>png.data[4*i]>180&&png.data[4*i+1]<70&&png.data[4*i+2]>180);
+  await expect.poll(async()=>mask(await capture()).filter(Boolean).length).toBeGreaterThan(500);
+  const full=mask(await capture());
+  await call(page,'execute_script',{source:`cuemol.getObject(${id}).getRendererByName('curve').sel=cuemol.makeSel('A.2:3.*');`});
+  let partial;
+  await expect.poll(async()=>{partial=mask(await capture());return partial.filter(Boolean).length;}).toBeGreaterThan(100);
+  const count=partial.filter(Boolean).length;
+  expect(count).toBeLessThan(full.filter(Boolean).length/2);
+  expect(partial.filter((on,i)=>on&&full[i]).length/count).toBeGreaterThan(0.97);
+  await page.screenshot({path:testInfo.outputPath('partial-spline.png')});
+  await call(page,'execute_script',{source:`cuemol.getObject(${id}).getRendererByName('curve').sel=cuemol.makeSel('A.2.*');`});
+  await expect.poll(async()=>mask(await capture()).filter(Boolean).length).toBe(0);
+});

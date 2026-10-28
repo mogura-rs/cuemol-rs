@@ -49,6 +49,8 @@ in saved scenes. Renderer `$molcol` colors inherit the object's coloring scheme,
 including hue, saturation, brightness and alpha modifiers.
 Saved and direct molecular surfaces use their renderer's coloring scheme,
 including paint rules and imported atom colors.
+Spline selections retain the whole chain's interpolation coefficients, so a
+selected pair of residues follows the same curve as the complete backbone.
 Native and browser viewports share GTAO, edge-aware AO filtering, FXAA, SMAA,
 and 2–32 temporal samples. Spatial AA works independently of AO. Camera,
 geometry, or setting changes reset temporal accumulation; unchanged frames reuse
