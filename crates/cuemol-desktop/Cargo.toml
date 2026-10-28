@@ -6,6 +6,7 @@ license.workspace = true
 build = "build.rs"
 
 [dependencies]
+cuemol-ui = { workspace = true, optional = true, features = ["egui"] }
 cuemol-command.workspace = true
 serde_json = "1"
 # GUI-agnostic shared logic (DesktopAppState facade, Gui* view-models, offscreen
@@ -46,6 +47,7 @@ winit = { version = "0.30.12", optional = true }
 [features]
 default = []
 egui-gui = [
+  "dep:cuemol-ui",
   "cuemol-desktop-core/offscreen",
   "cuemol-desktop-core/scripting",
   "cuemol-command/scripting",

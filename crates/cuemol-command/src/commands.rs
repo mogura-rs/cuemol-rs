@@ -462,7 +462,7 @@ pub fn prepare_render(
             .map(|p| p == "perspective")
             .unwrap_or(flag("perspective", camera.is_perspective())),
         use_clip_z: flag("clipPlane", flag("useClipZ", defaults.use_clip_z)),
-        supersample: number("supersample", 1.).clamp(1., 4.) as i32,
+        supersample: number("supersample", if npr { 3. } else { 1. }).clamp(1., 4.) as i32,
         ao_samples: if flag("aoEnabled", setting("aoSamples").is_some()) {
             number("aoSamples", 64.).clamp(0., 256.) as i32
         } else {
@@ -474,6 +474,9 @@ pub fn prepare_render(
         shadow_samples: number("shadowSamples", defaults.shadow_samples as f64).clamp(0., 256.)
             as i32,
         light_radius: number("lightRadius", defaults.light_radius),
+        light_intensity: number("lightIntensity", defaults.light_intensity),
+        flash_fraction: number("flashFraction", defaults.flash_fraction),
+        ambient_fraction: number("ambientFraction", defaults.ambient_fraction),
         show_edge_lines: flag("edgeLines", flag("showEdgeLines", defaults.show_edge_lines)),
         crease_limit: number("creaseLimit", defaults.crease_limit),
         edge_rise: number("edgeRise", defaults.edge_rise),
@@ -493,35 +496,7 @@ pub fn prepare_render(
     };
     let background = state.active_background_color()?;
     let hatch = if npr {
-        let parse_color = |key: &str, default: [u8; 3]| -> Result<[u8; 3]> {
-            let Some(value) = setting(key).and_then(Value::as_str) else {
-                return Ok(default);
-            };
-            let hex = value.strip_prefix('#').unwrap_or(value);
-            if hex.len() != 6 {
-                return Err(CueMolError::invalid_argument("hatch color must be #rrggbb"));
-            }
-            let packed = u32::from_str_radix(hex, 16)
-                .map_err(|_| CueMolError::invalid_argument("invalid hatch color"))?;
-            Ok([(packed >> 16) as u8, (packed >> 8) as u8, packed as u8])
-        };
-        Some(cuemol_render::HatchRenderParams {
-            density: number("hatchDensity", 1.),
-            width_scale: number("hatchWidthScale", 1.),
-            ink: if flag("hatchCustomInk", true) {
-                parse_color("hatchInkColor", [0; 3])?
-            } else {
-                [0; 3]
-            },
-            paper: if flag("hatchCustomPaper", true) {
-                parse_color("hatchPaperColor", [255; 3])?
-            } else {
-                [255; 3]
-            },
-            colored: setting("hatchColoring")
-                .and_then(Value::as_str)
-                .is_some_and(|v| v.eq_ignore_ascii_case("colored")),
-        })
+        Some(hatch_params(&settings, prefix)?)
     } else {
         None
     };
@@ -538,6 +513,70 @@ pub fn prepare_render(
         hatch,
         output,
     })
+}
+
+pub fn hatch_params(
+    settings: &serde_json::Map<String, Value>,
+    prefix: &str,
+) -> Result<cuemol_render::HatchRenderParams> {
+    let setting = |key: &str| {
+        settings
+            .get(&format!("{prefix}.{key}"))
+            .or_else(|| settings.get(key))
+    };
+    let number = |key: &str, default: f64| setting(key).and_then(Value::as_f64).unwrap_or(default);
+    let flag = |key: &str, default: bool| setting(key).and_then(Value::as_bool).unwrap_or(default);
+    let text = |key: &str, default: &str| {
+        setting(key)
+            .and_then(Value::as_str)
+            .unwrap_or(default)
+            .to_string()
+    };
+    let color = |key: &str, default: [u8; 3]| -> Result<[u8; 3]> {
+        let Some(value) = setting(key).and_then(Value::as_str) else {
+            return Ok(default);
+        };
+        let hex = value.strip_prefix('#').unwrap_or(value);
+        if hex.len() != 6 {
+            return Err(CueMolError::invalid_argument("hatch color must be #rrggbb"));
+        }
+        let v = u32::from_str_radix(hex, 16)
+            .map_err(|_| CueMolError::invalid_argument("invalid hatch color"))?;
+        Ok([(v >> 16) as u8, (v >> 8) as u8, v as u8])
+    };
+    let params = cuemol_render::HatchRenderParams {
+        density: number("hatchDensity", 1.),
+        width_scale: number("hatchWidthScale", 1.),
+        ink: color("hatchInkColor", [0; 3])?,
+        paper: color("hatchPaperColor", [255; 3])?,
+        style: text("hatchStyle", "richardson"),
+        coloring: text("hatchColoring", "Style default"),
+        layers_spec: text("hatchLayersSpec", ""),
+        tone_spec: text("hatchToneSpec", ""),
+        custom_ink: flag("hatchCustomInk", setting("hatchInkColor").is_some()),
+        custom_paper: flag("hatchCustomPaper", setting("hatchPaperColor").is_some()),
+        default_edges: flag("hatchDefaultEdges", true),
+        tone_strength: number("hatchToneStrength", 1.),
+        tone_curve: number("hatchToneCurve", 1.),
+        colored: false,
+    };
+    cuemol_render::validate_hatch_params(&params)?;
+    Ok(params)
+}
+
+pub fn hatch_settings(p: &cuemol_render::HatchRenderParams) -> String {
+    let color = |v: [u8; 3]| format!("#{:02x}{:02x}{:02x}", v[0], v[1], v[2]);
+    let settings = json!({"hatchStyle":p.style,"hatchColoring":p.coloring,"hatchLayersSpec":p.layers_spec,
+        "hatchToneSpec":p.tone_spec,"hatchDensity":p.density,"hatchWidthScale":p.width_scale,
+        "hatchCustomInk":p.custom_ink,"hatchCustomPaper":p.custom_paper,"hatchInkColor":color(p.ink),
+        "hatchPaperColor":color(p.paper),"hatchDefaultEdges":p.default_edges,"hatchToneStrength":p.tone_strength,"hatchToneCurve":p.tone_curve});
+    settings
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(k, v)| format!("umbreon_npr.{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 pub struct PreparedRender {

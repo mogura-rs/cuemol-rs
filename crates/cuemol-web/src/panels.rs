@@ -1,6 +1,56 @@
 use super::*;
 
 impl App {
+    pub(super) fn render_ui(&mut self, ctx: &egui::Context) {
+        if !self.show_render {
+            return;
+        }
+        let mut open = true;
+        let mut render = false;
+        egui::Window::new("Render image")
+            .open(&mut open)
+            .vscroll(true)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Width");
+                    ui.add(egui::DragValue::new(&mut self.render_size[0]).range(1..=8192));
+                    ui.label("Height");
+                    ui.add(egui::DragValue::new(&mut self.render_size[1]).range(1..=8192));
+                });
+                ui.checkbox(&mut self.render_hatching, "Hatched illustration");
+                ui.checkbox(&mut self.render_transparent, "Transparent background");
+                if self.render_hatching {
+                    cuemol_ui::hatch_controls(ui, &mut self.render_hatch);
+                }
+                render = ui.button("Render PNG").clicked();
+            });
+        self.show_render = open;
+        if render {
+            let backend = if self.render_hatching {
+                "umbreon_npr"
+            } else {
+                "umbreon"
+            };
+            let mut settings = format!(
+                "backend={backend}; width={}; height={}; unit=px; transparentBg={}",
+                self.render_size[0], self.render_size[1], self.render_transparent
+            );
+            if self.render_hatching {
+                settings.push_str("; ");
+                settings.push_str(&cuemol_command::hatch_settings(&self.render_hatch));
+            }
+            match cuemol_command::call_tool(
+                &mut self.state,
+                &mut self.camera,
+                "set_render_settings",
+                &json!({"settings":settings}),
+            ) {
+                Ok(_) => self.export_png(),
+                Err(e) => self.message = e.to_string(),
+            }
+        }
+    }
+
     pub(super) fn select_tool(&mut self, name: &str) {
         self.console_tool = name.into();
         self.form_tool.clear();

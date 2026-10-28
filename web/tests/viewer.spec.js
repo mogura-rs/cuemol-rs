@@ -204,3 +204,28 @@ test('browser analytic surfaces support both backends and density regeneration',
     expect(result.backend).toBe(backend);expect(result.triangles).toBeGreaterThan(0);
   }
 });
+
+test('browser NPR styles and edited hatch layers produce distinct transparent images',async({page},testInfo)=>{
+  const errors=[];page.on('pageerror',e=>errors.push(e.message));
+  await ready(page);await load(page,'npr-source.pdb',Buffer.from(structure));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  let state=await call(page,'get_hatch_style',{style:'richardson'});
+  const styles=JSON.parse(state.message).styles;
+  expect(styles).toHaveLength(9);
+  const images=[];
+  for(const style of styles){
+    await call(page,'set_render_settings',{settings:`backend=umbreon_npr; width=72; height=72; transparentBg=true; umbreon_npr.supersample=2; umbreon_npr.hatchStyle=${style}`});
+    state=await call(page,'get_screenshot',{});const image=JSON.parse(state.message)._image;
+    const bytes=Buffer.from(image,'base64');const decoded=PNG.sync.read(bytes);
+    expect(decoded.width).toBe(72);expect(decoded.height).toBe(72);
+    const alpha=Array.from({length:72*72},(_,i)=>decoded.data[i*4+3]);
+    expect(alpha.some(v=>v===0)).toBe(true);expect(alpha.some(v=>v===255)).toBe(true);
+    if(style==='richardson')await testInfo.attach('richardson',{body:bytes,contentType:'image/png'});
+    images.push(image);
+  }
+  expect(new Set(images).size).toBeGreaterThanOrEqual(7);
+  const spec='layer:kind=line,angle=20,spacing=8; layer:kind=dot,spacing=10';
+  await call(page,'set_render_settings',{settings:`umbreon_npr.hatchLayersSpec=${JSON.stringify(spec)}; umbreon_npr.hatchToneSpec="tone:strength=0.4,curve=0.8"`});
+  state=await call(page,'get_screenshot',{});expect(images).not.toContain(JSON.parse(state.message)._image);
+  expect(errors).toEqual([]);
+});

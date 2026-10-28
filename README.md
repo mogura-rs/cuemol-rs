@@ -217,9 +217,10 @@ The wgpu frontends share scene behavior but use egui controls rather than
 replicating Tritium's React layout pixel for pixel. Molecular surfaces support
 the MeshMS and BALL engines on native and browser targets, with `auto` selecting
 MeshMS and BALL as its fallback. The `rust` backend retains grid-based SES.
-The generation backend, density, and probe radius survive embedded scene saves. NPR rendering provides a Rust hatching pass;
-upstream custom hatch-layer specifications and every upstream light setting
-are not implemented. Native denoising uses bilateral or color-guided A-trous
+The generation backend, density, and probe radius survive embedded scene saves. NPR rendering includes the nine reference styles and editable line, dot, and
+stipple layers, with shared native/browser controls for ink, paper, and tone.
+Hatch and tone specifications use the reference syntax. Some upstream lighting
+settings remain unimplemented. Native denoising uses bilateral or color-guided A-trous
 filters. Intel OIDN is not bundled; old GUI preferences carrying that label
 migrate to the bilateral filter, and new MCP OIDN requests return an error.
 The A-trous implementation uses increasing B3-spline sample spacing, following

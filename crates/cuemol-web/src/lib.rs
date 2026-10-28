@@ -127,6 +127,11 @@ struct App {
     show_help: bool,
     dark: bool,
     show_settings: bool,
+    show_render: bool,
+    render_hatching: bool,
+    render_hatch: cuemol_render::HatchRenderParams,
+    render_size: [u32; 2],
+    render_transparent: bool,
     show_timeline: bool,
     settings_text: String,
     startup_text: String,
@@ -220,6 +225,11 @@ impl App {
             show_help: false,
             dark,
             show_settings: false,
+            show_render: false,
+            render_hatching: false,
+            render_hatch: Default::default(),
+            render_size: [1200, 900],
+            render_transparent: false,
             show_timeline: false,
             settings_text: String::new(),
             startup_text,
@@ -544,6 +554,18 @@ impl App {
                 if ui.button("PNG").clicked() {
                     self.export_png();
                 }
+                if ui.button("Render").clicked() {
+                    if let Ok(settings) = cuemol_command::render_settings(&self.state) {
+                        self.render_hatching =
+                            settings.get("backend").is_some_and(|v| v == "umbreon_npr");
+                        self.render_transparent =
+                            settings.get("transparentBg").is_some_and(|v| v == true);
+                        if let Ok(hatch) = cuemol_command::hatch_params(&settings, "umbreon_npr") {
+                            self.render_hatch = hatch;
+                        }
+                    }
+                    self.show_render = true;
+                }
                 ui.separator();
                 ui.add(
                     egui::TextEdit::singleline(&mut self.pdb_id)
@@ -645,7 +667,7 @@ impl App {
             &mut self.state,
             &mut self.camera,
             "get_screenshot",
-            &json!({"width":1200,"height":900}),
+            &json!({"width":self.render_size[0],"height":self.render_size[1]}),
         ) {
             Ok(value) => {
                 let data = value["_image"]["data"]
@@ -919,6 +941,7 @@ impl eframe::App for App {
             ctx.request_repaint_after(std::time::Duration::from_secs_f32(1.0 / self.fps));
         }
         self.settings_ui(ctx);
+        self.render_ui(ctx);
         self.tools_ui(ctx);
         self.properties_ui(ctx);
         self.timeline_ui(ctx);

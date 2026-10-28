@@ -8,6 +8,7 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+cuemol-ui = { workspace = true, features = ["egui"] }
 cuemol-core.workspace = true
 cuemol-gfx.workspace = true
 cuemol-desktop-core = { workspace = true, features = ["offscreen"] }

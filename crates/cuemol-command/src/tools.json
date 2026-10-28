@@ -1,5 +1,25 @@
 [
   {
+    "name": "get_hatch_style",
+    "description": "Get an editable NPR layer, tone and ink specification for a hatch style.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "style": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "append_trajectory",
     "description": "Append an indexed MD trajectory to a molecule.",
     "inputSchema": {

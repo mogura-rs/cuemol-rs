@@ -223,7 +223,10 @@ impl<'a> RayIndex<'a> {
         let primitive = &self.primitives[id];
         let group = primitive.group;
         if let Some(g) = group {
-            if self.snapshot.transparency_groups[g].alpha < 1. - 1e-4 && group != visible_group {
+            if self.snapshot.transparency_groups[g].alpha < 1. - 1e-4
+                && group != visible_group
+                && visible_group != Some(usize::MAX)
+            {
                 return None;
             }
         }

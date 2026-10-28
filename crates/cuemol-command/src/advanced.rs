@@ -21,6 +21,12 @@ pub fn call_tool(
     args: &Value,
 ) -> Result<Value> {
     match name {
+        "get_hatch_style" => {
+            let name = args["style"].as_str().unwrap_or("richardson");
+            Ok(
+                json!({"style":name,"spec":cuemol_render::hatch_style_spec(name)?,"styles":cuemol_render::HATCH_STYLES}),
+            )
+        }
         "delete_atoms" => {
             Ok(json!({"deleted":state.delete_atoms_in_object(uid(args,"objId")?,selection(args))?}))
         }

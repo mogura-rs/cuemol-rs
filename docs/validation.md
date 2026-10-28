@@ -95,3 +95,14 @@ noninteger density, regeneration, and an embedded QSC save/reload. The browser
 suite passed eight tests, including both analytic engines and regeneration.
 All 157 native GUI tests passed after the backend selector was added. Source
 revisions and local portability changes are recorded beside the bundled kernels.
+
+## NPR styles and layer editing
+
+The Rust line, dot, and stipple kernels matched 5,040 reference C++ samples
+within the stated floating-point tolerance. The composition regression also
+matched all nine styles for identical input tone, albedo, and shaded color.
+These comparisons cover the procedural ink and composition stages, not every
+ray-traced lighting result. Layer/tone serialization, deterministic marks, and
+increasing coverage as tone darkens passed. The native GUI suite passed all
+157 tests, and all nine browser tests passed, including custom hatch edits,
+style differences, and transparent PNG output.

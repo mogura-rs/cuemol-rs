@@ -62,8 +62,8 @@ pub fn call_tool(
         "set_render_settings" => {
             let sid = scene(state)?;
             let mut settings = render_settings(state)?;
-            for part in text(args, "settings")?
-                .split(';')
+            for part in split_settings(text(args, "settings")?)?
+                .into_iter()
                 .map(str::trim)
                 .filter(|p| !p.is_empty())
             {
@@ -101,12 +101,12 @@ pub fn call_tool(
                     "denoise" => parsed
                         .as_str()
                         .is_some_and(|v| matches!(v, "Bilateral" | "A-trous" | "None")),
-                    "hatchInkColor" | "hatchPaperColor" | "hatchColoring" => parsed.is_string(),
+                    "hatchInkColor" | "hatchPaperColor" | "hatchColoring" | "hatchStyle"
+                    | "hatchLayersSpec" | "hatchToneSpec" => parsed.is_string(),
                     "transparent" | "transparentBg" | "perspective" | "useClipZ" | "clipPlane"
                     | "shadows" | "showEdgeLines" | "edgeLines" | "useGi" | "useGI"
-                    | "giDenoise" | "aoEnabled" | "hatchCustomInk" | "hatchCustomPaper" => {
-                        parsed.is_boolean()
-                    }
+                    | "giDenoise" | "aoEnabled" | "hatchCustomInk" | "hatchCustomPaper"
+                    | "hatchDefaultEdges" => parsed.is_boolean(),
                     "width" | "height" | "dpi" | "hatchDensity" | "hatchWidthScale" => {
                         parsed.as_f64().is_some_and(|n| n.is_finite() && n > 0.)
                     }
@@ -119,6 +119,7 @@ pub fn call_tool(
                 }
                 settings.insert(key.into(), parsed);
             }
+            crate::commands::hatch_params(&settings, "umbreon_npr")?;
             state
                 .scene_manager_mut()
                 .scene_mut(sid)
@@ -148,7 +149,47 @@ pub fn call_tool(
     }
 }
 
+fn split_settings(input: &str) -> Result<Vec<&str>> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (i, c) in input.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if quoted && c == '\\' {
+            escaped = true;
+            continue;
+        }
+        if c == '"' {
+            quoted = !quoted;
+        }
+        if c == ';' && !quoted {
+            parts.push(&input[start..i]);
+            start = i + 1;
+        }
+    }
+    if quoted {
+        return Err(CueMolError::invalid_argument(
+            "unterminated render setting string",
+        ));
+    }
+    parts.push(&input[start..]);
+    Ok(parts)
+}
+
 const RENDER_KEYS: &[&str] = &[
+    "hatchStyle",
+    "hatchLayersSpec",
+    "hatchToneSpec",
+    "hatchDefaultEdges",
+    "hatchToneStrength",
+    "hatchToneCurve",
+    "lightIntensity",
+    "flashFraction",
+    "ambientFraction",
     "backend",
     "projection",
     "transparentBg",

@@ -2,7 +2,10 @@ mod bvh;
 mod npr;
 use bvh::RayIndex;
 use cuemol_core::clock::Instant;
-pub use npr::{render_umbreon_npr_snapshot, HatchRenderParams};
+pub use npr::{
+    hatch_style_spec, render_umbreon_npr_snapshot, validate_hatch_params, HatchLayer,
+    HatchLayerKind, HatchLook, HatchRenderParams, HATCH_STYLES,
+};
 use std::fs;
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, Ordering},
@@ -74,6 +77,9 @@ pub struct UmbreonRenderParams {
     pub shadows: bool,
     pub shadow_samples: i32,
     pub light_radius: f64,
+    pub light_intensity: f64,
+    pub flash_fraction: f64,
+    pub ambient_fraction: f64,
     pub show_edge_lines: bool,
     pub crease_limit: f64,
     pub edge_rise: f64,
@@ -100,6 +106,9 @@ impl Default for UmbreonRenderParams {
             shadows: false,
             shadow_samples: 1,
             light_radius: 0.0,
+            light_intensity: -1.,
+            flash_fraction: -1.,
+            ambient_fraction: -1.,
             show_edge_lines: true,
             crease_limit: -1.0,
             edge_rise: 0.5,
@@ -540,6 +549,17 @@ fn render_umbreon_snapshot_impl(
     params: &UmbreonRenderParams,
     async_state: Option<(&AtomicU32, &AtomicBool)>,
 ) -> Result<UmbreonFrame> {
+    render_with_hatch(snapshot, camera, background, params, async_state, None)
+}
+
+fn render_with_hatch(
+    snapshot: &RenderSceneSnapshot,
+    camera: &Camera,
+    background: [f32; 4],
+    params: &UmbreonRenderParams,
+    async_state: Option<(&AtomicU32, &AtomicBool)>,
+    hatch: Option<&npr::ResolvedHatch>,
+) -> Result<UmbreonFrame> {
     let width = usize::try_from(params.width)
         .ok()
         .filter(|value| *value > 0)
@@ -589,14 +609,22 @@ fn render_umbreon_snapshot_impl(
                     };
                     let origin = camera_center + transform_direction(inverse_rotation, eye_origin);
                     let direction = normalize(transform_direction(inverse_rotation, eye_direction));
-                    let sample = trace_sample(
-                        snapshot,
-                        &index,
-                        Ray { origin, direction },
-                        camera,
-                        background,
-                        params,
-                    );
+                    let ray = Ray { origin, direction };
+                    let sample = if let Some(hatch) = hatch {
+                        npr::trace_npr(
+                            snapshot,
+                            &index,
+                            ray,
+                            camera,
+                            background,
+                            params,
+                            hatch,
+                            (x * samples + sx) as f32 + 0.5,
+                            (y * samples + sy) as f32 + 0.5,
+                        )
+                    } else {
+                        trace_sample(snapshot, &index, ray, camera, background, params)
+                    };
                     for index in 0..4 {
                         accumulated[index] += sample[index];
                     }
@@ -605,8 +633,13 @@ fn render_umbreon_snapshot_impl(
             let divisor = (samples * samples) as f64;
             let offset = x * components;
             for index in 0..components {
+                let denominator = if components == 4 && index < 3 {
+                    accumulated[3].max(1e-12)
+                } else {
+                    divisor
+                };
                 row[offset + index] =
-                    ((accumulated[index] / divisor).clamp(0.0, 1.0) * 255.0).round() as u8;
+                    ((accumulated[index] / denominator).clamp(0.0, 1.0) * 255.0).round() as u8;
             }
         }
     };

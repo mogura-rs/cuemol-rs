@@ -1421,6 +1421,7 @@ struct GuiApplication {
     umbreon_denoise: UmbreonDenoiseMode,
     ray_size: [u32; 2],
     ray_hatching: bool,
+    ray_hatch: cuemol_render::HatchRenderParams,
     ray_transparent: bool,
     ray_samples: u32,
     ray_job: Option<mpsc::Receiver<std::result::Result<serde_json::Value, String>>>,
@@ -5062,6 +5063,7 @@ impl GuiApplication {
             umbreon_denoise: UmbreonDenoiseMode::default(),
             ray_size: [1200, 900],
             ray_hatching: false,
+            ray_hatch: Default::default(),
             ray_transparent: false,
             ray_samples: 8,
             ray_job: None,
@@ -17320,6 +17322,9 @@ impl GuiApplication {
                 }
             }
             self.ray_hatching = settings.get("backend").is_some_and(|v| v == "umbreon_npr");
+            if let Ok(hatch) = cuemol_command::hatch_params(&settings, "umbreon_npr") {
+                self.ray_hatch = hatch;
+            }
             self.ray_transparent = settings.get("transparentBg").is_some_and(|v| v == true);
         }
         if self.export_path.is_empty() || !self.export_path.ends_with(".png") {
@@ -17335,7 +17340,8 @@ impl GuiApplication {
         let mut open = true;
         egui::Window::new("Render image")
             .open(&mut open)
-            .resizable(false)
+            .resizable(true)
+            .vscroll(true)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("PNG file");
@@ -17358,6 +17364,7 @@ impl GuiApplication {
                 });
                 ui.checkbox(&mut self.ray_hatching, "Hatched illustration");
                 ui.checkbox(&mut self.ray_transparent, "Transparent background");
+                if self.ray_hatching {cuemol_ui::hatch_controls(ui,&mut self.ray_hatch);}
                 ui.add_enabled_ui(!self.ray_hatching, |ui| {
                     ui.horizontal(|ui| {
                         ui.label("Lighting samples");
@@ -17373,10 +17380,11 @@ impl GuiApplication {
                 if ui.add_enabled(self.ray_job.is_none(), egui::Button::new("Render")).clicked() {
                     let mut current = camera.to_qsys_camera("__current");
                     let backend = if self.ray_hatching { "umbreon_npr" } else { "umbreon" };
-                    let settings = format!(
+                    let mut settings = format!(
                         "width={}; height={}; unit=px; transparentBg={}; backend={backend}; umbreon.giSamples={}",
                         self.ray_size[0], self.ray_size[1], self.ray_transparent, self.ray_samples
                     );
+                    if self.ray_hatching {settings.push_str("; ");settings.push_str(&cuemol_command::hatch_settings(&self.ray_hatch));}
                     let result = cuemol_command::call_tool(
                         &mut self.state,
                         &mut current,

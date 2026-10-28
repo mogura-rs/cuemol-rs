@@ -1358,6 +1358,7 @@ dependencies = [
  "cuemol-qsys",
  "cuemol-render",
  "cuemol-surface",
+ "cuemol-ui",
  "cuemol-xtal",
  "egui",
  "egui-wgpu",
@@ -1555,6 +1556,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cuemol-ui"
+version = "0.1.0"
+dependencies = [
+ "cuemol-render",
+ "egui",
+]
+
+[[package]]
 name = "cuemol-web"
 version = "0.1.0"
 dependencies = [
@@ -1568,6 +1577,7 @@ dependencies = [
  "cuemol-molstr",
  "cuemol-qsys",
  "cuemol-render",
+ "cuemol-ui",
  "eframe",
  "getrandom 0.2.17",
  "getrandom 0.3.4",

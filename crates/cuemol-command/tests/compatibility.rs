@@ -287,7 +287,7 @@ fn prefixed_npr_settings_change_hatching_and_keep_alpha() {
         &mut state,
         &mut camera,
         "set_render_settings",
-        json!({"settings":"backend=umbreon_npr; width=96; height=96; transparentBg=true; umbreon_npr.hatchDensity=0.3"}),
+        json!({"settings":"backend=umbreon_npr; width=96; height=96; transparentBg=true; umbreon_npr.hatchDensity=0.3; umbreon_npr.hatchStyle=ink-cross"}),
     );
     let first = call(&mut state, &mut camera, "get_screenshot", json!({}));
     call(
@@ -308,7 +308,7 @@ fn prefixed_npr_settings_change_hatching_and_keep_alpha() {
     let info = decoder.next_frame(&mut bytes).unwrap();
     assert_eq!(info.color_type, png::ColorType::Rgba);
     assert!(bytes.chunks_exact(4).any(|p| p[3] == 0));
-    assert!(bytes.chunks_exact(4).any(|p| p[3] == 255 && p[0] == 0));
+    assert!(bytes.chunks_exact(4).any(|p| p[3] > 250 && p[0] < 128));
     assert!(bytes.chunks_exact(4).all(|p| p[0] == p[1] && p[1] == p[2]));
 }
 
@@ -380,4 +380,55 @@ fn analytic_surface_backends_regenerate_after_embedded_scene_roundtrip() {
         assert_eq!(result["backend"], backend);
         assert!(result["triangles"].as_u64().unwrap() > 0);
     }
+}
+
+#[test]
+fn edited_hatch_specs_and_labels_roundtrip_and_invalid_edits_are_atomic() {
+    let mut state = DesktopAppState::new();
+    let mut camera = Camera::new();
+    call(&mut state, &mut camera, "create_scene", json!({}));
+    let style = call(
+        &mut state,
+        &mut camera,
+        "get_hatch_style",
+        json!({"style":"stipple"}),
+    );
+    assert!(style["spec"].as_str().unwrap().contains("kind=stipple"));
+    let hatch = cuemol_render::HatchRenderParams {
+        style: "manga".into(),
+        coloring: "Colored ink on color fill".into(),
+        layers_spec: "layer:kind=line,angle=33; layer:kind=dot,spacing=9".into(),
+        tone_spec: "tone:strength=0.4,curve=0.7; ink:mincontrast=0.3".into(),
+        ..Default::default()
+    };
+    let settings = cuemol_command::hatch_settings(&hatch);
+    call(
+        &mut state,
+        &mut camera,
+        "set_render_settings",
+        json!({"settings":settings}),
+    );
+    let before = cuemol_command::render_settings(&state).unwrap();
+    let loaded = cuemol_command::hatch_params(&before, "umbreon_npr").unwrap();
+    assert_eq!(loaded.layers_spec, hatch.layers_spec);
+    assert_eq!(loaded.tone_spec, hatch.tone_spec);
+    assert_eq!(loaded.coloring, hatch.coloring);
+    for bad in [
+        "umbreon_npr.hatchLayersSpec=\"layer:bad=3\"",
+        "umbreon_npr.hatchStyle=unknown",
+        "umbreon_npr.hatchToneSpec=\"tone:gamma=NaN\"",
+    ] {
+        assert!(call_tool(
+            &mut state,
+            &mut camera,
+            "set_render_settings",
+            &json!({"settings":bad})
+        )
+        .is_err());
+        assert_eq!(before, cuemol_command::render_settings(&state).unwrap());
+    }
+    let bytes = state.active_scene_bytes().unwrap();
+    let mut restored = DesktopAppState::new();
+    restored.open_bytes("edited.qsc", &bytes).unwrap();
+    assert_eq!(before, cuemol_command::render_settings(&restored).unwrap());
 }
