@@ -5,6 +5,7 @@ use cuemol_render::RenderSceneSnapshot;
 
 pub(crate) enum Effects<'a> {
     None,
+    Matrix([[f32; 4]; 4]),
     Export(
         &'a mut crate::effects::ViewportEffects,
         crate::effects::ViewportOptions,
@@ -71,7 +72,11 @@ pub(crate) fn draw(
         b: background[2],
         a: background[3],
     };
-    let camera_uniform = CameraUniform::new(camera, [width, height], background, false);
+    let camera_uniform = if let Effects::Matrix(matrix) = &effects {
+        CameraUniform::from_mvp(*matrix, [width, height], background)?
+    } else {
+        CameraUniform::new(camera, [width, height], background, false)
+    };
     renderer.upload(device, queue, snapshot);
     if let Some((renderer, labels)) = &mut labels {
         renderer.prepare(device, queue, labels, [width as f32, height as f32], 1.);
@@ -125,7 +130,7 @@ pub(crate) fn draw(
                 );
                 false
             }
-            Effects::None => {
+            Effects::None | Effects::Matrix(_) => {
                 renderer.render_with_uniform(
                     &mut encoder,
                     queue,
@@ -145,7 +150,7 @@ pub(crate) fn draw(
         if let Some((renderer, _)) = &labels {
             let depth = match &effects {
                 Effects::Live(effects, _) | Effects::Export(effects, _) => effects.label_depth(),
-                Effects::None => None,
+                Effects::None | Effects::Matrix(_) => None,
             };
             if let Some(depth) = depth {
                 renderer.render(

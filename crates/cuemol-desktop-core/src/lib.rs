@@ -46,8 +46,9 @@ use cuemol_render::{
 use cuemol_surface::{MolSurfObj, PqrFileWriter, XyzrFileWriter};
 use cuemol_xtal::{
     density_map_from_cif, read_mmcif_map_file, read_mtz_metadata_file, read_opendx_file,
-    read_opendx_str, BrixMapReader, Ccp4MapReader, MapColorMode, MapMeshRenderer, MapRenderer,
-    MapSurfRenderer, MapSurfaceDrawMode, Mtz2MapReader, MtzFile, QdfDenMapReader, XplorMapReader,
+    read_opendx_str, BrixMapReader, Ccp4MapReader, GlslMapVolRenderer, MapColorMode,
+    MapMeshRenderer, MapRenderer, MapSurfRenderer, MapSurfaceDrawMode, Mtz2MapReader, MtzFile,
+    QdfDenMapReader, XplorMapReader,
 };
 // Re-exported so consumers (and tests) can name the scalar-field types the surface
 // potential API takes — e.g. `set_surface_potential_map(DensityMap)`.
@@ -73,6 +74,8 @@ mod trajectory_io;
 pub mod viewport;
 #[cfg(feature = "offscreen")]
 mod viewport_readback;
+#[cfg(feature = "offscreen")]
+pub mod volumes;
 
 /// Public molecular renderer types shown by CueMol2's renderer setup dialog.
 /// Internal `*` renderers and test-only renderers are intentionally excluded.
@@ -6962,7 +6965,29 @@ impl DesktopAppState {
                             });
                         }
                     }
-                    GuiDensityRendererKind::IsoSurface | GuiDensityRendererKind::Volume => {
+                    GuiDensityRendererKind::Volume => {
+                        let mut renderer = GlslMapVolRenderer::new();
+                        configure_density_level(renderer.map_mut(), config);
+                        renderer.set_center(config.center);
+                        renderer.set_extent(config.extent);
+                        renderer.set_use_pbc(config.use_pbc);
+                        renderer.set_xferfn_type(match config.xferfn_type.as_str() {
+                            "multigrad" => GlslMapVolRenderer::GLMV_MULTIGRAD,
+                            "auto2" => GlslMapVolRenderer::GLMV_AUTO2,
+                            _ => GlslMapVolRenderer::GLMV_AUTO1,
+                        });
+                        if let Some(data) = renderer.volume_data(&map_object.map) {
+                            if let Ok(volume) = cuemol_render::RenderVolume::new(
+                                data.counts,
+                                data.values,
+                                data.texture_to_world,
+                                data.transfer,
+                            ) {
+                                rendered.volumes.push(volume);
+                            }
+                        }
+                    }
+                    GuiDensityRendererKind::IsoSurface => {
                         let mut renderer = MapSurfRenderer::new();
                         configure_density_level(renderer.map_mut(), config);
                         renderer.map_mut().set_extent(config.extent);
@@ -49209,6 +49234,7 @@ fn append_snapshot(target: &mut RenderSceneSnapshot, source: RenderSceneSnapshot
     target.atoms.extend(source.atoms);
     target.bonds.extend(source.bonds);
     target.meshes.extend(source.meshes);
+    target.volumes.extend(source.volumes);
     target
         .transparency_groups
         .extend(source.transparency_groups.into_iter().map(|mut group| {
@@ -49695,17 +49721,26 @@ fn apply_renderer_properties(
     alpha: f64,
     material: &str,
 ) {
-    snapshot.mark_named_renderer_section(
-        name,
-        alpha as f32,
-        if material.trim().is_empty() {
-            "default"
-        } else {
-            material.trim()
-        },
-    );
+    if snapshot.volumes.is_empty()
+        || !snapshot.atoms.is_empty()
+        || !snapshot.bonds.is_empty()
+        || !snapshot.meshes.is_empty()
+    {
+        snapshot.mark_named_renderer_section(
+            name,
+            alpha as f32,
+            if material.trim().is_empty() {
+                "default"
+            } else {
+                material.trim()
+            },
+        );
+    }
     if alpha >= 1.0 {
         return;
+    }
+    for volume in &mut snapshot.volumes {
+        volume.alpha *= alpha as f32;
     }
     let apply_color = |color: &mut Option<cuemol_gfx::ColorSpec>| {
         let Some(rgba) = color.as_ref().and_then(cuemol_gfx::ColorSpec::rgba8) else {
@@ -67960,6 +67995,48 @@ attribute \"dep\" string \"positions\"
             let _ = std::fs::remove_file(path);
         }
         let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    #[cfg(feature = "scripting")]
+    fn volume_renderers_share_voxels_and_preserve_transfer_controls_in_scenes() {
+        let mut map = DensityMap::new();
+        map.set_map_byte_array(
+            &(0..512).map(|i| (i % 256) as u8).collect::<Vec<_>>(),
+            [8; 3],
+            0.,
+            256.,
+            127.5,
+            1.,
+        );
+        map.set_map_params([0; 3], [8; 3]);
+        map.set_xtal_params(8., 8., 8., 90., 90., 90.);
+        let mut app = DesktopAppState::new();
+        let scene = app.ensure_active_scene();
+        let uid = app.add_density_map(scene, "volume", map);
+        app.run_script_js(&format!("var m=cuemol.getObject({});var r=m.createRenderer('gpu_mapvol');r.center=cuemol.Vector('(4,4,4)');r.extent=5;r.use_pbc=false;r.siglevel=64;r.alpha=0.6;r.xferfn_type='auto2';", uid.get())).unwrap();
+        let before = app.active_render_snapshot("").unwrap();
+        assert!(before.meshes.is_empty());
+        assert_eq!(before.volumes.len(), 1);
+        assert_eq!(before.volumes[0].counts, [8; 3]);
+        assert_eq!(before.volumes[0].alpha, 0.6);
+        let cloned = before.clone();
+        assert!(std::sync::Arc::ptr_eq(
+            &before.volumes[0].values,
+            &cloned.volumes[0].values
+        ));
+        let bytes = app.active_scene_bytes().unwrap();
+        let mut restored = DesktopAppState::new();
+        restored.open_bytes("volume.qsc", &bytes).unwrap();
+        let after = restored.active_render_snapshot("").unwrap();
+        assert_eq!(after.volumes, before.volumes);
+        assert_eq!(restored.run_script_js("var r=cuemol.getObject('volume').getRendererByType('gpu_mapvol');print(r.xferfn_type);r.siglevel=128;").unwrap().0, "auto2\n");
+        let changed = restored.active_render_snapshot("").unwrap();
+        assert_ne!(changed.volumes[0].transfer, after.volumes[0].transfer);
+        assert!(std::sync::Arc::ptr_eq(
+            &changed.volumes[0].values,
+            &after.volumes[0].values
+        ));
     }
 
     #[test]

@@ -6,6 +6,9 @@ use cuemol_surface::{build_grid_isosurface_masked, MolSurfObj, ScalarField, Surf
 use cuemol_symm::CrystalInfo;
 use std::sync::Arc;
 
+mod volume;
+pub use volume::MapVolumeData;
+
 fn fraction_level(
     hist: &[u64; 256],
     base: f64,

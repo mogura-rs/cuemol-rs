@@ -448,6 +448,63 @@ pub struct CameraUniform {
 }
 
 impl CameraUniform {
+    pub fn from_mvp(
+        view_proj: [[f32; 4]; 4],
+        size: [u32; 2],
+        background: wgpu::Color,
+    ) -> Option<Self> {
+        let matrix = glam::Mat4::from_cols_array_2d(&view_proj);
+        let inverse = matrix.inverse();
+        if !inverse.is_finite() {
+            return None;
+        }
+        let unproject = |x, y, z| {
+            let p = inverse * glam::Vec4::new(x, y, z, 1.);
+            p.truncate() / p.w
+        };
+        let near = unproject(0., 0., 0.);
+        let far = unproject(0., 0., 1.);
+        let center = unproject(0., 0., 0.5);
+        let right = (unproject(1., 0., 0.) - near).normalize_or_zero();
+        let mut up = (unproject(0., 1., 0.) - near).normalize_or_zero();
+        if right.cross(up).dot(near - far) < 0. {
+            up = -up;
+        }
+        let front = right.cross(up).normalize_or_zero();
+        if !front.is_finite() || front.length_squared() == 0. {
+            return None;
+        }
+        let depth_row = glam::Vec3::new(view_proj[0][3], view_proj[1][3], view_proj[2][3]);
+        let scale = depth_row.length();
+        let perspective = scale > 0.;
+        let eye = if perspective {
+            near + front * ((depth_row.dot(near) + view_proj[3][3]) / scale)
+        } else {
+            near + front * (near - far).length().max(1.)
+        };
+        let zoom = (unproject(0., 1., 0.5) - center).length() * 2.;
+        Some(Self {
+            view_proj,
+            right: right.extend(0.).to_array(),
+            up: up.extend(0.).to_array(),
+            eye: eye.extend(0.).to_array(),
+            background: [
+                background.r as f32,
+                background.g as f32,
+                background.b as f32,
+                background.a as f32,
+            ],
+            fog: [f32::MAX, 1., 0., 0.],
+            pixel_scale: [
+                zoom / size[1].max(1) as f32,
+                (eye - center).dot(front),
+                f32::from(perspective),
+                0.,
+            ],
+            viewport: [size[0].max(1) as f32, size[1].max(1) as f32, 0., 0.],
+        })
+    }
+
     pub fn new(
         camera: &cuemol_qsys::Camera,
         size: [u32; 2],
@@ -696,6 +753,7 @@ pub struct ViewportRenderer {
     normal_atom_pipeline: wgpu::RenderPipeline,
     normal_bond_pipeline: wgpu::RenderPipeline,
     normal_mesh_pipeline: wgpu::RenderPipeline,
+    volumes: crate::volumes::VolumeRenderer,
     revision: u64,
     draws: Vec<PrimitiveDraw>,
     output_srgb: bool,
@@ -774,6 +832,7 @@ impl ViewportRenderer {
                 wgpu::TextureFormat::Rgba8Unorm,
                 true,
             ),
+            volumes: crate::volumes::VolumeRenderer::new(device, &layout, format),
             camera,
             bind_group,
             draws: Vec::new(),
@@ -808,6 +867,7 @@ impl ViewportRenderer {
         self.bonds.upload(device, queue, &bonds);
         self.vertices.upload(device, queue, &vertices);
         self.indices.upload(device, queue, &indices);
+        self.volumes.upload(device, queue, &scene.volumes);
     }
 
     pub fn render(
@@ -870,6 +930,30 @@ impl ViewportRenderer {
 
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render_volumes(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
+        target: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        uniform: &CameraUniform,
+        region: Option<[f32; 4]>,
+        linear: bool,
+    ) {
+        self.volumes.render(
+            encoder,
+            queue,
+            target,
+            depth,
+            &self.bind_group,
+            uniform,
+            region,
+            linear,
+            !linear && self.output_srgb,
+        );
     }
 
     pub(crate) fn render_gbuffer(
@@ -982,6 +1066,10 @@ impl ViewportRenderer {
                 pass.set_index_buffer(self.indices.slice(), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(draw.indices.clone(), 0, 0..1);
             }
+        }
+        drop(pass);
+        if normal.is_none() {
+            self.render_volumes(encoder, queue, target, depth, uniform, region, false);
         }
     }
 }

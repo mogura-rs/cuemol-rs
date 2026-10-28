@@ -535,7 +535,10 @@ impl ViewportEffects {
     fn postprocess(
         &self,
         device: &wgpu::Device,
+        renderer: &ViewportRenderer,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
+        uniform: &CameraUniform,
         options: ViewportOptions,
         half: bool,
     ) {
@@ -572,6 +575,7 @@ impl ViewportEffects {
             );
             color = &t.composite;
         }
+        renderer.render_volumes(encoder, queue, color, &t.depth, uniform, None, true);
         match options.antialiasing {
             Antialiasing::None => pass(encoder, &self.copy, &t.sample, color, color),
             Antialiasing::Fxaa => pass(encoder, &self.fxaa, &t.sample, color, color),
@@ -638,7 +642,9 @@ impl ViewportEffects {
                 &uniform,
                 background,
             );
-            self.postprocess(device, encoder, options, plan.half);
+            self.postprocess(
+                device, renderer, queue, encoder, &uniform, options, plan.half,
+            );
             if let Some(index) = plan.sample {
                 self.pass(
                     device,
@@ -703,7 +709,7 @@ impl ViewportEffects {
             uniform,
             background,
         );
-        self.postprocess(device, encoder, options, false);
+        self.postprocess(device, renderer, queue, encoder, uniform, options, false);
         self.pass(
             device,
             encoder,

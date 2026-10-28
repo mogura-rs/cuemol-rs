@@ -1,4 +1,6 @@
 pub mod raytrace;
+mod volume;
+pub use volume::{RenderVolume, VolumeSlices};
 
 use cuemol_core::{CueMolError, Matrix4, Result, Uid, Vector4};
 use cuemol_gfx::{CmsXform, ColorSpec, PixelBuffer, Rgba8};
@@ -236,6 +238,7 @@ pub struct RenderSceneSnapshot {
     pub atoms: Vec<RenderAtom>,
     pub bonds: Vec<RenderBond>,
     pub meshes: Vec<RenderMesh>,
+    pub volumes: Vec<RenderVolume>,
     /// Renderer-sized sections used for material and blendpng-compatible output.
     pub transparency_groups: Vec<RenderTransparencyGroup>,
     pub bounds: Option<(Vector4, Vector4)>,
@@ -311,6 +314,11 @@ fn apply_color_transform(snapshot: &mut RenderSceneSnapshot, transform: impl Fn(
             modifiers: Vec::new(),
         });
     };
+    for volume in &mut snapshot.volumes {
+        for color in &mut volume.transfer {
+            proof_rgba(color);
+        }
+    }
     for atom in &mut snapshot.atoms {
         proof_spec(&mut atom.color);
         if let Some(edge) = &mut atom.edge {
@@ -495,6 +503,7 @@ impl RenderSceneSnapshot {
             atoms: Vec::new(),
             bonds: Vec::new(),
             meshes: Vec::new(),
+            volumes: Vec::new(),
             transparency_groups: Vec::new(),
             bounds: None,
         }
@@ -557,6 +566,9 @@ impl RenderSceneSnapshot {
     /// transforms that set `xformMat`. Bounds are recomputed from the transformed
     /// geometry so a moved object still auto-frames correctly.
     pub fn apply_xform(&mut self, m: &Matrix4) {
+        for volume in &mut self.volumes {
+            volume.apply_xform(m);
+        }
         for atom in &mut self.atoms {
             m.xform3d(&mut atom.center);
         }
@@ -606,6 +618,11 @@ impl RenderSceneSnapshot {
                 max = Some(p);
             }
         };
+        for volume in &self.volumes {
+            for point in volume.corners() {
+                include(point);
+            }
+        }
         for atom in self.atoms.iter().filter(|atom| atom.hit.is_none()) {
             let r = f64::from(atom.radius + atom.edge.map_or(0.0, |edge| edge.width.max(0.0)));
             include(Vector4::new3(
@@ -5380,6 +5397,7 @@ pub fn atom_intr_snapshot_with_options(
             .then_some(mesh)
             .into_iter()
             .collect(),
+        volumes: Vec::new(),
         transparency_groups: Vec::new(),
         bounds,
     }
@@ -5863,6 +5881,7 @@ mod tests {
                 None,
             )],
             meshes: vec![mesh],
+            volumes: Vec::new(),
             transparency_groups: Vec::new(),
             bounds: None,
         };
@@ -5957,6 +5976,7 @@ mod tests {
                 }],
                 indices: Vec::new(),
             }],
+            volumes: Vec::new(),
             transparency_groups: Vec::new(),
             bounds: None,
         };
@@ -6043,6 +6063,7 @@ mod tests {
             atoms: vec![RenderAtom::new(Vector4::ZERO, 1.0, None)],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            volumes: Vec::new(),
             transparency_groups: Vec::new(),
             bounds: None,
         };
@@ -6208,6 +6229,7 @@ mod tests {
             atoms: vec![RenderAtom::new(c, 1.0, None)],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            volumes: Vec::new(),
             transparency_groups: Vec::new(),
             bounds: None,
         };
@@ -6303,6 +6325,7 @@ mod tests {
             atoms: vec![RenderAtom::new(center, 1.0, None)],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            volumes: Vec::new(),
             transparency_groups: Vec::new(),
             bounds: None,
         };
@@ -6381,6 +6404,7 @@ mod tests {
             atoms: vec![RenderAtom::new(center, radius as f32, None)],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            volumes: Vec::new(),
             transparency_groups: Vec::new(),
             bounds: None,
         };
@@ -6409,6 +6433,7 @@ mod tests {
             ],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            volumes: Vec::new(),
             transparency_groups: Vec::new(),
             bounds: None,
         };
@@ -6433,6 +6458,7 @@ mod tests {
             ],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            volumes: Vec::new(),
             transparency_groups: Vec::new(),
             bounds: None,
         };
@@ -6545,6 +6571,7 @@ mod tests {
             atoms: vec![RenderAtom::new(Vector4::new3(0.0, 0.0, 0.0), 1.0, None)],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            volumes: Vec::new(),
             transparency_groups: Vec::new(),
             bounds: None,
         };
@@ -6572,6 +6599,7 @@ mod tests {
             ],
             bonds: vec![RenderBond::new(a, b, 0.08, None)],
             meshes: Vec::new(),
+            volumes: Vec::new(),
             transparency_groups: Vec::new(),
             bounds: None,
         };
@@ -6583,6 +6611,7 @@ mod tests {
             atoms: Vec::new(),
             bonds: vec![RenderBond::new(a, a, 0.08, None)],
             meshes: Vec::new(),
+            volumes: Vec::new(),
             transparency_groups: Vec::new(),
             bounds: None,
         };
@@ -6602,6 +6631,7 @@ mod tests {
             atoms: vec![RenderAtom::new(from, 1.0, None).with_edge(Some(edge))],
             bonds: vec![RenderBond::new(from, to, 0.25, None).with_edge(Some(edge))],
             meshes: Vec::new(),
+            volumes: Vec::new(),
             transparency_groups: Vec::new(),
             bounds: None,
         };
@@ -6665,6 +6695,7 @@ mod tests {
             ],
             bonds: vec![RenderBond::new(a, b, 0.08, None)],
             meshes: Vec::new(),
+            volumes: Vec::new(),
             transparency_groups: Vec::new(),
             bounds: None,
         };
@@ -6799,6 +6830,7 @@ mod tests {
             atoms: vec![RenderAtom::new(c, 1.0, red)],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            volumes: Vec::new(),
             transparency_groups: Vec::new(),
             bounds: None,
         };
@@ -6991,6 +7023,7 @@ mod tests {
             atoms: Vec::new(),
             bonds: Vec::new(),
             meshes: vec![triangle(0.0, 0.5), triangle(2.0, 0.54), triangle(4.0, 0.95)],
+            volumes: Vec::new(),
             transparency_groups: vec![
                 RenderTransparencyGroup {
                     name: "translucent-a".to_string(),
@@ -7077,6 +7110,7 @@ mod tests {
             atoms: vec![RenderAtom::new(a, 0.45, red)],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            volumes: Vec::new(),
             transparency_groups: Vec::new(),
             bounds: None,
         };
@@ -7171,6 +7205,7 @@ mod tests {
             ],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            volumes: Vec::new(),
             transparency_groups: Vec::new(),
             bounds: None,
         };
@@ -7262,6 +7297,7 @@ mod tests {
             atoms: vec![RenderAtom::new(a, 0.45, None)],
             bonds: vec![RenderBond::new(a, b, 0.08, None)],
             meshes: Vec::new(),
+            volumes: Vec::new(),
             transparency_groups: Vec::new(),
             bounds: None,
         };
@@ -7338,6 +7374,7 @@ mod tests {
             ],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            volumes: Vec::new(),
             transparency_groups: Vec::new(),
             bounds: None,
         };
@@ -7411,6 +7448,7 @@ mod tests {
             atoms: vec![RenderAtom::new(Vector4::new3(0.0, 0.0, 0.0), 1.0, None)],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            volumes: Vec::new(),
             transparency_groups: Vec::new(),
             bounds: None,
         };

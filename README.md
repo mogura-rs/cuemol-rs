@@ -117,6 +117,10 @@ standard deviations. Default EM levels are capped by occupied voxels; explicitly
 setting the same numeric level overrides that cap. Reset and embedded scene
 storage preserve this distinction, and both desktop panels expose the matching
 absolute or native level range.
+`gpu_mapvol` uses interpolated 3D density textures and the reference rainbow
+opacity table. Native, WebGL and WebGPU views share the same volume pipeline;
+CPU rendering also composites volume samples with molecular geometry. Volume
+opacity, transforms and scene storage remain editable through the shared API.
 
 Load an MD topology and trajectory through the MD dialog or `load_trajectory`.
 GRO, PDB, mmCIF, PSF, AMBER topology, SDF, and MOL2 topologies are accepted.

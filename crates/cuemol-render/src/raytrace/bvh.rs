@@ -78,6 +78,49 @@ pub(super) struct RayIndex<'a> {
     pub edges: super::edges::EdgeGroups,
 }
 impl<'a> RayIndex<'a> {
+    pub fn snapshot(&self) -> &'a RenderSceneSnapshot {
+        self.snapshot
+    }
+
+    pub fn volume_hits(&self, ray: Ray, camera: &Camera, clip: bool, far: f64) -> Vec<Hit> {
+        let mut hits = Vec::new();
+        if self.snapshot.volumes.is_empty() {
+            return hits;
+        }
+        let rotation = camera
+            .rotation()
+            .inv()
+            .unwrap_or(cuemol_core::Quat::IDENTITY)
+            .to_matrix();
+        let front = transform_direction(rotation, Vector4::new3(0., 0., 1.));
+        let eye = camera.center() + front * camera.cam_dist();
+        for (id, volume) in self.snapshot.volumes.iter().enumerate() {
+            let Some(samples) = volume.ray_samples(ray.origin, ray.direction, eye, front, far)
+            else {
+                continue;
+            };
+            for (distance, color) in samples {
+                let position = ray.origin + ray.direction * distance;
+                if clip
+                    && (position - camera.center()).dot3d(front).abs() > camera.slab_depth() * 0.5
+                {
+                    continue;
+                }
+                hits.push(Hit {
+                    order: self.primitives.len() + id,
+                    distance,
+                    position,
+                    normal: Vector4::ZERO,
+                    color,
+                    unlit: true,
+                    is_volume: true,
+                    transparency_group: None,
+                });
+            }
+        }
+        hits
+    }
+
     #[cfg(test)]
     pub fn new(snapshot: &'a RenderSceneSnapshot) -> Self {
         Self::with_pixel_scale(snapshot, 0.0)
@@ -272,6 +315,7 @@ impl<'a> RayIndex<'a> {
                         normal,
                         color: color_from_spec(atom.color.as_ref()),
                         unlit: false,
+                        is_volume: false,
                         transparency_group: group,
                     }
                 } else {
@@ -298,6 +342,7 @@ impl<'a> RayIndex<'a> {
                         normal,
                         color: color_from_spec(bond.color.as_ref()),
                         unlit: false,
+                        is_volume: false,
                         transparency_group: group,
                     }
                 } else {
@@ -353,6 +398,7 @@ impl<'a> RayIndex<'a> {
                     },
                     color,
                     unlit: v0.is_edge_outline(),
+                    is_volume: false,
                     transparency_group: group,
                 }
             }

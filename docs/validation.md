@@ -907,3 +907,42 @@ GUI tests and 143 Tauri tests (one optional test ignored). Rebuilt-browser CCP4,
 potential and sparse-EM regressions passed. These results do not establish
 complete map-renderer parity; region/LOD and volume rendering remain in the
 ongoing implementation audit.
+
+### Volume rendering
+
+`gpu_mapvol` previously entered the isosurface branch in the shared GUI core.
+It now produces a scalar volume, with immutable byte data shared when the full
+grid is displayed. The GPU samples a 3D texture and the reference transfer table
+on view-aligned slices. Slices from overlapping volumes are sorted together;
+opaque geometry provides per-fragment depth rejection. Alpha and object/renderer
+transforms are applied without replacing the underlying map samples. Transfer
+edits update the small color texture while retaining the density texture.
+
+CPU image rendering samples the same texture-center interpolation and transfer
+table, then composites the samples with molecular intersections. Native and
+browser viewports, Tauri image composition, camera-based PNG output and the
+matrix-based scene image helpers include volumes. Volume samples are not opaque
+surfaces and do not write the geometry depth map. Mesh-only exchange formats
+continue to contain geometric primitives.
+
+`check-reference-volume.py` extracts the unchanged `genXferFunMap` body from the
+read-only reference source, captures its texture upload, and links the original
+HSB conversion. All 256 RGBA entries matched for 15 combinations of mode and
+threshold. The reference exposes `rainbow1`, `auto2`, and `multigrad` names, but
+its implementation produces the same rainbow table for all three. Rust follows
+that actual behavior; the names do not imply a separate custom gradient.
+
+Actual Metal image tests compare CPU and GPU center pixels within five 8-bit
+steps for opacity, interpolation, overlapping grids, rotated perspective views,
+opaque occlusion, slab clipping, postprocessing and matrix-based image output.
+Both WebGL and WebGPU browser tests check visible color, zero-opacity removal,
+and embedded scene reload; the resulting WebGPU image was inspected. Shared
+regressions verify scene persistence and shared allocations after level edits.
+
+Validation passed: 72 render tests, 61 map-domain tests, 213 shared-core tests,
+166 native GUI tests, 143 Tauri tests (one optional test ignored), the transfer
+oracle, two actual Metal tests, and four browser tests covering both volume
+backends plus existing molecule and label display. Browser texture dimensions
+respect the adapter limit. Volume extraction is bounded to 16 Mi samples and
+4096 view slices, so very large maps may be sampled more coarsely than the
+uncapped reference. Region/LOD controls are the next map audit item.

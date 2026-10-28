@@ -816,3 +816,50 @@ test('browser sparse EM contours preserve explicit levels and reset after scene 
   result=await call(page,'execute_script',{source:`var r=cuemol.getObject(${uid}).getRendererByType('isosurf');print(r.level);cuemol.resetProp(r,'siglevel');print(r.level);print(r.map_type_resolved);`});
   expect(JSON.parse(result.message).log).toBe(`0\n${levels[0]}\nem\n`);
 });
+
+for(const backend of ['webgl','webgpu']){
+  test(`browser ${backend} volume display responds to opacity and survives scene export`,async({page},testInfo)=>{
+    const errors=[];page.on('pageerror',error=>errors.push(error.message));
+    await page.goto(backend==='webgpu'?'./':'./?renderer=webgl');
+    await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId),{timeout:60000}).toBeGreaterThan(0);
+    const bytes=Buffer.alloc(1024+4096*4);
+    for(let i=0;i<3;i++){
+      bytes.writeInt32LE(16,i*4);bytes.writeInt32LE(16,(i+7)*4);
+      bytes.writeFloatLE(16,(i+10)*4);bytes.writeFloatLE(90,(i+13)*4);
+      bytes.writeInt32LE(i+1,(i+16)*4);
+    }
+    bytes.writeInt32LE(2,12);bytes.write('MAP ',208);
+    bytes.writeFloatLE(255,80);bytes.writeFloatLE(20,84);bytes.writeFloatLE(40,216);
+    for(let z=0;z<16;z++)for(let y=0;y<16;y++)for(let x=0;x<16;x++){
+      const radius=(x-7.5)**2+(y-7.5)**2+(z-7.5)**2;
+      bytes.writeFloatLE(255*Math.exp(-radius/18),1024+4*(x+16*(y+16*z)));
+    }
+    await load(page,'volume.mrc',bytes);
+    await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Loaded volume.mrc');
+    const uid=await page.evaluate(()=>window.cuemol.status().scene.maps[0].id);
+    await call(page,'execute_script',{source:`var m=cuemol.getObject(${uid});m.rend_uids.split(',').filter(Boolean).forEach(id=>cuemol.getRenderer(Number(id)).visible=false);var r=m.createRenderer('gpu_mapvol');r.center=cuemol.Vector('(8,8,8)');r.extent=8;r.use_pbc=false;r.siglevel=1.1;`});
+    const rect=await page.evaluate(()=>window.cuemol.status().ui.rects.Viewport);
+    const colored=async()=>{
+      const png=PNG.sync.read(await page.screenshot({clip:{x:rect[0],y:rect[1],width:rect[2],height:rect[3]}}));
+      let count=0;
+      for(let i=0;i<png.data.length;i+=4)if(Math.max(...png.data.subarray(i,i+3))-Math.min(...png.data.subarray(i,i+3))>40)count++;
+      return count;
+    };
+    await expect.poll(colored).toBeGreaterThan(500);
+    const visible=await colored();
+    await call(page,'execute_script',{source:`cuemol.getObject(${uid}).getRendererByType('gpu_mapvol').alpha=0;`});
+    await expect.poll(colored).toBeLessThan(visible/4);
+    await call(page,'execute_script',{source:`cuemol.getObject(${uid}).getRendererByType('gpu_mapvol').alpha=1;`});
+    await expect.poll(colored).toBeGreaterThan(500);
+    const download=page.waitForEvent('download');
+    const button=await page.evaluate(()=>window.cuemol.status().ui.rects['Save Scene']);
+    await page.mouse.click(button[0]+button[2]/2,button[1]+button[3]/2);
+    const stream=await(await download).createReadStream(),chunks=[];
+    for await(const chunk of stream)chunks.push(chunk);
+    await load(page,'volume.qsc',Buffer.concat(chunks));
+    await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Loaded volume.qsc');
+    await expect.poll(colored).toBeGreaterThan(500);
+    await page.screenshot({path:testInfo.outputPath('volume.png')});
+    expect(errors).toEqual([]);
+  });
+}

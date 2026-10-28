@@ -901,6 +901,7 @@ struct Hit {
     normal: Vector4,
     color: [f64; 4],
     unlit: bool,
+    is_volume: bool,
     transparency_group: Option<usize>,
 }
 
@@ -1094,6 +1095,15 @@ fn visible_hits(
             }
         }
     }
+    let far_limit = if params.transparent_background {
+        f64::INFINITY
+    } else {
+        hits.iter()
+            .filter(|h| !h.unlit && section_alpha(index.snapshot(), **h) >= 1. - 1e-6)
+            .map(|h| h.distance)
+            .fold(f64::INFINITY, f64::min)
+    };
+    hits.extend(index.volume_hits(ray, camera, params.use_clip_z, far_limit));
     hits.sort_by(|a, b| {
         a.distance
             .total_cmp(&b.distance)
@@ -1113,7 +1123,7 @@ fn section_alpha(snapshot: &RenderSceneSnapshot, hit: Hit) -> f64 {
     }
 }
 fn fog_at(hit: Hit, camera: &Camera) -> f64 {
-    if camera.slab_depth() <= 0. {
+    if hit.is_volume || camera.slab_depth() <= 0. {
         return 1.;
     }
     let eye = transform_direction(
@@ -1425,6 +1435,7 @@ fn scene_hits(snapshot: &RenderSceneSnapshot, ray: Ray, visible_group: Option<us
                 normal,
                 color: color_from_spec(atom.color.as_ref()),
                 unlit: false,
+                is_volume: false,
                 transparency_group,
             });
         } else if let Some(edge) = atom.edge.filter(|edge| edge.width > 0.0) {
@@ -1462,6 +1473,7 @@ fn scene_hits(snapshot: &RenderSceneSnapshot, ray: Ray, visible_group: Option<us
                 normal,
                 color: color_from_spec(bond.color.as_ref()),
                 unlit: false,
+                is_volume: false,
                 transparency_group,
             });
         } else if let Some(edge) = bond
@@ -1527,6 +1539,7 @@ fn scene_hits(snapshot: &RenderSceneSnapshot, ray: Ray, visible_group: Option<us
                     },
                     color,
                     unlit: v0.is_edge_outline(),
+                    is_volume: false,
                     transparency_group,
                 });
             }
@@ -1557,6 +1570,7 @@ fn primitive_edge_hit(
         normal,
         color: edge.color.map(f64::from),
         unlit: true,
+        is_volume: false,
         transparency_group,
     }
 }

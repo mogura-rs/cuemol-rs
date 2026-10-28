@@ -9,6 +9,7 @@ fn receiver() -> Hit {
         normal: Vector4::new3(0., 0., 1.),
         color: [0.5, 0.5, 0.5, 1.],
         unlit: false,
+        is_volume: false,
         transparency_group: None,
     }
 }

@@ -358,8 +358,35 @@ impl SceneRenderer {
         height: u32,
         clear: [f64; 4],
     ) -> Option<Vec<u8>> {
+        if !snapshot.volumes.is_empty() {
+            return self.render_snapshot_matrix(snapshot, mvp, width, height, clear, 0);
+        }
         let mesh = tessellate_snapshot(snapshot);
         self.render(&[mesh], mvp, width, height, clear)
+    }
+
+    fn render_snapshot_matrix(
+        &self,
+        snapshot: &RenderSceneSnapshot,
+        mvp: [[f32; 4]; 4],
+        width: u32,
+        height: u32,
+        clear: [f64; 4],
+        level: i32,
+    ) -> Option<Vec<u8>> {
+        let mut viewport = self.viewport.lock().ok()?;
+        crate::viewport_readback::draw(
+            &mut viewport,
+            &self.device,
+            &self.queue,
+            snapshot,
+            &Camera::new(),
+            [width, height],
+            clear,
+            level,
+            crate::viewport_readback::Effects::Matrix(mvp),
+            None,
+        )
     }
 
     /// Render and average the reference jitter table at the requested level.
@@ -1145,6 +1172,10 @@ pub fn render_snapshot_offscreen(
     height: u32,
     clear: [f64; 4],
 ) -> Option<Vec<u8>> {
+    if !snapshot.volumes.is_empty() {
+        return SceneRenderer::new()?
+            .render_snapshot_matrix(snapshot, mvp, width, height, clear, 0);
+    }
     let mesh = tessellate_snapshot(snapshot);
     render_meshes_offscreen(&[mesh], mvp, width, height, clear)
 }
@@ -1183,6 +1214,10 @@ pub fn render_snapshot_supersampled_offscreen(
     clear: [f64; 4],
     level: i32,
 ) -> Option<Vec<u8>> {
+    if !snapshot.volumes.is_empty() {
+        return SceneRenderer::new()?
+            .render_snapshot_matrix(snapshot, mvp, width, height, clear, level);
+    }
     let mesh = tessellate_snapshot(snapshot);
     render_meshes_supersampled_offscreen(&[mesh], mvp, width, height, clear, level)
 }
@@ -1498,6 +1533,7 @@ mod tests {
                 solid(0.5, 0.5, 0.5),
             )],
             meshes: Vec::new(),
+            volumes: Vec::new(),
             transparency_groups: Vec::new(),
             bounds: None,
         };
@@ -1610,6 +1646,7 @@ mod tests {
             )],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            volumes: Vec::new(),
             transparency_groups: Vec::new(),
             bounds: None,
         };
@@ -1638,6 +1675,7 @@ mod tests {
             )],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            volumes: Vec::new(),
             transparency_groups: Vec::new(),
             bounds: None,
         };
@@ -1677,6 +1715,7 @@ mod tests {
             )],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            volumes: Vec::new(),
             transparency_groups: Vec::new(),
             bounds: None,
         };
@@ -1720,6 +1759,7 @@ mod tests {
             ],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            volumes: Vec::new(),
             transparency_groups: Vec::new(),
             bounds: None,
         };
@@ -1837,6 +1877,7 @@ mod tests {
             ],
             bonds: Vec::new(),
             meshes: Vec::new(),
+            volumes: Vec::new(),
             transparency_groups: Vec::new(),
             bounds: None,
         };
