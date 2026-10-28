@@ -31,7 +31,7 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/CueMol/cuemol2-rs"
+repository = "https://github.com/mogura-rs/cuemol2-rs"
 
 [workspace.dependencies]
 cuemol-agent = { path = "crates/cuemol-agent" }

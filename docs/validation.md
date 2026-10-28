@@ -331,3 +331,22 @@ passed after correcting the test's menu-transition wait. After the final device
 migration change, all four input/render-cancellation browser cases passed again.
 Distribution-helper tests passed six cases. The native and browser adapters were
 also checked against the C++ input oracle and actual window events described above.
+
+The workspace repository metadata also used a stale organization URL. It now
+matches the configured Git remote and the installer/update repository.
+
+## Final installed distribution check
+
+The current Linux release build completed in 1 minute 57 seconds using the
+existing dependency cache. Its archive was about 181 MiB and contained the
+scientific runtimes, browser assets, and third-party notices. Installation into
+an isolated directory, checksum-verified self-upgrade, bundled PDB2PQR/FFmpeg,
+MCP tool discovery, and a 128 x 128 molecular PNG all succeeded. The installed
+executable matched the archive byte for byte after self-upgrade.
+
+From an empty working directory, the installed binary served its embedded viewer.
+All 21 browser tests passed there, covering WebGPU presentation, molecular edits,
+trajectory seeking, exports, numerical kernels, AI mock-provider interaction,
+input settings, and cancellable rendering. A final macOS GUI build with the same
+browser assets also passed. These remain local checks; release publication and
+GitHub Pages execution are intentionally pending authorization to push.
