@@ -22,7 +22,8 @@ jobs:
             .cache/web-tools
             .cache/emsdk
             .cache/web-kernels
-          key: web-tools-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'scripts/prepare-web-tools.py', 'scripts/build-web-kernels.py', 'crates/cuemol-molanl/vendor/**', 'crates/cuemol-gfx/vendor/**', 'crates/cuemol-surface/vendor/**') }}
+            .cache/oidn-packages
+          key: web-tools-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'scripts/prepare-web-tools.py', 'scripts/build-web-kernels.py', 'scripts/bundle-oidn.py', 'crates/cuemol-molanl/vendor/**', 'crates/cuemol-gfx/vendor/**', 'crates/cuemol-surface/vendor/**') }}
       - name: Prepare wasm-bindgen
         run: uv run --no-project python scripts/prepare-web-tools.py
       - name: Build browser application
@@ -33,6 +34,7 @@ jobs:
           path: |
             web/index.html
             web/kernels.js
+            web/oidn.js
             web/pkg/
           if-no-files-found: error
           retention-days: 7

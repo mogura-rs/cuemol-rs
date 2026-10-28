@@ -166,12 +166,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', type=Path, default=ROOT / '.cache/bundled-tools')
     parser.add_argument('--apbs-source', action='store_true')
+    parser.add_argument('--oidn-only', action='store_true')
     args = parser.parse_args()
     output = args.out.resolve()
     CACHE.mkdir(parents=True, exist_ok=True)
     (output / 'licenses').mkdir(parents=True, exist_ok=True)
+    if args.oidn_only:
+        run(sys.executable, ROOT / 'scripts/bundle-oidn.py', '--out', output / 'oidn')
+        return
     apbs(output, args.apbs_source)
     python_tools(output)
+    run(sys.executable, ROOT / "scripts/bundle-oidn.py", "--out", output / "oidn")
     license_file = fetch('https://raw.githubusercontent.com/FFmpeg/FFmpeg/n7.0.2/COPYING.GPLv3',
                          'ffmpeg-COPYING.GPLv3', '8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903')
     shutil.copy2(license_file, output / 'licenses/FFmpeg-GPL-3.0.txt')
@@ -179,6 +184,7 @@ def main():
     (output / 'SOURCES.json').write_text(json.dumps(SOURCES, indent=2) + '\n')
     (output / 'README.txt').write_text(
         'APBS, PDB2PQR and FFmpeg are separate executables distributed with CueMol.\n'
+        'The OIDN runtime and its source manifest are under oidn/.\n'
         'Their original licenses are in licenses/. Pinned sources and package versions\n'
         'are recorded in SOURCES.json and python-packages.json. FFmpeg is built and\n'
         'distributed by imageio-ffmpeg; its build configuration is in ffmpeg-build.txt.\n'

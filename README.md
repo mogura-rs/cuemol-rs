@@ -125,7 +125,7 @@ Configuration inspection does not execute startup scripts. Download caches use
 
 Umbreon is implemented in Rust and uses a BVH for primary, shadow, AO, and GI
 rays. USalign is compiled from the vendored reference implementation; its source
-and license are retained. Release tool bundles contain APBS, PDB2PQR, and FFmpeg,
+and license are retained. Release tool bundles contain APBS, PDB2PQR, FFmpeg, and the Intel OIDN runtime,
 including a private PDB2PQR runtime. They do not require a system Python install.
 Tool lookup checks configured paths, `CUEMOL_TOOLS_DIR`, the binary/application
 bundle, the cache, and `PATH`. POV-Ray remains an optional external backend.
@@ -154,7 +154,9 @@ tools. USalign uses the same vendored calculation kernel as the native applicati
 compiled into a companion WebAssembly module. LSQ and SSM remain shared Rust code.
 ICC soft proofing uses the embedded LittleCMS engine on both targets. Open an
 ICC/ICM file in the browser to activate it; the profile is retained in browser
-storage. APBS runs in the native application; the browser can import APBS DX maps. Scenes with external
+storage. OIDN runs through WebGPU with a bundled neural-network model; it requires
+WebGPU even when the interactive viewport uses WebGL2. Bilateral and A-trous
+remain available without WebGPU. APBS runs in the native application; the browser can import APBS DX maps. Scenes with external
 file references must be saved with embedded data before transfer to the browser.
 
 ## Build and check
@@ -171,6 +173,7 @@ cargo build --locked --release -p cuemol-cli --features gui,bundled-web
 cargo run --locked -p cuemol-cli -- tools bundle
 
 cargo fmt --all -- --check
+cargo run --locked -p cuemol-cli -- tools bundle --oidn-only
 cargo test --locked --workspace --exclude cuemol-desktop --exclude cuemol-web
 cargo test --locked -p cuemol-desktop --features egui-gui --lib
 scripts/test-install.sh target/debug/cuemol
@@ -181,7 +184,9 @@ necessary. It also builds the vendored browser kernels with Emscripten, using
 `EMXX`, an installed `em++`, or a pinned SDK installed in the checkout cache.
 The kernel build requires `uv`; compiled kernels and the SDK are cached in CI.
 `tools bundle` uses `uv` with hashed dependency pins; ARM APBS builds
-also need CMake, SuiteSparse, BLAS, and platform compiler libraries. See the
+also need CMake, SuiteSparse, BLAS, and platform compiler libraries. Linux ARM64
+builds OIDN with pinned ISPC and oneTBB sources; other targets use verified
+prebuilt OIDN libraries. The native tests require the OIDN runtime bundle. See the
 release workflow for platform dependencies. Generated builds, downloaded tools,
 browser packages, and test output are ignored.
 
@@ -223,9 +228,13 @@ Hatch and tone specifications use the reference syntax. The Rust ray tracer
 uses bounded diffuse path tracing, metallic reflection, camera-relative lights,
 and a sky/ground environment. AO supports multiple distance scales and bent
 normals; compatible supersamples reuse lighting within each output pixel.
-Contact/crease contours and both section-alpha blend modes are configurable. Native denoising uses bilateral or color-guided A-trous
-filters. Intel OIDN is not bundled; old GUI preferences carrying that label
-migrate to the bilateral filter, and new MCP OIDN requests return an error.
+Contact/crease contours and both section-alpha blend modes are configurable. OIDN denoises
+floating-point indirect irradiance with albedo and normal guides, then restores
+the direct-light contribution and original alpha. Full-frame OIDN is also
+available through `denoiser=2`. Native builds load the bundled CPU runtime,
+while browser builds use a packaged WebGPU model. Bilateral and color-guided
+A-trous filters are also selectable. `CUEMOL_OIDN_LIBRARY` overrides the native
+library location. Missing runtimes or unsupported browser devices report errors.
 The A-trous implementation uses increasing B3-spline sample spacing, following
 the [wavelet filtering approach](https://doi.org/10.2312/EGGH/HPG10/067-075),
 with color and alpha guidance rather than the paper's additional geometry data.

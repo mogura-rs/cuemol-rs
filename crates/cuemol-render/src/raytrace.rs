@@ -1,5 +1,9 @@
 mod bvh;
+mod denoise;
 mod lighting;
+#[cfg(target_arch = "wasm32")]
+pub use denoise::render_umbreon_snapshot_async;
+pub use denoise::{prepare_oidn_render, OidnRender};
 #[cfg(test)]
 mod lighting_tests;
 mod npr;
@@ -30,20 +34,22 @@ pub struct UmbreonSmokeResult {
     pub non_background_pixels: usize,
 }
 
-/// Native image filters. Legacy OIDN preferences map to the bilateral filter.
+/// Image filters shared by native and browser renderers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UmbreonDenoiseMode {
     #[default]
+    Oidn,
     Bilateral,
     Atrous,
     None,
 }
 
 impl UmbreonDenoiseMode {
-    pub const ALL: [Self; 3] = [Self::Bilateral, Self::Atrous, Self::None];
+    pub const ALL: [Self; 4] = [Self::Oidn, Self::Bilateral, Self::Atrous, Self::None];
 
     pub const fn label(self) -> &'static str {
         match self {
+            Self::Oidn => "OIDN",
             Self::Bilateral => "Bilateral",
             Self::Atrous => "A-trous",
             Self::None => "None",
@@ -52,13 +58,13 @@ impl UmbreonDenoiseMode {
 
     pub const fn exporter_settings(self) -> (bool, i32) {
         match self {
-            Self::Bilateral => (true, 0),
+            Self::Oidn | Self::Bilateral => (true, 0),
             Self::Atrous => (false, 1),
             Self::None => (false, 0),
         }
     }
 
-    /// Import saved preferences, including the legacy OIDN label.
+    /// Import saved image filter preferences.
     pub fn from_label_or_default(value: &str) -> Self {
         Self::ALL
             .into_iter()
@@ -104,6 +110,7 @@ pub struct UmbreonRenderParams {
     pub contact_edges: bool,
     pub outline_far_depth: f64,
     pub gi_denoise: bool,
+    pub gi_denoiser: i32,
     pub denoiser: i32,
 }
 
@@ -145,6 +152,7 @@ impl Default for UmbreonRenderParams {
             contact_edges: true,
             outline_far_depth: 0.2,
             gi_denoise: true,
+            gi_denoiser: 2,
             denoiser: 0,
         }
     }
@@ -399,6 +407,11 @@ impl UmbreonSceneExporter {
     pub fn set_denoise_mode(&mut self, mode: UmbreonDenoiseMode) {
         let (gi_denoise, denoiser) = mode.exporter_settings();
         self.set_gi_denoise(gi_denoise);
+        self.params.gi_denoiser = if mode == UmbreonDenoiseMode::Oidn {
+            2
+        } else {
+            0
+        };
         self.set_denoiser(denoiser);
     }
 
@@ -579,6 +592,28 @@ fn render_umbreon_snapshot_impl(
     render_with_hatch(snapshot, camera, background, params, async_state, None)
 }
 
+struct FloatFrame {
+    width: i32,
+    height: i32,
+    components: i32,
+    pixels: Vec<f32>,
+    render_seconds: f64,
+}
+impl FloatFrame {
+    fn into_frame(self) -> UmbreonFrame {
+        UmbreonFrame {
+            width: self.width,
+            height: self.height,
+            components: self.components,
+            pixels: self
+                .pixels
+                .into_iter()
+                .map(|v| (v.clamp(0., 1.) * 255.).round() as u8)
+                .collect(),
+            render_seconds: self.render_seconds,
+        }
+    }
+}
 fn render_with_hatch(
     snapshot: &RenderSceneSnapshot,
     camera: &Camera,
@@ -587,6 +622,46 @@ fn render_with_hatch(
     async_state: Option<(&AtomicU32, &AtomicBool)>,
     hatch: Option<&npr::ResolvedHatch>,
 ) -> Result<UmbreonFrame> {
+    let raw = render_float(snapshot, camera, background, params, async_state, hatch)?;
+    if raw.pixels.is_empty() {
+        return Ok(raw.into_frame());
+    }
+    if denoise::needs_oidn(params) {
+        let prepared = denoise::prepare(
+            snapshot,
+            camera,
+            background,
+            params,
+            raw,
+            async_state,
+            hatch,
+        )?;
+        return prepared.run();
+    }
+    let mut frame = raw.into_frame();
+    if params.denoiser == 1 || (params.use_gi && params.gi_denoise) {
+        denoise_pixels(
+            &mut frame.pixels,
+            frame.width as usize,
+            frame.height as usize,
+            frame.components as usize,
+            params.denoiser,
+        );
+    }
+    Ok(frame)
+}
+
+fn render_float(
+    snapshot: &RenderSceneSnapshot,
+    camera: &Camera,
+    background: [f32; 4],
+    params: &UmbreonRenderParams,
+    async_state: Option<(&AtomicU32, &AtomicBool)>,
+    hatch: Option<&npr::ResolvedHatch>,
+) -> Result<FloatFrame> {
+    if !(0..=2).contains(&params.denoiser) {
+        return Err(CueMolError::invalid_argument("Unknown image denoiser"));
+    }
     let width = usize::try_from(params.width)
         .ok()
         .filter(|value| *value > 0)
@@ -605,7 +680,7 @@ fn render_with_hatch(
     pixels
         .try_reserve_exact(length)
         .map_err(|e| CueMolError::invalid_argument(format!("cannot allocate render: {e}")))?;
-    pixels.resize(length, 0u8);
+    pixels.resize(length, 0f32);
     let started = Instant::now();
     let aspect = width as f64 / height as f64;
     let half_h = camera.zoom() * 0.5;
@@ -614,7 +689,7 @@ fn render_with_hatch(
     let camera_center = camera.center();
     let index = RayIndex::new(snapshot);
 
-    let render_row = |y: usize, row: &mut [u8]| {
+    let render_row = |y: usize, row: &mut [f32]| {
         for x in 0..width {
             let cache = lighting::PixelCache::new(camera.zoom() / height as f64);
             let mut accumulated = [0.0_f64; 4];
@@ -675,14 +750,13 @@ fn render_with_hatch(
                 } else {
                     divisor
                 };
-                row[offset + index] =
-                    ((accumulated[index] / denominator).clamp(0.0, 1.0) * 255.0).round() as u8;
+                row[offset + index] = (accumulated[index] / denominator).max(0.0) as f32;
             }
         }
     };
     let completed = std::sync::atomic::AtomicUsize::new(0);
     let row_bytes = width * components;
-    let render_rows = |start: usize, rows: &mut [u8]| {
+    let render_rows = |start: usize, rows: &mut [f32]| {
         for (i, row) in rows.chunks_mut(row_bytes).enumerate() {
             if async_state.is_some_and(|(_, cancel)| cancel.load(Ordering::Relaxed)) {
                 break;
@@ -723,7 +797,7 @@ fn render_with_hatch(
     #[cfg(target_arch = "wasm32")]
     render_rows(0, &mut pixels);
     if async_state.is_some_and(|(_, cancel)| cancel.load(Ordering::Relaxed)) {
-        return Ok(UmbreonFrame {
+        return Ok(FloatFrame {
             width: params.width,
             height: params.height,
             components: components as i32,
@@ -732,11 +806,7 @@ fn render_with_hatch(
         });
     }
 
-    if params.denoiser > 0 || (params.use_gi && params.gi_denoise) {
-        denoise_pixels(&mut pixels, width, height, components, params.denoiser);
-    }
-
-    Ok(UmbreonFrame {
+    Ok(FloatFrame {
         width: params.width,
         height: params.height,
         components: components as i32,
@@ -2040,6 +2110,7 @@ mod tests {
     #[test]
     fn native_denoise_modes_compose_the_two_exporter_knobs() {
         let expected = [
+            (UmbreonDenoiseMode::Oidn, "OIDN", true, 0),
             (UmbreonDenoiseMode::Bilateral, "Bilateral", true, 0),
             (UmbreonDenoiseMode::Atrous, "A-trous", false, 1),
             (UmbreonDenoiseMode::None, "None", false, 0),
@@ -2054,7 +2125,7 @@ mod tests {
         }
         assert_eq!(
             UmbreonDenoiseMode::from_label_or_default("unknown"),
-            UmbreonDenoiseMode::Bilateral
+            UmbreonDenoiseMode::Oidn
         );
     }
 

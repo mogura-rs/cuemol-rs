@@ -120,3 +120,20 @@ The affected render suite passed 65 tests and the command integration suites
 passed 12. All 157 native GUI tests and 10 browser tests passed. An older shell
 compatibility assertion still named the pre-backend surface API; it was updated
 to the current call, after which all 69 shell tests passed.
+
+## OIDN denoising
+
+Native OIDN 2.5.0 is loaded from the packaged CPU runtime. A 64 x 48 synthetic
+HDR image with two constant regions and clean albedo/normal guides had less
+than one quarter of its original mean squared noise error after filtering.
+The test also checked the region values and unchanged alpha. A separate
+recombination test preserved an unlit annotation while adding filtered indirect
+irradiance to direct light. The render suite passed 67 tests, and the native
+GUI and shell suites passed 157 and 69 tests respectively.
+
+All 11 browser tests passed, including a real WebGPU OIDN execution using the
+packaged model. The OIDN regression compared raw and filtered transparent PNGs,
+confirmed changed RGB values and identical alpha, and verified the model request.
+The interactive viewport used WebGL2 while OIDN used WebGPU in the same browser.
+The native and WebGPU implementations use different model/runtime versions;
+this check does not assert numerical identity between their filtered pixels.

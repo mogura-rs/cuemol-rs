@@ -5,6 +5,7 @@
 <script type="module">
 import init, {start, open_file, command, status} from './pkg/cuemol_web.js';
 import {initKernels} from './kernels.js';
+import './oidn.js';
 const loading=document.getElementById('loading');
 try {
   await Promise.all([init(), initKernels()]);

@@ -364,7 +364,7 @@ pub(super) fn shade(
     } else {
         1.
     };
-    let amb = if p.use_gi && !toon {
+    let amb = if p.use_gi && p.gi_intensity > 0. && !toon {
         0.
     } else {
         ambient * (1. - p.ao_intensity.clamp(0., 1.) * (1. - ao.open)) * amb_tint
@@ -398,7 +398,7 @@ pub(super) fn shade(
             color[c] += light.energy * vis * (hit.color[c] * kd * ndl * diffuse_ao + spec);
         }
     }
-    if p.use_gi && !toon {
+    if p.use_gi && p.gi_intensity > 0. && !toon {
         let e = cached_indirect(snapshot, index, hit, camera, p, group, cache);
         for c in 0..3 {
             color[c] += hit.color[c] * kd * e[c];
@@ -426,7 +426,8 @@ pub(super) fn shade(
                     .unwrap_or_else(|| environment(direction, camera, p));
                 let fresnel = (1. - view.dot3d(hit.normal).max(0.)).powi(5);
                 for c in 0..3 {
-                    color[c] += metallic
+                    color[c] += p.gi_intensity
+                        * metallic
                         * (hit.color[c] + (1. - hit.color[c]) * fresnel)
                         * reflected_color[c]
                         / count as f64;

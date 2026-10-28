@@ -326,7 +326,7 @@ fn unsupported_render_engines_and_denoisers_do_not_change_settings() {
     let before = cuemol_command::render_settings(&state).unwrap();
     for setting in [
         "width=96; backend=povray",
-        "denoise=OIDN",
+        "denoise=unknown",
         "umbreon.width=96",
     ] {
         assert!(cuemol_command::call_tool(

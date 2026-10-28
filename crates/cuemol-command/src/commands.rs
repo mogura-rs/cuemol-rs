@@ -557,8 +557,13 @@ pub fn rendering_params(
         ],
         gi_denoise: get("denoise")
             .and_then(Value::as_str)
-            .map(|v| v == "Bilateral")
+            .map(|v| matches!(v, "OIDN" | "Bilateral"))
             .unwrap_or(flag("giDenoise", true)),
+        gi_denoiser: if get("denoise").and_then(Value::as_str) == Some("Bilateral") {
+            0
+        } else {
+            2
+        },
         denoiser: get("denoise")
             .and_then(Value::as_str)
             .map(|v| i32::from(v == "A-trous"))
@@ -576,7 +581,7 @@ pub fn rendering_settings(p: &cuemol_render::UmbreonRenderParams, prefix: &str) 
         "lightIntensity":p.light_intensity,"flashFraction":p.flash_fraction,"ambientFraction":p.ambient_fraction,"edgeLines":p.show_edge_lines,"creaseLimit":p.crease_limit,"edgeRise":p.edge_rise,
         "contactEdges":p.contact_edges,"outlineFarDepth":p.outline_far_depth,"perPixelBlend":p.per_pixel_blend,"useGI":p.use_gi,"giSamples":p.gi_samples,"giBounces":p.gi_bounces,
         "giIntensity":p.gi_intensity,"giEnvIntensity":p.gi_env_intensity,"giSkyGradient":p.gi_sky_gradient,"giGroundColor":format!("#{:02x}{:02x}{:02x}",ground[0],ground[1],ground[2]),
-        "denoise":if p.denoiser>0 {"A-trous"} else if p.gi_denoise {"Bilateral"} else {"None"}});
+        "denoise":if p.denoiser==2 || (p.gi_denoise && p.gi_denoiser==2) {"OIDN"} else if p.denoiser==1 {"A-trous"} else if p.gi_denoise {"Bilateral"} else {"None"}});
     settings
         .as_object()
         .unwrap()
@@ -660,15 +665,13 @@ pub struct PreparedRender {
 }
 impl PreparedRender {
     pub fn run(self) -> Result<Value> {
-        let width = self.params.width;
-        let height = self.params.height;
-        let frame = if let Some(hatch) = self.hatch {
+        let frame = if let Some(hatch) = &self.hatch {
             cuemol_render::render_umbreon_npr_snapshot(
                 &self.snapshot,
                 &self.camera,
                 self.background,
                 &self.params,
-                &hatch,
+                hatch,
             )?
         } else {
             cuemol_render::render_umbreon_snapshot(
@@ -678,6 +681,23 @@ impl PreparedRender {
                 &self.params,
             )?
         };
+        self.encode(frame)
+    }
+    #[cfg(target_arch = "wasm32")]
+    pub async fn run_async(self) -> Result<Value> {
+        let frame = cuemol_render::render_umbreon_snapshot_async(
+            &self.snapshot,
+            &self.camera,
+            self.background,
+            &self.params,
+            self.hatch.as_ref(),
+        )
+        .await?;
+        self.encode(frame)
+    }
+    fn encode(self, frame: cuemol_render::UmbreonFrame) -> Result<Value> {
+        let width = self.params.width;
+        let height = self.params.height;
         let mut png = Vec::new();
         {
             let mut encoder = png::Encoder::new(&mut png, width as u32, height as u32);
@@ -694,6 +714,7 @@ impl PreparedRender {
                 .write_image_data(&frame.pixels)
                 .map_err(|e| CueMolError::Io(e.to_string()))?;
         }
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(path) = self.output {
             std::fs::write(&path, &png)?;
             Ok(json!({"path":path,"width":width,"height":height}))
@@ -702,6 +723,10 @@ impl PreparedRender {
                 json!({"width":width,"height":height,"_image":base64::engine::general_purpose::STANDARD.encode(png)}),
             )
         }
+        #[cfg(target_arch = "wasm32")]
+        Ok(
+            json!({"width":width,"height":height,"fileName":self.output,"_image":base64::engine::general_purpose::STANDARD.encode(png)}),
+        )
     }
 }
 

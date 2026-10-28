@@ -111,7 +111,27 @@ pub(super) struct ResolvedHatch {
     default_edges: bool,
 }
 impl ResolvedHatch {
-    fn new(p: &HatchRenderParams, samples: i32) -> Result<Self> {
+    pub(super) fn render_settings(
+        &self,
+        params: &UmbreonRenderParams,
+        background: [f32; 4],
+    ) -> (UmbreonRenderParams, [f32; 4]) {
+        let mut settings = params.clone();
+        if !self.look.over {
+            settings.use_gi = false;
+            settings.gi_denoise = false;
+            settings.denoiser = 0;
+        }
+        let background = [
+            self.look.paper[0],
+            self.look.paper[1],
+            self.look.paper[2],
+            background[3],
+        ];
+        (settings, background)
+    }
+
+    pub(super) fn new(p: &HatchRenderParams, samples: i32) -> Result<Self> {
         let look = resolve_look(p)?;
         let ss = samples.clamp(1, 8) as f32;
         let layers = look
@@ -221,18 +241,7 @@ pub fn render_umbreon_npr_snapshot(
     hatch: &HatchRenderParams,
 ) -> Result<UmbreonFrame> {
     let resolved = ResolvedHatch::new(hatch, params.supersample)?;
-    let mut settings = params.clone();
-    if !resolved.look.over {
-        settings.use_gi = false;
-        settings.gi_denoise = false;
-        settings.denoiser = 0;
-    }
-    let background = [
-        resolved.look.paper[0],
-        resolved.look.paper[1],
-        resolved.look.paper[2],
-        background[3],
-    ];
+    let (settings, background) = resolved.render_settings(params, background);
     super::render_with_hatch(
         snapshot,
         camera,

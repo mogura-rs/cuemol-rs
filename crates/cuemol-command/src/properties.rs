@@ -101,9 +101,10 @@ pub fn call_tool(
                     "aoGather" => parsed
                         .as_str()
                         .is_some_and(|v| matches!(v, "Per output pixel" | "Per shading hit")),
+                    "denoiser" => parsed.as_i64().is_some_and(|v| (0..=2).contains(&v)),
                     "denoise" => parsed
                         .as_str()
-                        .is_some_and(|v| matches!(v, "Bilateral" | "A-trous" | "None")),
+                        .is_some_and(|v| matches!(v, "OIDN" | "Bilateral" | "A-trous" | "None")),
                     "giGroundColor" | "hatchInkColor" | "hatchPaperColor" | "hatchColoring"
                     | "hatchStyle" | "hatchLayersSpec" | "hatchToneSpec" => parsed.is_string(),
                     "transparent" | "transparentBg" | "perspective" | "useClipZ" | "clipPlane"

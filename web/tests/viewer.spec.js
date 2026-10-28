@@ -19,6 +19,7 @@ async function load(page,name,buffer){
 async function call(page,name,args={}){
   await page.evaluate(([name,args])=>window.cuemol.command(name,args),[name,args]);
   await page.waitForTimeout(100);
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().busy),{timeout:60000}).toBe(false);
   return page.evaluate(()=>window.cuemol.status());
 }
 function dcd(frames){
@@ -244,4 +245,19 @@ test('browser lighting settings alter traced illumination',async({page})=>{
   expect(gi).not.toBe(bright);
   const mean=data=>{const p=PNG.sync.read(Buffer.from(data,'base64')).data;let sum=0;for(let i=0;i<p.length;i+=4)sum+=p[i]+p[i+1]+p[i+2];return sum;};
   expect(mean(bright)).toBeGreaterThan(mean(dark));
+});
+
+test('OIDN uses bundled WebGPU weights and preserves transparent output',async({page})=>{
+  await ready(page);await load(page,'oidn.pdb',Buffer.from(structure));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  await call(page,'set_render_settings',{settings:'backend=umbreon; supersample=1; useGI=true; giSamples=2; giBounces=1; transparentBg=true; denoise=None'});
+  const raw=JSON.parse((await call(page,'get_screenshot',{width:48,height:48})).message)._image;
+  await call(page,'set_render_settings',{settings:'denoise=OIDN'});
+  const state=await call(page,'get_screenshot',{width:48,height:48});
+  const filtered=JSON.parse(state.message)._image;
+  expect(filtered).not.toBe(raw);
+  const a=PNG.sync.read(Buffer.from(raw,'base64')),b=PNG.sync.read(Buffer.from(filtered,'base64'));
+  expect(b.width).toBe(48);expect(b.height).toBe(48);
+  for(let i=3;i<a.data.length;i+=4)expect(b.data[i]).toBe(a.data[i]);
+  expect(await page.evaluate(()=>performance.getEntriesByType('resource').some(e=>e.name.includes('rt_hdr_calb_cnrm.tza')))).toBe(true);
 });

@@ -1529,7 +1529,11 @@ dependencies = [
  "cuemol-core",
  "cuemol-gfx",
  "cuemol-qsys",
+ "js-sys",
+ "libloading 0.8.9",
  "png 0.17.16",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]

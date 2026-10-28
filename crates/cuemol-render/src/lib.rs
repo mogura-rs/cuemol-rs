@@ -9,10 +9,10 @@ use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 
 pub use raytrace::{
-    hatch_style_spec, render_umbreon_npr_snapshot, render_umbreon_smoke, render_umbreon_snapshot,
-    validate_hatch_params, HatchLayer, HatchLayerKind, HatchLook, HatchRenderParams,
-    UmbreonDenoiseMode, UmbreonFrame, UmbreonRenderParams, UmbreonSceneExporter,
-    UmbreonSmokeResult, HATCH_STYLES,
+    hatch_style_spec, prepare_oidn_render, render_umbreon_npr_snapshot, render_umbreon_smoke,
+    render_umbreon_snapshot, validate_hatch_params, HatchLayer, HatchLayerKind, HatchLook,
+    HatchRenderParams, OidnRender, UmbreonDenoiseMode, UmbreonFrame, UmbreonRenderParams,
+    UmbreonSceneExporter, UmbreonSmokeResult, HATCH_STYLES,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7475,3 +7475,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(target_arch = "wasm32")]
+pub use raytrace::render_umbreon_snapshot_async;

@@ -25,6 +25,7 @@ enum Event {
     Trajectory(Uid, BrowserTrajectory),
     Frame(Uid, usize, cuemol_mdtools::TrajectoryFrame),
     Command(String, Value),
+    Rendered(cuemol_core::Result<Value>, Option<String>),
 }
 fn enqueue(event: Event) {
     EVENTS.with(|events| events.borrow_mut().push_back(event));
@@ -250,6 +251,20 @@ impl App {
         self.future.clear();
     }
     fn call(&mut self, name: &str, args: Value) {
+        if matches!(name, "get_screenshot" | "capture_view" | "render_image") {
+            let download = if name == "render_image" {
+                Some(
+                    args["fileName"]
+                        .as_str()
+                        .unwrap_or("cuemol.png")
+                        .to_string(),
+                )
+            } else {
+                None
+            };
+            self.render_async(name, &args, download);
+            return;
+        }
         if let Some((id, trajectory)) = &self.trajectory {
             if name == "set_frame" && args["objId"].as_u64() == Some(id.get()) {
                 if let Some(index) = args["frame"]
@@ -465,6 +480,27 @@ impl App {
                     }
                 }
                 Event::Command(name, args) => self.call(&name, args),
+                Event::Rendered(result, name) => {
+                    self.busy = false;
+                    match result {
+                        Ok(value) => {
+                            if let Some(name) = name {
+                                match base64::engine::general_purpose::STANDARD
+                                    .decode(value["_image"].as_str().unwrap_or(""))
+                                {
+                                    Ok(bytes) => match download(&name, &bytes, "image/png") {
+                                        Ok(()) => self.message = format!("Saved {name}"),
+                                        Err(e) => self.message = js_error(e),
+                                    },
+                                    Err(e) => self.message = e.to_string(),
+                                }
+                            } else {
+                                self.message = serde_json::to_string_pretty(&value).unwrap();
+                            }
+                        }
+                        Err(e) => self.message = e.to_string(),
+                    }
+                }
             }
         }
     }
@@ -675,30 +711,28 @@ impl App {
 
         });
     }
-    fn export_png(&mut self) {
-        match cuemol_command::call_tool(
-            &mut self.state,
-            &mut self.camera,
-            "get_screenshot",
-            &json!({"width":self.render_size[0],"height":self.render_size[1]}),
-        ) {
-            Ok(value) => {
-                let data = value["_image"]["data"]
-                    .as_str()
-                    .or_else(|| value["_image"].as_str())
-                    .unwrap_or("");
-                use base64::Engine;
-                match base64::engine::general_purpose::STANDARD.decode(data) {
-                    Ok(bytes) => {
-                        if let Err(e) = download("cuemol.png", &bytes, "image/png") {
-                            self.message = js_error(e);
-                        }
-                    }
-                    Err(e) => self.message = e.to_string(),
-                }
+    fn render_async(&mut self, name: &str, args: &Value, download: Option<String>) {
+        if self.busy {
+            self.message = "Wait for the current operation to finish.".into();
+            return;
+        }
+        match cuemol_command::prepare_render(&self.state, &self.camera, name, args) {
+            Ok(render) => {
+                self.busy = true;
+                self.message = "Rendering image…".into();
+                spawn_local(async move {
+                    enqueue(Event::Rendered(render.run_async().await, download));
+                });
             }
             Err(e) => self.message = e.to_string(),
         }
+    }
+    fn export_png(&mut self) {
+        self.render_async(
+            "get_screenshot",
+            &json!({"width":self.render_size[0],"height":self.render_size[1]}),
+            Some("cuemol.png".into()),
+        );
     }
     fn viewport(&mut self, ui: &mut egui::Ui) {
         let size = ui.available_size();

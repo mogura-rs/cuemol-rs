@@ -82,7 +82,9 @@ pub fn lighting_controls(ui: &mut egui::Ui, p: &mut UmbreonRenderParams, npr: bo
             ui.checkbox(&mut p.ao_low_discrepancy, "Low discrepancy sampling");
             ui.checkbox(&mut p.ao_per_pixel, "Gather once per output pixel");
         }
-        let mut denoise = if p.denoiser > 0 {
+        let mut denoise = if p.denoiser == 2 || (p.gi_denoise && p.gi_denoiser == 2) {
+            "OIDN"
+        } else if p.denoiser == 1 {
             "A-trous"
         } else if p.gi_denoise {
             "Bilateral"
@@ -92,11 +94,12 @@ pub fn lighting_controls(ui: &mut egui::Ui, p: &mut UmbreonRenderParams, npr: bo
         egui::ComboBox::from_label("Denoising")
             .selected_text(denoise)
             .show_ui(ui, |ui| {
-                for value in ["Bilateral", "A-trous", "None"] {
+                for value in ["OIDN", "Bilateral", "A-trous", "None"] {
                     ui.selectable_value(&mut denoise, value, value);
                 }
             });
-        p.gi_denoise = denoise == "Bilateral";
+        p.gi_denoise = matches!(denoise, "OIDN" | "Bilateral");
+        p.gi_denoiser = if denoise == "OIDN" { 2 } else { 0 };
         p.denoiser = i32::from(denoise == "A-trous");
     });
     ui.collapsing("Contours and transparency", |ui| {
