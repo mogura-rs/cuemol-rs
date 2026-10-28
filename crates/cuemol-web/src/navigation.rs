@@ -2,24 +2,58 @@ use super::*;
 use cuemol_command::navigation::{self as shared, Command};
 
 impl App {
+    fn gpu_pick_image(&self) -> Option<std::sync::Arc<cuemol_desktop_core::picking::PickImage>> {
+        if !self
+            .state
+            .resolved_view_input(self.input_device.trackpad)
+            .gpu_pick()
+            || self.camera.stereo_mode() != cuemol_qsys::StereoMode::None
+        {
+            return None;
+        }
+        self.picking
+            .image(cuemol_desktop_core::picking::GpuPicking::stamp(
+                self.revision,
+                &self.camera,
+                self.target.as_ref()?.size,
+            ))
+    }
+    fn pick_record(
+        &self,
+        viewport: egui::Rect,
+        point: egui::Pos2,
+    ) -> Option<cuemol_desktop_core::picking::PickRecord> {
+        let image = self.gpu_pick_image();
+        let point = [
+            (point.x - viewport.left()) as f64,
+            (point.y - viewport.top()) as f64,
+        ];
+        let size = [viewport.width() as f64, viewport.height() as f64];
+        let precision = self
+            .state
+            .resolved_view_input(self.input_device.trackpad)
+            .hitprec();
+        image
+            .as_ref()
+            .and_then(|image| image.hit_at(point, size, precision))
+            .or_else(|| {
+                cuemol_desktop_core::picking::cpu_hit(
+                    self.snapshot.as_ref()?,
+                    (if image.is_some() {
+                        cuemol_desktop_core::offscreen::camera_pick_mvp
+                    } else {
+                        cuemol_desktop_core::offscreen::camera_mvp
+                    })(&self.camera, viewport.aspect_ratio() as f64),
+                    point,
+                    size,
+                    precision,
+                    image.is_some(),
+                )
+            })
+    }
     pub(super) fn screen_hit(&self, viewport: egui::Rect, point: egui::Pos2) -> Option<AtomHit> {
-        let mvp = cuemol_desktop_core::offscreen::camera_pick_mvp(
-            &self.camera,
-            viewport.aspect_ratio() as f64,
-        );
-        cuemol_desktop_core::pick_atom_screen(
-            &self.pick_atoms,
-            mvp,
-            (
-                (point.x - viewport.left()) as f64,
-                (point.y - viewport.top()) as f64,
-            ),
-            (viewport.width() as f64, viewport.height() as f64),
-            self.state
-                .resolved_view_input(self.input_device.trackpad)
-                .hitprec(),
-        )
-        .map(AtomHit::from)
+        self.pick_record(viewport, point)
+            .map(|record| AtomHit::from((record.object_id, record.atom_index)))
     }
     pub(super) fn navigation_click(
         &mut self,
@@ -150,17 +184,29 @@ impl App {
         {
             cuemol_ui::navigation::cursor(ui.ctx(), self.navigation.tool, self.input.is_pressed());
         }
+        let gpu_image = self.gpu_pick_image();
+        self.state.sync_viewport_pick_image(
+            &self.camera,
+            [rect.width(), rect.height()],
+            gpu_image.clone(),
+        );
         let hover = ui
             .input(|i| i.pointer.hover_pos())
             .filter(|p| rect.contains(*p) && ui.ctx().layer_id_at(*p) == Some(response.layer_id))
             .filter(|_| !self.input.is_pressed() && self.rectangle_start.is_none())
             .filter(|_| self.state.config_value("view_input:hover-info") != "false");
         if let Some(point) = hover {
-            if self.hover_sample != Some((point, self.revision, mvp)) {
+            if self.hover_sample != Some((point, self.revision, mvp, gpu_image.is_some())) {
+                let record = self.pick_record(rect, point);
+                self.state
+                    .set_active_hover_hit(record.map(|record| record.hit));
                 self.hover_hit = self.screen_hit(rect, point);
-                self.hover_sample = Some((point, self.revision, mvp));
+                self.hover_sample = Some((point, self.revision, mvp, gpu_image.is_some()));
             }
         } else {
+            if self.hover_sample.is_some() {
+                self.state.set_active_hover_hit(None);
+            }
             self.hover_hit = None;
             self.hover_sample = None;
         }

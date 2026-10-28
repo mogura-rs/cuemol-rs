@@ -16,7 +16,31 @@ pub(crate) enum Effects<'a> {
     ),
 }
 
+pub(crate) struct Interaction<'a> {
+    pub picker: &'a mut crate::picking::GpuPicking,
+    pub revision: u64,
+    pub hit: Option<cuemol_qsys::ViewHoverHit>,
+    pub color: [f32; 3],
+}
+
 pub(crate) fn draw(
+    renderer: &mut ViewportRenderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    snapshot: &RenderSceneSnapshot,
+    camera: &Camera,
+    size: [u32; 2],
+    background: [f64; 4],
+    level: i32,
+    effects: Effects<'_>,
+    labels: Option<(&mut crate::labels::LabelRenderer, &[crate::GuiAtomLabel])>,
+) -> Option<Vec<u8>> {
+    draw_interactive(
+        renderer, device, queue, snapshot, camera, size, background, level, effects, labels, None,
+    )
+}
+
+pub(crate) fn draw_interactive(
     renderer: &mut ViewportRenderer,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -27,6 +51,7 @@ pub(crate) fn draw(
     level: i32,
     mut effects: Effects<'_>,
     mut labels: Option<(&mut crate::labels::LabelRenderer, &[crate::GuiAtomLabel])>,
+    mut interaction: Option<Interaction<'_>>,
 ) -> Option<Vec<u8>> {
     let [width, height] = size.map(|n| n.max(1));
     let extent = wgpu::Extent3d {
@@ -102,6 +127,17 @@ pub(crate) fn draw(
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("viewport-export"),
         });
+        if let Some(input) = &mut interaction {
+            input.picker.encode(
+                device,
+                queue,
+                &mut encoder,
+                snapshot,
+                input.revision,
+                camera,
+                [width, height],
+            );
+        }
         let pending = match &mut effects {
             Effects::Live(effects, options) => effects.render(
                 renderer,
@@ -145,7 +181,28 @@ pub(crate) fn draw(
         };
         if pending {
             queue.submit([encoder.finish()]);
+            if let Some(input) = &mut interaction {
+                input.picker.start_readback();
+            }
             continue;
+        }
+        if let Some(input) = &mut interaction {
+            input.picker.render_hover(
+                device,
+                queue,
+                &mut encoder,
+                &color_view,
+                crate::picking::GpuPicking::stamp(input.revision, camera, [width, height]),
+                input.hit,
+                input.color,
+                [
+                    background.r as f32,
+                    background.g as f32,
+                    background.b as f32,
+                ],
+                [0., 0., width as f32, height as f32],
+                1.,
+            );
         }
         if let Some((renderer, _)) = &labels {
             let depth = match &effects {
@@ -180,6 +237,9 @@ pub(crate) fn draw(
             extent,
         );
         queue.submit([encoder.finish()]);
+        if let Some(input) = &mut interaction {
+            input.picker.start_readback();
+        }
         let slice = readback.slice(..);
         let (sender, receiver) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {

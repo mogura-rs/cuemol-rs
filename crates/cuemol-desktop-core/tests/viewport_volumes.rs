@@ -146,6 +146,7 @@ fn volume_texture_interpolation_respects_opaque_geometry_and_slab() {
         vertices: [(-4., -4.), (0., -4.), (0., 4.), (-4., 4.)]
             .into_iter()
             .map(|(x, y)| MeshVertex {
+                pick_atom_index: None,
                 position: Vector4::new3(x, y, 3.),
                 normal: Vector4::new3(0., 0., 1.),
                 color: [0., 0., 1., 1.],

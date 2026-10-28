@@ -171,7 +171,7 @@ struct App {
     navigation: Navigation,
     lasso_points: Vec<egui::Pos2>,
     hover_hit: Option<AtomHit>,
-    hover_sample: Option<(egui::Pos2, u64, [[f32; 4]; 4])>,
+    hover_sample: Option<(egui::Pos2, u64, [[f32; 4]; 4], bool)>,
     pick_atoms: Vec<cuemol_render::RenderAtom>,
     viewport_menu: Option<(egui::Pos2, AtomHit)>,
     rectangle_start: Option<egui::Pos2>,
@@ -189,6 +189,7 @@ struct App {
     camera: Camera,
     gpu: egui_wgpu::RenderState,
     renderer: ViewportRenderer,
+    picking: cuemol_desktop_core::picking::GpuPicking,
     effects: ViewportEffects,
     labels: cuemol_desktop_core::labels::LabelRenderer,
     target: Option<Target>,
@@ -286,6 +287,10 @@ impl App {
         let camera = state.active_view_camera().unwrap_or_default();
         CONTEXT.with(|ctx| *ctx.borrow_mut() = Some(cc.egui_ctx.clone()));
         let renderer = ViewportRenderer::new(&gpu.device, wgpu::TextureFormat::Rgba8Unorm);
+        let picking = cuemol_desktop_core::picking::GpuPicking::new(
+            &gpu.device,
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
         let effects =
             ViewportEffects::new(&gpu.device, &gpu.queue, wgpu::TextureFormat::Rgba8Unorm);
         let labels = cuemol_desktop_core::labels::LabelRenderer::new(
@@ -328,6 +333,7 @@ impl App {
             camera,
             gpu,
             renderer,
+            picking,
             effects,
             labels,
             target: None,
@@ -941,6 +947,22 @@ impl App {
             b: rgba[2] as f64,
             a: rgba[3] as f64,
         };
+        let input_config = self.state.resolved_view_input(self.input_device.trackpad);
+        let pick_enabled =
+            input_config.gpu_pick() && self.camera.stereo_mode() == cuemol_qsys::StereoMode::None;
+        if pick_enabled {
+            if let Some(snapshot) = &self.snapshot {
+                self.picking.encode(
+                    &self.gpu.device,
+                    &self.gpu.queue,
+                    &mut encoder,
+                    snapshot,
+                    self.revision,
+                    &self.camera,
+                    resolution,
+                );
+            }
+        }
         let pending = self.effects.render(
             &self.renderer,
             &self.gpu.device,
@@ -953,6 +975,29 @@ impl App {
             None,
             ViewportOptions::from_state(&self.state),
         );
+        if pick_enabled && self.state.config_value("view_input:hover-highlight") != "false" {
+            let color = input_config.hover_hl_color();
+            self.picking.render_hover(
+                &self.gpu.device,
+                &self.gpu.queue,
+                &mut encoder,
+                &target.view,
+                cuemol_desktop_core::picking::GpuPicking::stamp(
+                    self.revision,
+                    &self.camera,
+                    resolution,
+                ),
+                self.state.active_hover_hit(),
+                [
+                    color.r as f32 / 255.,
+                    color.g as f32 / 255.,
+                    color.b as f32 / 255.,
+                ],
+                [rgba[0], rgba[1], rgba[2]],
+                [0., 0., resolution[0] as f32, resolution[1] as f32],
+                pixels,
+            );
+        }
         let mvp = cuemol_desktop_core::offscreen::camera_mvp(
             &self.camera,
             f64::from(size.x / size.y.max(1.)),
@@ -983,7 +1028,8 @@ impl App {
             );
         }
         self.gpu.queue.submit([encoder.finish()]);
-        if pending {
+        self.picking.start_readback();
+        if pending || self.picking.is_pending() {
             ui.ctx().request_repaint();
         }
     }

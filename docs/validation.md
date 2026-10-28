@@ -1060,3 +1060,58 @@ Three rebuilt-browser tests passed for command-driven surface generation,
 live surface gradients and scripted backend selection followed by reload and
 regeneration. No public workflows or releases were run. Hover state and exporter
 settings remain in the separate QIF audit.
+
+
+### GPU picking, atom ownership and transient hover state
+
+Native, WebGL, WebGPU and Tauri views now share the GPU ID pass and the reference
+three-pass hover effect. The ID pass reuses sphere/cylinder fragment depth,
+uses mesh atom ownership and a depth buffer, and renders at half the viewport
+resolution. Cached GPU geometry and asynchronous image readback are invalidated
+by scene, camera or viewport changes. A target resize also invalidates the hover
+mask bindings, including a resize away from and back to the original dimensions.
+Picking and hover do not rebuild the scene on each pointer move.
+
+The GPU policy matches the reference: locked objects/renderers, sections with
+opacity at or below 0.6 and auxiliary ring plates are excluded. Unsupported
+renderers, including symmetry, use the renderer-aware CPU fallback. Disabling
+GPU picking or enabling stereo uses the ordinary CPU projection and display
+slab; GPU fallback queries use the GPU pass's fog clipping. Volume rendering
+is outside the GPU ID pass. Script `View.hitTest` uses the current view's image,
+and `setHoverHit`/`clearHoverHit` change transient presentation state. The input
+service's color, GPU switch and property reset work through live script handles.
+
+Mesh ownership now follows the generating renderer. Ribbon/tube triangles use
+the C++ provoking vertex and spline parameter boundaries, including unselected
+neighbors named by partial-selection caps. Nucleic bases retain the owning
+residue pivot even when another pivot is closer; separately colored detail
+bonds retain their actual atom IDs. Surface ownership uses the mesher's atom
+serial, and ellipsoids retain their source atom. Color-split bond halves keep
+one endpoint owner each. The CPU backbone candidates remain the selected pivots;
+extra GPU owner atoms do not expand rectangle or lasso selection.
+
+The independent C++ backbone oracle now emits atom ownership for each triangle.
+All 48 geometry/winding cases also pass the ownership comparison, including
+partial selections, caps, putty and secondary-structure junctions. The portable
+`scripts/check-reference-backbone.py` runner builds the oracle against the
+read-only reference checkout and runs these comparisons. Two explicit Metal
+tests pass for sphere edges, front/back occlusion, color fill, resize caching,
+bond halves, mesh ownership, auxiliary triangles and the opacity threshold.
+The explicit Tauri Metal test also returns a visible hover image. The shared
+script integration test verifies view identity, hit results, set/clear behavior
+and service reset.
+
+The native GUI tests pass (167); the Tauri suite passes (144, with three GPU
+checks excluded from the ordinary run). The hover check was then run explicitly
+on Metal. Shared-core tests pass with both scripting alone (217) and the
+scripting/offscreen feature combination (241). All 74 molecular-renderer unit
+tests pass. Browser navigation covers both rendering backends, configured hover
+colors, opacity and lock changes, script set/clear, transformed backbones and
+nucleic-base ownership. Pixel checks compare the configured 0.35-alpha fill to
+the unhighlighted image, preserving the underlying molecular color.
+
+A browser context-menu race was also corrected: invisible sizing passes no
+longer publish button rectangles to the UI test interface. Previously a click
+could use the preceding menu's coordinates and toggle a label instead of
+centering. Remaining exporter declarations are tracked by the QIF audit; this
+phase does not claim that the full reference API has already passed.

@@ -18572,8 +18572,33 @@ viewport.addEventListener("pointerdown", (event) => {
   dragReadout.textContent = drag.action.toUpperCase();
 });
 
+let hoverPending = null;
+let hoverRunning = false;
+async function updateHover(x, y) {
+  hoverPending = {x, y};
+  if (hoverRunning || !invoke) return;
+  hoverRunning = true;
+  try {
+    while (hoverPending) {
+      const point = hoverPending;
+      hoverPending = null;
+      const sequence = ++requestSequence;
+      const result = await invoke("hover_at_screen", {...point, ...viewportDimensions()});
+      if (result.image) applyViewport(result, sequence);
+    }
+  } catch (error) { showError(error); }
+  finally { hoverRunning = false; }
+}
+viewport.addEventListener("pointerleave", () => { if (!drag) void updateHover(-1, -1); });
 viewport.addEventListener("pointermove", (event) => {
-  if (!drag || drag.pointerId !== event.pointerId) return;
+  if (!drag) {
+    const bounds = viewport.getBoundingClientRect();
+    const size = viewportDimensions();
+    void updateHover((event.clientX - bounds.left) * size.width / bounds.width,
+      (event.clientY - bounds.top) * size.height / bounds.height);
+    return;
+  }
+  if (drag.pointerId !== event.pointerId) return;
   drag.dx = event.clientX - drag.x;
   drag.dy = event.clientY - drag.y;
   dragReadout.textContent = `${drag.action.toUpperCase()}  ${Math.round(drag.dx)}, ${Math.round(drag.dy)}`;

@@ -1,6 +1,7 @@
 mod command_support;
 mod density_view;
 mod map_surface;
+pub mod picking;
 pub use density_view::DensityViewSync;
 use density_view::DensityViewUpdate;
 pub mod property_catalog;
@@ -642,6 +643,12 @@ pub struct DesktopAppState {
     config: cuemol_qsys::SysConfig,
     runtime: BTreeMap<String, String>,
     active_scene: Option<Uid>,
+    gpu_pick_image: Option<(
+        Uid,
+        Uid,
+        cuemol_qsys::Camera,
+        std::sync::Arc<picking::PickImage>,
+    )>,
     last_qsc_status: Option<QscLoadStatus>,
     morphs: BTreeMap<Uid, MorphMol>,
     density_maps: BTreeMap<Uid, GuiDensityMapObject>,
@@ -1859,6 +1866,7 @@ impl Default for DesktopAppState {
             config: default_desktop_config(),
             runtime: BTreeMap::new(),
             active_scene: None,
+            gpu_pick_image: None,
             last_qsc_status: None,
             morphs: BTreeMap::new(),
             density_maps: BTreeMap::new(),
@@ -2776,6 +2784,7 @@ impl DesktopAppState {
                                     .vertices()
                                     .iter()
                                     .map(|vertex| cuemol_render::MeshVertex {
+                                        pick_atom_index: None,
                                         position: vertex.position,
                                         normal: vertex.normal,
                                         color,
@@ -2913,6 +2922,7 @@ impl DesktopAppState {
                                                 let color = gradient
                                                     .color(scalar.value_at(sample_position));
                                                 cuemol_render::MeshVertex {
+                                                    pick_atom_index: None,
                                                     position: vertex.position,
                                                     normal: vertex.normal,
                                                     color: rgba8_render_color(color),
@@ -7155,6 +7165,7 @@ impl DesktopAppState {
                     .vertices()
                     .iter()
                     .map(|vertex| cuemol_render::MeshVertex {
+                        pick_atom_index: None,
                         position: vertex.position,
                         normal: vertex.normal,
                         color,
@@ -7197,6 +7208,7 @@ impl DesktopAppState {
             .vertices()
             .iter()
             .map(|vertex| cuemol_render::MeshVertex {
+                pick_atom_index: None,
                 position: vertex.position,
                 normal: vertex.normal,
                 color,
@@ -7895,6 +7907,53 @@ impl DesktopAppState {
             .view(view_uid)
             .expect("the activated view exists")
             .camera())
+    }
+
+    pub fn active_hover_hit(&self) -> Option<cuemol_qsys::ViewHoverHit> {
+        let scene = self.scene_manager().scene(self.active_scene?)?;
+        self.command_manager
+            .view(scene.active_view_uid()?)?
+            .hover_hit()
+    }
+
+    pub fn set_active_hover_hit(&mut self, hit: Option<cuemol_qsys::ViewHoverHit>) {
+        let view_uid = self
+            .active_scene
+            .and_then(|id| self.scene_manager().scene(id))
+            .and_then(|scene| scene.active_view_uid());
+        if let Some(view) = view_uid.and_then(|id| self.command_manager.view_mut(id)) {
+            if let Some(hit) = hit {
+                view.set_hover_hit(hit.renderer_id, hit.atom_id, hit.symm_id);
+            } else {
+                view.clear_hover_hit();
+            }
+        }
+    }
+
+    pub fn sync_viewport_pick_image(
+        &mut self,
+        camera: &cuemol_qsys::Camera,
+        logical_size: [f32; 2],
+        image: Option<std::sync::Arc<picking::PickImage>>,
+    ) {
+        let _ = self.set_active_view_camera(camera);
+        let view_uid = self
+            .active_scene
+            .and_then(|id| self.scene_manager().scene(id))
+            .and_then(|scene| scene.active_view_uid());
+        if let Some(view) = view_uid.and_then(|id| self.command_manager.view_mut(id)) {
+            view.set_view_size(
+                logical_size[0].max(1.) as u32,
+                logical_size[1].max(1.) as u32,
+            );
+        }
+        self.gpu_pick_image =
+            self.active_scene
+                .zip(view_uid)
+                .zip(image)
+                .and_then(|((scene, uid), image)| {
+                    Some((scene, uid, self.command_manager.view(uid)?.camera(), image))
+                });
     }
 
     pub fn active_view_camera(&self) -> Option<cuemol_qsys::Camera> {
@@ -14427,7 +14486,11 @@ impl DesktopAppState {
         let selector = parse_gui_selector(selection_text)?;
         let styles = scene_style_manager(scene);
         let mut atoms = Vec::new();
-        for object in scene.objects().iter().filter(|object| object.is_visible()) {
+        for object in scene
+            .objects()
+            .iter()
+            .filter(|object| object.is_visible() && !object.is_ui_locked())
+        {
             let selected = if object.mol().selection_text().is_empty() {
                 selector
                     .as_ref()
@@ -14480,6 +14543,7 @@ impl DesktopAppState {
             }
             for renderer in object.renderers().iter().filter(|renderer| {
                 renderer.is_visible()
+                    && !renderer.qsc_attr("locked").is_some_and(qsc_bool)
                     && !renderer.renderer_type().starts_with('*')
                     && !matches!(
                         renderer.renderer_type(),
@@ -24861,11 +24925,45 @@ impl DesktopAppState {
             with_script_view_mut(this, ctx, cuemol_qsys::View::check_and_update)?;
             Ok(JsValue::undefined())
         }
+        fn js_view_set_hover(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let renderer = args
+                .first()
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_i32(ctx)?;
+            let atom = args
+                .get(1)
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_i32(ctx)?;
+            let symmetry = args
+                .get(2)
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_i32(ctx)?;
+            with_script_view_mut(this, ctx, |view| {
+                view.set_hover_hit(Uid::new(renderer.max(0) as u64), atom, symmetry)
+            })?;
+            Ok(JsValue::undefined())
+        }
+        fn js_view_clear_hover(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            with_script_view_mut(this, ctx, cuemol_qsys::View::clear_hover_hit)?;
+            Ok(JsValue::undefined())
+        }
         fn js_view_hit_test(
             this: &JsValue,
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            with_flushed_script_app(ctx, None, |_| ())?;
             let x = args
                 .first()
                 .cloned()
@@ -24876,13 +24974,45 @@ impl DesktopAppState {
                 .cloned()
                 .unwrap_or(JsValue::undefined())
                 .to_i32(ctx)?;
-            with_script_view(this, ctx, |view| JsString::from(view.hit_test(x, y)).into())
+            with_script_view(this, ctx, |view| {
+                let view = script_env::with(|env| env.hit_view(view, false, false, false));
+                let gpu = script_env::with(|env| {
+                    if !env.view_input_config.resolved(&env.styles).gpu_pick()
+                        || view.stereo_mode() != cuemol_qsys::StereoMode::None
+                    {
+                        return None;
+                    }
+                    let (scene, uid, camera, image) =
+                        env.live_app.as_ref()?.gpu_pick_image.as_ref()?;
+                    if *scene != view.scene_uid() || *uid != view.uid() || *camera != view.camera()
+                    {
+                        return None;
+                    }
+                    Some(
+                        image
+                            .hit_at(
+                                [x as f64, y as f64],
+                                [view.width() as f64, view.height() as f64],
+                                view.hit_precision(),
+                            )
+                            .map(|record| {
+                                env.hit_view(&view, false, false, true)
+                                    .hit_json_for_element(record.hit, Uid::new(record.object_id))
+                            })
+                            .unwrap_or_else(|| {
+                                env.hit_view(&view, true, false, false).hit_test(x, y)
+                            }),
+                    )
+                });
+                JsString::from(gpu.unwrap_or_else(|| view.hit_test(x, y))).into()
+            })
         }
         fn js_view_hit_test_rect(
             this: &JsValue,
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            with_flushed_script_app(ctx, None, |_| ())?;
             let x = args
                 .first()
                 .cloned()
@@ -24905,6 +25035,7 @@ impl DesktopAppState {
                 .to_i32(ctx)?;
             let nearest = args.get(4).is_some_and(JsValue::to_boolean);
             with_script_view(this, ctx, |view| {
+                let view = script_env::with(|env| env.hit_view(view, false, true, false));
                 JsString::from(view.hit_test_rect(x, y, width, height, nearest)).into()
             })
         }
@@ -24922,6 +25053,7 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            with_flushed_script_app(ctx, None, |_| ())?;
             let bytes = byte_array_from_value(args.first().unwrap_or(&JsValue::undefined()), ctx)?;
             if bytes.elem_type_code() != ByteArray::FLOAT32 || bytes.elem_count() % 2 != 0 {
                 return Err(script_error(
@@ -24940,6 +25072,7 @@ impl DesktopAppState {
             }
             let nearest = args.get(1).is_some_and(JsValue::to_boolean);
             with_script_view(this, ctx, |view| {
+                let view = script_env::with(|env| env.hit_view(view, false, true, false));
                 JsString::from(view.hit_test_polygon(&points, nearest)).into()
             })
         }
@@ -25596,6 +25729,16 @@ impl DesktopAppState {
                 .function(
                     NativeFunction::from_fn_ptr(js_view_check_update),
                     js_string!("checkAndUpdate"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_view_set_hover),
+                    js_string!("setHoverHit"),
+                    3,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_view_clear_hover),
+                    js_string!("clearHoverHit"),
                     0,
                 )
                 .function(
@@ -30908,6 +31051,14 @@ impl DesktopAppState {
             };
             if class_name == "Scene" {
                 if reset_scene_property(&value, &name, ctx)? {
+                    return Ok(JsValue::undefined());
+                }
+                return Err(script_error(format!(
+                    "{class_name}.{name} is not resettable"
+                )));
+            }
+            if class_name == "ViewInputConfig" {
+                if script_env::with_mut(|env| env.view_input_config.reset_property(&name)) {
                     return Ok(JsValue::undefined());
                 }
                 return Err(script_error(format!(
@@ -38920,7 +39071,19 @@ impl DesktopAppState {
                         }
                         operation(&mut app)
                     });
-            env.refresh_scene_data(app.build_script_env());
+            let fresh = app.build_script_env();
+            if app.gpu_pick_image.as_ref().is_some_and(|(scene, _, _, _)| {
+                env.render_scenes
+                    .get(&scene.get())
+                    .map(|scene| &scene.snapshot)
+                    != fresh
+                        .render_scenes
+                        .get(&scene.get())
+                        .map(|scene| &scene.snapshot)
+            }) {
+                app.gpu_pick_image = None;
+            }
+            env.refresh_scene_data(fresh);
             if result.is_ok() {
                 if let Some(scene_uid) = detach_camera_refs {
                     env.camera_refs.retain(|(uid, _, _)| *uid != scene_uid);
@@ -44604,13 +44767,29 @@ impl DesktopAppState {
             TrackballRadius,
             HitPrecision,
             Style,
+            GpuPick,
+            HoverColor,
         }
         fn input_config_get(
             property: InputConfigProperty,
             _this: &JsValue,
             _args: &[JsValue],
-            _ctx: &mut Context,
+            ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            if matches!(property, InputConfigProperty::HoverColor) {
+                let color = script_env::with(|env| {
+                    env.view_input_config.resolved(&env.styles).hover_hl_color()
+                });
+                return Ok(make_color(
+                    cuemol_gfx::SolidColor::from_rgba(
+                        color.r as f64 / 255.,
+                        color.g as f64 / 255.,
+                        color.b as f64 / 255.,
+                        color.a as f64 / 255.,
+                    ),
+                    ctx,
+                ));
+            }
             Ok(script_env::with(|env| {
                 let config = env.view_input_config.resolved(&env.styles);
                 match property {
@@ -44626,6 +44805,8 @@ impl DesktopAppState {
                     InputConfigProperty::TrackballRadius => JsValue::new(config.tbrad()),
                     InputConfigProperty::HitPrecision => JsValue::new(config.hitprec()),
                     InputConfigProperty::Style => JsString::from(config.style()).into(),
+                    InputConfigProperty::GpuPick => JsValue::new(config.gpu_pick()),
+                    InputConfigProperty::HoverColor => unreachable!(),
                 }
             }))
         }
@@ -44637,6 +44818,15 @@ impl DesktopAppState {
         ) -> JsResult<JsValue> {
             let value = args.first().cloned().unwrap_or(JsValue::undefined());
             match property {
+                InputConfigProperty::GpuPick => {
+                    script_env::with_mut(|env| {
+                        env.view_input_config.set_gpu_pick(value.to_boolean())
+                    });
+                }
+                InputConfigProperty::HoverColor => {
+                    let color = solid_color_from_script_value(&value, ctx)?.rgba8();
+                    script_env::with_mut(|env| env.view_input_config.set_hover_hl_color(color));
+                }
                 InputConfigProperty::TrackballRadius => {
                     let value = value.to_number(ctx)?;
                     script_env::with_mut(|env| env.view_input_config.set_tbrad(value));
@@ -44659,7 +44849,9 @@ impl DesktopAppState {
                         InputConfigProperty::Dist => env.view_input_config.set_conf_dist(value),
                         InputConfigProperty::Style => env.view_input_config.set_style(value),
                         InputConfigProperty::TrackballRadius
-                        | InputConfigProperty::HitPrecision => unreachable!(),
+                        | InputConfigProperty::HitPrecision
+                        | InputConfigProperty::GpuPick
+                        | InputConfigProperty::HoverColor => unreachable!(),
                     });
                 }
             }
@@ -44679,6 +44871,8 @@ impl DesktopAppState {
                 ("tbrad", InputConfigProperty::TrackballRadius),
                 ("hitprec", InputConfigProperty::HitPrecision),
                 ("style", InputConfigProperty::Style),
+                ("gpu_pick", InputConfigProperty::GpuPick),
+                ("hover_hl_color", InputConfigProperty::HoverColor),
             ];
             let accessors = properties
                 .into_iter()
@@ -48360,6 +48554,97 @@ type ScriptRuntimeUpdate = (
 
 #[cfg(feature = "scripting")]
 impl ScriptEnv {
+    fn hit_view(&self, view: &View, cpu_only: bool, area: bool, gpu_names: bool) -> View {
+        let mut view = view.clone();
+        view.set_hit_precision(self.view_input_config.resolved(&self.styles).hitprec());
+        let Some(scene) = self.render_scenes.get(&view.scene_uid().get()) else {
+            return view;
+        };
+        let mut candidates = Vec::new();
+        for section in &scene.snapshot.transparency_groups {
+            let Some(group) = &section.picking else {
+                continue;
+            };
+            if (cpu_only && group.gpu_supported) || (area && group.symm_id >= 0) {
+                continue;
+            }
+            let Some(object) = self
+                .objects
+                .iter()
+                .find(|object| object.uid == group.object_id && object.visible)
+            else {
+                continue;
+            };
+            let Some(renderer) = object
+                .renderers
+                .iter()
+                .find(|renderer| renderer.uid == group.renderer_id && renderer.visible)
+            else {
+                continue;
+            };
+            let Some(molecule) = self
+                .molecules
+                .iter()
+                .find(|molecule| molecule.uid == group.object_id)
+            else {
+                continue;
+            };
+            for pick in group
+                .atoms
+                .iter()
+                .chain(group.gpu_atoms.iter().filter(|_| gpu_names))
+            {
+                let Some(atom) = molecule
+                    .molecule
+                    .atoms()
+                    .get(pick.atom_index)
+                    .filter(|atom| atom.serial == pick.atom_id)
+                else {
+                    continue;
+                };
+                if cpu_only {
+                    let camera = view.camera();
+                    let position = camera
+                        .rotation()
+                        .to_matrix()
+                        .mul_vec(pick.position - camera.center());
+                    if position.z < -camera.slab_depth() * 0.5 {
+                        continue;
+                    }
+                }
+                let projected = view.proj_to_screen(pick.position);
+                if !projected.z.is_finite() || projected.z < -1. || projected.z > 1. {
+                    continue;
+                }
+                let position = object.xform.mul_vec(atom.position);
+                let mut fragment = MolRenderer::atom_hit_fragment(atom, position);
+                let names = if group.symm_id >= 0 {
+                    fragment.push_str(&format!(
+                        "\"symm_id\":{},\"symm_name\":{:?},",
+                        group.symm_id, group.symm_name
+                    ));
+                    vec![group.symm_id, atom.serial]
+                } else {
+                    vec![atom.serial]
+                };
+                candidates.push(cuemol_qsys::ViewHitCandidate {
+                    x: projected.x,
+                    y: projected.y,
+                    depth: projected.z,
+                    renderer_id: Uid::new(renderer.uid),
+                    renderer_type: renderer.rtype.clone(),
+                    renderer_name: renderer.name.clone(),
+                    object_id: Uid::new(object.uid),
+                    object_name: object.name.clone(),
+                    names,
+                    hit_fragment: fragment,
+                });
+            }
+        }
+        view.set_hit_candidates(candidates);
+        view
+    }
+
     fn runtime_update(&self) -> ScriptRuntimeUpdate {
         let mut scenes = self.scenes.clone();
         if let Some(scene) = scenes.iter_mut().find(|scene| scene.uid == self.scene_uid) {
@@ -49106,6 +49391,12 @@ fn surface_mesh_render_mesh_with_colors(
         nearest.push(*position, *color);
     }
     nearest.build();
+    let mut atom_indices = std::collections::HashMap::new();
+    for (index, atom) in object.mol().atoms().iter().enumerate() {
+        atom_indices
+            .entry(atom.serial as u32)
+            .or_insert(index as u32);
+    }
     let vertices = mesh
         .vertices()
         .iter()
@@ -49117,6 +49408,7 @@ fn surface_mesh_render_mesh_with_colors(
                 .copied()
                 .unwrap_or(GREY);
             cuemol_render::MeshVertex {
+                pick_atom_index: Some(atom_indices.get(&vertex.info).copied().unwrap_or(u32::MAX)),
                 position: vertex.position,
                 normal: vertex.normal,
                 color,
@@ -49258,6 +49550,7 @@ fn surface_scalar_mesh_from_mesh_colored(
                 vertex.position + vertex.normal.scale(distance)
             });
             cuemol_render::MeshVertex {
+                pick_atom_index: None,
                 position: vertex.position,
                 normal: vertex.normal,
                 color: potential_color_with_stops(
@@ -49545,13 +49838,24 @@ fn append_object_crystal_renderer_snapshot(
         let Some(base) = base.as_ref() else {
             continue;
         };
-        for transform in transforms {
+        for (symm_id, transform) in transforms.into_iter().enumerate() {
             if unitcell && transform_leaves_point_fixed(transform.matrix, center) {
                 continue;
             }
             let mut mate = base.clone();
             let xform = renderer.xform_matrix().mul_mat(transform.matrix);
             mate.apply_xform(&xform);
+            for group in &mut mate.transparency_groups {
+                if let Some(picking) = &mut group.picking {
+                    picking.renderer_id = renderer.uid().get();
+                    picking.symm_id = symm_id as i32;
+                    picking.symm_name = transform.name.clone();
+                    picking.gpu_supported = false;
+                    if renderer.qsc_attr("locked").is_some_and(qsc_bool) {
+                        group.picking = None;
+                    }
+                }
+            }
             append_snapshot(target, mate);
         }
     }
@@ -49983,13 +50287,16 @@ fn append_object_renderer_snapshot(
             })
             .unwrap_or_else(|| render_color_spec([1.0, 1.0, 191.0 / 255.0, 1.0]));
         let atom_colors = resolve_atom_colors(object.mol(), &options);
-        let rings = ring_meshes_snapshot_with_coloring(
+        let mut rings = ring_meshes_snapshot_with_coloring(
             object.mol(),
             thickness,
             &color,
             &atom_colors,
             options.draw_indices.as_deref(),
         );
+        for vertex in rings.meshes.iter_mut().flat_map(|mesh| &mut mesh.vertices) {
+            vertex.pick_atom_index = Some(u32::MAX);
+        }
         merge_bounds(&mut snapshot.bounds, rings.bounds);
         snapshot.meshes.extend(rings.meshes);
     }
@@ -50029,6 +50336,101 @@ fn append_object_renderer_snapshot(
                 styles,
             ),
         );
+    }
+    if !object.is_ui_locked()
+        && renderer.is_none_or(|renderer| !renderer.qsc_attr("locked").is_some_and(qsc_bool))
+        && !matches!(
+            renderer_type,
+            "atomintr" | "selection" | "*selection" | "unitcell" | "*unitcell"
+        )
+    {
+        let selected = renderer
+            .map(MolRenderer::selection)
+            .unwrap_or(&Selector::All);
+        let indices = if matches!(
+            renderer_type,
+            "trace" | "tracestick" | "ribbon" | "cartoon" | "tube" | "spline" | "nucl"
+        ) {
+            let pivot = renderer.and_then(|r| r.resolved_attr("pivotatom", styles, style_scope_id));
+            cuemol_molvis::mainchain_pick_indices(object.mol(), selected, pivot.as_deref())
+        } else {
+            object.mol().select_indices(selected)
+        };
+        let cpu_indices: std::collections::HashSet<_> = indices.iter().copied().collect();
+        let gpu_indices: std::collections::BTreeSet<_> = snapshot
+            .atoms
+            .iter()
+            .filter_map(|atom| atom.atom_index)
+            .chain(
+                snapshot
+                    .bonds
+                    .iter()
+                    .filter_map(|bond| bond.atom_indices)
+                    .flat_map(|(a, b)| [a, b]),
+            )
+            .chain(
+                snapshot
+                    .meshes
+                    .iter()
+                    .flat_map(|mesh| &mesh.vertices)
+                    .filter_map(|vertex| vertex.pick_atom_index.map(|index| index as usize)),
+            )
+            .filter(|index| !cpu_indices.contains(index) && *index < object.mol().atoms().len())
+            .collect();
+        if let Some(group) = snapshot.transparency_groups.last_mut() {
+            group.picking = Some(cuemol_render::RenderPickGroup {
+                object_id: object.uid().get(),
+                renderer_id: renderer.map_or(0, |r| r.uid().get()),
+                symm_id: -1,
+                symm_name: String::new(),
+                gpu_supported: matches!(
+                    renderer_type,
+                    "simple"
+                        | "ballstick"
+                        | "cpk"
+                        | "anisou"
+                        | "trace"
+                        | "tracestick"
+                        | "ribbon"
+                        | "cartoon"
+                        | "tube"
+                        | "spline"
+                        | "nucl"
+                        | "dsurface"
+                        | "directsurf"
+                        | "dsurf2"
+                ) && !renderer.is_some_and(|renderer| {
+                    matches!(
+                        renderer.renderer_type(),
+                        "dsurface" | "directsurf" | "dsurf2"
+                    ) && renderer
+                        .qsc_attr("draw_mode")
+                        .is_some_and(|mode| !matches!(mode, "fill" | "0"))
+                }),
+                gpu_atoms: gpu_indices
+                    .into_iter()
+                    .map(|index| {
+                        let atom = &object.mol().atoms()[index];
+                        cuemol_render::RenderPickAtom {
+                            position: atom.position,
+                            atom_id: atom.serial,
+                            atom_index: index,
+                        }
+                    })
+                    .collect(),
+                atoms: indices
+                    .into_iter()
+                    .map(|index| {
+                        let atom = &object.mol().atoms()[index];
+                        cuemol_render::RenderPickAtom {
+                            position: atom.position,
+                            atom_id: atom.serial,
+                            atom_index: index,
+                        }
+                    })
+                    .collect(),
+            });
+        }
     }
     // Apply the object + renderer `xformMat` (C++ `Object`/`Renderer` xformMat,
     // multiplied onto the modelview at display; the object xform is propagated onto
@@ -50217,6 +50619,7 @@ fn test_renderer_snapshot(
         mesh.vertices.extend(
             face.into_iter()
                 .map(|(position, color)| cuemol_render::MeshVertex {
+                    pick_atom_index: None,
                     position,
                     normal,
                     color,
@@ -50354,6 +50757,7 @@ fn direct_surface_snapshot(
                     transform.xform3d(&mut position);
                     let value = map.value_at(position);
                     cuemol_render::MeshVertex {
+                        pick_atom_index: None,
                         position: vertex.position,
                         normal: vertex.normal,
                         color: if use_gradient {
@@ -62487,6 +62891,7 @@ end_header
         });
         snapshot.meshes.push(cuemol_render::RenderMesh {
             vertices: vec![cuemol_render::MeshVertex {
+                pick_atom_index: None,
                 position: Vector4::new3(0.0, 0.0, 0.0),
                 normal: Vector4::new3(0.0, 0.0, 1.0),
                 color: [0.1, 0.2, 0.3, 0.8],

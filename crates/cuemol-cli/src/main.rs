@@ -1785,6 +1785,7 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
                         .vertices()
                         .iter()
                         .map(|vertex| cuemol_render::MeshVertex {
+                            pick_atom_index: None,
                             position: vertex.position,
                             normal: vertex.normal,
                             color: color_map
@@ -2291,6 +2292,7 @@ fn surface_mesh_with_color(
             .vertices()
             .iter()
             .map(|vertex| cuemol_render::MeshVertex {
+                pick_atom_index: None,
                 position: vertex.position,
                 normal: vertex.normal,
                 color: color(vertex),
@@ -3073,6 +3075,7 @@ fn test_renderer_scene_snapshot(
         mesh.vertices.extend(
             face.into_iter()
                 .map(|(position, color)| cuemol_render::MeshVertex {
+                    pick_atom_index: None,
                     position,
                     normal,
                     color,

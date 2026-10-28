@@ -1,4 +1,5 @@
 import {test,expect} from '@playwright/test';
+import {PNG} from 'pngjs';
 
 const points=[[-4,0,0],[-1,0,0],[1,2,0],[4,1,1]];
 const pdb=`HETATM    1  C1  LIG A   1      -4.000   0.000   0.000  1.00 10.00           C
@@ -9,8 +10,8 @@ END
 `;
 const status=page=>page.evaluate(()=>window.cuemol.status());
 async function command(page,name,args={}) {
-  await page.evaluate(([name,args])=>window.cuemol.command(name,args),[name,args]);
-  await page.waitForTimeout(80);
+  const id=await page.evaluate(([name,args])=>window.cuemol.command(name,args),[name,args]);
+  await expect.poll(async()=>{const value=await status(page);return value.lastCommand===id&&!value.busy;}).toBe(true);
   return status(page);
 }
 async function setup(page) {
@@ -46,6 +47,7 @@ test('atom labels, residue double-click, range extension, hover and undo share t
   expect(JSON.parse((await command(page,'count_selection',{objId:id,selection})).message).count).toBe(2);
   expect((await status(page)).view.center).toEqual(before.center);
   await page.waitForTimeout(550);await page.keyboard.down('Shift');await page.mouse.dblclick(...p[3],{delay:70});await page.keyboard.up('Shift');
+  await expect.poll(async()=>(await status(page)).selection).not.toBe(selection);
   selection=(await status(page)).selection;
   expect(JSON.parse((await command(page,'count_selection',{objId:id,selection})).message).count).toBe(4);
   await command(page,'undo');
@@ -179,4 +181,86 @@ END
   await page.screenshot({path:testInfo.outputPath('transformed-backbone-pick.png')});
   await command(page,'set_node_prop',{nodeType:'renderer',nodeId:renderer.id,prop:'xformMat',value:'(1,0,0,0,0,1,0,0,0,0,1,0,2,0,100,1)'});
   await expect.poll(async()=>(await status(page)).ui.navigation.hover).toBeNull();
+});
+
+for (const backend of ['webgl','webgpu']) {
+  test(`${backend} hover follows visible sphere fragments and script hit tests`,async({page},testInfo)=>{
+    const errors=[];page.on('pageerror',error=>errors.push(error.message));
+    await page.goto(`./?renderer=${backend}`);
+    await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId),{timeout:60000}).toBeGreaterThan(0);
+    await page.locator('#files').setInputFiles({name:'sphere.pdb',mimeType:'application/octet-stream',buffer:Buffer.from('HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n')});
+    await expect.poll(async()=>(await status(page)).scene.objects.length).toBe(1);
+    const object=(await status(page)).scene.objects[0].id;
+    await command(page,'create_renderer',{objId:object,rendererType:'cpk'});
+    const renderer=(await status(page)).scene.objects[0].renderers.find(renderer=>renderer.type==='cpk');
+    await command(page,'set_view',{center:[0,0,0],zoom:10,distance:40,slab:20});
+    const rect=(await status(page)).ui.rects.Viewport;
+    const center=[rect[0]+rect[2]/2,rect[1]+rect[3]/2];
+    const edge=[center[0]+rect[3]*.12,center[1]];
+    const sample=async()=>{
+      const image=PNG.sync.read(await page.screenshot({clip:{x:center[0]+20,y:center[1]+20,width:8,height:8}}));
+      return [0,1,2].map(channel=>Array.from({length:64},(_,i)=>image.data[i*4+channel]).reduce((a,b)=>a+b)/64);
+    };
+    await page.mouse.move(5,5);
+    const baseline=await sample();
+    const blendError=async(color)=>Math.max(...(await sample()).map((value,index)=>Math.abs(value-(baseline[index]*.65+color[index]*.35))));
+    await page.screenshot({path:testInfo.outputPath('before-hover.png')});
+    await page.mouse.move(...edge);
+    await expect.poll(async()=>(await status(page)).ui.navigation.hover?.index).toBe(0);
+    let reply=await command(page,'execute_script',{source:`var v=scene.getView(scene.activeViewID);print(JSON.parse(v.hitTest(${edge[0]-rect[0]},${edge[1]-rect[1]})).atom_id);`});
+    expect(JSON.parse(reply.message).log).toBe('1\n');
+    await expect.poll(()=>blendError([255,102,153])).toBeLessThan(2);
+    await page.screenshot({path:testInfo.outputPath('sphere-hover.png')});
+    await command(page,'execute_script',{source:"getService('ViewInputConfig').gpu_pick=false;"});
+    await page.mouse.move(edge[0]+1,edge[1]);
+    await expect.poll(async()=>(await status(page)).ui.navigation.hover).toBeNull();
+    await command(page,'execute_script',{source:"cuemol.resetProp(getService('ViewInputConfig'),'gpu_pick');getService('ViewInputConfig').hover_hl_color=cuemol.makeColor('#0000ff');"});
+    await page.mouse.move(edge[0],edge[1]);
+    await expect.poll(async()=>(await status(page)).ui.navigation.hover?.index).toBe(0);
+    await expect.poll(()=>blendError([0,0,255])).toBeLessThan(2);
+    await page.screenshot({path:testInfo.outputPath('blue-hover.png')});
+    await command(page,'set_node_prop',{nodeType:'renderer',nodeId:renderer.id,prop:'alpha',value:'0.6'});
+    await expect.poll(async()=>(await status(page)).ui.navigation.hover).toBeNull();
+    await command(page,'set_node_prop',{nodeType:'renderer',nodeId:renderer.id,prop:'alpha',value:'1'});
+    await expect.poll(async()=>(await status(page)).ui.navigation.hover?.index).toBe(0);
+    await command(page,'set_node_prop',{nodeType:'renderer',nodeId:renderer.id,prop:'locked',value:'true'});
+    await expect.poll(async()=>(await status(page)).ui.navigation.hover).toBeNull();
+    await command(page,'set_node_prop',{nodeType:'renderer',nodeId:renderer.id,prop:'locked',value:'false'});
+    await page.mouse.move(5,5);
+    await expect.poll(async()=>(await status(page)).ui.navigation.hover).toBeNull();
+    await command(page,'execute_script',{source:`scene.getView(scene.activeViewID).setHoverHit(${renderer.id},1,-1);`});
+    await expect.poll(()=>blendError([0,0,255])).toBeLessThan(2);
+    await command(page,'execute_script',{source:'scene.getView(scene.activeViewID).clearHoverHit();'});
+    await expect.poll(async()=>Math.max(...(await sample()).map((value,index)=>Math.abs(value-baseline[index])))).toBeLessThan(2);
+    expect(errors).toEqual([]);
+  });
+}
+
+test('nucleic base picking retains the owning residue when another pivot is closer',async({page})=>{
+  await page.goto('./?renderer=webgl');
+  await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId),{timeout:60000}).toBeGreaterThan(0);
+  const structure=`ATOM      1  C1'   A A   1      -4.000   0.000   0.000  1.00 10.00           C
+ATOM      2  N9    A A   1      -2.000   0.000   0.000  1.00 10.00           N
+ATOM      3  N1    A A   1       0.000   0.000   0.000  1.00 10.00           N
+ATOM      4  C1'   U A   2       1.000   2.000   0.000  1.00 10.00           C
+ATOM      5  N1    U A   2       2.000   2.000   0.000  1.00 10.00           N
+ATOM      6  N3    U A   2       3.000   2.000   0.000  1.00 10.00           N
+END
+`;
+  await page.locator('#files').setInputFiles({name:'bases.pdb',mimeType:'application/octet-stream',buffer:Buffer.from(structure)});
+  await expect.poll(async()=>(await status(page)).scene.objects.length).toBe(1);
+  const object=(await status(page)).scene.objects[0];
+  for(const renderer of object.renderers)await command(page,'set_node_prop',{nodeType:'renderer',nodeId:renderer.id,prop:'visible',value:'false'});
+  await command(page,'create_renderer',{objId:object.id,rendererType:'nucl'});
+  const renderer=(await status(page)).scene.objects[0].renderers.find(renderer=>renderer.type==='nucl');
+  expect(renderer).toBeDefined();
+  await command(page,'set_node_prop',{nodeType:'renderer',nodeId:renderer.id,prop:'show_tube',value:'false'});
+  await command(page,'set_node_prop',{nodeType:'renderer',nodeId:renderer.id,prop:'show_basepair',value:'false'});
+  await command(page,'set_projection',{perspective:false});
+  await command(page,'set_view',{center:[0,0,0],zoom:10,distance:40,slab:20});
+  const rect=(await status(page)).ui.rects.Viewport;
+  await page.mouse.move(rect[0]+rect[2]/2,rect[1]+rect[3]/2);
+  await expect.poll(async()=>(await status(page)).ui.navigation.hover?.index).toBe(0);
+  const reply=await command(page,'execute_script',{source:`var v=scene.getView(scene.activeViewID);print(JSON.parse(v.hitTest(${rect[2]/2},${rect[3]/2})).atom_id);`});
+  expect(JSON.parse(reply.message).log).toBe('1\n');
 });

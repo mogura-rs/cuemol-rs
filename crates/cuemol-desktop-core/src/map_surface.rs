@@ -94,6 +94,7 @@ impl DesktopAppState {
                     fallback
                 };
                 cuemol_render::MeshVertex {
+                    pick_atom_index: None,
                     position: vertex.position,
                     normal: vertex.normal,
                     color,

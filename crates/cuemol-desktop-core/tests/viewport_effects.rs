@@ -137,6 +137,7 @@ fn scene() -> RenderSceneSnapshot {
         vertices: [(-6.0, -5.0), (6.0, -5.0), (6.0, 5.0), (-6.0, 5.0)]
             .into_iter()
             .map(|(x, y)| MeshVertex {
+                pick_atom_index: None,
                 position: Vector4::new3(x, y, 0.0),
                 normal: Vector4::new3(0.0, 0.0, 1.0),
                 color: [0.7, 0.6, 0.5, 1.0],

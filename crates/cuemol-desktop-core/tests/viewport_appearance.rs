@@ -32,6 +32,7 @@ fn plane(depth: f64, normal: Vector4) -> RenderSceneSnapshot {
         vertices: [(-5.0, -5.0), (5.0, -5.0), (5.0, 5.0), (-5.0, 5.0)]
             .into_iter()
             .map(|(x, y)| MeshVertex {
+                pick_atom_index: None,
                 position: Vector4::new3(x, y, depth),
                 normal,
                 color: [0.6, 0.3, 0.1, 1.0],
@@ -281,6 +282,7 @@ fn viewport_composites_transparent_sections_after_opaque_geometry_and_depth_test
         alpha: 0.5,
         material: "default".into(),
         edge_group: String::new(),
+        picking: None,
         edge_style: None,
         atom_range: 0..0,
         bond_range: 0..0,

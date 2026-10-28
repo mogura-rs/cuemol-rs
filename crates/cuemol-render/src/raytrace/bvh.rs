@@ -515,6 +515,7 @@ mod tests {
         scene.meshes.push(RenderMesh {
             vertices: [[-5., -5., -1.], [5., -5., -1.], [0., 5., -1.]]
                 .map(|p| MeshVertex {
+                    pick_atom_index: None,
                     position: Vector4::new3(p[0], p[1], p[2]),
                     normal: Vector4::new3(0., 0., 1.),
                     color: [1., 0., 0., 0.5],

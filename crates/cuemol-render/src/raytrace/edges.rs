@@ -85,6 +85,7 @@ mod tests {
 
     fn section(name: &str, edge: Option<RenderEdgeStyle>) -> RenderTransparencyGroup {
         RenderTransparencyGroup {
+            picking: None,
             name: name.into(),
             alpha: 1.,
             material: "matte".into(),
@@ -155,6 +156,7 @@ mod tests {
                 vertices: [(left, -2.), (right, -2.), (right, 2.), (left, 2.)]
                     .into_iter()
                     .map(|(x, y)| MeshVertex {
+                        pick_atom_index: None,
                         position: Vector4::new3(x, y, 0.),
                         normal: Vector4::new3(0., 0., 1.),
                         color: [1.; 4],

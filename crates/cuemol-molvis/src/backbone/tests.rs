@@ -475,6 +475,7 @@ fn backbone_geometry_and_triangle_winding_match_cpp() {
         let expected = reference_mesh("color", &pdb, kind, style, settings)
             .chunks_exact(10)
             .map(|v| MeshVertex {
+                pick_atom_index: None,
                 position: Vector4::new3(v[0], v[1], v[2]),
                 normal: Vector4::new3(v[3], v[4], v[5]),
                 color: std::array::from_fn(|i| v[6 + i] as f32 / 255.0),
@@ -506,6 +507,47 @@ fn backbone_geometry_and_triangle_winding_match_cpp() {
             &actual_faces,
             &format!("C++ to Rust: {label}"),
         );
+        let expected_picks = reference_mesh("pick", &pdb, kind, style, settings);
+        let mut pick_grid = std::collections::HashMap::<_, Vec<_>>::new();
+        for row in expected_picks.chunks_exact(10) {
+            let triangle: [Vector4; 3] =
+                std::array::from_fn(|j| Vector4::new3(row[j * 3], row[j * 3 + 1], row[j * 3 + 2]));
+            if nondegenerate(&triangle) {
+                let center = (triangle[0] + triangle[1] + triangle[2]).scale(1. / 3.);
+                pick_grid
+                    .entry(cell(center))
+                    .or_default()
+                    .push((triangle, row[9] as i32));
+            }
+        }
+        let mut checked = 0;
+        for mesh in &snapshot.meshes {
+            for indices in mesh.indices.chunks_exact(3) {
+                let triangle: [Vector4; 3] =
+                    std::array::from_fn(|j| mesh.vertices[indices[j] as usize].position);
+                if !nondegenerate(&triangle) {
+                    continue;
+                }
+                let center = (triangle[0] + triangle[1] + triangle[2]).scale(1. / 3.);
+                let owner = mesh.vertices[indices[2] as usize]
+                    .pick_atom_index
+                    .map_or(-1, |n| n as i32);
+                assert!(
+                    in_neighbors(&pick_grid, center).any(|(candidate, expected)| *expected
+                        == owner
+                        && (0..3)
+                            .any(|offset| (0..3)
+                                .all(|j| (triangle[j] - candidate[(j + offset) % 3]).length3d()
+                                    < 5e-6))),
+                    "{label}: incorrect pick owner {owner} at {center:?}; reference {:?}",
+                    in_neighbors(&pick_grid, center)
+                        .map(|(_, owner)| *owner)
+                        .collect::<Vec<_>>()
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0);
         eprintln!(
             "Matched {label}: {} reference vertices and {} triangles",
             expected.len(),

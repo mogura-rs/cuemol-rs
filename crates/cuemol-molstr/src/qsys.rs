@@ -622,14 +622,19 @@ impl MolRenderer {
         let Some(atom) = molecule.get_atom_by_id(atom_id) else {
             return String::new();
         };
+        Self::atom_hit_fragment(atom, atom.position)
+    }
+
+    pub fn atom_hit_fragment(atom: &Atom, position: Vector4) -> String {
+        let atom_id = atom.serial;
         format!(
             "\"objtype\":\"MolCoord\",\"size\":1,\"sel\":\"aid {atom_id}\",\"atom_id\":{atom_id},\"message\":\"{}\",\"occ\":{:.2},\"bfac\":{:.2},\"x\":{:.2},\"y\":{:.2},\"z\":{:.2},",
             escape_json(&format_atom_message(atom)),
             atom.occupancy,
             atom.b_factor,
-            atom.position.x,
-            atom.position.y,
-            atom.position.z,
+            position.x,
+            position.y,
+            position.z,
         )
     }
 }

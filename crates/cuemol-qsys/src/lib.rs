@@ -73,7 +73,7 @@ pub use sys_config::{SysConfig, SysConfigSection};
 pub use text_render::{create_text_render, destroy_text_render, Canvas2DTextRender2};
 pub use tty_view::{TTYDisplayContext, TTYView, TtyDisplayContext, TtyView};
 pub use undo::{EditInfo, UndoManager, UndoManagerHandle};
-pub use view::{View, ViewHitCandidate};
+pub use view::{View, ViewHitCandidate, ViewHoverHit};
 pub use view_cap::ViewCap;
 
 pub type Command = CommandInstance;

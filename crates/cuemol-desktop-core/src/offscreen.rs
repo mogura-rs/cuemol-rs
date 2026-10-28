@@ -186,6 +186,7 @@ pub struct SceneRenderer {
     depth_pipeline: wgpu::RenderPipeline,
     bind_layout: wgpu::BindGroupLayout,
     viewport: std::sync::Mutex<crate::viewport::ViewportRenderer>,
+    picking: std::sync::Mutex<crate::picking::GpuPicking>,
     effects: std::sync::Mutex<crate::effects::ViewportEffects>,
     labels: std::sync::Mutex<crate::labels::LabelRenderer>,
 }
@@ -207,6 +208,7 @@ impl SceneRenderer {
         ));
         Some(Self {
             viewport,
+            picking: std::sync::Mutex::new(crate::picking::GpuPicking::new(&device, COLOR_FORMAT)),
             labels: std::sync::Mutex::new(crate::labels::LabelRenderer::new(&device, COLOR_FORMAT)),
             effects: std::sync::Mutex::new(crate::effects::ViewportEffects::new(
                 &device,
@@ -219,6 +221,55 @@ impl SceneRenderer {
             depth_pipeline,
             bind_layout,
         })
+    }
+
+    pub fn pick_image(
+        &self,
+        revision: u64,
+        camera: &Camera,
+        size: [u32; 2],
+    ) -> Option<std::sync::Arc<crate::picking::PickImage>> {
+        self.picking
+            .lock()
+            .ok()?
+            .image(crate::picking::GpuPicking::stamp(revision, camera, size))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_interactive_viewport(
+        &self,
+        snapshot: &RenderSceneSnapshot,
+        camera: &Camera,
+        size: [u32; 2],
+        background: [f64; 4],
+        options: crate::effects::ViewportOptions,
+        labels: &[crate::GuiAtomLabel],
+        revision: u64,
+        hover: Option<cuemol_qsys::ViewHoverHit>,
+        color: [f32; 3],
+    ) -> Option<Vec<u8>> {
+        let mut viewport = self.viewport.lock().ok()?;
+        let mut effects = self.effects.lock().ok()?;
+        let mut labels_renderer = self.labels.lock().ok()?;
+        let mut picker = self.picking.lock().ok()?;
+        crate::viewport_readback::draw_interactive(
+            &mut viewport,
+            &self.device,
+            &self.queue,
+            snapshot,
+            camera,
+            size,
+            background,
+            0,
+            crate::viewport_readback::Effects::Live(&mut effects, options),
+            Some((&mut labels_renderer, labels)),
+            Some(crate::viewport_readback::Interaction {
+                picker: &mut picker,
+                revision,
+                hit: hover,
+                color,
+            }),
+        )
     }
 
     pub fn render_camera(
@@ -1374,6 +1425,7 @@ mod tests {
 
     fn vert(x: f32, y: f32, color: [f32; 4]) -> MeshVertex {
         MeshVertex {
+            pick_atom_index: None,
             position: cuemol_core::Vector4::new3(x as f64, y as f64, 0.0),
             normal: cuemol_core::Vector4::new3(0.0, 0.0, 1.0),
             color,

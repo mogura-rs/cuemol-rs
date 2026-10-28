@@ -13,6 +13,13 @@ use std::sync::Arc;
 
 const F_EPS4: f64 = 1.0e-4;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ViewHoverHit {
+    pub renderer_id: Uid,
+    pub atom_id: i32,
+    pub symm_id: i32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViewHitCandidate {
     pub x: f64,
@@ -70,6 +77,8 @@ pub struct View {
     jitter_reset_requested: bool,
     jitter_offset_pixels: (f64, f64),
     ao_half_pending: bool,
+    hover_hit: Option<ViewHoverHit>,
+    present_dirty: bool,
 }
 
 impl View {
@@ -149,6 +158,8 @@ impl View {
             jitter_reset_requested: false,
             jitter_offset_pixels: (0.0, 0.0),
             ao_half_pending: false,
+            hover_hit: None,
+            present_dirty: false,
         }
     }
 
@@ -734,6 +745,7 @@ impl View {
     }
 
     pub fn complete_frame_render(&mut self, params: &FrameRenderParams) {
+        self.present_dirty = false;
         if !params.jitter_active {
             return;
         }
@@ -746,7 +758,7 @@ impl View {
     }
 
     pub fn needs_continuous_redraw(&self) -> bool {
-        self.jitter_more_samples || self.ao_half_pending
+        self.jitter_more_samples || self.ao_half_pending || self.present_dirty
     }
 
     pub fn force_redraw(&mut self) {
@@ -850,6 +862,32 @@ impl View {
         self.hit_precision = value.max(0.0);
     }
 
+    pub fn hover_hit(&self) -> Option<ViewHoverHit> {
+        self.hover_hit
+    }
+
+    pub fn set_hover_hit(&mut self, renderer_id: Uid, atom_id: i32, symm_id: i32) {
+        if atom_id < 0 {
+            self.clear_hover_hit();
+            return;
+        }
+        let hit = ViewHoverHit {
+            renderer_id,
+            atom_id,
+            symm_id,
+        };
+        if self.hover_hit != Some(hit) {
+            self.hover_hit = Some(hit);
+            self.present_dirty = true;
+        }
+    }
+
+    pub fn clear_hover_hit(&mut self) {
+        if self.hover_hit.take().is_some() {
+            self.present_dirty = true;
+        }
+    }
+
     pub fn set_hit_candidates(&mut self, candidates: Vec<ViewHitCandidate>) {
         self.hit_candidates = candidates;
     }
@@ -916,6 +954,21 @@ impl View {
             })
             .collect::<Vec<_>>();
         self.multiple_hit_json(selected, nearest)
+    }
+
+    pub fn hit_json_for_element(&self, hit: ViewHoverHit, object_id: Uid) -> String {
+        let candidate = self.hit_candidates.iter().find(|candidate| {
+            candidate.renderer_id == hit.renderer_id
+                && candidate.object_id == object_id
+                && if hit.symm_id >= 0 {
+                    candidate.names == [hit.symm_id, hit.atom_id]
+                } else {
+                    candidate.names == [hit.atom_id]
+                }
+        });
+        candidate
+            .map(|candidate| self.single_hit_json(candidate))
+            .unwrap_or_default()
     }
 
     fn single_hit_json(&self, candidate: &ViewHitCandidate) -> String {

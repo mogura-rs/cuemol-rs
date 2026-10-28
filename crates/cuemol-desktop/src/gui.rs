@@ -576,6 +576,8 @@ impl NativeRunner {
         let Some(app) = self.app.as_mut() else {
             return;
         };
+        let _ = gpu.device.poll(wgpu::PollType::Poll);
+        app.pick_cache = gpu.picking.cache();
         if app.handle_window_event(&event, &mut gpu.camera) {
             needs_redraw = true;
         }
@@ -606,9 +608,20 @@ impl NativeRunner {
                     .egui_ctx
                     .tessellate(full_output.shapes, full_output.pixels_per_point);
                 let labels = app.renderer_labels(&gpu.camera);
+                let input_config = app.state.resolved_view_input(app.input_device.trackpad);
+                let hover_color = input_config.hover_hl_color();
                 match gpu.render(
                     GpuSceneFrame {
                         labels: &labels,
+                        gpu_pick: input_config.gpu_pick(),
+                        hover: (app.state.config_value("view_input:hover-highlight") != "false")
+                            .then(|| app.state.active_hover_hit())
+                            .flatten(),
+                        hover_color: [
+                            hover_color.r as f32 / 255.,
+                            hover_color.g as f32 / 255.,
+                            hover_color.b as f32 / 255.,
+                        ],
                         snapshot: &app.snapshot,
                         revision: app.snapshot_revision,
                         background: app.background.clear_color(),
@@ -1473,7 +1486,8 @@ struct GuiApplication {
     navigation: Navigation,
     lasso_points: Vec<egui::Pos2>,
     hover_hit: Option<AtomHit>,
-    hover_sample: Option<(egui::Pos2, u64, [[f32; 4]; 4])>,
+    hover_sample: Option<(egui::Pos2, u64, [[f32; 4]; 4], bool)>,
+    pick_cache: cuemol_desktop_core::picking::PickCache,
     pick_atoms: Vec<cuemol_render::RenderAtom>,
     show_toolbar: bool,
     show_workspace: bool,
@@ -5148,6 +5162,7 @@ impl GuiApplication {
             lasso_points: Vec::new(),
             hover_hit: None,
             hover_sample: None,
+            pick_cache: Default::default(),
             pick_atoms: Vec::new(),
             show_toolbar,
             show_workspace: true,
@@ -31358,6 +31373,72 @@ impl GuiApplication {
         }
     }
 
+    fn gpu_pick_image(
+        &self,
+        camera: &CameraController,
+        viewport: egui::Rect,
+    ) -> Option<std::sync::Arc<cuemol_desktop_core::picking::PickImage>> {
+        let camera = camera.to_qsys_camera("__current");
+        if !self
+            .state
+            .resolved_view_input(self.input_device.trackpad)
+            .gpu_pick()
+            || camera.stereo_mode() != StereoMode::None
+        {
+            return None;
+        }
+        let size = [
+            (viewport.width() * self.pixels_per_point) as u32,
+            (viewport.height() * self.pixels_per_point) as u32,
+        ];
+        let stamp =
+            cuemol_desktop_core::picking::GpuPicking::stamp(self.snapshot_revision, &camera, size);
+        self.pick_cache
+            .lock()
+            .ok()?
+            .as_ref()
+            .filter(|image| image.stamp == stamp)
+            .cloned()
+    }
+
+    fn pick_record(
+        &self,
+        camera: &CameraController,
+        viewport: egui::Rect,
+        point: egui::Pos2,
+    ) -> Option<cuemol_desktop_core::picking::PickRecord> {
+        let image = self.gpu_pick_image(camera, viewport);
+        let point = [
+            (point.x - viewport.left()) as f64,
+            (point.y - viewport.top()) as f64,
+        ];
+        let size = [viewport.width() as f64, viewport.height() as f64];
+        let precision = self
+            .state
+            .resolved_view_input(self.input_device.trackpad)
+            .hitprec();
+        image
+            .as_ref()
+            .and_then(|image| image.hit_at(point, size, precision))
+            .or_else(|| {
+                cuemol_desktop_core::picking::cpu_hit(
+                    &self.snapshot,
+                    (if image.is_some() {
+                        cuemol_desktop_core::offscreen::camera_pick_mvp
+                    } else {
+                        cuemol_desktop_core::offscreen::camera_mvp
+                    })(
+                        &camera.to_qsys_camera("__current"),
+                        viewport.aspect_ratio() as f64,
+                    ),
+                    point,
+                    size,
+                    precision,
+                    image.is_some(),
+                )
+            })
+    }
+
     fn pick_hit(&self, camera: &CameraController, position: egui::Pos2) -> Option<PickHit> {
         self.pick_hit_with_object(camera, position, None)
     }
@@ -31373,40 +31454,16 @@ impl GuiApplication {
             .state
             .resolved_view_input(self.input_device.trackpad)
             .hitprec() as f32;
-        let mut best: Option<(f32, PickHit)> = None;
-        let atoms = &self.pick_atoms;
-        for atom in atoms {
-            let (Some(object_uid), Some(atom_index)) = (atom.object_uid, atom.atom_index) else {
-                continue;
-            };
-            if object_filter.is_some_and(|filter| filter.get() != object_uid) {
-                continue;
-            }
-            let center = vec3_from_vector(atom.center);
-            let Some((screen, depth)) = camera.project_to_viewport(center, viewport) else {
-                continue;
-            };
-            let radius = camera
-                .projected_radius(atom.radius, depth, viewport)
-                .max(hit_precision);
-            let distance = screen.distance(position);
-            if distance > radius {
-                continue;
-            }
-            let score = distance + depth * 0.001;
-            if best
-                .as_ref()
-                .is_none_or(|(best_score, _)| score < *best_score)
-            {
-                best = Some((
-                    score,
-                    PickHit::Atom {
-                        object_uid,
-                        atom_index,
-                    },
-                ));
-            }
+        if let Some(record) = self
+            .pick_record(camera, viewport, position)
+            .filter(|record| object_filter.is_none_or(|id| id.get() == record.object_id))
+        {
+            return Some(PickHit::Atom {
+                object_uid: record.object_id,
+                atom_index: record.atom_index,
+            });
         }
+        let mut best: Option<(f32, PickHit)> = None;
         if object_filter.is_none() {
             for (snapshot_index, atom) in self.snapshot.atoms.iter().enumerate() {
                 if atom.hit.is_none() || atom.object_uid.is_none() {
@@ -33865,6 +33922,9 @@ fn encode_animation_movie(
 }
 
 struct GpuSceneFrame<'a> {
+    gpu_pick: bool,
+    hover: Option<cuemol_qsys::ViewHoverHit>,
+    hover_color: [f32; 3],
     labels: &'a [GuiAtomLabel],
     options: ViewportOptions,
     snapshot: &'a RenderSceneSnapshot,
@@ -33900,6 +33960,7 @@ struct GpuState {
     size: PhysicalSize<u32>,
     camera: CameraController,
     viewport_renderer: ViewportRenderer,
+    picking: cuemol_desktop_core::picking::GpuPicking,
     labels: cuemol_desktop_core::labels::LabelRenderer,
     effects: ViewportEffects,
     effects_pending: bool,
@@ -33957,6 +34018,7 @@ impl GpuState {
         surface.configure(&device, &config);
         let camera = CameraController::default();
         let viewport_renderer = ViewportRenderer::new(&device, config.format);
+        let picking = cuemol_desktop_core::picking::GpuPicking::new(&device, config.format);
         let egui_renderer = egui_wgpu::Renderer::new(
             &device,
             config.format,
@@ -33973,6 +34035,7 @@ impl GpuState {
             size,
             camera,
             viewport_renderer,
+            picking,
             labels,
             effects,
             effects_pending: false,
@@ -34051,6 +34114,19 @@ impl GpuState {
             paint_jobs,
             &screen_descriptor,
         );
+        let camera = self.camera.to_qsys_camera("__current");
+        let pick_enabled = scene.gpu_pick && camera.stereo_mode() == StereoMode::None;
+        if pick_enabled {
+            self.picking.encode(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                scene.snapshot,
+                scene.revision,
+                &camera,
+                [vw as u32, vh as u32],
+            );
+        }
         self.effects_pending = self.effects.render(
             &self.viewport_renderer,
             &self.device,
@@ -34063,6 +34139,28 @@ impl GpuState {
             Some([vx, vy, vw, vh]),
             scene.options,
         );
+        if pick_enabled {
+            self.picking.render_hover(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &view,
+                cuemol_desktop_core::picking::GpuPicking::stamp(
+                    scene.revision,
+                    &camera,
+                    [vw as u32, vh as u32],
+                ),
+                scene.hover,
+                scene.hover_color,
+                [
+                    scene.background.r as f32,
+                    scene.background.g as f32,
+                    scene.background.b as f32,
+                ],
+                [vx, vy, vw, vh],
+                pixels_per_point,
+            );
+        }
         self.labels.prepare(
             &self.device,
             &self.queue,
@@ -34101,6 +34199,9 @@ impl GpuState {
         }
         command_buffers.push(encoder.finish());
         self.queue.submit(command_buffers);
+        self.picking.start_readback();
+        let _ = self.device.poll(wgpu::PollType::Poll);
+        self.effects_pending |= self.picking.is_pending();
         frame.present();
         Ok(())
     }
@@ -39532,6 +39633,21 @@ mod tests {
             hit: None,
         });
         app.pick_atoms = app.snapshot.atoms.clone();
+        app.snapshot.mark_transparency_group(1.);
+        app.snapshot.transparency_groups[0].picking = Some(cuemol_render::RenderPickGroup {
+            object_id: 7,
+            renderer_id: 8,
+            symm_id: -1,
+            symm_name: String::new(),
+            gpu_supported: true,
+            gpu_atoms: std::sync::Arc::from([]),
+            atoms: vec![cuemol_render::RenderPickAtom {
+                position: Vector4::ZERO,
+                atom_id: 4,
+                atom_index: 3,
+            }]
+            .into(),
+        });
         assert_eq!(
             app.pick_hit(&camera, egui::pos2(400.0, 300.0)),
             Some(PickHit::Atom {
@@ -39557,6 +39673,11 @@ mod tests {
         assert!(app.pick_atom_at(&camera, hit_screen));
         assert_eq!(app.status, "LWObject [], lightweight feature");
         app.pick_atoms[0].center.z = 10000.;
+        let group = app.snapshot.transparency_groups[0]
+            .picking
+            .as_mut()
+            .unwrap();
+        std::sync::Arc::make_mut(&mut group.atoms)[0].position.z = 10000.;
         assert_eq!(app.pick_hit(&camera, egui::pos2(400., 300.)), None);
     }
 

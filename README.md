@@ -103,6 +103,17 @@ set or remove non-standard bonds. Each completed edit has one undo entry.
 The palette cap and **View > Tool palette** share a persisted collapse setting.
 Hover information and highlighting are configurable in Settings.
 
+Native, WebGL, WebGPU and Tauri views share geometry-based GPU picking and a
+translucent hover fill with a two-tone outline. Picking follows visible sphere,
+bond and mesh fragments, including ribbon and nucleic-base atom ownership.
+`ViewInputConfig.gpu_pick` switches to the CPU point-picking path, and
+`hover_hl_color` sets the fill color. `View.setHoverHit` and `clearHoverHit` update
+transient highlighting without adding scene geometry or undo entries. Locked
+objects/renderers and GPU sections with opacity at or below 0.6 do not
+participate. Symmetry and other renderers without GPU hit names retain their
+CPU picking fallback. The GPU ID buffer uses half the viewport resolution;
+cached geometry and asynchronous readback avoid rebuilding it on pointer motion.
+
 CCP4/MRC density maps support header inspection, strict grid subsampling and
 voxel limits through `CCP4MapReader` and the desktop file dialogs. Native reads
 use a row buffer and quantized voxel storage; compressed files spool to a

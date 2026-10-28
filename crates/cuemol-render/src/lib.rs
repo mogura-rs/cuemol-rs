@@ -81,6 +81,8 @@ pub struct RenderBond {
 /// A single triangle-mesh vertex for ribbon/cartoon geometry.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MeshVertex {
+    /// Owning molecule atom; `u32::MAX` excludes auxiliary geometry from picking.
+    pub pick_atom_index: Option<u32>,
     pub position: Vector4,
     pub normal: Vector4,
     /// Resolved RGBA in `[0, 1]`.
@@ -193,11 +195,30 @@ impl RenderMesh {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct RenderPickAtom {
+    pub position: Vector4,
+    pub atom_id: i32,
+    pub atom_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderPickGroup {
+    pub object_id: u64,
+    pub renderer_id: u64,
+    pub symm_id: i32,
+    pub symm_name: String,
+    pub gpu_supported: bool,
+    pub atoms: std::sync::Arc<[RenderPickAtom]>,
+    pub gpu_atoms: std::sync::Arc<[RenderPickAtom]>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct RenderTransparencyGroup {
     pub name: String,
     pub alpha: f32,
     pub material: String,
     pub edge_group: String,
+    pub picking: Option<RenderPickGroup>,
     pub edge_style: Option<RenderEdgeStyle>,
     pub atom_range: Range<usize>,
     pub bond_range: Range<usize>,
@@ -529,6 +550,7 @@ impl RenderSceneSnapshot {
             alpha: alpha.clamp(0.0, 1.0),
             material: material.into(),
             edge_group: String::new(),
+            picking: None,
             edge_style: self
                 .atoms
                 .iter()
@@ -566,6 +588,15 @@ impl RenderSceneSnapshot {
     /// transforms that set `xformMat`. Bounds are recomputed from the transformed
     /// geometry so a moved object still auto-frames correctly.
     pub fn apply_xform(&mut self, m: &Matrix4) {
+        for group in &mut self.transparency_groups {
+            if let Some(picking) = &mut group.picking {
+                for atoms in [&mut picking.atoms, &mut picking.gpu_atoms] {
+                    for atom in std::sync::Arc::make_mut(atoms) {
+                        m.xform3d(&mut atom.position);
+                    }
+                }
+            }
+        }
         for volume in &mut self.volumes {
             volume.apply_xform(m);
         }
@@ -2875,6 +2906,7 @@ fn append_clipped_edge_vertex(
     normal.w = first.normal.w;
     let index = mesh.vertices.len() as u32;
     mesh.vertices.push(MeshVertex {
+        pick_atom_index: None,
         position,
         normal,
         color: first.color,
@@ -4964,6 +4996,7 @@ fn add_sphere_detailed(
             let (st, ct) = theta.sin_cos();
             let dir = Vector4::new3(sp * ct, cp, sp * st);
             mesh.vertices.push(MeshVertex {
+                pick_atom_index: None,
                 position: Vector4::new3(
                     center.x + radius * dir.x,
                     center.y + radius * dir.y,
@@ -5021,6 +5054,7 @@ fn add_cylinder_detailed(
             let (s, c) = theta.sin_cos();
             let offset = n1.scale(c * radius) + n2.scale(s * radius);
             mesh.vertices.push(MeshVertex {
+                pick_atom_index: None,
                 position: end + offset,
                 normal: normalize3(offset),
                 color,
@@ -5171,11 +5205,13 @@ fn add_cone_detailed(
         let radial = side1.scale(cos) + side2.scale(sin);
         let normal = normalize3(radial + tangent.scale(radius / length));
         mesh.vertices.push(MeshVertex {
+            pick_atom_index: None,
             position: base_center + radial.scale(radius),
             normal,
             color,
         });
         mesh.vertices.push(MeshVertex {
+            pick_atom_index: None,
             position: tip,
             normal,
             color,
@@ -5188,6 +5224,7 @@ fn add_cone_detailed(
 
     let cap_center = mesh.vertices.len() as u32;
     mesh.vertices.push(MeshVertex {
+        pick_atom_index: None,
         position: base_center,
         normal: tangent.scale(-1.0),
         color,
@@ -5196,6 +5233,7 @@ fn add_cone_detailed(
         let angle = std::f64::consts::TAU * index as f64 / segments as f64;
         let (sin, cos) = angle.sin_cos();
         mesh.vertices.push(MeshVertex {
+            pick_atom_index: None,
             position: base_center + (side1.scale(cos) + side2.scale(sin)).scale(radius),
             normal: tangent.scale(-1.0),
             color,
@@ -5856,6 +5894,7 @@ mod tests {
         let mut mesh = RenderMesh::new();
         mesh.vertices.push(
             MeshVertex {
+                pick_atom_index: None,
                 position: Vector4::new3(1.0, 0.0, 0.0),
                 normal: Vector4::new3(1.0, 0.0, 0.0),
                 color: [1.0, 1.0, 1.0, 1.0],
@@ -5970,6 +6009,7 @@ mod tests {
             )],
             meshes: vec![RenderMesh {
                 vertices: vec![MeshVertex {
+                    pick_atom_index: None,
                     position: Vector4::ZERO,
                     normal: Vector4::new3(0.0, 0.0, 1.0),
                     color: [0.0, 0.0, 1.0, 0.5],
@@ -6177,6 +6217,7 @@ mod tests {
             vertices: vertices
                 .iter()
                 .map(|position| MeshVertex {
+                    pick_atom_index: None,
                     position: *position,
                     normal: Vector4::new3(0.0, 0.0, 1.0),
                     color: [1.0; 4],
@@ -6251,6 +6292,7 @@ mod tests {
     #[test]
     fn luxrender_camera_export_bakes_view_transform_and_projection() {
         let vertex = |position| MeshVertex {
+            pick_atom_index: None,
             position,
             normal: Vector4::new3(0.0, 1.0, 0.0),
             color: [1.0; 4],
@@ -6290,6 +6332,7 @@ mod tests {
     #[test]
     fn luxrender_scene_preserves_gradient_and_alpha_materials() {
         let vertex = |x, color| MeshVertex {
+            pick_atom_index: None,
             position: Vector4::new3(x, 0.0, 0.0),
             normal: Vector4::new3(0.0, 1.0, 0.0),
             color,
@@ -6508,6 +6551,7 @@ mod tests {
             ]
             .into_iter()
             .map(|(x, y, z)| MeshVertex {
+                pick_atom_index: None,
                 position: Vector4::new3(x, y, z),
                 normal: Vector4::new3(0.0, 0.0, 1.0),
                 color: [1.0; 4],
@@ -6547,6 +6591,7 @@ mod tests {
             for &ci in &q {
                 let (x, y, z) = corners[ci];
                 verts.push(MeshVertex {
+                    pick_atom_index: None,
                     position: Vector4::new3(x, y, z),
                     normal: Vector4::new3(0.0, 0.0, 1.0),
                     color: [0.8; 4],
@@ -6735,16 +6780,19 @@ mod tests {
         let mesh = RenderMesh {
             vertices: vec![
                 MeshVertex {
+                    pick_atom_index: None,
                     position: Vector4::new3(-1.0, 0.0, 0.0),
                     normal,
                     color: [1.0, 0.0, 0.0, 1.0],
                 },
                 MeshVertex {
+                    pick_atom_index: None,
                     position: Vector4::new3(1.0, 0.0, 0.0),
                     normal,
                     color: [0.0, 1.0, 0.0, 1.0],
                 },
                 MeshVertex {
+                    pick_atom_index: None,
                     position: Vector4::new3(0.0, 1.0, 2.0),
                     normal,
                     color: [0.0, 0.0, 1.0, 1.0],
@@ -6782,16 +6830,19 @@ mod tests {
         let mesh = RenderMesh {
             vertices: vec![
                 MeshVertex {
+                    pick_atom_index: None,
                     position: Vector4::new3(0.0, 0.0, 0.0),
                     normal: Vector4::new3(0.0, 0.0, 1.0),
                     color: [0.0, 0.0, 0.0, 1.0],
                 },
                 MeshVertex {
+                    pick_atom_index: None,
                     position: Vector4::new3(1.0, 0.0, 0.0),
                     normal: Vector4::new3(0.0, 0.0, 1.0),
                     color: [1.0, 1.0, 1.0, 1.0],
                 },
                 MeshVertex {
+                    pick_atom_index: None,
                     position: Vector4::new3(0.0, 1.0, 0.0),
                     normal: Vector4::new3(0.0, 0.0, 1.0),
                     color: [1.0, 1.0, 1.0, 1.0],
@@ -6894,16 +6945,19 @@ mod tests {
         let mesh = RenderMesh {
             vertices: vec![
                 MeshVertex {
+                    pick_atom_index: None,
                     position: Vector4::new3(-1.0, -1.0, 0.0),
                     normal: Vector4::new3(0.0, 0.0, 1.0),
                     color: [1.0, 0.0, 0.0, 0.5],
                 },
                 MeshVertex {
+                    pick_atom_index: None,
                     position: Vector4::new3(1.0, -1.0, 0.0),
                     normal: Vector4::new3(0.0, 0.0, 1.0),
                     color: [1.0, 0.0, 0.0, 0.5],
                 },
                 MeshVertex {
+                    pick_atom_index: None,
                     position: Vector4::new3(0.0, 1.0, 0.0),
                     normal: Vector4::new3(0.0, 0.0, 1.0),
                     color: [1.0, 0.0, 0.0, 0.5],
@@ -6935,16 +6989,19 @@ mod tests {
         let mesh = RenderMesh {
             vertices: vec![
                 MeshVertex {
+                    pick_atom_index: None,
                     position: Vector4::new3(-1.0, -1.0, 0.0),
                     normal: Vector4::new3(0.0, 0.0, 1.0),
                     color: [1.0; 4],
                 },
                 MeshVertex {
+                    pick_atom_index: None,
                     position: Vector4::new3(1.0, -1.0, 0.0),
                     normal: Vector4::new3(0.0, 0.0, 1.0),
                     color: [1.0; 4],
                 },
                 MeshVertex {
+                    pick_atom_index: None,
                     position: Vector4::new3(0.0, 1.0, 0.0),
                     normal: Vector4::new3(0.0, 0.0, 1.0),
                     color: [1.0; 4],
@@ -6974,6 +7031,7 @@ mod tests {
             vertices: points
                 .iter()
                 .map(|position| MeshVertex {
+                    pick_atom_index: None,
                     position: *position,
                     normal: Vector4::new3(0.0, 0.0, 1.0),
                     color: [1.0; 4],
@@ -7002,16 +7060,19 @@ mod tests {
         let triangle = |offset: f64, alpha: f32| RenderMesh {
             vertices: vec![
                 MeshVertex {
+                    pick_atom_index: None,
                     position: Vector4::new3(offset, 0.0, 0.0),
                     normal: Vector4::new3(0.0, 0.0, 1.0),
                     color: [1.0, 0.0, 0.0, alpha],
                 },
                 MeshVertex {
+                    pick_atom_index: None,
                     position: Vector4::new3(offset + 1.0, 0.0, 0.0),
                     normal: Vector4::new3(0.0, 0.0, 1.0),
                     color: [1.0, 0.0, 0.0, alpha],
                 },
                 MeshVertex {
+                    pick_atom_index: None,
                     position: Vector4::new3(offset, 1.0, 0.0),
                     normal: Vector4::new3(0.0, 0.0, 1.0),
                     color: [1.0, 0.0, 0.0, alpha],
@@ -7030,6 +7091,7 @@ mod tests {
                     alpha: 0.5,
                     material: "matte".to_string(),
                     edge_group: String::new(),
+                    picking: None,
                     edge_style: None,
                     atom_range: 0..0,
                     bond_range: 0..0,
@@ -7040,6 +7102,7 @@ mod tests {
                     alpha: 0.54,
                     material: "metallic_chrome".to_string(),
                     edge_group: String::new(),
+                    picking: None,
                     edge_style: None,
                     atom_range: 0..0,
                     bond_range: 0..0,
@@ -7050,6 +7113,7 @@ mod tests {
                     alpha: 0.95,
                     material: "toon2".to_string(),
                     edge_group: String::new(),
+                    picking: None,
                     edge_style: None,
                     atom_range: 0..0,
                     bond_range: 0..0,
@@ -7142,16 +7206,19 @@ mod tests {
         let mesh = RenderMesh {
             vertices: vec![
                 MeshVertex {
+                    pick_atom_index: None,
                     position: Vector4::new3(2.0, 2.0, 3.0),
                     normal: Vector4::new3(0.0, 0.0, 1.0),
                     color,
                 },
                 MeshVertex {
+                    pick_atom_index: None,
                     position: Vector4::new3(1.0, 3.0, 3.0),
                     normal: Vector4::new3(0.0, 0.0, 1.0),
                     color,
                 },
                 MeshVertex {
+                    pick_atom_index: None,
                     position: Vector4::new3(1.0, 2.0, 4.0),
                     normal: Vector4::new3(0.0, 0.0, 1.0),
                     color,
@@ -7215,6 +7282,7 @@ mod tests {
                 alpha: 1.0,
                 material: "custom".to_string(),
                 edge_group: String::new(),
+                picking: None,
                 edge_style: None,
                 atom_range: 0..1,
                 bond_range: 0..0,
@@ -7225,6 +7293,7 @@ mod tests {
                 alpha: 1.0,
                 material: "default".to_string(),
                 edge_group: String::new(),
+                picking: None,
                 edge_style: None,
                 atom_range: 1..2,
                 bond_range: 0..0,
@@ -7335,6 +7404,7 @@ mod tests {
     fn luxcore_camera_export_bakes_view_transform_and_projection() {
         let mesh = RenderMesh {
             vertices: vec![MeshVertex {
+                pick_atom_index: None,
                 position: Vector4::new3(2.0, 4.0, 6.0),
                 normal: Vector4::new3(0.0, 1.0, 0.0),
                 color: [0.25, 0.5, 1.0, 1.0],
@@ -7384,6 +7454,7 @@ mod tests {
                 alpha: 1.0,
                 material: "default".to_string(),
                 edge_group: String::new(),
+                picking: None,
                 edge_style: None,
                 atom_range: 0..1,
                 bond_range: 0..0,
@@ -7394,6 +7465,7 @@ mod tests {
                 alpha: 1.0,
                 material: "default".to_string(),
                 edge_group: String::new(),
+                picking: None,
                 edge_style: None,
                 atom_range: 1..2,
                 bond_range: 0..0,

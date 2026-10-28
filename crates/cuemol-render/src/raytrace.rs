@@ -1751,6 +1751,7 @@ pub fn render_umbreon_smoke() -> UmbreonSmokeResult {
         vertices: [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
             .into_iter()
             .map(|(x, y)| crate::MeshVertex {
+                pick_atom_index: None,
                 position: Vector4::new3(x, y, 0.0),
                 normal: Vector4::new3(0.0, 0.0, 1.0),
                 color: [1.0, 1.0, 1.0, 1.0],
@@ -1835,6 +1836,7 @@ mod tests {
             vertices: [(-2.0, -2.0), (2.0, -2.0), (0.0, 2.0)]
                 .into_iter()
                 .map(|(x, y)| MeshVertex {
+                    pick_atom_index: None,
                     position: Vector4::new3(x, y, -1.0),
                     normal: Vector4::new3(0.0, 0.0, 1.0),
                     color: [1.0, 0.2, 0.2, 1.0],
@@ -1892,6 +1894,7 @@ mod tests {
                 .into_iter()
                 .map(|(x, y)| {
                     MeshVertex {
+                        pick_atom_index: None,
                         position: Vector4::new3(x, y, 0.0),
                         normal: Vector4::new3(1.0, 0.0, 0.0),
                         color,
@@ -1990,6 +1993,7 @@ mod tests {
             vertices: [(-2.0, -2.0), (2.0, -2.0), (0.0, 2.0)]
                 .into_iter()
                 .map(|(x, y)| MeshVertex {
+                    pick_atom_index: None,
                     position: Vector4::new3(x, y, z),
                     normal: Vector4::new3(0.0, 0.0, 1.0),
                     color: rgba,
@@ -2043,6 +2047,7 @@ mod tests {
                     material: "default".to_string(),
                     edge_group: String::new(),
                     edge_style: None,
+                    picking: None,
                     atom_range: atom_index..atom_index + 1,
                     bond_range: 0..0,
                     mesh_range: 0..0,
@@ -2087,6 +2092,7 @@ mod tests {
                     material: "default".to_string(),
                     edge_group: String::new(),
                     edge_style: None,
+                    picking: None,
                     atom_range: 0..sphere_count,
                     bond_range: 0..0,
                     mesh_range: 0..0,
@@ -2120,6 +2126,7 @@ mod tests {
                 vertices: [(-2.0, -2.0), (2.0, -2.0), (0.0, 2.0)]
                     .into_iter()
                     .map(|(x, y)| MeshVertex {
+                        pick_atom_index: None,
                         position: Vector4::new3(x, y, 0.0),
                         normal: Vector4::new3(0.0, 0.0, 1.0),
                         color: [0.5, 0.5, 0.5, 1.0],

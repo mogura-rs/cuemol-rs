@@ -76,6 +76,7 @@ fn diffuse_gather_conserves_uniform_environment_and_transfers_wall_color() {
         vertices: [(-5., 0.), (5., 0.), (5., 10.), (-5., 10.)]
             .into_iter()
             .map(|(y, z)| MeshVertex {
+                pick_atom_index: None,
                 position: Vector4::new3(-1., y, z),
                 normal: Vector4::new3(1., 0., 0.),
                 color: [1., 0.02, 0.01, 1.],
@@ -123,6 +124,7 @@ fn ao_separates_contact_and_shape_with_bounded_radii() {
 }
 fn group(alpha: f32) -> RenderTransparencyGroup {
     RenderTransparencyGroup {
+        picking: None,
         name: "veil".into(),
         alpha,
         material: "default".into(),
@@ -181,6 +183,7 @@ fn crease_angle_controls_fold_contours_without_inking_a_smooth_plane() {
             vertices: [(lo, -2.), (hi, -2.), (hi, 2.), (lo, 2.)]
                 .into_iter()
                 .map(|(x, y)| MeshVertex {
+                    pick_atom_index: None,
                     position: Vector4::new3(x, y, 0.),
                     normal: n,
                     color: [1.; 4],

@@ -725,6 +725,18 @@ pub(super) fn mesh(
     subdiv: usize,
 ) -> RenderMesh {
     let mut mesh = RenderMesh::new();
+    let owner_at = |ring: &Ring| {
+        let pivot = (ring.par.floor()
+            + if ring.par - ring.par.floor() > 0.5 {
+                1.
+            } else {
+                0.
+            })
+        .max(0.) as usize;
+        points
+            .get(pivot.min(points.len().saturating_sub(1)))
+            .map(|point| point.atom_index as u32)
+    };
     let color_at = |ring: &Ring| {
         let par = if options.smooth_color {
             ring.par
@@ -787,6 +799,7 @@ pub(super) fn mesh(
                 .unwrap_or(1.0);
             let scale = ring.scale;
             let color = color_at(ring);
+            let pick_atom_index = owner_at(ring);
             for vertex in strip.profile.vertices.iter() {
                 let [x, y] = vertex.xy;
                 let [nx, ny] = vertex.normal;
@@ -832,6 +845,7 @@ pub(super) fn mesh(
                     }
                 }
                 mesh.vertices.push(MeshVertex {
+                    pick_atom_index,
                     position: ring.center + offset,
                     normal,
                     color,
@@ -880,6 +894,11 @@ pub(super) fn mesh(
                 };
                 if cap != TubeCapType::None {
                     let next_color = strip.rings.get(1).map(&color_at).unwrap_or(color);
+                    let cap_owner = if ri == 0 && strip.start_cap_next_color {
+                        strip.rings.get(1).and_then(&owner_at).or(pick_atom_index)
+                    } else {
+                        pick_atom_index
+                    };
                     let cap_color = if ri == 0 && strip.start_cap_next_color {
                         next_color
                     } else {
@@ -897,6 +916,7 @@ pub(super) fn mesh(
                             ring,
                             &strip.profile,
                             next_color,
+                            strip.rings.get(1).and_then(&owner_at).or(pick_atom_index),
                             cap,
                             true,
                             putty,
@@ -909,6 +929,7 @@ pub(super) fn mesh(
                         &cap_ring,
                         &strip.profile,
                         cap_color,
+                        cap_owner,
                         cap,
                         ri == 0,
                         putty,
@@ -928,6 +949,7 @@ fn cap_mesh(
     ring: &Ring,
     profile: &Profile,
     color: [f32; 4],
+    pick_atom_index: Option<u32>,
     cap: TubeCapType,
     start: bool,
     putty: f64,
@@ -947,12 +969,14 @@ fn cap_mesh(
             }
             let base = mesh.vertices.len() as u32;
             mesh.vertices.push(MeshVertex {
+                pick_atom_index,
                 position: center,
                 normal,
                 color,
             });
             for position in edge {
                 mesh.vertices.push(MeshVertex {
+                    pick_atom_index,
                     position,
                     normal,
                     color,
@@ -1009,6 +1033,7 @@ fn cap_mesh(
                     )
                 };
                 mesh.vertices.push(MeshVertex {
+                    pick_atom_index,
                     position: center + position,
                     normal,
                     color,

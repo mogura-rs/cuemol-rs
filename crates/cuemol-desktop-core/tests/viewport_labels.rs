@@ -19,6 +19,7 @@ fn labels_depth_test_each_pixel_and_keep_explicit_overlay_order() {
         vertices: [(-4., -4.), (0., -4.), (0., 4.), (-4., 4.)]
             .into_iter()
             .map(|(x, y)| MeshVertex {
+                pick_atom_index: None,
                 position: Vector4::new3(x, y, 0.),
                 normal: Vector4::new4(0., 0., 1., 2.),
                 color: [1.; 4],

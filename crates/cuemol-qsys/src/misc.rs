@@ -1108,6 +1108,10 @@ impl crate::EditInfo for PropEditInfo {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViewInputConfig {
+    gpu_pick: bool,
+    hover_hl_color: Rgba8,
+    explicit_gpu_pick: bool,
+    explicit_hover_hl_color: bool,
     tb_rad: f64,
     hit_prec: f64,
     style_name: String,
@@ -1133,6 +1137,15 @@ impl Default for ViewInputConfig {
             (Self::VIEW_SLAB, "LBUTTON|SHIFT|MOUSE_X".to_string()),
         ]);
         Self {
+            gpu_pick: true,
+            hover_hl_color: Rgba8 {
+                r: 255,
+                g: 102,
+                b: 153,
+                a: 255,
+            },
+            explicit_gpu_pick: false,
+            explicit_hover_hl_color: false,
             tb_rad: 0.8,
             hit_prec: 10.0,
             style_name: String::new(),
@@ -1157,6 +1170,24 @@ impl ViewInputConfig {
 
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn gpu_pick(&self) -> bool {
+        self.gpu_pick
+    }
+
+    pub fn set_gpu_pick(&mut self, enabled: bool) {
+        self.gpu_pick = enabled;
+        self.explicit_gpu_pick = true;
+    }
+
+    pub fn hover_hl_color(&self) -> Rgba8 {
+        self.hover_hl_color
+    }
+
+    pub fn set_hover_hl_color(&mut self, color: Rgba8) {
+        self.hover_hl_color = color;
+        self.explicit_hover_hl_color = true;
     }
 
     pub fn tb_rad(&self) -> f64 {
@@ -1229,6 +1260,49 @@ impl ViewInputConfig {
         self.assign_binding(id, value);
     }
 
+    pub fn reset_property(&mut self, name: &str) -> bool {
+        let defaults = Self::default();
+        match name {
+            "gpu_pick" => {
+                self.gpu_pick = defaults.gpu_pick;
+                self.explicit_gpu_pick = false;
+            }
+            "hover_hl_color" => {
+                self.hover_hl_color = defaults.hover_hl_color;
+                self.explicit_hover_hl_color = false;
+            }
+            "tbrad" => {
+                self.tb_rad = defaults.tb_rad;
+                self.explicit_tb_rad = false;
+            }
+            "hitprec" => {
+                self.hit_prec = defaults.hit_prec;
+                self.explicit_hit_prec = false;
+            }
+            "style" => self.style_name = defaults.style_name,
+            _ => {
+                let id = match name {
+                    "conf_rotx" => Self::VIEW_ROTX,
+                    "conf_roty" => Self::VIEW_ROTY,
+                    "conf_rotz" => Self::VIEW_ROTZ,
+                    "conf_zoom" => Self::VIEW_ZOOM,
+                    "conf_trax" => Self::VIEW_TRAX,
+                    "conf_tray" => Self::VIEW_TRAY,
+                    "conf_traz" => Self::VIEW_TRAZ,
+                    "conf_slab" => Self::VIEW_SLAB,
+                    "conf_dist" => Self::VIEW_DIST,
+                    _ => return false,
+                };
+                self.explicit_bindings.retain(|(key, _)| *key != id);
+                self.bindings = defaults.bindings;
+                for (key, binding) in self.explicit_bindings.clone() {
+                    self.assign_binding(key, binding);
+                }
+            }
+        }
+        true
+    }
+
     fn assign_binding(&mut self, id: i32, value: String) {
         let codes: Vec<_> = value
             .split(',')
@@ -1262,11 +1336,27 @@ impl ViewInputConfig {
         let mut resolved = Self::default();
         resolved.tb_rad = self.tb_rad;
         resolved.hit_prec = self.hit_prec;
+        resolved.gpu_pick = self.gpu_pick;
+        resolved.hover_hl_color = self.hover_hl_color;
         resolved.style_name = self.style_name.clone();
         for name in self.style_name.split(',').map(str::trim) {
             let Some(node) = styles.style_node(0, name) else {
                 continue;
             };
+            if !self.explicit_gpu_pick {
+                if let Ok(value) = node.str_attr("gpu_pick").as_str().parse() {
+                    resolved.gpu_pick = value;
+                }
+            }
+            if !self.explicit_hover_hl_color {
+                if let Some(value) =
+                    cuemol_gfx::parse_color(node.str_attr("hover_hl_color").as_str())
+                        .ok()
+                        .and_then(|color| color.rgba8())
+                {
+                    resolved.hover_hl_color = value;
+                }
+            }
             if !self.explicit_tb_rad {
                 if let Ok(value) = node.str_attr("tbrad").as_str().parse() {
                     resolved.tb_rad = value;

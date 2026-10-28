@@ -3,6 +3,8 @@
 #include <iomanip>
 #include <iostream>
 #include <string>
+#include <map>
+#include <modules/molstr/AtomIterator.hpp>
 #include <libcuemol2_api/loader.hpp>
 #include <modules/molstr/MolCoord.hpp>
 #include <modules/molstr/PDBFileReader.hpp>
@@ -15,22 +17,33 @@
 
 template<class Base> class MeshOracle : public Base {
 public:
-    void write(std::ostream &out, bool faces, bool color) {
+    void write(std::ostream &out, bool faces, bool color, bool pick) {
         auto &builder = this->tubeGpuBuilder();
         builder.startBuild(this->getSceneID());
         this->render(nullptr);
         builder.finish();
-        if (faces) {
+        if (faces || pick) {
+            std::map<int, int> atom_indices;
+            molstr::AtomIterator atoms(this->getClientMol());
+            int ordinal = 0;
+            for (atoms.first(); atoms.hasMore(); atoms.next()) atom_indices[atoms.getID()] = ordinal++;
             const auto triangle = [&](int a, int b, int c) {
                 for (int i : {a, b, c}) {
                     const auto p = builder.getPos(i);
                     out << p.x() << ' ' << p.y() << ' ' << p.z() << ' ';
                 }
+                if (pick) {
+                    const int name = gfx::decodeHitName(builder.getHitName(c));
+                    out << (atom_indices.count(name) ? atom_indices.at(name) : -1);
+                }
                 out << '\n';
             };
             for (const auto &p : builder.getPrims()) {
                 if (p.type == molvis::TubeMeshBuilder::PRIM_FAN) {
-                    for (int j = 2; j < p.count; ++j) triangle(p.first, p.first + j - 1, p.first + j);
+                    for (int j = 2; j < p.count; ++j) {
+                        if (pick) triangle(p.first + j - 1, p.first + j, p.first);
+                        else triangle(p.first, p.first + j - 1, p.first + j);
+                    }
                 } else {
                     const int count = p.type == molvis::TubeMeshBuilder::PRIM_BAND ? p.count * 2 : p.count;
                     const auto index = [&](int j) {
@@ -38,7 +51,7 @@ public:
                         return j % 2 ? p.ref + (j / 2) * p.refStride : p.first + j / 2;
                     };
                     for (int j = 2; j < count; ++j) {
-                        if (j % 2) triangle(index(j - 1), index(j - 2), index(j));
+                        if (j % 2) triangle(index(j), index(j - 1), index(j - 2));
                         else triangle(index(j - 2), index(j - 1), index(j));
                     }
                 }
@@ -78,7 +91,7 @@ template<class Base> void mesh(molstr::MolCoordPtr mol, const char *style, std::
         if (!ok)
             throw std::runtime_error("Unknown property: " + setting);
     }
-    renderer->write(out, std::string(argv[2]) == "faces", std::string(argv[2]) == "color");
+    renderer->write(out, std::string(argv[2]) == "faces", std::string(argv[2]) == "color", std::string(argv[2]) == "pick");
 }
 
 int main(int argc, char **argv) {
@@ -87,7 +100,7 @@ int main(int argc, char **argv) {
     std::ofstream out(argv[3]);
     out << std::setprecision(17);
     const std::string mode(argv[2]);
-    if ((mode == "mesh" || mode == "faces" || mode == "color") && argc >= 7) {
+    if ((mode == "mesh" || mode == "faces" || mode == "color" || mode == "pick") && argc >= 7) {
         molstr::MolCoordPtr mol(new molstr::MolCoord());
         molstr::PDBFileReader reader;
         reader.resetAllProps();

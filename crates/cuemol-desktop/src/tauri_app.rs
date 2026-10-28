@@ -1531,6 +1531,7 @@ struct AppModel {
     renderer_warmup: Option<std::thread::JoinHandle<Option<Arc<SceneRenderer>>>>,
     renderer_init_attempted: bool,
     render_snapshot: Option<RenderSceneSnapshot>,
+    snapshot_revision: u64,
     snapshot_refit_pending: bool,
     selection: String,
     background: String,
@@ -1728,6 +1729,7 @@ impl AppModel {
             renderer_warmup: None,
             renderer_init_attempted: false,
             render_snapshot: None,
+            snapshot_revision: 0,
             snapshot_refit_pending: loaded > 0,
             selection: startup_selection.unwrap_or_default(),
             background: "black".to_string(),
@@ -6153,6 +6155,7 @@ impl AppModel {
     }
 
     fn invalidate_snapshot(&mut self, refit: bool) {
+        self.snapshot_revision = self.snapshot_revision.wrapping_add(1);
         self.render_snapshot = None;
         self.snapshot_refit_pending |= refit;
     }
@@ -6262,6 +6265,28 @@ impl AppModel {
                     .active_atom_intr_labels(mvp, width as f32, height as f32, 1000),
             )
             .collect::<Vec<_>>();
+        let input = self.desktop.resolved_view_input(false);
+        if input.gpu_pick() && self.camera.stereo_mode() == cuemol_qsys::StereoMode::None {
+            let color = input.hover_hl_color();
+            let hit = (self.desktop.config_value("view_input:hover-highlight") != "false")
+                .then(|| self.desktop.active_hover_hit())
+                .flatten();
+            return renderer.render_interactive_viewport(
+                snapshot,
+                &self.camera,
+                [width, height],
+                background,
+                ViewportOptions::from_state(&self.desktop),
+                &labels,
+                self.snapshot_revision,
+                hit,
+                [
+                    color.r as f32 / 255.,
+                    color.g as f32 / 255.,
+                    color.b as f32 / 255.,
+                ],
+            );
+        }
         renderer.render_viewport_with_labels(
             snapshot,
             &self.camera,
@@ -6329,6 +6354,9 @@ impl AppModel {
                         format!("data:image/png;base64,{}", base64_encode(&png))
                     })
             });
+        let image = self.gpu_pick_image(width, height);
+        self.desktop
+            .sync_viewport_pick_image(&self.camera, [width as f32, height as f32], image);
         viewport
     }
 
@@ -6867,6 +6895,71 @@ impl AppModel {
         Ok(())
     }
 
+    fn gpu_pick_image(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> Option<Arc<cuemol_desktop_core::picking::PickImage>> {
+        if self.render_snapshot.is_none()
+            || !self.desktop.resolved_view_input(false).gpu_pick()
+            || self.camera.stereo_mode() != cuemol_qsys::StereoMode::None
+        {
+            return None;
+        }
+        self.renderer
+            .as_ref()?
+            .pick_image(self.snapshot_revision, &self.camera, [width, height])
+    }
+
+    fn pick_record(
+        &self,
+        x: f64,
+        y: f64,
+        width: u32,
+        height: u32,
+    ) -> Option<cuemol_desktop_core::picking::PickRecord> {
+        let image = self.gpu_pick_image(width, height);
+        let precision = self.desktop.resolved_view_input(false).hitprec();
+        image
+            .as_ref()
+            .and_then(|image| image.hit_at([x, y], [width as f64, height as f64], precision))
+            .or_else(|| {
+                cuemol_desktop_core::picking::cpu_hit(
+                    self.render_snapshot.as_ref()?,
+                    (if image.is_some() {
+                        camera_pick_mvp
+                    } else {
+                        camera_mvp
+                    })(&self.camera, width as f64 / height.max(1) as f64),
+                    [x, y],
+                    [width as f64, height as f64],
+                    precision,
+                    image.is_some(),
+                )
+            })
+    }
+
+    fn hover_at_screen(&mut self, x: f64, y: f64, width: u32, height: u32) -> Option<ViewportDto> {
+        let hit = self.pick_record(x, y, width, height);
+        let identity = hit.map(|record| record.hit);
+        if identity == self.desktop.active_hover_hit() {
+            return None;
+        }
+        self.desktop.set_active_hover_hit(identity);
+        if let Some(record) = hit {
+            if let Ok(atom) = self
+                .desktop
+                .atom_summary(Uid::new(record.object_id), record.atom_index)
+            {
+                self.status = format!(
+                    "{} {}{}:{}",
+                    atom.serial, atom.residue_name, atom.residue_id, atom.name
+                );
+            }
+        }
+        Some(self.render(width, height))
+    }
+
     fn atom_at_screen(
         &self,
         selection: &str,
@@ -6875,6 +6968,16 @@ impl AppModel {
         width: u32,
         height: u32,
     ) -> Result<Option<crate::GuiAtomSummary>, String> {
+        if self.render_snapshot.is_some() {
+            return self
+                .pick_record(x, y, width, height)
+                .map(|record| {
+                    self.desktop
+                        .atom_summary(Uid::new(record.object_id), record.atom_index)
+                        .map_err(|error| error.to_string())
+                })
+                .transpose();
+        }
         let atoms = self
             .desktop
             .active_pick_atoms(selection)
@@ -8085,6 +8188,12 @@ enum ModelRequest {
     SetDensityLevel(f64),
     SetBackground(String),
     PickAtom {
+        x: f64,
+        y: f64,
+        width: u32,
+        height: u32,
+    },
+    HoverAtScreen {
         x: f64,
         y: f64,
         width: u32,
@@ -11994,6 +12103,17 @@ fn handle_model_request(
                 },
             )))
         }
+        ModelRequest::HoverAtScreen {
+            x,
+            y,
+            width,
+            height,
+        } => {
+            let viewport = model
+                .hover_at_screen(x, y, width, height)
+                .unwrap_or_else(|| model.viewport_metadata(width, height));
+            Ok(ModelResponse::Viewport(viewport))
+        }
         ModelRequest::PickAtomIdentifier {
             x,
             y,
@@ -15431,6 +15551,25 @@ fn pick_atom(
 }
 
 #[tauri::command]
+fn hover_at_screen(
+    x: f64,
+    y: f64,
+    width: u32,
+    height: u32,
+    state: State<'_, ManagedState>,
+) -> Result<ViewportDto, String> {
+    viewport_response(request_model(
+        &state,
+        ModelRequest::HoverAtScreen {
+            x,
+            y,
+            width,
+            height,
+        },
+    )?)
+}
+
+#[tauri::command]
 fn pick_atom_identifier(
     x: f64,
     y: f64,
@@ -16203,6 +16342,7 @@ pub fn run() -> Result<(), tauri::Error> {
             set_background,
             pick_atom,
             pick_atom_identifier,
+            hover_at_screen,
             select_screen_rect,
             add_animation_object,
             delete_animation_object,
@@ -16309,6 +16449,7 @@ mod tests {
             renderer_warmup: None,
             renderer_init_attempted: false,
             render_snapshot: None,
+            snapshot_revision: 0,
             snapshot_refit_pending: false,
             selection: String::new(),
             background: "black".to_string(),
@@ -24373,5 +24514,54 @@ mod tests {
         let _ = std::fs::remove_file(output_dir.join("frame_frm_0000.png"));
         let _ = std::fs::remove_file(output_dir.join("frame_frm_0001.png"));
         let _ = std::fs::remove_dir(output_dir);
+    }
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn gpu_hover_uses_shared_geometry_and_does_not_rebuild_scene() {
+        let mut model = model_without_gpu();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let molecule = cuemol_molstr::read_pdb_str(
+            "HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n",
+        )
+        .unwrap();
+        let scene = model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap();
+        let object = scene.add_molecule_with_source_type("sphere", molecule, "pdb");
+        let renderer = scene
+            .object_mut(object)
+            .unwrap()
+            .add_renderer("cpk", "spheres");
+        model.camera.set_center(Vector4::ZERO);
+        model.camera.set_zoom(10.);
+        model.camera.set_cam_dist(40.);
+        model.camera.set_slab_depth(20.);
+        model.renderer = shared_scene_renderer();
+        assert!(
+            model.renderer.is_some(),
+            "a GPU adapter is required for this test"
+        );
+        model.invalidate_snapshot(false);
+        let first = model.render(128, 128);
+        assert!(first.image.is_some());
+        let revision = model.snapshot_revision;
+        let atom = model
+            .atom_at_screen("", 82., 64., 128, 128)
+            .unwrap()
+            .unwrap();
+        assert_eq!(atom.serial, 1);
+        let hover = model.hover_at_screen(82., 64., 128, 128).unwrap();
+        assert_ne!(hover.image, first.image);
+        assert_eq!(
+            model.desktop.active_hover_hit().unwrap().renderer_id,
+            renderer
+        );
+        assert_eq!(model.snapshot_revision, revision);
+        assert!(model.hover_at_screen(81., 64., 128, 128).is_none());
+        let cleared = model.hover_at_screen(-1., -1., 128, 128).unwrap();
+        assert_eq!(cleared.image, first.image);
+        assert_eq!(model.desktop.active_hover_hit(), None);
     }
 }

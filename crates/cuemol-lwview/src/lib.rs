@@ -821,6 +821,7 @@ fn append_draw_arrays(
                         .map_or(face_normal, |normal| f32_to_vector(*normal));
                     let color = colors.get(index).copied().unwrap_or([255; 4]);
                     mesh.vertices.push(cuemol_render::MeshVertex {
+                        pick_atom_index: None,
                         position: f32_to_vector(positions[index]),
                         normal,
                         color: lw_color_f32(color),
@@ -1224,16 +1225,19 @@ mod tests {
         let mesh = cuemol_render::RenderMesh {
             vertices: vec![
                 cuemol_render::MeshVertex {
+                    pick_atom_index: None,
                     position: Vector4::new3(0.0, 0.0, 0.0),
                     normal: Vector4::new3(0.0, 0.0, 1.0),
                     color: [1.0, 0.0, 0.0, 1.0],
                 },
                 cuemol_render::MeshVertex {
+                    pick_atom_index: None,
                     position: Vector4::new3(1.0, 0.0, 0.0),
                     normal: Vector4::new3(0.0, 0.0, 1.0),
                     color: [0.0, 1.0, 0.0, 1.0],
                 },
                 cuemol_render::MeshVertex {
+                    pick_atom_index: None,
                     position: Vector4::new3(0.0, 1.0, 0.0),
                     normal: Vector4::new3(0.0, 0.0, 1.0),
                     color: [0.0, 0.0, 1.0, 1.0],
@@ -1296,6 +1300,7 @@ mod tests {
                 ]
                 .into_iter()
                 .map(|position| cuemol_render::MeshVertex {
+                    pick_atom_index: None,
                     position,
                     normal: Vector4::new3(0.0, 0.0, 1.0),
                     color,

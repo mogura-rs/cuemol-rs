@@ -36,7 +36,9 @@ pub fn context_menu(
     ui.separator();
     let mut button = |ui: &mut Ui, label: &str| {
         let response = ui.button(label);
-        rects.push((label.to_string(), response.rect));
+        if ui.is_visible() {
+            rects.push((label.to_string(), response.rect));
+        }
         response.clicked()
     };
     if button(ui, "Center at this atom") {
@@ -388,7 +390,9 @@ pub fn feedback(
     }
     if let Some(hit) = hover {
         if let (Some(p), Ok(text)) = (screen(hit), hit.description(state)) {
-            if state.config_value("view_input:hover-highlight") != "false" {
+            if state.config_value("view_input:hover-highlight") != "false"
+                && !state.resolved_view_input(false).gpu_pick()
+            {
                 painter.circle_stroke(p, 7., Stroke::new(2., Color32::from_rgb(255, 210, 70)));
             }
             let font = egui::FontId::proportional(12.);

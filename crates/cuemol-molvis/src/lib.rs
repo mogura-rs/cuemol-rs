@@ -5381,7 +5381,7 @@ pub fn simple_line_snapshot(
                         ScreenLineMeta {
                             width,
                             object_uid: options.object_uid,
-                            atom_indices: Some((bond.atom1, bond.atom2)),
+                            atom_indices: Some((bond.atom1, bond.atom1)),
                             selected: selected_bond,
                         },
                     );
@@ -5394,7 +5394,7 @@ pub fn simple_line_snapshot(
                         ScreenLineMeta {
                             width,
                             object_uid: options.object_uid,
-                            atom_indices: Some((bond.atom1, bond.atom2)),
+                            atom_indices: Some((bond.atom2, bond.atom2)),
                             selected: selected_bond,
                         },
                     );
@@ -5566,6 +5566,10 @@ pub fn mainchain_line_snapshot(
             }
         }
         sample_colors.push(colors[pivots.last().expect("non-empty pivots").atom_index].clone());
+        let owner_at = |sample: usize| {
+            let pivot = sample / subdiv + usize::from((sample % subdiv) * 2 > subdiv);
+            pivots[pivot.min(pivots.len() - 1)].atom_index
+        };
         for index in 0..samples.len().saturating_sub(1) {
             let pivot_segment = (index / subdiv).min(pivots.len() - 2);
             let start_index = pivots[pivot_segment].atom_index;
@@ -5585,7 +5589,10 @@ pub fn mainchain_line_snapshot(
                 ScreenLineMeta {
                     width,
                     object_uid: options.object_uid,
-                    atom_indices: Some((start_index, end_index)),
+                    atom_indices: Some((
+                        owner_at(index),
+                        owner_at(if smooth_color { index + 1 } else { index }),
+                    )),
                     selected: selected.contains(&start_index) || selected.contains(&end_index),
                 },
             );
@@ -5702,21 +5709,21 @@ fn append_valence_bond_geometry(
     let color2 = atom_colors[bond.atom2].clone();
     let selected_bond = selected.contains(&bond.atom1) || selected.contains(&bond.atom2);
     let add_bond = |bonds: &mut Vec<RenderBond>, from: Vector4, to: Vector4| {
-        let mut push = |from, to, color| {
+        let mut push = |from, to, color, owners| {
             bonds.push(
                 RenderBond::new(from, to, options.bond_radius, Some(color)).with_picking(
                     options.object_uid,
-                    Some((bond.atom1, bond.atom2)),
+                    Some(owners),
                     selected_bond,
                 ),
             );
         };
         if same_resolved_color(&color1, &color2) {
-            push(from, to, color1.clone());
+            push(from, to, color1.clone(), (bond.atom1, bond.atom2));
         } else {
             let midpoint = (from + to).scale(0.5);
-            push(from, midpoint, color1.clone());
-            push(to, midpoint, color2.clone());
+            push(from, midpoint, color1.clone(), (bond.atom1, bond.atom1));
+            push(to, midpoint, color2.clone(), (bond.atom2, bond.atom2));
         }
     };
     let multiple = matches!(bond.order, BondOrder::Double | BondOrder::Triple);
@@ -7279,6 +7286,7 @@ fn append_tube_cap(
     if cap_type == TubeCapType::Flat {
         let center_index = vertices.len() as u32;
         vertices.push(MeshVertex {
+            pick_atom_index: None,
             position: center,
             normal: direction,
             color,
@@ -7320,6 +7328,7 @@ fn append_tube_cap(
             let t = index as f64 / radial_detail as f64;
             let (offset, radial_normal) = ring_point(t, width * ring_scale, thick * ring_scale);
             vertices.push(MeshVertex {
+                pick_atom_index: None,
                 position: center + direction.scale(cap_depth * axial) + offset,
                 normal: normalize_or(
                     radial_normal.scale(ring_scale) + direction.scale(axial),
@@ -7344,6 +7353,7 @@ fn append_tube_cap(
     }
     let pole = vertices.len() as u32;
     vertices.push(MeshVertex {
+        pick_atom_index: None,
         position: center + direction.scale(cap_depth),
         normal: direction,
         color,
@@ -7470,6 +7480,7 @@ fn ribbon_tube_mesh(
             }
             vertex_color[3] *= fade;
             vertices.push(MeshVertex {
+                pick_atom_index: None,
                 position: center + offset,
                 normal: nrm,
                 color: vertex_color,
@@ -7689,12 +7700,14 @@ fn ring_meshes_snapshot_impl(
             let offset = normal.scale(thickness);
             let mut mesh = RenderMesh::new();
             mesh.vertices.push(MeshVertex {
+                pick_atom_index: None,
                 position: centroid + offset,
                 normal,
                 color,
             });
             for v in &verts {
                 mesh.vertices.push(MeshVertex {
+                    pick_atom_index: None,
                     position: *v + offset,
                     normal,
                     color,
@@ -7706,12 +7719,14 @@ fn ring_meshes_snapshot_impl(
             }
             let bottom = mesh.vertices.len() as u32;
             mesh.vertices.push(MeshVertex {
+                pick_atom_index: None,
                 position: centroid - offset,
                 normal: -normal,
                 color,
             });
             for v in &verts {
                 mesh.vertices.push(MeshVertex {
+                    pick_atom_index: None,
                     position: *v - offset,
                     normal: -normal,
                     color,
@@ -7758,6 +7773,7 @@ pub fn valence_wedge_meshes_snapshot(molecule: &MolCoord, width: f64) -> RenderS
         if bond.stereo == 1 {
             for position in [apex, wide + half, wide - half] {
                 mesh.vertices.push(MeshVertex {
+                    pick_atom_index: None,
                     position,
                     normal,
                     color,
@@ -7779,6 +7795,7 @@ pub fn valence_wedge_meshes_snapshot(molecule: &MolCoord, width: f64) -> RenderS
                     center - bar_half + half_thickness,
                 ] {
                     mesh.vertices.push(MeshVertex {
+                        pick_atom_index: None,
                         position,
                         normal,
                         color,
@@ -8155,6 +8172,7 @@ fn append_na_colored_bond(
     start_color: Option<ColorSpec>,
     end_color: Option<ColorSpec>,
     atom_indices: Option<(usize, usize)>,
+    same_color_owner: usize,
 ) {
     let colors_differ = match (&start_color, &end_color) {
         (Some(start), Some(end)) => start.rgba8() != end.rgba8(),
@@ -8165,18 +8183,22 @@ fn append_na_colored_bond(
         bonds.push(
             RenderBond::new(start, middle, radius, start_color).with_picking(
                 None,
-                atom_indices,
+                atom_indices.map(|(a, _)| (a, a)),
                 false,
             ),
         );
         bonds.push(
-            RenderBond::new(middle, end, radius, end_color).with_picking(None, atom_indices, false),
+            RenderBond::new(middle, end, radius, end_color).with_picking(
+                None,
+                atom_indices.map(|(_, b)| (b, b)),
+                false,
+            ),
         );
     } else {
         bonds.push(
             RenderBond::new(start, end, radius, start_color.or(end_color)).with_picking(
                 None,
-                atom_indices,
+                Some((same_color_owner, same_color_owner)),
                 false,
             ),
         );
@@ -8319,6 +8341,7 @@ pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> R
                                     na_atom_color(options, pivot_index),
                                     na_atom_color(options, partner_pivot_index),
                                     Some((pivot_index, partner_pivot_index)),
+                                    pivot_index,
                                 );
                                 rendered.insert(partner_index);
                                 rendered.insert(index);
@@ -8327,7 +8350,7 @@ pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> R
                         }
                     }
                 }
-                if let Some((far_index, far)) = atom_in(&summary.atom_indices, far_name) {
+                if let Some((_, far)) = atom_in(&summary.atom_indices, far_name) {
                     let color = na_atom_color(options, pivot_index);
                     append_na_colored_bond(
                         &mut bonds,
@@ -8336,11 +8359,12 @@ pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> R
                         radius,
                         color.clone(),
                         color.clone(),
-                        Some((pivot_index, far_index)),
+                        Some((pivot_index, pivot_index)),
+                        pivot_index,
                     );
                     atoms.push(
                         RenderAtom::new(far, radius, color)
-                            .with_picking(None, Some(far_index), false)
+                            .with_picking(None, Some(pivot_index), false)
                             .with_detail(detail),
                     );
                 }
@@ -8360,13 +8384,20 @@ pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> R
                             };
                             if let (
                                 Some((partner_pivot_index, partner_pivot)),
-                                Some((partner_glyco_index, partner_glyco)),
+                                Some((_, partner_glyco)),
                             ) = (
                                 pivot_in(partner),
                                 atom_in(&partner.atom_indices, partner_glyco_name),
                             ) {
                                 let color1 = na_atom_color(options, pivot_index);
                                 let color2 = na_atom_color(options, partner_pivot_index);
+                                let partner_owner = if na_mesh_color(color1.as_ref())
+                                    == na_mesh_color(color2.as_ref())
+                                {
+                                    pivot_index
+                                } else {
+                                    partner_pivot_index
+                                };
                                 append_na_colored_bond(
                                     &mut bonds,
                                     pivot,
@@ -8374,7 +8405,8 @@ pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> R
                                     radius,
                                     color1.clone(),
                                     color1.clone(),
-                                    Some((pivot_index, glyco_index)),
+                                    Some((pivot_index, pivot_index)),
+                                    pivot_index,
                                 );
                                 append_na_colored_bond(
                                     &mut bonds,
@@ -8383,7 +8415,8 @@ pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> R
                                     radius,
                                     color1.clone(),
                                     color2.clone(),
-                                    Some((glyco_index, partner_glyco_index)),
+                                    Some((pivot_index, partner_pivot_index)),
+                                    pivot_index,
                                 );
                                 append_na_colored_bond(
                                     &mut bonds,
@@ -8392,11 +8425,12 @@ pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> R
                                     radius,
                                     color2.clone(),
                                     color2.clone(),
-                                    Some((partner_glyco_index, partner_pivot_index)),
+                                    Some((partner_pivot_index, partner_pivot_index)),
+                                    partner_owner,
                                 );
                                 for (atom_index, position, color) in [
-                                    (glyco_index, glyco, color1),
-                                    (partner_glyco_index, partner_glyco, color2),
+                                    (pivot_index, glyco, color1),
+                                    (partner_owner, partner_glyco, color2),
                                 ] {
                                     atoms.push(
                                         RenderAtom::new(position, radius, color)
@@ -8422,7 +8456,8 @@ pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> R
                     radius,
                     color.clone(),
                     color.clone(),
-                    Some((pivot_index, glyco_index)),
+                    Some((pivot_index, pivot_index)),
+                    pivot_index,
                 );
                 append_na_colored_bond(
                     &mut bonds,
@@ -8431,12 +8466,13 @@ pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> R
                     radius,
                     color.clone(),
                     color.clone(),
-                    Some((glyco_index, far_index)),
+                    Some((pivot_index, pivot_index)),
+                    pivot_index,
                 );
-                for (atom_index, position) in [(glyco_index, glyco), (far_index, far)] {
+                for (_, position) in [(glyco_index, glyco), (far_index, far)] {
                     atoms.push(
                         RenderAtom::new(position, radius, color.clone())
-                            .with_picking(None, Some(atom_index), false)
+                            .with_picking(None, Some(pivot_index), false)
                             .with_detail(detail),
                     );
                 }
@@ -8457,7 +8493,7 @@ pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> R
                                 radius,
                                 na_atom_color(options, atom_index).or_else(|| pivot_color.clone()),
                             )
-                            .with_picking(None, Some(atom_index), false)
+                            .with_picking(None, Some(pivot_index), false)
                             .with_detail(detail),
                         );
                     }
@@ -8477,6 +8513,7 @@ pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> R
                             na_atom_color(options, lhs_index).or_else(|| pivot_color.clone()),
                             na_atom_color(options, rhs_index).or_else(|| pivot_color.clone()),
                             Some((lhs_index, rhs_index)),
+                            pivot_index,
                         );
                     }
                 };
@@ -8519,6 +8556,7 @@ pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> R
                             pivot_color.clone(),
                             na_atom_color(options, c1_index).or_else(|| pivot_color.clone()),
                             Some((pivot_index, c1_index)),
+                            pivot_index,
                         );
                     }
                 } else {
@@ -8540,12 +8578,14 @@ pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> R
                             pivot_color.clone(),
                             na_atom_color(options, c4_index).or_else(|| pivot_color.clone()),
                             Some((pivot_index, c4_index)),
+                            pivot_index,
                         );
                     }
                 }
                 append_na_ring_meshes(
                     summary,
                     &included,
+                    pivot_index,
                     options.base_thick,
                     na_mesh_color(pivot_color.as_ref()),
                     &mut meshes,
@@ -8569,6 +8609,7 @@ pub fn na_renderer_snapshot(molecule: &MolCoord, options: &NARenderOptions) -> R
 fn append_na_ring_meshes(
     summary: &cuemol_molstr::ResidueSummary,
     included: &std::collections::HashMap<String, (usize, Vector4)>,
+    pivot_index: usize,
     thickness: f64,
     color: [f32; 4],
     meshes: &mut Vec<RenderMesh>,
@@ -8593,6 +8634,7 @@ fn append_na_ring_meshes(
         let mut mesh = RenderMesh::new();
         for point in &points {
             mesh.vertices.push(MeshVertex {
+                pick_atom_index: Some(pivot_index as u32),
                 position: *point + offset,
                 normal,
                 color,
@@ -8600,6 +8642,7 @@ fn append_na_ring_meshes(
         }
         for point in &points {
             mesh.vertices.push(MeshVertex {
+                pick_atom_index: Some(pivot_index as u32),
                 position: *point - offset,
                 normal: normal * -1.0,
                 color,
@@ -8762,6 +8805,7 @@ pub fn anisou_ellipsoid_mesh(
                 Vector4::new3(0.0, 0.0, 1.0),
             );
             mesh.vertices.push(MeshVertex {
+                pick_atom_index: None,
                 position,
                 normal,
                 color,
@@ -8843,6 +8887,7 @@ fn append_anisou_disc(
             local_normal[tangent_axes[0]] = angle.cos();
             local_normal[tangent_axes[1]] = angle.sin();
             mesh.vertices.push(MeshVertex {
+                pick_atom_index: None,
                 position: transform(local),
                 normal: transform_normal(local_normal),
                 color: geometry.color,
@@ -8866,6 +8911,7 @@ fn append_anisou_disc(
         local_normal[normal_axis] = sign;
         let normal = transform_normal(local_normal);
         mesh.vertices.push(MeshVertex {
+            pick_atom_index: None,
             position: transform(local),
             normal,
             color: geometry.color,
@@ -8875,6 +8921,7 @@ fn append_anisou_disc(
             local[tangent_axes[0]] = geometry.radius * angle.cos();
             local[tangent_axes[1]] = geometry.radius * angle.sin();
             mesh.vertices.push(MeshVertex {
+                pick_atom_index: None,
                 position: transform(local),
                 normal,
                 color: geometry.color,
@@ -9006,6 +9053,9 @@ pub fn anisou_mesh_snapshot_with_options(
                             geometry,
                         );
                     }
+                }
+                for vertex in &mut mesh.vertices {
+                    vertex.pick_atom_index = Some(index as u32);
                 }
                 meshes.push(mesh);
             }
@@ -10617,6 +10667,11 @@ return cuemol.makeColor("#0000ff");
         let on = na_base_sticks_snapshot(&mol, 0.3, true);
         // The paired form is pivot->glyco, glyco->glyco, glyco->pivot.
         assert_eq!(on.bonds.len(), 3);
+        assert!(on
+            .bonds
+            .iter()
+            .all(|bond| bond.atom_indices == Some((0, 0))));
+        assert!(on.atoms.iter().all(|atom| atom.atom_index == Some(0)));
         assert!(
             on.bonds.iter().any(|b| {
                 let (f, t) = ((b.from.x, b.from.y), (b.to.x, b.to.y));
@@ -10636,6 +10691,14 @@ return cuemol.makeColor("#0000ff");
             },
         );
         assert_eq!(colored.bonds.len(), 4, "two colors split the central rung");
+        assert_eq!(
+            colored
+                .bonds
+                .iter()
+                .map(|bond| bond.atom_indices)
+                .collect::<Vec<_>>(),
+            vec![Some((0, 0)), Some((0, 0)), Some((7, 7)), Some((7, 7))]
+        );
         assert_eq!(
             colored
                 .bonds
@@ -10719,6 +10782,8 @@ return cuemol.makeColor("#0000ff");
         );
         assert_eq!(basepair.bonds.len(), 1);
         assert_eq!(basepair.atoms.len(), 1);
+        assert_eq!(basepair.bonds[0].atom_indices, Some((0, 0)));
+        assert_eq!(basepair.atoms[0].atom_index, Some(0));
 
         let mut detail_colors = vec![rgb_spec(1.0, 1.0, 1.0); mol.atom_count()];
         detail_colors[0] = rgb_spec(1.0, 0.0, 0.0);
@@ -10751,6 +10816,40 @@ return cuemol.makeColor("#0000ff");
             "detail2 also draws the ribose ring"
         );
         assert!(detail2.atoms.len() > detail1.atoms.len());
+        assert!(detail2.atoms.iter().all(|atom| atom.atom_index == Some(0)));
+        assert!(detail2
+            .bonds
+            .iter()
+            .all(|bond| bond.atom_indices == Some((0, 0))));
+        assert!(detail2
+            .meshes
+            .iter()
+            .flat_map(|mesh| &mesh.vertices)
+            .all(|vertex| vertex.pick_atom_index == Some(0)));
+    }
+
+    #[test]
+    fn differently_colored_bond_halves_keep_one_owner_each() {
+        let mut molecule = MolCoord::with_atoms(vec![
+            sample_atom("C1", "C", -2., 0., 0.),
+            sample_atom("O1", "O", 2., 0., 0.),
+        ]);
+        molecule.add_bond(0, 1, BondOrder::Single);
+        let options = MoleculeRenderOptions {
+            draw_bonds: true,
+            color_mode: MoleculeColorMode::Element,
+            ..Default::default()
+        };
+        for snapshot in [
+            molecule_render_snapshot(&molecule, &options),
+            simple_line_snapshot(&molecule, &options, 2.),
+        ] {
+            assert_eq!(snapshot.bonds.len(), 2);
+            for (index, bond) in snapshot.bonds.iter().enumerate() {
+                assert_eq!(bond.atom_indices, Some((index, index)));
+                assert!((bond.to.x).abs() < 1e-12);
+            }
+        }
     }
 
     #[test]
@@ -11283,8 +11382,9 @@ return cuemol.makeColor("#0000ff");
         for bond in snapshot
             .bonds
             .iter()
-            .filter(|bond| bond.atom_indices == Some((0, 1)))
+            .filter(|bond| bond.atom_indices != Some((2, 2)))
         {
+            assert!(matches!(bond.atom_indices, Some((0, 0) | (1, 1))));
             assert_eq!(bond.color, bond.end_color);
             assert!(
                 ((bond.to - bond.from).length3d() - 0.5).abs() < 1.0e-9,

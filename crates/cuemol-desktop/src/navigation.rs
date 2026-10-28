@@ -146,13 +146,23 @@ impl GuiApplication {
         {
             cuemol_ui::navigation::cursor(ui.ctx(), self.navigation.tool, self.input.is_pressed());
         }
+        let gpu_image = self.gpu_pick_image(camera, rect);
+        self.state.sync_viewport_pick_image(
+            &camera.to_qsys_camera("__current"),
+            [rect.width(), rect.height()],
+            gpu_image.clone(),
+        );
         let hover = self
             .last_cursor
             .filter(|p| self.pointer_in_viewport(Some(*p)))
             .filter(|_| !self.input.is_pressed() && self.rect_select_start.is_none())
             .filter(|_| self.state.config_value("view_input:hover-info") != "false");
         if let Some(point) = hover {
-            if self.hover_sample != Some((point, self.snapshot_revision, mvp)) {
+            if self.hover_sample != Some((point, self.snapshot_revision, mvp, gpu_image.is_some()))
+            {
+                let record = self.pick_record(camera, rect, point);
+                self.state
+                    .set_active_hover_hit(record.map(|record| record.hit));
                 self.hover_hit = match self.pick_hit(camera, point) {
                     Some(PickHit::Atom {
                         object_uid,
@@ -160,9 +170,12 @@ impl GuiApplication {
                     }) => Some(AtomHit::from((object_uid, atom_index))),
                     _ => None,
                 };
-                self.hover_sample = Some((point, self.snapshot_revision, mvp));
+                self.hover_sample = Some((point, self.snapshot_revision, mvp, gpu_image.is_some()));
             }
         } else {
+            if self.hover_sample.is_some() {
+                self.state.set_active_hover_hit(None);
+            }
             self.hover_hit = None;
             self.hover_sample = None;
         }
