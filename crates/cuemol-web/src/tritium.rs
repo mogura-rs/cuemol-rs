@@ -320,26 +320,32 @@ impl App {
             self.message = error.to_string();
             return;
         }
-        let result = if let Some((id, trajectory)) = &self.trajectory {
-            self.state
-                .active_scene_bytes_with_external_trajectory(*id, trajectory.source_type())
-                .map_err(|e| e.to_string())
-                .and_then(|(prefix, suffix)| {
-                    let parts = js_sys::Array::new();
-                    parts.push(&js_sys::Uint8Array::from(prefix.as_slice()));
-                    parts.push(trajectory.file());
-                    parts.push(&js_sys::Uint8Array::from(suffix.as_slice()));
-                    download_parts("scene.qsc", &parts, "application/octet-stream")
-                        .map_err(js_error)
-                })
-        } else {
-            self.state
-                .active_scene_bytes()
-                .map_err(|e| e.to_string())
-                .and_then(|bytes| {
-                    download("scene.qsc", &bytes, "application/octet-stream").map_err(js_error)
-                })
-        };
+        let external = self
+            .trajectories
+            .iter()
+            .filter(|(id, _)| {
+                self.state.scene_manager().scene_uid_for_object(**id) == self.state.active_scene()
+            })
+            .flat_map(|(id, group)| group.blocks.iter().map(move |block| (*id, block.clone())))
+            .collect::<Vec<_>>();
+        let sources = external
+            .iter()
+            .map(|(id, block)| (*id, block.source_type()))
+            .collect::<Vec<_>>();
+        let result = self
+            .state
+            .active_scene_parts_with_external_trajectories(&sources)
+            .map_err(|error| error.to_string())
+            .and_then(|fragments| {
+                let parts = js_sys::Array::new();
+                for (index, fragment) in fragments.iter().enumerate() {
+                    parts.push(&js_sys::Uint8Array::from(fragment.as_slice()));
+                    if let Some((_, block)) = external.get(index) {
+                        parts.push(block.file());
+                    }
+                }
+                download_parts("scene.qsc", &parts, "application/octet-stream").map_err(js_error)
+            });
         if let Err(error) = result {
             self.message = error;
         }

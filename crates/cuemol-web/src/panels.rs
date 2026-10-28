@@ -20,29 +20,34 @@ impl App {
                 let _ = reply.try_send(Err(error));
                 continue;
             }
-            if let Some((id, trajectory)) = &self.trajectory {
-                if name == "list_trajectories" {
-                    let _=reply.try_send(Ok(json!({"trajectories":[{"objectId":id.get(),"frames":trajectory.frames,"frame":self.frame}]})));
-                    continue;
-                }
-                if name == "set_frame" && arguments["objId"].as_u64() == Some(id.get()) {
-                    let frame = arguments["frame"].as_u64().unwrap_or(u64::MAX);
-                    if frame >= trajectory.frames as u64 {
-                        let _ = reply.try_send(Err("Frame out of range".into()));
-                        continue;
+            if name == "list_trajectories" {
+                let _ = reply.try_send(Ok(self.trajectory_list()));
+                continue;
+            }
+            if name == "set_frame" {
+                if let Some(id) = arguments["objId"].as_u64().map(Uid::new) {
+                    if let Some(group) = self.trajectories.get(&id) {
+                        let frame = arguments["frame"]
+                            .as_u64()
+                            .and_then(|v| usize::try_from(v).ok())
+                            .unwrap_or(usize::MAX);
+                        let native_count = self.state.trajectory_len(id);
+                        if frame >= native_count + group.frame_count() {
+                            let _ = reply.try_send(Err("Frame out of range".into()));
+                            continue;
+                        }
+                        if let Some((source, local_index)) = frame
+                            .checked_sub(native_count)
+                            .and_then(|index| group.source(index))
+                        {
+                            let revision = self.revision;
+                            spawn_local(async move {
+                                let result = source.frame(local_index).await.map_err(js_error);
+                                enqueue(Event::AgentFrame(id, frame, result, reply, revision));
+                            });
+                            continue;
+                        }
                     }
-                    let (id, trajectory, revision) = (*id, trajectory.clone(), self.revision);
-                    spawn_local(async move {
-                        let result = trajectory.frame(frame as usize).await.map_err(js_error);
-                        enqueue(Event::AgentFrame(
-                            id,
-                            frame as usize,
-                            result,
-                            reply,
-                            revision,
-                        ));
-                    });
-                    continue;
                 }
             }
             if matches!(
@@ -104,6 +109,13 @@ impl App {
                 cuemol_command::call_tool(&mut self.state, &mut self.camera, &name, &arguments)
                     .map_err(|e| e.to_string())
             };
+            if result.is_ok() && name == "set_frame" {
+                if let (Some(id), Some(frame)) =
+                    (arguments["objId"].as_u64(), arguments["frame"].as_u64())
+                {
+                    self.set_trajectory_frame_index(Uid::new(id), frame as usize);
+                }
+            }
             if result.is_ok() && mutating {
                 if let Some(undo) = undo {
                     self.history.push(undo);

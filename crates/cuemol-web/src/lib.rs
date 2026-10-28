@@ -19,10 +19,10 @@ use std::sync::{
 };
 use std::{
     cell::{Cell, RefCell},
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     rc::Rc,
 };
-use trajectory::BrowserTrajectory;
+use trajectory::{BrowserTrajectory, BrowserTrajectoryGroup};
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace=cuemolOidn,js_name=cancel)]
@@ -49,10 +49,11 @@ enum Event {
         u64,
     ),
     Source(web_sys::File),
+    SourceFinished,
     Data(String, Vec<u8>),
     Error(String),
-    Trajectory(Uid, BrowserTrajectory),
-    Frame(Uid, usize, cuemol_mdtools::TrajectoryFrame),
+    Trajectory(Uid, BrowserTrajectory, cuemol_mdtools::TrajectoryFrame),
+    Frame(Uid, usize, cuemol_mdtools::TrajectoryFrame, u64),
     Command(u32, String, Value),
     Rendered(cuemol_core::Result<Value>, Option<String>),
 }
@@ -157,7 +158,7 @@ struct HistoryEntry {
     selection: String,
     state: DesktopAppState,
     camera: Camera,
-    trajectory: Option<(Uid, Rc<BrowserTrajectory>)>,
+    trajectories: BTreeMap<Uid, BrowserTrajectoryGroup>,
     frame: usize,
     selected: Option<Uid>,
 }
@@ -205,7 +206,9 @@ struct App {
     message: String,
     history: Vec<HistoryEntry>,
     future: Vec<HistoryEntry>,
-    trajectory: Option<(Uid, Rc<BrowserTrajectory>)>,
+    trajectories: BTreeMap<Uid, BrowserTrajectoryGroup>,
+    source_queue: VecDeque<web_sys::File>,
+    source_active: bool,
     frame: usize,
     busy: bool,
     last_command: u32,
@@ -349,7 +352,9 @@ impl App {
             message,
             history: Vec::new(),
             future: Vec::new(),
-            trajectory: None,
+            trajectories: BTreeMap::new(),
+            source_queue: VecDeque::new(),
+            source_active: false,
             frame: 0,
             busy: false,
             last_command: 0,
@@ -384,7 +389,7 @@ impl App {
             selection: self.selection.clone(),
             state: self.state.clone(),
             camera: self.camera.clone(),
-            trajectory: self.trajectory.clone(),
+            trajectories: self.trajectories.clone(),
             frame: self.frame,
             selected: self.selected,
         }
@@ -394,7 +399,7 @@ impl App {
         self.selection = snapshot.selection;
         self.state = snapshot.state;
         self.camera = snapshot.camera;
-        self.trajectory = snapshot.trajectory;
+        self.trajectories = snapshot.trajectories;
         self.frame = snapshot.frame;
         self.selected = snapshot.selected;
         self.playing = false;
@@ -431,21 +436,22 @@ impl App {
             self.render_async(name, &args, download);
             return;
         }
-        if let Some((id, trajectory)) = &self.trajectory {
-            if name == "set_frame" && args["objId"].as_u64() == Some(id.get()) {
-                if let Some(index) = args["frame"]
-                    .as_u64()
-                    .filter(|i| *i < trajectory.frames as u64)
-                {
-                    self.request_frame(index as usize);
-                } else {
-                    self.message = "Frame out of range".into();
+        if name == "list_trajectories" {
+            self.message = self.trajectory_list().to_string();
+            return;
+        }
+        if name == "set_frame" {
+            if let Some(id) = args["objId"].as_u64().map(Uid::new) {
+                if self.trajectories.contains_key(&id) {
+                    if let Some(index) =
+                        args["frame"].as_u64().and_then(|v| usize::try_from(v).ok())
+                    {
+                        self.request_object_frame(id, index);
+                    } else {
+                        self.message = "Frame out of range".into();
+                    }
+                    return;
                 }
-                return;
-            }
-            if name == "list_trajectories" {
-                self.message = json!({"trajectories":[{"objectId":id.get(),"frames":trajectory.frames,"frame":self.frame}]}).to_string();
-                return;
             }
         }
         if name == "undo" || name == "redo" {
@@ -533,7 +539,7 @@ impl App {
                                 self.history.remove(0);
                             }
                         }
-                        self.frame = index;
+                        self.set_trajectory_frame_index(id, index);
                         self.dirty = true;
                         self.agent.changed_scene = true;
                         self.revision = self.revision.wrapping_add(1);
@@ -562,41 +568,10 @@ impl App {
                         }
                     });
                 }
-                Event::Source(file) => {
-                    let name = file.name();
-                    let extension = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-                    if matches!(
-                        extension.as_str(),
-                        "dcd" | "xtc" | "trr" | "nc" | "netcdf" | "mdcrd" | "crd"
-                    ) {
-                        let Some(id) = self.selected else {
-                            self.message = "Load and select a topology first.".into();
-                            continue;
-                        };
-                        let atoms = self
-                            .state
-                            .scene_manager()
-                            .object(id)
-                            .map(|o| o.mol().atom_count());
-                        self.busy = true;
-                        self.message = "Indexing trajectory…".into();
-                        spawn_local(async move {
-                            match BrowserTrajectory::open(file, atoms).await {
-                                Ok(t) => enqueue(Event::Trajectory(id, t)),
-                                Err(e) => enqueue(Event::Error(js_error(e))),
-                            }
-                        });
-                    } else {
-                        spawn_local(async move {
-                            match JsFuture::from(file.array_buffer()).await {
-                                Ok(bytes) => enqueue(Event::Data(
-                                    name,
-                                    js_sys::Uint8Array::new(&bytes).to_vec(),
-                                )),
-                                Err(e) => enqueue(Event::Error(js_error(e))),
-                            }
-                        });
-                    }
+                Event::Source(file) => self.source_queue.push_back(file),
+                Event::SourceFinished => {
+                    self.source_active = false;
+                    self.busy = false;
                 }
                 Event::Data(name, bytes) => {
                     if name.to_lowercase().ends_with(".qsc") {
@@ -653,7 +628,6 @@ impl App {
                             self.dirty = true;
                             self.rebuild();
                             if matches!(loaded, GuiLoadedPath::Scene { .. }) {
-                                self.trajectory = None;
                                 self.frame = 0;
                                 self.playing = false;
                                 self.camera = self.state.active_view_camera().unwrap_or_default();
@@ -674,7 +648,7 @@ impl App {
                     self.busy = false;
                     self.playing = false;
                 }
-                Event::Trajectory(id, trajectory) => {
+                Event::Trajectory(id, trajectory, first_frame) => {
                     let atoms = self
                         .state
                         .scene_manager()
@@ -683,23 +657,43 @@ impl App {
                     if atoms != Some(trajectory.atoms) {
                         self.message =
                             "Trajectory atom count does not match the selected topology.".into();
+                        continue;
+                    }
+                    let previous = self.trajectory_state(id).unwrap_or((0, 0));
+                    self.checkpoint();
+                    let added = trajectory.frames;
+                    let group =
+                        self.trajectories
+                            .entry(id)
+                            .or_insert_with(|| BrowserTrajectoryGroup {
+                                current_frame: previous.1,
+                                ..Default::default()
+                            });
+                    group.blocks.push(Rc::new(trajectory));
+                    if previous.0 == 0 {
+                        if let Err(error) = self.state.apply_coordinate_frame(id, &first_frame) {
+                            let snapshot = self.history.pop().unwrap();
+                            self.restore_history(snapshot);
+                            self.message = error.to_string();
+                            continue;
+                        }
+                        self.frame = 0;
+                        self.dirty = true;
+                    }
+                    self.message = format!("Indexed {added} frames; {} frames across all blocks. Coordinates are read one frame at a time.", previous.0 + added);
+                }
+                Event::Frame(id, index, frame, revision) => {
+                    if revision != self.revision {
                         self.busy = false;
                         continue;
                     }
-                    self.message = format!(
-                        "Indexed {} frames; coordinates are read one frame at a time.",
-                        trajectory.frames
-                    );
-                    self.trajectory = Some((id, Rc::new(trajectory)));
-                    self.busy = false;
-                    self.request_frame(0);
-                }
-                Event::Frame(id, index, frame) => {
                     self.revision = self.revision.wrapping_add(1);
                     self.busy = false;
                     match self.state.apply_coordinate_frame(id, &frame) {
                         Ok(()) => {
-                            self.frame = index;
+                            self.set_trajectory_frame_index(id, index);
+                            self.message =
+                                json!({"objectId": id.get(), "frame": index}).to_string();
                             self.dirty = true;
                         }
                         Err(e) => {
@@ -736,33 +730,135 @@ impl App {
                 }
             }
         }
+        self.start_next_source();
     }
-    fn trajectory_info(&self) -> Option<(Uid, usize, usize)> {
-        if let Some((id, trajectory)) = &self.trajectory {
-            if self.state.scene_manager().scene_uid_for_object(*id) == self.state.active_scene() {
-                return Some((*id, trajectory.frames, self.frame));
-            }
+    fn start_next_source(&mut self) {
+        if self.source_active || self.busy {
+            return;
         }
-        let summaries = self.state.active_trajectory_summaries();
-        summaries
+        let Some(file) = self.source_queue.pop_front() else {
+            return;
+        };
+        self.source_active = true;
+        self.busy = true;
+        let name = file.name();
+        let extension = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+        if matches!(
+            extension.as_str(),
+            "dcd" | "xtc" | "trr" | "nc" | "netcdf" | "mdcrd" | "crd"
+        ) {
+            let Some(id) = self.selected else {
+                enqueue(Event::Error("Load and select a topology first.".into()));
+                enqueue(Event::SourceFinished);
+                return;
+            };
+            let atoms = self
+                .state
+                .scene_manager()
+                .object(id)
+                .map(|o| o.mol().atom_count());
+            self.message = "Indexing trajectory…".into();
+            spawn_local(async move {
+                let result = async {
+                    let trajectory = BrowserTrajectory::open(file, atoms).await?;
+                    let first = trajectory.frame(0).await?;
+                    Ok::<_, JsValue>((trajectory, first))
+                }
+                .await;
+                match result {
+                    Ok((trajectory, first)) => enqueue(Event::Trajectory(id, trajectory, first)),
+                    Err(error) => enqueue(Event::Error(js_error(error))),
+                }
+                enqueue(Event::SourceFinished);
+            });
+        } else {
+            spawn_local(async move {
+                match JsFuture::from(file.array_buffer()).await {
+                    Ok(bytes) => {
+                        enqueue(Event::Data(name, js_sys::Uint8Array::new(&bytes).to_vec()))
+                    }
+                    Err(error) => enqueue(Event::Error(js_error(error))),
+                }
+                enqueue(Event::SourceFinished);
+            });
+        }
+    }
+
+    fn trajectory_state(&self, id: Uid) -> Option<(usize, usize)> {
+        let native = self.state.trajectory_frame_state(id);
+        if let Some(group) = self.trajectories.get(&id) {
+            Some((
+                native.map_or(0, |(_, count)| count) + group.frame_count(),
+                group.current_frame,
+            ))
+        } else {
+            native.map(|(frame, count)| (count, frame))
+        }
+    }
+
+    fn trajectory_list(&self) -> Value {
+        let native = self.state.active_trajectory_summaries();
+        let trajectories = self.state.active_object_summaries().iter().filter_map(|object| {
+            let (frames, frame) = self.trajectory_state(object.uid)?;
+            let mut blocks = native.iter().find(|t| t.object_uid == object.uid).map_or_else(Vec::new, |t| t.blocks.iter()
+                .map(|b| json!({"id":b.uid,"source":b.source,"format":b.format,"frames":b.frame_count})).collect());
+            if let Some(group) = self.trajectories.get(&object.uid) {
+                blocks.extend(group.blocks.iter().map(|b| json!({"source":b.file().name(),"format":b.source_type(),"frames":b.frames})));
+            }
+            Some(json!({"objectId":object.uid.get(),"name":object.name,"frames":frames,"frame":frame,"blocks":blocks}))
+        }).collect::<Vec<_>>();
+        json!({"trajectories":trajectories})
+    }
+
+    fn trajectory_info(&self) -> Option<(Uid, usize, usize)> {
+        let objects = self.state.active_object_summaries();
+        let selected = objects
             .iter()
-            .find(|t| Some(t.object_uid) == self.selected)
-            .or_else(|| summaries.first())
-            .filter(|t| t.frame_count > 0)
-            .map(|t| (t.object_uid, t.frame_count, t.current_frame))
+            .find(|object| Some(object.uid) == self.selected)
+            .and_then(|object| {
+                self.trajectory_state(object.uid)
+                    .map(|(count, frame)| (object.uid, count, frame))
+            });
+        selected
+            .or_else(|| {
+                objects.iter().find_map(|object| {
+                    self.trajectory_state(object.uid)
+                        .map(|(count, frame)| (object.uid, count, frame))
+                })
+            })
+            .filter(|(_, count, _)| *count > 0)
+    }
+
+    fn set_trajectory_frame_index(&mut self, id: Uid, index: usize) {
+        if let Some(group) = self.trajectories.get_mut(&id) {
+            group.current_frame = index;
+        }
+        self.frame = index;
     }
 
     fn request_frame(&mut self, index: usize) {
+        if let Some((id, _, _)) = self.trajectory_info() {
+            self.request_object_frame(id, index);
+        }
+    }
+
+    fn request_object_frame(&mut self, id: Uid, index: usize) {
         if self.busy {
             return;
         }
-        let Some((id, _, _)) = self.trajectory_info() else {
+        if self
+            .trajectory_state(id)
+            .is_none_or(|(count, _)| index >= count)
+        {
+            self.message = "Frame out of range".into();
             return;
-        };
-        let Some((_, trajectory)) = self.trajectory.as_ref().filter(|(uid, _)| *uid == id) else {
+        }
+        let native_count = self.state.trajectory_len(id);
+        if index < native_count {
             match self.state.apply_trajectory_frame(id, index) {
                 Ok(()) => {
-                    self.frame = index;
+                    self.set_trajectory_frame_index(id, index);
+                    self.message = json!({"objectId": id.get(), "frame": index}).to_string();
                     self.dirty = true;
                     self.revision = self.revision.wrapping_add(1);
                 }
@@ -772,13 +868,20 @@ impl App {
                 }
             }
             return;
+        }
+        let Some((source, local_index)) = self
+            .trajectories
+            .get(&id)
+            .and_then(|group| group.source(index - native_count))
+        else {
+            return;
         };
-        let trajectory = trajectory.clone();
         self.busy = true;
+        let revision = self.revision;
         spawn_local(async move {
-            match trajectory.frame(index).await {
-                Ok(frame) => enqueue(Event::Frame(id, index, frame)),
-                Err(e) => enqueue(Event::Error(js_error(e))),
+            match source.frame(local_index).await {
+                Ok(frame) => enqueue(Event::Frame(id, index, frame, revision)),
+                Err(error) => enqueue(Event::Error(js_error(error))),
             }
         });
     }

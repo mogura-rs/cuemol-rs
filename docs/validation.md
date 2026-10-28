@@ -1174,3 +1174,30 @@ passes 225 and native GUI passes 167. A browser pixel regression verifies that
 two selected residues remain visible on the full-chain curve and that a single
 selected residue disappears. An obsolete helper comment calling the natural
 cubic interpolator Catmull-Rom was corrected to match its implementation.
+
+### Multiple browser trajectory sources
+
+The browser now retains ordered trajectory blocks for each molecule. Previously
+one optional source was replaced whenever another trajectory was loaded, and
+`set_frame` could resolve the wrong object through the active timeline. File
+loads are queued in input order, including a topology followed by its trajectory
+files. A block append retains the previous frame; each object has its own current
+frame and timeline. Both ordinary commands and AI tool calls resolve global frame
+indices into the correct block. Late frame reads are rejected after a scene edit.
+
+History shares the `File` handles and indices, while playback still decodes one
+frame at a time. QSC export returns fragments interleaved with every active
+external file as Blob parts. Existing embedded blocks remain before appended
+files, and distinct molecules keep distinct lists. Shared-core tests verify this
+with three external payloads spanning two objects and an existing embedded block.
+All 226 shared scripting tests and 167 native GUI tests pass.
+
+Five browser integration checks pass for ordinary file loading, indexed playback,
+AI cancellation and frame undo, and multiple sources. Three rebuilt-browser
+checks also pass for MDCRD cells, AI seeking and the expanded multi-source case.
+The latter loads two blocks with a topology in one file selection, appends a third,
+undoes/redoes that append, seeks across boundaries for two molecules, downloads
+and reloads the scene, then appends to the reloaded trajectory. A truncated input
+leaves the existing blocks and coordinates intact, and the next valid file loads
+successfully. Frame reset on QSC reload follows the reference's nonpersistent
+`frame` property. Public release execution remains outside this local checkpoint.

@@ -3,6 +3,28 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::File;
 
+#[derive(Clone, Default)]
+pub struct BrowserTrajectoryGroup {
+    pub blocks: Vec<std::rc::Rc<BrowserTrajectory>>,
+    pub current_frame: usize,
+}
+
+impl BrowserTrajectoryGroup {
+    pub fn frame_count(&self) -> usize {
+        self.blocks.iter().map(|block| block.frames).sum()
+    }
+
+    pub fn source(&self, mut index: usize) -> Option<(std::rc::Rc<BrowserTrajectory>, usize)> {
+        for block in &self.blocks {
+            if index < block.frames {
+                return Some((block.clone(), index));
+            }
+            index -= block.frames;
+        }
+        None
+    }
+}
+
 fn error(value: impl ToString) -> JsValue {
     JsValue::from_str(&value.to_string())
 }

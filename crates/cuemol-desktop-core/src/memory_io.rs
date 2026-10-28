@@ -145,58 +145,94 @@ impl DesktopAppState {
         object_uid: Uid,
         source_type: &str,
     ) -> Result<(Vec<u8>, Vec<u8>)> {
-        if !matches!(
-            source_type,
-            "dcdtraj" | "xtctraj" | "trrtraj" | "ambnetcdftraj" | "mdcrd"
-        ) {
-            return Err(CueMolError::invalid_argument(
-                "unsupported trajectory source",
-            ));
-        }
-        let index = self
+        let mut parts = self
+            .active_scene_parts_with_external_trajectories(&[(object_uid, source_type)])?
+            .into_iter();
+        Ok((parts.next().unwrap(), parts.next().unwrap()))
+    }
+
+    /// Interleave these fragments with the supplied payloads to export without copying their bytes.
+    /// Existing embedded blocks precede the additional payloads for each molecule.
+    pub fn active_scene_parts_with_external_trajectories(
+        &mut self,
+        sources: &[(Uid, &str)],
+    ) -> Result<Vec<Vec<u8>>> {
+        let scene = self
             .active_scene()
             .and_then(|sid| self.scene_manager().scene(sid))
-            .and_then(|scene| {
+            .ok_or_else(|| CueMolError::not_found("scene"))?;
+        let indices = sources
+            .iter()
+            .map(|(uid, source)| {
+                if !matches!(
+                    *source,
+                    "dcdtraj" | "xtctraj" | "trrtraj" | "ambnetcdftraj" | "mdcrd"
+                ) {
+                    return Err(CueMolError::invalid_argument(
+                        "unsupported trajectory source",
+                    ));
+                }
                 scene
                     .objects()
                     .iter()
-                    .position(|obj| obj.uid() == object_uid)
+                    .position(|obj| obj.uid() == *uid)
+                    .ok_or_else(|| CueMolError::not_found("trajectory topology"))
             })
-            .ok_or_else(|| CueMolError::not_found("trajectory topology"))?;
+            .collect::<Result<Vec<_>>>()?;
         let bytes = self.active_scene_bytes()?;
+        if sources.is_empty() {
+            return Ok(vec![bytes]);
+        }
         let (xml, suffix) = split_qsc_document(&bytes)?;
         let mut tree = parse_ldom2_xml(xml)?;
-        let node = tree
-            .top_mut()
-            .children_mut()
-            .iter_mut()
-            .filter(|node| !node.is_attr() && node.tag_name() == "object")
-            .nth(index)
-            .ok_or_else(|| CueMolError::not_found("trajectory topology node"))?;
-        node.set_type_name("Trajectory");
-        node.retain_children(|child| child.tag_name() != "trajfiles");
-        let chunk = (0..100_000)
+        let mut available = (0..100_000)
             .rev()
             .map(|index| format!("{index:05}"))
-            .find(|id| {
+            .filter(|id| {
                 byte_index(
                     suffix,
                     format!("{QSC_DATA_CHUNK_START}{id}==========").as_bytes(),
                 )
                 .is_none()
-            })
-            .ok_or_else(|| CueMolError::invalid_argument("too many embedded scene data chunks"))?;
-        let file = node.append_child("trajfiles").append_child("trajfile");
-        file.set_type_name("TrajBlock");
-        file.set_str_attr("src", format!("datachunk:{chunk}"));
-        file.set_str_attr("srctype", source_type);
-        let mut prefix =
+            });
+        let mut chunks = Vec::with_capacity(sources.len());
+        for (index, (_, source)) in indices.into_iter().zip(sources) {
+            let chunk = available.next().ok_or_else(|| {
+                CueMolError::invalid_argument("too many embedded scene data chunks")
+            })?;
+            let node = tree
+                .top_mut()
+                .children_mut()
+                .iter_mut()
+                .filter(|node| !node.is_attr() && node.tag_name() == "object")
+                .nth(index)
+                .ok_or_else(|| CueMolError::not_found("trajectory topology node"))?;
+            node.set_type_name("Trajectory");
+            if node.find_child("trajfiles").is_none() {
+                node.append_child("trajfiles");
+            }
+            let file = node
+                .find_child_mut("trajfiles")
+                .unwrap()
+                .append_child("trajfile");
+            file.set_type_name("TrajBlock");
+            file.set_str_attr("src", format!("datachunk:{chunk}"));
+            file.set_str_attr("srctype", *source);
+            chunks.push(chunk);
+        }
+        let mut parts = Vec::with_capacity(chunks.len() + 1);
+        let mut fragment =
             format!("{}\n\n{}", write_ldom2_xml(&tree), QSC_XML_END_MARKER).into_bytes();
-        prefix.extend_from_slice(suffix);
-        prefix
-            .extend_from_slice(format!("==========START datachunk:{chunk}==========\n").as_bytes());
-        let suffix = format!("\n==========END datachunk:{chunk}==========\n").into_bytes();
-        Ok((prefix, suffix))
+        fragment.extend_from_slice(suffix);
+        for chunk in chunks {
+            fragment.extend_from_slice(
+                format!("==========START datachunk:{chunk}==========\n").as_bytes(),
+            );
+            parts.push(fragment);
+            fragment = format!("\n==========END datachunk:{chunk}==========\n").into_bytes();
+        }
+        parts.push(fragment);
+        Ok(parts)
     }
 
     pub fn apply_coordinate_frame(
@@ -235,6 +271,78 @@ impl DesktopAppState {
 mod tests {
     use super::*;
     const PDB: &[u8] = b"HETATM    1  C1  LIG A   1       1.000   2.000   3.000  1.00 10.00           C  \nHETATM    2  O1  LIG A   1       2.300   2.000   3.000  1.00 10.00           O  \nEND\n";
+    #[test]
+    fn browser_export_preserves_existing_and_multiple_external_trajectory_blocks() {
+        let mut state = DesktopAppState::new();
+        state.open_bytes("first.pdb", PDB).unwrap();
+        state.open_bytes("second.pdb", PDB).unwrap();
+        let objects = state.active_object_summaries();
+        let (first, second) = (objects[0].uid, objects[1].uid);
+        let frame = |x| vec![Vector4::new3(x, 0., 0.), Vector4::new3(x + 1., 0., 0.)];
+        state.set_object_trajectory(first, vec![frame(1.)]);
+        let payload = |values: &[f64]| {
+            GuiTrajectoryFrames::Memory(std::sync::Arc::new(
+                values.iter().map(|x| frame(*x)).collect(),
+            ))
+            .dcd_bytes(2)
+            .unwrap()
+        };
+        let fragments = state
+            .active_scene_parts_with_external_trajectories(&[
+                (first, "dcdtraj"),
+                (second, "dcdtraj"),
+                (first, "dcdtraj"),
+            ])
+            .unwrap();
+        assert_eq!(fragments.len(), 4);
+        let mut bytes = Vec::new();
+        for (fragment, payload) in
+            fragments[..3]
+                .iter()
+                .zip([payload(&[2., 3.]), payload(&[10., 11.]), payload(&[4.])])
+        {
+            bytes.extend(fragment);
+            bytes.extend(payload);
+        }
+        bytes.extend(&fragments[3]);
+        let mut restored = DesktopAppState::new();
+        restored.open_bytes("scene.qsc", &bytes).unwrap();
+        let objects = restored.active_object_summaries();
+        assert_eq!(restored.trajectory_len(objects[0].uid), 4);
+        assert_eq!(restored.trajectory_len(objects[1].uid), 2);
+        for (index, expected) in [1., 2., 3., 4.].into_iter().enumerate() {
+            restored
+                .apply_trajectory_frame(objects[0].uid, index)
+                .unwrap();
+            assert_eq!(
+                restored
+                    .scene_manager()
+                    .object(objects[0].uid)
+                    .unwrap()
+                    .mol()
+                    .atoms()[0]
+                    .position
+                    .x,
+                expected
+            );
+        }
+        restored.apply_trajectory_frame(objects[1].uid, 1).unwrap();
+        assert_eq!(
+            restored
+                .scene_manager()
+                .object(objects[1].uid)
+                .unwrap()
+                .mol()
+                .atoms()[0]
+                .position
+                .x,
+            11.
+        );
+        assert!(state
+            .active_scene_parts_with_external_trajectories(&[(first, "invalid")])
+            .is_err());
+    }
+
     #[test]
     fn browser_memory_scene_round_trip_has_embedded_coordinates_and_renderers() {
         let mut state = DesktopAppState::new();

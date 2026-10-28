@@ -293,9 +293,13 @@ yields between row batches so the viewport remains interactive, and can be
 cancelled from the status bar. Browser settings
 and startup scripts are stored in localStorage for that origin.
 
-Browser MD playback keeps a `File` handle and reads selected DCD/XTC/TRR/NetCDF/MDCRD
-frames with `File.slice`, without first loading the whole trajectory into JS
-memory. The browser cannot access arbitrary native paths or spawn external
+Browser MD playback keeps `File` handles and reads selected DCD/XTC/TRR/NetCDF/MDCRD
+frames with `File.slice`, without first loading whole trajectories into JS
+memory. Additional files append as ordered blocks for the selected molecule;
+multiple molecules retain independent frame positions. Loading a topology and
+several trajectories together preserves their input order. Undo shares the file
+handles, and scene downloads interleave them with QSC fragments as browser Blobs.
+The browser cannot access arbitrary native paths or spawn external
 tools. USalign uses the same vendored calculation kernel as the native application,
 compiled into a companion WebAssembly module. LSQ and SSM remain shared Rust code.
 ICC soft proofing uses the embedded LittleCMS engine on both targets. Open an

@@ -40,12 +40,12 @@ test('default WebGPU viewport presents colored geometry',async({page},testInfo)=
   await page.screenshot({path:testInfo.outputPath('webgpu.png')});
   expect(errors).toEqual([]);
 });
-function dcd(frames){
+function dcd(frames,offset=0){
   const chunks=[];
   const record=data=>{const n=Buffer.alloc(4);n.writeInt32LE(data.length);chunks.push(n,data,n);};
   const header=Buffer.alloc(84);header.write('CORD');header.writeInt32LE(frames,4);record(header);record(Buffer.alloc(4));
   const count=Buffer.alloc(4);count.writeInt32LE(3);record(count);
-  for(let frame=0;frame<frames;frame++){for(let axis=0;axis<3;axis++){const coords=Buffer.alloc(12);for(let i=0;i<3;i++)coords.writeFloatLE(frame+i+axis*.1,i*4);record(coords);}}
+  for(let frame=0;frame<frames;frame++){for(let axis=0;axis<3;axis++){const coords=Buffer.alloc(12);for(let i=0;i<3;i++)coords.writeFloatLE(offset+frame+i+axis*.1,i*4);record(coords);}}
   return Buffer.concat(chunks);
 }
 test('wgpu structure display, mouse controls, commands, undo, and embedded scene export',async({page},testInfo)=>{
@@ -1017,4 +1017,61 @@ test('partial spline selection keeps the full-chain curve and draws two residues
   await page.screenshot({path:testInfo.outputPath('partial-spline.png')});
   await call(page,'execute_script',{source:`cuemol.getObject(${id}).getRendererByName('curve').sel=cuemol.makeSel('A.2.*');`});
   await expect.poll(async()=>mask(await capture()).filter(Boolean).length).toBe(0);
+});
+
+
+test('browser trajectories append ordered files across molecules and retain blocks through undo and export',async({page})=>{
+  const errors=[];page.on('pageerror',error=>errors.push(error.message));
+  await ready(page);
+  const file=(name,buffer)=>({name,mimeType:'application/octet-stream',buffer});
+  await page.locator('#files').setInputFiles([
+    file('first.pdb',Buffer.from(structure)),file('first.dcd',dcd(2,10)),file('second.dcd',dcd(3,20)),
+  ]);
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toContain('Indexed 3 frames; 5 frames');
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().busy)).toBe(false);
+  const first=(await page.evaluate(()=>window.cuemol.status())).scene.objects[0].id;
+  const list=async()=>JSON.parse((await call(page,'list_trajectories')).message).trajectories;
+  expect((await list())[0].frames).toBe(5);expect((await list())[0].blocks).toHaveLength(2);
+  await load(page,'third.dcd',dcd(1,30));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toContain('Indexed 1 frames; 6 frames');
+  await call(page,'undo');expect((await list())[0].frames).toBe(5);
+  await call(page,'redo');expect((await list())[0].frames).toBe(6);
+  const x=async id=>Number(JSON.parse((await call(page,'execute_script',{source:`print(cuemol.getObject(${id}).getAtomByID(1).pos.x);`})).message).log.trim());
+  for(const [frame,expected] of [[1,11],[2,20],[4,22],[5,30]]){
+    await call(page,'set_frame',{objId:first,frame});expect(await x(first)).toBe(expected);
+  }
+  await page.locator('#files').setInputFiles([file('other.pdb',Buffer.from(structure)),file('other.dcd',dcd(2,40))]);
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toContain('Indexed 2 frames; 2 frames');
+  const second=(await page.evaluate(()=>window.cuemol.status())).scene.objects.find(object=>object.id!==first).id;
+  expect((await list()).map(item=>item.frames)).toEqual([6,2]);
+  await call(page,'set_frame',{objId:first,frame:2});expect(await x(first)).toBe(20);
+  await call(page,'set_frame',{objId:second,frame:1});expect(await x(second)).toBe(41);
+  expect((await list()).map(item=>item.frame)).toEqual([2,1]);
+  const saved=page.waitForEvent('download');
+  const button=await page.evaluate(()=>window.cuemol.status().ui.rects['Save Scene']);
+  await page.mouse.click(button[0]+button[2]/2,button[1]+button[3]/2);
+  const chunks=[];for await(const part of await (await saved).createReadStream())chunks.push(part);
+  await page.reload();await expect.poll(()=>page.evaluate(()=>!!window.cuemol),{timeout:60000}).toBe(true);
+  await load(page,'multiple.qsc',Buffer.concat(chunks));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Loaded multiple.qsc');
+  let restored=await list();expect(restored.map(item=>item.frames)).toEqual([6,2]);
+  const target=restored[0].objectId;
+  await call(page,'set_frame',{objId:target,frame:5});expect(await x(target)).toBe(30);
+  const row=await page.evaluate(id=>window.cuemol.status().ui.rects[`object:${id}`],target);
+  await page.mouse.click(row[0]+row[2]/2,row[1]+row[3]/2);
+  await load(page,'fourth.dcd',dcd(2,50));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toContain('Indexed 2 frames; 8 frames');
+  for(const [frame,expected] of [[0,10],[5,30],[6,50],[7,51]]){
+    await call(page,'set_frame',{objId:target,frame});expect(await x(target)).toBe(expected);
+  }
+  expect((await list()).map(item=>item.frames)).toEqual([8,2]);
+  await load(page,'broken.dcd',dcd(1).subarray(0,120));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toContain('Truncated');
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().busy)).toBe(false);
+  expect((await list()).map(item=>item.frames)).toEqual([8,2]);
+  expect(await x(target)).toBe(51);
+  await load(page,'recovered.dcd',dcd(1,60));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toContain('Indexed 1 frames; 9 frames');
+  await call(page,'set_frame',{objId:target,frame:8});expect(await x(target)).toBe(60);
+  expect(errors).toEqual([]);
 });
