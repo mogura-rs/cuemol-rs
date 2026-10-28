@@ -26,7 +26,7 @@ use wasm_bindgen_futures::{spawn_local, JsFuture};
 thread_local! {
     static EVENTS: RefCell<VecDeque<Event>> = RefCell::new(VecDeque::new());
     static CONTEXT: RefCell<Option<egui::Context>> = const { RefCell::new(None) };
-    static STATUS: RefCell<String> = RefCell::new(String::new());
+    static STATUS: RefCell<String> = RefCell::new(r#"{"busy":true,"scene":{"sceneId":0,"objects":[]}}"#.to_string());
 }
 enum Event {
     AgentStart(String, cuemol_agent::Settings, String),
