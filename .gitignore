@@ -34,3 +34,5 @@ web/playwright-report/
 # Python build-helper bytecode
 __pycache__/
 *.py[cod]
+
+third_party/*/Cargo.lock
