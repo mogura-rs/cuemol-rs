@@ -46,8 +46,8 @@ use cuemol_render::{
 use cuemol_surface::{MolSurfObj, PqrFileWriter, XyzrFileWriter};
 use cuemol_xtal::{
     density_map_from_cif, read_mmcif_map_file, read_mtz_metadata_file, read_opendx_file,
-    read_opendx_str, BrixMapReader, Ccp4MapReader, MapColorMode, MapMeshRenderer, MapSurfRenderer,
-    MapSurfaceDrawMode, Mtz2MapReader, MtzFile, QdfDenMapReader, XplorMapReader,
+    read_opendx_str, BrixMapReader, Ccp4MapReader, MapColorMode, MapMeshRenderer, MapRenderer,
+    MapSurfRenderer, MapSurfaceDrawMode, Mtz2MapReader, MtzFile, QdfDenMapReader, XplorMapReader,
 };
 // Re-exported so consumers (and tests) can name the scalar-field types the surface
 // potential API takes — e.g. `set_surface_potential_map(DensityMap)`.
@@ -5547,12 +5547,24 @@ impl DesktopAppState {
         for (key, value) in specific {
             if matches!(
                 key.as_str(),
-                "minLevel" | "maxLevel" | "level" | "maxExtent"
+                "minLevel"
+                    | "maxLevel"
+                    | "level"
+                    | "maxExtent"
+                    | "ui_abslevel_min"
+                    | "ui_abslevel_max"
+                    | "ui_level_min"
+                    | "ui_level_max"
+                    | "siglevel_effective"
+                    | "map_type_resolved"
             ) {
                 continue;
             }
             match key.as_str() {
-                "siglevel" => renderer.siglevel = parse_density_f64(key, value)?,
+                "siglevel" => {
+                    let level = parse_density_f64(key, value)?;
+                    renderer.siglevel = level;
+                }
                 "extent" => renderer.extent = parse_density_f64(key, value)?,
                 "center" => {
                     renderer.center = parse_qsc_vector3(value).ok_or_else(|| {
@@ -5776,6 +5788,22 @@ impl DesktopAppState {
         Ok(uid)
     }
 
+    pub fn density_native_level_from_absolute(&self, map_uid: Uid, value: f64) -> Result<f64> {
+        let map = self
+            .density_maps
+            .get(&map_uid)
+            .ok_or_else(|| CueMolError::not_found("density map"))?;
+        let mut renderer = MapRenderer::new();
+        renderer.set_level_from(&map.map, value);
+        Ok(renderer.siglevel())
+    }
+
+    pub fn density_quantization_step(&self, map_uid: Uid) -> f64 {
+        self.density_maps
+            .get(&map_uid)
+            .map_or(0., |object| object.map.quant_step())
+    }
+
     pub fn set_density_renderer_center(
         &mut self,
         map_uid: Uid,
@@ -5824,6 +5852,9 @@ impl DesktopAppState {
         renderer.name = name.into();
         renderer.color = color;
         renderer.siglevel = siglevel;
+        renderer
+            .attributes
+            .insert("siglevel".to_string(), siglevel.to_string());
         map.modified = true;
         Ok(uid)
     }
@@ -5872,7 +5903,7 @@ impl DesktopAppState {
                 })
         };
         let mut generator = MapSurfRenderer::new();
-        generator.map_mut().set_siglevel(config.siglevel);
+        configure_density_level(generator.map_mut(), &config);
         generator.map_mut().set_extent(config.extent);
         generator.map_mut().set_center(config.center);
         generator.map_mut().set_use_pbc(config.use_pbc);
@@ -6888,7 +6919,7 @@ impl DesktopAppState {
                 match config.kind {
                     GuiDensityRendererKind::Contour => {
                         let mut renderer = MapMeshRenderer::new();
-                        renderer.map_mut().set_siglevel(config.siglevel);
+                        configure_density_level(renderer.map_mut(), config);
                         renderer.map_mut().set_extent(config.extent);
                         renderer.map_mut().set_center(config.center);
                         renderer.map_mut().set_use_pbc(config.use_pbc);
@@ -6933,7 +6964,7 @@ impl DesktopAppState {
                     }
                     GuiDensityRendererKind::IsoSurface | GuiDensityRendererKind::Volume => {
                         let mut renderer = MapSurfRenderer::new();
-                        renderer.map_mut().set_siglevel(config.siglevel);
+                        configure_density_level(renderer.map_mut(), config);
                         renderer.map_mut().set_extent(config.extent);
                         renderer.map_mut().set_center(config.center);
                         renderer.map_mut().set_use_pbc(config.use_pbc);
@@ -30728,6 +30759,19 @@ impl DesktopAppState {
                     "{class_name}.{name} is not resettable"
                 )));
             }
+            if runtime_implements(&class_name, "MapRenderer")
+                && matches!(name.as_str(), "siglevel" | "level")
+                && !pending_renderer_is_attached(&value, ctx)?
+            {
+                let fallback = map_renderer_fallback_property(
+                    &class_name,
+                    "siglevel",
+                    MapRendererProperty::SigLevel,
+                    true,
+                );
+                object.delete_property_or_throw(pending_renderer_attr_key(fallback), ctx)?;
+                return Ok(JsValue::undefined());
+            }
             if runtime_implements(&class_name, "Renderer")
                 && reset_attached_renderer_property(&value, &name, ctx)?
             {
@@ -36548,6 +36592,12 @@ impl DesktopAppState {
         }
         #[derive(Clone, Copy)]
         enum MapRendererProperty {
+            UiAbsMin,
+            UiAbsMax,
+            UiMin,
+            UiMax,
+            EffectiveSigLevel,
+            MapTypeResolved,
             MaxLevel,
             MinLevel,
             ColorMode,
@@ -36589,6 +36639,20 @@ impl DesktopAppState {
                 return Vec::new();
             }
             let mut properties = vec![
+                ("ui_abslevel_min", MapRendererProperty::UiAbsMin, false),
+                ("ui_abslevel_max", MapRendererProperty::UiAbsMax, false),
+                ("ui_level_min", MapRendererProperty::UiMin, false),
+                ("ui_level_max", MapRendererProperty::UiMax, false),
+                (
+                    "siglevel_effective",
+                    MapRendererProperty::EffectiveSigLevel,
+                    false,
+                ),
+                (
+                    "map_type_resolved",
+                    MapRendererProperty::MapTypeResolved,
+                    false,
+                ),
                 ("maxLevel", MapRendererProperty::MaxLevel, false),
                 ("minLevel", MapRendererProperty::MinLevel, false),
                 ("colormode", MapRendererProperty::ColorMode, true),
@@ -36639,6 +36703,12 @@ impl DesktopAppState {
                 Boolean, Color, Integer, Real, Selection, String as Text, Vector,
             };
             let (key, kind, default) = match property {
+                MapRendererProperty::UiAbsMin => ("ui_abslevel_min", Real, "0"),
+                MapRendererProperty::UiAbsMax => ("ui_abslevel_max", Real, "0"),
+                MapRendererProperty::UiMin => ("ui_level_min", Real, "0"),
+                MapRendererProperty::UiMax => ("ui_level_max", Real, "0"),
+                MapRendererProperty::EffectiveSigLevel => ("siglevel_effective", Real, "1.1"),
+                MapRendererProperty::MapTypeResolved => ("map_type_resolved", Text, ""),
                 MapRendererProperty::MaxLevel => ("maxLevel", Real, "0"),
                 MapRendererProperty::MinLevel => ("minLevel", Real, "0"),
                 MapRendererProperty::ColorMode => ("colormode", Text, "solid"),
@@ -36852,6 +36922,17 @@ impl DesktopAppState {
                 qsc_bool(&value)
             }
         }
+        fn script_map_level_state(renderer: &ScriptRend) -> JsResult<MapRenderer> {
+            let mut state = MapRenderer::new();
+            if let Some(map) = script_object(renderer.object_uid)?.scalar_map {
+                state.attach_client_scalar(&map);
+            }
+            let level = renderer_effective_attr(renderer, "siglevel", "");
+            if !level.is_empty() {
+                state.set_siglevel(level.parse().unwrap_or(1.1));
+            }
+            Ok(state)
+        }
         fn map_renderer_property_get(
             property: MapRendererProperty,
             this: &JsValue,
@@ -36861,25 +36942,30 @@ impl DesktopAppState {
             let renderer = script_renderer(renderer_proxy_uid(this, ctx)?)?;
             match property {
                 MapRendererProperty::MaxLevel => {
-                    let map = script_object(renderer.object_uid)?.scalar_map;
-                    Ok(JsValue::new(map.map_or(0.0, |map| {
-                        if map.den_sigma().abs() < f64::EPSILON {
-                            0.0
-                        } else {
-                            map.den_max() / map.den_sigma()
-                        }
-                    })))
+                    Ok(script_map_level_state(&renderer)?.max_level().into())
                 }
                 MapRendererProperty::MinLevel => {
-                    let map = script_object(renderer.object_uid)?.scalar_map;
-                    Ok(JsValue::new(map.map_or(0.0, |map| {
-                        if map.den_sigma().abs() < f64::EPSILON {
-                            0.0
-                        } else {
-                            map.den_min() / map.den_sigma()
-                        }
-                    })))
+                    Ok(script_map_level_state(&renderer)?.min_level().into())
                 }
+                MapRendererProperty::UiAbsMin => {
+                    Ok(script_map_level_state(&renderer)?.ui_abslevel_min().into())
+                }
+                MapRendererProperty::UiAbsMax => {
+                    Ok(script_map_level_state(&renderer)?.ui_abslevel_max().into())
+                }
+                MapRendererProperty::UiMin => {
+                    Ok(script_map_level_state(&renderer)?.ui_level_min().into())
+                }
+                MapRendererProperty::UiMax => {
+                    Ok(script_map_level_state(&renderer)?.ui_level_max().into())
+                }
+                MapRendererProperty::EffectiveSigLevel => Ok(script_map_level_state(&renderer)?
+                    .siglevel_effective()
+                    .into()),
+                MapRendererProperty::MapTypeResolved => Ok(JsString::from(
+                    script_map_level_state(&renderer)?.map_type_resolved(),
+                )
+                .into()),
                 MapRendererProperty::ColorMode => {
                     Ok(
                         JsString::from(renderer_effective_attr(&renderer, "colormode", "solid"))
@@ -36929,14 +37015,7 @@ impl DesktopAppState {
                     .unwrap_or(Vector4::ZERO);
                     Ok(make_vector(center, ctx))
                 }
-                MapRendererProperty::Level => {
-                    let sigma = script_object(renderer.object_uid)?
-                        .scalar_map
-                        .map_or(0.0, |map| map.den_sigma());
-                    Ok(JsValue::new(
-                        map_renderer_number(&renderer, "siglevel", 1.1) * sigma,
-                    ))
-                }
+                MapRendererProperty::Level => Ok(script_map_level_state(&renderer)?.level().into()),
                 MapRendererProperty::UsePbc => {
                     Ok(JsValue::new(map_renderer_bool(&renderer, "use_pbc", true)))
                 }
@@ -37086,7 +37165,13 @@ impl DesktopAppState {
             let renderer = script_renderer(uid)?;
             let input = args.first().cloned().unwrap_or(JsValue::undefined());
             let (key, value) = match property {
-                MapRendererProperty::MaxLevel
+                MapRendererProperty::UiAbsMin
+                | MapRendererProperty::UiAbsMax
+                | MapRendererProperty::UiMin
+                | MapRendererProperty::UiMax
+                | MapRendererProperty::EffectiveSigLevel
+                | MapRendererProperty::MapTypeResolved
+                | MapRendererProperty::MaxLevel
                 | MapRendererProperty::MinLevel
                 | MapRendererProperty::MultiGradient
                 | MapRendererProperty::MaxExtent => {
@@ -37111,16 +37196,9 @@ impl DesktopAppState {
                     ("center", vector_from_value(&input, ctx)?.to_string())
                 }
                 MapRendererProperty::Level => {
-                    let sigma = script_object(renderer.object_uid)?
-                        .scalar_map
-                        .map_or(0.0, |map| map.den_sigma());
-                    let level = input.to_number(ctx)?;
-                    let siglevel = if sigma.abs() > f64::EPSILON {
-                        level / sigma
-                    } else {
-                        0.0
-                    };
-                    ("siglevel", siglevel.to_string())
+                    let mut state = script_map_level_state(&renderer)?;
+                    state.set_level(input.to_number(ctx)?);
+                    ("siglevel", state.siglevel().to_string())
                 }
                 MapRendererProperty::UsePbc => ("use_pbc", input.to_boolean().to_string()),
                 MapRendererProperty::UseAbsLevel => {
@@ -37259,9 +37337,7 @@ impl DesktopAppState {
                 })
                 .flatten();
             let mut surface_renderer = MapSurfRenderer::new();
-            surface_renderer
-                .map_mut()
-                .set_siglevel(map_renderer_number(&renderer, "siglevel", 1.1));
+            *surface_renderer.map_mut() = script_map_level_state(&renderer)?;
             surface_renderer
                 .map_mut()
                 .set_extent(map_renderer_number(&renderer, "extent", 15.0));
@@ -50403,7 +50479,19 @@ fn density_renderer_qsc_node(renderer: &GuiDensityRenderer) -> LDom2Node {
     for (name, value) in &renderer.attributes {
         if matches!(
             name.as_str(),
-            "type" | "name" | "visible" | "minLevel" | "maxLevel" | "level" | "multi_grad"
+            "type"
+                | "name"
+                | "visible"
+                | "minLevel"
+                | "maxLevel"
+                | "level"
+                | "multi_grad"
+                | "ui_abslevel_min"
+                | "ui_abslevel_max"
+                | "ui_level_min"
+                | "ui_level_max"
+                | "siglevel_effective"
+                | "map_type_resolved"
         ) {
             continue;
         }
@@ -50413,7 +50501,9 @@ fn density_renderer_qsc_node(renderer: &GuiDensityRenderer) -> LDom2Node {
     if !renderer.visible {
         node.set_str_attr("visible", "false");
     }
-    node.set_str_attr("siglevel", renderer.siglevel.to_string());
+    if renderer.attributes.contains_key("siglevel") || renderer.siglevel != 1.1 {
+        node.set_str_attr("siglevel", renderer.siglevel.to_string());
+    }
     node.set_str_attr("extent", renderer.extent.to_string());
     node.set_str_attr("center", renderer.center.to_string());
     node.set_str_attr("use_pbc", renderer.use_pbc.to_string());
@@ -51466,6 +51556,34 @@ fn parse_density_i32(name: &str, value: &str) -> Result<i32> {
     })
 }
 
+fn configure_density_level(renderer: &mut MapRenderer, config: &GuiDensityRenderer) {
+    if config.attributes.contains_key("siglevel") || config.siglevel != 1.1 {
+        renderer.set_siglevel(config.siglevel);
+    } else {
+        renderer.reset_siglevel();
+    }
+}
+
+fn density_level_state(map: &DensityMap, config: &GuiDensityRenderer) -> MapRenderer {
+    let mut renderer = MapRenderer::new();
+    renderer.attach_client_scalar(map);
+    configure_density_level(&mut renderer, config);
+    renderer
+}
+
+fn density_level_properties(renderer: &MapRenderer) -> [(&'static str, f64); 8] {
+    [
+        ("minLevel", renderer.min_level()),
+        ("maxLevel", renderer.max_level()),
+        ("level", renderer.level()),
+        ("siglevel_effective", renderer.siglevel_effective()),
+        ("ui_abslevel_min", renderer.ui_abslevel_min()),
+        ("ui_abslevel_max", renderer.ui_abslevel_max()),
+        ("ui_level_min", renderer.ui_level_min()),
+        ("ui_level_max", renderer.ui_level_max()),
+    ]
+}
+
 fn density_renderer_summary(
     map_uid: Uid,
     map: &DensityMap,
@@ -51516,23 +51634,14 @@ fn density_renderer_summary(
     );
     specific.insert("color_mapname".to_string(), renderer.color_mapname.clone());
     specific.insert("xferfn_type".to_string(), renderer.xferfn_type.clone());
-    let sigma = map.den_sigma();
-    let sigma_level = |density: f64| {
-        if sigma.abs() < f64::EPSILON {
-            0.0
-        } else {
-            density / sigma
-        }
-    };
+    let level_state = density_level_state(map, renderer);
+    for (key, value) in density_level_properties(&level_state) {
+        specific.insert(key.to_string(), value.to_string());
+    }
     specific.insert(
-        "minLevel".to_string(),
-        sigma_level(map.den_min()).to_string(),
+        "map_type_resolved".to_string(),
+        level_state.map_type_resolved().to_string(),
     );
-    specific.insert(
-        "maxLevel".to_string(),
-        sigma_level(map.den_max()).to_string(),
-    );
-    specific.insert("level".to_string(), (renderer.siglevel * sigma).to_string());
     let col_extent = map.col_no() as f64 * map.col_grid_size() / 2.0;
     let row_extent = map.row_no() as f64 * map.row_grid_size() / 2.0;
     let sec_extent = map.sec_no() as f64 * map.sec_grid_size() / 2.0;
@@ -52367,7 +52476,9 @@ fn density_renderer_to_script(
     renderer: &GuiDensityRenderer,
 ) -> ScriptRend {
     let mut attributes = renderer.attributes.clone();
-    attributes.insert("siglevel".to_string(), renderer.siglevel.to_string());
+    if renderer.attributes.contains_key("siglevel") || renderer.siglevel != 1.1 {
+        attributes.insert("siglevel".to_string(), renderer.siglevel.to_string());
+    }
     attributes.insert("extent".to_string(), renderer.extent.to_string());
     attributes.insert("center".to_string(), renderer.center.to_string());
     attributes.insert("use_pbc".to_string(), renderer.use_pbc.to_string());
@@ -52399,25 +52510,13 @@ fn density_renderer_to_script(
     if let Some(rgba) = renderer.color.rgba8() {
         attributes.insert("color".to_string(), qsc_rgba8_string(rgba));
     }
-    let sigma = object.map.den_sigma();
-    let sigma_level = |density: f64| {
-        if sigma.abs() < f64::EPSILON {
-            0.0
-        } else {
-            density / sigma
-        }
-    };
+    let level_state = density_level_state(&object.map, renderer);
+    for (key, value) in density_level_properties(&level_state) {
+        attributes.insert(key.to_string(), value.to_string());
+    }
     attributes.insert(
-        "minLevel".to_string(),
-        sigma_level(object.map.den_min()).to_string(),
-    );
-    attributes.insert(
-        "maxLevel".to_string(),
-        sigma_level(object.map.den_max()).to_string(),
-    );
-    attributes.insert(
-        "level".to_string(),
-        (renderer.siglevel * object.map.den_sigma()).to_string(),
+        "map_type_resolved".to_string(),
+        level_state.map_type_resolved().to_string(),
     );
     ScriptRend {
         uid: renderer.uid.get(),
@@ -67861,6 +67960,55 @@ attribute \"dep\" string \"positions\"
             let _ = std::fs::remove_file(path);
         }
         let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    #[cfg(feature = "scripting")]
+    fn em_renderer_levels_preserve_explicit_defaults_reset_and_scene_storage() {
+        let mut values = vec![0; 4096];
+        for (i, value) in values.iter_mut().take(10).enumerate() {
+            *value = 230 + i as u8;
+        }
+        let mut map = DensityMap::new();
+        map.set_map_byte_array(&values, [16; 3], -2., 254., 0.5, 10.);
+        map.set_map_params([0; 3], [16; 3]);
+        map.set_xtal_params(16., 16., 16., 90., 90., 90.);
+        map.set_detected_map_type(2);
+        let mut app = DesktopAppState::new();
+        let scene = app.ensure_active_scene();
+        let uid = app.add_density_map(scene, "em", map);
+        let rid = app.add_density_renderer(uid, "isosurf").unwrap();
+        let before = app
+            .active_render_snapshot("")
+            .unwrap()
+            .mesh_triangle_count();
+        let source = format!("var r=cuemol.getRenderer({}); print(r.siglevel+':'+r.siglevel_effective+':'+r.level+':'+r.map_type_resolved);", rid.get());
+        assert_eq!(
+            app.run_script_js(&source).unwrap().0,
+            "1.1:0.244140625:228:em\n"
+        );
+        app.run_script_js(&format!("var r=cuemol.getRenderer({}); r.siglevel=1.1; print(r.siglevel_effective+':'+r.level);",rid.get())).map(|r| assert_eq!(r.0,"1.1:-2\n")).unwrap();
+        assert_ne!(
+            app.active_render_snapshot("")
+                .unwrap()
+                .mesh_triangle_count(),
+            before
+        );
+        let bytes = app.active_scene_bytes().unwrap();
+        let mut restored = DesktopAppState::new();
+        restored.open_bytes("em.qsc", &bytes).unwrap();
+        assert_eq!(restored.run_script_js("var r=cuemol.getObject('em').getRendererByType('isosurf'); print(r.level); cuemol.resetProp(r,'level'); print(r.level); r.level=232; print(r.level); cuemol.resetProp(r,'siglevel'); print(r.level);").unwrap().0,"-2\n228\n232\n228\n");
+        let bytes = restored.active_scene_bytes().unwrap();
+        let mut defaults = DesktopAppState::new();
+        defaults.open_bytes("defaults.qsc", &bytes).unwrap();
+        assert_eq!(defaults.run_script_js("var m=cuemol.getObject('em'); var r=m.getRendererByType('isosurf'); print(r.level); var q=cuemol.MapSurfRenderer(); q.name='detached'; q.siglevel=1.1; cuemol.resetProp(q,'siglevel'); m.attachRenderer(q); print(q.level);").unwrap().0,"228\n228\n");
+        assert_eq!(
+            defaults
+                .active_render_snapshot("")
+                .unwrap()
+                .mesh_triangle_count(),
+            before * 2
+        );
     }
 
     #[test]

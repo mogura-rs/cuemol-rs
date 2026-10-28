@@ -112,6 +112,11 @@ OpenDX and QDF electrostatic potentials retain shared 32-bit floating-point
 samples and trilinear sampling; embedded scenes use `qdfpot` for these objects.
 Scripts expose the quantization step, map origin, top-fraction density levels,
 and an editable `map_type` with its resolved crystallographic or EM kind.
+EM contours use the occupied top fraction, while crystallographic contours use
+standard deviations. Default EM levels are capped by occupied voxels; explicitly
+setting the same numeric level overrides that cap. Reset and embedded scene
+storage preserve this distinction, and both desktop panels expose the matching
+absolute or native level range.
 
 Load an MD topology and trajectory through the MD dialog or `load_trajectory`.
 GRO, PDB, mmCIF, PSF, AMBER topology, SDF, and MOL2 topologies are accepted.

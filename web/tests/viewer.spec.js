@@ -784,3 +784,35 @@ ${Array.from({length:27},(_,i)=>i*0.125-1.625).join(' ')}
   expect(JSON.parse(state.message).log).toBe(before);
   expect(errors).toEqual([]);
 });
+
+test('browser sparse EM contours preserve explicit levels and reset after scene reload',async({page})=>{
+  await ready(page);
+  const bytes=Buffer.alloc(1024+4096*4);
+  for(let i=0;i<3;i++){
+    bytes.writeInt32LE(16,i*4);bytes.writeInt32LE(16,(i+7)*4);
+    bytes.writeFloatLE(16,(i+10)*4);bytes.writeFloatLE(90,(i+13)*4);
+    bytes.writeInt32LE(i+1,(i+16)*4);
+  }
+  bytes.writeInt32LE(2,12);bytes.write('MAP ',208);
+  bytes.writeFloatLE(255,80);bytes.writeFloatLE(0.5,84);bytes.writeFloatLE(10,216);
+  for(let z=7;z<=8;z++)for(let y=7;y<=8;y++)for(let x=7;x<=8;x++)
+    bytes.writeFloatLE(230+x+y+z,1024+4*(x+16*(y+16*z)));
+  await load(page,'sparse.mrc',bytes);
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Loaded sparse.mrc');
+  let uid=await page.evaluate(()=>window.cuemol.status().scene.maps[0].id);
+  let result=await call(page,'execute_script',{source:`var m=cuemol.getObject(${uid});var r=m.createRenderer('isosurf');r.name='levels';print(r.level);print(r.siglevel_effective);r.siglevel=1.1;print(r.level);`});
+  const levels=JSON.parse(result.message).log.trim().split('\n').map(Number);
+  expect(levels[0]).toBeGreaterThan(0);
+  expect(levels[1]).toBeLessThan(1.1);
+  expect(levels[2]).toBe(0);
+  const download=page.waitForEvent('download');
+  const button=await page.evaluate(()=>window.cuemol.status().ui.rects['Save Scene']);
+  await page.mouse.click(button[0]+button[2]/2,button[1]+button[3]/2);
+  const stream=await(await download).createReadStream(),chunks=[];
+  for await(const chunk of stream)chunks.push(chunk);
+  await load(page,'sparse.qsc',Buffer.concat(chunks));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Loaded sparse.qsc');
+  uid=await page.evaluate(()=>window.cuemol.status().scene.maps[0].id);
+  result=await call(page,'execute_script',{source:`var r=cuemol.getObject(${uid}).getRendererByType('isosurf');print(r.level);cuemol.resetProp(r,'siglevel');print(r.level);print(r.map_type_resolved);`});
+  expect(JSON.parse(result.message).log).toBe(`0\n${levels[0]}\nem\n`);
+});

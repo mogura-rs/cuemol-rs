@@ -26,6 +26,13 @@ impl ScalarHistogram {
 }
 
 pub trait ScalarObject {
+    fn density_histogram(&self) -> Option<[u64; 256]> {
+        None
+    }
+    fn density_map_kind(&self) -> Option<&'static str> {
+        None
+    }
+
     fn percent_level_histogram(&self) -> Option<[u64; 256]> {
         None
     }

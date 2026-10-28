@@ -882,3 +882,28 @@ Validation passed: five C++ oracle cases, 211 shared-core tests, 165 native
 GUI tests, and three rebuilt-browser tests (structure/scene export, CCP4
 metadata, and potential display/scene export). The remaining QIF audit is tracked
 separately; these checks establish the scalar-data changes only.
+
+### Map levels and default-state persistence
+
+The shared map renderer now resolves crystallographic sigma levels, EM top-percent
+levels, absolute levels, and the four UI bounds using the reference formulas.
+The EM occupancy cap applies only while the native level remains at its default.
+An explicit assignment of `1.1` therefore differs from the initial `1.1`; reset
+and both external and embedded QSC storage retain that distinction. Legacy
+`minLevel` and `maxLevel` remain sigma ratios even for EM maps, as in the C++
+implementation. Uniform byte maps retain the reference quantization step of one.
+
+Native and Tauri density controls use the resolved native/absolute level and UI
+bounds. Editing color or transparency leaves the default flag intact. Absolute
+Tauri edits use the shared conversion instead of dividing by RMS for all maps.
+Both changes are covered by GUI regressions. The browser regression loads a
+sparse MRC map, explicitly overrides its default, reloads the embedded scene,
+and restores the original threshold through reset.
+
+The scalar oracle now also compiles `reference_map_levels.cpp`. It compares 25
+states across crystallographic, sparse EM, continuous potential, uniform EM,
+and tiny-value maps. All states passed, as did 212 shared-core tests, 166 native
+GUI tests and 143 Tauri tests (one optional test ignored). Rebuilt-browser CCP4,
+potential and sparse-EM regressions passed. These results do not establish
+complete map-renderer parity; region/LOD and volume rendering remain in the
+ongoing implementation audit.

@@ -15564,7 +15564,7 @@ function densityPanelProperties(target, changes = {}) {
     showRing: renderer.showRing,
     ringThickness: renderer.ringThickness,
     ringColor: renderer.ringColor,
-    specific: { ...renderer.specific, ...(changes.specific || {}) },
+    specific: { ...(changes.specific || {}) },
   };
 }
 
@@ -15643,7 +15643,7 @@ function renderDensity() {
     const useAbsolute = target.renderer.specific.use_abslevel === "true";
     const colorMode = target.renderer.specific.colormode || "solid";
     for (const [label, key, value, selected] of [
-      ["Use sigma contour level", "use_abslevel", "false", !useAbsolute],
+      [target.renderer.specific.map_type_resolved === "em" ? "Use top-percent contour level" : "Use sigma contour level", "use_abslevel", "false", !useAbsolute],
       ["Use absolute contour level", "use_abslevel", "true", useAbsolute],
       ["Solid coloring", "colormode", "solid", colorMode === "solid"],
       ["Multi gradient", "colormode", "multigrad", colorMode === "multigrad"],
@@ -15719,13 +15719,11 @@ function renderDensity() {
   controls.append(transparency.row);
 
   const useAbsolute = renderer.specific.use_abslevel === "true";
-  const sigma = map.rmsdDensity;
-  const sigmaLevel = Number(renderer.specific.siglevel ?? 1.1);
-  const minimumSigma = Number(renderer.specific.minLevel ?? -10);
-  const maximumSigma = Number(renderer.specific.maxLevel ?? 10);
-  const scale = useAbsolute ? sigma : 1;
-  let levelMinimum = minimumSigma * scale;
-  let levelMaximum = maximumSigma * scale;
+  const isPercent = renderer.specific.map_type_resolved === "em";
+  const currentLevel = Number(renderer.specific[useAbsolute ? "level" : "siglevel_effective"] ?? 1.1);
+  let levelMinimum = Number(renderer.specific[useAbsolute ? "ui_abslevel_min" : "ui_level_min"] ?? -10);
+  let levelMaximum = Number(renderer.specific[useAbsolute ? "ui_abslevel_max" : "ui_level_max"] ?? 10);
+  const levelEnabled = Number.isFinite(levelMinimum) && Number.isFinite(levelMaximum) && levelMaximum > levelMinimum;
   if (!Number.isFinite(levelMinimum) || !Number.isFinite(levelMaximum) || levelMinimum === levelMaximum) {
     levelMinimum = -10;
     levelMaximum = 10;
@@ -15734,20 +15732,20 @@ function renderDensity() {
   const levelRange = Math.abs(levelMaximum - levelMinimum);
   const levelStep = useAbsolute && levelRange > 0
     ? 10 ** Math.floor(Math.log10(levelRange / 100))
-    : 0.1;
+    : isPercent ? 0.01 : 0.1;
   const level = densityPanelRange(
     "Level:",
-    sigmaLevel * scale,
+    currentLevel,
     levelMinimum,
     levelMaximum,
     levelStep,
-    useAbsolute ? "" : " σ",
+    useAbsolute ? "" : isPercent ? " %" : " σ",
     (value) =>
       updateDensityPanelRenderer(target, {
-        specific: { siglevel: String(useAbsolute ? value / sigma : value) },
+        specific: { [useAbsolute ? "level" : "siglevel"]: String(value) },
       }),
   );
-  level.slider.disabled = useAbsolute && Math.abs(sigma) < Number.EPSILON;
+  level.slider.disabled = !levelEnabled;
   controls.append(level.row);
 
   const configuredMaxExtent = Number(renderer.specific.maxExtent);

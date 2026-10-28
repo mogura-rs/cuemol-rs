@@ -354,6 +354,9 @@ impl DensityMap {
         self.rmsd_density = rmsd_density;
         self.level_base = min_density;
         self.level_step = (max_density - min_density) / 256.0;
+        if self.level_step <= 0. {
+            self.level_step = 1.;
+        }
         self.bytes = std::sync::Arc::new(bytes.to_vec());
         self.pad_or_truncate_bytes();
         self.rebuild_histogram();
@@ -540,6 +543,9 @@ impl DensityMap {
         self.rmsd_density = rmsd;
         self.level_base = min;
         self.level_step = (max - min) / 256.0;
+        if self.level_step <= 0. {
+            self.level_step = 1.;
+        }
     }
 
     fn float_to_byte(&self, value: f64) -> u8 {
@@ -663,6 +669,15 @@ fn delta_from_cell(
 }
 
 impl ScalarObject for DensityMap {
+    fn density_histogram(&self) -> Option<[u64; 256]> {
+        self.continuous_values.is_none().then_some(self.histogram)
+    }
+    fn density_map_kind(&self) -> Option<&'static str> {
+        self.continuous_values
+            .is_none()
+            .then_some(if self.is_em() { "em" } else { "xtal" })
+    }
+
     fn quant_step(&self) -> f64 {
         if self.continuous_values.is_some() {
             0.
@@ -863,6 +878,8 @@ impl MapColorMode {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct MapClientInfo {
+    mean_density: f64,
+    map_kind: Option<&'static str>,
     rmsd_density: f64,
     min_density: f64,
     max_density: f64,
@@ -876,7 +893,9 @@ struct MapClientInfo {
 impl MapClientInfo {
     fn from_scalar(scalar: &impl ScalarObject) -> Self {
         Self {
-            histogram: scalar.percent_level_histogram(),
+            histogram: scalar.density_histogram(),
+            mean_density: scalar.mean_density(),
+            map_kind: scalar.density_map_kind(),
             level_base: scalar.level_base(),
             level_step: scalar.level_step(),
             rmsd_density: scalar.rmsd_density(),
@@ -898,6 +917,7 @@ pub struct MapRenderer {
     color_mode: MapColorMode,
     color: SolidColor,
     siglevel: f64,
+    siglevel_default: bool,
     extent: f64,
     center: Vector4,
     use_pbc: bool,
@@ -917,6 +937,7 @@ impl Default for MapRenderer {
             color_mode: MapColorMode::Solid,
             color: SolidColor::from_rgb(0.0, 0.0, 1.0),
             siglevel: 1.1,
+            siglevel_default: true,
             extent: 15.0,
             center: Vector4::ZERO,
             use_pbc: true,
@@ -1004,11 +1025,108 @@ impl MapRenderer {
 
     pub fn set_siglevel(&mut self, value: f64) {
         self.siglevel = value;
+        self.siglevel_default = false;
         self.invalidate_display_cache();
     }
 
     pub fn set_sig_level(&mut self, value: f64) {
         self.set_siglevel(value);
+    }
+
+    pub fn reset_siglevel(&mut self) {
+        self.siglevel = 1.1;
+        self.siglevel_default = true;
+        self.invalidate_display_cache();
+    }
+
+    pub fn siglevel_is_default(&self) -> bool {
+        self.siglevel_default
+    }
+
+    fn ui_abs_range_for(client: MapClientInfo) -> (f64, f64) {
+        let mut lo = client.min_density;
+        let mut hi = client.max_density;
+        if let Some(hist) = &client.histogram {
+            let at_fraction = |fraction| {
+                fraction_level(
+                    hist,
+                    client.level_base,
+                    client.level_step,
+                    client.min_density,
+                    client.max_density,
+                    fraction,
+                )
+            };
+            hi = hi.min(at_fraction(1e-4));
+            if client.map_kind == Some("em") {
+                let background = client.mean_density + client.rmsd_density;
+                if background > lo {
+                    lo = at_fraction(level_fraction(
+                        hist,
+                        client.level_base,
+                        client.level_step,
+                        background,
+                    ));
+                }
+            }
+        }
+        if hi > lo {
+            (lo, hi)
+        } else {
+            (client.min_density, client.max_density)
+        }
+    }
+
+    fn effective_siglevel_for(&self, client: MapClientInfo) -> f64 {
+        if self.siglevel_default && client.map_kind == Some("em") {
+            let lo = Self::ui_abs_range_for(client).0;
+            if let Some(hist) = client.histogram {
+                let cap = level_fraction(&hist, client.level_base, client.level_step, lo) * 100.;
+                if cap > 0. {
+                    return self.siglevel.min(cap);
+                }
+            }
+        }
+        self.siglevel
+    }
+
+    pub fn siglevel_effective(&self) -> f64 {
+        self.client_info
+            .map_or(self.siglevel, |c| self.effective_siglevel_for(c))
+    }
+    pub fn ui_abslevel_min(&self) -> f64 {
+        self.client_info.map_or(0., |c| Self::ui_abs_range_for(c).0)
+    }
+    pub fn ui_abslevel_max(&self) -> f64 {
+        self.client_info.map_or(0., |c| Self::ui_abs_range_for(c).1)
+    }
+    pub fn ui_level_min(&self) -> f64 {
+        self.client_info.map_or(0., |c| {
+            if c.map_kind == Some("em") {
+                0.01
+            } else if c.rmsd_density > 0. {
+                Self::ui_abs_range_for(c).0 / c.rmsd_density
+            } else {
+                0.
+            }
+        })
+    }
+    pub fn ui_level_max(&self) -> f64 {
+        self.client_info.map_or(0., |c| {
+            let (lo, hi) = Self::ui_abs_range_for(c);
+            if c.map_kind == Some("em") {
+                c.histogram.map_or(0., |hist| {
+                    level_fraction(&hist, c.level_base, c.level_step, lo) * 100.
+                })
+            } else if c.rmsd_density > 0. {
+                hi / c.rmsd_density
+            } else {
+                0.
+            }
+        })
+    }
+    pub fn map_type_resolved(&self) -> &'static str {
+        self.client_info.and_then(|c| c.map_kind).unwrap_or("")
     }
 
     pub fn extent(&self) -> f64 {
@@ -1161,38 +1279,27 @@ impl MapRenderer {
         self.invalidate_display_cache();
     }
 
-    pub fn level(&self) -> f64 {
-        self.client_info.map_or(0.0, |client| {
-            client
-                .histogram
-                .as_ref()
-                .map_or(self.siglevel * client.rmsd_density, |hist| {
-                    fraction_level(
-                        hist,
-                        client.level_base,
-                        client.level_step,
-                        client.min_density,
-                        client.max_density,
-                        self.siglevel / 100.,
-                    )
-                })
-        })
+    fn level_for(&self, client: MapClientInfo) -> f64 {
+        let native = self.effective_siglevel_for(client);
+        if client.map_kind == Some("em") {
+            if let Some(hist) = client.histogram {
+                return fraction_level(
+                    &hist,
+                    client.level_base,
+                    client.level_step,
+                    client.min_density,
+                    client.max_density,
+                    native / 100.,
+                );
+            }
+        }
+        native * client.rmsd_density
     }
-
+    pub fn level(&self) -> f64 {
+        self.client_info.map_or(0., |c| self.level_for(c))
+    }
     pub fn level_from(&self, scalar: &impl ScalarObject) -> f64 {
-        scalar.percent_level_histogram().as_ref().map_or(
-            self.siglevel * scalar.rmsd_density(),
-            |hist| {
-                fraction_level(
-                    hist,
-                    scalar.level_base(),
-                    scalar.level_step(),
-                    scalar.min_density(),
-                    scalar.max_density(),
-                    self.siglevel / 100.,
-                )
-            },
-        )
+        self.level_for(MapClientInfo::from_scalar(scalar))
     }
 
     pub fn get_level(&self) -> f64 {
@@ -1201,7 +1308,7 @@ impl MapRenderer {
 
     pub fn set_level(&mut self, value: f64) {
         if let Some(client) = self.client_info {
-            if let Some(hist) = client.histogram {
+            if let Some(hist) = client.histogram.filter(|_| client.map_kind == Some("em")) {
                 self.set_siglevel(
                     level_fraction(&hist, client.level_base, client.level_step, value) * 100.,
                 );
@@ -1209,11 +1316,7 @@ impl MapRenderer {
             }
         }
         let rmsd = self.client_info.map_or(0.0, |client| client.rmsd_density);
-        self.set_siglevel(if rmsd.abs() < 1.0e-12 {
-            0.0
-        } else {
-            value / rmsd
-        });
+        self.set_siglevel(if rmsd <= 0.0 { 0.0 } else { value / rmsd });
     }
 
     pub fn set_level_from(&mut self, scalar: &impl ScalarObject, value: f64) {
@@ -1224,19 +1327,12 @@ impl MapRenderer {
             return;
         }
         let rmsd = scalar.rmsd_density();
-        self.set_siglevel(if rmsd.abs() < 1.0e-12 {
-            0.0
-        } else {
-            value / rmsd
-        });
+        self.set_siglevel(if rmsd <= 0.0 { 0.0 } else { value / rmsd });
     }
 
     pub fn max_level(&self) -> f64 {
-        if self.client_info.is_some_and(|c| c.histogram.is_some()) {
-            return 100.;
-        }
         self.client_info.map_or(0.0, |client| {
-            if client.rmsd_density.abs() < 1.0e-12 {
+            if client.rmsd_density <= 0.0 {
                 0.0
             } else {
                 client.max_density / client.rmsd_density
@@ -1245,11 +1341,8 @@ impl MapRenderer {
     }
 
     pub fn max_level_from(&self, scalar: &impl ScalarObject) -> f64 {
-        if scalar.percent_level_histogram().is_some() {
-            return 100.;
-        }
         let rmsd = scalar.rmsd_density();
-        if rmsd.abs() < 1.0e-12 {
+        if rmsd <= 0.0 {
             0.0
         } else {
             scalar.max_density() / rmsd
@@ -1261,11 +1354,8 @@ impl MapRenderer {
     }
 
     pub fn min_level(&self) -> f64 {
-        if self.client_info.is_some_and(|c| c.histogram.is_some()) {
-            return 0.;
-        }
         self.client_info.map_or(0.0, |client| {
-            if client.rmsd_density.abs() < 1.0e-12 {
+            if client.rmsd_density <= 0.0 {
                 0.0
             } else {
                 client.min_density / client.rmsd_density
@@ -1274,11 +1364,8 @@ impl MapRenderer {
     }
 
     pub fn min_level_from(&self, scalar: &impl ScalarObject) -> f64 {
-        if scalar.percent_level_histogram().is_some() {
-            return 0.;
-        }
         let rmsd = scalar.rmsd_density();
-        if rmsd.abs() < 1.0e-12 {
+        if rmsd <= 0.0 {
             0.0
         } else {
             scalar.min_density() / rmsd

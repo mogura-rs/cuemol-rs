@@ -2970,6 +2970,19 @@ impl AppModel {
                 return Err(format!("invalid density color: {color}"));
             }
         }
+        let mut specific = properties.specific.clone();
+        if let Some(level) = specific.remove("level") {
+            let level = level
+                .parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite())
+                .ok_or_else(|| "level must be finite".to_string())?;
+            let native = self
+                .desktop
+                .density_native_level_from_absolute(Uid::new(properties.object_uid), level)
+                .map_err(|error| error.to_string())?;
+            specific.insert("siglevel".to_string(), native.to_string());
+        }
         self.desktop
             .set_density_renderer_properties(
                 Uid::new(properties.object_uid),
@@ -2982,7 +2995,7 @@ impl AppModel {
                 properties.edge_type,
                 properties.edge_width,
                 properties.edge_color.trim(),
-                &properties.specific,
+                &specific,
             )
             .map_err(|error| error.to_string())?;
         if let Some(styles) = properties.specific.get("style") {
@@ -20212,6 +20225,44 @@ mod tests {
         assert_eq!(snapshot.background, "white");
         assert_eq!(snapshot.density_level, 2.4);
         assert_eq!(snapshot.status, "Redo: Density level: 2.40 σ");
+    }
+
+    #[test]
+    fn em_density_panel_edits_preserve_defaults_and_convert_absolute_levels() {
+        let mut model = model_without_gpu();
+        let scene = model.desktop.active_scene().unwrap();
+        let mut values = vec![0; 4096];
+        for (i, value) in values.iter_mut().take(10).enumerate() {
+            *value = 230 + i as u8;
+        }
+        let mut map = cuemol_xtal::DensityMap::new();
+        map.set_map_byte_array(&values, [16; 3], -2., 254., 0.5, 10.);
+        map.set_map_params([0; 3], [16; 3]);
+        map.set_xtal_params(16., 16., 16., 90., 90., 90.);
+        map.set_detected_map_type(2);
+        let uid = model.desktop.add_density_map(scene, "em", map);
+        let rid = model.desktop.add_density_renderer(uid, "isosurf").unwrap();
+        let mut properties = default_renderer_properties_input(uid, rid, "em surface");
+        properties.alpha = 0.6;
+        properties.specific.insert("color".into(), "red".into());
+        model.set_density_renderer_properties(properties).unwrap();
+        assert_eq!(
+            model.desktop.density_map_summary(uid).unwrap().renderers[0].specific["level"],
+            "228"
+        );
+        let mut properties = default_renderer_properties_input(uid, rid, "em surface");
+        properties.specific.insert("siglevel".into(), "1.1".into());
+        model.set_density_renderer_properties(properties).unwrap();
+        assert_eq!(
+            model.desktop.density_map_summary(uid).unwrap().renderers[0].specific["level"],
+            "-2"
+        );
+        let mut properties = default_renderer_properties_input(uid, rid, "em surface");
+        properties.specific.insert("level".into(), "232".into());
+        model.set_density_renderer_properties(properties).unwrap();
+        let renderer = &model.desktop.density_map_summary(uid).unwrap().renderers[0];
+        assert_eq!(renderer.specific["level"], "232");
+        assert!(renderer.specific["siglevel"].parse::<f64>().unwrap() < 1.1);
     }
 
     #[test]

@@ -3537,6 +3537,7 @@ struct NativeRendererProperties {
     ring_thickness: f64,
     ring_color: String,
     specific: std::collections::BTreeMap<String, String>,
+    density_level_edited: bool,
 }
 
 impl NativeRendererProperties {
@@ -3629,6 +3630,7 @@ impl NativeRendererProperties {
                 .unwrap_or("#ffffbf")
                 .to_string(),
             specific,
+            density_level_edited: false,
         })
     }
 
@@ -3820,6 +3822,7 @@ impl NativeRendererProperties {
             ring_thickness: 0.2,
             ring_color: "#ffffbf".to_string(),
             specific,
+            density_level_edited: false,
         }
     }
 
@@ -12923,6 +12926,9 @@ impl GuiApplication {
             let use_abslevel = selected_renderer
                 .and_then(|renderer| renderer.specific.get("use_abslevel"))
                 .is_some_and(|value| value_is_true(value));
+            let is_percent = selected_renderer
+                .and_then(|r| r.specific.get("map_type_resolved"))
+                .is_some_and(|kind| kind == "em");
             let color_mode = selected_renderer
                 .and_then(|renderer| renderer.specific.get("colormode"))
                 .map(String::as_str)
@@ -12930,7 +12936,14 @@ impl GuiApplication {
             ui.add_enabled_ui(selected_renderer.is_some(), |ui| {
                 ui.menu_button("▾", |ui| {
                     if ui
-                        .selectable_label(!use_abslevel, "Use sigma contour level")
+                        .selectable_label(
+                            !use_abslevel,
+                            if is_percent {
+                                "Use top-percent contour level"
+                            } else {
+                                "Use sigma contour level"
+                            },
+                        )
                         .clicked()
                     {
                         menu_change = Some(("use_abslevel", "false".to_string()));
@@ -13041,55 +13054,80 @@ impl GuiApplication {
             .specific
             .get("use_abslevel")
             .is_some_and(|value| value_is_true(value));
-        let sigma = map.rmsd_density;
-        let mut sigma_level = draft
-            .specific_value("siglevel", "1.1")
-            .parse::<f64>()
-            .unwrap_or(1.1);
-        let min_sigma = renderer
+        let scalar = |key: &str, fallback: f64| {
+            renderer
+                .specific
+                .get(key)
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(fallback)
+        };
+        let is_percent = renderer
             .specific
-            .get("minLevel")
-            .and_then(|value| value.parse::<f64>().ok())
-            .unwrap_or(-10.0);
-        let max_sigma = renderer
-            .specific
-            .get("maxLevel")
-            .and_then(|value| value.parse::<f64>().ok())
-            .unwrap_or(10.0);
-        let scale = if use_abslevel { sigma } else { 1.0 };
-        let mut level = sigma_level * scale;
-        let mut level_min = min_sigma * scale;
-        let mut level_max = max_sigma * scale;
-        if level_min > level_max {
-            std::mem::swap(&mut level_min, &mut level_max);
-        }
-        if !level_min.is_finite() || !level_max.is_finite() || level_max <= level_min {
-            level_min = -10.0;
-            level_max = 10.0;
-        }
-        let step = if use_abslevel {
-            let range = (level_max - level_min).abs();
-            if range > 0.0 {
-                10.0_f64.powf((range / 100.0).log10().floor())
+            .get("map_type_resolved")
+            .is_some_and(|kind| kind == "em");
+        let mut level = if use_abslevel {
+            scalar("level", 0.)
+        } else {
+            scalar("siglevel_effective", 1.1)
+        };
+        let mut level_min = scalar(
+            if use_abslevel {
+                "ui_abslevel_min"
             } else {
-                0.1
-            }
+                "ui_level_min"
+            },
+            -10.,
+        );
+        let mut level_max = scalar(
+            if use_abslevel {
+                "ui_abslevel_max"
+            } else {
+                "ui_level_max"
+            },
+            10.,
+        );
+        let enabled = level_min.is_finite() && level_max.is_finite() && level_max > level_min;
+        if !enabled {
+            level_min = level - 1.;
+            level_max = level + 1.;
+        }
+        let range = (level_max - level_min).abs();
+        let step = if use_abslevel {
+            self.state
+                .density_quantization_step(map_uid)
+                .max(10.0_f64.powf((range / 100.).log10().floor()))
+        } else if is_percent {
+            0.01
         } else {
             0.1
         };
         ui.horizontal(|ui| {
             ui.label("Level:");
             let response = ui.add_enabled(
-                !use_abslevel || sigma.abs() >= f64::EPSILON,
+                enabled,
                 egui::Slider::new(&mut level, level_min..=level_max)
                     .step_by(step)
-                    .suffix(if use_abslevel { "" } else { " σ" }),
+                    .clamping(egui::SliderClamping::Edits)
+                    .suffix(if use_abslevel {
+                        ""
+                    } else if is_percent {
+                        " %"
+                    } else {
+                        " σ"
+                    }),
             );
             if response.changed() {
-                sigma_level = if use_abslevel { level / sigma } else { level };
+                let native = if use_abslevel {
+                    self.state
+                        .density_native_level_from_absolute(map_uid, level)
+                        .unwrap_or(0.)
+                } else {
+                    level
+                };
+                draft.density_level_edited = true;
                 draft
                     .specific
-                    .insert("siglevel".to_string(), sigma_level.to_string());
+                    .insert("siglevel".to_string(), native.to_string());
                 changed = true;
             }
         });
@@ -23374,6 +23412,16 @@ impl GuiApplication {
         if renderer_type != draft.renderer_type {
             return Err("renderer type changed while the dialog was open".to_string());
         }
+        let mut specific = draft.specific.clone();
+        if !draft.density_level_edited
+            && map
+                .renderers
+                .iter()
+                .find(|r| r.uid == draft.renderer_uid)
+                .is_some_and(|r| r.specific.get("siglevel") == specific.get("siglevel"))
+        {
+            specific.remove("siglevel");
+        }
         let scene_uid = map.scene_uid;
         let undo = self.capture_undo();
         self.state
@@ -23388,7 +23436,7 @@ impl GuiApplication {
                 &draft.edge_type,
                 draft.edge_width,
                 draft.edge_color.trim(),
-                &draft.specific,
+                &specific,
             )
             .map_err(|error| error.to_string())?;
         self.state
@@ -37388,6 +37436,44 @@ mod tests {
             .loaded_styles()[local_index]
             .data
             .contains("id=\"Mapcontour\""));
+    }
+
+    #[test]
+    fn native_em_level_edits_keep_default_caps_until_the_level_changes() {
+        let mut app = GuiApplication::new();
+        let scene = app.state.active_scene().unwrap();
+        let mut values = vec![0; 4096];
+        for (i, value) in values.iter_mut().take(10).enumerate() {
+            *value = 230 + i as u8;
+        }
+        let mut map = cuemol_xtal::DensityMap::new();
+        map.set_map_byte_array(&values, [16; 3], -2., 254., 0.5, 10.);
+        map.set_map_params([0; 3], [16; 3]);
+        map.set_xtal_params(16., 16., 16., 90., 90., 90.);
+        map.set_detected_map_type(2);
+        let uid = app.state.add_density_map(scene, "em", map);
+        let rid = app.state.add_density_renderer(uid, "isosurf").unwrap();
+        let mut draft = NativeRendererProperties::from_density_state(&app.state, uid, rid).unwrap();
+        assert_eq!(draft.specific["level"], "228");
+        draft.alpha = 0.6;
+        draft.specific.insert("color".into(), "red".into());
+        app.apply_renderer_properties(&draft).unwrap();
+        assert_eq!(
+            app.state.density_map_summary(uid).unwrap().renderers[0].specific["level"],
+            "228"
+        );
+        draft.density_level_edited = true;
+        draft.specific.insert("siglevel".into(), "1.1".into());
+        app.apply_renderer_properties(&draft).unwrap();
+        assert_eq!(
+            app.state.density_map_summary(uid).unwrap().renderers[0].specific["level"],
+            "-2"
+        );
+        app.undo(&mut CameraController::default());
+        assert_eq!(
+            app.state.density_map_summary(uid).unwrap().renderers[0].specific["level"],
+            "228"
+        );
     }
 
     #[test]
