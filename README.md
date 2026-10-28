@@ -242,8 +242,8 @@ file references must be saved with embedded data before transfer to the browser.
 
 Rust, a C++20 compiler for the vendored numerical kernels, and the native platform's wgpu/winit
 system dependencies are required. The default workspace build is headless.
-A pinned winit source patch prevents duplicate X11 wheel-release events;
-its provenance and license are retained under `third_party/winit`.
+The published winit crate is resolved through Cargo. A small native input filter
+uses raw X11 button states to discard duplicate wheel-release events.
 Tauri is an optional alternate frontend and requires its platform SDKs.
 
 ```sh

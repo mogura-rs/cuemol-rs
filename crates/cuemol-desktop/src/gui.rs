@@ -4,6 +4,8 @@ mod navigation;
 mod tritium;
 #[path = "updates.rs"]
 mod updates;
+#[path = "wheel_filter.rs"]
+mod wheel_filter;
 #[cfg(test)]
 use cuemol_command::navigation::{add_selection_expression, atom_id_selection};
 use cuemol_command::navigation::{AtomHit, Navigation, Tool as ViewportTool};
@@ -311,6 +313,7 @@ struct NativeRunner {
     startup_paths: Vec<PathBuf>,
     started_at: Instant,
     exit_after: Option<Duration>,
+    wheel_filter: wheel_filter::X11WheelFilter,
 }
 
 impl NativeRunner {
@@ -330,6 +333,7 @@ impl NativeRunner {
             startup_paths,
             started_at: Instant::now(),
             exit_after: exit_after_from_env(),
+            wheel_filter: wheel_filter::X11WheelFilter::default(),
         }
     }
 
@@ -341,7 +345,21 @@ impl NativeRunner {
 
 impl ApplicationHandler for NativeRunner {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "linux")]
+        {
+            use winit::platform::x11::ActiveEventLoopExtX11;
+            self.wheel_filter.enabled = event_loop.is_x11();
+        }
         self.guard_gui_callback(event_loop, "resumed", Self::resumed_impl);
+    }
+
+    fn device_event(
+        &mut self,
+        _: &ActiveEventLoop,
+        device: winit::event::DeviceId,
+        event: winit::event::DeviceEvent,
+    ) {
+        self.wheel_filter.device_event(device, &event);
     }
 
     fn window_event(
@@ -350,12 +368,16 @@ impl ApplicationHandler for NativeRunner {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        if self.wheel_filter.suppress(&event) {
+            return;
+        }
         let _ = self.guard_gui_callback(event_loop, "window_event", |this, event_loop| {
             this.window_event_impl(event_loop, window_id, event);
         });
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.wheel_filter.clear();
         let _ = self.guard_gui_callback(event_loop, "about_to_wait", |this, event_loop| {
             this.about_to_wait_impl(event_loop);
         });

@@ -312,10 +312,12 @@ windows and menus from viewport input. A browser interaction test changes the
 input device through Settings, confirms that the dialog captures wheel events,
 and reloads the viewer to verify the saved trackpad behavior.
 
-The pinned winit XInput2 path emitted a wheel event on both button press and
-release. A source patch drops only releases of wheel buttons 4 through 7;
-valuator scrolling is unchanged. The upstream archive checksum, commit and
-license are retained with the patch, and release packages include its notices.
+The published winit XInput2 path emits a wheel event on both button press and
+release. The native input filter correlates the preceding raw button state and
+drops only releases of wheel buttons 4 through 7 before either egui or the camera
+receives them. Valuator scrolling is unchanged; pending state is cleared between
+event batches and when focus leaves. Cargo resolves the unmodified published
+crate, and release packages retain its license.
 
 The final native X11 interaction check matched one wheel step from zoom 50 to
 38, retained the camera distance, and checked the drag threshold, pan transform
@@ -415,3 +417,13 @@ browser tests passed. The actual Linux window checks also passed again; distance
 angle and torsion values were visible alongside atom labels in the inspected
 viewport. These are local checks and do not establish untested parameter
 combinations or public distribution availability.
+
+## Published winit dependency
+
+The vendored winit source and workspace patch were removed. The lockfile now
+resolves the unmodified crates.io 0.30.13 archive. The native suite passed 165
+tests on Linux and Apple Silicon. An X11 window received real button events and
+confirmed a single wheel step from zoom 50 to 38, unchanged camera distance,
+rotation, translation, the drag threshold and both Shift-drag axis locks.
+The input filter also checks repeated steps, both axes, raw valuator motion and
+state reset without depending on an elapsed-time debounce.

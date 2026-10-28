@@ -25,7 +25,6 @@ members = [
   "crates/cuemol-node",
   "crates/cuemol-py",
 ]
-exclude = ["third_party/winit"]
 resolver = "2"
 
 [workspace.package]
@@ -74,6 +73,3 @@ strip = "debuginfo"
 [profile.web]
 inherits = "release"
 opt-level = "s"
-
-[patch.crates-io]
-winit = { path = "third_party/winit" }
