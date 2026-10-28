@@ -11,9 +11,11 @@ extern "C" int cuemol_usalign(const double *moving, const char *moving_names,
       molanl::usalign::Chain result;
       result.xyz.assign(xyz, xyz + len * 3);
       for (unsigned i = 0; i < len; ++i) {
-        const char code = molanl::usalign::residueCode(std::string(names + i * 3, 3));
+        char code = molanl::usalign::residueCode(std::string(names + i * 4, 3));
+        const bool nucleic = names[i * 4 + 3] != 0;
+        if (nucleic && code >= 'A' && code <= 'Z') code += 'a' - 'A';
         result.seq.push_back(code);
-        result.molScore += (code >= 'a' && code <= 'z') ? 1 : -1;
+        result.molScore += nucleic ? 1 : -1;
       }
       return result;
     };
@@ -28,6 +30,8 @@ extern "C" int cuemol_usalign(const double *moving, const char *moving_names,
     scores[1] = result.tmMov;
     scores[2] = result.rmsd;
     scores[3] = result.nAligned;
+    scores[4] = result.seqId;
+    scores[5] = result.nucleic ? 1.0 : 0.0;
     return 0;
   } catch (const std::exception &ex) {
     if (error_len) { std::strncpy(error, ex.what(), error_len - 1); error[error_len - 1] = 0; }

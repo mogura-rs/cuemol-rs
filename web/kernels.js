@@ -67,14 +67,14 @@ export async function initKernels() {
         const mx = copy(moving), mn = copy(movingNames);
         const rx = copy(reference), rn = copy(referenceNames);
         const atom = copy(new TextEncoder().encode(pivot + '\0'));
-        const matrix = allocate(96), scores = allocate(32), error = allocate(512);
+        const matrix = allocate(96), scores = allocate(48), error = allocate(512);
         module.HEAPU8[error] = 0;
         const status = module._cuemol_usalign(mx, mn, moving.length / 3,
           rx, rn, reference.length / 3, atom, matrix, scores, error, 512);
         if (status) throw new Error(module.UTF8ToString(error) || 'USalign failed');
-        const output = new Float64Array(16);
+        const output = new Float64Array(18);
         output.set(module.HEAPF64.subarray(matrix / 8, matrix / 8 + 12));
-        output.set(module.HEAPF64.subarray(scores / 8, scores / 8 + 4), 12);
+        output.set(module.HEAPF64.subarray(scores / 8, scores / 8 + 6), 12);
         return output;
       } finally {
         for (const pointer of pointers) module._free(pointer);

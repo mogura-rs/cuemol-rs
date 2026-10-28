@@ -15427,20 +15427,17 @@ impl DesktopAppState {
         let manager = MolAnlManager::new();
         let reference_selector = parse_gui_selector(reference_selection)?.unwrap_or(Selector::All);
         let moving_selector = parse_gui_selector(moving_selection)?.unwrap_or(Selector::All);
-        let reference = self
-            .scene_manager()
-            .object(reference_object)
-            .ok_or_else(|| {
-                CueMolError::NotFound(format!("reference object {}", reference_object.get()))
-            })?
-            .mol()
-            .clone();
-        let moving = self
-            .scene_manager()
-            .object(moving_object)
-            .ok_or_else(|| CueMolError::NotFound(format!("moving object {}", moving_object.get())))?
-            .mol()
-            .clone();
+        let world_molecule = |uid: Uid| -> Result<MolCoord> {
+            let object = self
+                .scene_manager()
+                .object(uid)
+                .ok_or_else(|| CueMolError::not_found("superposition molecule"))?;
+            let mut molecule = object.mol().clone();
+            molecule.xform_by_mat(object.xform_matrix(), None);
+            Ok(molecule)
+        };
+        let reference = world_molecule(reference_object)?;
+        let moving = world_molecule(moving_object)?;
         let matrix = match algorithm.trim().to_ascii_lowercase().as_str() {
             "usalign" => {
                 cuemol_molanl::superpose_usalign(
@@ -15476,6 +15473,9 @@ impl DesktopAppState {
             .ok_or_else(|| {
                 CueMolError::NotFound(format!("moving object {}", moving_object.get()))
             })?;
+        let original_transform = moving.xform_matrix();
+        moving.mol_mut().xform_by_mat(original_transform, None);
+        moving.set_xform_matrix(Matrix4::IDENTITY);
         if use_property {
             moving.set_xform_matrix(matrix);
         } else {
@@ -42033,19 +42033,144 @@ impl DesktopAppState {
             });
             Ok(JsValue::undefined())
         }
+        fn script_world_molecule(value: &JsValue, ctx: &mut Context) -> JsResult<ScriptMol> {
+            let mut molecule = script_molecule(value, ctx)?;
+            let transform = iterator_object(value)?.get(js_string!("xformMat"), ctx)?;
+            molecule
+                .molecule
+                .xform_by_mat(matrix_from_value(&transform, ctx)?, None);
+            Ok(molecule)
+        }
+        fn script_apply_superposition(
+            value: &JsValue,
+            matrix: Matrix4,
+            use_property: bool,
+            ctx: &mut Context,
+        ) -> JsResult<()> {
+            let mut molecule = script_world_molecule(value, ctx)?;
+            if !use_property {
+                molecule.molecule.xform_by_mat(matrix, None);
+            }
+            molecule.molecule.fire_atoms_moved();
+            with_script_molecule_mut(molecule.uid, |target| *target = molecule.molecule)?;
+            let stored = make_matrix(
+                if use_property {
+                    matrix
+                } else {
+                    Matrix4::IDENTITY
+                },
+                ctx,
+            );
+            iterator_object(value)?.set(js_string!("xformMat"), stored, true, ctx)?;
+            Ok(())
+        }
+        fn script_usalign_result(
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<cuemol_molanl::UsAlignResult> {
+            let reference =
+                script_world_molecule(&args.first().cloned().unwrap_or(JsValue::undefined()), ctx)?;
+            let ref_sel = selector_from_script_value(
+                &args.get(1).cloned().unwrap_or(JsValue::undefined()),
+                ctx,
+            )?;
+            let moving =
+                script_world_molecule(&args.get(2).cloned().unwrap_or(JsValue::undefined()), ctx)?;
+            let mov_sel = selector_from_script_value(
+                &args.get(3).cloned().unwrap_or(JsValue::undefined()),
+                ctx,
+            )?;
+            let pivot = args
+                .get(4)
+                .filter(|v| !v.is_null_or_undefined())
+                .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
+                .transpose()?
+                .unwrap_or_default();
+            cuemol_molanl::superpose_usalign(
+                &reference.molecule,
+                &ref_sel,
+                &moving.molecule,
+                &mov_sel,
+                &pivot,
+            )
+            .map_err(|error| script_error(error.to_string()))
+        }
+        fn script_usalign_stats(result: &cuemol_molanl::UsAlignResult) -> String {
+            format!("{{\"tm_ref\":{:.6},\"tm_mov\":{:.6},\"rmsd\":{:.6},\"nalgn\":{},\"seqid\":{:.6},\"nucleic\":{}}}",
+                result.tm_reference,result.tm_moving,result.rmsd,result.aligned_residues,result.sequence_identity,result.nucleic)
+        }
+        fn js_molanl_usalign1(
+            _t: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let result = script_usalign_result(args, ctx)?;
+            script_apply_superposition(
+                &args[2],
+                result.matrix,
+                args.get(5).is_some_and(JsValue::to_boolean),
+                ctx,
+            )?;
+            script_cmds::push(ScriptCmd::Print(format!(
+                "US-align: {}",
+                script_usalign_stats(&result)
+            )));
+            Ok(make_matrix(result.matrix, ctx))
+        }
+        fn js_molanl_usalign2(
+            _t: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let reference = js_get_object(
+                &JsValue::undefined(),
+                &[args.first().cloned().unwrap_or(JsValue::undefined())],
+                ctx,
+            )?;
+            let moving = js_get_object(
+                &JsValue::undefined(),
+                &[args.get(2).cloned().unwrap_or(JsValue::undefined())],
+                ctx,
+            )?;
+            js_molanl_usalign1(
+                &JsValue::undefined(),
+                &[
+                    reference,
+                    args.get(1).cloned().unwrap_or(JsValue::undefined()),
+                    moving,
+                    args.get(3).cloned().unwrap_or(JsValue::undefined()),
+                    args.get(4).cloned().unwrap_or(JsValue::undefined()),
+                    JsValue::new(false),
+                ],
+                ctx,
+            )?;
+            Ok(JsValue::undefined())
+        }
+        fn js_molanl_usalign_json(
+            _t: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let result = script_usalign_result(args, ctx)?;
+            let json = script_usalign_stats(&result);
+            if args.get(5).is_some_and(JsValue::to_boolean) {
+                script_cmds::push(ScriptCmd::Print(format!("US-align: {json}")));
+            }
+            Ok(JsString::from(json).into())
+        }
         fn js_molanl_superpose_ssm1(
             _t: &JsValue,
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let reference_value = args.first().cloned().unwrap_or(JsValue::undefined());
-            let reference = script_molecule(&reference_value, ctx)?;
+            let reference = script_world_molecule(&reference_value, ctx)?;
             let reference_selection = selector_from_script_value(
                 &args.get(1).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
             let moving_value = args.get(2).cloned().unwrap_or(JsValue::undefined());
-            let moving = script_molecule(&moving_value, ctx)?;
+            let moving = script_world_molecule(&moving_value, ctx)?;
             let moving_selection = selector_from_script_value(
                 &args.get(3).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
@@ -42059,12 +42184,7 @@ impl DesktopAppState {
                     &moving_selection,
                 )
                 .map_err(|error| script_error(error.to_string()))?;
-            if !use_property {
-                script_cmds::push(ScriptCmd::ApplyMoleculeMatrix {
-                    object_uid: moving.uid,
-                    matrix,
-                });
-            }
+            script_apply_superposition(&moving_value, matrix, use_property, ctx)?;
             Ok(make_matrix(matrix, ctx))
         }
         fn js_molanl_superpose_lsq1(
@@ -42073,13 +42193,13 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let reference_value = args.first().cloned().unwrap_or(JsValue::undefined());
-            let reference = script_molecule(&reference_value, ctx)?;
+            let reference = script_world_molecule(&reference_value, ctx)?;
             let reference_selection = selector_from_script_value(
                 &args.get(1).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
             let moving_value = args.get(2).cloned().unwrap_or(JsValue::undefined());
-            let moving = script_molecule(&moving_value, ctx)?;
+            let moving = script_world_molecule(&moving_value, ctx)?;
             let moving_selection = selector_from_script_value(
                 &args.get(3).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
@@ -42093,12 +42213,7 @@ impl DesktopAppState {
                     &moving_selection,
                 )
                 .map_err(|error| script_error(error.to_string()))?;
-            if !use_property {
-                script_cmds::push(ScriptCmd::ApplyMoleculeMatrix {
-                    object_uid: moving.uid,
-                    matrix,
-                });
-            }
+            script_apply_superposition(&moving_value, matrix, use_property, ctx)?;
             Ok(JsValue::undefined())
         }
         fn js_molanl_superpose_ssm2(
@@ -42106,40 +42221,27 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            let reference_uid = color_arg(args, 0, 0.0, ctx)? as u64;
-            let reference_selection = argn(args, 1, ctx);
-            let moving_uid = color_arg(args, 2, 0.0, ctx)? as u64;
-            let moving_selection = argn(args, 3, ctx);
-            let (reference, moving) = script_env::with(|env| {
-                (
-                    env.molecules
-                        .iter()
-                        .find(|entry| entry.uid == reference_uid)
-                        .cloned(),
-                    env.molecules
-                        .iter()
-                        .find(|entry| entry.uid == moving_uid)
-                        .cloned(),
-                )
-            });
-            let reference =
-                reference.ok_or_else(|| script_error("reference MolCoord is not available"))?;
-            let moving = moving.ok_or_else(|| script_error("moving MolCoord is not available"))?;
-            let reference_selector =
-                parse_script_selector(&reference_selection, reference.scene_uid)?;
-            let moving_selector = parse_script_selector(&moving_selection, moving.scene_uid)?;
-            let matrix = MolAnlManager::new()
-                .superpose_ssm_matrix(
-                    &reference.molecule,
-                    &reference_selector,
-                    &moving.molecule,
-                    &moving_selector,
-                )
-                .map_err(|error| script_error(error.to_string()))?;
-            script_cmds::push(ScriptCmd::ApplyMoleculeMatrix {
-                object_uid: moving_uid,
-                matrix,
-            });
+            let reference = js_get_object(
+                &JsValue::undefined(),
+                &[args.first().cloned().unwrap_or(JsValue::undefined())],
+                ctx,
+            )?;
+            let moving = js_get_object(
+                &JsValue::undefined(),
+                &[args.get(2).cloned().unwrap_or(JsValue::undefined())],
+                ctx,
+            )?;
+            js_molanl_superpose_ssm1(
+                &JsValue::undefined(),
+                &[
+                    reference,
+                    args.get(1).cloned().unwrap_or(JsValue::undefined()),
+                    moving,
+                    args.get(3).cloned().unwrap_or(JsValue::undefined()),
+                    JsValue::new(false),
+                ],
+                ctx,
+            )?;
             Ok(JsValue::undefined())
         }
         fn js_molanl_superpose_ssm_rmsd(
@@ -42148,13 +42250,13 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let reference_value = args.first().cloned().unwrap_or(JsValue::undefined());
-            let reference = script_molecule(&reference_value, ctx)?;
+            let reference = script_world_molecule(&reference_value, ctx)?;
             let reference_selection = selector_from_script_value(
                 &args.get(1).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
             let moving_value = args.get(2).cloned().unwrap_or(JsValue::undefined());
-            let moving = script_molecule(&moving_value, ctx)?;
+            let moving = script_world_molecule(&moving_value, ctx)?;
             let moving_selection = selector_from_script_value(
                 &args.get(3).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
@@ -42176,13 +42278,13 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let reference_value = args.first().cloned().unwrap_or(JsValue::undefined());
-            let reference = script_molecule(&reference_value, ctx)?;
+            let reference = script_world_molecule(&reference_value, ctx)?;
             let reference_selection = selector_from_script_value(
                 &args.get(1).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
             let moving_value = args.get(2).cloned().unwrap_or(JsValue::undefined());
-            let moving = script_molecule(&moving_value, ctx)?;
+            let moving = script_world_molecule(&moving_value, ctx)?;
             let moving_selection = selector_from_script_value(
                 &args.get(3).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
@@ -44591,6 +44693,21 @@ impl DesktopAppState {
                         Attribute::all(),
                     )
                     .function(
+                        NativeFunction::from_fn_ptr(js_molanl_usalign1),
+                        js_string!("superposeUSalign1"),
+                        6,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_molanl_usalign2),
+                        js_string!("superposeUSalign2"),
+                        5,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_molanl_usalign_json),
+                        js_string!("superposeUSalignJSON"),
+                        6,
+                    )
+                    .function(
                         NativeFunction::from_fn_ptr(js_molanl_superpose_ssm1),
                         js_string!("superposeSSM1"),
                         5,
@@ -46514,13 +46631,6 @@ impl DesktopAppState {
                         object.mol_mut().set_cell_params(cell);
                     }
                 }
-                ScriptCmd::ApplyMoleculeMatrix { object_uid, matrix } => {
-                    if let Some(object) = self.scene_manager_mut().object_mut(Uid::new(object_uid))
-                    {
-                        object.mol_mut().xform_by_mat(matrix, None);
-                        object.mol_mut().fire_atoms_moved();
-                    }
-                }
                 ScriptCmd::CopyAtoms {
                     target_uid,
                     source_uid,
@@ -47576,10 +47686,6 @@ enum ScriptCmd {
         beta: f64,
         gamma: f64,
         nsg: i32,
-    },
-    ApplyMoleculeMatrix {
-        object_uid: u64,
-        matrix: Matrix4,
     },
     CopyAtoms {
         target_uid: u64,
@@ -53400,6 +53506,140 @@ mod tests {
             )
             .unwrap();
         assert_eq!(log.trim(), "registry=166:true:true:true:false");
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_alignment_services_apply_world_transforms_and_undo() {
+        let mut app = DesktopAppState::new();
+        let sid = app.ensure_active_scene();
+        let template = read_pdb_str(
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n",
+        )
+        .unwrap()
+        .atoms()[0]
+            .clone();
+        let mut molecule = MolCoord::new();
+        for i in 0..12 {
+            let mut atom = template.clone();
+            atom.serial = i + 1;
+            atom.res_id = i + 1;
+            let t = i as f64;
+            atom.position = Vector4::new3((t * 0.8).cos() * 4. - 4., (t * 0.8).sin() * 4., t * 1.5);
+            molecule.push_atom(atom);
+        }
+        app.scene_manager_mut()
+            .scene_mut(sid)
+            .unwrap()
+            .add_molecule("ref", molecule.clone());
+        for atom in molecule.atoms_mut() {
+            atom.position.x += 3.;
+        }
+        app.scene_manager_mut()
+            .scene_mut(sid)
+            .unwrap()
+            .add_molecule("mov", molecule);
+        let (mut log,_)=app.run_script_js(r#"
+            var s=cuemol.getScene(),r=cuemol.getObject('ref'),m=cuemol.getObject('mov'),a=cuemol.getService('MolAnlManager'),sel=cuemol.makeSel('*');
+            var rt=cuemol.Matrix();rt.setAt(1,4,10);r.xformMat=rt;
+            var mt=cuemol.Matrix();mt.setAt(1,4,5);m.xformMat=mt;
+            var result=JSON.parse(a.superposeUSalignJSON(r,sel,m,sel,'auto',false));
+            print('stats='+result.nalgn+':'+result.seqid+':'+result.nucleic+':'+result.tm_ref+':'+result.tm_mov);
+            print('unchanged='+m.getAtomByID(1).pos.x.toFixed(1)+':'+m.xformMat.getAt(1,4).toFixed(1));
+        "#).unwrap();
+        let prefix="var s=cuemol.getScene(),r=cuemol.getObject('ref'),m=cuemol.getObject('mov'),a=cuemol.getService('MolAnlManager'),sel=cuemol.makeSel('*');";
+        log.push_str(&app.run_script_js(&(prefix.to_string()+r#"
+            s.startUndoTxn('Align');var matrix=a.superposeUSalign1(r,sel,m,sel,'auto',true);s.commitUndoTxn();
+            print('property='+m.getAtomByID(1).pos.x.toFixed(1)+':'+m.xformMat.getAt(1,4).toFixed(1)+':'+matrix.getAt(1,4).toFixed(1));
+        "#)).unwrap().0);
+        app.run_script_js("cuemol.getScene().undo(0)").unwrap();
+        log.push_str(&app.run_script_js(&(prefix.to_string()+r#"
+
+            print('undo='+m.getAtomByID(1).pos.x.toFixed(1)+':'+m.xformMat.getAt(1,4).toFixed(1));
+            a.superposeUSalign2(r.uid,'*',m.uid,'*','auto');
+            print('coords='+m.getAtomByID(1).pos.x.toFixed(1)+':'+m.xformMat.getAt(1,4).toFixed(1));
+            var mt=cuemol.Matrix();mt.setAt(1,4,5);m.xformMat=mt;a.superposeLSQ1(r,sel,m,sel,true);
+            print('lsq='+m.getAtomByID(1).pos.x.toFixed(1)+':'+m.xformMat.getAt(1,4).toFixed(1));
+            a.superposeSSM1(r,sel,m,sel,true);
+            print('ssm='+m.getAtomByID(1).pos.x.toFixed(1)+':'+Math.abs(m.xformMat.getAt(1,4)).toFixed(1));
+        "#)).unwrap().0);
+        for line in [
+            "stats=12:1:false:1:1",
+            "unchanged=3.0:5.0",
+            "property=8.0:2.0:2.0",
+            "undo=3.0:5.0",
+            "coords=10.0:0.0",
+            "lsq=15.0:-5.0",
+            "ssm=10.0:0.0",
+        ] {
+            assert!(log.lines().any(|l| l == line), "missing {line} in {log}");
+        }
+        let moving = app
+            .scene_manager()
+            .scene(sid)
+            .unwrap()
+            .objects()
+            .iter()
+            .find(|o| o.name() == "mov")
+            .unwrap();
+        assert!((moving.mol().atoms()[0].position.x - 10.).abs() < 1e-6);
+        assert!(moving.xform_matrix().get_trans_part().length() < 1e-6);
+    }
+
+    #[test]
+    fn command_alignment_preserves_world_positions_with_existing_transforms() {
+        for algorithm in ["lsq", "usalign"] {
+            for use_property in [false, true] {
+                let mut app = DesktopAppState::new();
+                let sid = app.ensure_active_scene();
+                let mut mol = MolCoord::new();
+                let atom=read_pdb_str("ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap().atoms()[0].clone();
+                for i in 0..8 {
+                    let mut atom = atom.clone();
+                    atom.serial = i + 1;
+                    atom.res_id = i + 1;
+                    let t = i as f64;
+                    atom.position = Vector4::new3(t, t.sin(), t.cos());
+                    mol.push_atom(atom);
+                }
+                let r = app
+                    .scene_manager_mut()
+                    .scene_mut(sid)
+                    .unwrap()
+                    .add_molecule("ref", mol.clone());
+                let m = app
+                    .scene_manager_mut()
+                    .scene_mut(sid)
+                    .unwrap()
+                    .add_molecule("mov", mol);
+                let mut rt = Matrix4::IDENTITY;
+                rt.set_at(1, 4, 10.).unwrap();
+                let mut mt = Matrix4::IDENTITY;
+                mt.set_at(1, 4, 5.).unwrap();
+                app.scene_manager_mut()
+                    .object_mut(r)
+                    .unwrap()
+                    .set_xform_matrix(rt);
+                app.scene_manager_mut()
+                    .object_mut(m)
+                    .unwrap()
+                    .set_xform_matrix(mt);
+                app.superpose_objects_with_pivot(r, "*", m, "*", algorithm, use_property, "auto")
+                    .unwrap();
+                let moving = app.scene_manager().object(m).unwrap();
+                let p = moving.mol().atoms()[0].position;
+                assert!(
+                    (moving
+                        .xform_matrix()
+                        .mulvec(Vector4::new4(p.x, p.y, p.z, 1.))
+                        .x
+                        - 10.)
+                        .abs()
+                        < 1e-5
+                );
+                assert!((p.x - if use_property { 5. } else { 10. }).abs() < 1e-5);
+            }
+        }
     }
 
     #[cfg(feature = "scripting")]

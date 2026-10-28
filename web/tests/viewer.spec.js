@@ -175,10 +175,24 @@ test('USalign fits rotated browser molecules with the native calculation kernel'
     expect(value).toBeCloseTo(points[i][row],3);
   }
   const values=await page.evaluate(([moving,reference])=>Array.from(window.cuemolKernels.usalign(
-    new Float64Array(moving.flat()),new TextEncoder().encode('ALA'.repeat(moving.length)),
-    new Float64Array(reference.flat()),new TextEncoder().encode('ALA'.repeat(reference.length)),'CA')),[moving,points]);
+    new Float64Array(moving.flat()),new TextEncoder().encode('ALA\0'.repeat(moving.length)),
+    new Float64Array(reference.flat()),new TextEncoder().encode('ALA\0'.repeat(reference.length)),'CA')),[moving,points]);
   expect(values[12]).toBeCloseTo(1,7);expect(values[13]).toBeCloseTo(1,7);
   expect(values[14]).toBeCloseTo(0,5);expect(values[15]).toBe(12);
+  expect(values).toHaveLength(18);expect(values[16]).toBe(1);expect(values[17]).toBe(0);
+  const scripted=await call(page,'execute_script',{source:`
+    var r=cuemol.getObject(${objects[0].id}),m=cuemol.getObject(${objects[1].id}),a=getService('MolAnlManager'),sel=cuemol.makeSel('*');
+    var rt=cuemol.Matrix();rt.setAt(1,4,10);r.xformMat=rt;
+    var mt=cuemol.Matrix();mt.setAt(1,4,5);m.xformMat=mt;
+    var report=JSON.parse(a.superposeUSalignJSON(r,sel,m,sel,'AUTO',false));
+    print('stats='+report.nalgn+':'+report.seqid+':'+report.nucleic);
+    a.superposeUSalign1(r,sel,m,sel,'auto',true);
+    print('property='+m.getAtomByID(1).pos.x.toFixed(2)+':'+m.xformMat.getAt(1,4).toFixed(2));
+    a.superposeUSalign2(r.uid,'*',m.uid,'*','auto');
+    print('coordinates='+m.getAtomByID(1).pos.x.toFixed(2)+':'+m.xformMat.getAt(1,4).toFixed(2));
+  `});
+  const log=JSON.parse(scripted.message).log;
+  expect(log).toContain('stats=12:1:false');expect(log).toContain('property=9.00:5.00');expect(log).toContain('coordinates=14.00:0.00');
   expect(errors).toEqual([]);
 });
 

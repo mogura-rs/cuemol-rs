@@ -709,3 +709,27 @@ audit still requires map controls, alignment methods, hover and exporter work.
 All 36 browser tests passed, including saving a File-backed DCD, reloading its
 QSC after a page reload, seeking the final frame and reading its coordinates
 through the script API. The command compatibility suite passed all 14 tests.
+
+## Alignment service parity
+
+`MolAnlManager.superposeUSalign1`, `superposeUSalign2` and
+`superposeUSalignJSON` now use the shared native/browser US-align kernel.
+Statistics include reference- and moving-normalized TM scores, RMSD, aligned
+residue count, sequence identity and the nucleic-acid flag. Automatic pivot
+selection chooses CA or C3-prime per residue, recognizes modified nucleotides
+from their sugar backbone, and omits alternate conformations other than A.
+
+Alignment now uses coordinates after each object's existing transform. Applying
+an alignment first bakes the moving object's old transform, then either writes
+the alignment as the new transform property or applies it to the coordinates.
+The same correction covers LSQ and SSM. Their script adapters now update live
+molecule queries, and `useprop=true` performs the requested transform.
+
+Regression tests cover mixed protein/nucleic selections, duplicate pivot
+conformations, statistics, existing object transforms, both application modes,
+and undo between script calls. All 204 shared application tests, 165 native GUI
+tests, 14 command compatibility tests and the molecule-analysis suite passed.
+The browser US-align test also passed with the updated kernel and all three
+script methods. These tests exposed a separate issue: queries immediately after
+Undo within one script evaluation still see the prior environment. The shared
+script transaction bridge requires a follow-up correction.
