@@ -21,6 +21,12 @@ fn main() {
         ("pkg/kernels/usalign.wasm", "application/wasm"),
         ("pkg/kernels/lcms.js", "text/javascript; charset=utf-8"),
         ("pkg/kernels/lcms.wasm", "application/wasm"),
+        ("pkg/kernels/surface.js", "text/javascript; charset=utf-8"),
+        ("pkg/kernels/surface.wasm", "application/wasm"),
+        ("pkg/kernels/BALL-LICENSE", "text/plain; charset=utf-8"),
+        ("pkg/kernels/Boost-LICENSE", "text/plain; charset=utf-8"),
+        ("pkg/kernels/MeshMS-SOURCE.json", "application/json"),
+        ("pkg/kernels/BALL-SOURCE.json", "application/json"),
         ("pkg/kernels/LittleCMS-LICENSE", "text/plain; charset=utf-8"),
         ("pkg/kernels/USalign-LICENSE", "text/plain; charset=utf-8"),
     ];

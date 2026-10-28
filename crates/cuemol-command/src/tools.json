@@ -1906,11 +1906,12 @@
             "string",
             "null"
           ],
-          "description": "Use auto for the Rust solvent-excluded surface backend. Legacy meshms and ball requests return an unsupported-backend error.",
+          "description": "Solvent-excluded surface engine. Auto selects MeshMS with BALL fallback. Rust selects the grid implementation.",
           "enum": [
             "auto",
             "meshms",
             "ball",
+            "rust",
             null
           ]
         }
@@ -2497,11 +2498,12 @@
             "string",
             "null"
           ],
-          "description": "Use auto for the Rust solvent-excluded surface backend. Legacy meshms and ball requests return an unsupported-backend error.",
+          "description": "Solvent-excluded surface engine. Auto selects MeshMS with BALL fallback. Rust selects the grid implementation.",
           "enum": [
             "auto",
             "meshms",
             "ball",
+            "rust",
             null
           ]
         }

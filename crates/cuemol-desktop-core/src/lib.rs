@@ -5709,15 +5709,34 @@ impl DesktopAppState {
         density: f64,
         probe_radius: f64,
     ) -> Result<Uid> {
+        self.create_molecular_surface_object_with_backend(
+            object_uid,
+            selection,
+            name,
+            density,
+            probe_radius,
+            "auto",
+        )
+    }
+
+    pub fn create_molecular_surface_object_with_backend(
+        &mut self,
+        object_uid: Uid,
+        selection: &str,
+        name: &str,
+        density: f64,
+        probe_radius: f64,
+        backend: &str,
+    ) -> Result<Uid> {
         let name = name.trim();
         if name.is_empty() {
             return Err(CueMolError::invalid_argument(
                 "surface name must not be empty",
             ));
         }
-        if !density.is_finite() || density < 1.0 {
+        if !density.is_finite() || density <= 0.0 {
             return Err(CueMolError::invalid_argument(
-                "surface density must be at least 1",
+                "surface density must be positive",
             ));
         }
         if !probe_radius.is_finite() || probe_radius < 0.1 {
@@ -5743,7 +5762,14 @@ impl DesktopAppState {
             parse_selector(selection_text)?
         };
         let mut surface = MolSurfObj::new();
-        surface.create_ses_from_mol(&molecule, &selector, density, probe_radius);
+        let requested_backend = cuemol_surface::backends::SesBackend::parse(backend)?;
+        let used_backend = surface.create_ses_from_mol_with_backend(
+            &molecule,
+            &selector,
+            density,
+            probe_radius,
+            requested_backend,
+        )?;
         surface.set_orig_mol(&molecule_name);
         surface.set_orig_sel(selection_text);
         let raw_data = cuemol_surface::qdf::write_qdf_surface_bytes(&surface);
@@ -5809,6 +5835,8 @@ impl DesktopAppState {
         object_node.set_str_attr("orig_sel", selection_text);
         object_node.set_str_attr("orig_den", density.to_string());
         object_node.set_str_attr("orig_prad", probe_radius.to_string());
+        object_node.set_str_attr("sesbackend", requested_backend.name());
+        object_node.set_str_attr("sesbackend_used", used_backend.name());
         let mut renderer_node = LDom2Node::new();
         renderer_node.set_tag_name("renderer");
         renderer_node.set_type_name("molsurf");
@@ -5848,6 +5876,15 @@ impl DesktopAppState {
         surface_uid: Uid,
         density: f64,
     ) -> Result<usize> {
+        self.regenerate_surface_object_with_backend(surface_uid, density, None)
+    }
+
+    pub fn regenerate_surface_object_with_backend(
+        &mut self,
+        surface_uid: Uid,
+        density: f64,
+        backend: Option<&str>,
+    ) -> Result<usize> {
         let scene_uid = self
             .scene_manager()
             .scene_uid_for_surface(surface_uid)
@@ -5860,7 +5897,7 @@ impl DesktopAppState {
                 "surface has no original molecule",
             ));
         }
-        let (molecule, raw_data) = {
+        let (molecule, raw_data, stored_backend) = {
             let scene = self
                 .scene_manager()
                 .scene(scene_uid)
@@ -5880,19 +5917,39 @@ impl DesktopAppState {
                 .ok_or_else(|| CueMolError::NotFound(format!("surface {}", surface_uid.get())))?
                 .raw_data
                 .clone();
-            (molecule, raw_data)
+            let backend = scene
+                .loaded_surface(surface_uid)
+                .and_then(|s| s.qsc_node.as_ref())
+                .map(|node| node.str_attr("sesbackend").to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "auto".to_string());
+            (molecule, raw_data, backend)
         };
         let mut surface = cuemol_surface::qdf::read_qdf_surface_bytes(&raw_data)?;
         let selection = (!summary.original_selection.trim().is_empty())
             .then(|| parse_selector(&summary.original_selection))
             .transpose()?;
-        let density = if density > 0.0 { density } else { -1.0 };
+        let density = if density > 0.0 {
+            density
+        } else {
+            summary.original_density
+        };
         let probe_radius = if summary.original_probe_radius >= 0.0 {
             summary.original_probe_radius
         } else {
             -1.0
         };
-        surface.regenerate_ses_from_mol(&molecule, selection.as_ref(), density, probe_radius)?;
+        let requested_backend =
+            cuemol_surface::backends::SesBackend::parse(backend.unwrap_or(&stored_backend))?;
+        let used_backend = surface.create_ses_from_mol_with_backend(
+            &molecule,
+            selection.as_ref().unwrap_or(&Selector::All),
+            density,
+            probe_radius,
+            requested_backend,
+        )?;
+        surface.set_orig_mol(&summary.original_molecule);
+        surface.set_orig_sel(&summary.original_selection);
         let triangle_count = surface.mesh().triangle_count();
         let raw_data = cuemol_surface::qdf::write_qdf_surface_bytes(&surface);
         let target = self
@@ -5909,7 +5966,20 @@ impl DesktopAppState {
         node.set_str_attr("orig_sel", surface.orig_sel());
         node.set_str_attr("orig_den", surface.orig_den().to_string());
         node.set_str_attr("orig_prad", surface.orig_prad().to_string());
+        node.set_str_attr("sesbackend", requested_backend.name());
+        node.set_str_attr("sesbackend_used", used_backend.name());
         Ok(triangle_count)
+    }
+
+    pub fn molecular_surface_backend(&self, surface_uid: Uid) -> Option<String> {
+        let scene = self.scene_manager().scene_uid_for_surface(surface_uid)?;
+        let node = self
+            .scene_manager()
+            .scene(scene)?
+            .loaded_surface(surface_uid)?
+            .qsc_node
+            .as_ref()?;
+        Some(node.str_attr("sesbackend_used").to_string())
     }
 
     pub fn clipping_plane_from_camera(camera: &cuemol_qsys::Camera) -> (Vector4, Vector4) {

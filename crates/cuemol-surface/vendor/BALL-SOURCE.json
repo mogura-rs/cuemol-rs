@@ -1,0 +1,10 @@
+{
+  "repository": "https://github.com/CueMol/cuemol2",
+  "revision": "242600329b0ed85f166fd3b951b998f01beb37c4",
+  "path": "src/modules/surface/BALL",
+  "changes": [
+    "Use portable pointer types and standard unordered containers.",
+    "Remove legacy Boost configuration dependencies from the bundled quaternion header.",
+    "Use local sinc and sinhc helpers with Taylor expansions near zero."
+  ]
+}

@@ -27,6 +27,8 @@ shutil.copytree(tools, package / 'cuemol-tools')
 licenses = package / 'cuemol-tools/licenses'
 shutil.copy2(root / 'crates/cuemol-molanl/vendor/usalign/LICENSE', licenses / 'USalign.txt')
 shutil.copy2(root / 'crates/cuemol-gfx/vendor/lcms2/LICENSE', licenses / 'LittleCMS.txt')
+for name in ('CueMol-LICENSE', 'Boost-LICENSE', 'BALL-SOURCE.json', 'meshms/SOURCE.json'):
+    shutil.copy2(root / 'crates/cuemol-surface/vendor' / name, licenses / ('MeshMS-SOURCE.json' if name.startswith('meshms/') else name))
 if windows:
     output = dist / f'cuemol-{args.target}.zip'
     temporary = output.with_suffix('.tmp')

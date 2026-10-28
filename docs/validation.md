@@ -85,3 +85,13 @@ profile tests and browser checks cover profile validation, alpha preservation,
 profile persistence, proofed image export, and four Generic CMYK colors. The
 CMYK values matched an independent call to the installed LittleCMS library.
 The optional reference profile was present for these checks.
+
+## Analytic molecular surfaces
+
+The bundled MeshMS and BALL calculations run on native and WebAssembly targets.
+A single-sphere regression checks radius, unit normals, and surface area against
+analytic values. Shared command tests cover both engines, the Rust grid engine,
+noninteger density, regeneration, and an embedded QSC save/reload. The browser
+suite passed eight tests, including both analytic engines and regeneration.
+All 157 native GUI tests passed after the backend selector was added. Source
+revisions and local portability changes are recorded beside the bundled kernels.

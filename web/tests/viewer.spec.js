@@ -190,3 +190,17 @@ test('browser CMYK proof matches the reference LittleCMS colors',async({page})=>
   },Array.from(readFileSync(file)));
   expect(result).toEqual([0xf2f3fa,0x767578,0x345ba0,0xb469a4]);
 });
+
+test('browser analytic surfaces support both backends and density regeneration',async({page})=>{
+  await ready(page);await load(page,'surface-source.pdb',Buffer.from(structure));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  const object=(await page.evaluate(()=>window.cuemol.status())).scene.objects[0].id;
+  for(const backend of ['meshms','ball']) {
+    let state=await call(page,'create_surface',{objId:object,name:backend,backend,density:1.5});
+    let result=JSON.parse(state.message);
+    expect(result.backend).toBe(backend);
+    state=await call(page,'recalc_surface',{surfId:result.objectId,density:3});
+    result=JSON.parse(state.message);
+    expect(result.backend).toBe(backend);expect(result.triangles).toBeGreaterThan(0);
+  }
+});

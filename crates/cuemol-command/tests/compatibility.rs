@@ -339,3 +339,45 @@ fn unsupported_render_engines_and_denoisers_do_not_change_settings() {
         assert_eq!(cuemol_command::render_settings(&state).unwrap(), before);
     }
 }
+
+#[test]
+fn analytic_surface_backends_regenerate_after_embedded_scene_roundtrip() {
+    for backend in ["meshms", "ball", "rust"] {
+        let mut state = DesktopAppState::new();
+        let mut camera = Camera::new();
+        let id = molecule(&mut state, &mut camera, "surface_source", 0.);
+        let result = call(
+            &mut state,
+            &mut camera,
+            "create_surface",
+            json!({"objId":id,"name":"surface","backend":backend,"density":1.5}),
+        );
+        assert_eq!(result["backend"], backend);
+        let surface = Uid::new(result["objectId"].as_u64().unwrap());
+        assert_eq!(
+            state.surface_summary(surface).unwrap().original_density,
+            1.5
+        );
+        let result = call(
+            &mut state,
+            &mut camera,
+            "recalc_surface",
+            json!({"surfId":surface.get(),"density":3.}),
+        );
+        assert_eq!(result["backend"], backend);
+        assert!(result["triangles"].as_u64().unwrap() > 0);
+        assert_eq!(state.surface_summary(surface).unwrap().original_density, 3.);
+        let bytes = state.active_scene_bytes().unwrap();
+        let mut restored = DesktopAppState::new();
+        restored.open_bytes("surface.qsc", &bytes).unwrap();
+        let surface = restored.active_surface_summaries()[0].uid;
+        let result = call(
+            &mut restored,
+            &mut camera,
+            "recalc_surface",
+            json!({"surfId":surface.get()}),
+        );
+        assert_eq!(result["backend"], backend);
+        assert!(result["triangles"].as_u64().unwrap() > 0);
+    }
+}

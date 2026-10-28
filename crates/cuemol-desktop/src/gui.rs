@@ -1555,6 +1555,7 @@ struct GuiApplication {
     surface_selection: String,
     surface_name: String,
     surface_density: f64,
+    surface_backend: String,
     surface_probe_radius: f64,
     cut_surface_target: Option<cuemol_core::Uid>,
     cut_surface_mode: String,
@@ -5196,6 +5197,7 @@ impl GuiApplication {
             surface_selection: String::new(),
             surface_name: "surface".to_string(),
             surface_density: 1.0,
+            surface_backend: "auto".into(),
             surface_probe_radius: 1.4,
             cut_surface_target: None,
             cut_surface_mode: "full".to_string(),
@@ -19897,12 +19899,13 @@ impl GuiApplication {
         } else {
             ""
         };
-        match self.state.create_molecular_surface_object(
+        match self.state.create_molecular_surface_object_with_backend(
             object_uid,
             selection,
             self.surface_name.trim(),
-            self.surface_density.trunc(),
+            self.surface_density,
             self.surface_probe_radius,
+            &self.surface_backend,
         ) {
             Ok(surface_uid) => {
                 self.push_undo_snapshot(undo);
@@ -27563,12 +27566,21 @@ impl GuiApplication {
             );
         });
         ui.horizontal(|ui| {
+            ui.label("Backend:");
+            egui::ComboBox::from_id_salt("surface-backend")
+                .selected_text(&self.surface_backend)
+                .show_ui(ui, |ui| {
+                    for backend in ["auto", "meshms", "ball", "rust"] {
+                        ui.selectable_value(&mut self.surface_backend, backend.into(), backend);
+                    }
+                });
+        });
+        ui.horizontal(|ui| {
             ui.label("Density (/Å):");
             ui.add(
                 egui::DragValue::new(&mut self.surface_density)
-                    .range(1.0..=100.0)
-                    .speed(1.0)
-                    .max_decimals(0),
+                    .range(0.1..=100.0)
+                    .speed(0.1),
             );
         });
         ui.horizontal(|ui| {
@@ -31334,7 +31346,7 @@ impl GuiApplication {
             molecule: surface.original_molecule,
             selection: surface.original_selection,
             surface_name: surface.name,
-            density: surface.original_density.max(1.0),
+            density: surface.original_density.max(0.1),
             probe_radius: surface.original_probe_radius,
         });
     }
@@ -31343,7 +31355,7 @@ impl GuiApplication {
         let undo = self.capture_undo();
         match self
             .state
-            .regenerate_surface_object_with_density(draft.surface_uid, draft.density.trunc())
+            .regenerate_surface_object_with_density(draft.surface_uid, draft.density)
         {
             Ok(triangle_count) => {
                 self.push_undo_snapshot(undo);

@@ -45,7 +45,7 @@ def build_kernel(name, source_root, inputs, options, exports, runtime, output, e
     if not stamp.is_file() or stamp.read_text() != fingerprint or not all(p.is_file() for p in products):
         command = [*emxx, "-O2", *options, *map(str, inputs),
                    "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sALLOW_MEMORY_GROWTH=1",
-                   "-sENVIRONMENT=web,worker", "-sEXPORTED_FUNCTIONS=" + json.dumps(exports + ["_malloc", "_free"]),
+                   "-sENVIRONMENT=web,worker", "-sSTACK_SIZE=2097152", "-sEXPORTED_FUNCTIONS=" + json.dumps(exports + ["_malloc", "_free"]),
                    "-sEXPORTED_RUNTIME_METHODS=" + json.dumps(runtime), "-o", str(products[0])]
         subprocess.run(command, check=True)
         stamp.write_text(fingerprint)
@@ -71,6 +71,22 @@ def main():
                   "_cmsCreate_sRGBProfile", "_cmsSaveProfileToMem", "_cmsCloseProfile"],
                  ["HEAPU8", "HEAPU32", "UTF8ToString"], args.out_dir, emxx)
     shutil.copyfile(sources / "lcms2/LICENSE", args.out_dir / "LittleCMS-LICENSE")
+    sources = ROOT / "crates/cuemol-surface/vendor"
+    inputs = sorted((sources / "meshms/src").glob("*.cpp"))
+    for directory in ("COMMON", "DATATYPE", "STRUCTURE"):
+        inputs.extend(sorted((sources / "BALL" / directory).glob("*.cpp")))
+    inputs.append(sources / "surface_bridge.cpp")
+    build_kernel("surface", sources, inputs,
+                 ["-std=c++20", "-fexceptions", "-ffp-contract=off", "-sDISABLE_EXCEPTION_CATCHING=0",
+                  "-I" + str(sources), "-I" + str(sources / "meshms/include")],
+                 ["_cuemol_surface_build", "_cuemol_surface_destroy", "_cuemol_surface_backend",
+                  "_cuemol_surface_vertex_count", "_cuemol_surface_triangle_count",
+                  "_cuemol_surface_vertices", "_cuemol_surface_triangles"],
+                 ["HEAPU8", "HEAPU32", "HEAPF64", "UTF8ToString"], args.out_dir, emxx)
+    for source, name in [("CueMol-LICENSE", "BALL-LICENSE"), ("Boost-LICENSE", "Boost-LICENSE"),
+                         ("meshms/SOURCE.json", "MeshMS-SOURCE.json"), ("BALL-SOURCE.json", "BALL-SOURCE.json")]:
+        shutil.copyfile(sources / source, args.out_dir / name)
+
 
 
 if __name__ == "__main__":

@@ -139,45 +139,34 @@ pub fn call_tool(
             json!({"rendererId":state.create_renderer_group(uid(args,"objId")?,args["name"].as_str().unwrap_or("group"))?.get()}),
         ),
         "create_surface" => {
-            if args["backend"]
-                .as_str()
-                .is_some_and(|v| !matches!(v, "auto" | "rust"))
-            {
-                return Err(CueMolError::invalid_argument(
-                    "This build uses the Rust solvent-excluded surface backend; use backend=auto.",
-                ));
-            }
             let id = uid(args, "objId")?;
             let sid = scene(state)?;
             let label = args["name"]
                 .as_str()
                 .map(str::to_owned)
                 .unwrap_or(state.suggest_object_name(sid, "surface")?);
-            let surf = state.create_molecular_surface_object(
+            let surf = state.create_molecular_surface_object_with_backend(
                 id,
                 selection(args),
                 &label,
                 number(args, "density", 2.),
                 number(args, "probeRadius", 1.4),
+                args["backend"].as_str().unwrap_or("auto"),
             )?;
-            Ok(json!({"objectId":surf.get(),"name":label,"backend":"rust"}))
+            Ok(
+                json!({"objectId":surf.get(),"name":label,"backend":state.molecular_surface_backend(surf)}),
+            )
         }
         "recalc_surface" => {
-            if args["backend"]
-                .as_str()
-                .is_some_and(|v| !matches!(v, "auto" | "rust"))
-            {
-                return Err(CueMolError::invalid_argument(
-                    "This build uses the Rust solvent-excluded surface backend; use backend=auto.",
-                ));
-            }
             let id = uid(args, "surfId")?;
-            let count = if let Some(density) = args["density"].as_f64() {
-                state.regenerate_surface_object_with_density(id, density)?
-            } else {
-                state.regenerate_surface_object(id)?
-            };
-            Ok(json!({"objectId":id.get(),"triangles":count,"backend":"rust"}))
+            let count = state.regenerate_surface_object_with_backend(
+                id,
+                number(args, "density", -1.),
+                args["backend"].as_str(),
+            )?;
+            Ok(
+                json!({"objectId":id.get(),"triangles":count,"backend":state.molecular_surface_backend(id)}),
+            )
         }
         "create_surface_from_map" => {
             let id = uid(args, "rendId")?;

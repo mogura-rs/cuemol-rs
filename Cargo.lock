@@ -1535,11 +1535,14 @@ dependencies = [
 name = "cuemol-surface"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "cuemol-core",
  "cuemol-gfx",
  "cuemol-molstr",
  "cuemol-qsys",
+ "js-sys",
  "lyon",
+ "wasm-bindgen",
 ]
 
 [[package]]

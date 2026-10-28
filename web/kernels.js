@@ -1,9 +1,26 @@
 import createUsalign from './pkg/kernels/usalign.js';
 import createLcms from './pkg/kernels/lcms.js';
+import createSurface from './pkg/kernels/surface.js';
 
 export async function initKernels() {
-  const [module, cms] = await Promise.all([createUsalign(), createLcms()]);
+  const [module, cms, ses] = await Promise.all([createUsalign(), createLcms(), createSurface()]);
   globalThis.cuemolKernels = {
+    surface(xyzr, density, probe, backend) {
+      const data = ses._malloc(xyzr.byteLength), error = ses._malloc(512);
+      let handle = 0;
+      try {
+        if (!data || !error) throw new Error('Surface allocation failed');
+        ses.HEAPF64.set(xyzr, data / 8);ses.HEAPU8[error] = 0;
+        handle = ses._cuemol_surface_build(data, xyzr.length / 4, density, probe, backend, error, 512);
+        if (!handle) throw new Error(ses.UTF8ToString(error) || 'Surface generation failed');
+        const vertices = ses._cuemol_surface_vertex_count(handle), triangles = ses._cuemol_surface_triangle_count(handle);
+        const v = ses._cuemol_surface_vertices(handle) / 8, t = ses._cuemol_surface_triangles(handle) / 4;
+        return [ses.HEAPF64.slice(v,v+vertices*6), ses.HEAPU32.slice(t,t+triangles*3), ses._cuemol_surface_backend(handle)];
+      } finally {
+        if (handle) ses._cuemol_surface_destroy(handle);
+        ses._free(data);ses._free(error);
+      }
+    },
     cmsCreate(bytes, intent) {
       const data = cms._malloc(bytes.length);
       if (!data) throw new Error('ICC profile allocation failed');

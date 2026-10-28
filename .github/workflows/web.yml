@@ -22,7 +22,7 @@ jobs:
             .cache/web-tools
             .cache/emsdk
             .cache/web-kernels
-          key: web-tools-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'scripts/prepare-web-tools.py', 'scripts/build-web-kernels.py', 'crates/cuemol-molanl/vendor/**', 'crates/cuemol-gfx/vendor/**') }}
+          key: web-tools-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'scripts/prepare-web-tools.py', 'scripts/build-web-kernels.py', 'crates/cuemol-molanl/vendor/**', 'crates/cuemol-gfx/vendor/**', 'crates/cuemol-surface/vendor/**') }}
       - name: Prepare wasm-bindgen
         run: uv run --no-project python scripts/prepare-web-tools.py
       - name: Build browser application

@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::{Rc, Weak};
 
 pub mod analytic_ses;
+pub mod backends;
 pub mod boundary;
 pub mod dist_field;
 pub mod grid_surface;
@@ -1519,6 +1520,26 @@ impl MolSurfObj {
             self.source_molecule = None;
         }
         self.cut_planes.clear();
+    }
+
+    pub fn create_ses_from_mol_with_backend(
+        &mut self,
+        molecule: &MolCoord,
+        selection: &Selector,
+        density: f64,
+        probe_radius: f64,
+        backend: backends::SesBackend,
+    ) -> cuemol_core::Result<backends::SesBackend> {
+        let (mesh, used) =
+            backends::build_molecular_surface(molecule, selection, density, probe_radius, backend)?;
+        self.mesh = mesh;
+        self.orig_selector = Some(selection.clone());
+        self.orig_sel = selection.dump();
+        self.orig_den = density;
+        self.orig_prad = probe_radius;
+        self.source_molecule = Some(molecule.clone());
+        self.cut_planes.clear();
+        Ok(used)
     }
 
     pub fn create_ses_from_array(

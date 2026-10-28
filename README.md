@@ -159,7 +159,7 @@ file references must be saved with embedded data before transfer to the browser.
 
 ## Build and check
 
-Rust, a C++17 compiler for vendored USalign, and the native platform's wgpu/winit
+Rust, a C++20 compiler for the vendored numerical kernels, and the native platform's wgpu/winit
 system dependencies are required. The default workspace build is headless.
 Tauri is an optional alternate frontend and requires its platform SDKs.
 
@@ -214,9 +214,10 @@ uv run --no-project --with mdtraj --with netCDF4 \
 ## Compatibility boundaries
 
 The wgpu frontends share scene behavior but use egui controls rather than
-replicating Tritium's React layout pixel for pixel. Rust surface generation uses
-its solvent-excluded surface implementation; explicit `meshms` or `ball`
-backend requests are rejected. NPR rendering provides a Rust hatching pass;
+replicating Tritium's React layout pixel for pixel. Molecular surfaces support
+the MeshMS and BALL engines on native and browser targets, with `auto` selecting
+MeshMS and BALL as its fallback. The `rust` backend retains grid-based SES.
+The generation backend, density, and probe radius survive embedded scene saves. NPR rendering provides a Rust hatching pass;
 upstream custom hatch-layer specifications and every upstream light setting
 are not implemented. Native denoising uses bilateral or color-guided A-trous
 filters. Intel OIDN is not bundled; old GUI preferences carrying that label
