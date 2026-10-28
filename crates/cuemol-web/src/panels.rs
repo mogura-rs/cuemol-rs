@@ -52,6 +52,14 @@ impl App {
     pub(super) fn settings_ui(&mut self, ctx: &egui::Context) {
         let mut open = self.show_settings;
         egui::Window::new("Settings").open(&mut open).default_width(620.).show(ctx,|ui|{
+            if let Some(scene) = self.state.active_scene() {
+                let mut proof = self.state.scene_manager().scene(scene).and_then(|s| s.scene_attribute("use_colproof")).is_some_and(|v| v == "true");
+                if ui.checkbox(&mut proof, "Use color proofing").changed() {
+                    self.call("set_node_prop", json!({"nodeType":"scene", "prop":"use_colproof", "value":proof.to_string()}));
+                }
+                ui.label(format!("ICC profile: {}", self.state.config_value("color:icc_profile")));
+                if ui.button("Import ICC profile…").clicked() { choose_file(); }
+            }
             ui.label("Settings are saved in this browser. Use the same tab-separated configuration format as the native application.");
             ui.add(egui::TextEdit::multiline(&mut self.settings_text).code_editor().desired_rows(8).desired_width(f32::INFINITY));
             ui.separator();ui.label("Startup JavaScript");

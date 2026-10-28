@@ -26,6 +26,7 @@ shutil.copy2(binary, package / binary.name)
 shutil.copytree(tools, package / 'cuemol-tools')
 licenses = package / 'cuemol-tools/licenses'
 shutil.copy2(root / 'crates/cuemol-molanl/vendor/usalign/LICENSE', licenses / 'USalign.txt')
+shutil.copy2(root / 'crates/cuemol-gfx/vendor/lcms2/LICENSE', licenses / 'LittleCMS.txt')
 if windows:
     output = dist / f'cuemol-{args.target}.zip'
     temporary = output.with_suffix('.tmp')

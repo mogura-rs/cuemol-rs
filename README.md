@@ -152,7 +152,9 @@ frames with `File.slice`, without first loading the whole trajectory into JS
 memory. The browser cannot access arbitrary native paths or spawn external
 tools. USalign uses the same vendored calculation kernel as the native application,
 compiled into a companion WebAssembly module. LSQ and SSM remain shared Rust code.
-APBS and ICC soft proofing run in the native application; the browser can import APBS DX maps. Scenes with external
+ICC soft proofing uses the embedded LittleCMS engine on both targets. Open an
+ICC/ICM file in the browser to activate it; the profile is retained in browser
+storage. APBS runs in the native application; the browser can import APBS DX maps. Scenes with external
 file references must be saved with embedded data before transfer to the browser.
 
 ## Build and check

@@ -2150,12 +2150,36 @@ impl DesktopAppState {
     /// Apply the configured ICC soft-proof profile to a snapshot. Returns `true`
     /// when LittleCMS and an external profile were used, or `false` when the
     /// profile-independent Generic CMYK fallback was used.
+    pub fn apply_scene_color_proof(&self, snapshot: &mut RenderSceneSnapshot) -> Result<bool> {
+        let enabled = self
+            .active_scene()
+            .and_then(|id| self.scene_manager().scene(id))
+            .and_then(|scene| scene.scene_attribute("use_colproof"))
+            .is_some_and(|value| value == "true" || value == "1");
+        if enabled {
+            self.apply_color_proof(snapshot)
+        } else {
+            Ok(false)
+        }
+    }
+
     pub fn apply_color_proof(&self, snapshot: &mut RenderSceneSnapshot) -> Result<bool> {
-        let profile = self.config_value("color:icc_profile");
-        let intent = self
-            .config_value("color:icc_intent")
-            .parse::<i32>()
-            .unwrap_or(0);
+        let scene = self
+            .active_scene()
+            .and_then(|id| self.scene_manager().scene(id));
+        let profile = scene
+            .and_then(|scene| scene.scene_attribute("icc_filename"))
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.config_value("color:icc_profile"));
+        let intent = scene
+            .and_then(|scene| scene.scene_attribute("icc_intent"))
+            .and_then(|value| value.parse::<i32>().ok())
+            .unwrap_or_else(|| {
+                self.config_value("color:icc_intent")
+                    .parse::<i32>()
+                    .unwrap_or(0)
+            });
         self.apply_color_proof_with(snapshot, &profile, intent)
     }
 
@@ -2171,17 +2195,24 @@ impl DesktopAppState {
             return Ok(false);
         }
         let intent = intent.clamp(0, 3);
-        type ProfileCache = BTreeMap<(String, i32), cuemol_gfx::CmsXform>;
+        type ProfileCache = BTreeMap<(String, i32, u64), cuemol_gfx::CmsXform>;
         static CACHE: OnceLock<Mutex<ProfileCache>> = OnceLock::new();
         let mut cache = CACHE
             .get_or_init(|| Mutex::new(BTreeMap::new()))
             .lock()
             .map_err(|_| CueMolError::Io("ICC profile cache is poisoned".to_string()))?;
-        let key = (profile.to_string(), intent);
+        let key = (
+            profile.to_string(),
+            intent,
+            cuemol_gfx::cms::icc_profile_revision(),
+        );
         if !cache.contains_key(&key) {
             let mut transform = cuemol_gfx::CmsXform::new();
             transform.set_icc_intent(intent);
             transform.load_icc_file(profile)?;
+            if cache.len() >= 16 {
+                cache.clear();
+            }
             cache.insert(key.clone(), transform);
         }
         cuemol_render::apply_icc_color_proof(snapshot, &cache[&key]);

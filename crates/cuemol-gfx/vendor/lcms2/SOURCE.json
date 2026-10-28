@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/mm2/Little-CMS",
+  "tag": "lcms2.19.1",
+  "revision": "21c582a594fe5279f90c0b93437c398f93bf62b0",
+  "license": "MIT",
+  "files": "Unmodified src/*.c, src/*.h and include/*.h"
+}

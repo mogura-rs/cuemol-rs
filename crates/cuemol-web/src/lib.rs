@@ -1,6 +1,7 @@
 #![cfg(target_arch = "wasm32")]
 mod panels;
 mod trajectory;
+use base64::Engine;
 use cuemol_core::{Uid, Vector4};
 use cuemol_desktop_core::{viewport::ViewportRenderer, DesktopAppState, GuiLoadedPath};
 use cuemol_qsys::Camera;
@@ -147,6 +148,20 @@ impl App {
             .and_then(|s| s.get_item("cuemol.config").ok().flatten())
         {
             let _ = state.load_config_text(&config);
+        }
+        if let Some(storage) = &storage {
+            for i in 0..storage.length().unwrap_or(0) {
+                let Some(key) = storage.key(i).ok().flatten() else {
+                    continue;
+                };
+                if let Some(name) = key.strip_prefix("cuemol.icc.") {
+                    if let Some(bytes) = storage.get_item(&key).ok().flatten().and_then(|value| {
+                        base64::engine::general_purpose::STANDARD.decode(value).ok()
+                    }) {
+                        let _ = cuemol_gfx::cms::register_icc_profile(name, &bytes);
+                    }
+                }
+            }
         }
         let dark = storage
             .as_ref()
@@ -333,6 +348,47 @@ impl App {
                     }
                 }
                 Event::Data(name, bytes) => {
+                    if name.rsplit('.').next().is_some_and(|ext| {
+                        matches!(ext.to_ascii_lowercase().as_str(), "icc" | "icm")
+                    }) {
+                        match cuemol_gfx::cms::register_icc_profile(&name, &bytes) {
+                            Ok(()) => {
+                                self.checkpoint();
+                                self.state.put_config_value("color:icc_profile", &name);
+                                if let Some(scene) = self
+                                    .state
+                                    .active_scene()
+                                    .and_then(|id| self.state.scene_manager_mut().scene_mut(id))
+                                {
+                                    scene.set_scene_attribute("use_colproof", "true");
+                                    scene.set_scene_attribute("icc_filename", &name);
+                                }
+                                self.dirty = true;
+                                self.message = format!("Loaded ICC profile {name}");
+                                if let Some(storage) =
+                                    web_sys::window().and_then(|w| w.local_storage().ok().flatten())
+                                {
+                                    let result = storage
+                                        .set_item(
+                                            &format!("cuemol.icc.{name}"),
+                                            &base64::engine::general_purpose::STANDARD
+                                                .encode(&bytes),
+                                        )
+                                        .and_then(|_| {
+                                            storage.set_item(
+                                                "cuemol.config",
+                                                &self.state.config_text(),
+                                            )
+                                        });
+                                    if result.is_err() {
+                                        self.message.push_str(" (browser storage is full)");
+                                    }
+                                }
+                            }
+                            Err(error) => self.message = error.to_string(),
+                        }
+                        continue;
+                    }
                     self.checkpoint();
                     match self.state.open_bytes(&name, &bytes) {
                         Ok(loaded) => {
@@ -420,7 +476,10 @@ impl App {
             return;
         }
         match self.state.active_render_snapshot(&self.selection) {
-            Ok(snapshot) => {
+            Ok(mut snapshot) => {
+                if let Err(error) = self.state.apply_scene_color_proof(&mut snapshot) {
+                    self.message = error.to_string();
+                }
                 self.renderer
                     .upload(&self.gpu.device, &self.gpu.queue, &snapshot);
                 self.snapshot = Some(snapshot);

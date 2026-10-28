@@ -1,5 +1,6 @@
 import {test,expect} from '@playwright/test';
 import {PNG} from 'pngjs';
+import {existsSync, readFileSync} from 'node:fs';
 const structure=`HETATM    1  C1  LIG A   1      -2.000   0.000   0.000  1.00 10.00           C  
 HETATM    2  O1  LIG A   1       0.000   0.000   0.000  1.00 10.00           O  
 HETATM    3  N1  LIG A   1       1.300   1.000   0.000  1.00 10.00           N  
@@ -143,4 +144,49 @@ test('USalign fits rotated browser molecules with the native calculation kernel'
   expect(values[12]).toBeCloseTo(1,7);expect(values[13]).toBeCloseTo(1,7);
   expect(values[14]).toBeCloseTo(0,5);expect(values[15]).toBe(12);
   expect(errors).toEqual([]);
+});
+
+test('ICC profiles load, proof colors, and persist in browser storage',async({page})=>{
+  await ready(page);
+  const profile=await page.evaluate(async()=>{
+    const {default:create}=await import('/pkg/kernels/lcms.js');
+    const cms=await create();
+    const handle=cms._cmsCreate_sRGBProfile(), size=cms._malloc(4);
+    try {
+      cms._cmsSaveProfileToMem(handle,0,size);
+      const length=cms.HEAPU32[size/4],data=cms._malloc(length);
+      try {cms._cmsSaveProfileToMem(handle,data,size);return Array.from(cms.HEAPU8.subarray(data,data+length));}
+      finally {cms._free(data);}
+    } finally {cms._free(size);cms._cmsCloseProfile(handle);}
+  });
+  await load(page,'proof.icc',Buffer.from(profile));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Loaded ICC profile proof.icc');
+  const result=await page.evaluate(profile=>{
+    const handle=window.cuemolKernels.cmsCreate(new Uint8Array(profile),0);
+    try {return {color:window.cuemolKernels.cmsColor(handle,0x4080c0,false),info:window.cuemolKernels.cmsInfo(handle)};}
+    finally {window.cuemolKernels.cmsDestroy(handle);}
+  },profile);
+  expect(result.info).toContain('sRGB');
+  for(const shift of [0,8,16])expect(Math.abs(((result.color>>shift)&255)-((0x4080c0>>shift)&255))).toBeLessThanOrEqual(1);
+  await ready(page);await load(page,'ligand.pdb',Buffer.from(structure));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  let state=await call(page,'set_node_prop',{nodeType:'scene',prop:'use_colproof',value:'true'});
+  expect(state.message).not.toContain('Error');
+  state=await call(page,'get_screenshot',{width:32,height:32});
+  expect(JSON.parse(state.message)._image).toBeTruthy();
+  await load(page,'broken.icc',Buffer.alloc(128));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toContain('LittleCMS rejected');
+  expect(await page.evaluate(()=>!!localStorage.getItem('cuemol.icc.proof.icc'))).toBe(true);
+});
+
+test('browser CMYK proof matches the reference LittleCMS colors',async({page})=>{
+  const file=new URL('../../../cuemol2/src/xul_gui/data/icc_profiles/GenericCMYK.icm',import.meta.url);
+  test.skip(!existsSync(file),'Optional CueMol2 profile is absent');
+  await ready(page);
+  const result=await page.evaluate(profile=>{
+    const handle=window.cuemolKernels.cmsCreate(new Uint8Array(profile),0);
+    try {return [0xffffff,0x777777,0x0000ff,0xff00ff].map(rgb=>window.cuemolKernels.cmsColor(handle,rgb,false));}
+    finally {window.cuemolKernels.cmsDestroy(handle);}
+  },Array.from(readFileSync(file)));
+  expect(result).toEqual([0xf2f3fa,0x767578,0x345ba0,0xb469a4]);
 });

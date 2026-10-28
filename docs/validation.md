@@ -79,3 +79,9 @@ the native application. Five browser tests passed after adding this integration.
 The alignment regression applies a known rotation and translation to twelve
 noncoplanar C-alpha coordinates, checks the recovered transform through the
 shared command API, and verifies unit TM scores and near-zero RMSD.
+
+LittleCMS is compiled into both native and browser distributions. The native
+profile tests and browser checks cover profile validation, alpha preservation,
+profile persistence, proofed image export, and four Generic CMYK colors. The
+CMYK values matched an independent call to the installed LittleCMS library.
+The optional reference profile was present for these checks.

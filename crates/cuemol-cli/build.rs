@@ -19,6 +19,9 @@ fn main() {
         ("kernels.js", "text/javascript; charset=utf-8"),
         ("pkg/kernels/usalign.js", "text/javascript; charset=utf-8"),
         ("pkg/kernels/usalign.wasm", "application/wasm"),
+        ("pkg/kernels/lcms.js", "text/javascript; charset=utf-8"),
+        ("pkg/kernels/lcms.wasm", "application/wasm"),
+        ("pkg/kernels/LittleCMS-LICENSE", "text/plain; charset=utf-8"),
         ("pkg/kernels/USalign-LICENSE", "text/plain; charset=utf-8"),
     ];
     assets.sort_unstable();

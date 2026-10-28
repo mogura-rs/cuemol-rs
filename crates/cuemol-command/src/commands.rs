@@ -438,7 +438,8 @@ pub fn prepare_render(
             "render size must be positive and at most 32 megapixels",
         ));
     }
-    let snapshot = state.active_render_snapshot("")?;
+    let mut snapshot = state.active_render_snapshot("")?;
+    state.apply_scene_color_proof(&mut snapshot)?;
     let npr = args["style"]
         .as_str()
         .map(|style| style == "npr")

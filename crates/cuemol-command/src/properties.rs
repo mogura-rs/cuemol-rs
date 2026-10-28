@@ -610,7 +610,8 @@ fn export(state: &DesktopAppState, camera: &Camera, name: &str, args: &Value) ->
             state.export_active_scene_pov_with_camera(path, "", camera, Default::default())?;
         return Ok(json!({"path":path,"primitives":count}));
     }
-    let snapshot = state.active_render_snapshot("")?;
+    let mut snapshot = state.active_render_snapshot("")?;
+    state.apply_scene_color_proof(&mut snapshot)?;
     match format {
         "stl" => {
             let exporter = cuemol_render::StlSceneExporter::new();

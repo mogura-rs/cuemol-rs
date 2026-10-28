@@ -1412,8 +1412,10 @@ dependencies = [
 name = "cuemol-gfx"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "cuemol-core",
  "libloading 0.8.9",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -1558,6 +1560,7 @@ dependencies = [
  "cuemol-command",
  "cuemol-core",
  "cuemol-desktop-core",
+ "cuemol-gfx",
  "cuemol-mdtools",
  "cuemol-molstr",
  "cuemol-qsys",

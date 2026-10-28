@@ -1,8 +1,36 @@
 import createUsalign from './pkg/kernels/usalign.js';
+import createLcms from './pkg/kernels/lcms.js';
 
 export async function initKernels() {
-  const module = await createUsalign();
+  const [module, cms] = await Promise.all([createUsalign(), createLcms()]);
   globalThis.cuemolKernels = {
+    cmsCreate(bytes, intent) {
+      const data = cms._malloc(bytes.length);
+      if (!data) throw new Error('ICC profile allocation failed');
+      try {
+        cms.HEAPU8.set(bytes, data);
+        const handle = cms._cuemol_cms_create(data, bytes.length, intent);
+        if (!handle) throw new Error('LittleCMS rejected the ICC profile');
+        return handle;
+      } finally { cms._free(data); }
+    },
+    cmsDestroy(handle) { cms._cuemol_cms_destroy(handle); },
+    cmsColor(handle, rgb, gamut) { return cms._cuemol_cms_color(handle, rgb, gamut ? 1 : 0); },
+    cmsInfo(handle) {
+      const values = [];
+      for (let type = 0; type < 4; type++) {
+        const size = cms._cuemol_cms_info(handle, type, 0, 0);
+        if (!size) continue;
+        const output = cms._malloc(size);
+        if (!output) throw new Error('ICC description allocation failed');
+        try {
+          cms._cuemol_cms_info(handle, type, output, size);
+          const text = cms.UTF8ToString(output).trim();
+          if (text) values.push(text);
+        } finally { cms._free(output); }
+      }
+      return values.join('\n');
+    },
     usalign(moving, movingNames, reference, referenceNames, pivot) {
       const pointers = [];
       const allocate = bytes => {

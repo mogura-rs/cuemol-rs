@@ -30,36 +30,47 @@ def compiler():
     return [sys.executable, str(sdk / "upstream/emscripten/em++.py")]
 
 
+def build_kernel(name, source_root, inputs, options, exports, runtime, output, emxx):
+    build = ROOT / ".cache/web-kernels"
+    build.mkdir(parents=True, exist_ok=True)
+    version = subprocess.check_output([*emxx, "--version"])
+    digest = hashlib.sha256(version + json.dumps([options, exports, runtime]).encode())
+    for source in sorted(source_root.rglob("*")):
+        if source.is_file():
+            digest.update(source.relative_to(source_root).as_posix().encode())
+            digest.update(source.read_bytes())
+    fingerprint = digest.hexdigest()
+    stamp = build / f"{name}.sha256"
+    products = [build / f"{name}.{extension}" for extension in ("js", "wasm")]
+    if not stamp.is_file() or stamp.read_text() != fingerprint or not all(p.is_file() for p in products):
+        command = [*emxx, "-O2", *options, *map(str, inputs),
+                   "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sALLOW_MEMORY_GROWTH=1",
+                   "-sENVIRONMENT=web,worker", "-sEXPORTED_FUNCTIONS=" + json.dumps(exports + ["_malloc", "_free"]),
+                   "-sEXPORTED_RUNTIME_METHODS=" + json.dumps(runtime), "-o", str(products[0])]
+        subprocess.run(command, check=True)
+        stamp.write_text(fingerprint)
+    for product in products:
+        shutil.copyfile(product, output / product.name)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out-dir", type=Path, default=ROOT / "web/pkg/kernels")
     args = parser.parse_args()
-    sources = ROOT / "crates/cuemol-molanl/vendor"
-    build = ROOT / ".cache/web-kernels"
-    build.mkdir(parents=True, exist_ok=True)
-    emxx = compiler()
-    version = subprocess.check_output([*emxx, "--version"])
-    digest = hashlib.sha256(version + Path(__file__).read_bytes())
-    for source in sorted(sources.rglob("*")):
-        if source.is_file():
-            digest.update(source.relative_to(sources).as_posix().encode())
-            digest.update(source.read_bytes())
-    fingerprint = digest.hexdigest()
-    stamp = build / "usalign.sha256"
-    if not stamp.is_file() or stamp.read_text() != fingerprint or not (build / "usalign.wasm").is_file():
-        command = [*emxx, "-std=c++17", "-O2", "-fexceptions",
-                   str(sources / "USalignImpl.cpp"), str(sources / "usalign_bridge.cpp"),
-                   "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sALLOW_MEMORY_GROWTH=1",
-                   "-sENVIRONMENT=web,worker", "-sDISABLE_EXCEPTION_CATCHING=0",
-                   "-sEXPORTED_FUNCTIONS=" + json.dumps(["_cuemol_usalign", "_malloc", "_free"]),
-                   "-sEXPORTED_RUNTIME_METHODS=" + json.dumps(["HEAPU8", "HEAPF64", "UTF8ToString"]),
-                   "-o", str(build / "usalign.js")]
-        subprocess.run(command, check=True)
-        stamp.write_text(fingerprint)
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    for name in ("usalign.js", "usalign.wasm"):
-        shutil.copyfile(build / name, args.out_dir / name)
+    emxx = compiler()
+    sources = ROOT / "crates/cuemol-molanl/vendor"
+    build_kernel("usalign", sources, [sources / "USalignImpl.cpp", sources / "usalign_bridge.cpp"],
+                 ["-std=c++17", "-fexceptions", "-sDISABLE_EXCEPTION_CATCHING=0"],
+                 ["_cuemol_usalign"], ["HEAPU8", "HEAPF64", "UTF8ToString"], args.out_dir, emxx)
     shutil.copyfile(sources / "usalign/LICENSE", args.out_dir / "USalign-LICENSE")
+    sources = ROOT / "crates/cuemol-gfx/vendor"
+    build_kernel("lcms", sources, [*sorted((sources / "lcms2/src").glob("*.c")), sources / "cms_bridge.c"],
+                 ["-x", "c", "-std=c99", "-I" + str(sources / "lcms2/include")],
+                 ["_cuemol_cms_create", "_cuemol_cms_destroy", "_cuemol_cms_color", "_cuemol_cms_info",
+                  "_cmsCreate_sRGBProfile", "_cmsSaveProfileToMem", "_cmsCloseProfile"],
+                 ["HEAPU8", "HEAPU32", "UTF8ToString"], args.out_dir, emxx)
+    shutil.copyfile(sources / "lcms2/LICENSE", args.out_dir / "LittleCMS-LICENSE")
 
 
 if __name__ == "__main__":
