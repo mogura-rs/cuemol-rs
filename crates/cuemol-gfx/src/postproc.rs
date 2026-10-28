@@ -20,6 +20,7 @@ pub struct AoConstants {
     pub slice_count: i32,
     pub steps_per_slice: i32,
     pub ao_noise_offset: f32,
+    pub smaa_threshold: f32,
 }
 
 impl Default for AoConstants {
@@ -40,6 +41,7 @@ impl Default for AoConstants {
             slice_count: 9,
             steps_per_slice: 3,
             ao_noise_offset: 0.0,
+            smaa_threshold: 0.05,
         }
     }
 }

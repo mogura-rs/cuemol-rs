@@ -49,6 +49,7 @@ use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
 
+use cuemol_desktop_core::effects::{ViewportEffects, ViewportOptions};
 use cuemol_desktop_core::viewport::*;
 const MAX_RECENT_PATHS: usize = 10;
 const MAX_SELECTION_HISTORY: usize = 10;
@@ -610,6 +611,7 @@ impl NativeRunner {
                         revision: app.snapshot_revision,
                         background: app.background.clear_color(),
                         viewport: app.viewport_rect,
+                        options: ViewportOptions::from_state(&app.state),
                     },
                     &paint_jobs,
                     &full_output.textures_delta,
@@ -623,7 +625,7 @@ impl NativeRunner {
                     Err(wgpu::SurfaceError::Timeout) => {}
                     Err(_) => {}
                 }
-                if self.egui_ctx.has_requested_repaint() {
+                if self.egui_ctx.has_requested_repaint() || gpu.effects_pending {
                     needs_redraw = true;
                 }
             }
@@ -4199,6 +4201,7 @@ struct NativeSceneProperties {
     ao_half_res: bool,
     aa_method: String,
     aa_jitter_level: i32,
+    aa_smaa_threshold: f64,
     onload: String,
     object_uids: String,
     active_object_id: u64,
@@ -4250,6 +4253,7 @@ impl NativeSceneProperties {
                 .unwrap_or("fxaa")
                 .to_string(),
             aa_jitter_level: scene_attr_i32(scene.scene_attribute("aaJitterLevel"), 0),
+            aa_smaa_threshold: scene_attr_f64(scene.scene_attribute("aaSmaaThreshold"), 0.05),
             onload: scene.scene_attribute("onload").unwrap_or("").to_string(),
             object_uids,
             active_object_id: scene.active_object_uid().map_or(0, cuemol_core::Uid::get),
@@ -4286,6 +4290,7 @@ enum ScenePropertyKey {
     AoHalfRes,
     AaMethod,
     AaJitterLevel,
+    AaSmaaThreshold,
     Onload,
     ObjectUids,
     ActiveObjectId,
@@ -4373,6 +4378,13 @@ const SCENE_PROPERTY_DEFINITIONS: &[ScenePropertyDefinition] = &[
         ScenePropertyKey::AaJitterLevel,
         "aaJitterLevel",
         "integer",
+        false,
+        true,
+    ),
+    scene_property(
+        ScenePropertyKey::AaSmaaThreshold,
+        "aaSmaaThreshold",
+        "real",
         false,
         true,
     ),
@@ -23820,6 +23832,13 @@ impl GuiApplication {
                         }
                     });
             }
+            Key::AaSmaaThreshold => {
+                ui.add(
+                    egui::DragValue::new(&mut draft.aa_smaa_threshold)
+                        .range(0.0..=1.0)
+                        .speed(0.005),
+                );
+            }
             Key::AaJitterLevel => {
                 ui.add(egui::DragValue::new(&mut draft.aa_jitter_level).range(0..=5));
             }
@@ -23880,6 +23899,9 @@ impl GuiApplication {
         if !matches!(draft.aa_method.as_str(), "none" | "fxaa" | "smaa") {
             return Err(format!("unsupported AA method: {}", draft.aa_method));
         }
+        if !draft.aa_smaa_threshold.is_finite() || !(0.0..=1.0).contains(&draft.aa_smaa_threshold) {
+            return Err("SMAA threshold must be between 0 and 1".to_string());
+        }
         if !(0..=5).contains(&draft.aa_jitter_level) {
             return Err("AA jitter level must be between 0 and 5".to_string());
         }
@@ -23904,6 +23926,12 @@ impl GuiApplication {
         set_native_scene_attr_default(scene, "aoSteps", &draft.ao_steps.to_string(), "3");
         set_native_scene_attr_default(scene, "aoHalfRes", &draft.ao_half_res.to_string(), "false");
         set_native_scene_attr_default(scene, "aa_method", &draft.aa_method, "fxaa");
+        set_native_scene_attr_default(
+            scene,
+            "aaSmaaThreshold",
+            &draft.aa_smaa_threshold.to_string(),
+            "0.05",
+        );
         set_native_scene_attr_default(
             scene,
             "aaJitterLevel",
@@ -32411,6 +32439,7 @@ fn scene_property_value(properties: &NativeSceneProperties, key: ScenePropertyKe
         Key::AoHalfRes => properties.ao_half_res.to_string(),
         Key::AaMethod => properties.aa_method.clone(),
         Key::AaJitterLevel => properties.aa_jitter_level.to_string(),
+        Key::AaSmaaThreshold => properties.aa_smaa_threshold.to_string(),
         Key::Onload => properties.onload.clone(),
         Key::ObjectUids => properties.object_uids.clone(),
         Key::ActiveObjectId => properties.active_object_id.to_string(),
@@ -32435,6 +32464,7 @@ fn scene_property_is_default(properties: &NativeSceneProperties, key: ScenePrope
         Key::AoHalfRes => !properties.ao_half_res,
         Key::AaMethod => properties.aa_method == "fxaa",
         Key::AaJitterLevel => properties.aa_jitter_level == 0,
+        Key::AaSmaaThreshold => properties.aa_smaa_threshold == 0.05,
         Key::Onload => properties.onload.is_empty(),
         Key::UseColorProof => !properties.use_color_proof,
         Key::IccFilename => properties.icc_filename.is_empty(),
@@ -32455,6 +32485,7 @@ fn reset_scene_property(properties: &mut NativeSceneProperties, key: SceneProper
         Key::AoHalfRes => properties.ao_half_res = false,
         Key::AaMethod => properties.aa_method = "fxaa".to_string(),
         Key::AaJitterLevel => properties.aa_jitter_level = 0,
+        Key::AaSmaaThreshold => properties.aa_smaa_threshold = 0.05,
         Key::Onload => properties.onload.clear(),
         Key::UseColorProof => properties.use_color_proof = false,
         Key::IccFilename => properties.icc_filename.clear(),
@@ -33675,6 +33706,7 @@ fn encode_animation_movie(
 }
 
 struct GpuSceneFrame<'a> {
+    options: ViewportOptions,
     snapshot: &'a RenderSceneSnapshot,
     revision: u64,
     background: wgpu::Color,
@@ -33706,9 +33738,10 @@ struct GpuState {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     size: PhysicalSize<u32>,
-    depth_view: wgpu::TextureView,
     camera: CameraController,
     viewport_renderer: ViewportRenderer,
+    effects: ViewportEffects,
+    effects_pending: bool,
     uploaded_snapshot_revision: Option<u64>,
     egui_renderer: egui_wgpu::Renderer,
 }
@@ -33761,7 +33794,6 @@ impl GpuState {
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
-        let depth_view = create_depth_view(&device, config.width, config.height);
         let camera = CameraController::default();
         let viewport_renderer = ViewportRenderer::new(&device, config.format);
         let egui_renderer = egui_wgpu::Renderer::new(
@@ -33770,15 +33802,17 @@ impl GpuState {
             egui_wgpu::RendererOptions::default(),
         );
 
+        let effects = ViewportEffects::new(&device, &queue, config.format);
         Ok(Self {
             surface,
             device,
             queue,
             config,
             size,
-            depth_view,
             camera,
             viewport_renderer,
+            effects,
+            effects_pending: false,
             uploaded_snapshot_revision: None,
             egui_renderer,
         })
@@ -33792,7 +33826,6 @@ impl GpuState {
         self.config.width = size.width;
         self.config.height = size.height;
         self.surface.configure(&self.device, &self.config);
-        self.depth_view = create_depth_view(&self.device, size.width, size.height);
     }
 
     fn render(
@@ -33855,15 +33888,17 @@ impl GpuState {
             paint_jobs,
             &screen_descriptor,
         );
-        self.viewport_renderer.render_region(
-            &mut encoder,
+        self.effects_pending = self.effects.render(
+            &self.viewport_renderer,
+            &self.device,
             &self.queue,
+            &mut encoder,
             &view,
-            &self.depth_view,
             &self.camera.to_qsys_camera("__current"),
             [vw as u32, vh as u32],
             scene.background,
-            [vx, vy, vw, vh],
+            Some([vx, vy, vw, vh]),
+            scene.options,
         );
         {
             let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -35932,6 +35967,7 @@ mod tests {
                 "aoHalfRes",
                 "aa_method",
                 "aaJitterLevel",
+                "aaSmaaThreshold",
                 "onload",
                 "obj_uids",
                 "activeObjID",
@@ -35955,6 +35991,7 @@ mod tests {
         properties.ao_half_res = true;
         properties.aa_method = "smaa".to_string();
         properties.aa_jitter_level = 4;
+        properties.aa_smaa_threshold = 0.12;
         properties.onload = "sceneReady();".to_string();
         properties.use_color_proof = true;
         properties.icc_filename = "proof.icc".to_string();
@@ -35987,6 +36024,7 @@ mod tests {
             ("aoHalfRes", "true"),
             ("aa_method", "smaa"),
             ("aaJitterLevel", "4"),
+            ("aaSmaaThreshold", "0.12"),
             ("onload", "sceneReady();"),
             ("use_colproof", "true"),
             ("icc_filename", "proof.icc"),

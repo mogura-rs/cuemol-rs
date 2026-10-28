@@ -29,7 +29,7 @@ cuemol-py = { workspace = true, optional = true }
 # default workspace build stays light and headless (no GPU stack compiled).
 bytemuck = { version = "1.25", features = ["derive"], optional = true }
 glam = { version = "0.30.10", optional = true }
-naga = { version = "27", features = ["termcolor"], optional = true }
+naga = { version = "27", features = ["termcolor", "glsl-out"], optional = true }
 png = { version = "0.17", optional = true }
 pollster = { version = "0.4", optional = true }
 wgpu = { version = "27.0.1", optional = true }

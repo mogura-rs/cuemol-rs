@@ -72,13 +72,20 @@ struct PrimitiveFsOut {
     @builtin(frag_depth) depth: f32,
 };
 
-@fragment
-fn atom_fs(input: AtomVsOut) -> PrimitiveFsOut {
+struct GBufferFsOut {
+    @location(0) color: vec4<f32>,
+    @location(1) normal: vec4<f32>,
+    @location(2) encoded_depth: vec4<f32>,
+    @builtin(frag_depth) depth: f32,
+};
+
+fn atom_fragment(input: AtomVsOut) -> GBufferFsOut {
     let d = dot(input.local, input.local);
     if (d > input.edge_ratio * input.edge_ratio) {
         discard;
     }
-    var output: PrimitiveFsOut;
+    var output: GBufferFsOut;
+    output.normal = vec4<f32>(0.0, 0.0, 0.0, 1.0);
     output.depth = input.position.z;
     if (d > 1.0) {
         output.color = finish_color(input.edge_color, input.plane_world);
@@ -96,6 +103,7 @@ fn atom_fs(input: AtomVsOut) -> PrimitiveFsOut {
         camera.right.xyz * input.local.x + camera.up.xyz * input.local.y
             + normalize(cross(camera.right.xyz, camera.up.xyz)) * z
     );
+    output.normal = vec4<f32>(eye_normal(normal), 1.0);
     output.color = reference_lighting(eye_normal(normal), input.color);
     if (input.selected > 0.5 && d > 0.62) {
         output.color = vec4<f32>(0.0, 0.95, 1.0, 1.0);
@@ -204,14 +212,14 @@ fn bond_vs(input: BondVsIn) -> BondVsOut {
     return output;
 }
 
-@fragment
-fn bond_fs(input: BondVsOut) -> PrimitiveFsOut {
+fn bond_fragment(input: BondVsOut) -> GBufferFsOut {
     if (abs(input.local.x) > input.edge_ratio) {
         discard;
     }
     if input.unlit > 0.5 {
         if input.line.y > 0.5 && (u32(input.line.x) % 16u) < 8u { discard; }
-        var output: PrimitiveFsOut;
+        var output: GBufferFsOut;
+        output.normal = vec4<f32>(0.0, 0.0, 0.0, 1.0);
         output.depth = input.position.z;
         output.color = finish_color(input.color, input.plane_world);
         return output;
@@ -219,7 +227,8 @@ fn bond_fs(input: BondVsOut) -> PrimitiveFsOut {
     let z = sqrt(max(0.0, 1.0 - input.local.x * input.local.x));
     let along = input.local.y - z * input.cap.x * input.cap.y;
     if abs(along) >= 1.0 { discard; }
-    var output: PrimitiveFsOut;
+    var output: GBufferFsOut;
+    output.normal = vec4<f32>(0.0, 0.0, 0.0, 1.0);
     output.depth = input.position.z;
     if (abs(input.local.x) > 1.0) {
         output.color = finish_color(vec4<f32>(input.edge_color.rgb, input.color.a), input.plane_world);
@@ -233,6 +242,7 @@ fn bond_fs(input: BondVsOut) -> PrimitiveFsOut {
     output.depth = surface.z / surface.w;
     if output.depth < 0.0 || output.depth > 1.0 { discard; }
     let normal = normalize(input.perpendicular * input.local.x + input.along_normal * z);
+    output.normal = vec4<f32>(eye_normal(normal), 1.0);
     output.color = finish_color(reference_lighting(eye_normal(normal), input.color), input.plane_world + front * z * input.radius);
     return output;
 }
@@ -256,7 +266,7 @@ struct MeshVsOut {
 fn mesh_vs(input: MeshVsIn) -> MeshVsOut {
     var output: MeshVsOut;
     output.position = camera.view_proj * vec4<f32>(input.position, 1.0);
-    output.normal = input.normal;
+    output.normal = eye_normal(input.normal);
     output.color = input.color;
     if input.cull_back_faces < 1.5 {
         output.color = reference_lighting(eye_normal(input.normal), input.color);
@@ -266,13 +276,61 @@ fn mesh_vs(input: MeshVsIn) -> MeshVsOut {
     return output;
 }
 
-@fragment
-fn mesh_fs(input: MeshVsOut, @builtin(front_facing) front_facing: bool) -> PrimitiveFsOut {
+fn mesh_fragment(input: MeshVsOut, front_facing: bool) -> GBufferFsOut {
     if (input.cull_back_faces > 0.5 && !front_facing) {
         discard;
     }
-    var output: PrimitiveFsOut;
+    var output: GBufferFsOut;
+    output.normal = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    if input.cull_back_faces < 1.5 && dot(input.normal, input.normal) > 1.0e-12 {
+        output.normal = vec4<f32>(normalize(input.normal), 1.0);
+    }
     output.color = finish_color(input.color, input.world);
     output.depth = select(input.position.z, 0.9999, input.cull_back_faces > 2.5);
     return output;
+}
+
+// Packed depth avoids depth-texture sampling restrictions in WebGL2.
+fn pack_depth(depth: f32) -> vec4<f32> {
+    let value = u32(round(clamp(depth, 0.0, 1.0) * 16777215.0));
+    return vec4<f32>(vec3<f32>(f32(value >> 16u), f32((value >> 8u) & 255u), f32(value & 255u)) / 255.0, 1.0);
+}
+
+@fragment
+fn atom_fs(input: AtomVsOut) -> PrimitiveFsOut {
+    let result = atom_fragment(input);
+    return PrimitiveFsOut(result.color, result.depth);
+}
+
+@fragment
+fn atom_gbuffer_fs(input: AtomVsOut) -> GBufferFsOut {
+    var result = atom_fragment(input);
+    result.encoded_depth = pack_depth(result.depth);
+    return result;
+}
+
+@fragment
+fn bond_fs(input: BondVsOut) -> PrimitiveFsOut {
+    let result = bond_fragment(input);
+    return PrimitiveFsOut(result.color, result.depth);
+}
+
+@fragment
+fn bond_gbuffer_fs(input: BondVsOut) -> GBufferFsOut {
+    var result = bond_fragment(input);
+    result.encoded_depth = pack_depth(result.depth);
+    return result;
+}
+
+@fragment
+fn mesh_fs(input: MeshVsOut, @builtin(front_facing) front_facing: bool) -> PrimitiveFsOut {
+    let result = mesh_fragment(input, front_facing);
+    return PrimitiveFsOut(result.color, result.depth);
+}
+
+@fragment
+fn mesh_gbuffer_fs(input: MeshVsOut, @builtin(front_facing) front_facing: bool) -> GBufferFsOut {
+    var result = mesh_fragment(input, front_facing);
+    result.encoded_depth = pack_depth(result.depth);
+    return result;
 }

@@ -61,6 +61,8 @@ use std::sync::{Mutex, OnceLock};
 // Offscreen wgpu mesh renderer (verifiable headless; the wgpu 3D component every
 // front end composites). Behind the `offscreen` feature so the default build is
 // GPU-free; GUI crates that show a 3D view enable it.
+#[cfg(feature = "offscreen")]
+pub mod effects;
 mod memory_io;
 #[cfg(feature = "offscreen")]
 pub mod offscreen;
@@ -14318,7 +14320,7 @@ impl DesktopAppState {
         let rgba = if exporter.use_depth() {
             crate::offscreen::render_snapshot_depth_offscreen(&snapshot, &camera, width, height)
         } else {
-            crate::offscreen::render_snapshot_camera_offscreen(
+            crate::offscreen::render_snapshot_camera_with_effects(
                 &snapshot,
                 &camera,
                 width,
@@ -14330,6 +14332,7 @@ impl DesktopAppState {
                     if exporter.use_alpha() { 0.0 } else { 1.0 },
                 ],
                 5,
+                crate::effects::ViewportOptions::from_scene(scene),
             )
         }
         .ok_or_else(|| CueMolError::invalid_argument("no GPU adapter for offscreen render"))?;
@@ -27128,6 +27131,18 @@ impl DesktopAppState {
                 f32::from(background.g) / 255.0,
                 f32::from(background.b) / 255.0,
             ];
+            #[cfg(feature = "offscreen")]
+            let scene_attributes = script_env::with(|env| {
+                if scene_uid == env.scene_uid {
+                    env.scene_attributes.clone()
+                } else {
+                    env.scenes
+                        .iter()
+                        .find(|scene| scene.uid == scene_uid)
+                        .map(|scene| scene.attributes.clone())
+                        .unwrap_or_default()
+                }
+            });
             let mut exporter = script_env::with_mut(|env| env.native_scene_exporters.remove(&id))
                 .ok_or_else(|| script_error("SceneExporter is not available"))?;
             let mesh = cuemol_render::tessellate_snapshot(&render_scene.snapshot);
@@ -27157,7 +27172,7 @@ impl DesktopAppState {
                                         height,
                                     )
                                 } else {
-                                    crate::offscreen::render_snapshot_camera_offscreen(
+                                    crate::offscreen::render_snapshot_camera_with_effects(
                                         &render_scene.snapshot,
                                         &camera,
                                         width,
@@ -27169,6 +27184,9 @@ impl DesktopAppState {
                                             if exporter.use_alpha() { 0.0 } else { 1.0 },
                                         ],
                                         5,
+                                        crate::effects::ViewportOptions::from_attributes(|key| {
+                                            scene_attributes.get(key).map(String::as_str)
+                                        }),
                                     )
                                 }
                                 .ok_or_else(|| {
@@ -29888,6 +29906,7 @@ impl DesktopAppState {
                 "aoSteps" => JsValue::new(3),
                 "aa_method" => js_string!("fxaa").into(),
                 "aaJitterLevel" => JsValue::new(0),
+                "aaSmaaThreshold" => JsValue::new(0.05),
                 "onload" | "icc_filename" => js_string!("").into(),
                 "icc_intent" => js_string!("perceptual").into(),
                 _ => return Ok(false),
@@ -37804,6 +37823,7 @@ impl DesktopAppState {
             AoHalfRes,
             AaMethod,
             AaJitterLevel,
+            AaSmaaThreshold,
             OnLoad,
             ActiveObject,
             ActiveRenderer,
@@ -37951,6 +37971,11 @@ impl DesktopAppState {
                 SceneProperty::AaMethod => {
                     JsString::from(scene_attr_for(scene_uid, "aa_method", "fxaa")).into()
                 }
+                SceneProperty::AaSmaaThreshold => JsValue::new(
+                    scene_attr_for(scene_uid, "aaSmaaThreshold", "0.05")
+                        .parse::<f64>()
+                        .unwrap_or(0.05),
+                ),
                 SceneProperty::AaJitterLevel => JsValue::new(
                     scene_attr_for(scene_uid, "aaJitterLevel", "0")
                         .parse::<i32>()
@@ -38024,6 +38049,13 @@ impl DesktopAppState {
                         return Err(script_error(format!("unknown aa_method {value}")));
                     }
                     ("aa_method", value)
+                }
+                SceneProperty::AaSmaaThreshold => {
+                    let number = value.to_number(ctx)?;
+                    if !number.is_finite() {
+                        return Err(script_error("aaSmaaThreshold must be finite"));
+                    }
+                    ("aaSmaaThreshold", number.clamp(0.0, 1.0).to_string())
                 }
                 SceneProperty::AaJitterLevel => {
                     ("aaJitterLevel", value.to_i32(ctx)?.clamp(0, 5).to_string())
@@ -38405,6 +38437,7 @@ impl DesktopAppState {
                 ("aoHalfRes", SceneProperty::AoHalfRes, true),
                 ("aa_method", SceneProperty::AaMethod, true),
                 ("aaJitterLevel", SceneProperty::AaJitterLevel, true),
+                ("aaSmaaThreshold", SceneProperty::AaSmaaThreshold, true),
                 ("onload", SceneProperty::OnLoad, true),
                 ("activeObjID", SceneProperty::ActiveObject, true),
                 ("activeRendID", SceneProperty::ActiveRenderer, true),
@@ -55447,7 +55480,7 @@ end_header
                 "scene.setName('after'); scene.bgcolor = cuemol.makeColor('red'); \
                  scene.aoEnabled = true; scene.aoRadius = 7.5; scene.aoIntensity = 3; \
                  scene.aoSlices = 12; scene.aoSteps = 5; scene.aoHalfRes = true; \
-                 scene.aa_method = 'none'; scene.aaJitterLevel = 4; scene.onload = 'ready();'; \
+                 scene.aa_method = 'none'; scene.aaJitterLevel = 4; scene.aaSmaaThreshold = 0.12; scene.onload = 'ready();'; \
                  scene.use_colproof = true; scene.icc_filename = 'proof.icc'; \
                  scene.icc_intent = 'saturation'; \
                  var extra = scene.createView(); extra.name = 'extra'; \
@@ -55477,6 +55510,7 @@ end_header
         assert_eq!(live_scene.name(), "after");
         assert_eq!(live_scene.scene_attribute("aoEnabled"), Some("true"));
         assert_eq!(live_scene.scene_attribute("aoRadius"), Some("7.5"));
+        assert_eq!(live_scene.scene_attribute("aaSmaaThreshold"), Some("0.12"));
         assert_eq!(live_scene.cameras().len(), 1);
         assert_eq!(app.command_manager().views().len(), 2);
         let extra_view = app

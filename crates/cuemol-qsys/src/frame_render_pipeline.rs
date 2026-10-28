@@ -173,6 +173,7 @@ impl FrameRenderPipeline {
         let mut constants = params.camera_ao_constants;
         constants.effect_radius = scene.ao_radius() as f32;
         constants.final_value_power = scene.ao_intensity() as f32;
+        constants.smaa_threshold = scene.aa_smaa_threshold() as f32;
         constants.slice_count = scene.ao_slices();
         constants.steps_per_slice = scene.ao_steps();
         constants.ao_noise_offset = params.ao_noise_offset;

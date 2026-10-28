@@ -258,6 +258,41 @@ pub fn render_settings(state: &DesktopAppState) -> Result<serde_json::Map<String
         .unwrap_or_default())
 }
 
+const VIEW_EFFECT_DEFAULTS: &[(&str, &str)] = &[
+    ("aoEnabled", "false"),
+    ("aoRadius", "4"),
+    ("aoIntensity", "2.2"),
+    ("aoSlices", "9"),
+    ("aoSteps", "3"),
+    ("aoHalfRes", "false"),
+    ("aa_method", "fxaa"),
+    ("aaJitterLevel", "0"),
+    ("aaSmaaThreshold", "0.05"),
+];
+
+fn validate_view_effect_property(key: &str, value: &str) -> Result<()> {
+    let valid = match key {
+        "aoEnabled" | "aoHalfRes" => value.parse::<bool>().is_ok(),
+        "aoRadius" | "aoIntensity" => value
+            .parse::<f64>()
+            .is_ok_and(|n| n.is_finite() && n >= 0.0),
+        "aaSmaaThreshold" => value
+            .parse::<f64>()
+            .is_ok_and(|n| n.is_finite() && (0.0..=1.0).contains(&n)),
+        "aoSlices" | "aoSteps" => value.parse::<i32>().is_ok_and(|n| (1..=64).contains(&n)),
+        "aaJitterLevel" => value.parse::<i32>().is_ok_and(|n| (0..=5).contains(&n)),
+        "aa_method" => matches!(value, "none" | "fxaa" | "smaa"),
+        _ => true,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(CueMolError::invalid_argument(format!(
+            "invalid value for {key}: {value}"
+        )))
+    }
+}
+
 fn properties(
     state: &mut DesktopAppState,
     camera: &mut Camera,
@@ -332,6 +367,7 @@ fn properties(
                 }
             }
             "scene" => {
+                validate_view_effect_property(&prop, value)?;
                 if prop == "bgcolor" {
                     cuemol_gfx::parse_color(value)?;
                 }
@@ -406,6 +442,9 @@ fn properties(
             let mut v = s.scene_attributes().clone();
             v.insert("name".into(), s.name().into());
             v.entry("bgcolor".into()).or_insert_with(|| "black".into());
+            for (key, value) in VIEW_EFFECT_DEFAULTS {
+                v.entry((*key).into()).or_insert_with(|| (*value).into());
+            }
             v
         }
         "view" => BTreeMap::from([

@@ -32,6 +32,7 @@ pub struct Scene<T> {
     ao_half_res: bool,
     aa_method: AAMethod,
     aa_jitter_level: i32,
+    aa_smaa_threshold: f64,
     onload: String,
     use_colproof: bool,
     icc_filename: String,
@@ -87,6 +88,7 @@ impl<T> Scene<T> {
             ao_half_res: false,
             aa_method: AAMethod::Fxaa,
             aa_jitter_level: 0,
+            aa_smaa_threshold: 0.05,
             onload: String::new(),
             use_colproof: false,
             icc_filename: String::new(),
@@ -323,6 +325,19 @@ impl<T> Scene<T> {
     pub fn set_aa_jitter_level(&mut self, value: i32) {
         self.aa_jitter_level = value;
         self.mark_render_option_changed("aaJitterLevel");
+    }
+
+    pub fn aa_smaa_threshold(&self) -> f64 {
+        self.aa_smaa_threshold
+    }
+
+    pub fn get_aa_smaa_threshold(&self) -> f64 {
+        self.aa_smaa_threshold()
+    }
+
+    pub fn set_aa_smaa_threshold(&mut self, value: f64) {
+        self.aa_smaa_threshold = value;
+        self.mark_render_option_changed("aaSmaaThreshold");
     }
 
     fn mark_render_option_changed(&mut self, property_name: &str) {
@@ -1372,6 +1387,7 @@ mod tests {
         assert!(!scene.ao_half_res());
         assert_eq!(scene.aa_method(), AAMethod::Fxaa);
         assert_eq!(scene.aa_jitter_level(), 0);
+        assert_eq!(scene.aa_smaa_threshold(), 0.05);
 
         let view_uid = scene.create_view();
         scene.view_mut(view_uid).unwrap().reset_projection_changed();
@@ -1383,6 +1399,7 @@ mod tests {
         scene.set_ao_half_res(true);
         scene.set_aa_method(AAMethod::Smaa);
         scene.set_aa_jitter_level(4);
+        scene.set_aa_smaa_threshold(0.12);
 
         assert!(scene.is_ao_enabled());
         assert!(scene.ao_enabled());
@@ -1394,6 +1411,7 @@ mod tests {
         assert!(scene.ao_half_res());
         assert_eq!(scene.get_aa_method(), AAMethod::Smaa);
         assert_eq!(scene.get_aa_jitter_level(), 4);
+        assert_eq!(scene.get_aa_smaa_threshold(), 0.12);
         assert!(scene.view(view_uid).unwrap().is_projection_changed());
         assert!(scene.is_modified());
         assert!(scene.modified());

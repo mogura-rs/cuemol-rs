@@ -35,7 +35,7 @@ def shader_source(path, directories, seen=None):
     return "\n".join(lines) + "\n"
 
 
-def reference_image(ctx, programs, fixture):
+def reference_image(ctx, programs, fixture, postprocess=None, offset=(0, 0)):
     width, height = fixture["size"]
     view = np.array(fixture["view"], dtype="f4")
     distance, slab, zoom = (fixture[key] for key in ("distance", "slab", "zoom"))
@@ -53,6 +53,8 @@ def reference_image(ctx, programs, fixture):
         projection[2, 2] = -2 / (far - near)
         projection[2, 3] = -(far + near) / (far - near)
         projection[3, 3] = 1
+    projection[0] += np.float32(2 * offset[0] / width) * projection[3]
+    projection[1] += np.float32(2 * offset[1] / height) * projection[3]
     normal = np.identity(4, dtype="f4")
     normal[:3, :3] = view[:3, :3]
     matrices = ctx.buffer(view.T.tobytes() + projection.T.tobytes() + normal.T.tobytes())
@@ -61,8 +63,12 @@ def reference_image(ctx, programs, fixture):
     matrices.bind_to_uniform_block(0)
     fog.bind_to_uniform_block(1)
     color = ctx.texture((width, height), 4)
-    normals = ctx.texture((width, height), 4, dtype="f4")
-    depth = ctx.depth_renderbuffer((width, height))
+    normals = ctx.texture((width, height), 4, dtype="f2")
+    depth = ctx.depth_texture((width, height))
+    depth.compare_func = ""
+    for texture in (depth, normals, color):
+        texture.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        texture.repeat_x = texture.repeat_y = False
     framebuffer = ctx.framebuffer([color, normals], depth)
     framebuffer.use()
     framebuffer.clear(*fixture["background"], depth=1)
@@ -108,7 +114,10 @@ def reference_image(ctx, programs, fixture):
             value = mesh["vertices"][index]
             vertices.append([*value[:3], 1, *value[3:6], 0, *value[6:10]])
         draw("mesh", vertices, "4f 4f 4f", ["aVertex", "aNormal", "aColor"], struct.pack("fiii", 1, 1, 0, 0))
-    pixels = np.frombuffer(framebuffer.read(components=4, alignment=1), dtype="u1").reshape(height, width, 4)[::-1].copy()
+    if postprocess is None:
+        pixels = np.frombuffer(framebuffer.read(components=4, alignment=1), dtype="u1").reshape(height, width, 4)[::-1].copy()
+    else:
+        pixels = postprocess(ctx, fixture, color, normals, depth)
     for resource in (framebuffer, depth, normals, color, matrices, fog):
         resource.release()
     return pixels

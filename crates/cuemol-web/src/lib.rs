@@ -7,6 +7,7 @@ mod trajectory;
 mod tritium;
 use base64::Engine;
 use cuemol_core::Uid;
+use cuemol_desktop_core::effects::{ViewportEffects, ViewportOptions};
 use cuemol_desktop_core::{viewport::ViewportRenderer, DesktopAppState, GuiLoadedPath};
 use cuemol_qsys::Camera;
 use cuemol_render::RenderSceneSnapshot;
@@ -136,7 +137,6 @@ fn choose_file() {
 }
 struct Target {
     view: wgpu::TextureView,
-    depth: wgpu::TextureView,
     id: egui::TextureId,
     size: [u32; 2],
 }
@@ -176,6 +176,7 @@ struct App {
     camera: Camera,
     gpu: egui_wgpu::RenderState,
     renderer: ViewportRenderer,
+    effects: ViewportEffects,
     target: Option<Target>,
     snapshot: Option<RenderSceneSnapshot>,
     dirty: bool,
@@ -270,6 +271,8 @@ impl App {
         let camera = state.active_view_camera().unwrap_or_default();
         CONTEXT.with(|ctx| *ctx.borrow_mut() = Some(cc.egui_ctx.clone()));
         let renderer = ViewportRenderer::new(&gpu.device, wgpu::TextureFormat::Rgba8Unorm);
+        let effects =
+            ViewportEffects::new(&gpu.device, &gpu.queue, wgpu::TextureFormat::Rgba8Unorm);
         let mut agent = cuemol_ui::AgentPanel::default();
         if let Some(text) = storage
             .as_ref()
@@ -306,6 +309,7 @@ impl App {
             camera,
             gpu,
             renderer,
+            effects,
             target: None,
             snapshot: None,
             dirty: true,
@@ -819,11 +823,6 @@ impl App {
                     view_formats: &[],
                 })
                 .create_view(&Default::default());
-            let depth = cuemol_desktop_core::viewport::create_depth_view(
-                &self.gpu.device,
-                resolution[0],
-                resolution[1],
-            );
             let id = if let Some(target) = &self.target {
                 self.gpu
                     .renderer
@@ -844,7 +843,6 @@ impl App {
             };
             self.target = Some(Target {
                 view,
-                depth,
                 id,
                 size: resolution,
             });
@@ -875,16 +873,22 @@ impl App {
             b: rgba[2] as f64,
             a: rgba[3] as f64,
         };
-        self.renderer.render(
-            &mut encoder,
+        let pending = self.effects.render(
+            &self.renderer,
+            &self.gpu.device,
             &self.gpu.queue,
+            &mut encoder,
             &target.view,
-            &target.depth,
             &self.camera,
             resolution,
             background,
+            None,
+            ViewportOptions::from_state(&self.state),
         );
         self.gpu.queue.submit([encoder.finish()]);
+        if pending {
+            ui.ctx().request_repaint();
+        }
     }
     fn mouse(&mut self, ui: &egui::Ui, response: &egui::Response) {
         let clicks = self.pointer_input(ui, response);

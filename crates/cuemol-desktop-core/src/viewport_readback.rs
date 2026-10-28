@@ -12,6 +12,10 @@ pub(crate) fn draw(
     size: [u32; 2],
     background: [f64; 4],
     level: i32,
+    mut effects: Option<(
+        &mut crate::effects::ViewportEffects,
+        crate::effects::ViewportOptions,
+    )>,
 ) -> Option<Vec<u8>> {
     let [width, height] = size.map(|n| n.max(1));
     let extent = wgpu::Extent3d {
@@ -73,15 +77,30 @@ pub(crate) fn draw(
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("viewport-export"),
         });
-        renderer.render_with_uniform(
-            &mut encoder,
-            queue,
-            &color_view,
-            &depth_view,
-            &uniform,
-            background,
-            None,
-        );
+        if let Some((effects, options)) = effects.as_mut() {
+            effects.render_export(
+                renderer,
+                device,
+                queue,
+                &mut encoder,
+                &color_view,
+                camera,
+                &uniform,
+                [width, height],
+                background,
+                *options,
+            );
+        } else {
+            renderer.render_with_uniform(
+                &mut encoder,
+                queue,
+                &color_view,
+                &depth_view,
+                &uniform,
+                background,
+                None,
+            );
+        }
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &color,

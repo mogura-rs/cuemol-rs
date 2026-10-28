@@ -186,6 +186,7 @@ pub struct SceneRenderer {
     depth_pipeline: wgpu::RenderPipeline,
     bind_layout: wgpu::BindGroupLayout,
     viewport: std::sync::Mutex<crate::viewport::ViewportRenderer>,
+    effects: std::sync::Mutex<crate::effects::ViewportEffects>,
 }
 
 impl SceneRenderer {
@@ -205,6 +206,11 @@ impl SceneRenderer {
         ));
         Some(Self {
             viewport,
+            effects: std::sync::Mutex::new(crate::effects::ViewportEffects::new(
+                &device,
+                &queue,
+                COLOR_FORMAT,
+            )),
             device,
             queue,
             pipeline,
@@ -232,6 +238,32 @@ impl SceneRenderer {
             [width, height],
             background,
             level,
+            None,
+        )
+    }
+
+    pub fn render_camera_with_effects(
+        &self,
+        snapshot: &RenderSceneSnapshot,
+        camera: &Camera,
+        width: u32,
+        height: u32,
+        background: [f64; 4],
+        level: i32,
+        options: crate::effects::ViewportOptions,
+    ) -> Option<Vec<u8>> {
+        let mut viewport = self.viewport.lock().ok()?;
+        let mut effects = self.effects.lock().ok()?;
+        crate::viewport_readback::draw(
+            &mut viewport,
+            &self.device,
+            &self.queue,
+            snapshot,
+            camera,
+            [width, height],
+            background,
+            level,
+            Some((&mut effects, options)),
         )
     }
 
@@ -1070,6 +1102,19 @@ pub fn render_snapshot_camera_offscreen(
     level: i32,
 ) -> Option<Vec<u8>> {
     SceneRenderer::new()?.render_camera(snapshot, camera, width, height, background, level)
+}
+
+pub fn render_snapshot_camera_with_effects(
+    snapshot: &RenderSceneSnapshot,
+    camera: &Camera,
+    width: u32,
+    height: u32,
+    background: [f64; 4],
+    level: i32,
+    options: crate::effects::ViewportOptions,
+) -> Option<Vec<u8>> {
+    SceneRenderer::new()?
+        .render_camera_with_effects(snapshot, camera, width, height, background, level, options)
 }
 
 /// Render a whole scene with jitter supersampling.

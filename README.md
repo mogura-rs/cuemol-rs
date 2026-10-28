@@ -49,6 +49,13 @@ in saved scenes. Renderer `$molcol` colors inherit the object's coloring scheme,
 including hue, saturation, brightness and alpha modifiers.
 Saved and direct molecular surfaces use their renderer's coloring scheme,
 including paint rules and imported atom colors.
+Native and browser viewports share GTAO, edge-aware AO filtering, FXAA, SMAA,
+and 2–32 temporal samples. Spatial AA works independently of AO. Camera,
+geometry, or setting changes reset temporal accumulation; unchanged frames reuse
+the completed image. Optional half-resolution AO refines at full resolution when
+the view stops changing. Scene properties include the SMAA edge threshold, and
+these settings survive QSC saves. Camera PNG exports apply full-resolution AO
+and supersampling while preserving transparent backgrounds.
 The Rendering menu offers built-in GI and hatched PNG output. Animation
 rendering also defaults to the bundled Rust renderer. Maps, molecular surfaces,
 saved cameras, measurements, labels, and animation

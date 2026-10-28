@@ -50,6 +50,16 @@ pub fn create_atom_pipeline(
     camera_layout: &wgpu::BindGroupLayout,
     format: wgpu::TextureFormat,
 ) -> wgpu::RenderPipeline {
+    create_atom_pipeline_with_normals(device, shader, camera_layout, format, false)
+}
+
+fn create_atom_pipeline_with_normals(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    camera_layout: &wgpu::BindGroupLayout,
+    format: wgpu::TextureFormat,
+    normals: bool,
+) -> wgpu::RenderPipeline {
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("atom-pipeline-layout"),
         bind_group_layouts: &[camera_layout],
@@ -66,12 +76,12 @@ pub fn create_atom_pipeline(
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some("atom_fs"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
+            entry_point: Some(if normals {
+                "atom_gbuffer_fs"
+            } else {
+                "atom_fs"
+            }),
+            targets: &color_targets(format, normals),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         }),
         primitive: wgpu::PrimitiveState {
@@ -98,6 +108,16 @@ pub fn create_bond_pipeline(
     camera_layout: &wgpu::BindGroupLayout,
     format: wgpu::TextureFormat,
 ) -> wgpu::RenderPipeline {
+    create_bond_pipeline_with_normals(device, shader, camera_layout, format, false)
+}
+
+fn create_bond_pipeline_with_normals(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    camera_layout: &wgpu::BindGroupLayout,
+    format: wgpu::TextureFormat,
+    normals: bool,
+) -> wgpu::RenderPipeline {
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("bond-pipeline-layout"),
         bind_group_layouts: &[camera_layout],
@@ -114,12 +134,12 @@ pub fn create_bond_pipeline(
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some("bond_fs"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
+            entry_point: Some(if normals {
+                "bond_gbuffer_fs"
+            } else {
+                "bond_fs"
+            }),
+            targets: &color_targets(format, normals),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         }),
         primitive: wgpu::PrimitiveState {
@@ -146,6 +166,16 @@ pub fn create_mesh_pipeline(
     camera_layout: &wgpu::BindGroupLayout,
     format: wgpu::TextureFormat,
 ) -> wgpu::RenderPipeline {
+    create_mesh_pipeline_with_normals(device, shader, camera_layout, format, false)
+}
+
+fn create_mesh_pipeline_with_normals(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    camera_layout: &wgpu::BindGroupLayout,
+    format: wgpu::TextureFormat,
+    normals: bool,
+) -> wgpu::RenderPipeline {
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("mesh-pipeline-layout"),
         bind_group_layouts: &[camera_layout],
@@ -162,12 +192,12 @@ pub fn create_mesh_pipeline(
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some("mesh_fs"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
+            entry_point: Some(if normals {
+                "mesh_gbuffer_fs"
+            } else {
+                "mesh_fs"
+            }),
+            targets: &color_targets(format, normals),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         }),
         primitive: wgpu::PrimitiveState {
@@ -186,6 +216,31 @@ pub fn create_mesh_pipeline(
         multiview: None,
         cache: None,
     })
+}
+
+fn color_targets(
+    format: wgpu::TextureFormat,
+    normals: bool,
+) -> Vec<Option<wgpu::ColorTargetState>> {
+    let mut targets = vec![Some(wgpu::ColorTargetState {
+        format,
+        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+        write_mask: wgpu::ColorWrites::ALL,
+    })];
+    if normals {
+        // G-buffer outputs have alpha one and share the WebGL2 blend state.
+        for format in [
+            wgpu::TextureFormat::Rgba16Float,
+            wgpu::TextureFormat::Rgba8Unorm,
+        ] {
+            targets.push(Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            }));
+        }
+    }
+    targets
 }
 
 pub fn atom_quad_layout<'a>() -> wgpu::VertexBufferLayout<'a> {
@@ -380,7 +435,7 @@ pub fn rgba_to_float(rgba: Option<Rgba8>) -> [f32; 4] {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CameraUniform {
     pub view_proj: [[f32; 4]; 4],
     pub right: [f32; 4],
@@ -638,6 +693,10 @@ pub struct ViewportRenderer {
     atom_pipeline: wgpu::RenderPipeline,
     bond_pipeline: wgpu::RenderPipeline,
     mesh_pipeline: wgpu::RenderPipeline,
+    normal_atom_pipeline: wgpu::RenderPipeline,
+    normal_bond_pipeline: wgpu::RenderPipeline,
+    normal_mesh_pipeline: wgpu::RenderPipeline,
+    revision: u64,
     draws: Vec<PrimitiveDraw>,
     output_srgb: bool,
 }
@@ -685,12 +744,40 @@ impl ViewportRenderer {
                 contents: bytemuck::cast_slice(&ATOM_QUAD),
                 usage: wgpu::BufferUsages::VERTEX,
             }),
-            atom_pipeline: create_atom_pipeline(device, &shader, &layout, format),
-            bond_pipeline: create_bond_pipeline(device, &shader, &layout, format),
-            mesh_pipeline: create_mesh_pipeline(device, &shader, &layout, format),
+            atom_pipeline: create_atom_pipeline_with_normals(
+                device, &shader, &layout, format, false,
+            ),
+            normal_atom_pipeline: create_atom_pipeline_with_normals(
+                device,
+                &shader,
+                &layout,
+                wgpu::TextureFormat::Rgba8Unorm,
+                true,
+            ),
+            bond_pipeline: create_bond_pipeline_with_normals(
+                device, &shader, &layout, format, false,
+            ),
+            normal_bond_pipeline: create_bond_pipeline_with_normals(
+                device,
+                &shader,
+                &layout,
+                wgpu::TextureFormat::Rgba8Unorm,
+                true,
+            ),
+            mesh_pipeline: create_mesh_pipeline_with_normals(
+                device, &shader, &layout, format, false,
+            ),
+            normal_mesh_pipeline: create_mesh_pipeline_with_normals(
+                device,
+                &shader,
+                &layout,
+                wgpu::TextureFormat::Rgba8Unorm,
+                true,
+            ),
             camera,
             bind_group,
             draws: Vec::new(),
+            revision: 0,
             output_srgb: format.is_srgb(),
         }
     }
@@ -716,6 +803,7 @@ impl ViewportRenderer {
             indices.extend(mesh.indices.iter().map(|i| base + i));
         }
         self.draws = primitive_draws(scene);
+        self.revision = self.revision.wrapping_add(1);
         self.atoms.upload(device, queue, &atoms);
         self.bonds.upload(device, queue, &bonds);
         self.vertices.upload(device, queue, &vertices);
@@ -775,23 +863,84 @@ impl ViewportRenderer {
         background: wgpu::Color,
         region: Option<[f32; 4]>,
     ) {
+        self.render_attachments(
+            encoder, queue, target, depth, uniform, background, region, None,
+        );
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub(crate) fn render_gbuffer(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
+        target: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        normal: &wgpu::TextureView,
+        encoded_depth: &wgpu::TextureView,
+        uniform: &CameraUniform,
+        background: wgpu::Color,
+    ) {
+        self.render_attachments(
+            encoder,
+            queue,
+            target,
+            depth,
+            uniform,
+            background,
+            None,
+            Some((normal, encoded_depth)),
+        );
+    }
+
+    fn render_attachments(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
+        target: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        uniform: &CameraUniform,
+        background: wgpu::Color,
+        region: Option<[f32; 4]>,
+        normal: Option<(&wgpu::TextureView, &wgpu::TextureView)>,
+    ) {
         queue.write_buffer(&self.camera, 0, bytemuck::bytes_of(uniform));
+        let output_srgb = self.output_srgb && normal.is_none();
+        let mut attachments = vec![Some(wgpu::RenderPassColorAttachment {
+            view: target,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(target_clear_color(background, output_srgb)),
+                store: wgpu::StoreOp::Store,
+            },
+        })];
+        if let Some((normal, encoded_depth)) = normal {
+            for (view, clear) in [
+                (normal, wgpu::Color::TRANSPARENT),
+                (encoded_depth, wgpu::Color::WHITE),
+            ] {
+                attachments.push(Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(clear),
+                        store: wgpu::StoreOp::Store,
+                    },
+                }));
+            }
+        }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("molecule-view"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(target_clear_color(background, self.output_srgb)),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
+            color_attachments: &attachments,
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth,
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Discard,
+                    store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
             }),
@@ -804,19 +953,31 @@ impl ViewportRenderer {
         pass.set_bind_group(0, &self.bind_group, &[]);
         for draw in &self.draws {
             if !draw.bonds.is_empty() {
-                pass.set_pipeline(&self.bond_pipeline);
+                pass.set_pipeline(if normal.is_some() {
+                    &self.normal_bond_pipeline
+                } else {
+                    &self.bond_pipeline
+                });
                 pass.set_vertex_buffer(0, self.quad.slice(..));
                 pass.set_vertex_buffer(1, self.bonds.slice());
                 pass.draw(0..6, draw.bonds.clone());
             }
             if !draw.atoms.is_empty() {
-                pass.set_pipeline(&self.atom_pipeline);
+                pass.set_pipeline(if normal.is_some() {
+                    &self.normal_atom_pipeline
+                } else {
+                    &self.atom_pipeline
+                });
                 pass.set_vertex_buffer(0, self.quad.slice(..));
                 pass.set_vertex_buffer(1, self.atoms.slice());
                 pass.draw(0..6, draw.atoms.clone());
             }
             if !draw.indices.is_empty() {
-                pass.set_pipeline(&self.mesh_pipeline);
+                pass.set_pipeline(if normal.is_some() {
+                    &self.normal_mesh_pipeline
+                } else {
+                    &self.mesh_pipeline
+                });
                 pass.set_vertex_buffer(0, self.vertices.slice());
                 pass.set_index_buffer(self.indices.slice(), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(draw.indices.clone(), 0, 0..1);

@@ -32,6 +32,87 @@ fn molecule(state: &mut DesktopAppState, camera: &mut Camera, name: &str, shift:
 }
 
 #[test]
+fn viewport_effect_properties_are_discoverable_validated_and_saved() {
+    let mut state = DesktopAppState::new();
+    let mut camera = Camera::new();
+    molecule(&mut state, &mut camera, "effects", 0.0);
+    let properties = call(
+        &mut state,
+        &mut camera,
+        "list_node_props",
+        json!({"nodeType":"scene"}),
+    );
+    for (key, expected) in [
+        ("aoEnabled", "false"),
+        ("aa_method", "fxaa"),
+        ("aaJitterLevel", "0"),
+        ("aaSmaaThreshold", "0.05"),
+    ] {
+        let row = properties["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["key"] == key)
+            .unwrap();
+        assert_eq!(row["value"], expected);
+    }
+    let changes = [
+        ("aoEnabled", "true"),
+        ("aoHalfRes", "true"),
+        ("aoRadius", "6.2"),
+        ("aa_method", "smaa"),
+        ("aaJitterLevel", "3"),
+        ("aaSmaaThreshold", "0.12"),
+    ];
+    for (key, value) in changes {
+        call(
+            &mut state,
+            &mut camera,
+            "set_prop",
+            json!({"path":key,"value":value}),
+        );
+    }
+    for (key, value) in [
+        ("aoRadius", "NaN"),
+        ("aaSmaaThreshold", "-1"),
+        ("aa_method", "unknown"),
+        ("aaJitterLevel", "6"),
+    ] {
+        assert!(call_tool(
+            &mut state,
+            &mut camera,
+            "set_prop",
+            &json!({"path":key,"value":value})
+        )
+        .is_err());
+    }
+    let bytes = state.active_scene_bytes().unwrap();
+    let mut restored = DesktopAppState::new();
+    restored.open_bytes("effects.qsc", &bytes).unwrap();
+    for (key, value) in changes {
+        assert_eq!(
+            call(&mut restored, &mut camera, "get_prop", json!({"path":key}))["value"],
+            value
+        );
+    }
+    call(
+        &mut restored,
+        &mut camera,
+        "reset_prop",
+        json!({"path":"aaSmaaThreshold"}),
+    );
+    assert_eq!(
+        call(
+            &mut restored,
+            &mut camera,
+            "get_prop",
+            json!({"path":"aaSmaaThreshold"})
+        )["value"],
+        "0.05"
+    );
+}
+
+#[test]
 fn named_styles_paint_properties_and_saved_scene_roundtrip() {
     let mut state = DesktopAppState::new();
     let mut camera = Camera::new();
