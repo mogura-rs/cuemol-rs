@@ -11215,6 +11215,24 @@ impl GuiApplication {
                 ("Bfac/Occ coloring", ColoringMode::Bfac),
                 ("Rainbow coloring", ColoringMode::Rainbow),
             ],
+            Some(NativeColoringTarget::DensityRenderer {
+                map_uid,
+                renderer_uid,
+            }) if self.state.density_map_summary(map_uid).is_some_and(|m| {
+                m.renderers
+                    .iter()
+                    .any(|r| r.uid == renderer_uid && r.renderer_type == "isosurf")
+            }) =>
+            {
+                &[
+                    ("Paint coloring", ColoringMode::Paint),
+                    ("Solid coloring", ColoringMode::Solid),
+                    ("CPK coloring", ColoringMode::Cpk),
+                    ("Bfac/Occ coloring", ColoringMode::Bfac),
+                    ("Rainbow coloring", ColoringMode::Rainbow),
+                    ("Multi-gradient coloring", ColoringMode::MultiGradient),
+                ]
+            }
             Some(NativeColoringTarget::DensityRenderer { .. }) => &[
                 ("Solid coloring", ColoringMode::Solid),
                 ("Multi-gradient coloring", ColoringMode::MultiGradient),
@@ -11358,24 +11376,42 @@ impl GuiApplication {
                     } else if let Some(value) = renderer.specific.get("color") {
                         attrs.insert("color".to_string(), value.clone());
                     }
-                    (
-                        Some(
-                            if mode == "multigrad" {
-                                "MultiGradientColoring"
-                            } else {
-                                "SolidColoring"
-                            }
-                            .to_string(),
-                        ),
-                        attrs,
-                        Vec::new(),
-                        renderer.multi_gradient,
-                        renderer
-                            .specific
-                            .get("color")
-                            .cloned()
-                            .unwrap_or_else(|| "#ffffff".to_string()),
-                    )
+                    if mode == "molecule" {
+                        let (kind, attrs, paint) = self
+                            .state
+                            .renderer_coloring_state(map_uid, renderer_uid)
+                            .unwrap_or_default();
+                        (
+                            Some(kind),
+                            attrs,
+                            paint,
+                            Vec::new(),
+                            renderer
+                                .specific
+                                .get("color")
+                                .cloned()
+                                .unwrap_or_else(|| "#d9d9d9".into()),
+                        )
+                    } else {
+                        (
+                            Some(
+                                if mode == "multigrad" {
+                                    "MultiGradientColoring"
+                                } else {
+                                    "SolidColoring"
+                                }
+                                .to_string(),
+                            ),
+                            attrs,
+                            Vec::new(),
+                            renderer.multi_gradient,
+                            renderer
+                                .specific
+                                .get("color")
+                                .cloned()
+                                .unwrap_or_else(|| "#ffffff".to_string()),
+                        )
+                    }
                 }
                 NativeColoringTarget::SurfaceRenderer {
                     surface_uid,
@@ -11598,6 +11634,26 @@ impl GuiApplication {
                     paint_entries,
                     default_color,
                 ),
+                NativeColoringTarget::DensityRenderer {
+                    map_uid,
+                    renderer_uid,
+                } if matches!(
+                    mode,
+                    ColoringMode::Paint
+                        | ColoringMode::Cpk
+                        | ColoringMode::Bfac
+                        | ColoringMode::Rainbow
+                ) =>
+                {
+                    self.commit_renderer_coloring_details(
+                        map_uid,
+                        renderer_uid,
+                        coloring_type,
+                        attrs,
+                        paint_entries,
+                        default_color,
+                    );
+                }
                 NativeColoringTarget::DensityRenderer {
                     map_uid,
                     renderer_uid,
@@ -12334,6 +12390,14 @@ impl GuiApplication {
         renderer_uid: cuemol_core::Uid,
         mode: ColoringMode,
     ) {
+        if matches!(
+            mode,
+            ColoringMode::Paint | ColoringMode::Cpk | ColoringMode::Bfac | ColoringMode::Rainbow
+        ) {
+            let (kind, attrs, paint, _, color) = self.default_coloring_details(map_uid, mode);
+            self.commit_renderer_coloring_details(map_uid, renderer_uid, kind, attrs, paint, color);
+            return;
+        }
         let maps = self.state.active_density_map_summaries();
         let map_name = maps.first().map(|map| map.name.clone()).unwrap_or_default();
         let (minimum, maximum) = maps
@@ -22888,6 +22952,17 @@ impl GuiApplication {
             );
             match draft.renderer_type.as_str() {
                 "isosurf" => {
+                    Self::renderer_specific_choice(
+                        ui,
+                        draft,
+                        "cap_mode",
+                        "Boundary caps:",
+                        "auto",
+                        &[("auto", "Automatic"), ("on", "Closed"), ("off", "Open")],
+                    );
+                    Self::renderer_specific_text(ui, draft, "target", "Coloring molecule:", "");
+                    Self::renderer_specific_text(ui, draft, "sel", "Coloring selection:", "");
+
                     Self::renderer_specific_choice(
                         ui,
                         draft,
@@ -40074,6 +40149,28 @@ mod tests {
         assert_eq!(
             object.coloring_attrs().get("auto").map(String::as_str),
             Some("rend")
+        );
+    }
+
+    #[test]
+    fn native_density_surface_coloring_updates_and_undoes() {
+        let mut app = GuiApplication::new();
+        let sid = app.state.ensure_active_scene();
+        let map = app
+            .state
+            .add_density_map(sid, "map", cuemol_xtal::DensityMap::new());
+        let renderer = app.state.add_density_renderer(map, "isosurf").unwrap();
+        app.apply_density_coloring(map, renderer, ColoringMode::Cpk);
+        let before = app.state.renderer_coloring_state(map, renderer).unwrap();
+        assert_eq!(before.0, "CPKColoring");
+        app.apply_density_coloring(map, renderer, ColoringMode::Paint);
+        let paint = app.state.renderer_coloring_state(map, renderer).unwrap();
+        assert_eq!(paint.0, "PaintColoring");
+        assert!(!paint.2.is_empty());
+        app.undo(&mut CameraController::default());
+        assert_eq!(
+            app.state.renderer_coloring_state(map, renderer).unwrap(),
+            before
         );
     }
 

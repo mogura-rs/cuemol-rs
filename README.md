@@ -126,6 +126,11 @@ scalar maps. `region_mode`, `lod`, `lod_budget` and `zoom_refine` control the
 shared extraction. Automatic full-region sampling uses a cell budget, and view
 refinement retains existing geometry while it covers the visible area. Native,
 Tauri and browser navigation debounce region updates by 150 ms.
+Isosurface `cap_mode` controls boundary faces independently of that region:
+`auto` caps full regions and generated surface objects, `on` always caps, and
+`off` leaves them open. Molecular coloring uses the nearest selected atom in
+`target`, with the renderer's coloring scheme and the molecule's inherited
+colors. Both selection and coloring survive embedded scene storage.
 
 Load an MD topology and trajectory through the MD dialog or `load_trajectory`.
 GRO, PDB, mmCIF, PSF, AMBER topology, SDF, and MOL2 topologies are accepted.

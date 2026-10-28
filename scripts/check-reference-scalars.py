@@ -22,6 +22,7 @@ def main():
         ('oracle', 'reference_scalar.cpp', 'scalar_map_compat', 'CUEMOL_SCALAR_ORACLE'),
         ('levels', 'reference_map_levels.cpp', 'map_levels_compat', 'CUEMOL_MAP_LEVEL_ORACLE'),
         ('regions', 'reference_map_regions.cpp', 'map_regions_compat', 'CUEMOL_MAP_REGION_ORACLE'),
+        ('caps', 'reference_map_caps.cpp', 'map_caps_compat', 'CUEMOL_MAP_CAP_ORACLE'),
     ]:
         oracle = output / name
         subprocess.run(shlex.split(os.environ.get('CXX', 'c++')) + [

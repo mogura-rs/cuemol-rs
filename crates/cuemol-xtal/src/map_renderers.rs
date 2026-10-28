@@ -1,11 +1,13 @@
-use cuemol_core::{Matrix3, Matrix4, Vector4};
+use cuemol_core::{BSPTree, Matrix3, Matrix4, Vector4};
 use cuemol_gfx::SolidColor;
-use cuemol_molstr::{GridMap, Selector};
+use cuemol_molstr::{GridMap, Selector, SolidColoring};
 use cuemol_qsys::{DispListRenderer, MultiGradient, ScalarObject, View};
 use cuemol_surface::{build_grid_isosurface_masked, MolSurfObj, ScalarField, SurfaceMesh};
 use cuemol_symm::CrystalInfo;
 use std::sync::Arc;
 
+mod caps;
+pub use caps::MapCapMode;
 mod region;
 pub use region::{
     lod_align_range, lod_cell_count, lod_step_for_budget, MapRegionMode, MapSamplingRegion,
@@ -1720,6 +1722,10 @@ impl MapSurfaceDrawMode {
 pub struct MapSurfRenderer {
     map: MapRenderer,
     client_map: Option<Arc<DensityMap>>,
+    cap_mode: MapCapMode,
+    target: String,
+    selection: Option<Selector>,
+    coloring: SolidColoring,
     autoupdate: bool,
     dragupdate: bool,
     cullface: bool,
@@ -1733,9 +1739,15 @@ pub struct MapSurfRenderer {
 
 impl Default for MapSurfRenderer {
     fn default() -> Self {
+        let mut map = MapRenderer::new();
+        map.set_color(SolidColor::from_rgb(0.85, 0.85, 0.85));
         Self {
-            map: MapRenderer::new(),
+            map,
             client_map: None,
+            cap_mode: MapCapMode::Auto,
+            target: String::new(),
+            selection: None,
+            coloring: SolidColoring::default(),
             autoupdate: true,
             dragupdate: false,
             cullface: false,
@@ -1789,6 +1801,42 @@ impl MapSurfRenderer {
     pub fn clear_client_map(&mut self) {
         self.client_map = None;
         self.map.clear_client_scalar();
+    }
+
+    pub fn cap_mode(&self) -> MapCapMode {
+        self.cap_mode
+    }
+
+    pub fn set_cap_mode(&mut self, mode: MapCapMode) {
+        self.cap_mode = mode;
+        self.map.invalidate_display_cache();
+    }
+
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
+    pub fn set_target(&mut self, target: impl Into<String>) {
+        self.target = target.into();
+        self.map.invalidate_display_cache();
+    }
+
+    pub fn selection(&self) -> Option<&Selector> {
+        self.selection.as_ref()
+    }
+
+    pub fn set_selection(&mut self, selection: Option<Selector>) {
+        self.selection = selection;
+        self.map.invalidate_display_cache();
+    }
+
+    pub fn coloring(&self) -> &SolidColoring {
+        &self.coloring
+    }
+
+    pub fn set_coloring(&mut self, coloring: SolidColoring) {
+        self.coloring = coloring;
+        self.map.invalidate_display_cache();
     }
 
     pub fn autoupdate(&self) -> bool {
@@ -1916,7 +1964,7 @@ impl MapSurfRenderer {
     /// electron density, with the native level resolved through the map kind.
     /// The mesh is extracted by marching the map's own grid (corners are grid
     /// nodes, crossings are mapped to Cartesian via the map transform), reusing
-    /// the shared marching-tetrahedra core in `cuemol-surface`. This is the
+    /// the shared marching-cubes core in `cuemol-surface`. This is the
     /// visual consumer of the MTZ/mmCIF -> density pipeline.
     pub fn generate_surf_obj(&self) -> MolSurfObj {
         self.client_map
@@ -1934,6 +1982,23 @@ impl MapSurfRenderer {
         &self,
         scalar: &impl ScalarObject,
         boundary_points: Option<&[Vector4]>,
+    ) -> MolSurfObj {
+        self.build_surface(scalar, boundary_points, true)
+    }
+
+    pub fn display_surface(
+        &self,
+        scalar: &impl ScalarObject,
+        boundary_points: Option<&[Vector4]>,
+    ) -> MolSurfObj {
+        self.build_surface(scalar, boundary_points, false)
+    }
+
+    fn build_surface(
+        &self,
+        scalar: &impl ScalarObject,
+        boundary_points: Option<&[Vector4]>,
+        generated_surface: bool,
     ) -> MolSurfObj {
         let mut object = MolSurfObj::new();
         let level = self.map.level_from(scalar);
@@ -1955,6 +2020,8 @@ impl MapSurfRenderer {
             region.range(),
             region.step,
             BoundaryFilter::new(boundary_points, self.map.bndry_rng()),
+            self.cap_mode
+                .enabled(self.map.is_full_region(scalar), generated_surface),
         );
         object
     }
@@ -2088,26 +2155,40 @@ fn inverse_grid_basis(axes: [Vector4; 3]) -> Option<Matrix3> {
     .ok()
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct BoundaryFilter<'a> {
     points: Option<&'a [Vector4]>,
+    index: Option<BSPTree<usize>>,
     range_sq: f64,
 }
 
 impl<'a> BoundaryFilter<'a> {
     fn new(points: Option<&'a [Vector4]>, range: f64) -> Self {
+        let index = points.filter(|p| p.len() >= 32).map(|points| {
+            let mut index = BSPTree::new();
+            for (id, point) in points.iter().enumerate() {
+                index.push(*point, id);
+            }
+            index.build();
+            index
+        });
         Self {
             points,
+            index,
             range_sq: range.max(0.0).powi(2),
         }
     }
 
-    fn contains(self, position: Vector4) -> bool {
+    fn contains(&self, position: Vector4) -> bool {
         self.points.is_none_or(|points| {
-            points.iter().any(|point| {
-                let delta = position - *point;
-                delta.dot3d(delta) <= self.range_sq
-            })
+            let inside = |point: &Vector4| (position - *point).sqlen3d() <= self.range_sq;
+            if let Some(index) = &self.index {
+                index
+                    .nearest(position)
+                    .is_some_and(|id| inside(&points[*id]))
+            } else {
+                points.iter().any(inside)
+            }
         })
     }
 }
@@ -2222,6 +2303,7 @@ fn build_density_isosurface<S: ScalarObject>(
     range: GridRange,
     binning: usize,
     boundary: BoundaryFilter<'_>,
+    cap: bool,
 ) {
     let sample_axis = |axis: usize| {
         let mut indices = Vec::new();
@@ -2275,6 +2357,9 @@ fn build_density_isosurface<S: ScalarObject>(
         },
         spacing * binning as f64,
     );
+    if cap {
+        caps::append_caps(mesh, map, level, &indices, range, &boundary);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

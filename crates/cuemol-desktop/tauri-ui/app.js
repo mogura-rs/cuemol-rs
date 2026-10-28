@@ -2812,6 +2812,16 @@ function rendererPropertiesEditor(object, renderer, styleOptions = []) {
     let mapWidth = null;
     let drawMode = null;
     if (isosurfLike) {
+      addSpecificSelect(settings, "cap_mode", "Boundary caps:", [["auto", "Automatic"], ["on", "Closed"], ["off", "Open"]], "auto");
+      for (const [key, label] of [["target", "Coloring molecule:"], ["sel", "Coloring selection:"]]) {
+        const input = document.createElement("input");
+        input.value = renderer.specific?.[key] ?? "";
+        propertyField(settings, label, input);
+        specificInputs.set(key, input);
+        specificDefaults.set(key, "");
+        specificControls.push(input);
+      }
+
       drawMode = addSpecificSelect(
         settings,
         "drawmode",

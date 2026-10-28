@@ -617,6 +617,33 @@ impl SurfaceMesh {
         self.triangles.len()
     }
 
+    pub fn apply_transform(&mut self, transform: &cuemol_core::Matrix4) {
+        let inverse = transform.invert().ok();
+        for vertex in &mut self.vertices {
+            transform.xform3d(&mut vertex.position);
+            if let Some(inverse) = inverse {
+                let n = vertex.normal;
+                let m = inverse.values;
+                vertex.normal = Vector4::new3(
+                    m[0][0] * n.x + m[1][0] * n.y + m[2][0] * n.z,
+                    m[0][1] * n.x + m[1][1] * n.y + m[2][1] * n.z,
+                    m[0][2] * n.x + m[1][2] * n.y + m[2][2] * n.z,
+                )
+                .normalize3d()
+                .unwrap_or(n);
+            }
+        }
+        let m = transform.values;
+        let determinant = Vector4::new3(m[0][0], m[1][0], m[2][0])
+            .cross(Vector4::new3(m[0][1], m[1][1], m[2][1]))
+            .dot3d(Vector4::new3(m[0][2], m[1][2], m[2][2]));
+        if determinant < 0.0 {
+            for triangle in &mut self.triangles {
+                triangle.swap(1, 2);
+            }
+        }
+    }
+
     pub fn to_obj_string(&self, name: &str) -> String {
         let mut output = String::new();
         output.push_str("# CueMol2-rs surface mesh\n");

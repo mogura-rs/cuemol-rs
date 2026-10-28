@@ -2077,8 +2077,30 @@ impl AppModel {
                     .map(|renderer| {
                         let ui_order = renderer.ui_order;
                         let uid = renderer.uid.get();
-                        let coloring_type = scalar_coloring_type(&renderer.specific);
-                        let coloring_attrs = scalar_coloring_attrs(&renderer.specific);
+                        let molecular = renderer.renderer_type == "isosurf";
+                        let details = self.desktop.renderer_coloring_state(map.uid, renderer.uid);
+                        let scheme_coloring_type = details.as_ref().map(|d| d.0.clone());
+                        let (coloring_type, coloring_attrs, paint_entries) = if renderer
+                            .specific
+                            .get("colormode")
+                            .is_some_and(|v| v == "molecule")
+                        {
+                            let (kind, attrs, paint) = details.unwrap_or_default();
+                            (
+                                Some(kind),
+                                attrs,
+                                paint
+                                    .into_iter()
+                                    .map(|(selection, color)| PaintEntryDto { selection, color })
+                                    .collect(),
+                            )
+                        } else {
+                            (
+                                scalar_coloring_type(&renderer.specific),
+                                scalar_coloring_attrs(&renderer.specific),
+                                Vec::new(),
+                            )
+                        };
                         let dto = RendererDto {
                             uid,
                             name: renderer.name,
@@ -2101,14 +2123,14 @@ impl AppModel {
                             show_ring: false,
                             ring_thickness: 0.2,
                             ring_color: "#ffffbf".to_string(),
-                            supports_coloring: false,
+                            supports_coloring: molecular,
                             supports_solid_coloring: true,
                             supports_electrostatic_coloring: false,
                             supports_multi_gradient: true,
-                            scheme_coloring_type: None,
+                            scheme_coloring_type,
                             coloring_type,
                             coloring_attrs,
-                            paint_entries: Vec::new(),
+                            paint_entries,
                             gradient_entries: renderer
                                 .multi_gradient
                                 .into_iter()
@@ -9221,7 +9243,7 @@ fn validate_coloring_update(input: &ColoringUpdateInput) -> Result<(), String> {
         }
         return Ok(());
     };
-    let scalar_target = matches!(input.kind.as_str(), "surfaceRenderer" | "densityRenderer");
+    let scalar_target = input.kind == "surfaceRenderer";
     if scalar_target
         && !matches!(
             coloring_type,
@@ -11047,6 +11069,31 @@ fn handle_model_request(
                             color_mode,
                             &attrs,
                             &gradient_entries,
+                        )
+                        .map_err(|error| error.to_string())?;
+                }
+                "densityRenderer"
+                    if matches!(
+                        input.coloring_type.as_deref(),
+                        Some(
+                            "PaintColoring"
+                                | "CPKColoring"
+                                | "BfacColoring"
+                                | "RainbowColoring"
+                                | "ScriptColoring"
+                                | "AtomPropColoring"
+                        )
+                    ) =>
+                {
+                    model
+                        .desktop
+                        .set_renderer_coloring_details(
+                            Uid::new(input.object_uid),
+                            renderer_uid,
+                            input.coloring_type,
+                            input.attrs,
+                            paint_entries,
+                            input.default_color,
                         )
                         .map_err(|error| error.to_string())?;
                 }
@@ -22068,6 +22115,46 @@ mod tests {
             snapshot.objects[0].coloring_type.as_deref(),
             Some("RainbowColoring")
         );
+    }
+
+    #[test]
+    fn density_surface_coloring_requests_reach_shared_state_and_undo() {
+        let (mut model, _, _) = model_with_renderer();
+        let sid = model.desktop.active_scene().unwrap();
+        let map = model
+            .desktop
+            .add_density_map(sid, "map", cuemol_xtal::DensityMap::new());
+        let renderer = model.desktop.add_density_renderer(map, "isosurf").unwrap();
+        let before = model.desktop.renderer_coloring_state(map, renderer);
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetColoring {
+                input: ColoringUpdateInput {
+                    kind: "densityRenderer".into(),
+                    object_uid: map.get(),
+                    renderer_uid: Some(renderer.get()),
+                    coloring_type: Some("PaintColoring".into()),
+                    attrs: BTreeMap::new(),
+                    paint_entries: vec![PaintEntryDto {
+                        selection: "*".into(),
+                        color: "#123456".into(),
+                    }],
+                    gradient_entries: Vec::new(),
+                    default_color: None,
+                },
+                width: 32,
+                height: 32,
+            },
+        )
+        .unwrap();
+        let snapshot = model.snapshot();
+        let renderer_dto = &snapshot.density_maps[0].renderers[0];
+        assert!(renderer_dto.supports_coloring);
+        assert_eq!(renderer_dto.coloring_type.as_deref(), Some("PaintColoring"));
+        assert_eq!(renderer_dto.paint_entries[0].color, "#123456");
+        assert_eq!(renderer_dto.specific["colormode"], "molecule");
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert_eq!(model.desktop.renderer_coloring_state(map, renderer), before);
     }
 
     #[test]

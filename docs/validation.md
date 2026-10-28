@@ -991,3 +991,42 @@ volume backends. Two Tauri tests require an explicit GPU run; the volume test
 was run successfully, while the pre-existing animation export test remains
 outside this phase. The broader QIF audit still tracks surface cap/coloring,
 hover state and exporter settings separately.
+
+### Map surface caps and molecular coloring
+
+Map surfaces now distinguish the display mesh from `generateSurfObj`.
+`cap_mode=auto` caps full-region displays and generated objects; a box display
+stays open. `on` and `off` override this policy. Caps use the reference face
+patterns and skip faces whose corners leave the molecular boundary. World-space
+normals remain outward for skewed and reflected grids. Generated surface objects
+bake the source map transform, including inverse-transpose normals and reflected
+winding. Boundary and nearest-color searches build spatial indices rather than
+scanning every atom for every sample or vertex.
+
+The scalar comparison adds `reference_map_caps.cpp`. For all 256 corner
+configurations, the number and area of cap triangles match C++. The two saddle
+face patterns (5 and 10) intentionally produce no cap triangles in the reference
+and here. Consequently, enabling caps does not guarantee a closed mesh for
+those patterns. The reference table header describes generation only, but the
+actual renderer also uses it for full-region display and `cap_mode=on`. The
+Rust map documentation also incorrectly described tetrahedra after the mesher
+had changed to marching cubes; that comment now names the actual algorithm.
+
+`MapSurfRenderer` now defaults to neutral gray (`#d9d9d9`). Its `target`, `sel`
+and `coloring` drive actual nearest-atom coloring, including object transforms,
+scene styles, paint/CPK/rainbow schemes and inherited molecular colors. Map
+renderer children are retained through script handles, edits and QSC storage.
+Gradient lookup also respects both maps' object transforms. Desktop property
+dialogs expose the cap policy and coloring target/selection; the native and
+Tauri coloring panels can edit molecular schemes for map surfaces.
+
+Validation passed: 216 shared-core tests, all map-domain tests with the reference
+checkout available, 166 native GUI tests plus the new native coloring/undo
+regression, and 143 Tauri tests plus the new Tauri coloring/undo regression
+(two explicit GPU tests skipped). Four rebuilt-browser tests cover direct
+surface gradients, sparse EM thresholds, map regions and the new cap/coloring
+round trip. The new browser test checks both molecular colors, cap removal,
+selection changes and embedded reload, and its resulting image was inspected.
+A further shared regression checks generated surface coordinates, normals and
+winding under reflection, scaling and translation. Hover state, molecular SES
+backend properties and exporter settings remain in the separate QIF audit.

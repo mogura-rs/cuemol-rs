@@ -1,5 +1,6 @@
 mod command_support;
 mod density_view;
+mod map_surface;
 pub use density_view::DensityViewSync;
 use density_view::DensityViewUpdate;
 pub mod property_catalog;
@@ -1767,6 +1768,7 @@ struct GuiDensityRenderer {
     color: cuemol_gfx::ColorSpec,
     xferfn_type: String,
     attributes: BTreeMap<String, String>,
+    children: Vec<LDom2Node>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5515,6 +5517,11 @@ impl DesktopAppState {
     ) -> Result<()> {
         for (key, value) in specific {
             match key.as_str() {
+                "cap_mode" if !matches!(value.as_str(), "auto" | "on" | "off") => {
+                    return Err(CueMolError::invalid_argument(
+                        "cap_mode must be auto, on or off",
+                    ));
+                }
                 "region_mode" if !matches!(value.as_str(), "auto" | "box" | "full") => {
                     return Err(CueMolError::invalid_argument(format!(
                         "invalid map region_mode: {value}"
@@ -5681,7 +5688,7 @@ impl DesktopAppState {
         attrs: &BTreeMap<String, String>,
         gradient_entries: &[(f64, String)],
     ) -> Result<()> {
-        if !matches!(color_mode, "solid" | "multigrad") {
+        if !matches!(color_mode, "solid" | "molecule" | "multigrad") {
             return Err(CueMolError::invalid_argument(format!(
                 "invalid density color mode: {color_mode}"
             )));
@@ -5689,6 +5696,7 @@ impl DesktopAppState {
         let allowed: &[&str] = match color_mode {
             "solid" => &["color"],
             "multigrad" => &["color_mapname"],
+            "molecule" => &["target", "sel", "color"],
             _ => unreachable!(),
         };
         if let Some(name) = attrs.keys().find(|name| !allowed.contains(&name.as_str())) {
@@ -5759,7 +5767,7 @@ impl DesktopAppState {
         let (kind, default_color, width) = match renderer_type {
             "contour" => (GuiDensityRendererKind::Contour, "#0000ff", 1.0),
             "gpu_mapmesh" => (GuiDensityRendererKind::Contour, "#00ff00", 1.0),
-            "isosurf" => (GuiDensityRendererKind::IsoSurface, "#00ff00", 1.2),
+            "isosurf" => (GuiDensityRendererKind::IsoSurface, "#d9d9d9", 1.2),
             "gpu_mapvol" => (GuiDensityRendererKind::Volume, "#00ff00", 1.2),
             "*unitcell" | "unitcell" => (GuiDensityRendererKind::UnitCell, "#ffff00", 1.0),
             _ => {
@@ -5814,6 +5822,7 @@ impl DesktopAppState {
             color: cuemol_gfx::parse_color(default_color)
                 .expect("built-in density renderer color must parse"),
             xferfn_type: "rainbow1".to_string(),
+            children: Vec::new(),
             attributes: BTreeMap::from([
                 ("ui_order".to_string(), ui_order.to_string()),
                 ("autoupdate".to_string(), "true".to_string()),
@@ -7034,44 +7043,16 @@ impl DesktopAppState {
                         renderer.set_binning(config.binning);
                         renderer.set_max_grids(config.max_grids);
                         renderer.set_drawmode(config.drawmode);
-                        let mesh = renderer.generate_surf_obj_with_boundary(
-                            &map_object.map,
-                            boundary_points.as_deref(),
+                        renderer.set_cap_mode(
+                            config_attr("cap_mode")
+                                .as_deref()
+                                .and_then(cuemol_xtal::MapCapMode::parse)
+                                .unwrap_or_default(),
                         );
-                        let rgba = config.color.rgba8().unwrap_or(cuemol_gfx::Rgba8 {
-                            r: 0,
-                            g: 0,
-                            b: 255,
-                            a: 255,
-                        });
-                        let color = [rgba.r, rgba.g, rgba.b, rgba.a]
-                            .map(|component| f32::from(component) / 255.0);
-                        let color_map = (config.color_mode == MapColorMode::MultiGradient)
-                            .then(|| {
-                                self.density_maps.values().find(|candidate| {
-                                    candidate.scene_uid == scene_uid
-                                        && candidate.name == config.color_mapname
-                                })
-                            })
-                            .flatten();
-                        let vertices = mesh
-                            .mesh()
-                            .vertices()
-                            .iter()
-                            .map(|vertex| cuemol_render::MeshVertex {
-                                position: vertex.position,
-                                normal: vertex.normal,
-                                color: color_map
-                                    .map(|color_map| {
-                                        let rgba = config
-                                            .multi_grad
-                                            .color(color_map.map.value_at(vertex.position));
-                                        [rgba.r, rgba.g, rgba.b, rgba.a]
-                                            .map(|component| f32::from(component) / 255.0)
-                                    })
-                                    .unwrap_or(color),
-                            })
-                            .collect::<Vec<_>>();
+                        let mesh =
+                            renderer.display_surface(&map_object.map, boundary_points.as_deref());
+                        let vertices =
+                            self.density_surface_vertices(map_object, config, mesh.mesh(), &styles);
                         let indices = mesh
                             .mesh()
                             .triangles()
@@ -8856,6 +8837,26 @@ impl DesktopAppState {
         object_uid: Uid,
         renderer_uid: Uid,
     ) -> Option<GuiRendererColoringState> {
+        if let Some(map) = self.density_maps.get(&object_uid) {
+            let renderer = map.renderers.iter().find(|r| r.uid == renderer_uid)?;
+            if renderer.kind != GuiDensityRendererKind::IsoSurface {
+                return None;
+            }
+            let scene = self.scene_manager().scene(map.scene_uid)?;
+            let styles = scene_style_manager(scene);
+            let node = renderer
+                .children
+                .iter()
+                .find(|n| n.tag_name() == "coloring")
+                .or_else(|| {
+                    renderer.attributes.get("style").and_then(|names| {
+                        styles.resolve_style_child_node(map.scene_uid.get(), names, "coloring")
+                    })
+                });
+            return node
+                .and_then(qsc_coloring_state)
+                .or_else(|| Some(("SolidColoring".to_string(), BTreeMap::new(), Vec::new())));
+        }
         if let Some(scene_uid) = self.scene_manager().scene_uid_for_object(object_uid) {
             let scene = self.scene_manager().scene(scene_uid)?;
             let styles = scene_style_manager(scene);
@@ -10864,6 +10865,16 @@ impl DesktopAppState {
         paint_entries: Vec<(String, String)>,
         default_color: Option<String>,
     ) -> Result<()> {
+        if self.density_maps.contains_key(&object_uid) {
+            return self.set_density_coloring(
+                object_uid,
+                renderer_uid,
+                coloring_type,
+                attrs,
+                paint_entries,
+                default_color,
+            );
+        }
         if let Some(scene_uid) = self.scene_manager().scene_uid_for_surface(object_uid) {
             let styles = self
                 .scene_manager()
@@ -35262,7 +35273,10 @@ impl DesktopAppState {
         }
         fn renderer_supports_coloring(renderer_type: &str) -> bool {
             runtime_implements(renderer_runtime_class(renderer_type), "MolRenderer")
-                || renderer_runtime_class(renderer_type) == "MolSurfRenderer"
+                || matches!(
+                    renderer_runtime_class(renderer_type),
+                    "MolSurfRenderer" | "MapSurfRenderer"
+                )
         }
         fn coloring_property_specs(class_name: &str) -> Vec<RendererAttrProperty> {
             use RendererAttrKind::{Color, Real, String as Text};
@@ -36824,6 +36838,8 @@ impl DesktopAppState {
                             | "GLSLMapVolRenderer"
                     ) {
                         "#00ff00"
+                    } else if matches!(renderer_type, "isosurf" | "MapSurfRenderer") {
+                        "#d9d9d9"
                     } else {
                         "#0000ff"
                     },
@@ -37116,6 +37132,8 @@ impl DesktopAppState {
                             | "GLSLMapVolRenderer"
                     ) {
                         "#00ff00"
+                    } else if matches!(renderer.rtype.as_str(), "isosurf" | "MapSurfRenderer") {
+                        "#d9d9d9"
                     } else {
                         "#0000ff"
                     };
@@ -37477,7 +37495,10 @@ impl DesktopAppState {
             if !matches!(renderer.rtype.as_str(), "isosurf" | "MapSurfRenderer") {
                 return Err(script_error("Renderer does not generate a surface object"));
             }
-            let map = script_object(renderer.object_uid)?
+            let map_object = script_object(renderer.object_uid)?;
+            let map_xform = map_object.xform;
+            let map_inverse = map_xform.invert().unwrap_or(Matrix4::IDENTITY);
+            let map = map_object
                 .scalar_map
                 .ok_or_else(|| script_error("Density map is unavailable"))?;
             let selector = parse_script_selector(
@@ -37497,23 +37518,29 @@ impl DesktopAppState {
                                     && object.name == boundary_name
                             })
                             .and_then(|object| {
-                                env.molecules
-                                    .iter()
-                                    .find(|molecule| molecule.uid == object.uid)
-                            })
-                            .map(|molecule| {
-                                molecule
-                                    .molecule
-                                    .select_indices(&selector)
-                                    .into_iter()
-                                    .map(|index| molecule.molecule.atoms()[index].position)
-                                    .collect::<Vec<_>>()
+                                let molecule =
+                                    env.molecules.iter().find(|m| m.uid == object.uid)?;
+                                let transform = map_inverse.mul_mat(object.xform);
+                                Some(
+                                    molecule
+                                        .molecule
+                                        .select_indices(&selector)
+                                        .into_iter()
+                                        .map(|i| {
+                                            let mut position =
+                                                molecule.molecule.atoms()[i].position;
+                                            transform.xform3d(&mut position);
+                                            position
+                                        })
+                                        .collect::<Vec<_>>(),
+                                )
                             })
                     })
                 })
                 .flatten();
             let mut surface_renderer = MapSurfRenderer::new();
             *surface_renderer.map_mut() = script_map_level_state(&renderer)?;
+            surface_renderer.map_mut().set_world_transform(map_xform);
             surface_renderer
                 .map_mut()
                 .set_extent(map_renderer_number(&renderer, "extent", 15.0));
@@ -37543,8 +37570,15 @@ impl DesktopAppState {
                     .round()
                     .max(1.0) as i32,
             );
-            let surface =
+            surface_renderer.set_cap_mode(
+                cuemol_xtal::MapCapMode::parse(&renderer_effective_attr(
+                    &renderer, "cap_mode", "auto",
+                ))
+                .unwrap_or_default(),
+            );
+            let mut surface =
                 surface_renderer.generate_surf_obj_with_boundary(&map, boundary_points.as_deref());
+            surface.mesh_mut().apply_transform(&map_xform);
             let value = make_molsurf(ctx);
             set_molsurf(&value, &surface, ctx)?;
             Ok(value)
@@ -46808,6 +46842,17 @@ impl DesktopAppState {
                     children,
                 } => {
                     let object_uid = Uid::new(object_uid);
+                    if let Some(map) = self.density_maps.get_mut(&object_uid) {
+                        if let Some(target) = map
+                            .renderers
+                            .iter_mut()
+                            .find(|r| r.uid.get() == renderer_uid)
+                        {
+                            target.children = children;
+                            map.modified = true;
+                            continue;
+                        }
+                    }
                     let renderer_uid = self
                         .scene_manager()
                         .object(object_uid)
@@ -48897,21 +48942,24 @@ fn surface_mesh_render_mesh_with_colors(
             Some((atom.serial as u32, atom.position, rgba))
         })
         .collect();
+    let mut by_id = std::collections::HashMap::new();
+    for (id, _, color) in &palette {
+        by_id.entry(*id).or_insert(*color);
+    }
+    let mut nearest = cuemol_core::BSPTree::new();
+    for (_, position, color) in &palette {
+        nearest.push(*position, *color);
+    }
+    nearest.build();
     let vertices = mesh
         .vertices()
         .iter()
         .map(|vertex| {
-            let color = palette
-                .iter()
-                .find(|(id, _, _)| vertex.info != 0 && *id == vertex.info)
-                .or_else(|| {
-                    palette.iter().min_by(|(_, a, _), (_, b, _)| {
-                        let da = a.sub(vertex.position).sqlen3d();
-                        let db = b.sub(vertex.position).sqlen3d();
-                        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                })
-                .map(|(_, _, color)| *color)
+            let color = (vertex.info != 0)
+                .then(|| by_id.get(&vertex.info))
+                .flatten()
+                .or_else(|| nearest.nearest(vertex.position))
+                .copied()
                 .unwrap_or(GREY);
             cuemol_render::MeshVertex {
                 position: vertex.position,
@@ -50548,6 +50596,7 @@ fn density_renderer_configs(
                 GuiDensityRendererKind::Contour if renderer_type != "gpu_mapmesh" => {
                     "Blue".to_string()
                 }
+                GuiDensityRendererKind::IsoSurface => "#d9d9d9".to_string(),
                 GuiDensityRendererKind::UnitCell => "Yellow".to_string(),
                 _ => "Green".to_string(),
             });
@@ -50606,6 +50655,12 @@ fn density_renderer_configs(
                 multi_grad,
                 color,
                 xferfn_type: attr("xferfn_type").unwrap_or_else(|| "rainbow1".to_string()),
+                children: node
+                    .children()
+                    .iter()
+                    .filter(|c| !c.is_attr() && c.tag_name() != "multi_grad")
+                    .cloned()
+                    .collect(),
                 attributes: node
                     .children()
                     .iter()
@@ -50724,6 +50779,11 @@ fn density_renderer_qsc_node(renderer: &GuiDensityRenderer) -> LDom2Node {
     }
     if renderer.kind == GuiDensityRendererKind::Volume {
         node.set_str_attr("xferfn_type", renderer.xferfn_type.clone());
+    }
+    for child in &renderer.children {
+        if !child.is_attr() && child.tag_name() != "multi_grad" {
+            node.append_child_node(child.clone());
+        }
     }
     if renderer.multi_grad.size() > 0 {
         let mut gradient = LDom2Node::new();
@@ -51935,6 +51995,11 @@ fn density_renderer_summary(
     specific
         .entry("cullface".to_string())
         .or_insert_with(|| "false".to_string());
+    if renderer.kind == GuiDensityRendererKind::IsoSurface {
+        for (key, fallback) in [("cap_mode", "auto"), ("target", ""), ("sel", "")] {
+            specific.insert(key.to_string(), attribute(key, fallback));
+        }
+    }
     GuiDensityRendererSummary {
         map_uid,
         uid: renderer.uid,
@@ -52775,7 +52840,7 @@ fn density_renderer_to_script(
         rtype: renderer.renderer_type.clone(),
         visible: renderer.visible,
         attributes,
-        children: Vec::new(),
+        children: renderer.children.clone(),
         atom_intr_lines: Vec::new(),
         multi_gradient: Some(renderer.multi_grad.clone()),
     }
@@ -52840,7 +52905,6 @@ fn density_renderer_from_script(
                 })
                 .or_else(|| cuemol_gfx::parse_color(value).ok())
         })
-        .or_else(|| previous.map(|renderer| renderer.color.clone()))
         .unwrap_or_else(|| {
             let default = match renderer.rtype.as_str() {
                 "gpu_mapmesh"
@@ -52849,6 +52913,7 @@ fn density_renderer_from_script(
                 | "GLSLMapMeshRenderer2"
                 | "GLSLMapVolRenderer" => "#00ff00",
                 "*unitcell" | "unitcell" | "UnitCellRenderer" => "#ffff00",
+                "isosurf" | "MapSurfRenderer" => "#d9d9d9",
                 _ => "#0000ff",
             };
             cuemol_gfx::parse_color(default).unwrap()
@@ -52913,6 +52978,7 @@ fn density_renderer_from_script(
         color,
         xferfn_type: string_attr("xferfn_type", "rainbow1"),
         attributes: renderer.attributes.clone(),
+        children: renderer.children.clone(),
     })
 }
 

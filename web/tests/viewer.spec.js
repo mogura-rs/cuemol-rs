@@ -907,3 +907,42 @@ test('browser map regions update geometry and retain LOD after scene export',asy
   expect(JSON.parse(result.message).log).toBe('full:step4:false\n');
   await expect.poll(magenta).toBeGreaterThan(100);
 });
+
+test('browser map caps and molecular colors survive selection edits and embedded saves',async({page},testInfo)=>{
+  await ready(page);
+  await load(page,'target.pdb',Buffer.from(structure));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  const molecule=await page.evaluate(()=>window.cuemol.status().scene.objects[0].id);
+  await call(page,'execute_script',{source:`cuemol.getObject(${molecule}).visible=false;`});
+  const dx='object 1 class gridpositions counts 3 3 3\norigin -4 -4 -4\ndelta 4 0 0\ndelta 0 4 0\ndelta 0 0 4\nobject 2 class gridconnections counts 3 3 3\nobject 3 class array type double rank 0 items 27 data follows\n'+Array(27).fill(1).join(' ')+'\n';
+  await load(page,'caps.dx',Buffer.from(dx));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Loaded caps.dx');
+  let uid=await page.evaluate(()=>window.cuemol.status().scene.maps[0].id);
+  const result=await call(page,'execute_script',{source:`var m=cuemol.getObject(${uid});m.rend_uids.split(',').filter(Boolean).forEach(id=>cuemol.getRenderer(Number(id)).visible=false);var r=m.createRenderer('isosurf');r.name='caps';r.region_mode='full';r.zoom_refine=false;r.level=0;r.target=cuemol.getObject(${molecule}).name;r.sel=cuemol.makeSel('aid 1,2');r.colormode='molecule';var p=cuemol.PaintColoring();p.append(cuemol.makeSel('aid 1'),cuemol.makeColor('#ff00ff'));p.append(cuemol.makeSel('aid 2'),cuemol.makeColor('#00ffff'));r.coloring=p;print(r.cap_mode+':'+r.color.r());`});
+  expect(JSON.parse(result.message).log).toBe('auto:217\n');
+  await call(page,'set_view',{center:[0,0,0],zoom:12,slab:30,distance:100});
+  const rect=await page.evaluate(()=>window.cuemol.status().ui.rects.Viewport);
+  const colors=async()=>{
+    const png=PNG.sync.read(await page.screenshot({clip:{x:rect[0],y:rect[1],width:rect[2],height:rect[3]}}));
+    let magenta=0,cyan=0;
+    for(let i=0;i<png.data.length;i+=4){const [r,g,b]=png.data.subarray(i,i+3);if(r>g+40&&b>g+40)magenta++;if(g>r+40&&b>r+40)cyan++;}
+    return {magenta,cyan};
+  };
+  await expect.poll(async()=>(await colors()).magenta).toBeGreaterThan(300);
+  await expect.poll(async()=>(await colors()).cyan).toBeGreaterThan(300);
+  await call(page,'execute_script',{source:`cuemol.getObject(${uid}).getRendererByName('caps').cap_mode='off';`});
+  await expect.poll(async()=>(await colors()).magenta).toBeLessThan(50);
+  await call(page,'execute_script',{source:`var r=cuemol.getObject(${uid}).getRendererByName('caps');cuemol.resetProp(r,'cap_mode');r.sel=cuemol.makeSel('aid 2');`});
+  await expect.poll(async()=>(await colors()).cyan).toBeGreaterThan(1000);
+  await expect.poll(async()=>(await colors()).magenta).toBeLessThan(50);
+  const download=page.waitForEvent('download');
+  const button=await page.evaluate(()=>window.cuemol.status().ui.rects['Save Scene']);
+  await page.mouse.click(button[0]+button[2]/2,button[1]+button[3]/2);
+  const stream=await(await download).createReadStream(),chunks=[];
+  for await(const chunk of stream)chunks.push(chunk);
+  await load(page,'caps.qsc',Buffer.concat(chunks));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Loaded caps.qsc');
+  await expect.poll(async()=>(await colors()).cyan).toBeGreaterThan(1000);
+  await expect.poll(async()=>(await colors()).magenta).toBeLessThan(50);
+  await page.screenshot({path:testInfo.outputPath('map-caps.png')});
+});

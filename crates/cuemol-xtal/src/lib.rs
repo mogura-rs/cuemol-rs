@@ -21,8 +21,9 @@ pub use cuemol_symm::CrystalInfo;
 pub use fft::{MapFFT, Reflection, SymOp};
 pub use map_renderers::{
     contour_lines_to_obj, lod_align_range, lod_cell_count, lod_step_for_budget, DensityMap,
-    GlslMapMeshRenderer, GlslMapMeshRenderer2, GlslMapVolRenderer, MapColorMode, MapMeshRenderer,
-    MapRegionMode, MapRenderer, MapSamplingRegion, MapSurfRenderer, MapSurfaceDrawMode,
+    GlslMapMeshRenderer, GlslMapMeshRenderer2, GlslMapVolRenderer, MapCapMode, MapColorMode,
+    MapMeshRenderer, MapRegionMode, MapRenderer, MapSamplingRegion, MapSurfRenderer,
+    MapSurfaceDrawMode,
 };
 pub use mtz::{
     density_map_from_mtz, density_map_from_mtz_weighted, density_map_from_reflections,

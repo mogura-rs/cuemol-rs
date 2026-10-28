@@ -40,6 +40,14 @@ pub fn validate_renderer_attr(
             _ => {}
         }
     }
+    if matches!(renderer_type, "isosurf" | "MapSurfRenderer")
+        && name == "cap_mode"
+        && !matches!(value, "auto" | "on" | "off")
+    {
+        return Err(cuemol_core::CueMolError::invalid_argument(
+            "cap_mode must be auto, on or off",
+        ));
+    }
     Ok(())
 }
 pub fn renderer_attr_properties(renderer_type: &str) -> Vec<RendererAttrProperty> {
@@ -81,6 +89,11 @@ pub fn renderer_attr_properties(renderer_type: &str) -> Vec<RendererAttrProperty
         add("defaultcolor", Color, "#ffffff");
     }
     match renderer_type {
+        "isosurf" | "MapSurfRenderer" => {
+            add("cap_mode", Text, "auto");
+            add("target", Text, "");
+            add("sel", Selection, "");
+        }
         "test" => add("color1", Color, "#00ffff"),
         "simple" => {
             add("width", Real, "1.2");
