@@ -556,7 +556,7 @@ command is dispatched. Callers can wait for that ID and busy=false before readin
 results; a fixed delay did not reliably distinguish queued from completed work.
 
 The registry now covers all 166 reference classes. The wider QIF audit still
-reports missing members/defaults in maps, labels, trajectory loading, edge groups
+reports missing members/defaults in maps, labels, trajectory loading
 and exporters. Registry coverage alone does not establish their behavior.
 
 All 32 browser tests passed after adding command acknowledgments, including
@@ -565,3 +565,18 @@ edits and QSC reloads. The class-set test passed with the reference present;
 13 command integration tests, 117 shared core unit tests and 165 native GUI unit
 tests also passed. The latter two counts describe the selected feature sets,
 not the separate unfinished QIF member/default audit.
+
+## Shared outline groups
+
+Renderer `egroup` values now survive scripts, undo and embedded QSC reloads and
+reach the Umbreon renderer. Named groups use their first enabled edge style;
+unnamed groups share equal edge styles. Group membership is independent of
+object names, materials and transparency. Silhouettes preserve outer contours,
+while joined groups suppress their internal contact lines. Edge colors follow
+the group style and widths retain the reference minimum of one output pixel.
+
+The `Renderer.qif` comment describes unnamed groups as object-specific, but
+`UmbreonDisplayContext.cpp` groups them by style. This implementation follows
+the executable code. The 71 render tests include pixel comparisons for merged
+contact lines and shared styles. The focused scripting roundtrip test, 13 command
+integration tests and 165 native GUI tests passed with the reference present.

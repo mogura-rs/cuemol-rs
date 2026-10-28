@@ -125,6 +125,8 @@ fn group(alpha: f32) -> RenderTransparencyGroup {
         name: "veil".into(),
         alpha,
         material: "default".into(),
+        edge_group: String::new(),
+        edge_style: None,
         atom_range: 0..0,
         bond_range: 0..0,
         mesh_range: 0..0,

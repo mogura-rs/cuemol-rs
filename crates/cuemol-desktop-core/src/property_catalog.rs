@@ -29,6 +29,7 @@ pub fn renderer_attr_properties(renderer_type: &str) -> Vec<RendererAttrProperty
             writable: true,
         });
     };
+    add("egroup", Text, "");
     if matches!(
         renderer_type,
         "simple"

@@ -1,5 +1,6 @@
 mod bvh;
 mod denoise;
+mod edges;
 mod lighting;
 #[cfg(target_arch = "wasm32")]
 pub use denoise::render_umbreon_snapshot_async;
@@ -750,7 +751,10 @@ fn render_float_region(
     let index = if let Some(index) = supplied_index {
         index
     } else {
-        owned_index = RayIndex::new(snapshot);
+        owned_index = RayIndex::with_pixel_scale(
+            snapshot,
+            (camera.zoom() / params.height.max(1) as f64) as f32,
+        );
         &owned_index
     };
 
@@ -1083,7 +1087,7 @@ fn visible_hits(
         if h.unlit && h.distance == f64::MAX {
             let own_distance = (h.position - ray.origin).length3d();
             if front.is_some_and(|f| {
-                f.transparency_group != h.transparency_group
+                !index.edges.same(f.transparency_group, h.transparency_group)
                     || 1. - fog_at(f, camera) > params.outline_far_depth
             }) {
                 h.distance = own_distance;
@@ -1143,7 +1147,11 @@ fn trace_sample_pass(
             cache,
         );
         if !hit.unlit && edge_at(index, hit, ray, camera, params, visible_group, false) {
-            shaded = [0.; 3];
+            shaded = index
+                .edges
+                .style(hit.transparency_group)
+                .map(|style| [style.color[0], style.color[1], style.color[2]].map(f64::from))
+                .unwrap_or([0.; 3]);
         }
         let fog = fog_at(hit, camera);
         let alpha = section_alpha(snapshot, hit)
@@ -1184,16 +1192,23 @@ fn edge_at(
     group: Option<usize>,
     default_edges: bool,
 ) -> bool {
-    if !p.show_edge_lines || (!default_edges && p.crease_limit <= 0. && !p.contact_edges) {
+    if !p.show_edge_lines {
         return false;
     }
+    let style = index.edges.style(hit.transparency_group);
+    if !default_edges && style.is_none() && hit.transparency_group.is_some() {
+        return false;
+    }
+    let outline_only = style.is_some_and(|style| style.mode == crate::RenderEdgeMode::Silhouette);
+    let silhouette = default_edges || style.is_some();
     let rotation = camera.rotation().to_matrix();
     let inverse = camera
         .rotation()
         .inv()
         .unwrap_or(cuemol_core::Quat::IDENTITY)
         .to_matrix();
-    let step = camera.zoom() / p.height.max(1) as f64 * (0.5 + p.edge_rise.clamp(0., 2.));
+    let step = (camera.zoom() / p.height.max(1) as f64 * (0.5 + p.edge_rise.clamp(0., 2.)))
+        .max(style.map_or(0.0, |style| f64::from(style.width) * 0.5));
     let half = camera.slab_depth() * 0.5;
     for (x, y) in [(step, 0.), (-step, 0.), (0., step), (0., -step)] {
         let offset = transform_direction(inverse, Vector4::new3(x, y, 0.));
@@ -1215,7 +1230,7 @@ fn edge_at(
                         .contains(&transform_direction(rotation, h.position - camera.center()).z))
         });
         let Some(other) = adjacent else {
-            if default_edges {
+            if silhouette {
                 return true;
             } else {
                 continue;
@@ -1223,16 +1238,23 @@ fn edge_at(
         };
         let depth_jump = (other.distance - hit.distance).abs();
         if depth_jump > step * 4. {
-            if default_edges && other.distance > hit.distance {
+            if silhouette && !outline_only && other.distance > hit.distance {
                 return true;
             } else {
                 continue;
             }
         }
-        if p.contact_edges && other.transparency_group != hit.transparency_group {
+        if !outline_only
+            && p.contact_edges
+            && !index
+                .edges
+                .same(other.transparency_group, hit.transparency_group)
+        {
             return true;
         }
-        if p.crease_limit > 0. && hit.normal.dot3d(other.normal) < p.crease_limit.to_radians().cos()
+        if !outline_only
+            && p.crease_limit > 0.
+            && hit.normal.dot3d(other.normal) < p.crease_limit.to_radians().cos()
         {
             return true;
         }
@@ -2005,6 +2027,8 @@ mod tests {
                     name: format!("translucent-{index}"),
                     alpha: 0.95,
                     material: "default".to_string(),
+                    edge_group: String::new(),
+                    edge_style: None,
                     atom_range: atom_index..atom_index + 1,
                     bond_range: 0..0,
                     mesh_range: 0..0,
@@ -2047,6 +2071,8 @@ mod tests {
                     name: "translucent".to_string(),
                     alpha: 0.5,
                     material: "default".to_string(),
+                    edge_group: String::new(),
+                    edge_style: None,
                     atom_range: 0..sphere_count,
                     bond_range: 0..0,
                     mesh_range: 0..0,

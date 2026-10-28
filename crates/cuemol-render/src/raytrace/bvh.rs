@@ -52,6 +52,7 @@ enum Shape {
     Atom(usize),
     Bond(usize),
     Triangle(usize, usize),
+    OutlineTriangle(usize, usize),
 }
 struct Primitive {
     shape: Shape,
@@ -74,15 +75,22 @@ pub(super) struct RayIndex<'a> {
     nodes: Vec<Node>,
     order: Vec<usize>,
     pub translucent_groups: Vec<(usize, f64)>,
+    pub edges: super::edges::EdgeGroups,
 }
 impl<'a> RayIndex<'a> {
+    #[cfg(test)]
     pub fn new(snapshot: &'a RenderSceneSnapshot) -> Self {
+        Self::with_pixel_scale(snapshot, 0.0)
+    }
+
+    pub fn with_pixel_scale(snapshot: &'a RenderSceneSnapshot, pixel_scale: f32) -> Self {
         let mut index = Self {
             snapshot,
             primitives: Vec::new(),
             nodes: Vec::new(),
             order: Vec::new(),
             translucent_groups: Vec::new(),
+            edges: super::edges::EdgeGroups::new(snapshot, pixel_scale),
         };
         for (i, group) in snapshot.transparency_groups.iter().enumerate() {
             if group.alpha < 1. - 1e-4
@@ -110,24 +118,22 @@ impl<'a> RayIndex<'a> {
             .enumerate()
             .filter(|(_, a)| a.hit.is_none())
         {
+            let group = transparency_group_for_atom(snapshot, id);
+            let edge = index.edges.style(group).or(atom.edge);
             let mut bounds = Bounds::empty();
             bounds.include(
                 atom.center,
-                f64::from(atom.radius.abs() + atom.edge.map(|e| e.width.max(0.)).unwrap_or(0.))
-                    + 1e-7,
+                f64::from(atom.radius.abs() + edge.map(|e| e.width.max(0.)).unwrap_or(0.)) + 1e-7,
             );
-            add(
-                Shape::Atom(id),
-                transparency_group_for_atom(snapshot, id),
-                bounds,
-            );
+            add(Shape::Atom(id), group, bounds);
         }
         for (id, bond) in snapshot.bonds.iter().enumerate() {
+            let group = transparency_group_for_bond(snapshot, id);
+            let edge = index.edges.style(group).or(bond.edge);
             let mut bounds = Bounds::empty();
             let radius = f64::from(
                 bond.radius.abs()
-                    + bond
-                        .edge
+                    + edge
                         .filter(|_| bond.screen_width.is_none())
                         .map(|e| e.width.max(0.))
                         .unwrap_or(0.),
@@ -136,14 +142,18 @@ impl<'a> RayIndex<'a> {
             if !bond.screen_point {
                 bounds.include(bond.to, radius);
             }
-            add(
-                Shape::Bond(id),
-                transparency_group_for_bond(snapshot, id),
-                bounds,
-            );
+            add(Shape::Bond(id), group, bounds);
         }
         for (id, mesh) in snapshot.meshes.iter().enumerate() {
             let group = transparency_group_for_mesh(snapshot, id);
+            let edge = index.edges.style(group);
+            let outline = mesh
+                .vertices
+                .first()
+                .is_some_and(|vertex| vertex.is_edge_outline());
+            if outline && edge.is_some() {
+                continue;
+            }
             for (triangle, vertices) in mesh.indices.chunks_exact(3).enumerate() {
                 let mut bounds = Bounds::empty();
                 let mut valid = true;
@@ -157,6 +167,14 @@ impl<'a> RayIndex<'a> {
                 }
                 if valid {
                     add(Shape::Triangle(id, triangle), group, bounds);
+                    if let Some(edge) = edge.filter(|_| !outline) {
+                        let mut bounds = Bounds::empty();
+                        for &vertex in vertices {
+                            let vertex = &mesh.vertices[vertex as usize];
+                            bounds.include(vertex.position, f64::from(edge.width) + 1e-7);
+                        }
+                        add(Shape::OutlineTriangle(id, triangle), group, bounds);
+                    }
                 }
             }
         }
@@ -257,7 +275,7 @@ impl<'a> RayIndex<'a> {
                         transparency_group: group,
                     }
                 } else {
-                    let edge = atom.edge.filter(|e| e.width > 0.)?;
+                    let edge = self.edge_style(group, atom.edge).filter(|e| e.width > 0.)?;
                     let (distance, normal) =
                         ray_sphere(ray, atom.center, f64::from(atom.radius + edge.width))?;
                     primitive_edge_hit(ray, distance, normal, edge, group)
@@ -283,12 +301,28 @@ impl<'a> RayIndex<'a> {
                         transparency_group: group,
                     }
                 } else {
-                    let edge = bond
-                        .edge
+                    let edge = self
+                        .edge_style(group, bond.edge)
                         .filter(|e| e.width > 0. && bond.screen_width.is_none())?;
                     let (distance, normal) = intersect(f64::from(bond.radius + edge.width))?;
                     primitive_edge_hit(ray, distance, normal, edge, group)
                 }
+            }
+            Shape::OutlineTriangle(mesh, triangle) => {
+                let style = self.edge_style(group, None)?;
+                let mesh = &self.snapshot.meshes[mesh];
+                let ids = &mesh.indices[triangle * 3..triangle * 3 + 3];
+                let vertices = [ids[0], ids[2], ids[1]].map(|id| mesh.vertices[id as usize]);
+                let positions = vertices.map(|vertex| {
+                    vertex.position + normalize(vertex.normal) * f64::from(style.width)
+                });
+                let (distance, u, v) = ray_triangle(ray, positions, true)?;
+                let normal = normalize(
+                    vertices[0].normal * (1.0 - u - v)
+                        + vertices[1].normal * u
+                        + vertices[2].normal * v,
+                );
+                primitive_edge_hit(ray, distance, normal, style, group)
             }
             Shape::Triangle(mesh, triangle) => {
                 let mesh = &self.snapshot.meshes[mesh];
@@ -325,6 +359,21 @@ impl<'a> RayIndex<'a> {
         };
         result.order = id;
         Some(result)
+    }
+    fn edge_style(
+        &self,
+        section: Option<usize>,
+        fallback: Option<crate::RenderEdgeStyle>,
+    ) -> Option<crate::RenderEdgeStyle> {
+        self.edges
+            .style(section)
+            .map(|mut style| {
+                if let Some(section) = section {
+                    style.color[3] *= self.snapshot.transparency_groups[section].alpha;
+                }
+                style
+            })
+            .or(fallback)
     }
     pub fn hits(&self, ray: Ray, group: Option<usize>) -> Vec<Hit> {
         let mut hits = Vec::new();

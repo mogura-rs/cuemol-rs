@@ -494,6 +494,19 @@ impl Renderer {
         self.edge_line_type
     }
 
+    pub fn edge_group_name(&self) -> &str {
+        self.properties.get("egroup").map_or("", String::as_str)
+    }
+
+    pub fn get_edge_group_name(&self) -> &str {
+        self.edge_group_name()
+    }
+
+    pub fn set_edge_group_name(&mut self, value: impl Into<String>) {
+        self.properties.insert("egroup".into(), value.into());
+        self.fire_property_changed("egroup");
+    }
+
     pub fn get_edge_line_type(&self) -> i32 {
         self.edge_line_type()
     }

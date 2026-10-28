@@ -2441,6 +2441,7 @@ impl DesktopAppState {
                     .filter(|name| !name.is_empty())
                     .unwrap_or_else(|| format!("{}_surface", surface.name));
                 apply_renderer_properties(&mut rendered, &renderer_name, alpha, &material);
+                set_renderer_edge_group(&mut rendered, attr("egroup").as_deref(), edge_style);
                 append_snapshot(snapshot, rendered);
             }
         }
@@ -6839,6 +6840,16 @@ impl DesktopAppState {
                     .clamp(0.0, 1.0);
                 let material = config_attr("material").unwrap_or_else(|| "default".to_string());
                 apply_renderer_properties(&mut rendered, &config.name, alpha, &material);
+                set_renderer_edge_group(
+                    &mut rendered,
+                    config_attr("egroup").as_deref(),
+                    renderer_edge_style(
+                        config_attr("egtype").as_deref(),
+                        config_attr("eglinew").as_deref(),
+                        config_attr("egcolor").as_deref(),
+                        &styles,
+                    ),
+                );
                 let renderer_xform = config_attr("xformMat")
                     .and_then(|value| Matrix4::from_script_string(&value).ok())
                     .unwrap_or(Matrix4::IDENTITY);
@@ -48322,6 +48333,19 @@ fn append_object_renderer_snapshot(
         .unwrap_or_else(|| "default".to_string());
     let renderer_name = renderer.map(MolRenderer::name).unwrap_or("default");
     apply_renderer_properties(&mut snapshot, renderer_name, alpha, &material);
+    if let Some(renderer) = renderer {
+        let attr = |name| renderer.resolved_attr(name, styles, style_scope_id);
+        set_renderer_edge_group(
+            &mut snapshot,
+            attr("egroup").as_deref(),
+            renderer_edge_style(
+                attr("egtype").as_deref(),
+                attr("eglinew").as_deref(),
+                attr("egcolor").as_deref(),
+                styles,
+            ),
+        );
+    }
     // Apply the object + renderer `xformMat` (C++ `Object`/`Renderer` xformMat,
     // multiplied onto the modelview at display; the object xform is propagated onto
     // atom positions). The effective transform is `renderer · object`, baked into
@@ -48341,6 +48365,24 @@ fn append_object_renderer_snapshot(
         snapshot.apply_xform(&xform);
     }
     append_snapshot(target, snapshot);
+}
+
+fn set_renderer_edge_group(
+    snapshot: &mut RenderSceneSnapshot,
+    name: Option<&str>,
+    style: Option<SurfaceEdgeStyle>,
+) {
+    if let Some(section) = snapshot.transparency_groups.last_mut() {
+        section.edge_group = name.unwrap_or_default().to_string();
+        section.edge_style = style.map(|style| cuemol_render::RenderEdgeStyle {
+            mode: match style.mode {
+                SurfaceEdgeMode::Edges => cuemol_render::RenderEdgeMode::Edges,
+                SurfaceEdgeMode::Silhouette => cuemol_render::RenderEdgeMode::Silhouette,
+            },
+            width: style.width as f32,
+            color: style.color,
+        });
+    }
 }
 
 fn apply_renderer_properties(
@@ -48707,6 +48749,16 @@ fn append_lw_object_snapshot(
             .clamp(0.0, 1.0);
         let material = resolved("material").unwrap_or_else(|| "default".to_string());
         apply_renderer_properties(&mut snapshot, &renderer.name, alpha, &material);
+        set_renderer_edge_group(
+            &mut snapshot,
+            resolved("egroup").as_deref(),
+            renderer_edge_style(
+                resolved("egtype").as_deref(),
+                resolved("eglinew").as_deref(),
+                resolved("egcolor").as_deref(),
+                styles,
+            ),
+        );
         let xform = renderer.xform.mul_mat(loaded.xform);
         if xform != Matrix4::IDENTITY {
             snapshot.apply_xform(&xform);
@@ -57221,6 +57273,60 @@ end_header
             "{reload_log:?}"
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_renderer_edge_groups_reach_rendering_and_roundtrip() {
+        let mut app = DesktopAppState::new();
+        let created = app.new_scene("edge-groups", true);
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00           C\n",
+        )
+        .unwrap();
+        app.scene_manager_mut()
+            .scene_mut(created.result_scene)
+            .unwrap()
+            .add_molecule("mol", molecule);
+        let (log, _) = app
+            .run_script_js(
+                r#"
+            var mol = cuemol.getObject('mol');
+            var first = cuemol.CPKRenderer(); first.name = 'first';
+            print('default=' + first.egroup);
+            first.egroup = 'combined'; first.egtype = 'edges'; first.eglinew = 0.2;
+            first.egcolor = cuemol.Color('#ff0000');
+            mol.attachRenderer(first);
+            var second = mol.createRenderer('cpk', 'second');
+            second.egroup = 'combined';
+            print(first.egroup + ':' + second.egroup);
+        "#,
+            )
+            .unwrap();
+        assert_eq!(log, "default=\ncombined:combined\n");
+        let snapshot = app.active_render_snapshot("").unwrap();
+        assert_eq!(snapshot.transparency_groups.len(), 2);
+        assert!(snapshot
+            .transparency_groups
+            .iter()
+            .all(|group| group.edge_group == "combined"));
+        assert_eq!(
+            snapshot.transparency_groups[0].edge_style.unwrap().color,
+            [1., 0., 0., 1.]
+        );
+        let bytes = app.active_scene_bytes().unwrap();
+        let mut reloaded = DesktopAppState::new();
+        reloaded.open_bytes("edge-groups.qsc", &bytes).unwrap();
+        let (log, _) = reloaded
+            .run_script_js(
+                r#"
+            var renderer = cuemol.getRenderer('mol', 'first');
+            print(renderer.egroup);
+            cuemol.resetProp(renderer, 'egroup'); print('reset=' + renderer.egroup);
+        "#,
+            )
+            .unwrap();
+        assert_eq!(log, "combined\nreset=\n");
     }
 
     #[cfg(feature = "scripting")]

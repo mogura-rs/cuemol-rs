@@ -280,6 +280,8 @@ fn viewport_composites_transparent_sections_after_opaque_geometry_and_depth_test
         name: "front".into(),
         alpha: 0.5,
         material: "default".into(),
+        edge_group: String::new(),
+        edge_style: None,
         atom_range: 0..0,
         bond_range: 0..0,
         mesh_range: 0..1,

@@ -348,7 +348,9 @@ fn trace_npr_pass(
             } else {
                 [0.; 3]
             };
-            h.composite(
+            let edge = super::edge_at(index, hit, ray, camera, p, group, h.default_edges);
+            let style = index.edges.style(hit.transparency_group);
+            let composed = h.composite(
                 x,
                 y,
                 raw,
@@ -358,8 +360,13 @@ fn trace_npr_pass(
                     hit.color[2] as f32,
                 ],
                 shaded,
-                h.default_edges && super::edge_at(index, hit, ray, camera, p, group, true),
-            )
+                edge && style.is_none(),
+            );
+            if let Some(style) = style.filter(|_| edge) {
+                [style.color[0], style.color[1], style.color[2]]
+            } else {
+                composed
+            }
         };
         let alpha =
             super::section_alpha(snapshot, hit) * if p.transparent_background { fog } else { 1. };

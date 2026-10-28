@@ -187,7 +187,10 @@ async fn render_float_async(
     cancel: Option<&AtomicBool>,
 ) -> Result<FloatFrame> {
     let started = Instant::now();
-    let index = RayIndex::new(snapshot);
+    let index = RayIndex::with_pixel_scale(
+        snapshot,
+        (camera.zoom() / params.height.max(1) as f64) as f32,
+    );
     let mut frame = FloatFrame {
         width: params.width,
         height: params.height,
@@ -338,7 +341,10 @@ fn prepare_with_direct(
     let mut albedo = vec![0.; color.len()];
     let mut normal = vec![0.; color.len()];
     let mut preserve = vec![true; width * height];
-    let index = RayIndex::new(snapshot);
+    let index = RayIndex::with_pixel_scale(
+        snapshot,
+        (camera.zoom() / params.height.max(1) as f64) as f32,
+    );
     let inverse = camera.rotation().inv()?.to_matrix();
     let rotation = camera.rotation().to_matrix();
     let half_h = camera.zoom() * 0.5;
