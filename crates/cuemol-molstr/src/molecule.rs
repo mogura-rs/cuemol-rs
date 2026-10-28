@@ -724,6 +724,24 @@ impl MolCoord {
         Ok(())
     }
 
+    pub(crate) fn replace_secondary_structure(
+        &mut self,
+        assignments: impl IntoIterator<Item = (ResidueKey, Option<&'static str>, String)>,
+    ) {
+        self.residue_props.retain(|_, props| {
+            props.remove("secondary");
+            props.remove("secondary2");
+            !props.is_empty()
+        });
+        for (key, secondary, marker) in assignments {
+            let props = self.residue_props.entry(key).or_default();
+            if let Some(secondary) = secondary {
+                props.insert("secondary".into(), secondary.into());
+            }
+            props.insert("secondary2".into(), marker);
+        }
+    }
+
     pub fn get_residue_prop_str(
         &self,
         chain: &str,

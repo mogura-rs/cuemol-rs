@@ -327,7 +327,7 @@ fn render_qsc_colors_and_filters_saved_surfaces_by_molecule() {
                <coloring type=\"PaintColoring\"><paint sel=\"elem C\" color=\"#00ff00\"/><paint sel=\"elem O\" color=\"#ff0000\"/></coloring>\n\
                </object>\n\
                <object type=\"MolSurf\" name=\"surface\" src=\"datachunk:00001\" srctype=\"obj\" orig_mol=\"mol\">\n\
-               <renderer type=\"molsurf\" name=\"molecule-color\" colormode=\"molecule\" target=\"mol\" sel=\"*\" showsel=\"elem C\"/>\n\
+               <renderer type=\"molsurf\" name=\"molecule-color\" colormode=\"molecule\" defaultcolor=\"$molcol\" target=\"mol\" sel=\"*\" showsel=\"elem C\"/>\n\
                </object>\n\
                </scene>\n\
                ========== End of XML ==========\n\

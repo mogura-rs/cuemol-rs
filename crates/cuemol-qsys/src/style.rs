@@ -609,14 +609,19 @@ impl StyleManager {
             .is_some_and(|set| set.remove_color(key))
     }
 
-    pub fn color_defs_json(&self, scope_id: u64) -> String {
-        let names = self
-            .scopes
+    pub fn color_names(&self, scope_id: u64) -> Vec<String> {
+        self.scopes
             .get(&scope_id)
             .into_iter()
             .flatten()
-            .flat_map(|set| set.colors.keys().map(String::as_str));
-        json_names(names)
+            .flat_map(|set| set.colors.keys().cloned())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    pub fn color_defs_json(&self, scope_id: u64) -> String {
+        json_names(self.color_names(scope_id).iter().map(String::as_str))
     }
 
     pub fn get_color_defs_json(&self, scope_id: u64) -> String {
@@ -906,8 +911,7 @@ impl StyleManager {
         }
         parse_color(rep)
             .ok()
-            .and_then(|spec| spec.rgba8())
-            .map(SolidColor::from)
+            .and_then(|spec| spec.resolve(|name| self.get_color(name, scope_id).cloned(), None))
             .unwrap_or_default()
     }
 
@@ -1021,7 +1025,7 @@ impl StyleManager {
     }
 
     /// Like [`StyleManager::style_attr`] but for an attribute on a nested child
-    /// element of the preset (e.g. `DefaultRibbon` → `<helix tuber="6.0">`).
+    /// element of the preset (e.g. `DefaultRibbon` → `<helix tuber="6.5">`).
     /// Used for the ribbon cross-section sub-elements `<helix>/<sheet>/<coil>`.
     pub fn style_child_attr(
         &self,
@@ -1897,6 +1901,13 @@ mod tests {
         assert_eq!(manager.compile_color("accent", 42).rgba8().b, 255);
         assert_eq!(manager.compile_color("global-only", 42).rgba8().g, 255);
         assert_eq!(manager.compile_color("#010203", 42).rgba8().r, 1);
+        let tinted = manager
+            .compile_color("accent{mod_h:120;mod_s:-0.5;alpha:0.5}", 42)
+            .rgba8();
+        assert_eq!(tinted.r, 255);
+        assert!((127..=128).contains(&tinted.g));
+        assert!((127..=128).contains(&tinted.b));
+        assert!((127..=128).contains(&tinted.a));
         manager.set_style_value(42, "local", "Renderer.width", "2");
         assert_eq!(manager.pending_event_count(), 1);
 
@@ -2120,32 +2131,28 @@ mod tests {
         let mut manager = StyleManager::new();
         manager.load_builtin_default_styles(0);
 
-        // DefaultRibbon's nested <helix tuber="6.0" width="0.2"/> and
-        // <sheet tuber="7.0" width="0.2"/> cross-section sub-elements.
+        for section in ["helix", "sheet"] {
+            assert_eq!(
+                manager
+                    .style_child_attr(0, "DefaultRibbon", section, "tuber")
+                    .as_deref(),
+                Some("6.5")
+            );
+            assert_eq!(
+                manager
+                    .style_child_attr(0, "DefaultRibbon", section, "width")
+                    .as_deref(),
+                Some("0.18")
+            );
+        }
         assert_eq!(
             manager
-                .style_child_attr(0, "DefaultRibbon", "helix", "tuber")
-                .as_deref(),
-            Some("6.0")
-        );
-        assert_eq!(
-            manager
-                .style_child_attr(0, "DefaultRibbon", "helix", "width")
+                .style_child_attr(0, "DefaultRibbon", "coil", "width")
                 .as_deref(),
             Some("0.2")
         );
-        assert_eq!(
-            manager
-                .style_child_attr(0, "DefaultRibbon", "sheet", "tuber")
-                .as_deref(),
-            Some("7.0")
-        );
-        // No <coil> sub-element in DefaultRibbon.
-        assert!(manager
-            .style_child_attr(0, "DefaultRibbon", "coil", "width")
-            .is_none());
         // Resolve across a style list (later style wins): RoundRibbon's helix is
-        // elliptical with the same tuber=6.0.
+        // elliptical with tuber=6.0.
         assert_eq!(
             manager
                 .resolve_style_child_attr(0, "DefaultRibbon,RoundRibbon", "helix", "type")

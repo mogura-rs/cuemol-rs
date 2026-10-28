@@ -1194,18 +1194,13 @@ fn render_qsc_scene(input: &str, output: &str) -> Result<(), String> {
             }
             let renderer_coloring_type =
                 renderer.resolved_child_type("coloring", &styles, DEFAULT_STYLE_SCOPE);
-            if matches!(
-                renderer_coloring_type.as_deref(),
-                None | Some("CPKColoring")
-            ) {
-                apply_object_coloring(
-                    &mut options,
-                    object.coloring_type(),
-                    |name| object.coloring_attr(name),
-                    object.paint_coloring(),
-                    object.mol().default_color(),
-                );
-            }
+            cuemol_molvis::apply_molecular_coloring(
+                &mut options,
+                object,
+                renderer,
+                &styles,
+                DEFAULT_STYLE_SCOPE,
+            );
             let mut snapshot = if rtype == "simple" {
                 let width = renderer
                     .resolved_attr("width", &styles, DEFAULT_STYLE_SCOPE)
@@ -2311,7 +2306,6 @@ fn surface_molecule_render_mesh(
     selector: &cuemol_molstr::Selector,
     mesh: &cuemol_surface::SurfaceMesh,
 ) -> RenderMesh {
-    const GREY: [f32; 4] = [0.76, 0.79, 0.84, 1.0];
     let mut options = MoleculeRenderOptions::default();
     apply_object_coloring(
         &mut options,
@@ -2321,6 +2315,16 @@ fn surface_molecule_render_mesh(
         object.mol().default_color(),
     );
     let atom_colors = resolve_atom_colors(object.mol(), &options);
+    surface_molecule_render_mesh_with_colors(object, selector, mesh, &atom_colors)
+}
+
+fn surface_molecule_render_mesh_with_colors(
+    object: &cuemol_molstr::MolObject,
+    selector: &cuemol_molstr::Selector,
+    mesh: &cuemol_surface::SurfaceMesh,
+    atom_colors: &[cuemol_gfx::ColorSpec],
+) -> RenderMesh {
+    const GREY: [f32; 4] = [0.76, 0.79, 0.84, 1.0];
     let palette = object
         .mol()
         .select_indices(selector)
@@ -2678,7 +2682,24 @@ fn loaded_surface_snapshots(
             let mut render_mesh = match color_mode.as_str() {
                 "molecule" | "3" => scene
                     .object_by_name(&target_name)
-                    .map(|object| surface_molecule_render_mesh(object, &map_selection, &mesh))
+                    .map(|object| {
+                        let mut options = MoleculeRenderOptions::default();
+                        cuemol_molvis::apply_molecular_node_coloring(
+                            &mut options,
+                            object,
+                            renderer_node,
+                            styles,
+                            DEFAULT_STYLE_SCOPE,
+                            "#c0c0ff",
+                        );
+                        let colors = resolve_atom_colors(object.mol(), &options);
+                        surface_molecule_render_mesh_with_colors(
+                            object,
+                            &map_selection,
+                            &mesh,
+                            &colors,
+                        )
+                    })
                     .unwrap_or_else(&flat_mesh),
                 "potential" | "1" => {
                     let map_name = attr("elepot").unwrap_or_default();
@@ -3171,7 +3192,18 @@ fn direct_surface_scene_snapshot(
                 )
             })
         })
-        .unwrap_or_else(|| surface_molecule_render_mesh(object, &selector, &surface));
+        .unwrap_or_else(|| {
+            let mut options = MoleculeRenderOptions::default();
+            cuemol_molvis::apply_molecular_coloring(
+                &mut options,
+                object,
+                renderer,
+                styles,
+                DEFAULT_STYLE_SCOPE,
+            );
+            let colors = resolve_atom_colors(object.mol(), &options);
+            surface_molecule_render_mesh_with_colors(object, &selector, &surface, &colors)
+        });
     if let Some(show_selection) = resolved("showsel")
         .filter(|value| !value.is_empty() && value != "*")
         .as_deref()
@@ -3438,4 +3470,79 @@ fn print_mol_info(mol: &cuemol_molstr::MolCoord) {
     println!("bonds={}", mol.bond_count());
     println!("residues={}", mol.residue_count());
     println!("chains={}", mol.chain_ids().join(","));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_scene_export_uses_surface_renderer_colors() {
+        for kind in ["molsurf", "dsurface", "dsurf2"] {
+            let mut app = cuemol_desktop_core::DesktopAppState::new();
+            let scene_uid = app.ensure_active_scene();
+            let molecule = cuemol_molstr::read_pdb_str(
+                "ATOM      1  N   GLY A   1       0.000   0.000   0.000  1.00 10.00           N\n",
+            )
+            .unwrap();
+            let object_uid = app
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .unwrap()
+                .add_molecule("source", molecule);
+            let (owner, renderer_uid) = if kind == "molsurf" {
+                let uid = app
+                    .create_molecular_surface_object(object_uid, "*", "surface", 1.0, 1.4)
+                    .unwrap();
+                (uid, app.surface_summary(uid).unwrap().renderers[0].uid)
+            } else {
+                let uid = app
+                    .new_renderer_in_active_scene(object_uid, kind, "surface")
+                    .unwrap()
+                    .result_renderer;
+                app.set_renderer_property(object_uid, uid, "surftype", "vdw")
+                    .unwrap();
+                (object_uid, uid)
+            };
+            app.set_renderer_coloring_details(
+                owner,
+                renderer_uid,
+                Some("SolidColoring".into()),
+                Default::default(),
+                Vec::new(),
+                Some("#123456".into()),
+            )
+            .unwrap();
+            let scene = app.scene_manager().scene(scene_uid).unwrap();
+            let styles = scene_style_manager(scene);
+            let snapshots = if kind == "molsurf" {
+                loaded_surface_snapshots(scene, &styles).unwrap()
+            } else {
+                let object = scene.object(object_uid).unwrap();
+                vec![direct_surface_scene_snapshot(
+                    object,
+                    object.renderer(renderer_uid).unwrap(),
+                    &styles,
+                    scene,
+                )
+                .unwrap()]
+            };
+            assert!(snapshots.iter().any(|s| s.mesh_triangle_count() > 0));
+            assert!(
+                snapshots
+                    .iter()
+                    .flat_map(|s| &s.meshes)
+                    .flat_map(|m| &m.vertices)
+                    .all(|v| {
+                        v.color
+                            .iter()
+                            .zip([18u8, 52, 86, 255])
+                            .all(|(actual, target)| {
+                                (*actual - f32::from(target) / 255.0).abs() < 0.005
+                            })
+                    }),
+                "{kind}"
+            );
+        }
+    }
 }

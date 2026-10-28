@@ -1193,6 +1193,41 @@ impl ColCompiler {
 }
 
 impl ColorSpec {
+    pub fn resolve(
+        &self,
+        named: impl Fn(&str) -> Option<SolidColor>,
+        molecule: Option<&SolidColor>,
+    ) -> Option<SolidColor> {
+        let color = match &self.base {
+            ColorBase::Named(name) => named(name).or_else(|| named_color(name))?,
+            ColorBase::MolColor(_) => molecule?.clone(),
+            _ => SolidColor::from(self.rgba8()?),
+        };
+        let number = |name: &str, default| {
+            self.modifiers
+                .iter()
+                .find(|m| m.name == name)
+                .and_then(|m| m.value.as_number())
+                .map(f64::from)
+                .unwrap_or(default)
+        };
+        let material = self
+            .modifiers
+            .iter()
+            .find(|m| m.name == "material")
+            .map(|m| m.value.as_text())
+            .unwrap_or("")
+            .to_string();
+        Some(apply_color_overrides(
+            color,
+            material,
+            number("alpha", -1.0),
+            number("mod_h", 0.0),
+            number("mod_s", 0.0),
+            number("mod_b", 0.0),
+        ))
+    }
+
     pub fn rgba8(&self) -> Option<Rgba8> {
         let mut rgba = match self.base {
             ColorBase::Html { r, g, b, a } => Rgba8 { r, g, b, a },

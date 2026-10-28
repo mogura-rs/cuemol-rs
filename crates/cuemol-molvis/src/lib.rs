@@ -1,3 +1,7 @@
+mod backbone;
+mod coloring;
+pub use coloring::{apply_molecular_coloring, apply_molecular_node_coloring, MolecularColoring};
+
 use cuemol_core::Vector4;
 use cuemol_gfx::{ColorBase, ColorSpec, MolColorRef, SolidColor};
 use cuemol_molstr::{
@@ -3453,6 +3457,7 @@ pub struct MoleculeRenderOptions {
     pub draw_bonds: bool,
     pub color_mode: MoleculeColorMode,
     pub uniform_color: Option<ColorSpec>,
+    pub molecular_coloring: Option<MolecularColoring>,
     pub cpk_colors: std::collections::BTreeMap<String, ColorSpec>,
     pub selected_indices: Vec<usize>,
     /// Backbone-trace "putty" width modulation (TubeRenderer): off by default.
@@ -3477,8 +3482,8 @@ pub struct MoleculeRenderOptions {
     /// [`cuemol_render::tessellate_snapshot_with_detail`] at mesh-build time.
     pub sphere_detail: Option<u32>,
     /// Ribbon/cartoon spline subdivisions per residue along the backbone (C++
-    /// Ribbon/Spline/Tube `axialdetail`; 8 == the default). Higher = a smoother,
-    /// denser backbone mesh. `None` keeps the default subdivision.
+    /// `axialdetail`; named ribbon styles and cartoon use 8, while tube/spline
+    /// defaults use 6). `None` uses eight subdivisions for standalone snapshots.
     pub ribbon_axial_detail: Option<u32>,
     /// Number of vertices around a TubeRenderer cross-section (`section.detail`).
     pub ribbon_radial_detail: Option<u32>,
@@ -3502,7 +3507,12 @@ pub struct MoleculeRenderOptions {
     pub cartoon_anchor_selection: Option<String>,
     pub cartoon_anchor_weight: f64,
     /// Cartoon cylinder/ribbon helix mode and cylinder width parameters.
+    pub cartoon: bool,
     pub cartoon_helix_ribbon: bool,
+    pub cartoon_helix_width_mode: CartoonHelixWidthMode,
+    pub cartoon_helix_extend: f64,
+    pub cartoon_helix_width_smoothing: f64,
+    pub cartoon_sheet_normal_smoothing: f64,
     pub cartoon_helix_width: f64,
     pub cartoon_helix_width_plus: f64,
     /// Custom MainChainRenderer pivot atom name. `None` uses the topology pivot.
@@ -3529,6 +3539,7 @@ pub struct MoleculeRenderOptions {
     /// (the C++ `$molcol`→object-coloring cascade — the backbone CA is carbon, so
     /// CPKColoring defers it to the object's paint). Empty = the default colours.
     pub object_paint: Vec<(String, String)>,
+    pub selection_aliases: std::collections::HashMap<String, cuemol_molstr::Selector>,
     /// Object `<coloring type="RainbowColoring">`: colours the backbone by a hue
     /// gradient over the chain residues (C++ RainbowColoring). Takes precedence
     /// over `object_paint` (it is the object's coloring scheme). `None` = no rainbow.
@@ -3678,6 +3689,14 @@ impl RibbonSectionValues {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CartoonHelixWidthMode {
+    Constant,
+    #[default]
+    Average,
+    Wavy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RibbonJunctionType {
     #[default]
     Smooth,
@@ -3824,6 +3843,7 @@ impl Default for MoleculeRenderOptions {
             draw_bonds: true,
             color_mode: MoleculeColorMode::Element,
             uniform_color: None,
+            molecular_coloring: None,
             cpk_colors: std::collections::BTreeMap::new(),
             selected_indices: Vec::new(),
             putty: PuttyOptions::default(),
@@ -3848,7 +3868,12 @@ impl Default for MoleculeRenderOptions {
             sheet_side_color: None,
             cartoon_anchor_selection: None,
             cartoon_anchor_weight: 10.0,
+            cartoon: false,
             cartoon_helix_ribbon: false,
+            cartoon_helix_width_mode: CartoonHelixWidthMode::Average,
+            cartoon_helix_extend: 0.5,
+            cartoon_helix_width_smoothing: 5.0,
+            cartoon_sheet_normal_smoothing: 5.0,
             cartoon_helix_width: 2.3,
             cartoon_helix_width_plus: 0.2,
             pivot_atom: None,
@@ -3860,6 +3885,7 @@ impl Default for MoleculeRenderOptions {
             backbone_atom_colors: false,
             draw_indices: None,
             object_paint: Vec::new(),
+            selection_aliases: std::collections::HashMap::new(),
             rainbow: None,
             bfac: None,
             atom_color_property: None,
@@ -4139,6 +4165,7 @@ pub fn apply_renderer_styles(
     styles: &StyleManager,
     scope_id: u64,
 ) {
+    options.selection_aliases = style_selection_aliases(styles, scope_id);
     if let Some(bondw) = renderer
         .resolved_attr("bondw", styles, scope_id)
         .and_then(|value| value.trim().parse::<f32>().ok())
@@ -4445,6 +4472,14 @@ fn apply_mainchain_renderer_styles(
     smooth_color_default: bool,
     cap_default: TubeCapType,
 ) {
+    options.ribbon_axial_detail = renderer
+        .resolved_attr("axialdetail", styles, scope_id)
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .or(Some(if renderer.renderer_type() == "cartoon" {
+            8
+        } else {
+            6
+        }));
     options.smooth_color = resolved_renderer_bool(
         renderer,
         styles,
@@ -4545,14 +4580,26 @@ pub fn apply_cartoon_renderer_styles(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     options.cartoon_anchor_weight = resolved_f64("anchor_weight", 10.0).clamp(0.0, 20.0);
+    options.cartoon = true;
+    options.cartoon_helix_width_mode = match renderer
+        .resolved_attr("helix_width_mode", styles, scope_id)
+        .as_deref()
+    {
+        Some("const" | "constant") => CartoonHelixWidthMode::Constant,
+        Some("wavy") => CartoonHelixWidthMode::Wavy,
+        _ => CartoonHelixWidthMode::Average,
+    };
+    options.cartoon_helix_extend = resolved_f64("helix_extend", 0.5).clamp(0.0, 1.0);
+    options.cartoon_helix_width_smoothing = resolved_f64("helix_wsmooth", 5.0);
+    options.cartoon_sheet_normal_smoothing = resolved_f64("sheet_wsmooth", 5.0);
     options.cartoon_helix_ribbon =
         resolved_renderer_bool(renderer, styles, scope_id, "helix_ribbon", false);
     options.cartoon_helix_width = resolved_f64("helix_width", 2.3).max(f64::EPSILON);
     options.cartoon_helix_width_plus = resolved_f64("helix_wplus", 0.2);
     if options.cartoon_helix_ribbon {
-        if let Some(section) = resolve_ribbon_section(renderer, styles, scope_id, "ribhelix") {
-            options.styled_ribbon.helix = Some(section);
-        }
+        options.styled_ribbon.helix = Some(
+            resolve_ribbon_section(renderer, styles, scope_id, "ribhelix").unwrap_or((0.35, 0.35)),
+        );
         options.styled_ribbon.helix_shape =
             resolve_section_shape(renderer, styles, scope_id, "ribhelix");
         if let Some(value) = renderer
@@ -4570,14 +4617,12 @@ pub fn apply_cartoon_renderer_styles(
         options.helix_head = resolve_ribbon_junction(renderer, styles, scope_id, "ribhelix_head");
         options.helix_tail = resolve_ribbon_junction(renderer, styles, scope_id, "ribhelix_tail");
     } else {
-        let radius =
-            (options.cartoon_helix_width + options.cartoon_helix_width_plus).max(f64::EPSILON);
         let tuber = renderer
             .resolved_child_attr("helix", "tuber", styles, scope_id)
             .and_then(|value| value.trim().parse::<f64>().ok())
             .unwrap_or(1.0)
             .max(f64::EPSILON);
-        options.styled_ribbon.helix = Some((radius * tuber, radius));
+        options.styled_ribbon.helix = Some((tuber, 1.0));
     }
     options.sheet_head = resolve_ribbon_junction(renderer, styles, scope_id, "sheethead");
     options.ribbon_radial_detail = options
@@ -4593,6 +4638,10 @@ pub fn apply_tube_renderer_styles(
     styles: &StyleManager,
     scope_id: u64,
 ) {
+    options.ribbon_axial_detail = renderer
+        .resolved_attr("axialdetail", styles, scope_id)
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .or(Some(6));
     let child_f64 = |name: &str, fallback: f64| {
         renderer
             .resolved_child_attr("section", name, styles, scope_id)
@@ -4922,6 +4971,9 @@ return JSON.stringify(__results);
 /// shows (C++ `MolSurfRenderer::getColorMol`: nearest atom → its scheme colour).
 /// Returns one `ColorSpec` per atom, indexed by atom index.
 pub fn resolve_atom_colors(molecule: &MolCoord, options: &MoleculeRenderOptions) -> Vec<ColorSpec> {
+    if let Some(coloring) = &options.molecular_coloring {
+        return coloring.resolve(molecule);
+    }
     let script_colors = options
         .script_coloring
         .as_ref()
@@ -4929,7 +4981,8 @@ pub fn resolve_atom_colors(molecule: &MolCoord, options: &MoleculeRenderOptions)
     // Object coloring ($molcol cascade) for an atom renderer: CPKColoring carbon is
     // $molcol, so carbons defer to the object's paint/bfac scheme; other elements
     // keep their CPK colour. Built once when the object declares a scheme.
-    let paint_styles = (!options.object_paint.is_empty()).then(default_style_manager);
+    let paint_entries = (!options.object_paint.is_empty() && options.molecular_coloring.is_none())
+        .then(|| compile_paint_colors(options, &default_style_manager()));
     let bfac_atoms = options.bfac.clone().map(|mut bfac| {
         bfac.start_molecule(molecule);
         bfac
@@ -4962,9 +5015,8 @@ pub fn resolve_atom_colors(molecule: &MolCoord, options: &MoleculeRenderOptions)
         if let Some(bfac) = &bfac_atoms {
             return Some(solid_color_to_spec(&bfac.color_for_atom(atom)));
         }
-        if let Some(styles) = &paint_styles {
-            return resolve_paint_color(&options.object_paint, atom, molecule, styles)
-                .map(rgba_to_spec);
+        if let Some(entries) = &paint_entries {
+            return resolve_paint_color(entries, atom, molecule).map(rgba_to_spec);
         }
         None
     };
@@ -5836,6 +5888,7 @@ fn putty_value_stats(chains: &[Vec<MainchainPoint>], putty: &PuttyOptions) -> (f
     let vals: Vec<f64> = chains
         .iter()
         .flatten()
+        .filter(|point| point.selected)
         .map(|point| pivot_target(point, putty.target))
         .collect();
     if vals.is_empty() {
@@ -5851,21 +5904,47 @@ fn putty_value_stats(chains: &[Vec<MainchainPoint>], putty: &PuttyOptions) -> (f
 /// Resolve an atom's object paint colour: the first entry whose selection matches
 /// the atom, its colour name resolved to RGBA (C++ first-match PaintColoring).
 /// `None` when no entry matches.
+fn style_selection_aliases(
+    styles: &StyleManager,
+    scope_id: u64,
+) -> std::collections::HashMap<String, cuemol_molstr::Selector> {
+    styles
+        .str_data_entries("sel", scope_id)
+        .into_iter()
+        .filter_map(|(name, value)| parse_selector(&value).ok().map(|selector| (name, selector)))
+        .collect()
+}
+
+fn compile_paint_colors(
+    options: &MoleculeRenderOptions,
+    styles: &StyleManager,
+) -> Vec<(cuemol_molstr::Selector, [f32; 4])> {
+    let fallback;
+    let aliases = if options.selection_aliases.is_empty() {
+        fallback = style_selection_aliases(styles, DEFAULT_STYLE_SCOPE);
+        &fallback
+    } else {
+        &options.selection_aliases
+    };
+    options
+        .object_paint
+        .iter()
+        .filter_map(|(selection, color)| {
+            let selection = cuemol_molstr::parse_named_selector(selection, aliases).ok()?;
+            Some((selection, resolve_color_name(color, styles)?))
+        })
+        .collect()
+}
+
 fn resolve_paint_color(
-    entries: &[(String, String)],
+    entries: &[(cuemol_molstr::Selector, [f32; 4])],
     atom: &Atom,
     molecule: &MolCoord,
-    styles: &StyleManager,
 ) -> Option<[f32; 4]> {
-    for (sel, color_name) in entries {
-        let Ok(selector) = parse_selector(sel) else {
-            continue;
-        };
-        if selector.matches_in_molecule(atom, molecule) {
-            return resolve_color_name(color_name, styles);
-        }
-    }
-    None
+    entries
+        .iter()
+        .find(|(selector, _)| selector.matches_in_molecule(atom, molecule))
+        .map(|(_, color)| *color)
 }
 
 /// Wrap an RGBA `[f32;4]` in a flat `ColorSpec`.
@@ -5908,7 +5987,13 @@ fn resolve_color_name(name: &str, styles: &StyleManager) -> Option<[f32; 4]> {
     }
     cuemol_gfx::parse_color(name)
         .ok()
-        .and_then(|spec| spec.rgba8())
+        .and_then(|spec| {
+            spec.resolve(
+                |name| styles.get_color(name, DEFAULT_STYLE_SCOPE).cloned(),
+                None,
+            )
+        })
+        .map(|color| color.rgba8())
         .map(to_rgba)
 }
 
@@ -5920,9 +6005,8 @@ fn ribbon_paint_colors(
     sample_count: usize,
     pivots: &[MainchainPoint],
     subdiv: usize,
-    entries: &[(String, String)],
+    entries: &[(cuemol_molstr::Selector, [f32; 4])],
     molecule: &MolCoord,
-    styles: &StyleManager,
 ) -> Vec<Option<[f32; 4]>> {
     let n = pivots.len();
     let subdiv = subdiv.max(1);
@@ -5932,7 +6016,7 @@ fn ribbon_paint_colors(
             molecule
                 .atoms()
                 .get(pivot.atom_index)
-                .and_then(|atom| resolve_paint_color(entries, atom, molecule, styles))
+                .and_then(|atom| resolve_paint_color(entries, atom, molecule))
         })
         .collect();
     (0..sample_count)
@@ -6246,6 +6330,10 @@ struct MainchainPoint {
     /// Molecule atom index of this residue's backbone pivot (CA/P/C1'/O5'), used
     /// to evaluate per-residue paint coloring against the pivot atom.
     atom_index: usize,
+    carbonyl: Option<Vector4>,
+    secondary_marker: u8,
+    selected: bool,
+    pivot_selected: bool,
 }
 
 /// Read a residue's `secondary` property (set by the PDB reader's HELIX/SHEET
@@ -6272,6 +6360,15 @@ fn collect_mainchain_pivots(
     draw: Option<&std::collections::BTreeSet<usize>>,
     pivot_atom: Option<&str>,
 ) -> Vec<Vec<MainchainPoint>> {
+    collect_mainchain_pivots_with_context(molecule, draw, pivot_atom, false)
+}
+
+fn collect_mainchain_pivots_with_context(
+    molecule: &MolCoord,
+    draw: Option<&std::collections::BTreeSet<usize>>,
+    pivot_atom: Option<&str>,
+    preserve_chain: bool,
+) -> Vec<Vec<MainchainPoint>> {
     let mut runs: Vec<Vec<MainchainPoint>> = Vec::new();
     // Previous accepted pivot: (chain name, position, link cutoff).
     let mut prev: Option<(String, Vector4, f64)> = None;
@@ -6287,9 +6384,12 @@ fn collect_mainchain_pivots(
                     .iter()
                     .any(|index| set.contains(index))
             });
-            if included {
-                if let Some((point, cutoff)) = mainchain_pivot_point(molecule, residue, pivot_atom)
+            if included || preserve_chain {
+                if let Some((mut point, cutoff)) =
+                    mainchain_pivot_point(molecule, residue, pivot_atom)
                 {
+                    point.selected = included;
+                    point.pivot_selected = draw.is_none_or(|set| set.contains(&point.atom_index));
                     let chain = residue.chain_name().to_string();
                     let pos = point.pos;
                     let new_run = match &prev {
@@ -6360,11 +6460,32 @@ fn mainchain_pivot_point(
                     NUCLEIC_PIVOT_LINK_DIST
                 };
                 let point = MainchainPoint {
+                    selected: true,
+                    pivot_selected: true,
                     pos: Vector4::new3(atom.position.x, atom.position.y, atom.position.z),
                     ss: residue_secondary(molecule, atom),
                     b_factor: atom.b_factor as f64,
                     occupancy: atom.occupancy as f64,
                     atom_index: index,
+                    carbonyl: if residue_secondary(molecule, atom) == Secondary::Sheet {
+                        let named = |name: &str| {
+                            indices
+                                .iter()
+                                .filter_map(|&i| molecule.atoms().get(i))
+                                .find(|a| a.name.trim() == name)
+                                .map(|a| a.position)
+                        };
+                        named("O")
+                            .zip(named("C"))
+                            .map(|(o, c)| Vector4::new3(o.x - c.x, o.y - c.y, o.z - c.z))
+                    } else {
+                        None
+                    },
+                    secondary_marker: molecule
+                        .residue_prop_for_atom(atom, "secondary2")
+                        .and_then(|value| value.as_bytes().get(1))
+                        .copied()
+                        .unwrap_or(0),
                 };
                 return Some((point, cutoff));
             }
@@ -6449,7 +6570,7 @@ impl CubicSpline {
             let mut h = vec![0.0; int_no];
             let mut ih = vec![0.0; int_no];
             for i in 0..int_no {
-                h[i] = points[i].sub_vec(points[i + 1]).length3d();
+                h[i] = points[i].sub_vec(points[i + 1]).length3d().max(1.0e-8);
                 ih[i] = 1.0 / h[i];
             }
 
@@ -6614,25 +6735,37 @@ pub fn ribbon_mesh_snapshot(
             .copied()
             .collect::<std::collections::BTreeSet<_>>()
     });
-    let chains = collect_mainchain_pivots(molecule, draw.as_ref(), options.pivot_atom.as_deref());
+    let chains = collect_mainchain_pivots_with_context(
+        molecule,
+        draw.as_ref(),
+        options.pivot_atom.as_deref(),
+        !options.cartoon && !options.linear_backbone,
+    );
     // Putty (TubeRenderer): modulate the ribbon width per residue by the B-factor/
     // occupancy, on top of the section width scales. Stats are over all pivots.
     let putty = options.putty;
     let (putty_lo, putty_hi, putty_aver) = putty_value_stats(&chains, &putty);
     // Object paint coloring (resolved against the X11 table) colours the backbone
     // where the renderer defers to $molcol; built once when the scene paints.
-    let paint_styles = (!options.object_paint.is_empty()).then(default_style_manager);
+    let paint_entries = (!options.object_paint.is_empty() && options.molecular_coloring.is_none())
+        .then(|| compile_paint_colors(options, &default_style_manager()));
     // BfacColoring: auto-scale to the molecule's B-factor range once up front.
-    let bfac_coloring = options.bfac.clone().map(|mut bfac| {
-        bfac.start_molecule(molecule);
-        bfac
-    });
+    let bfac_coloring = options
+        .bfac
+        .clone()
+        .filter(|_| options.molecular_coloring.is_none())
+        .map(|mut bfac| {
+            bfac.start_molecule(molecule);
+            bfac
+        });
     let backbone_atom_colors = (options.backbone_atom_colors || options.script_coloring.is_some())
         .then(|| resolve_atom_colors(molecule, options));
     let cartoon_anchor_atoms = options
         .cartoon_anchor_selection
         .as_deref()
-        .and_then(|selection| parse_selector(selection).ok())
+        .and_then(|selection| {
+            cuemol_molstr::parse_named_selector(selection, &options.selection_aliases).ok()
+        })
         .map(|selection| {
             molecule
                 .select_indices(&selection)
@@ -6642,28 +6775,37 @@ pub fn ribbon_mesh_snapshot(
     let rainbow_colors = options
         .rainbow
         .as_ref()
+        .filter(|_| options.molecular_coloring.is_none())
         .map(|rainbow| rainbow_atom_colors(molecule, rainbow));
     let mut meshes = Vec::new();
     for pivots in &chains {
-        if pivots.len() < 2 {
+        if pivots.len() < 2
+            || (!options.cartoon && !options.linear_backbone && pivots.len() < 3)
+            || !pivots.iter().any(|p| p.selected)
+        {
             continue;
         }
-        let (samples, sections, mut width_scales) = sample_backbone(
-            pivots,
-            subdiv,
-            &BackboneSamplingOptions {
-                anchor_weight: options.anchor_weight,
-                section_smoothing: options.ribbon_smoothing,
-                cartoon_anchor_atoms: cartoon_anchor_atoms.as_ref(),
-                cartoon_anchor_weight: options.cartoon_anchor_weight,
-                linear: options.linear_backbone,
-                uniform_section: options.uniform_backbone,
-                helix_head: options.helix_head,
-                helix_tail: options.helix_tail,
-                sheet_head: options.sheet_head,
-                sheet_tail: options.sheet_tail,
-            },
-        );
+        let sample_count = (pivots.len() - 1) * subdiv + 1;
+        let (samples, sections, mut width_scales) = if options.linear_backbone {
+            sample_backbone(
+                pivots,
+                subdiv,
+                &BackboneSamplingOptions {
+                    anchor_weight: options.anchor_weight,
+                    section_smoothing: options.ribbon_smoothing,
+                    cartoon_anchor_atoms: cartoon_anchor_atoms.as_ref(),
+                    cartoon_anchor_weight: options.cartoon_anchor_weight,
+                    linear: options.linear_backbone,
+                    uniform_section: options.uniform_backbone || !options.linear_backbone,
+                    helix_head: options.helix_head,
+                    helix_tail: options.helix_tail,
+                    sheet_head: options.sheet_head,
+                    sheet_tail: options.sheet_tail,
+                },
+            )
+        } else {
+            (Vec::new(), Vec::new(), vec![1.0; sample_count])
+        };
         if putty.mode != PuttyMode::Off {
             apply_putty_to_width_scales(
                 &mut width_scales,
@@ -6676,9 +6818,13 @@ pub fn ribbon_mesh_snapshot(
             );
         }
         // Renderer coloring takes precedence, followed by the object scheme.
-        let mut paint = if let Some(property) = options.atom_color_property.as_deref() {
+        let mut paint = if options.molecular_coloring.is_some() {
+            backbone_atom_colors
+                .as_ref()
+                .map(|colors| ribbon_resolved_atom_colors(sample_count, pivots, subdiv, colors))
+        } else if let Some(property) = options.atom_color_property.as_deref() {
             Some(ribbon_atom_prop_colors(
-                samples.len(),
+                sample_count,
                 pivots,
                 subdiv,
                 property,
@@ -6686,32 +6832,31 @@ pub fn ribbon_mesh_snapshot(
             ))
         } else if let Some(atom_colors) = &rainbow_colors {
             Some(ribbon_rainbow_colors(
-                samples.len(),
+                sample_count,
                 pivots,
                 subdiv,
                 atom_colors,
             ))
         } else if let Some(bfac) = &bfac_coloring {
             Some(ribbon_bfac_colors(
-                samples.len(),
+                sample_count,
                 pivots,
                 subdiv,
                 bfac,
                 molecule,
             ))
-        } else if let Some(styles) = paint_styles.as_ref() {
+        } else if let Some(entries) = paint_entries.as_ref() {
             Some(ribbon_paint_colors(
-                samples.len(),
+                sample_count,
                 pivots,
                 subdiv,
-                &options.object_paint,
+                entries,
                 molecule,
-                styles,
             ))
         } else {
             backbone_atom_colors
                 .as_ref()
-                .map(|colors| ribbon_resolved_atom_colors(samples.len(), pivots, subdiv, colors))
+                .map(|colors| ribbon_resolved_atom_colors(sample_count, pivots, subdiv, colors))
         };
         if options.smooth_color {
             if let Some(colors) = &mut paint {
@@ -6733,7 +6878,23 @@ pub fn ribbon_mesh_snapshot(
             helix_back_color: options.helix_back_color,
             sheet_side_color: options.sheet_side_color,
         };
-        let mesh = ribbon_tube_mesh(&samples, &sections, &width_scales, &mesh_options);
+        let mesh = if options.linear_backbone {
+            ribbon_tube_mesh(&samples, &sections, &width_scales, &mesh_options)
+        } else {
+            let strips = if options.cartoon {
+                backbone::cartoon::strips(pivots, options, cartoon_anchor_atoms.as_ref())
+            } else {
+                backbone::ribbon_strips(pivots, options)
+            };
+            backbone::mesh(
+                &strips,
+                pivots,
+                paint.as_deref(),
+                &width_scales,
+                options,
+                subdiv,
+            )
+        };
         if !mesh.vertices.is_empty() {
             meshes.push(mesh);
         }
@@ -9018,6 +9179,78 @@ mod tests {
     }
 
     #[test]
+    fn molecular_color_reference_inherits_every_element_and_paint_modifiers() {
+        let molecule = MolCoord::with_atoms(vec![
+            sample_atom("CA", "C", 0.0, 0.0, 0.0),
+            sample_atom("P", "P", 1.0, 0.0, 0.0),
+            sample_atom("O", "O", 2.0, 0.0, 0.0),
+        ]);
+        let mut scene = cuemol_molstr::MolSceneManager::new();
+        let scene_uid = scene.new_scene("coloring");
+        let object_uid = scene
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("molecule", molecule);
+        let object = scene.object_mut(object_uid).unwrap();
+        object.set_coloring(Some("PaintColoring".into()), Default::default());
+        object.set_paint_coloring(vec![("*".into(), "#2468ac".into())]);
+        let uid = object.add_renderer("tube", "tube");
+        object
+            .renderer_mut(uid)
+            .unwrap()
+            .set_qsc_attr("style", "DefaultHSCPaint");
+        let styles = default_style_manager();
+        let mut options = MoleculeRenderOptions::default();
+        apply_molecular_coloring(
+            &mut options,
+            object,
+            object.renderer(uid).unwrap(),
+            &styles,
+            0,
+        );
+        let colors = resolve_atom_colors(object.mol(), &options);
+        let expected = cuemol_gfx::Rgba8 {
+            r: 0x24,
+            g: 0x68,
+            b: 0xac,
+            a: 255,
+        };
+        assert!(colors.iter().all(|c| c.rgba8() == Some(expected)));
+
+        let renderer = object.renderer_mut(uid).unwrap();
+        renderer.set_qsc_attr("defaultcolor", "#abcdef");
+        let mut paint = cuemol_core::LDom2Node::new();
+        paint.set_tag_name("coloring");
+        paint.set_type_name("PaintColoring");
+        let entry = paint.append_child("paint");
+        entry.set_str_attr("sel", "elem O");
+        entry.set_str_attr("color", "$molcol{alpha:0.5}");
+        renderer.set_qsc_children(vec![paint]);
+        apply_molecular_coloring(
+            &mut options,
+            object,
+            object.renderer(uid).unwrap(),
+            &styles,
+            0,
+        );
+        let colors = resolve_atom_colors(object.mol(), &options);
+        let solid = cuemol_gfx::Rgba8 {
+            r: 0xab,
+            g: 0xcd,
+            b: 0xef,
+            a: 255,
+        };
+        assert_eq!(colors[0].rgba8(), Some(solid));
+        assert_eq!(colors[1].rgba8(), Some(solid));
+        let oxygen = colors[2].rgba8().unwrap();
+        assert_eq!(
+            [oxygen.r, oxygen.g, oxygen.b],
+            [expected.r, expected.g, expected.b]
+        );
+        assert!((i32::from(oxygen.a) - 128).abs() <= 1);
+    }
+
+    #[test]
     fn object_solid_coloring_only_replaces_molcol_atoms() {
         let mut options = MoleculeRenderOptions::default();
         let default_color = SolidColor::from_rgba_u8(0x65, 0x43, 0x21, 0xff);
@@ -9695,9 +9928,7 @@ return cuemol.makeColor("#0000ff");
 
     #[test]
     fn ribbon_style_section_shape_is_rectangular_or_elliptical_per_type() {
-        // Build a helix run and render it under two styles that share the same
-        // dims but differ in section `type`: DefaultRibbon (rectangle) vs
-        // RoundRibbon (elliptical).
+        // Rectangle and ellipse profiles have different face-normal continuity.
         fn first_ring_distinct_normals(style: &str) -> (SectionShape, usize) {
             let mut mol = MolCoord::with_atoms(vec![
                 ca_atom(1, 0.0, 0.0, 0.0),
@@ -9756,7 +9987,7 @@ return cuemol.makeColor("#0000ff");
 
     #[test]
     fn ribbon_style_section_sets_cross_section_aspect_from_tuber() {
-        // A helix run styled by DefaultRibbon (<helix width="0.2" tuber="6.0"/>).
+        // RoundRibbon gives the helix absolute semi-axes of 1.2 and 0.2.
         let mut mol = MolCoord::with_atoms(vec![
             ca_atom(1, 0.0, 0.0, 0.0),
             ca_atom(2, 3.0, 0.0, 0.0),
@@ -9774,9 +10005,7 @@ return cuemol.makeColor("#0000ff");
         let obj_uid = scene.add_molecule("m", mol);
         let obj = scene.object_mut(obj_uid).unwrap();
         let rend_uid = obj.add_renderer("ribbon", "rb");
-        // RoundRibbon: same helix/sheet dims as DefaultRibbon but an ELLIPTICAL
-        // profile, so the ring aspect equals tuber exactly (a rectangle's corners
-        // would push the max distance past base_width — covered by the shape test).
+        // The elliptical profile includes both principal axes.
         obj.renderer_mut(rend_uid)
             .unwrap()
             .set_qsc_attr("style", "RoundRibbon");
@@ -9799,20 +10028,12 @@ return cuemol.makeColor("#0000ff");
         // band — and is distinctly flatter than the unstyled factor model (~3.14).
         let aspect = |opts: &MoleculeRenderOptions| -> f64 {
             let snap = ribbon_mesh_snapshot(obj.mol(), opts);
-            let ring = &snap.meshes[0].vertices[0..TUBE_RADIAL];
-            let n = TUBE_RADIAL as f64;
-            let c = (
-                ring.iter().map(|v| v.position.x).sum::<f64>() / n,
-                ring.iter().map(|v| v.position.y).sum::<f64>() / n,
-                ring.iter().map(|v| v.position.z).sum::<f64>() / n,
-            );
-            let dists: Vec<f64> = ring
+            let dists = snap.meshes[0]
+                .vertices
                 .iter()
-                .map(|v| {
-                    let (dx, dy, dz) = (v.position.x - c.0, v.position.y - c.1, v.position.z - c.2);
-                    (dx * dx + dy * dy + dz * dz).sqrt()
-                })
-                .collect();
+                .filter(|v| (v.position.x - 3.0).abs() < 1.0e-8)
+                .map(|v| v.position.y.hypot(v.position.z))
+                .collect::<Vec<_>>();
             dists.iter().cloned().fold(0.0_f64, f64::max)
                 / dists
                     .iter()
@@ -11185,11 +11406,15 @@ return cuemol.makeColor("#0000ff");
             .iter()
             .enumerate()
             .map(|(i, &(x, y, z))| MainchainPoint {
+                selected: true,
+                pivot_selected: true,
                 pos: Vector4::new3(x, y, z),
                 ss: Secondary::Coil,
                 b_factor: 0.0,
                 occupancy: 1.0,
                 atom_index: i,
+                carbonyl: None,
+                secondary_marker: 0,
             })
             .collect();
         let positions: Vec<Vector4> = pivots.iter().map(|p| p.pos).collect();
@@ -11336,11 +11561,15 @@ return cuemol.makeColor("#0000ff");
         ]
         .iter()
         .map(|&(x, y, z)| MainchainPoint {
+            selected: true,
+            pivot_selected: true,
             pos: Vector4::new3(x, y, z),
             ss: Secondary::Coil,
             b_factor: 0.0,
             occupancy: 1.0,
             atom_index: 0,
+            carbonyl: None,
+            secondary_marker: 0,
         })
         .collect();
         let max_y = |w: f64| {
@@ -11403,10 +11632,21 @@ return cuemol.makeColor("#0000ff");
         assert_eq!(snap.atom_count(), 0);
         assert_eq!(snap.bond_count(), 0);
         assert_eq!(snap.mesh_count(), 1);
-        // 4 pivots, SUBDIV=8 -> 25 ring samples; each of the 24 ring gaps emits
-        // TUBE_RADIAL quads = 2 triangles.
-        assert_eq!(snap.meshes[0].triangle_count(), 24 * TUBE_RADIAL * 2);
-        assert_eq!(snap.meshes[0].vertices.len(), 25 * TUBE_RADIAL);
+        // QIF defaults use eight axial subdivisions and sixteen radial samples.
+        assert_eq!(snap.meshes[0].triangle_count(), 24 * 16 * 2);
+        let positions = snap.meshes[0]
+            .vertices
+            .iter()
+            .map(|v| {
+                [v.position.x, v.position.y, v.position.z]
+                    .map(|value| (value * 1.0e8).round() as i64)
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(positions.len(), 25 * 16);
+        assert!(snap.meshes[0]
+            .indices
+            .iter()
+            .all(|&i| (i as usize) < snap.meshes[0].vertices.len()));
         // Vertex normals must be unit length for correct lighting.
         for vertex in &snap.meshes[0].vertices {
             assert!((vertex.normal.length3d() - 1.0).abs() < 1.0e-5);
@@ -11439,8 +11679,18 @@ return cuemol.makeColor("#0000ff");
         options.styled_ribbon.coil = Some((0.4, 0.4));
         let snapshot = ribbon_mesh_snapshot(&molecule, &options);
         let mesh = &snapshot.meshes[0];
-        assert_eq!(mesh.vertices.len(), 5 * 9 + 2);
         assert_eq!(mesh.triangle_count(), 4 * 9 * 2 + 2 * 9);
+        for (x, sign) in [(0.0, -1.0), (6.0, 1.0)] {
+            let cap = mesh
+                .vertices
+                .iter()
+                .filter(|v| (v.position.x - x).abs() < 1.0e-8 && (v.normal.x - sign).abs() < 1.0e-8)
+                .collect::<Vec<_>>();
+            assert!(cap.len() >= 10);
+            assert!(cap
+                .iter()
+                .any(|v| (v.position.y - 2.0).abs() < 1.0e-8 && v.position.z.abs() < 1.0e-8));
+        }
         let first_center = mesh.vertices[..9]
             .iter()
             .fold(Vector4::new3(0.0, 0.0, 0.0), |sum, vertex| {
@@ -11454,10 +11704,60 @@ return cuemol.makeColor("#0000ff");
     }
 
     #[test]
-    fn ribbon_mesh_snapshot_skips_single_residue_chain() {
-        let mol = MolCoord::with_atoms(vec![ca_atom(1, 0.0, 0.0, 0.0)]);
-        let snap = ribbon_mesh_snapshot(&mol, &MoleculeRenderOptions::default());
-        assert_eq!(snap.mesh_count(), 0);
+    fn ribbon_mesh_snapshot_skips_short_physical_chains() {
+        for count in [1, 2] {
+            let mol = MolCoord::with_atoms(
+                (0..count)
+                    .map(|i| ca_atom(i + 1, i as f64 * 3.8, 0.0, 0.0))
+                    .collect(),
+            );
+            let snap = ribbon_mesh_snapshot(&mol, &MoleculeRenderOptions::default());
+            assert_eq!(snap.mesh_count(), 0);
+        }
+    }
+
+    #[test]
+    fn paint_coloring_resolves_named_secondary_structure_selections() {
+        let mut molecule = MolCoord::with_atoms(vec![
+            ca_atom(1, 0.0, 0.0, 0.0),
+            ca_atom(2, 3.8, 0.0, 0.0),
+            ca_atom(3, 7.6, 0.0, 0.0),
+        ]);
+        molecule
+            .set_residue_prop_str("A", "1", "secondary", "helix")
+            .unwrap();
+        molecule
+            .set_residue_prop_str("A", "2", "secondary", "sheet")
+            .unwrap();
+        let options = MoleculeRenderOptions {
+            object_paint: vec![
+                ("helix".into(), "#ff0000".into()),
+                ("sheet".into(), "#00ff00".into()),
+                ("coil".into(), "#0000ff".into()),
+            ],
+            ..MoleculeRenderOptions::default()
+        };
+        let colors = resolve_atom_colors(&molecule, &options);
+        for (i, color) in colors.iter().enumerate() {
+            let color = color.rgba8().unwrap();
+            let channels = [color.r, color.g, color.b];
+            for (j, channel) in channels.into_iter().enumerate() {
+                assert_eq!(channel, if i == j { 255 } else { 0 });
+            }
+            assert_eq!(color.a, 255);
+        }
+        let snapshot = ribbon_mesh_snapshot(&molecule, &options);
+        for color in [
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 1.0],
+        ] {
+            assert!(snapshot
+                .meshes
+                .iter()
+                .flat_map(|mesh| &mesh.vertices)
+                .any(|v| v.color == color));
+        }
     }
 
     #[test]
@@ -11508,18 +11808,12 @@ return cuemol.makeColor("#0000ff");
         // ribbon-vs-tube distinction in the real mesh geometry.
         fn first_ring_aspect(mol: &MolCoord) -> f64 {
             let snap = ribbon_mesh_snapshot(mol, &MoleculeRenderOptions::default());
-            let ring = &snap.meshes[0].vertices[0..TUBE_RADIAL];
-            let n = TUBE_RADIAL as f64;
-            let cx = ring.iter().map(|v| v.position.x).sum::<f64>() / n;
-            let cy = ring.iter().map(|v| v.position.y).sum::<f64>() / n;
-            let cz = ring.iter().map(|v| v.position.z).sum::<f64>() / n;
-            let dists: Vec<f64> = ring
+            let dists = snap.meshes[0]
+                .vertices
                 .iter()
-                .map(|v| {
-                    let (dx, dy, dz) = (v.position.x - cx, v.position.y - cy, v.position.z - cz);
-                    (dx * dx + dy * dy + dz * dz).sqrt()
-                })
-                .collect();
+                .filter(|v| (v.position.x - 3.0).abs() < 1.0e-8)
+                .map(|v| v.position.y.hypot(v.position.z))
+                .collect::<Vec<_>>();
             let max = dists.iter().cloned().fold(0.0_f64, f64::max);
             let min = dists.iter().cloned().fold(f64::INFINITY, f64::min);
             max / min.max(1.0e-9)

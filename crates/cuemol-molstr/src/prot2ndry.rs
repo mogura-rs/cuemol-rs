@@ -8,9 +8,9 @@
 //! - `secondary2` = "H"|"G"|"I"|"E" with a trailing "s" (start) / "e" (end)
 //!   marker, or "" for coil.
 
-use crate::molecule::{Atom, MolCoord, ResidueKey};
+use crate::molecule::{MolCoord, ResidueKey};
 use cuemol_core::Vector4;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Maximum N(i)-C(i-1) peptide-bond distance before a chain break is assumed.
 const PEPDIST_MAX: f64 = 3.0;
@@ -20,11 +20,12 @@ const PARALLEL: i32 = 1;
 const ANTIPARALLEL: i32 = 2;
 
 /// One backbone residue with the geometry and bookkeeping the DSSP passes need.
+#[cfg_attr(test, derive(Clone))]
 struct Backbone {
     key: ResidueKey,
-    /// Residue name (compared case-sensitively against "pro", mirroring C++).
+    /// Residue name used to exclude proline donors.
     resn: String,
-    /// Sequential chain-segment index; H-bonds never cross segments.
+    /// Sequential chain-segment index for peptide connectivity.
     chind: i32,
     ca: Vector4,
     c: Vector4,
@@ -64,9 +65,6 @@ struct Bridge {
 /// Mirrors C++ `MolCoord::calcProt2ndry(hb_high, bIgnoreBulge)`.
 pub fn calc_prot_2ndry(mol: &mut MolCoord, hb_high: f64, ignore_bulge: bool) {
     let mut chains = build_backbone(mol);
-    if chains.is_empty() {
-        return;
-    }
     doit(&mut chains, hb_high, ignore_bulge);
     apply_to_mol(mol, &chains);
 }
@@ -76,9 +74,6 @@ pub fn calc_prot_2ndry(mol: &mut MolCoord, hb_high: f64, ignore_bulge: bool) {
 /// dhangl1)`; `hb_high` is fixed at -500 as in the original.
 pub fn calc_prot_2ndry2(mol: &mut MolCoord, ignore_bulge: bool, dhangl: f64) {
     let mut chains = build_backbone(mol);
-    if chains.is_empty() {
-        return;
-    }
     doit(&mut chains, -500.0, ignore_bulge);
     if dhangl > 0.01 {
         con_helices(&mut chains, dhangl);
@@ -90,15 +85,6 @@ fn doit(chains: &mut [Backbone], hb_high: f64, ignore_bulge: bool) {
     calc_hbon(chains, hb_high);
     calc_bridge(chains, ignore_bulge);
     calc_helices(chains);
-}
-
-/// First backbone atom with the given (trimmed) name within a residue.
-fn find_pos(atoms: &[Atom], indices: &[usize], name: &str) -> Option<Vector4> {
-    indices
-        .iter()
-        .filter_map(|&i| atoms.get(i))
-        .find(|a| a.name.trim() == name)
-        .map(|a| a.position)
 }
 
 struct PrevRes {
@@ -116,22 +102,40 @@ fn build_backbone(mol: &MolCoord) -> Vec<Backbone> {
     let mut prev: Option<PrevRes> = None;
     let mut ci: i32 = 0;
 
-    for summary in mol.residue_summaries() {
-        let (Some(n), Some(o), Some(c), Some(ca)) = (
-            find_pos(atoms, &summary.atom_indices, "N"),
-            find_pos(atoms, &summary.atom_indices, "O"),
-            find_pos(atoms, &summary.atom_indices, "C"),
-            find_pos(atoms, &summary.atom_indices, "CA"),
-        ) else {
-            // Incomplete/non-protein residue: break the segment.
+    let mut residues = BTreeSet::new();
+    let mut nitrogen = HashMap::new();
+    for atom in atoms {
+        let key = (atom.chain_id.as_str(), atom.res_id, atom.ins_code);
+        residues.insert(key);
+        if atom.name.trim() == "N" {
+            nitrogen.entry(key).or_insert((atom, [None; 3]));
+        }
+    }
+    for atom in atoms {
+        let index = match atom.name.trim() {
+            "O" => 0,
+            "C" => 1,
+            "CA" => 2,
+            _ => continue,
+        };
+        if let Some((_, positions)) =
+            nitrogen.get_mut(&(atom.chain_id.as_str(), atom.res_id, atom.ins_code))
+        {
+            positions[index].get_or_insert(atom.position);
+        }
+    }
+    for (chain, res_id, ins_code) in residues {
+        let Some((nitrogen, [Some(o), Some(c), Some(ca)])) =
+            nitrogen.get(&(chain, res_id, ins_code))
+        else {
             prev = None;
             continue;
         };
-
-        let chain = summary.key.chain_id.clone();
+        let (n, o, c, ca) = (nitrogen.position, *o, *c, *ca);
+        let chain = chain.to_string();
         let mut bb = Backbone {
-            key: summary.key.clone(),
-            resn: summary.res_name.clone(),
+            key: ResidueKey::new(chain.clone(), res_id, ins_code),
+            resn: nitrogen.res_name.clone(),
             chind: 0,
             ca,
             c,
@@ -195,35 +199,36 @@ fn no_chain_brk(chains: &[Backbone], i: i32, j: i32) -> bool {
 
 fn calc_hbon(chains: &mut [Backbone], hb_high: f64) {
     const CADIST: f64 = 9.0;
-    let n = chains.len();
-    for i in 0..n {
-        if !no_chain_brk(chains, i as i32, i as i32) {
-            continue;
-        }
-        for j in (i + 1)..n {
-            if !no_chain_brk(chains, j as i32, j as i32) {
-                continue;
+    let coordinates = chains
+        .iter()
+        .map(|bb| [bb.ca.x, bb.ca.y, bb.ca.z].map(|v| (v / CADIST).floor() as i64))
+        .collect::<Vec<_>>();
+    let mut cells: HashMap<[i64; 3], Vec<usize>> = HashMap::new();
+    for (i, &cell) in coordinates.iter().enumerate() {
+        cells.entry(cell).or_default().push(i);
+    }
+    let mut candidates = Vec::new();
+    for (i, &[x, y, z]) in coordinates.iter().enumerate() {
+        candidates.clear();
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    if let Some(indices) = cells.get(&[x + dx, y + dy, z + dz]) {
+                        candidates.extend(indices.iter().copied().filter(|&j| j > i));
+                    }
+                }
             }
-            let cadist = chains[i].ca.sub(chains[j].ca).length();
-            if cadist >= CADIST {
+        }
+        candidates.sort_unstable();
+        for &j in &candidates {
+            if chains[i].ca.sub(chains[j].ca).length() >= CADIST {
                 continue;
             }
             check_hbon_pair(chains, i, j, hb_high);
-            // (i, i+1) only makes sense one way (peptide bond, not an H-bond).
             if j != i + 1 {
                 check_hbon_pair(chains, j, i, hb_high);
             }
         }
-    }
-
-    // C++ keeps acceptors in a std::set ordered by energy; `isHbon` inspects
-    // the two strongest. Replicate by sorting ascending.
-    for bb in chains.iter_mut() {
-        bb.acceptors.sort_by(|a, b| {
-            a.energy
-                .partial_cmp(&b.energy)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
     }
 }
 
@@ -233,7 +238,13 @@ fn check_hbon_pair(chains: &mut [Backbone], i: usize, j: usize, hb_high: f64) {
     if energy >= hb_high {
         return;
     }
-    chains[i].acceptors.push(HydrogenBond { peer: j, energy });
+    let acceptors = &mut chains[i].acceptors;
+    if let Err(index) = acceptors.binary_search_by(|bond| bond.energy.total_cmp(&energy)) {
+        if index < 2 {
+            acceptors.insert(index, HydrogenBond { peer: j, energy });
+            acceptors.truncate(2);
+        }
+    }
 }
 
 /// DSSP electrostatic H-bond energy (kcal/mol) for donor i, acceptor j.
@@ -243,12 +254,7 @@ fn calc_hbon_energy(chains: &[Backbone], i: usize, j: usize) -> f64 {
     const Q: f64 = -27888.0;
 
     let with = &chains[i];
-    // NOTE: C++ compares case-sensitively against lowercase "pro". CueMol stores
-    // residue names uppercase (PDBFileReader keeps PDB casing; all other molstr
-    // code compares uppercase literals like equals("CYS")/"ILE"), so this never
-    // matches "PRO" — proline is in practice treated as a normal donor. The
-    // dead-in-both-impls comparison is reproduced verbatim for output parity.
-    if with.resn == "pro" {
+    if with.resn.eq_ignore_ascii_case("PRO") {
         return 0.0;
     }
 
@@ -288,15 +294,39 @@ fn is_hbon(chains: &[Backbone], i: i32, j: i32) -> bool {
 
 fn calc_bridge(chains: &mut [Backbone], ignore_bulge: bool) {
     let mut bridges: Vec<Bridge> = Vec::new();
-    let n = chains.len() as i32;
+    let n = chains.len();
+    let mut neighbors = vec![Vec::new(); n];
+    for (i, residue) in chains.iter().enumerate() {
+        for bond in &residue.acceptors {
+            neighbors[i].push(bond.peer);
+            neighbors[bond.peer].push(i);
+        }
+    }
+    let mut candidates = Vec::new();
     for i in 0..n {
-        check_bridge(chains, &mut bridges, i);
+        candidates.clear();
+        for links in &neighbors[i.saturating_sub(1)..=(i + 1).min(n - 1)] {
+            for &peer in links {
+                for j in peer.saturating_sub(1)..=(peer + 1).min(n - 1) {
+                    if j > i + 2 {
+                        candidates.push(j as i32);
+                    }
+                }
+            }
+        }
+        candidates.sort_unstable();
+        candidates.dedup();
+        check_bridge(chains, &mut bridges, i as i32, candidates.iter().copied());
     }
     link_strands(chains, &mut bridges, ignore_bulge);
 }
 
-fn check_bridge(chains: &[Backbone], bridges: &mut Vec<Bridge>, i: i32) {
-    let n = chains.len() as i32;
+fn check_bridge(
+    chains: &[Backbone],
+    bridges: &mut Vec<Bridge>,
+    i: i32,
+    candidates: impl Iterator<Item = i32>,
+) {
     let mut j1 = 0i32;
     let mut j2 = 0i32;
 
@@ -304,8 +334,10 @@ fn check_bridge(chains: &[Backbone], bridges: &mut Vec<Bridge>, i: i32) {
         return;
     }
 
-    let mut j = i + 3;
-    while j < n && j2 == 0 {
+    for j in candidates {
+        if j2 != 0 {
+            break;
+        }
         if no_chain_brk(chains, j - 1, j + 1) {
             let b = if (is_hbon(chains, i + 1, j) && is_hbon(chains, j, i - 1))
                 || (is_hbon(chains, j + 1, i) && is_hbon(chains, i, j - 1))
@@ -329,7 +361,6 @@ fn check_bridge(chains: &[Backbone], bridges: &mut Vec<Bridge>, i: i32) {
                 }
             }
         }
-        j += 1;
     }
 }
 
@@ -668,17 +699,7 @@ fn con_helices(chains: &mut [Backbone], dangl: f64) {
 // ---------------------------------------------------------------------------
 
 fn apply_to_mol(mol: &mut MolCoord, chains: &[Backbone]) {
-    // C++ `init` clears these props from every residue it visits.
-    let all: Vec<(String, String)> = mol
-        .residue_summaries()
-        .iter()
-        .map(|s| (s.key.chain_id.clone(), s.key.script_index()))
-        .collect();
-    for (chain, sindex) in &all {
-        let _ = mol.remove_residue_prop_str(chain, sindex, "secondary");
-        let _ = mol.remove_residue_prop_str(chain, sindex, "secondary2");
-    }
-
+    let mut assignments = Vec::with_capacity(chains.len());
     let n = chains.len();
     for idx in 0..n {
         let bb = &chains[idx];
@@ -725,13 +746,9 @@ fn apply_to_mol(mol: &mut MolCoord, chains: &[Backbone]) {
             (None, String::new())
         };
 
-        let chain = bb.key.chain_id.clone();
-        let sindex = bb.key.script_index();
-        if let Some(s) = secondary {
-            let _ = mol.set_residue_prop_str(&chain, &sindex, "secondary", s);
-        }
-        let _ = mol.set_residue_prop_str(&chain, &sindex, "secondary2", secondary2);
+        assignments.push((bb.key.clone(), secondary, secondary2));
     }
+    mol.replace_secondary_structure(assignments);
 }
 
 // ---------------------------------------------------------------------------
@@ -892,5 +909,83 @@ impl Prot2ndrySet {
             }
             i = j + 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn backbone(i: usize) -> Backbone {
+        let t = i as f64;
+        let position = Vector4::new3(12.0 * (t * 0.17).cos(), 12.0 * (t * 0.17).sin(), 0.1 * t);
+        Backbone {
+            key: ResidueKey::new("A", i as i32, None),
+            resn: "ALA".into(),
+            chind: (i / 100) as i32,
+            ca: position,
+            c: position + Vector4::new3(0.3, 0.1, 0.4),
+            n: position + Vector4::new3(-0.6, 0.3, 0.0),
+            o: position + Vector4::new3(1.2, 0.0, 0.0),
+            h: position + Vector4::new3(0.1, 0.3, 0.0),
+            ss: String::new(),
+            ssid: 0,
+            turn: [b' '; 3],
+            acceptors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn proline_never_donates_for_any_residue_name_case() {
+        let mut residues = vec![backbone(0), backbone(1)];
+        residues[0].h = residues[1].o;
+        assert_eq!(calc_hbon_energy(&residues, 0, 1), -9900.0);
+        for name in ["PRO", "Pro", "pro"] {
+            residues[0].resn = name.into();
+            assert_eq!(calc_hbon_energy(&residues, 0, 1), 0.0);
+        }
+    }
+
+    #[test]
+    fn sparse_hydrogen_bonds_and_bridges_match_all_pairs() {
+        let mut sparse = (0..400).map(backbone).collect::<Vec<_>>();
+        let mut exhaustive = sparse.clone();
+        calc_hbon(&mut sparse, -500.0);
+        for i in 0..exhaustive.len() {
+            for j in i + 1..exhaustive.len() {
+                if (exhaustive[i].ca - exhaustive[j].ca).length() >= 9.0 {
+                    continue;
+                }
+                check_hbon_pair(&mut exhaustive, i, j, -500.0);
+                if j != i + 1 {
+                    check_hbon_pair(&mut exhaustive, j, i, -500.0);
+                }
+            }
+        }
+        for (actual, expected) in sparse.iter().zip(&exhaustive) {
+            assert_eq!(
+                actual
+                    .acceptors
+                    .iter()
+                    .map(|h| (h.peer, h.energy))
+                    .collect::<Vec<_>>(),
+                expected
+                    .acceptors
+                    .iter()
+                    .map(|h| (h.peer, h.energy))
+                    .collect::<Vec<_>>()
+            );
+            assert!(actual.acceptors.len() <= 2);
+        }
+        calc_bridge(&mut sparse, false);
+        let mut bridges = Vec::new();
+        for i in 0..exhaustive.len() as i32 {
+            check_bridge(&exhaustive, &mut bridges, i, i + 3..exhaustive.len() as i32);
+        }
+        link_strands(&mut exhaustive, &mut bridges, false);
+        assert_eq!(
+            sparse.iter().map(|r| &r.ss).collect::<Vec<_>>(),
+            exhaustive.iter().map(|r| &r.ss).collect::<Vec<_>>()
+        );
     }
 }

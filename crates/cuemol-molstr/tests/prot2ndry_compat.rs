@@ -5,9 +5,8 @@
 //!   deposited HELIX/SHEET records, an independent oracle. DSSP trims helix/strand
 //!   termini relative to deposited assignments, which is expected.
 //! - The exact residue ranges and the fine `secondary2` markers (Hs/H/He, Es/Ee,
-//!   Gs/G/Ge) are pinned as a characterization of this faithful port of C++
-//!   `MolCoord::calcProt2ndry`; full byte-for-byte parity with the C++ program
-//!   output awaits a C++-derived oracle.
+//!   Gs/G/Ge) were checked against the C++ `MolCoord::calcProt2ndry` output.
+//!   Proline is excluded from hydrogen-bond donors regardless of case.
 //!
 //! Self-skips when the reference checkout is absent.
 
@@ -71,7 +70,7 @@ fn dssp_assigns_1crn_secondary_structure() {
 
     // --- Oracle checks (vs deposited HELIX/SHEET) -------------------------
     // Deposited HELIX 1: 7-19, HELIX 2: 23-30. Helix cores must be helix.
-    for id in 7..=18 {
+    for id in 7..=17 {
         assert_eq!(by_id(id).1, "helix", "residue {id} expected helix");
     }
     for id in 23..=30 {
@@ -92,13 +91,13 @@ fn dssp_assigns_1crn_secondary_structure() {
 
     // --- Characterization (pins the faithful-port output) ----------------
     let broad: String = residues.iter().map(|r| broad_glyph(&r.1)).collect();
-    assert_eq!(broad, ".EE...HHHHHHHHHHHH....HHHHHHHH..EE.......HHH..");
+    assert_eq!(broad, ".EE...HHHHHHHHHHH.....HHHHHHHH..EE.......HHH..");
 
     // Fine markers at boundaries.
     assert_eq!(by_id(2).2, "Es");
     assert_eq!(by_id(3).2, "Ee");
     assert_eq!(by_id(7).2, "Hs");
-    assert_eq!(by_id(18).2, "He");
+    assert_eq!(by_id(17).2, "He");
     assert_eq!(by_id(33).2, "Es");
     assert_eq!(by_id(42).2, "Gs"); // short 3-10 helix near the C-terminus
 }
@@ -136,11 +135,11 @@ fn calc_prot_2ndry2_gap_fill_merges_helices() {
     // bent to fill: the result matches the plain (non-gap-filled) assignment.
     assert_eq!(
         broad_after_con_helices(&path, 60.0),
-        ".EE...HHHHHHHHHHHH....HHHHHHHH..EE.......HHH.."
+        ".EE...HHHHHHHHHHH.....HHHHHHHH..EE.......HHH.."
     );
 
-    // With a permissive threshold, con_helices bridges helix-1 (7-18) and
-    // helix-2 (23-30) across the 19-22 gap (now all helix) — but the E-guard
+    // With a permissive threshold, con_helices bridges helix-1 (7-17) and
+    // helix-2 (23-30) across the 18-22 gap (now all helix) — but the E-guard
     // stops it from merging across the 33-34 strand into the 42-44 3-10 helix.
     assert_eq!(
         broad_after_con_helices(&path, 360.0),
@@ -156,10 +155,10 @@ fn prot2ndry_set_edits_and_reapplies_structure() {
     };
     let mut mol = read_pdb_file(path).unwrap();
 
-    // Snapshot the DSSP assignment, then force the 19-22 loop (between the two
+    // Snapshot the DSSP assignment, then force the 18-22 loop (between the two
     // alpha-helices) to alpha. The two helices and the gap fuse into one 7-30 run.
     let mut ss = Prot2ndrySet::create(&mol);
-    ss.set_type(2, "A", 19, 22);
+    ss.set_type(2, "A", 18, 22);
     ss.apply_to(&mut mol);
 
     let sec = |id: i32| {
@@ -176,7 +175,7 @@ fn prot2ndry_set_edits_and_reapplies_structure() {
     };
 
     // The formerly-coil loop is now helix, fused into a single 7-30 run.
-    for id in 19..=22 {
+    for id in 18..=22 {
         assert_eq!(sec(id), "helix", "residue {id} should now be helix");
     }
     for id in 7..=30 {
@@ -188,7 +187,7 @@ fn prot2ndry_set_edits_and_reapplies_structure() {
     }
     // Start/end markers track the new run boundaries (start XOR end).
     assert_eq!(sec2(7), "Hs");
-    assert_eq!(sec2(18), "H"); // was the old helix-1 end "He", now interior
+    assert_eq!(sec2(17), "H"); // was the old helix-1 end "He", now interior
     assert_eq!(sec2(30), "He");
 
     // Untouched elements are preserved: the beta-sheet and the 3-10 helix.

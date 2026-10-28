@@ -367,11 +367,16 @@ fn set_coloring(state: &mut DesktopAppState, args: &Value) -> Result<Value> {
     }
     .map(str::to_string);
     let paint = if mode == "paint-type-paint" {
-        vec![
-            ("sheet".into(), "SteelBlue".into()),
-            ("helix".into(), "khaki".into()),
-            ("*".into(), "FloralWhite".into()),
-        ]
+        let object = if target == "object" {
+            id
+        } else {
+            renderer_owner(state, id)?
+        };
+        let scene = state
+            .scene_manager()
+            .scene_uid_for_object(object)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object.get())))?;
+        state.default_molecule_paint(scene, object)?
     } else {
         vec![]
     };

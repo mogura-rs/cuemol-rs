@@ -82,7 +82,7 @@ tauri-gui = [
 ]
 
 # Visual self-verification: render the egui shell to a PNG offscreen (wgpu/Metal),
-# so the CueMol2 layout can be compared against the XUL spec without a window.
+# so the Tritium layout can be checked without a window.
 # Pinned to egui's exact minor (0.33.x) — a mismatch would drag a second egui copy
 # into the tree and break `egui::Context` type identity. Only used by egui-gui tests.
 [dev-dependencies]

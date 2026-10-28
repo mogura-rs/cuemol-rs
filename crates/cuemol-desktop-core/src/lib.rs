@@ -2461,6 +2461,15 @@ impl DesktopAppState {
                             renderer_node
                                 .map(|node| node.str_attr(name).to_string())
                                 .filter(|value| !value.is_empty())
+                                .or_else(|| {
+                                    renderer_node.and_then(|node| {
+                                        styles.resolve_style_attr(
+                                            scene.uid().get(),
+                                            &node.str_attr("style").to_string(),
+                                            name,
+                                        )
+                                    })
+                                })
                         };
                         let renderer_number = |name: &str, default| {
                             renderer_attr(name)
@@ -2531,7 +2540,22 @@ impl DesktopAppState {
                                                 .ok()
                                             })
                                             .unwrap_or(Selector::All);
-                                        surface_mesh_render_mesh(object, &selector, &mesh)
+                                        let mut options = MoleculeRenderOptions::default();
+                                        cuemol_molvis::apply_molecular_node_coloring(
+                                            &mut options,
+                                            object,
+                                            renderer_node,
+                                            &styles,
+                                            scene.uid().get(),
+                                            "#c0c0ff",
+                                        );
+                                        let colors = cuemol_molvis::resolve_atom_colors(
+                                            object.mol(),
+                                            &options,
+                                        );
+                                        surface_mesh_render_mesh_with_colors(
+                                            object, &selector, &mesh, &colors,
+                                        )
                                     })
                                     .unwrap_or_else(&flat_mesh)
                             }
@@ -10393,9 +10417,7 @@ impl DesktopAppState {
         )))
     }
 
-    /// The object's current object-level coloring scheme class name (e.g.
-    /// `"RainbowColoring"`), or `None` when it uses the default element/CPK coloring.
-    /// Lets the Coloring panel reflect the live state instead of guessing.
+    /// The object's coloring scheme, or `None` for its default solid color.
     pub fn object_coloring_type(&self, object_uid: Uid) -> Option<String> {
         self.scene_manager()
             .object(object_uid)?
@@ -10405,7 +10427,7 @@ impl DesktopAppState {
 
     /// Set an object's coloring scheme (CueMol2 Coloring panel). `coloring_type` is a
     /// C++ scheme class name (e.g. `"RainbowColoring"`, `"BfacColoring"`); `None`
-    /// clears it so the renderers fall back to their default (element/CPK) coloring.
+    /// clears it so `$molcol` resolves to the object's default solid color.
     /// `attrs` are the scheme parameters (`start_hue`, `low_color`, …) read back by
     /// the snapshot's `*_coloring_from_attrs` builders.
     pub fn set_object_coloring(
@@ -11938,7 +11960,98 @@ impl DesktopAppState {
         })
     }
 
+    pub fn default_molecule_paint(
+        &mut self,
+        scene_uid: Uid,
+        object_uid: Uid,
+    ) -> Result<Vec<(String, String)>> {
+        let scene = self
+            .scene_manager()
+            .scene(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let styles = scene_style_manager(scene);
+        let global = cuemol_molvis::default_style_manager();
+        let names = global.color_names(0);
+        let theme = styles.get_str_data("palette", "default_paint", scene_uid.get());
+        let colors = |theme: &str| {
+            let prefix = format!("{theme}_");
+            let mut values = names
+                .iter()
+                .filter_map(|name| {
+                    Some((
+                        name.strip_prefix(&prefix)?.parse::<u32>().ok()?,
+                        name.clone(),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            values.sort_by_key(|(index, _)| *index);
+            values.into_iter().map(|(_, name)| name).collect::<Vec<_>>()
+        };
+        let mut palette = colors(theme.trim());
+        if palette.is_empty() {
+            palette = colors("okabe_ito");
+        }
+        if palette.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut ids = scene
+            .objects()
+            .iter()
+            .map(MolObject::uid)
+            .collect::<Vec<_>>();
+        ids.sort();
+        let index = ids
+            .iter()
+            .position(|uid| *uid == object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        let base = &palette[index % palette.len()];
+        let saved = scene.loaded_styles().iter().any(|style| {
+            parse_ldom2_xml(&style.data).ok().is_some_and(|tree| {
+                tree.top()
+                    .children()
+                    .iter()
+                    .any(|node| node.tag_name() == "color" && node.str_attr("id").as_str() == base)
+            })
+        });
+        if !saved {
+            let mut node = LDom2Node::new();
+            node.set_tag_name("styles");
+            node.set_str_attr("id", self.suggest_style_name(scene_uid)?);
+            let entry = node.append_child("color");
+            entry.set_str_attr("id", base);
+            entry.set_str_attr("value", global.compile_color(base, 0).script_string());
+            let data = write_ldom2_xml(&LDom2Tree::from(node.clone()));
+            self.scene_manager_mut()
+                .scene_mut(scene_uid)
+                .unwrap()
+                .add_loaded_style(LoadedStyle { node, data });
+        }
+        Ok([
+            ("sheet", ""),
+            ("helix", ""),
+            ("nucleic", "{mod_h:15}"),
+            ("*", "{mod_s:-0.6;mod_b:0.1}"),
+        ]
+        .into_iter()
+        .map(|(selection, modifier)| (selection.to_string(), format!("{base}{modifier}")))
+        .collect())
+    }
+
     fn create_default_molecule_renderers(&mut self, scene_uid: Uid, object_uid: Uid) -> Result<()> {
+        let object = self
+            .scene_manager()
+            .object(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        if object.coloring_type().is_none() && object.paint_coloring().is_empty() {
+            let paint = self.default_molecule_paint(scene_uid, object_uid)?;
+            self.set_object_coloring_details(
+                object_uid,
+                Some("PaintColoring".into()),
+                BTreeMap::new(),
+                paint,
+                None,
+            )?;
+        }
         let styles = [
             ("ribbon", "protein", "rprop type=prot"),
             ("cartoon", "nucleic", "rprop type=nucl"),
@@ -12236,16 +12349,12 @@ impl DesktopAppState {
             }
             return Ok(());
         }
+        let paint = self.default_molecule_paint(scene_uid, object_uid)?;
         self.set_object_coloring_details(
             object_uid,
             Some("PaintColoring".to_string()),
             BTreeMap::new(),
-            vec![
-                ("sheet".to_string(), "SteelBlue".to_string()),
-                ("helix".to_string(), "khaki".to_string()),
-                ("nucleic".to_string(), "yellow".to_string()),
-                ("*".to_string(), "FloralWhite".to_string()),
-            ],
+            paint,
             None,
         )?;
         self.new_renderer_from_setup(
@@ -15636,10 +15745,8 @@ impl DesktopAppState {
         }
     }
 
-    /// Build a molecular surface (SES) for an object and convert it to a renderable
-    /// triangle mesh (CueMol2 `molsurf` renderer DISPLAY — until now the desktop only
-    /// EXPORTED the surface to OBJ, never drew it). A front end caches the mesh and adds
-    /// it to the snapshot. Light-grey, lit by the per-vertex SES normals.
+    /// Build an SES preview with nearest-atom colors and per-vertex normals.
+    /// Scene surface renderers resolve their own coloring scheme separately.
     pub fn build_surface_mesh(
         &self,
         object_uid: Uid,
@@ -46715,16 +46822,7 @@ mod script_env {
     }
 }
 
-/// Convert a built molecular surface to a renderable mesh, colouring each vertex
-/// by its nearest surface-generating atom under the object's coloring cascade —
-/// the C++ `MolSurfRenderer` MOLFANC mode (`getColorMol`: nearest atom via an
-/// atom-position map, then that atom's colour-scheme colour). Reuses the CPK
-/// renderer's per-atom resolver ([`cuemol_molvis::resolve_atom_colors`]) so the
-/// surface matches the atoms the same viewer draws (element/CPK by default;
-/// rainbow/bfac/paint follow the object's scheme on the same carbon cascade the
-/// atoms use). Nearest search is a linear scan over the SELECTED atom subset (the
-/// atoms the surface was built from): O(vertices × selected_atoms), fine for
-/// typical selections; no spatial index until a large-structure test needs one.
+/// Convert a preview surface using the legacy element/object coloring options.
 fn surface_render_mesh(
     object: &MolObject,
     selector: &Selector,
@@ -46738,8 +46836,6 @@ fn surface_mesh_render_mesh(
     selector: &Selector,
     mesh: &cuemol_surface::SurfaceMesh,
 ) -> cuemol_render::RenderMesh {
-    // Fallback when no atom is available to colour a vertex (the former flat grey).
-    const GREY: [f32; 4] = [0.76, 0.79, 0.84, 1.0];
     let mut options = MoleculeRenderOptions::default();
     apply_object_coloring(
         &mut options,
@@ -46749,6 +46845,16 @@ fn surface_mesh_render_mesh(
         object.mol().default_color(),
     );
     let atom_colors = cuemol_molvis::resolve_atom_colors(object.mol(), &options);
+    surface_mesh_render_mesh_with_colors(object, selector, mesh, &atom_colors)
+}
+
+fn surface_mesh_render_mesh_with_colors(
+    object: &MolObject,
+    selector: &Selector,
+    mesh: &cuemol_surface::SurfaceMesh,
+    atom_colors: &[cuemol_gfx::ColorSpec],
+) -> cuemol_render::RenderMesh {
+    const GREY: [f32; 4] = [0.76, 0.79, 0.84, 1.0];
     // The surface-generating atom subset: position + resolved [f32;4] colour.
     let palette: Vec<(u32, cuemol_core::Vector4, [f32; 4])> = object
         .mol()
@@ -47347,14 +47453,17 @@ fn append_object_renderer_snapshot(
             options.draw_indices = Some(object.mol().select_indices(&selector));
         }
     }
-    // A concrete renderer scheme wins. CPK is the exception: its carbon `$molcol`
-    // continues through the object's scheme.
     let renderer_coloring_type = renderer
         .and_then(|renderer| renderer.resolved_child_type("coloring", styles, style_scope_id));
-    if matches!(
-        renderer_coloring_type.as_deref(),
-        None | Some("CPKColoring")
-    ) {
+    if let Some(renderer) = renderer {
+        cuemol_molvis::apply_molecular_coloring(
+            &mut options,
+            object,
+            renderer,
+            styles,
+            style_scope_id,
+        );
+    } else {
         apply_object_coloring(
             &mut options,
             object.coloring_type(),
@@ -47916,7 +48025,18 @@ fn direct_surface_snapshot(
     } else {
         None
     }
-    .unwrap_or_else(|| surface_mesh_render_mesh(object, &selector, &mesh));
+    .unwrap_or_else(|| {
+        let mut options = MoleculeRenderOptions::default();
+        cuemol_molvis::apply_molecular_coloring(
+            &mut options,
+            object,
+            renderer,
+            styles,
+            style_scope_id,
+        );
+        let colors = cuemol_molvis::resolve_atom_colors(object.mol(), &options);
+        surface_mesh_render_mesh_with_colors(object, &selector, &mesh, &colors)
+    });
     if let Some(show_selection) = resolved("showsel")
         .filter(|value| !value.is_empty() && value != "*")
         .and_then(|value| parse_selector_with_styles(&value, styles, style_scope_id).ok())
@@ -59901,6 +60021,85 @@ end_header
     }
 
     #[test]
+    fn surface_renderers_apply_their_coloring_and_object_inheritance() {
+        for kind in ["molsurf", "dsurface", "dsurf2"] {
+            let mut app = DesktopAppState::new();
+            let scene = app.ensure_active_scene();
+            let mut molecule = read_pdb_str(
+                "ATOM      1  N   GLY A   1       0.000   0.000   0.000  1.00 10.00           N\n",
+            )
+            .unwrap();
+            molecule.atoms_mut()[0].set_int_prop("col", 0xff123456_u32 as i32);
+            let object = app
+                .scene_manager_mut()
+                .scene_mut(scene)
+                .unwrap()
+                .add_molecule("source", molecule);
+            app.set_object_coloring_details(
+                object,
+                Some("SolidColoring".into()),
+                BTreeMap::new(),
+                Vec::new(),
+                Some("#00ff00".into()),
+            )
+            .unwrap();
+            let (owner, renderer) = if kind == "molsurf" {
+                let surface = app
+                    .create_molecular_surface_object(object, "*", "surface", 1.0, 1.4)
+                    .unwrap();
+                (
+                    surface,
+                    app.surface_summary(surface).unwrap().renderers[0].uid,
+                )
+            } else {
+                let renderer = app
+                    .new_renderer_in_active_scene(object, kind, "surface")
+                    .unwrap()
+                    .result_renderer;
+                app.set_renderer_property(object, renderer, "surftype", "vdw")
+                    .unwrap();
+                (object, renderer)
+            };
+            for (scheme, fallback, paint, expected) in [
+                (
+                    "SolidColoring",
+                    "#abcdef",
+                    Vec::new(),
+                    [171u8, 205, 239, 255],
+                ),
+                ("SolidColoring", "$molcol", Vec::new(), [0, 255, 0, 255]),
+                (
+                    "PaintColoring",
+                    "#ffffff",
+                    vec![("name N".into(), "#ff0000".into())],
+                    [255, 0, 0, 255],
+                ),
+                ("AtomPropColoring", "#ffffff", Vec::new(), [18, 52, 86, 255]),
+            ] {
+                app.set_renderer_coloring_details(
+                    owner,
+                    renderer,
+                    Some(scheme.into()),
+                    BTreeMap::new(),
+                    paint,
+                    Some(fallback.into()),
+                )
+                .unwrap();
+                let snapshot = app.active_render_snapshot("").unwrap();
+                assert!(snapshot.mesh_triangle_count() > 0, "{kind}/{scheme}");
+                assert!(
+                    snapshot.meshes.iter().flat_map(|m| &m.vertices).all(|v| {
+                        v.color.iter().zip(expected).all(|(actual, target)| {
+                            (*actual - f32::from(target) / 255.0).abs() < 0.005
+                        })
+                    }),
+                    "{kind}/{scheme}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn surface_vertex_atom_id_takes_precedence_over_nearest_position() {
         let mut app = DesktopAppState::new();
         let scene_uid = app.new_scene("surface", false).result_scene;
@@ -62956,7 +63155,7 @@ end_header
     fn nucl_renderer_adds_base_sticks_to_the_backbone_ribbon() {
         // A nucleic-acid renderer draws the backbone ribbon PLUS each nucleotide's
         // base stick (C++ NARenderer), which the plain mainchain ribbon omits.
-        // Build two purine nucleotides (C1'/N9/N1) by exact PDB columns.
+        // Build three purine nucleotides (C1'/N9/N1) by exact PDB columns.
         fn pdb_atom(
             serial: i32,
             name: &str,
@@ -62984,7 +63183,7 @@ end_header
             String::from_utf8(line).unwrap()
         }
         let mut pdb = String::new();
-        for (resid, base_x) in [(1, 0.0), (2, 5.0)] {
+        for (resid, base_x) in [(1, 0.0), (2, 5.0), (3, 10.0)] {
             let serial = (resid - 1) * 4;
             pdb.push_str(&pdb_atom(serial + 4, "P", "G", resid, base_x, 0.0, 1.0));
             pdb.push('\n');
@@ -63033,11 +63232,11 @@ end_header
             "the C1' atoms must have parsed (else the test verifies nothing)"
         );
 
-        // A plain trace draws one pixel-width backbone line and no base sticks.
+        // A plain trace draws pixel-width backbone lines and no base sticks.
         app.new_renderer_in_active_scene(object, "trace", "tr")
             .unwrap();
         let trace = app.active_render_snapshot("").unwrap();
-        assert_eq!(trace.bond_count(), 1);
+        assert_eq!(trace.bond_count(), 2);
         assert!(trace.bonds.iter().all(|bond| bond.screen_width.is_some()));
 
         // Replace it with a nucl renderer: ribbon mesh + base-stick bonds.
@@ -63056,7 +63255,7 @@ end_header
             "nucl still draws the backbone ribbon mesh"
         );
         assert!(
-            nucl.bond_count() >= 2,
+            nucl.bond_count() >= 3,
             "default basepair mode draws each unpaired base, got {}",
             nucl.bond_count()
         );
@@ -63093,6 +63292,35 @@ end_header
             .iter()
             .all(|bond| (bond.radius - 0.8).abs() < 1.0e-6));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn default_molecule_palette_cycles_and_survives_embedded_scene_reload() {
+        let pdb = b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n";
+        let mut app = DesktopAppState::new();
+        app.open_bytes("first.pdb", pdb).unwrap();
+        app.open_bytes("second.pdb", pdb).unwrap();
+        let scene = app
+            .scene_manager()
+            .scene(app.active_scene().unwrap())
+            .unwrap();
+        assert_eq!(scene.objects()[0].paint_coloring()[0].1, "okabe_ito_1");
+        assert_eq!(scene.objects()[1].paint_coloring()[0].1, "okabe_ito_2");
+        let colors = |app: &DesktopAppState| {
+            app.active_render_snapshot("")
+                .unwrap()
+                .atoms
+                .iter()
+                .filter_map(|atom| atom.color.as_ref().and_then(cuemol_gfx::ColorSpec::rgba8))
+                .collect::<Vec<_>>()
+        };
+        let before = colors(&app);
+        assert_eq!(before.len(), 2);
+        assert_ne!(before[0], before[1]);
+        let bytes = app.active_scene_bytes().unwrap();
+        let mut restored = DesktopAppState::new();
+        restored.open_bytes("colors.qsc", &bytes).unwrap();
+        assert_eq!(colors(&restored), before);
     }
 
     #[test]
@@ -63332,7 +63560,7 @@ end_header
              \t<qsc_opts base64=\"false\" compress=\"none\" version=\"QDF0\"/>\n\
              \t<object type=\"MolCoord\" name=\"rb\" src=\"datachunk:00000\" srctype=\"qdfpdb\">\n\
              \t\t<coloring type=\"RainbowColoring\" start_hue=\"240\" end_hue=\"0\" sat=\"1\" bri=\"1\"/>\n\
-             \t\t<renderer type=\"trace\" name=\"trace1\"/>\n\
+             \t\t<renderer type=\"trace\" name=\"trace1\" style=\"DefaultHSCPaint\"/>\n\
              \t</object>\n</scene>\n\n========== End of XML ==========\n\n\
              ==========START datachunk:00000==========\n{pdb}\n==========END datachunk:00000==========\n"
         );
@@ -63494,7 +63722,7 @@ end_header
              \t<qsc_opts base64=\"false\" compress=\"none\" version=\"QDF0\"/>\n\
              \t<object type=\"MolCoord\" name=\"bf\" src=\"datachunk:00000\" srctype=\"qdfpdb\">\n\
              \t\t<coloring type=\"BfacColoring\"/>\n\
-             \t\t<renderer type=\"trace\" name=\"trace1\"/>\n\
+             \t\t<renderer type=\"trace\" name=\"trace1\" style=\"DefaultHSCPaint\"/>\n\
              \t</object>\n</scene>\n\n========== End of XML ==========\n\n\
              ==========START datachunk:00000==========\n{pdb}\n==========END datachunk:00000==========\n"
         );
@@ -63571,7 +63799,7 @@ end_header
              \t<qsc_opts base64=\"false\" compress=\"none\" version=\"QDF0\"/>\n\
              \t<object type=\"MolCoord\" name=\"a\" src=\"datachunk:00000\" srctype=\"qdfpdb\">\n\
              \t\t<coloring type=\"PaintColoring\">\n\t\t\t<paint sel=\"*\" color=\"FloralWhite\"/>\n\t\t</coloring>\n\
-             \t\t<renderer type=\"cpk\" name=\"cpk1\"/>\n\
+             \t\t<renderer type=\"cpk\" name=\"cpk1\" style=\"DefaultCPKColoring\"/>\n\
              \t</object>\n</scene>\n\n========== End of XML ==========\n\n\
              ==========START datachunk:00000==========\n{pdb}\n==========END datachunk:00000==========\n"
         );
@@ -63646,7 +63874,7 @@ end_header
              \t<qsc_opts base64=\"false\" compress=\"none\" version=\"QDF0\"/>\n\
              \t<object type=\"MolCoord\" name=\"r\" src=\"datachunk:00000\" srctype=\"qdfpdb\">\n\
              \t\t<coloring type=\"RainbowColoring\" start_hue=\"240\" end_hue=\"0\" sat=\"1\" bri=\"1\"/>\n\
-             \t\t<renderer type=\"ballstick\" name=\"bs1\"/>\n\
+             \t\t<renderer type=\"ballstick\" name=\"bs1\" style=\"DefaultCPKColoring\"/>\n\
              \t</object>\n</scene>\n\n========== End of XML ==========\n\n\
              ==========START datachunk:00000==========\n{pdb}\n==========END datachunk:00000==========\n"
         );
@@ -64459,10 +64687,13 @@ attribute \"dep\" string \"positions\"
         assert_eq!(
             object.paint_coloring(),
             [
-                ("sheet".to_string(), "SteelBlue".to_string()),
-                ("helix".to_string(), "khaki".to_string()),
-                ("nucleic".to_string(), "yellow".to_string()),
-                ("*".to_string(), "FloralWhite".to_string()),
+                ("sheet".to_string(), "okabe_ito_1".to_string()),
+                ("helix".to_string(), "okabe_ito_1".to_string()),
+                ("nucleic".to_string(), "okabe_ito_1{mod_h:15}".to_string()),
+                (
+                    "*".to_string(),
+                    "okabe_ito_1{mod_s:-0.6;mod_b:0.1}".to_string()
+                ),
             ]
         );
         let atoms = object

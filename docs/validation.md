@@ -191,3 +191,87 @@ The release build embeds the isolated, verified browser artifact through
 `CUEMOL_WEB_DIR`; source-tree test files are not part of that artifact.
 All five workflow files pass actionlint. GitHub-hosted release and Pages runs
 remain unexecuted because these changes have not been pushed.
+
+## Backbone geometry and secondary structure
+
+The C++ reference library was built from the read-only sibling source and used
+as an executable oracle for ribbon, cartoon and tube meshes. Forty-eight 1CRN
+configurations covered the default, round and fancy sections, helix cylinders,
+wavy/constant widths, ribbon helices, spherical caps, flat junctions, custom
+arrows, putty, smoothing, anchor selections, partial and disjoint selections,
+segment-end transparency, and smooth/stepped coloring. Every vertex position and normal
+matched in both directions. The position tolerance was 0.000005 angstrom; the
+largest observed position error in the standard styles was about 0.0000022
+angstrom, consistent with the reference mesh storing float coordinates.
+Nondegenerate triangle positions and winding also matched in both directions;
+triangles with edges below 0.00001 angstrom were excluded from that comparison.
+The Rust mesh shares rings instead of reproducing duplicate reference vertices.
+All cases matched RGB and alpha within one 8-bit level, including solid colors,
+named-color modifiers, molecular color inheritance, and smooth/stepped paint boundaries.
+Partial ribbon/tube selections retain full-chain spline coefficients; cartoon
+segments follow the reference's local fitting. Selection-end fading tests
+include selections that contain no pivot atoms and unchanged physical termini.
+Named paint selections are resolved once before coloring, including style aliases.
+
+Twenty section-profile configurations matched C++ coordinates, normals and face
+labels within 1e-12. Sixty weighted/unweighted smoothing fits, including short
+segments and linear extrapolation, produced identical sampled coordinates,
+first derivatives and second derivatives. These optional tests require
+`CUEMOL_BACKBONE_ORACLE` and `CUEMOL_BACKBONE_CONFIG`; the reference program's
+source is `crates/cuemol-molvis/tests/reference_backbone.cpp`.
+
+The 1CRN secondary-structure assignment now agrees with the current C++ reader:
+the first alpha helix ends at residue 17. Proline is excluded as a hydrogen-bond
+donor regardless of case. Sparse hydrogen-bond and bridge searches match an
+independent exhaustive enumeration in the shared tests. The secondary-structure
+pass also avoids constructing atom-index lists for solvent residues and avoids
+scanning the atom array for every property assignment.
+
+The corrected source comments and style data include the previous proline
+case-sensitivity claim, the obsolete DefaultRibbon dimensions, and the blanket
+claim that tube/spline axial detail defaults to eight. The actual tube/spline
+QIF default is six; the named ribbon styles and cartoon use eight.
+
+The color cascade follows the renderer's scheme and resolves `$molcol` through
+the object's scheme for every element. Named colors use the scene's definition
+before the global one, including hue, saturation, brightness and alpha modifiers.
+The default load palette follows Tritium's molecule order and persists its color
+definitions in embedded scenes. Tests cover noncarbon pivots, paint fallbacks,
+two distinct molecule colors and an embedded save/reload. Older synthetic coloring
+fixtures omitted the explicit `$molcol` styles required by the C++ implementation;
+those inputs now include the styles. The old load-palette expectation was also
+updated from the legacy SteelBlue/khaki colors to the current Tritium palette.
+
+A native Linux window in a private virtual display was inspected and controlled
+with real input events. Wheel zoom, Shift-wheel slab thickness, trackball rotation,
+Inspector editing and toolbar undo changed the live scene as expected. The
+macOS GUI also loaded the molecule and accepted MCP representation changes;
+its rendered screenshots were inspected, but screen capture permission was not
+available for capturing the macOS window itself.
+
+Saved molecular surfaces and both direct-surface renderers now resolve their
+own coloring schemes, including solid, paint, atom-property colors and object
+inheritance. Shared and legacy CLI exports check the resulting vertex colors.
+The affected shared suites passed 206 tests, followed by 162 native GUI tests,
+69 alternate-shell tests and 17 browser tests. The earlier full shared-workspace
+run passed 1,140 tests; the final surface changes were then covered by the affected
+suites. Native GUI builds with bundled browser assets passed on Linux and macOS.
+
+The final native Linux window passed wheel zoom, Shift-wheel slab, trackball,
+Inspector rename and toolbar undo checks. A real 1CRN molecule was also displayed
+as ribbon and cartoon in WebGL and WebGPU. The Linux software-browser check
+requires Vulkan compositing flags in addition to enabling the WebGPU API;
+without them, even an independent WebGPU red-clear canvas was blank. With those
+flags, both the minimal canvas and the application rendered correctly. The same
+application was also checked with Chrome's WebGPU backend on a Mac GPU.
+See Chromium's [SwiftShader configuration](https://github.com/chromium/chromium/blob/main/docs/gpu/swiftshader.md)
+and [headless GPU guidance](https://chromium.googlesource.com/chromium/src.git/+/main/docs/gpu/using-gpu-hardware-in-headless-chrome.md).
+
+Additional documentation corrections: the trajectory header previously described
+the current C++ reader as eager, although it also indexes frames; the native
+frontend comment referred to XUL rather than the current Tritium layout; and the
+surface-preview comment said light grey although the helper applies atom colors.
+Object-color documentation now states the solid default used for `$molcol`.
+Synthetic tests that expected molecular inheritance without `$molcol`, or a
+spline mesh for a physical chain with fewer than three residues, now express the
+reference's actual prerequisites.

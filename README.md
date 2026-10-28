@@ -44,6 +44,11 @@ Open files on the command line, through the file dialog, or by drag and drop.
 The initial representation uses a protein ribbon, a nucleic-acid cartoon, and
 ball-and-stick geometry for other atoms. The renderer controls remain available
 for adding or changing representations, selections, coloring, and materials.
+New molecules use Tritium's ordered palette, with their named colors embedded
+in saved scenes. Renderer `$molcol` colors inherit the object's coloring scheme,
+including hue, saturation, brightness and alpha modifiers.
+Saved and direct molecular surfaces use their renderer's coloring scheme,
+including paint rules and imported atom colors.
 The Rendering menu offers built-in GI and hatched PNG output. Animation
 rendering also defaults to the bundled Rust renderer. Maps, molecular surfaces,
 saved cameras, measurements, labels, and animation
@@ -281,6 +286,13 @@ uv run --no-project --with mdtraj --with netCDF4 \
 ```
 
 ## Compatibility boundaries
+
+The ribbon, cartoon and tube paths use the reference cross-section profiles,
+natural and smoothing splines, junctions, helix-width modes and end caps.
+Their geometry, triangle winding, partial selections and color boundaries are
+checked against an optional C++ oracle.
+Secondary-structure assignment excludes proline donors and uses sparse
+hydrogen-bond/bridge searches with bounded per-residue bond storage.
 
 The wgpu frontends implement Tritium's layout with Rust egui controls.
 The optional Tauri shell retains the older CueMol2 layout. Molecular surfaces support
