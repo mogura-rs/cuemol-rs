@@ -820,3 +820,13 @@ resulting density histogram. Linux could not check the optional Tauri shell
 because its JavaScriptCore GTK system library was unavailable; that shell is
 checked separately on Apple Silicon.
 The Apple Silicon Tauri suite passed 142 tests with one optional test ignored.
+
+## Shared density payloads
+
+Density-map scene records now share immutable QDF/source bytes across native and
+script undo snapshots. Binary payloads are no longer also converted into lossy
+UTF-8 strings. A regression checks the payload and decoded-voxel allocation
+identities across four script transactions, undo, a native state clone and an
+embedded scene reload. The shared core passed 210 tests and native egui passed
+165 tests. Two rebuilt-browser regressions covered transactions and MRC/QSC
+persistence. Other raw surface/lightweight payload types were not changed here.

@@ -1715,7 +1715,7 @@ pub struct LoadedDensityMap {
     pub object_type: String,
     pub srctype: String,
     pub data: String,
-    pub raw_data: Vec<u8>,
+    pub raw_data: std::sync::Arc<[u8]>,
     pub qsc_node: Option<LDom2Node>,
 }
 
@@ -2607,8 +2607,8 @@ impl MolScene {
                         name: object_name.clone(),
                         object_type: object_type.clone(),
                         srctype,
-                        data: String::from_utf8_lossy(&data).into_owned(),
-                        raw_data: data,
+                        data: String::new(),
+                        raw_data: data.into(),
                         qsc_node: Some(object_node.clone()),
                     });
                     return Ok(());

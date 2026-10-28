@@ -7189,8 +7189,8 @@ impl DesktopAppState {
                 name: name.clone(),
                 object_type: "DensityMap".to_string(),
                 srctype: "qdfmap".to_string(),
-                data: String::from_utf8_lossy(&raw_data).into_owned(),
-                raw_data,
+                data: String::new(),
+                raw_data: raw_data.into(),
                 qsc_node: None,
             });
             index
@@ -13056,8 +13056,8 @@ impl DesktopAppState {
                     "DensityMap".to_string()
                 },
                 srctype: "qdfmap".to_string(),
-                data: String::from_utf8_lossy(&raw_data).into_owned(),
-                raw_data,
+                data: String::new(),
+                raw_data: raw_data.into(),
                 qsc_node: Some(qsc_node),
             });
         if matches!(format, "apbs" | "qdfpot") {
@@ -13686,8 +13686,8 @@ impl DesktopAppState {
             .and_then(|scene| scene.loaded_density_maps_mut().get_mut(storage_index))
             .ok_or_else(|| CueMolError::NotFound(format!("density map storage {storage_index}")))?;
         loaded.srctype = source_type.to_string();
-        loaded.data = String::from_utf8_lossy(&raw_data).into_owned();
-        loaded.raw_data = raw_data;
+        loaded.data.clear();
+        loaded.raw_data = raw_data.into();
         loaded.qsc_node = Some(node);
         Ok(())
     }
@@ -67859,6 +67859,70 @@ attribute \"dep\" string \"positions\"
             let _ = std::fs::remove_file(path);
         }
         let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    #[cfg(feature = "scripting")]
+    fn density_payloads_and_voxels_are_shared_across_undo_snapshots() {
+        let mut map = DensityMap::new();
+        map.set_map_byte_array(&vec![127; 64 * 64 * 64], [64; 3], 0., 256., 127., 1.);
+        map.set_map_params([0; 3], [64; 3]);
+        map.set_xtal_params(64., 64., 64., 90., 90., 90.);
+        let mut app = DesktopAppState::new();
+        let scene = app.ensure_active_scene();
+        let uid = app.add_density_map(scene, "density", map);
+        let raw = app
+            .scene_manager()
+            .scene(scene)
+            .unwrap()
+            .loaded_density_maps()[0]
+            .raw_data
+            .clone();
+        let voxels = app.density_maps[&uid].map.byte_values().as_ptr();
+        for index in 0..4 {
+            app.run_script_js(&format!("var s=cuemol.getScene(); s.startUndoTxn('rename'); cuemol.getObject({}).name='density{index}'; s.commitUndoTxn();", uid.get())).unwrap();
+        }
+        for entry in &app.script_scene_undo[&scene.get()].undo {
+            for snapshot in [&entry.before, &entry.after] {
+                let stored = &snapshot.scene.loaded_density_maps()[0];
+                assert!(std::sync::Arc::ptr_eq(&raw, &stored.raw_data));
+                assert!(stored.data.is_empty());
+                assert_eq!(
+                    voxels,
+                    snapshot.density_maps[&uid].map.byte_values().as_ptr()
+                );
+            }
+        }
+        app.run_script_js("cuemol.getScene().undo(0);").unwrap();
+        let native_snapshot = app.clone();
+        assert!(std::sync::Arc::ptr_eq(
+            &raw,
+            &native_snapshot
+                .scene_manager()
+                .scene(scene)
+                .unwrap()
+                .loaded_density_maps()[0]
+                .raw_data
+        ));
+        let bytes = app.active_scene_bytes().unwrap();
+        let mut restored = DesktopAppState::new();
+        restored.open_bytes("density.qsc", &bytes).unwrap();
+        let stored = &restored
+            .scene_manager()
+            .scene(restored.active_scene().unwrap())
+            .unwrap()
+            .loaded_density_maps()[0];
+        assert!(stored.data.is_empty());
+        assert_eq!(
+            restored
+                .density_maps
+                .values()
+                .next()
+                .unwrap()
+                .map
+                .byte_values(),
+            &[127; 64 * 64 * 64]
+        );
     }
 
     #[test]
