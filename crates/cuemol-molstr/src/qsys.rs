@@ -1,3 +1,5 @@
+mod atom_intr;
+
 use crate::{
     read_mmcif_file, read_mmcif_str, read_mol2_file, read_mol2_str, read_pdb_file, read_pdb_str,
     read_qdf_mol_bytes, read_qdfpdb_file, read_sdf_file, read_sdf_str, write_pdb_string, Atom,
@@ -22,8 +24,8 @@ const UID_OBJECT_STRIDE: u64 = 1_000;
 type PendingAtomIntrRenderer = (String, Vec<PendingAtomIntrDef>);
 
 enum PendingAtomIntrDef {
-    Atoms(AtomIntrKind, Vec<String>),
-    Selections(AtomIntrKind, Vec<String>),
+    Atoms(AtomIntrKind, Vec<String>, Vec<String>),
+    Selections(AtomIntrKind, Vec<String>, Vec<String>),
     Positions(AtomIntrKind, Vec<Vector4>),
 }
 
@@ -49,6 +51,7 @@ pub struct AtomIntrLine {
     kind: AtomIntrKind,
     aids: Vec<String>,
     selectors: Vec<String>,
+    object_refs: Vec<(Option<Uid>, String)>,
     positions: Vec<Vector4>,
     active: bool,
 }
@@ -123,6 +126,7 @@ impl AtomIntrLine {
             aids,
             selectors: Vec::new(),
             positions: Vec::new(),
+            object_refs: Vec::new(),
             active: true,
         }
     }
@@ -137,6 +141,7 @@ impl AtomIntrLine {
             aids: Vec::new(),
             selectors,
             positions: Vec::new(),
+            object_refs: Vec::new(),
             active: true,
         }
     }
@@ -165,6 +170,7 @@ impl AtomIntrLine {
             aids: Vec::new(),
             selectors: Vec::new(),
             positions,
+            object_refs: Vec::new(),
             active: true,
         }
     }
@@ -1211,7 +1217,7 @@ impl MolObject {
     ) -> Result<Uid> {
         let defs = defs
             .iter()
-            .map(|(kind, aids)| PendingAtomIntrDef::Atoms(*kind, aids.clone()))
+            .map(|(kind, aids)| PendingAtomIntrDef::Atoms(*kind, aids.clone(), Vec::new()))
             .collect::<Vec<_>>();
         self.add_pending_atom_intr_renderer(name, &defs, qsc_attrs)
     }
@@ -1225,7 +1231,7 @@ impl MolObject {
         let mut lines = Vec::new();
         for def in defs {
             match def {
-                PendingAtomIntrDef::Atoms(kind, aids) => {
+                PendingAtomIntrDef::Atoms(kind, aids, objects) => {
                     if aids.len() != kind.atom_count() {
                         return Err(CueMolError::invalid_argument(format!(
                             "AtomIntr {} requires {} atoms",
@@ -1235,15 +1241,23 @@ impl MolObject {
                     }
                     let labels = aids
                         .iter()
-                        .map(|aid| self.resolve_atom_label(aid))
+                        .enumerate()
+                        .map(|(i, aid)| {
+                            if let Some(name) = objects.get(i).filter(|name| !name.is_empty()) {
+                                Ok(format!("{name}:{aid}"))
+                            } else {
+                                self.resolve_atom_label(aid)
+                            }
+                        })
                         .collect::<Result<Vec<_>>>()?;
-                    lines.push(AtomIntrLine::from_atom_references(
-                        *kind,
-                        aids.clone(),
-                        labels,
-                    ));
+                    let mut line = AtomIntrLine::from_atom_references(*kind, aids.clone(), labels);
+                    if objects.iter().any(|name| !name.is_empty()) {
+                        line.object_refs =
+                            objects.iter().map(|name| (None, name.clone())).collect();
+                    }
+                    lines.push(line);
                 }
-                PendingAtomIntrDef::Selections(kind, selections) => {
+                PendingAtomIntrDef::Selections(kind, selections, objects) => {
                     if selections.len() != kind.atom_count() {
                         return Err(CueMolError::invalid_argument(format!(
                             "AtomIntr {} requires {} selections",
@@ -1254,7 +1268,12 @@ impl MolObject {
                     for selection in selections {
                         crate::parse_selector(selection)?;
                     }
-                    lines.push(AtomIntrLine::from_selections(*kind, selections.clone()));
+                    let mut line = AtomIntrLine::from_selections(*kind, selections.clone());
+                    if objects.iter().any(|name| !name.is_empty()) {
+                        line.object_refs =
+                            objects.iter().map(|name| (None, name.clone())).collect();
+                    }
+                    lines.push(line);
                 }
                 PendingAtomIntrDef::Positions(kind, positions) => {
                     if positions.len() != kind.atom_count() {
@@ -1341,6 +1360,9 @@ impl MolObject {
         if !line.positions.is_empty() {
             return Some(line.positions.clone());
         }
+        if !line.object_refs.is_empty() {
+            return None;
+        }
         if !line.selectors.is_empty() {
             return line
                 .selectors
@@ -1410,11 +1432,10 @@ impl MolObject {
             .collect()
     }
 
-    /// Resolved 3D endpoints of each atom-interaction line (in line order),
-    /// skipping any line whose atoms cannot be resolved. This is the single
-    /// source of truth both the desktop GUIs and the CLI use for measurement
-    /// geometry, so an `atomintr` renderer draws its lines rather than the whole
-    /// molecule.
+    /// Resolved endpoints in declaration order, skipping unresolved lines.
+    /// For scene measurements, pass the renderer returned by
+    /// [`MolScene::resolve_atom_intr_renderer`] to obtain world coordinates
+    /// and resolve references to other molecules.
     pub fn atom_intr_segments(&self, renderer: &MolRenderer) -> Vec<(Vector4, Vector4)> {
         renderer
             .atom_intr_lines
@@ -1435,8 +1456,8 @@ impl MolObject {
 
     /// Screen-label anchors and formatted values for each AtomIntr definition.
     /// Positions match C++ `renderDistLabel`, `renderAngleLabel`, and
-    /// `renderTorsionLabel`; the GUI projects these anchors after object and
-    /// renderer transforms.
+    /// `renderTorsionLabel`. Scene-resolved renderers already contain world
+    /// coordinates; only the renderer's display transform remains to apply.
     pub fn atom_intr_labels(&self, renderer: &MolRenderer) -> Vec<(Vector4, String)> {
         renderer
             .atom_intr_lines
@@ -2263,6 +2284,7 @@ impl MolScene {
         self.loaded_styles = loaded_styles;
         self.scene_attributes = scene_attributes;
         self.scene_extension_nodes = scene_extension_nodes;
+        self.bind_atom_intr_objects();
         Ok(())
     }
 
@@ -2501,18 +2523,21 @@ impl MolScene {
                 }
             } else if let Some(kind) = atom_intr_kind_from_line(line) {
                 if let Some((_, defs)) = current_atomintr.as_mut() {
+                    let objects = (1..=kind.atom_count())
+                        .map(|index| attr_value(line, &format!("mol{index}")).unwrap_or_default())
+                        .collect::<Vec<_>>();
                     let aids = (1..=kind.atom_count())
                         .map(|index| attr_value(line, &format!("aid{index}")))
                         .collect::<Option<Vec<_>>>();
                     if let Some(aids) = aids {
-                        defs.push(PendingAtomIntrDef::Atoms(kind, aids));
+                        defs.push(PendingAtomIntrDef::Atoms(kind, aids, objects));
                         continue;
                     }
                     let selections = (1..=kind.atom_count())
                         .map(|index| attr_value(line, &format!("sel{index}")))
                         .collect::<Option<Vec<_>>>();
                     if let Some(selections) = selections {
-                        defs.push(PendingAtomIntrDef::Selections(kind, selections));
+                        defs.push(PendingAtomIntrDef::Selections(kind, selections, objects));
                         continue;
                     }
                     let positions = (1..=kind.atom_count())
@@ -2794,6 +2819,20 @@ impl MolScene {
                                 })
                                 .collect::<String>()
                         };
+                        let mut attrs = attrs;
+                        for (index, (uid, name)) in line.object_refs.iter().enumerate() {
+                            let name = uid
+                                .and_then(|uid| self.object(uid))
+                                .map(MolObject::name)
+                                .unwrap_or(name);
+                            if !name.is_empty() {
+                                attrs.push_str(&format!(
+                                    " mol{}=\"{}\"",
+                                    index + 1,
+                                    escape_xml(name)
+                                ));
+                            }
+                        }
                         output.push_str(&format!("\t\t\t<{}{attrs}/>\n", line.kind.tag()));
                     }
                     for child in renderer.qsc_children() {

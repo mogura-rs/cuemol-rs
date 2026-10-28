@@ -72,10 +72,9 @@ impl AtomHit {
     }
     pub fn position(self, state: &DesktopAppState) -> Option<Vector4> {
         let o = state.scene_manager().object(self.object)?;
-        Some(
-            o.xform_matrix()
-                .transform_point(o.mol().atoms().get(self.index)?.position),
-        )
+        let mut position = o.mol().atoms().get(self.index)?.position;
+        o.xform_matrix().xform3d(&mut position);
+        Some(position)
     }
     fn spec(self, state: &DesktopAppState) -> Result<Value> {
         let a = self.atom(state)?;

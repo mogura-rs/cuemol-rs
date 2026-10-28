@@ -351,6 +351,7 @@ impl crate::DesktopAppState {
                 &styles,
                 sid.get(),
                 self.surface_potential.as_ref(),
+                scene,
             );
         } else if let Some(surface) = scene.loaded_surface(object_uid) {
             snapshot.meshes =

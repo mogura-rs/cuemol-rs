@@ -562,7 +562,9 @@ fn run() -> Result<(), String> {
                         println!("defs={}", renderer.get_defs_json());
                         println!(
                             "measurements={}",
-                            object.atom_intr_measurements_json(renderer)
+                            object.atom_intr_measurements_json(
+                                &scene.resolve_atom_intr_renderer(object, renderer)
+                            )
                         );
                     }
                 }

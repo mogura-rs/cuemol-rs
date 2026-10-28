@@ -1448,7 +1448,7 @@ struct GuiApplication {
     navigation: Navigation,
     lasso_points: Vec<egui::Pos2>,
     hover_hit: Option<AtomHit>,
-    hover_sample: Option<(egui::Pos2, u64)>,
+    hover_sample: Option<(egui::Pos2, u64, [[f32; 4]; 4])>,
     pick_atoms: Vec<cuemol_render::RenderAtom>,
     show_toolbar: bool,
     show_workspace: bool,
@@ -19920,7 +19920,7 @@ impl GuiApplication {
         }
     }
 
-    /// Draw serialized `*namelabel` renderer entries independently of the
+    /// Draw serialized atom names and measurement values independently of the
     /// temporary selection-label toggle.
     fn draw_name_labels(&self, ui: &egui::Ui, camera: &CameraController, rect: egui::Rect) {
         if rect.width() <= 0.0 || rect.height() <= 0.0 {
@@ -19931,7 +19931,12 @@ impl GuiApplication {
             .to_cols_array_2d();
         let labels = self
             .state
-            .active_name_labels(mvp, rect.width(), rect.height(), 1_000);
+            .active_name_labels(mvp, rect.width(), rect.height(), 1_000)
+            .into_iter()
+            .chain(
+                self.state
+                    .active_atom_intr_labels(mvp, rect.width(), rect.height(), 1_000),
+            );
         let painter = ui.painter();
         for label in labels {
             let rgba = cuemol_gfx::parse_color(&label.color)
@@ -39693,7 +39698,16 @@ mod tests {
             .unwrap();
         assert_eq!(renderer.renderer_type(), "atomintr");
         assert_eq!(renderer.atom_intr_lines().len(), 3);
-        assert_eq!(renderer.atom_intr_lines()[0].positions().len(), 2);
+        assert_eq!(renderer.atom_intr_lines()[0].aids().len(), 2);
+        assert!(renderer.atom_intr_lines()[0].positions().is_empty());
+        let scene = app
+            .state
+            .scene_manager()
+            .scene(app.state.active_scene().unwrap())
+            .unwrap();
+        let object = scene.object(first).unwrap();
+        let resolved = scene.resolve_atom_intr_renderer(object, renderer);
+        assert_eq!(object.atom_intr_segments(&resolved).len(), 3);
         app.undo(&mut camera);
         assert!(app
             .state

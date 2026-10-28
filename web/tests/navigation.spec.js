@@ -102,6 +102,11 @@ test('bond picks reject a repeated atom and support undo',async({page})=>{
 test('tool shortcuts, cursors and the collapsed palette persist the expected interaction state',async({page},testInfo)=>{
   const {points:p}=await setup(page);
   await page.mouse.click(p[0][0],p[0][1]+60);
+  await page.mouse.move(...p[2]);
+  await expect.poll(async()=>(await status(page)).ui.navigation.hover?.index).toBe(2);
+  await page.mouse.wheel(0,-200);
+  await expect.poll(async()=>(await status(page)).ui.navigation.hover).toBeNull();
+  await command(page,'set_view',{center:[0,0,0],zoom:20,distance:200,slab:50});
   for(const [key,label] of [['l','Lasso'],['d','Distance'],['a','Angle'],['t','Torsion'],['e','Add Bond'],['b','Rect Select'],['n','Navigate']]) {
     await page.keyboard.press(key);
     await expect.poll(async()=>(await status(page)).ui.navigation.tool).toBe(label);
@@ -116,4 +121,31 @@ test('tool shortcuts, cursors and the collapsed palette persist the expected int
   await choose(page,'Show tool palette');
   await expect.poll(async()=>(await status(page)).ui.rects['Distance']?.length).toBe(4);
   await page.screenshot({path:testInfo.outputPath('palette.png')});
+});
+
+test('cross-molecule measurement values follow transforms and survive scene reloads',async({page},testInfo)=>{
+  const {id}=await setup(page);
+  await page.locator('#files').setInputFiles({name:'other.pdb',mimeType:'application/octet-stream',buffer:Buffer.from(pdb)});
+  await expect.poll(async()=>(await status(page)).scene.objects.length).toBe(2);
+  const other=(await status(page)).scene.objects.find(o=>o.id!==id).id;
+  await command(page,'set_view',{center:[0,0,0],zoom:20,distance:200,slab:50});
+  await command(page,'measure_geometry',{objId:id,atoms:[{chain:'A',resid:'1',atomName:'C1'},{chain:'A',resid:'1',atomName:'C2'}],atomObjects:String(other),draw:true,label:'measure'});
+  await expect.poll(async()=>(await status(page)).ui.navigation.measurementLabels).toEqual(['3.00']);
+  await command(page,'set_node_prop',{nodeType:'object',nodeId:other,prop:'xformMat',value:'(1,0,0,0,0,1,0,0,0,0,1,0,2,0,0,1)'});
+  await expect.poll(async()=>(await status(page)).ui.navigation.measurementLabels).toEqual(['5.00']);
+  await command(page,'set_node_prop',{nodeType:'object',nodeId:other,prop:'name',value:'renamed'});
+  const pending=page.waitForEvent('download');
+  await choose(page,'Save Scene');
+  const saved=await pending,stream=await saved.createReadStream(),chunks=[];
+  for await(const chunk of stream)chunks.push(chunk);
+  const scene=Buffer.concat(chunks);
+  expect(scene.toString()).toContain('mol2="renamed"');
+  await command(page,'create_scene',{name:'reload'});
+  await page.locator('#files').setInputFiles({name:'measure.qsc',mimeType:'application/octet-stream',buffer:scene});
+  await expect.poll(async()=>(await status(page)).message).toBe('Loaded measure.qsc');
+  await expect.poll(async()=>(await status(page)).ui.navigation.measurementLabels).toEqual(['5.00']);
+  const restored=(await status(page)).scene.objects.find(o=>o.name==='renamed').id;
+  await command(page,'set_node_prop',{nodeType:'object',nodeId:restored,prop:'xformMat',value:'(1,0,0,0,0,1,0,0,0,0,1,0,4,0,0,1)'});
+  await expect.poll(async()=>(await status(page)).ui.navigation.measurementLabels).toEqual(['7.00']);
+  await page.screenshot({path:testInfo.outputPath('live-measurements.png')});
 });

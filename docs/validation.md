@@ -380,3 +380,17 @@ An actual Linux window was exercised with pointer and keyboard events. Atom
 labels, residue double-clicks, Shift range extension, all three measurement
 modes, closed lasso selection, bond creation and undo passed. The camera remained
 unchanged throughout these edits, and the final annotated viewport was inspected.
+
+The measurement audit replaced cached cross-molecule endpoints with live atom
+references. Translation, scaling, coordinate updates, object renaming, deletion,
+and embedded QSC reload are covered. Scripted measurements and contact lines use
+the same resolver, and transforms are applied once to both geometry and labels.
+The native viewport now paints measurement values as well as atom names. Hover
+picking is refreshed after camera changes even when the pointer stays still.
+
+After these changes, the shared workspace passed 1,157 tests, the scripting-enabled
+navigation suite passed nine tests, native suites passed 164 tests on Linux and
+macOS, and all 27 browser tests passed. The added browser case saves and reloads
+a cross-molecule measurement, then changes its transform again and checks the
+visible value. Earlier documentation of atom-only native annotations did not
+cover measurement values; the implementation and its comments now include both.

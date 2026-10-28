@@ -233,3 +233,185 @@ fn viewport_picking_excludes_atoms_hidden_by_renderer_selection() {
         .set_visible(false);
     assert!(state.active_pick_atoms("").unwrap().is_empty());
 }
+
+fn duplicate_molecule(state: &mut DesktopAppState, id: Uid) -> Uid {
+    let molecule = state.scene_manager().object(id).unwrap().mol().clone();
+    let scene = state.active_scene().unwrap();
+    state
+        .scene_manager_mut()
+        .scene_mut(scene)
+        .unwrap()
+        .add_molecule("other", molecule)
+}
+fn measurement_value(state: &DesktopAppState, id: Uid, name: &str) -> Option<f64> {
+    let scene = state
+        .scene_manager()
+        .scene(state.active_scene().unwrap())
+        .unwrap();
+    let object = scene.object(id).unwrap();
+    let renderer = scene.resolve_atom_intr_renderer(object, object.renderer_by_name(name).unwrap());
+    object.atom_intr_values(&renderer)[0]
+}
+
+#[test]
+fn cross_object_measurements_follow_atoms_transforms_renames_and_scene_reload() {
+    use cuemol_core::{Matrix4, Vector4};
+    let (mut state, id) = fixture();
+    let other = duplicate_molecule(&mut state, id);
+    state
+        .scene_manager_mut()
+        .object_mut(other)
+        .unwrap()
+        .set_xform_matrix(Matrix4::make_trans_mat(Vector4::new3(3., 0., 0.)));
+    let mut nav = Navigation::default();
+    nav.set_tool(Tool::Distance);
+    click(&mut nav, &mut state, id, 0, false, false);
+    let value = click(&mut nav, &mut state, other, 1, false, false).unwrap();
+    assert_eq!(value["value"], 4.);
+    let renderer = state
+        .scene_manager()
+        .object(id)
+        .unwrap()
+        .renderer_by_name("measure")
+        .unwrap();
+    assert!(renderer.atom_intr_lines()[0].positions().is_empty());
+    assert_eq!(measurement_value(&state, id, "measure"), Some(4.));
+    state
+        .scene_manager_mut()
+        .object_mut(other)
+        .unwrap()
+        .mol_mut()
+        .atoms_mut()[1]
+        .position
+        .x = 3.;
+    state
+        .scene_manager_mut()
+        .object_mut(id)
+        .unwrap()
+        .set_xform_matrix(Matrix4::make_trans_mat(Vector4::new3(1., 0., 0.)));
+    state
+        .scene_manager_mut()
+        .object_mut(other)
+        .unwrap()
+        .set_name("renamed");
+    assert_eq!(measurement_value(&state, id, "measure"), Some(5.));
+    let mvp = [
+        [0.1, 0., 0., 0.],
+        [0., 0.1, 0., 0.],
+        [0., 0., 0.1, 0.],
+        [0., 0., 0., 1.],
+    ];
+    let labels = state.active_atom_intr_labels(mvp, 100., 100., 10);
+    assert_eq!(labels.len(), 1);
+    assert_eq!(labels[0].text, "5.00");
+    assert!((labels[0].x - 67.5).abs() < 1e-5);
+    let scene = state
+        .scene_manager()
+        .scene(state.active_scene().unwrap())
+        .unwrap();
+    let owner_name = scene.object(id).unwrap().name().to_string();
+    let qsc = scene.write_qsc_string();
+    assert!(qsc.contains("mol2=\"renamed\""));
+    let mut loaded = cuemol_molstr::MolSceneManager::new();
+    let sid = loaded.new_scene("reload");
+    let scene = loaded.scene_mut(sid).unwrap();
+    scene.load_qsc_str(&qsc).unwrap();
+    let other = scene.object_by_name("renamed").unwrap().uid();
+    let owner = scene.object_by_name(&owner_name).unwrap().uid();
+    scene.object_mut(other).unwrap().set_name("again");
+    scene.object_mut(other).unwrap().mol_mut().atoms_mut()[1]
+        .position
+        .x = 4.;
+    let object = scene.object(owner).unwrap();
+    let renderer =
+        scene.resolve_atom_intr_renderer(object, object.renderer_by_name("measure").unwrap());
+    assert_eq!(object.atom_intr_values(&renderer), vec![Some(6.)]);
+    assert!(scene.write_qsc_string().contains("mol2=\"again\""));
+    scene.destroy_object(other);
+    let object = scene.object(owner).unwrap();
+    let renderer =
+        scene.resolve_atom_intr_renderer(object, object.renderer_by_name("measure").unwrap());
+    assert!(object.atom_intr_segments(&renderer).is_empty());
+}
+
+#[cfg(feature = "scripting")]
+#[test]
+fn scripted_and_contact_measurements_keep_live_cross_object_references() {
+    let (mut state, id) = fixture();
+    let other = duplicate_molecule(&mut state, id);
+    let source = format!("var r = cuemol.getObject({}).createRenderer('atomintr', 'script'); r.appendById(1, {}, 2, false);", id.get(), other.get());
+    call_tool(
+        &mut state,
+        &mut Camera::new(),
+        "execute_script",
+        &serde_json::json!({"source": source}),
+    )
+    .unwrap();
+    let contacts = state
+        .define_atom_contacts(
+            id,
+            "aid 1",
+            Some(other),
+            Some("aid 2"),
+            0.,
+            2.,
+            false,
+            10,
+            "contacts",
+        )
+        .unwrap();
+    assert_eq!(contacts.count, 1);
+    assert_eq!(measurement_value(&state, id, "script"), Some(1.));
+    assert_eq!(measurement_value(&state, id, "contacts"), Some(1.));
+    state
+        .scene_manager_mut()
+        .object_mut(other)
+        .unwrap()
+        .mol_mut()
+        .atoms_mut()[1]
+        .position
+        .x = 7.;
+    assert_eq!(measurement_value(&state, id, "script"), Some(7.));
+    assert_eq!(measurement_value(&state, id, "contacts"), Some(7.));
+}
+
+#[test]
+fn measurement_labels_and_geometry_apply_object_transforms_once() {
+    use cuemol_core::{Matrix4, Vector4};
+    let (mut state, id) = fixture();
+    let mut nav = Navigation::default();
+    nav.set_tool(Tool::Distance);
+    click(&mut nav, &mut state, id, 0, false, false);
+    click(&mut nav, &mut state, id, 1, false, false);
+    let object = state.scene_manager_mut().object_mut(id).unwrap();
+    let hidden = object.renderers()[0].uid();
+    object.renderer_mut(hidden).unwrap().set_visible(false);
+    let renderer = object.renderer_by_name("measure").unwrap().uid();
+    for (key, value) in [("mode", "simple"), ("stipple0", "-1"), ("stipple1", "-1")] {
+        object
+            .renderer_mut(renderer)
+            .unwrap()
+            .set_qsc_attr(key, value);
+    }
+    object.set_xform_matrix(
+        Matrix4::make_trans_mat(Vector4::new3(1., 0., 0.))
+            .mul_mat(Matrix4::make_scale_mat(Vector4::new3(2., 2., 2.))),
+    );
+    assert_eq!(measurement_value(&state, id, "measure"), Some(2.));
+    let snapshot = state.active_render_snapshot("").unwrap();
+    assert!(!snapshot.bonds.is_empty());
+    assert_eq!(snapshot.bonds[0].from.x, 1.);
+    assert_eq!(snapshot.bonds[0].to.x, 3.);
+    let mvp = [
+        [0.1, 0., 0., 0.],
+        [0., 0.1, 0., 0.],
+        [0., 0., 0.1, 0.],
+        [0., 0., 0., 1.],
+    ];
+    let labels = state.active_atom_intr_labels(mvp, 100., 100., 10);
+    assert_eq!(labels[0].text, "2.00");
+    assert!((labels[0].x - 60.).abs() < 1e-5);
+    let lines = state.active_atom_intr_lines(mvp, 100., 100., 10);
+    assert!((lines[0].x1 - 55.).abs() < 1e-5);
+    assert!((lines[0].x2 - 65.).abs() < 1e-5);
+}

@@ -574,7 +574,7 @@ fn molecule_annotations(state: &mut DesktopAppState, name: &str, args: &Value) -
 fn measure(state: &mut DesktopAppState, name: &str, args: &Value) -> Result<Value> {
     let id = uid(args, "objId")?;
     let mut references = Vec::new();
-    let mut all_local = true;
+    let mut objects = Vec::new();
     let (positions, labels) = if name == "measure_selections" {
         let sels = text(args, "selections")?
             .split(';')
@@ -623,17 +623,25 @@ fn measure(state: &mut DesktopAppState, name: &str, args: &Value) -> Result<Valu
         for (spec, owner) in specs.iter().zip(owners) {
             let index = atom_indices(state, owner, &json!({"atoms":[spec]}))?[0];
             let atom = &state.scene_manager().object(owner).unwrap().mol().atoms()[index];
-            positions.push(
+            let mut position = atom.position;
+            state
+                .scene_manager()
+                .object(owner)
+                .unwrap()
+                .xform_matrix()
+                .xform3d(&mut position);
+            positions.push(position);
+            let aid = crate::navigation::atom_reference(atom);
+            references.push(aid.clone());
+            objects.push((
+                owner,
                 state
                     .scene_manager()
                     .object(owner)
                     .unwrap()
-                    .xform_matrix()
-                    .transform_point(atom.position),
-            );
-            let aid = crate::navigation::atom_reference(atom);
-            references.push(aid.clone());
-            all_local &= owner == id;
+                    .name()
+                    .to_string(),
+            ));
             labels.push(aid);
         }
         (positions, labels)
@@ -699,18 +707,8 @@ fn measure(state: &mut DesktopAppState, name: &str, args: &Value) -> Result<Valu
             });
         let line = if name == "measure_selections" {
             AtomIntrLine::from_selections(kind, labels)
-        } else if all_local {
-            AtomIntrLine::from_atom_references(kind, references, labels)
         } else {
-            let inverse = object.xform_matrix().invert()?;
-            AtomIntrLine::from_positions_with_labels(
-                kind,
-                positions
-                    .into_iter()
-                    .map(|p| inverse.transform_point(p))
-                    .collect(),
-                labels,
-            )
+            AtomIntrLine::from_atom_references(kind, references, labels).with_objects(id, objects)
         };
         object
             .renderer_mut(r)

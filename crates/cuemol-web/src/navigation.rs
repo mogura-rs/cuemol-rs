@@ -142,6 +142,8 @@ impl App {
     pub(super) fn navigation_feedback(&mut self, ui: &egui::Ui, response: &egui::Response) {
         self.navigation.sync_scene(self.state.active_scene());
         let rect = response.rect;
+        let mvp =
+            cuemol_desktop_core::offscreen::camera_mvp(&self.camera, rect.aspect_ratio() as f64);
         if ui
             .input(|i| i.pointer.hover_pos())
             .is_some_and(|p| rect.contains(p) && ui.ctx().layer_id_at(p) == Some(response.layer_id))
@@ -154,16 +156,15 @@ impl App {
             .filter(|_| !self.input.is_pressed() && self.rectangle_start.is_none())
             .filter(|_| self.state.config_value("view_input:hover-info") != "false");
         if let Some(point) = hover {
-            if self.hover_sample != Some((point, self.revision)) {
+            if self.hover_sample != Some((point, self.revision, mvp)) {
                 self.hover_hit = self.screen_hit(rect, point);
-                self.hover_sample = Some((point, self.revision));
+                self.hover_sample = Some((point, self.revision, mvp));
             }
         } else {
             self.hover_hit = None;
             self.hover_sample = None;
         }
-        let mvp =
-            cuemol_desktop_core::offscreen::camera_mvp(&self.camera, rect.aspect_ratio() as f64);
+
         cuemol_ui::navigation::annotations(ui, &self.state, mvp, rect);
         cuemol_ui::navigation::feedback(
             ui,

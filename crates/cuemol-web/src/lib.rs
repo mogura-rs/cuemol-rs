@@ -158,7 +158,7 @@ struct App {
     navigation: Navigation,
     lasso_points: Vec<egui::Pos2>,
     hover_hit: Option<AtomHit>,
-    hover_sample: Option<(egui::Pos2, u64)>,
+    hover_sample: Option<(egui::Pos2, u64, [[f32; 4]; 4])>,
     pick_atoms: Vec<cuemol_render::RenderAtom>,
     viewport_menu: Option<(egui::Pos2, AtomHit)>,
     rectangle_start: Option<egui::Pos2>,
@@ -1007,6 +1007,6 @@ impl eframe::App for App {
                 [rect.min.x, rect.min.y, rect.width(), rect.height()]
             })
             .collect();
-        STATUS.with(|status|*status.borrow_mut()=json!({"scene":state,"selection":self.selection,"view":cuemol_command::view_json(&self.camera),"message":self.message,"frame":self.frame,"busy":self.busy,"agent":self.agent.status(),"ui":{"overlays":overlays,"rects":self.ui_rects,"activity":self.activity.map(cuemol_ui::shell::Activity::key),"bottom":self.bottom_tab,"inspector":self.inspector.rects,"navigation":{"tool":self.navigation.tool.label(),"picks":self.navigation.picks.len(),"hover":self.hover_hit.map(|hit|json!({"object":hit.object.get(),"index":hit.index})),"labels":self.state.active_name_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).len()}}}).to_string());
+        STATUS.with(|status|*status.borrow_mut()=json!({"scene":state,"selection":self.selection,"view":cuemol_command::view_json(&self.camera),"message":self.message,"frame":self.frame,"busy":self.busy,"agent":self.agent.status(),"ui":{"overlays":overlays,"rects":self.ui_rects,"activity":self.activity.map(cuemol_ui::shell::Activity::key),"bottom":self.bottom_tab,"inspector":self.inspector.rects,"navigation":{"tool":self.navigation.tool.label(),"picks":self.navigation.picks.len(),"hover":self.hover_hit.map(|hit|json!({"object":hit.object.get(),"index":hit.index})),"measurementLabels":self.state.active_atom_intr_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).into_iter().map(|label|label.text).collect::<Vec<_>>(),"labels":self.state.active_name_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).len()}}}).to_string());
     }
 }

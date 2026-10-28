@@ -22,7 +22,7 @@ use cuemol_molstr::{
     read_qdf_mol_bytes, read_sdf_str, write_pdb_string, write_qdf_mol_bytes, write_sdf_string,
     AtomIntrKind, AtomIntrLine, LoadObjectResult, LoadedDensityMap, LoadedLWObject,
     LoadedLWRenderer, LoadedStyle, LoadedSurface, MolCommandManager, MolCoord, MolObject,
-    MolRenderer, MolSceneManager, NewRendererResult, NewSceneResult, QdfMolFileReader,
+    MolRenderer, MolScene, MolSceneManager, NewRendererResult, NewSceneResult, QdfMolFileReader,
     QdfMolFileWriter, QscLoadStatus, ResidRangeSet, ResidueKey, Selector, StreamManager,
 };
 use cuemol_molvis::{
@@ -13849,8 +13849,9 @@ impl DesktopAppState {
                     continue;
                 }
                 let label_style = gui_renderer_label_style(renderer, &styles);
-                let xform = renderer.xform_matrix().mul_mat(object.xform_matrix());
-                for (mut position, text) in object.atom_intr_labels(renderer) {
+                let xform = renderer.xform_matrix();
+                let resolved = scene.resolve_atom_intr_renderer(object, renderer);
+                for (mut position, text) in object.atom_intr_labels(&resolved) {
                     if out.len() >= max {
                         return out;
                     }
@@ -13905,8 +13906,9 @@ impl DesktopAppState {
                     b: 0,
                     a: 255,
                 }));
-                let xform = renderer.xform_matrix().mul_mat(object.xform_matrix());
-                for (mut from, mut to) in object.atom_intr_segments(renderer) {
+                let xform = renderer.xform_matrix();
+                let resolved = scene.resolve_atom_intr_renderer(object, renderer);
+                for (mut from, mut to) in object.atom_intr_segments(&resolved) {
                     if out.len() >= max {
                         return out;
                     }
@@ -14345,6 +14347,7 @@ impl DesktopAppState {
                 &styles,
                 scene_uid.get(),
                 self.surface_potential.as_ref(),
+                scene,
             );
             append_object_crystal_renderer_snapshot(
                 &mut snapshot,
@@ -14353,6 +14356,7 @@ impl DesktopAppState {
                 &styles,
                 scene_uid.get(),
                 self.surface_potential.as_ref(),
+                scene,
             );
         }
         for object in scene
@@ -14396,6 +14400,7 @@ impl DesktopAppState {
                             &styles,
                             source_uid.get(),
                             self.surface_potential.as_ref(),
+                            source,
                         );
                         append_molecule_lw_hit_points(
                             &mut snapshot,
@@ -14425,6 +14430,7 @@ impl DesktopAppState {
                         &styles,
                         source_uid.get(),
                         self.surface_potential.as_ref(),
+                        source,
                     );
                     append_molecule_lw_hit_points(
                         &mut snapshot,
@@ -15010,7 +15016,6 @@ impl DesktopAppState {
                     &molecule1, &selector1, &molecule2, &selector2, r_min, r_max, hbond, max_count,
                 )
             };
-            let owner_inverse = object1.xform_matrix().invert()?;
             pairs
                 .into_iter()
                 .filter_map(|(aid1, aid2)| {
@@ -15042,20 +15047,23 @@ impl DesktopAppState {
                             )
                         });
                     }
-                    let local_positions = [(object1, atom1.position), (object2, atom2.position)]
-                        .into_iter()
-                        .map(|(object, position)| {
-                            let world = object
-                                .xform_matrix()
-                                .mulvec(Vector4::new4(position.x, position.y, position.z, 1.0));
-                            owner_inverse.mulvec(world)
-                        })
-                        .collect();
-                    Some(AtomIntrLine::from_positions_with_labels(
-                        AtomIntrKind::Distance,
-                        local_positions,
-                        vec![label(atom1), label(atom2)],
-                    ))
+                    Some(
+                        AtomIntrLine::from_atom_references(
+                            AtomIntrKind::Distance,
+                            vec![
+                                object1.mol().to_str_aid(aid1),
+                                object2.mol().to_str_aid(aid2),
+                            ],
+                            vec![label(atom1), label(atom2)],
+                        )
+                        .with_objects(
+                            object_uid,
+                            vec![
+                                (object_uid, object1.name().to_string()),
+                                (object2_uid, object2.name().to_string()),
+                            ],
+                        ),
+                    )
                 })
                 .collect::<Vec<_>>()
         };
@@ -36602,19 +36610,6 @@ impl DesktopAppState {
                 ))
             })
         }
-        fn atom_intr_owner_positions(
-            owner_uid: u64,
-            world_positions: Vec<Vector4>,
-        ) -> JsResult<Vec<Vector4>> {
-            let owner_xform = script_object(owner_uid)?.xform;
-            let inverse = owner_xform
-                .invert()
-                .map_err(|error| script_error(error.to_string()))?;
-            Ok(world_positions
-                .into_iter()
-                .map(|position| inverse.mulvec(position))
-                .collect())
-        }
         fn atom_intr_by_ids(
             this: &JsValue,
             kind: AtomIntrKind,
@@ -36630,40 +36625,26 @@ impl DesktopAppState {
                 .iter()
                 .map(|(_, label, _)| label.clone())
                 .collect::<Vec<_>>();
-            if molecule_atom_ids
-                .iter()
-                .all(|(molecule_uid, _)| *molecule_uid == renderer.object_uid)
-            {
-                let aids = script_env::with(|env| {
-                    let molecule = env
-                        .molecules
-                        .iter()
-                        .find(|molecule| molecule.uid == renderer.object_uid)?;
-                    molecule_atom_ids
-                        .iter()
-                        .map(|(_, atom_id)| {
-                            let aid = molecule.molecule.to_str_aid(*atom_id);
-                            (!aid.is_empty()).then_some(aid)
-                        })
-                        .collect::<Option<Vec<_>>>()
-                })
-                .ok_or_else(|| script_error("AtomIntr atom reference is not available"))?;
-                return append_atom_intr_line(
-                    this,
-                    AtomIntrLine::from_atom_references(kind, aids, labels),
-                    ctx,
-                );
-            }
-            let positions = atom_intr_owner_positions(
-                renderer.object_uid,
-                atoms
+            let aids = script_env::with(|env| {
+                molecule_atom_ids
                     .iter()
-                    .map(|(position, _, _)| *position)
-                    .collect::<Vec<_>>(),
-            )?;
+                    .map(|(uid, aid)| {
+                        let molecule = env.molecules.iter().find(|m| m.uid == *uid)?;
+                        let aid = molecule.molecule.to_str_aid(*aid);
+                        (!aid.is_empty()).then_some(aid)
+                    })
+                    .collect::<Option<Vec<_>>>()
+            })
+            .ok_or_else(|| script_error("AtomIntr atom reference is not available"))?;
+            let objects = molecule_atom_ids
+                .iter()
+                .zip(&atoms)
+                .map(|((uid, _), (_, _, name))| (Uid::new(*uid), name.clone()))
+                .collect();
             append_atom_intr_line(
                 this,
-                AtomIntrLine::from_positions_with_labels(kind, positions, labels),
+                AtomIntrLine::from_atom_references(kind, aids, labels)
+                    .with_objects(Uid::new(renderer.object_uid), objects),
                 ctx,
             )
         }
@@ -47173,6 +47154,7 @@ fn append_object_snapshot(
     styles: &StyleManager,
     style_scope_id: u64,
     surface_potential: Option<&DensityMap>,
+    scene: &MolScene,
 ) {
     let selected_indices = if object.mol().selection_text().is_empty() {
         selector
@@ -47213,6 +47195,7 @@ fn append_object_snapshot(
             styles,
             style_scope_id,
             surface_potential,
+            scene,
         );
     }
     for renderer in visible_renderers {
@@ -47224,6 +47207,7 @@ fn append_object_snapshot(
             styles,
             style_scope_id,
             surface_potential,
+            scene,
         );
     }
 
@@ -47251,6 +47235,7 @@ fn append_object_crystal_renderer_snapshot(
     styles: &StyleManager,
     style_scope_id: u64,
     surface_potential: Option<&DensityMap>,
+    scene: &MolScene,
 ) {
     let Some(cell) = object.mol().cell_params() else {
         return;
@@ -47357,6 +47342,7 @@ fn append_object_crystal_renderer_snapshot(
                 styles,
                 style_scope_id,
                 surface_potential,
+                scene,
             );
             base = Some(rendered);
         }
@@ -47483,7 +47469,10 @@ fn append_object_renderer_snapshot(
     styles: &StyleManager,
     style_scope_id: u64,
     surface_potential: Option<&DensityMap>,
+    scene: &MolScene,
 ) {
+    let resolved_renderer = renderer.map(|r| scene.resolve_atom_intr_renderer(object, r));
+    let renderer = resolved_renderer.as_deref();
     let renderer_type = renderer.map(MolRenderer::renderer_type).unwrap_or("simple");
     let mut options = renderer_render_options(
         object.uid(),
@@ -47814,8 +47803,13 @@ fn append_object_renderer_snapshot(
     // multiplied onto the modelview at display; the object xform is propagated onto
     // atom positions). The effective transform is `renderer · object`, baked into
     // this renderer's geometry so a superposed/positioned object renders where the
-    // scene saved it. Skipped when both are identity (the common case).
-    let object_xform = object.xform_matrix();
+    // scene saved it. AtomIntr endpoints already include each source object's
+    // transform. Skipped when both remaining transforms are identity.
+    let object_xform = if renderer_type == "atomintr" {
+        Matrix4::IDENTITY
+    } else {
+        object.xform_matrix()
+    };
     let renderer_xform = renderer
         .map(MolRenderer::xform_matrix)
         .unwrap_or(Matrix4::IDENTITY);
@@ -66987,7 +66981,15 @@ attribute \"dep\" string \"positions\"
             renderer.qsc_attr("style"),
             Some("DefaultLabel,DefaultAtomIntr")
         );
-        assert!(renderer.atom_intr_lines()[5].positions().len() == 2);
+        assert_eq!(renderer.atom_intr_lines()[5].aids().len(), 2);
+        assert!(renderer.atom_intr_lines()[5].positions().is_empty());
+        let scene = app
+            .scene_manager()
+            .scene(app.active_scene().unwrap())
+            .unwrap();
+        let object = scene.object(first).unwrap();
+        let resolved = scene.resolve_atom_intr_renderer(object, renderer);
+        assert!(object.atom_intr_values(&resolved)[5].unwrap() < 0.1);
         let entries = app
             .atom_intr_def_summaries(first, defined.renderer_uid)
             .unwrap();

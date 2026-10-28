@@ -53,6 +53,9 @@ The Rendering menu offers built-in GI and hatched PNG output. Animation
 rendering also defaults to the bundled Rust renderer. Maps, molecular surfaces,
 saved cameras, measurements, labels, and animation
 share the same application state and command API.
+Atom-based measurements retain their object and atom references across scene
+saves, so their geometry and displayed values follow coordinate and transform
+changes, including measurements between different molecules.
 
 | Input | Action |
 | --- | --- |

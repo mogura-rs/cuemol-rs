@@ -137,6 +137,9 @@ impl GuiApplication {
         rect: egui::Rect,
     ) {
         self.navigation.sync_scene(self.state.active_scene());
+        let mvp = camera
+            .view_projection(rect.aspect_ratio())
+            .to_cols_array_2d();
         if self
             .last_cursor
             .is_some_and(|p| self.pointer_in_viewport(Some(p)))
@@ -149,7 +152,7 @@ impl GuiApplication {
             .filter(|_| !self.input.is_pressed() && self.rect_select_start.is_none())
             .filter(|_| self.state.config_value("view_input:hover-info") != "false");
         if let Some(point) = hover {
-            if self.hover_sample != Some((point, self.snapshot_revision)) {
+            if self.hover_sample != Some((point, self.snapshot_revision, mvp)) {
                 self.hover_hit = match self.pick_hit(camera, point) {
                     Some(PickHit::Atom {
                         object_uid,
@@ -157,15 +160,13 @@ impl GuiApplication {
                     }) => Some(AtomHit::from((object_uid, atom_index))),
                     _ => None,
                 };
-                self.hover_sample = Some((point, self.snapshot_revision));
+                self.hover_sample = Some((point, self.snapshot_revision, mvp));
             }
         } else {
             self.hover_hit = None;
             self.hover_sample = None;
         }
-        let mvp = camera
-            .view_projection(rect.aspect_ratio())
-            .to_cols_array_2d();
+
         cuemol_ui::navigation::feedback(
             ui,
             &self.state,
@@ -284,6 +285,29 @@ mod tests {
                 .filter(|r| r.renderer_type == "atomintr")
                 .count(),
             1
+        );
+        let ctx = egui::Context::default();
+        let viewport = app.viewport_rect.unwrap();
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(viewport),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default()
+                    .show(ctx, |ui| app.draw_name_labels(ui, &camera, viewport));
+            },
+        );
+        fn has_value(shape: &egui::Shape) -> bool {
+            match shape {
+                egui::Shape::Text(text) => text.galley.text() == "135.00",
+                egui::Shape::Vec(shapes) => shapes.iter().any(has_value),
+                _ => false,
+            }
+        }
+        assert!(
+            output.shapes.iter().any(|shape| has_value(&shape.shape)),
+            "measurement value must be painted in the viewport"
         );
         assert_eq!(app.undo_stack.len(), 1);
         app.undo(&mut camera);
