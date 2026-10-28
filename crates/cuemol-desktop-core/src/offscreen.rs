@@ -46,11 +46,10 @@ struct DepthParams {
     _padding: f32,
 }
 
-// Flat color in the vertex's world normal, two-sided diffuse (Lambert) shading
-// against a fixed light so curved surfaces (spheres/cylinders) get a brightness
-// gradient — `abs(dot)` keeps back faces lit (no black interiors) and leaves
-// camera-facing flats fully lit.
-const MESH_SHADER: &str = r#"
+const MESH_SHADER: &str = concat!(
+    include_str!("appearance.wgsl"),
+    "\n",
+    r#"
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) color: vec4<f32>,
@@ -70,6 +69,12 @@ fn vs(@location(0) position: vec4<f32>, @location(1) normal: vec4<f32>, @locatio
     var out: VsOut;
     out.clip = mvp * position;
     out.color = color;
+    if normal.w < 1.5 {
+        let right = normalize(vec3<f32>(mvp[0].x, mvp[1].x, mvp[2].x));
+        let up = normalize(vec3<f32>(mvp[0].y, mvp[1].y, mvp[2].y));
+        let eye_normal = vec3<f32>(dot(normal.xyz, right), dot(normal.xyz, up), dot(normal.xyz, cross(right, up)));
+        out.color = reference_lighting(eye_normal, color);
+    }
     out.normal = normal.xyz;
     out.cull_back_faces = normal.w;
     return out;
@@ -79,14 +84,7 @@ fn fs(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0) vec4
     if (in.cull_back_faces > 0.5 && !front_facing) {
         discard;
     }
-    if (in.cull_back_faces > 1.5) {
-        return in.color;
-    }
-    let light = normalize(vec3<f32>(0.0, 0.0, 1.0));
-    let n = normalize(in.normal);
-    let lambert = abs(dot(n, light));
-    let intensity = 0.4 + 0.6 * lambert;
-    return vec4<f32>(in.color.rgb * intensity, in.color.a);
+    return in.color;
 }
 @fragment
 fn fs_depth(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
@@ -107,7 +105,8 @@ fn fs_depth(in: VsOut, @builtin(front_facing) front_facing: bool) -> @location(0
     let gray = 1.0 - normalized;
     return vec4<f32>(gray, gray, gray, 1.0);
 }
-"#;
+"#
+);
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -186,6 +185,7 @@ pub struct SceneRenderer {
     pipeline: wgpu::RenderPipeline,
     depth_pipeline: wgpu::RenderPipeline,
     bind_layout: wgpu::BindGroupLayout,
+    viewport: std::sync::Mutex<crate::viewport::ViewportRenderer>,
 }
 
 impl SceneRenderer {
@@ -199,13 +199,40 @@ impl SceneRenderer {
     async fn new_async() -> Option<Self> {
         let (device, queue) = create_device().await?;
         let (pipeline, depth_pipeline, bind_layout) = build_pipeline(&device);
+        let viewport = std::sync::Mutex::new(crate::viewport::ViewportRenderer::new(
+            &device,
+            COLOR_FORMAT,
+        ));
         Some(Self {
+            viewport,
             device,
             queue,
             pipeline,
             depth_pipeline,
             bind_layout,
         })
+    }
+
+    pub fn render_camera(
+        &self,
+        snapshot: &RenderSceneSnapshot,
+        camera: &Camera,
+        width: u32,
+        height: u32,
+        background: [f64; 4],
+        level: i32,
+    ) -> Option<Vec<u8>> {
+        let mut viewport = self.viewport.lock().ok()?;
+        crate::viewport_readback::draw(
+            &mut viewport,
+            &self.device,
+            &self.queue,
+            snapshot,
+            camera,
+            [width, height],
+            background,
+            level,
+        )
     }
 
     /// Render `meshes` to a `width`x`height` RGBA8 image (same output as
@@ -433,9 +460,9 @@ impl OffScreenView {
             } else {
                 1.0
             };
-            renderer.render_supersampled(
-                &[mesh],
-                mvp,
+            renderer.render_camera(
+                snapshot,
+                &camera,
                 width,
                 height,
                 background,
@@ -914,14 +941,16 @@ fn translation(tx: f64, ty: f64, tz: f64) -> Matrix4 {
 /// Build the row-major projection matrix for a [`Camera`] — orthographic, or
 /// perspective when the camera's `perspective` flag is set. The focal plane at
 /// `cam_dist` has half-height `zoom/2` (width scaled by `aspect`) in both modes;
-/// near/far bracket `cam_dist` by `slab_depth/2`, mapping to wgpu depth `[0, 1]`.
+/// the display clip planes map to wgpu depth `[0, 1]`.
 fn projection_matrix(camera: &Camera, aspect: f64) -> Matrix4 {
+    projection_matrix_with_range(camera, aspect, camera_depth_range(camera))
+}
+
+fn projection_matrix_with_range(camera: &Camera, aspect: f64, range: (f64, f64)) -> Matrix4 {
     let cam_dist = camera.cam_dist();
     let half_h = (camera.zoom() / 2.0).max(1.0e-6);
     let half_w = (half_h * aspect).max(1.0e-6);
-    let slab = camera.slab_depth().max(1.0e-3);
-    let near_dist = (cam_dist - slab / 2.0).max(1.0e-3);
-    let far_dist = cam_dist + slab / 2.0;
+    let (near_dist, far_dist) = range;
     let mut p = Matrix4 {
         values: [[0.0; 4]; 4],
     };
@@ -935,8 +964,8 @@ fn projection_matrix(camera: &Camera, aspect: f64) -> Matrix4 {
     } else {
         p.values[0][0] = 1.0 / half_w;
         p.values[1][1] = 1.0 / half_h;
-        p.values[2][2] = -1.0 / slab;
-        p.values[2][3] = -near_dist / slab;
+        p.values[2][2] = -1.0 / (far_dist - near_dist);
+        p.values[2][3] = -near_dist / (far_dist - near_dist);
         p.values[3][3] = 1.0;
     }
     p
@@ -947,6 +976,20 @@ fn projection_matrix(camera: &Camera, aspect: f64) -> Matrix4 {
 /// Mirrors the CueMol camera model: view = `T(0,0,-cam_dist) · R(rotation) ·
 /// T(-center)`, then the [`projection_matrix`] (orthographic or perspective).
 pub fn camera_mvp(camera: &Camera, aspect: f64) -> [[f32; 4]; 4] {
+    camera_mvp_with_projection(camera, projection_matrix(camera, aspect))
+}
+
+/// Picking stops at the fog end; fully fogged geometry remains in display depth.
+pub fn camera_pick_mvp(camera: &Camera, aspect: f64) -> [[f32; 4]; 4] {
+    let (near, _) = camera_depth_range(camera);
+    let far = (camera.cam_dist() + camera.slab_depth() * 0.5).max(near + 0.1);
+    camera_mvp_with_projection(
+        camera,
+        projection_matrix_with_range(camera, aspect, (near, far)),
+    )
+}
+
+fn camera_mvp_with_projection(camera: &Camera, projection: Matrix4) -> [[f32; 4]; 4] {
     let center = camera.center();
     let rotation = camera.rotation().to_matrix();
     let cam_dist = camera.cam_dist();
@@ -954,7 +997,7 @@ pub fn camera_mvp(camera: &Camera, aspect: f64) -> [[f32; 4]; 4] {
         .mul_mat(rotation)
         .mul_mat(translation(-center.x, -center.y, -center.z));
 
-    let mvp = projection_matrix(camera, aspect).mul_mat(view);
+    let mvp = projection.mul_mat(view);
     // Row-major Matrix4 -> column-major array for WGSL (out[col][row]).
     let mut out = [[0.0f32; 4]; 4];
     for (col, out_col) in out.iter_mut().enumerate() {
@@ -967,14 +1010,14 @@ pub fn camera_mvp(camera: &Camera, aspect: f64) -> [[f32; 4]; 4] {
 
 /// Near and far distances used by [`camera_mvp`].
 pub fn camera_depth_range(camera: &Camera) -> (f64, f64) {
-    let slab = camera.slab_depth().max(1.0e-3);
+    let slab = camera.slab_depth().max(0.1);
     (
-        (camera.cam_dist() - slab / 2.0).max(1.0e-3),
-        camera.cam_dist() + slab / 2.0,
+        (camera.cam_dist() - slab / 2.0).max(0.1),
+        camera.cam_dist() + slab,
     )
 }
 
-fn jittered_mvp(
+pub(crate) fn jittered_mvp(
     mut mvp: [[f32; 4]; 4],
     width: u32,
     height: u32,
@@ -1015,6 +1058,18 @@ pub fn render_snapshot_offscreen(
 ) -> Option<Vec<u8>> {
     let mesh = tessellate_snapshot(snapshot);
     render_meshes_offscreen(&[mesh], mvp, width, height, clear)
+}
+
+/// Render the shared interactive pipelines with a camera and jitter supersampling.
+pub fn render_snapshot_camera_offscreen(
+    snapshot: &RenderSceneSnapshot,
+    camera: &Camera,
+    width: u32,
+    height: u32,
+    background: [f64; 4],
+    level: i32,
+) -> Option<Vec<u8>> {
+    SceneRenderer::new()?.render_camera(snapshot, camera, width, height, background, level)
 }
 
 /// Render a whole scene with jitter supersampling.
@@ -1349,12 +1404,12 @@ mod tests {
         assert!(mesh.vertices.len() > 100 && !mesh.indices.is_empty());
 
         // Orthographic MVP (column-major for WGSL): x,y pass through to NDC; z in
-        // [-2,2] maps to depth [0,1] (z' = 0.25 z + 0.5), so the atom's front
+        // [-2,2] maps to depth [1,0] (z' = -0.25 z + 0.5), so the atom's front
         // surface (nearest depth) occludes the bond behind it.
         const ORTHO: [[f32; 4]; 4] = [
             [1.0, 0.0, 0.0, 0.0],
             [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 0.25, 0.0],
+            [0.0, 0.0, -0.25, 0.0],
             [0.0, 0.0, 0.5, 1.0],
         ];
         let Some(img) = render_snapshot_offscreen(&snapshot, ORTHO, 64, 64, [0.0, 0.0, 0.0, 1.0])
@@ -1388,7 +1443,7 @@ mod tests {
     #[test]
     fn camera_mvp_projects_scene_geometry_into_ndc() {
         // GPU-free oracle: the scene Camera's MVP maps the look-at centre to the
-        // NDC origin at mid-depth, and a point `zoom/2` off-centre to the screen
+        // NDC origin at one-third depth, and a point `zoom/2` off-centre to the screen
         // edge. Default camera: centre origin, cam_dist 200, zoom 50, slab 50.
         let camera = Camera::new();
         let mvp = camera_mvp(&camera, 1.0);
@@ -1399,8 +1454,8 @@ mod tests {
             "centre not at NDC origin: {origin:?}"
         );
         assert!(
-            (origin[2] - 0.5).abs() < 1.0e-4,
-            "centre depth not mid-slab: {origin:?}"
+            (origin[2] - 1.0 / 3.0).abs() < 1.0e-4,
+            "centre depth does not match the display clip planes: {origin:?}"
         );
         // World (zoom/2, 0, 0) -> horizontal screen edge; (0, zoom/2, 0) ->
         // vertical edge. (The y SIGN follows the default camera rotation's
@@ -1415,6 +1470,28 @@ mod tests {
             (top[1].abs() - 1.0).abs() < 1.0e-3,
             "y extent wrong: {top:?}"
         );
+    }
+
+    #[test]
+    fn display_depth_includes_fogged_geometry_but_picking_ends_at_the_fog_limit() {
+        let mut camera = Camera::new();
+        camera.set_cam_dist(2.0);
+        camera.set_slab_depth(10.0);
+        assert_eq!(camera_depth_range(&camera), (0.1, 12.0));
+        let depth = |mvp, z| {
+            let clip = project(mvp, [0.0, 0.0, z, 1.0]);
+            clip[2] / clip[3]
+        };
+        for perspective in [false, true] {
+            camera.set_perspective(perspective);
+            let display = camera_mvp(&camera, 1.0);
+            let pick = camera_pick_mvp(&camera, 1.0);
+            assert!(depth(display, 1.9).abs() < 1.0e-5);
+            assert!((depth(display, -10.0) - 1.0).abs() < 1.0e-5);
+            assert!((depth(pick, -5.0) - 1.0).abs() < 1.0e-5);
+            assert!((0.0..1.0).contains(&depth(display, -6.0)));
+            assert!(depth(pick, -6.0) > 1.0);
+        }
     }
 
     #[test]

@@ -427,3 +427,43 @@ confirmed a single wheel step from zoom 50 to 38, unchanged camera distance,
 rotation, translation, the drag threshold and both Shift-drag axis locks.
 The input filter also checks repeated steps, both axes, raw valuator motion and
 state reset without depending on an elapsed-time debounce.
+
+## Shared viewport appearance
+
+The native viewport now uses the browser's persistent molecular GPU pipelines.
+Lighting follows the reference eye-space Blinn model: ambient 0.4, diffuse 0.8,
+specular 0.16 and shininess 32. Mesh colors are lit per vertex; sphere and cylinder
+impostors are lit per fragment. Fog blends into the scene background. Screen-space
+lines, stipples, points and displaced lines use the depth buffer. Opaque renderer
+sections precede transparent sections. Display and picking use their distinct
+reference far planes, and camera exports preserve the scene background.
+
+`scripts/check-appearance.py` runs the read-only reference GLSL shaders against
+geometry exported by the Rust fixture test. All 18 Linux fixtures matched every
+RGBA byte, including ribbon and cartoon protein meshes, camera rotations,
+perspective, tilted cylinders, fog and stippled lines. The Apple Silicon Metal
+fixtures passed the stated comparison tolerance. The comparison checks that
+reference images contain foreground pixels; two empty images cannot pass.
+This isolates shader equivalence for the same geometry. Backbone geometry has
+separate C++ comparisons above; these images do not establish every renderer or
+parameter combination.
+
+The GPU-enabled shared core passed 138 unit tests and two pixel tests. The pixel
+tests also cover transparent compositing, line occlusion, silhouette depth and
+point displacement. Both native suites passed 165 tests. The scripting surface
+fixture now explicitly tests SolidColoring fallback and a subsequent CPK color
+change; its previous gray expectation contradicted the reference coloring
+cascade. The lightweight-scene fixture now uses the actual `simple` renderer
+name instead of the unregistered `line` name.
+
+The full scripting audit also exposed differences in the reference class registry
+that are outside these appearance changes. AO and spatial AA still require their
+post-processing passes to be connected to the shared viewport. Those follow-up
+items remain open; the appearance comparison is not a full-feature completion
+claim.
+
+All 28 browser cases passed after the shared pipeline change. A real Linux window
+also passed pointer/keyboard checks for labels, residue ranges, measurements,
+closed lasso selection, bond editing and undo. The inspected viewport showed all
+three measurement values. The 138 core unit tests and both pixel tests also ran
+successfully on Metal after installing the required reference fixtures.

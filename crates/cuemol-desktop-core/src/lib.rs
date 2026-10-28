@@ -66,6 +66,8 @@ mod memory_io;
 pub mod offscreen;
 #[cfg(feature = "offscreen")]
 pub mod viewport;
+#[cfg(feature = "offscreen")]
+mod viewport_readback;
 
 /// Public molecular renderer types shown by CueMol2's renderer setup dialog.
 /// Internal `*` renderers and test-only renderers are intentionally excluded.
@@ -13626,14 +13628,7 @@ impl DesktopAppState {
             .active_scene
             .and_then(|id| self.scene_manager().scene(id))
             .ok_or_else(|| CueMolError::not_found("scene"))?;
-        let value = scene.scene_attribute("bgcolor").unwrap_or("black");
-        let styles = scene_style_manager(scene);
-        let color = styles
-            .get_color(value, scene.uid().get())
-            .map(|c| c.rgba8())
-            .or_else(|| resolve_qsc_color(value, &styles))
-            .ok_or_else(|| CueMolError::invalid_argument("unresolved background color"))?;
-        Ok(rgba8_render_color(color))
+        scene_background_color(scene)
     }
 
     pub fn active_sequence_summaries(&self) -> Vec<GuiSequenceSummary> {
@@ -14319,17 +14314,21 @@ impl DesktopAppState {
             )
         }
         .unwrap_or_else(|| auto_frame_camera(&snapshot));
-        let aspect = width.max(1) as f64 / height.max(1) as f64;
+        let background = scene_background_color(scene)?;
         let rgba = if exporter.use_depth() {
             crate::offscreen::render_snapshot_depth_offscreen(&snapshot, &camera, width, height)
         } else {
-            let mvp = crate::offscreen::camera_mvp(&camera, aspect);
-            crate::offscreen::render_snapshot_supersampled_offscreen(
+            crate::offscreen::render_snapshot_camera_offscreen(
                 &snapshot,
-                mvp,
+                &camera,
                 width,
                 height,
-                [0.1, 0.1, 0.12, if exporter.use_alpha() { 0.0 } else { 1.0 }],
+                [
+                    background[0] as f64,
+                    background[1] as f64,
+                    background[2] as f64,
+                    if exporter.use_alpha() { 0.0 } else { 1.0 },
+                ],
                 5,
             )
         }
@@ -27150,7 +27149,6 @@ impl DesktopAppState {
                             });
                         width.and_then(|width| {
                             height.and_then(|height| {
-                                let aspect = width as f64 / height as f64;
                                 let rgba = if exporter.use_depth() {
                                     crate::offscreen::render_snapshot_depth_offscreen(
                                         &render_scene.snapshot,
@@ -27159,16 +27157,15 @@ impl DesktopAppState {
                                         height,
                                     )
                                 } else {
-                                    let mvp = crate::offscreen::camera_mvp(&camera, aspect);
-                                    crate::offscreen::render_snapshot_supersampled_offscreen(
+                                    crate::offscreen::render_snapshot_camera_offscreen(
                                         &render_scene.snapshot,
-                                        mvp,
+                                        &camera,
                                         width,
                                         height,
                                         [
-                                            0.1,
-                                            0.1,
-                                            0.12,
+                                            background[0] as f64,
+                                            background[1] as f64,
+                                            background[2] as f64,
                                             if exporter.use_alpha() { 0.0 } else { 1.0 },
                                         ],
                                         5,
@@ -51585,6 +51582,17 @@ pub fn atoms_in_screen_rect(
     selected
 }
 
+fn scene_background_color(scene: &MolScene) -> Result<[f32; 4]> {
+    let value = scene.scene_attribute("bgcolor").unwrap_or("black");
+    let styles = scene_style_manager(scene);
+    let color = styles
+        .get_color(value, scene.uid().get())
+        .map(|c| c.rgba8())
+        .or_else(|| resolve_qsc_color(value, &styles))
+        .ok_or_else(|| CueMolError::invalid_argument("unresolved background color"))?;
+    Ok(rgba8_render_color(color))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -54065,7 +54073,7 @@ end_header
             let hidden_uid = scene
                 .object_mut(first_uid)
                 .unwrap()
-                .add_renderer("line", "hidden-line");
+                .add_renderer("simple", "hidden-line");
             scene
                 .object_mut(first_uid)
                 .unwrap()
@@ -57843,10 +57851,22 @@ end_header
             .expect("surface molecule colouring is editable");
         let rendered = reloaded.active_scene_surface_meshes();
         assert_eq!(rendered.len(), 1);
+        assert!(rendered[0]
+            .vertices
+            .iter()
+            .all(|vertex| vertex.color == [1.0, 0.0, 0.0, 1.0]));
+        reloaded
+            .run_script_js(
+                "var rend = cuemol.getObject('generated-surface').getRendererByName('surface'); \
+             rend.coloring = cuemol.CPKColoring(); \
+             rend.coloring.col_C = cuemol.makeColor('#335577');",
+            )
+            .unwrap();
+        let rendered = reloaded.active_scene_surface_meshes();
         assert!(rendered[0].vertices.iter().all(|vertex| {
-            (vertex.color[0] - 0.38).abs() < 0.02
-                && (vertex.color[1] - 0.38).abs() < 0.02
-                && (vertex.color[2] - 0.38).abs() < 0.02
+            (vertex.color[0] - 51.0 / 255.0).abs() < 1.0e-6
+                && (vertex.color[1] - 85.0 / 255.0).abs() < 1.0e-6
+                && (vertex.color[2] - 119.0 / 255.0).abs() < 1.0e-6
                 && (vertex.color[3] - 1.0).abs() < 1.0e-6
         }));
 

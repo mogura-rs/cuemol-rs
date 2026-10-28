@@ -1546,6 +1546,7 @@ dependencies = [
  "naga",
  "png 0.17.16",
  "pollster",
+ "serde_json",
  "wgpu",
 ]
 

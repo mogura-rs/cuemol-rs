@@ -57,3 +57,6 @@ offscreen = [
 [lib]
 name = "cuemol_desktop_core"
 path = "src/lib.rs"
+
+[dev-dependencies]
+serde_json = "1"

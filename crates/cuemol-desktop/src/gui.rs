@@ -43,7 +43,6 @@ use std::sync::{
     mpsc, Arc,
 };
 use std::time::{Duration, Instant};
-use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -5569,7 +5568,6 @@ impl GuiApplication {
             .show(ctx, |ui| {
                 let rect = ui.max_rect();
                 self.viewport_rect = Some(rect);
-                self.draw_screen_lines(ui, camera, rect);
                 self.draw_center_mark(ui, rect, camera);
                 self.draw_name_labels(ui, camera, rect);
                 self.draw_atom_labels(ui, camera, rect);
@@ -19985,93 +19983,6 @@ impl GuiApplication {
         }
     }
 
-    fn draw_screen_lines(&self, ui: &egui::Ui, camera: &CameraController, rect: egui::Rect) {
-        let painter = ui.painter();
-        for bond in self
-            .snapshot
-            .bonds
-            .iter()
-            .filter(|bond| bond.screen_width.is_some())
-        {
-            let Some((from, _)) = camera.project_to_viewport(vec3_from_vector(bond.from), rect)
-            else {
-                continue;
-            };
-            let Some((to, _)) = camera.project_to_viewport(vec3_from_vector(bond.to), rect) else {
-                continue;
-            };
-            let offset = egui::vec2(bond.screen_offset[0], bond.screen_offset[1]);
-            let from = from + offset;
-            let to = to + offset;
-            let rgba = bond
-                .color
-                .as_ref()
-                .and_then(cuemol_gfx::ColorSpec::rgba8)
-                .unwrap_or(Rgba8 {
-                    r: 255,
-                    g: 255,
-                    b: 0,
-                    a: 255,
-                });
-            let end_rgba = bond
-                .end_color
-                .as_ref()
-                .and_then(cuemol_gfx::ColorSpec::rgba8)
-                .unwrap_or(rgba);
-            let width = bond.screen_width.unwrap_or(1.0).max(0.1);
-            if bond.screen_point {
-                painter.rect_filled(
-                    egui::Rect::from_center_size(from, egui::vec2(width, width)),
-                    0.0,
-                    egui::Color32::from_rgba_unmultiplied(rgba.r, rgba.g, rgba.b, rgba.a),
-                );
-                continue;
-            }
-            let delta = to - from;
-            let length = delta.length();
-            if length <= f32::EPSILON {
-                continue;
-            }
-            let direction = delta / length;
-            let gradient = rgba != end_rgba;
-            let paint_span = |start: f32, end: f32| {
-                let steps = if gradient {
-                    ((end - start) / 4.0).ceil().max(1.0) as usize
-                } else {
-                    1
-                };
-                for step in 0..steps {
-                    let span_start = start + (end - start) * step as f32 / steps as f32;
-                    let span_end = start + (end - start) * (step + 1) as f32 / steps as f32;
-                    let t = ((span_start + span_end) * 0.5 / length).clamp(0.0, 1.0);
-                    let lerp = |start: u8, end: u8| {
-                        (f32::from(start) + (f32::from(end) - f32::from(start)) * t).round() as u8
-                    };
-                    let color = egui::Color32::from_rgba_unmultiplied(
-                        lerp(rgba.r, end_rgba.r),
-                        lerp(rgba.g, end_rgba.g),
-                        lerp(rgba.b, end_rgba.b),
-                        lerp(rgba.a, end_rgba.a),
-                    );
-                    painter.line_segment(
-                        [from + direction * span_start, from + direction * span_end],
-                        egui::Stroke::new(width, color),
-                    );
-                }
-            };
-            if !bond.screen_stipple {
-                paint_span(0.0, length);
-                continue;
-            }
-            let mut start = 0.0_f32;
-            while start < length {
-                let end = (start + 8.0).min(length);
-                paint_span(start, end);
-                start += 16.0;
-            }
-        }
-    }
-
     fn draw_center_mark(&self, ui: &egui::Ui, rect: egui::Rect, camera: &CameraController) {
         if camera.center_mark == CenterMark::None {
             return;
@@ -31550,7 +31461,7 @@ impl CameraController {
     }
 
     fn view_projection(&self, aspect: f32) -> Mat4 {
-        Mat4::from_cols_array_2d(&cuemol_desktop_core::offscreen::camera_mvp(
+        Mat4::from_cols_array_2d(&cuemol_desktop_core::offscreen::camera_pick_mvp(
             &self.to_qsys_camera("__current"),
             aspect.max(0.01) as f64,
         ))
@@ -31577,28 +31488,6 @@ impl CameraController {
             (radius * focal / depth.max(0.1)).clamp(2.0, 48.0)
         } else {
             (radius * viewport.height() / (self.ortho_scale * 2.0).max(0.1)).clamp(2.0, 48.0)
-        }
-    }
-
-    fn uniform(&self, size: PhysicalSize<u32>) -> CameraUniform {
-        let width = size.width.max(1) as f32;
-        let height = size.height.max(1) as f32;
-        let aspect = width / height;
-        let rotation = self.rotation();
-        let right = rotation * Vec3::X;
-        let up = rotation * Vec3::Y;
-        let view_proj = self.view_projection(aspect);
-        CameraUniform {
-            view_proj: view_proj.to_cols_array_2d(),
-            right: [right.x, right.y, right.z, 0.0],
-            up: [up.x, up.y, up.z, 0.0],
-            light: [0.25, 0.45, 0.85, 0.0],
-            pixel_scale: [
-                self.zoom() / height,
-                self.distance,
-                if self.perspective { 1.0 } else { 0.0 },
-                0.0,
-            ],
         }
     }
 
@@ -33818,20 +33707,8 @@ struct GpuState {
     config: wgpu::SurfaceConfiguration,
     size: PhysicalSize<u32>,
     depth_view: wgpu::TextureView,
-    atom_pipeline: wgpu::RenderPipeline,
-    bond_pipeline: wgpu::RenderPipeline,
     camera: CameraController,
-    camera_buffer: wgpu::Buffer,
-    camera_bind_group: wgpu::BindGroup,
-    atom_quad_buffer: wgpu::Buffer,
-    atom_instance_buffer: ReusableGpuBuffer,
-    atom_instance_count: u32,
-    bond_instance_buffer: ReusableGpuBuffer,
-    bond_instance_count: u32,
-    mesh_pipeline: wgpu::RenderPipeline,
-    mesh_vertex_buffer: ReusableGpuBuffer,
-    mesh_index_buffer: ReusableGpuBuffer,
-    mesh_index_count: u32,
+    viewport_renderer: ViewportRenderer,
     uploaded_snapshot_revision: Option<u64>,
     egui_renderer: egui_wgpu::Renderer,
 }
@@ -33865,7 +33742,7 @@ impl GpuState {
             .formats
             .iter()
             .copied()
-            .find(wgpu::TextureFormat::is_srgb)
+            .find(|format| !format.is_srgb())
             .unwrap_or(caps.formats[0]);
         let present_mode = caps
             .present_modes
@@ -33886,53 +33763,7 @@ impl GpuState {
         surface.configure(&device, &config);
         let depth_view = create_depth_view(&device, config.width, config.height);
         let camera = CameraController::default();
-        let camera_uniform = camera.uniform(size);
-        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("camera-uniform-buffer"),
-            contents: bytemuck::bytes_of(&camera_uniform),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-        let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("camera-bind-group-layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("camera-bind-group"),
-            layout: &camera_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
-            }],
-        });
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("molecule-shader"),
-            source: wgpu::ShaderSource::Wgsl(MOLECULE_SHADER.into()),
-        });
-        let atom_pipeline = create_atom_pipeline(&device, &shader, &camera_layout, config.format);
-        let bond_pipeline = create_bond_pipeline(&device, &shader, &camera_layout, config.format);
-        let atom_quad_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("atom-quad-buffer"),
-            contents: bytemuck::cast_slice(&ATOM_QUAD),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let atom_instance_buffer =
-            ReusableGpuBuffer::new(&device, "atom-instance-buffer", wgpu::BufferUsages::VERTEX);
-        let bond_instance_buffer =
-            ReusableGpuBuffer::new(&device, "bond-instance-buffer", wgpu::BufferUsages::VERTEX);
-        let mesh_pipeline = create_mesh_pipeline(&device, &shader, &camera_layout, config.format);
-        let mesh_vertex_buffer =
-            ReusableGpuBuffer::new(&device, "mesh-vertex-buffer", wgpu::BufferUsages::VERTEX);
-        let mesh_index_buffer =
-            ReusableGpuBuffer::new(&device, "mesh-index-buffer", wgpu::BufferUsages::INDEX);
+        let viewport_renderer = ViewportRenderer::new(&device, config.format);
         let egui_renderer = egui_wgpu::Renderer::new(
             &device,
             config.format,
@@ -33946,20 +33777,8 @@ impl GpuState {
             config,
             size,
             depth_view,
-            atom_pipeline,
-            bond_pipeline,
             camera,
-            camera_buffer,
-            camera_bind_group,
-            atom_quad_buffer,
-            atom_instance_buffer,
-            atom_instance_count: 0,
-            bond_instance_buffer,
-            bond_instance_count: 0,
-            mesh_pipeline,
-            mesh_vertex_buffer,
-            mesh_index_buffer,
-            mesh_index_count: 0,
+            viewport_renderer,
             uploaded_snapshot_revision: None,
             egui_renderer,
         })
@@ -33984,7 +33803,8 @@ impl GpuState {
         pixels_per_point: f32,
     ) -> std::result::Result<(), wgpu::SurfaceError> {
         if snapshot_upload_required(self.uploaded_snapshot_revision, scene.revision) {
-            self.prepare_snapshot(scene.snapshot);
+            self.viewport_renderer
+                .upload(&self.device, &self.queue, scene.snapshot);
             self.uploaded_snapshot_revision = Some(scene.revision);
         }
         // Confine the 3D scene to the central viewport region (everything but the
@@ -34011,9 +33831,6 @@ impl GpuState {
                 self.config.height as f32,
             ),
         };
-        let camera_uniform = self.camera.uniform(PhysicalSize::new(vw as u32, vh as u32));
-        self.queue
-            .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&camera_uniform));
         for (id, image_delta) in &textures_delta.set {
             self.egui_renderer
                 .update_texture(&self.device, &self.queue, *id, image_delta);
@@ -34038,51 +33855,16 @@ impl GpuState {
             paint_jobs,
             &screen_descriptor,
         );
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("molecule-render-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(scene.background),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            render_pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
-            render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            if self.mesh_index_count > 0 {
-                render_pass.set_pipeline(&self.mesh_pipeline);
-                render_pass.set_vertex_buffer(0, self.mesh_vertex_buffer.slice());
-                render_pass
-                    .set_index_buffer(self.mesh_index_buffer.slice(), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(0..self.mesh_index_count, 0, 0..1);
-            }
-            if self.bond_instance_count > 0 {
-                render_pass.set_pipeline(&self.bond_pipeline);
-                render_pass.set_vertex_buffer(0, self.atom_quad_buffer.slice(..));
-                render_pass.set_vertex_buffer(1, self.bond_instance_buffer.slice());
-                render_pass.draw(0..6, 0..self.bond_instance_count);
-            }
-            if self.atom_instance_count > 0 {
-                render_pass.set_pipeline(&self.atom_pipeline);
-                render_pass.set_vertex_buffer(0, self.atom_quad_buffer.slice(..));
-                render_pass.set_vertex_buffer(1, self.atom_instance_buffer.slice());
-                render_pass.draw(0..6, 0..self.atom_instance_count);
-            }
-        }
+        self.viewport_renderer.render_region(
+            &mut encoder,
+            &self.queue,
+            &view,
+            &self.depth_view,
+            &self.camera.to_qsys_camera("__current"),
+            [vw as u32, vh as u32],
+            scene.background,
+            [vx, vy, vw, vh],
+        );
         {
             let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("egui-render-pass"),
@@ -34112,43 +33894,6 @@ impl GpuState {
         self.queue.submit(command_buffers);
         frame.present();
         Ok(())
-    }
-
-    fn prepare_snapshot(&mut self, snapshot: &RenderSceneSnapshot) {
-        let atoms = snapshot
-            .atoms
-            .iter()
-            .filter(|atom| atom.hit.is_none())
-            .map(atom_instance)
-            .collect::<Vec<_>>();
-        self.atom_instance_count = atoms.len() as u32;
-        self.atom_instance_buffer
-            .upload(&self.device, &self.queue, &atoms);
-
-        let bonds = snapshot
-            .bonds
-            .iter()
-            .filter(|bond| bond.screen_width.is_none())
-            .map(bond_instance)
-            .collect::<Vec<_>>();
-        self.bond_instance_count = bonds.len() as u32;
-        self.bond_instance_buffer
-            .upload(&self.device, &self.queue, &bonds);
-
-        // Ribbon/cartoon triangle meshes: concatenate all chain meshes into one
-        // vertex + index buffer, offsetting each mesh's indices by its base.
-        let mut mesh_vertices: Vec<MeshGpuVertex> = Vec::new();
-        let mut mesh_indices: Vec<u32> = Vec::new();
-        for mesh in &snapshot.meshes {
-            let base = mesh_vertices.len() as u32;
-            mesh_vertices.extend(mesh.vertices.iter().map(mesh_gpu_vertex));
-            mesh_indices.extend(mesh.indices.iter().map(|index| base + index));
-        }
-        self.mesh_index_count = mesh_indices.len() as u32;
-        self.mesh_vertex_buffer
-            .upload(&self.device, &self.queue, &mesh_vertices);
-        self.mesh_index_buffer
-            .upload(&self.device, &self.queue, &mesh_indices);
     }
 }
 

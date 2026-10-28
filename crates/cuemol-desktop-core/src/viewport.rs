@@ -305,7 +305,13 @@ pub fn bond_instance(bond: &RenderBond) -> BondInstance {
         color,
         end_color,
         edge_color: edge.2,
-        edge_mode: [edge.1, 0.0, bond.screen_width.unwrap_or(0.0), 0.0],
+        edge_mode: [
+            edge.1,
+            f32::from(bond.screen_stipple),
+            bond.screen_width.unwrap_or(0.0),
+            f32::from(bond.screen_point),
+        ],
+        screen: [bond.screen_offset[0], bond.screen_offset[1], 0.0, 0.0],
     }
 }
 
@@ -379,8 +385,76 @@ pub struct CameraUniform {
     pub view_proj: [[f32; 4]; 4],
     pub right: [f32; 4],
     pub up: [f32; 4],
-    pub light: [f32; 4],
+    pub eye: [f32; 4],
+    pub background: [f32; 4],
+    pub fog: [f32; 4],
     pub pixel_scale: [f32; 4],
+    pub viewport: [f32; 4],
+}
+
+impl CameraUniform {
+    pub fn new(
+        camera: &cuemol_qsys::Camera,
+        size: [u32; 2],
+        background: wgpu::Color,
+        output_srgb: bool,
+    ) -> Self {
+        let q = camera.rotation();
+        let rotation =
+            glam::Quat::from_xyzw(q.x as f32, q.y as f32, q.z as f32, q.w as f32).normalize();
+        let right = rotation * glam::Vec3::X;
+        let up = rotation * glam::Vec3::Y;
+        let front = right.cross(up);
+        let center = camera.center();
+        let eye = glam::Vec3::new(center.x as f32, center.y as f32, center.z as f32)
+            + front * camera.cam_dist() as f32;
+        let fog_start = camera.cam_dist().max(1.0);
+        let fog_end = camera.cam_dist() + camera.slab_depth() * 0.5;
+        Self {
+            view_proj: crate::offscreen::camera_mvp(
+                camera,
+                size[0].max(1) as f64 / size[1].max(1) as f64,
+            ),
+            right: [right.x, right.y, right.z, 0.0],
+            up: [up.x, up.y, up.z, 0.0],
+            eye: [eye.x, eye.y, eye.z, 0.0],
+            background: [
+                background.r as f32,
+                background.g as f32,
+                background.b as f32,
+                background.a as f32,
+            ],
+            fog: [
+                fog_end as f32,
+                (1.0 / (fog_end - fog_start).max(1.0e-6)) as f32,
+                0.0,
+                0.0,
+            ],
+            viewport: [size[0].max(1) as f32, size[1].max(1) as f32, 0.0, 0.0],
+            pixel_scale: [
+                camera.zoom() as f32 / size[1].max(1) as f32,
+                camera.cam_dist() as f32,
+                f32::from(camera.is_perspective()),
+                f32::from(output_srgb),
+            ],
+        }
+    }
+}
+
+pub fn target_clear_color(mut color: wgpu::Color, output_srgb: bool) -> wgpu::Color {
+    if output_srgb {
+        let linear = |c: f64| {
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        color.r = linear(color.r);
+        color.g = linear(color.g);
+        color.b = linear(color.b);
+    }
+    color
 }
 
 #[repr(C)]
@@ -408,6 +482,7 @@ pub struct BondInstance {
     pub end_color: [f32; 4],
     pub edge_color: [f32; 4],
     pub edge_mode: [f32; 4],
+    pub screen: [f32; 4],
 }
 
 #[repr(C)]
@@ -427,13 +502,14 @@ pub const ATOM_INSTANCE_ATTRS: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_ar
     4 => Float32x4,
     5 => Float32x4
 ];
-pub const BOND_INSTANCE_ATTRS: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+pub const BOND_INSTANCE_ATTRS: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
     1 => Float32x4,
     2 => Float32x4,
     3 => Float32x4,
     4 => Float32x4,
     5 => Float32x4,
-    6 => Float32x4
+    6 => Float32x4,
+    7 => Float32x4
 ];
 pub const MESH_VERTEX_ATTRS: [wgpu::VertexAttribute; 4] =
     wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32];
@@ -455,7 +531,100 @@ pub const ATOM_QUAD: [QuadVertex; 6] = [
     },
 ];
 
-pub const MOLECULE_SHADER: &str = include_str!("molecule.wgsl");
+pub const MOLECULE_SHADER: &str = concat!(
+    include_str!("appearance.wgsl"),
+    "\n",
+    include_str!("molecule.wgsl")
+);
+
+#[derive(Default)]
+struct PrimitiveDraw {
+    atoms: std::ops::Range<u32>,
+    bonds: std::ops::Range<u32>,
+    indices: std::ops::Range<u32>,
+    transparent: bool,
+}
+
+fn primitive_draws(scene: &RenderSceneSnapshot) -> Vec<PrimitiveDraw> {
+    let prefix = |counts: Vec<u32>| {
+        let mut result = Vec::with_capacity(counts.len() + 1);
+        result.push(0_u32);
+        for count in counts {
+            result.push(result.last().copied().unwrap() + count);
+        }
+        result
+    };
+    let offsets = [
+        prefix(
+            scene
+                .atoms
+                .iter()
+                .map(|atom| u32::from(atom.hit.is_none()))
+                .collect(),
+        ),
+        prefix(vec![1; scene.bonds.len()]),
+        prefix(
+            scene
+                .meshes
+                .iter()
+                .map(|mesh| mesh.indices.len() as u32)
+                .collect(),
+        ),
+    ];
+    if scene.transparency_groups.is_empty() {
+        return vec![PrimitiveDraw {
+            atoms: 0..*offsets[0].last().unwrap(),
+            bonds: 0..*offsets[1].last().unwrap(),
+            indices: 0..*offsets[2].last().unwrap(),
+            transparent: false,
+        }];
+    }
+    let mut covered = offsets
+        .each_ref()
+        .map(|values| vec![false; values.len() - 1]);
+    let mut draws = Vec::new();
+    for group in &scene.transparency_groups {
+        let ranges = [&group.atom_range, &group.bond_range, &group.mesh_range];
+        let mut output = [0..0, 0..0, 0..0];
+        for kind in 0..3 {
+            let end = ranges[kind].end.min(covered[kind].len());
+            let start = ranges[kind].start.min(end);
+            covered[kind][start..end].fill(true);
+            output[kind] = offsets[kind][start]..offsets[kind][end];
+        }
+        let [atoms, bonds, indices] = output;
+        draws.push(PrimitiveDraw {
+            atoms,
+            bonds,
+            indices,
+            transparent: group.alpha < 1.0,
+        });
+    }
+    for kind in 0..3 {
+        let mut start = 0;
+        while start < covered[kind].len() {
+            if covered[kind][start] {
+                start += 1;
+                continue;
+            }
+            let mut end = start + 1;
+            while end < covered[kind].len() && !covered[kind][end] {
+                end += 1;
+            }
+            let range = offsets[kind][start]..offsets[kind][end];
+            let mut draw = PrimitiveDraw::default();
+            match kind {
+                0 => draw.atoms = range,
+                1 => draw.bonds = range,
+                _ => draw.indices = range,
+            }
+            draws.push(draw);
+            start = end;
+        }
+    }
+    draws.sort_by_key(|draw| draw.transparent);
+    draws
+}
 
 /// Persistent GPU buffers; scene geometry is uploaded only when it changes.
 pub struct ViewportRenderer {
@@ -469,7 +638,8 @@ pub struct ViewportRenderer {
     atom_pipeline: wgpu::RenderPipeline,
     bond_pipeline: wgpu::RenderPipeline,
     mesh_pipeline: wgpu::RenderPipeline,
-    counts: [u32; 3],
+    draws: Vec<PrimitiveDraw>,
+    output_srgb: bool,
 }
 
 impl ViewportRenderer {
@@ -520,7 +690,8 @@ impl ViewportRenderer {
             mesh_pipeline: create_mesh_pipeline(device, &shader, &layout, format),
             camera,
             bind_group,
-            counts: [0; 3],
+            draws: Vec::new(),
+            output_srgb: format.is_srgb(),
         }
     }
 
@@ -544,7 +715,7 @@ impl ViewportRenderer {
             vertices.extend(mesh.vertices.iter().map(mesh_gpu_vertex));
             indices.extend(mesh.indices.iter().map(|i| base + i));
         }
-        self.counts = [atoms.len() as u32, bonds.len() as u32, indices.len() as u32];
+        self.draws = primitive_draws(scene);
         self.atoms.upload(device, queue, &atoms);
         self.bonds.upload(device, queue, &bonds);
         self.vertices.upload(device, queue, &vertices);
@@ -561,30 +732,50 @@ impl ViewportRenderer {
         size: [u32; 2],
         background: wgpu::Color,
     ) {
-        let q = camera.rotation();
-        let rotation =
-            glam::Quat::from_xyzw(q.x as f32, q.y as f32, q.z as f32, q.w as f32).normalize();
-        let right = rotation * glam::Vec3::X;
-        let up = rotation * glam::Vec3::Y;
-        queue.write_buffer(
-            &self.camera,
-            0,
-            bytemuck::bytes_of(&CameraUniform {
-                view_proj: crate::offscreen::camera_mvp(
-                    camera,
-                    size[0] as f64 / size[1].max(1) as f64,
-                ),
-                right: [right.x, right.y, right.z, 0.0],
-                up: [up.x, up.y, up.z, 0.0],
-                light: [0.25, 0.45, 0.85, 0.0],
-                pixel_scale: [
-                    camera.zoom() as f32 / size[1].max(1) as f32,
-                    camera.cam_dist() as f32,
-                    if camera.is_perspective() { 1.0 } else { 0.0 },
-                    0.0,
-                ],
-            }),
+        self.render_with_uniform(
+            encoder,
+            queue,
+            target,
+            depth,
+            &CameraUniform::new(camera, size, background, self.output_srgb),
+            background,
+            None,
         );
+    }
+
+    pub fn render_region(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
+        target: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        camera: &cuemol_qsys::Camera,
+        size: [u32; 2],
+        background: wgpu::Color,
+        region: [f32; 4],
+    ) {
+        self.render_with_uniform(
+            encoder,
+            queue,
+            target,
+            depth,
+            &CameraUniform::new(camera, size, background, self.output_srgb),
+            background,
+            Some(region),
+        );
+    }
+
+    pub(crate) fn render_with_uniform(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
+        target: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        uniform: &CameraUniform,
+        background: wgpu::Color,
+        region: Option<[f32; 4]>,
+    ) {
+        queue.write_buffer(&self.camera, 0, bytemuck::bytes_of(uniform));
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("molecule-view"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -592,7 +783,7 @@ impl ViewportRenderer {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(background),
+                    load: wgpu::LoadOp::Clear(target_clear_color(background, self.output_srgb)),
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -607,24 +798,29 @@ impl ViewportRenderer {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
+        if let Some([x, y, width, height]) = region {
+            pass.set_viewport(x, y, width, height, 0.0, 1.0);
+        }
         pass.set_bind_group(0, &self.bind_group, &[]);
-        if self.counts[1] > 0 {
-            pass.set_pipeline(&self.bond_pipeline);
-            pass.set_vertex_buffer(0, self.quad.slice(..));
-            pass.set_vertex_buffer(1, self.bonds.slice());
-            pass.draw(0..6, 0..self.counts[1]);
-        }
-        if self.counts[0] > 0 {
-            pass.set_pipeline(&self.atom_pipeline);
-            pass.set_vertex_buffer(0, self.quad.slice(..));
-            pass.set_vertex_buffer(1, self.atoms.slice());
-            pass.draw(0..6, 0..self.counts[0]);
-        }
-        if self.counts[2] > 0 {
-            pass.set_pipeline(&self.mesh_pipeline);
-            pass.set_vertex_buffer(0, self.vertices.slice());
-            pass.set_index_buffer(self.indices.slice(), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..self.counts[2], 0, 0..1);
+        for draw in &self.draws {
+            if !draw.bonds.is_empty() {
+                pass.set_pipeline(&self.bond_pipeline);
+                pass.set_vertex_buffer(0, self.quad.slice(..));
+                pass.set_vertex_buffer(1, self.bonds.slice());
+                pass.draw(0..6, draw.bonds.clone());
+            }
+            if !draw.atoms.is_empty() {
+                pass.set_pipeline(&self.atom_pipeline);
+                pass.set_vertex_buffer(0, self.quad.slice(..));
+                pass.set_vertex_buffer(1, self.atoms.slice());
+                pass.draw(0..6, draw.atoms.clone());
+            }
+            if !draw.indices.is_empty() {
+                pass.set_pipeline(&self.mesh_pipeline);
+                pass.set_vertex_buffer(0, self.vertices.slice());
+                pass.set_index_buffer(self.indices.slice(), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(draw.indices.clone(), 0, 0..1);
+            }
         }
     }
 }

@@ -3,7 +3,7 @@ use cuemol_command::navigation::{self as shared, Command};
 
 impl App {
     pub(super) fn screen_hit(&self, viewport: egui::Rect, point: egui::Pos2) -> Option<AtomHit> {
-        let mvp = cuemol_desktop_core::offscreen::camera_mvp(
+        let mvp = cuemol_desktop_core::offscreen::camera_pick_mvp(
             &self.camera,
             viewport.aspect_ratio() as f64,
         );
@@ -118,7 +118,7 @@ impl App {
                 ]
             })
             .collect::<Vec<_>>();
-        let mvp = cuemol_desktop_core::offscreen::camera_mvp(
+        let mvp = cuemol_desktop_core::offscreen::camera_pick_mvp(
             &self.camera,
             viewport.aspect_ratio() as f64,
         );
