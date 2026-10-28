@@ -673,7 +673,7 @@ pub struct MolObject {
     qsc_coloring_node: Option<LDom2Node>,
     qsc_extra_attrs: BTreeMap<String, String>,
     qsc_extension_nodes: Vec<LDom2Node>,
-    qsc_extra_data: BTreeMap<String, Vec<u8>>,
+    qsc_extra_data: BTreeMap<String, std::sync::Arc<[u8]>>,
     /// The object's `xformMat` transform (C++ `Object::getXformMatrix`). In C++
     /// it is propagated onto every atom (`MolAtom::getPos` applies it), so the
     /// rendered structure sits at its transformed position — e.g. a structure
@@ -1013,10 +1013,14 @@ impl MolObject {
     }
 
     pub fn qsc_extra_data(&self, source: &str) -> Option<&[u8]> {
-        self.qsc_extra_data.get(source).map(Vec::as_slice)
+        self.qsc_extra_data.get(source).map(AsRef::as_ref)
     }
 
-    pub fn qsc_extra_data_map(&self) -> &BTreeMap<String, Vec<u8>> {
+    pub fn qsc_extra_data_shared(&self, source: &str) -> Option<std::sync::Arc<[u8]>> {
+        self.qsc_extra_data.get(source).cloned()
+    }
+
+    pub fn qsc_extra_data_map(&self) -> &BTreeMap<String, std::sync::Arc<[u8]>> {
         &self.qsc_extra_data
     }
 
@@ -1024,6 +1028,20 @@ impl MolObject {
         &mut self,
         nodes: Vec<LDom2Node>,
         extra_data: BTreeMap<String, Vec<u8>>,
+    ) {
+        self.replace_shared_qsc_extensions(
+            nodes,
+            extra_data
+                .into_iter()
+                .map(|(key, data)| (key, data.into()))
+                .collect(),
+        );
+    }
+
+    pub fn replace_shared_qsc_extensions(
+        &mut self,
+        nodes: Vec<LDom2Node>,
+        extra_data: BTreeMap<String, std::sync::Arc<[u8]>>,
     ) {
         self.qsc_extension_nodes = nodes;
         self.qsc_extra_data = extra_data;
@@ -2716,7 +2734,10 @@ impl MolScene {
         object.object_type = object_type;
         object.qsc_extra_attrs = qsc_extra_attrs;
         object.qsc_extension_nodes = qsc_extension_nodes;
-        object.qsc_extra_data = qsc_extra_data;
+        object.qsc_extra_data = qsc_extra_data
+            .into_iter()
+            .map(|(key, data)| (key, data.into()))
+            .collect();
         object.set_source(attr_value(object_line, "src").unwrap_or_default());
         object.alt_source = attr_value(object_line, "alt_src").unwrap_or_default();
         object.ui_locked = attr_value(object_line, "locked")
@@ -4359,6 +4380,18 @@ mod tests {
             vec![node],
             BTreeMap::from([("datachunk:blob".to_string(), payload.clone())]),
         );
+        let original = manager
+            .object(uid)
+            .unwrap()
+            .qsc_extra_data_shared("datachunk:blob")
+            .unwrap();
+        let snapshot = manager.clone();
+        let shared = snapshot
+            .object(uid)
+            .unwrap()
+            .qsc_extra_data_shared("datachunk:blob")
+            .unwrap();
+        assert!(std::sync::Arc::ptr_eq(&original, &shared));
         let bytes = manager.scene(scene).unwrap().write_qsc_bytes();
         let mut restored = MolSceneManager::new();
         let scene = restored.new_scene("loaded");

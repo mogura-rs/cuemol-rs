@@ -765,3 +765,18 @@ available entries and returns false when the requested count exceeds history.
 All 165 native GUI tests, 14 command compatibility tests and 37 browser tests
 passed. The browser regression checks immediate coordinate queries across two
 transactions, Rollback, a second scene and a later script evaluation.
+
+## Embedded trajectory storage sharing
+
+QSC extension payloads now use immutable shared byte buffers. The embedded
+trajectory index reads the same buffer that the molecule retains for scene
+saving. Cloning a scene or recording Undo therefore does not copy the encoded
+DCD payload in addition to sharing its frame index. Morph extension payloads
+use the same storage, while the legacy byte-vector setter remains available.
+
+Allocation-identity regressions cover the indexed reader, a binary QSC round
+trip, application cloning and script Undo, followed by another frame seek.
+The full molecule and MD suites passed with the reference checkout present;
+209 application tests and 165 native GUI tests passed. Four browser tests
+covering trajectory playback, embedded scene export and script transactions
+also passed after rebuilding WASM.

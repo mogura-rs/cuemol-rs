@@ -210,9 +210,19 @@ impl IndexedTrajectory {
         stride: usize,
         expected: Option<usize>,
     ) -> Result<Self> {
+        Self::from_shared_bytes_with_name(Arc::from(bytes), name, stride, expected)
+    }
+
+    pub fn from_shared_bytes_with_name(
+        bytes: Arc<[u8]>,
+        name: &str,
+        stride: usize,
+        expected: Option<usize>,
+    ) -> Result<Self> {
+        let byte_len = bytes.len() as u64;
         Self::from_source(
-            Source::Memory(Cursor::new(Arc::from(bytes))),
-            bytes.len() as u64,
+            Source::Memory(Cursor::new(bytes)),
+            byte_len,
             Path::new(name),
             stride,
             expected,
@@ -563,6 +573,23 @@ mod tests {
         assert!(indexed.read_frame(indexed.frame_count()).is_err());
         assert!(IndexedTrajectory::open(file.path(), 0, None).is_err());
         assert!(IndexedTrajectory::open(file.path(), 1, Some(expected.atom_count() + 1)).is_err());
+    }
+
+    #[test]
+    fn shared_encoded_frames_keep_the_original_allocation() {
+        let bytes: Arc<[u8]> = dcd(12, 7, false).into();
+        let trajectory =
+            IndexedTrajectory::from_shared_bytes_with_name(bytes.clone(), "test.dcd", 2, Some(12))
+                .unwrap();
+        {
+            let source = trajectory.file.lock().unwrap();
+            let Source::Memory(cursor) = &*source else {
+                panic!("expected memory source")
+            };
+            assert!(Arc::ptr_eq(cursor.get_ref(), &bytes));
+        }
+        assert_eq!(trajectory.frame_count(), 4);
+        assert_eq!(trajectory.read_frame(3).unwrap().coordinates[0], 600.);
     }
 
     #[test]

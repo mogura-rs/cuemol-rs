@@ -13494,7 +13494,7 @@ impl DesktopAppState {
                 node.set_str_attr("name", frame.name());
                 node.set_str_attr("src", &source);
                 node.set_str_attr("srctype", "qdfmol");
-                extra_data.insert(source, write_qdf_mol_bytes(&molecule));
+                extra_data.insert(source, write_qdf_mol_bytes(&molecule).into());
             }
             extension_nodes.push(frames);
             object.set_object_type("MorphMol");
@@ -13503,7 +13503,7 @@ impl DesktopAppState {
             } else {
                 object.remove_qsc_extra_attr("scale_frame");
             }
-            object.replace_qsc_extensions(extension_nodes, extra_data);
+            object.replace_shared_qsc_extensions(extension_nodes, extra_data);
         }
         Ok(())
     }
@@ -53842,6 +53842,40 @@ mod tests {
             5.
         );
         assert!(restored.trajectories[&uid].blocks[0].frames.is_lazy());
+        let source = restored.trajectories[&uid].blocks[0].source.clone();
+        let encoded = restored
+            .scene_manager()
+            .object(uid)
+            .unwrap()
+            .qsc_extra_data_shared(&source)
+            .unwrap();
+        assert!(std::sync::Arc::strong_count(&encoded) >= 3);
+        let clone = restored.clone();
+        let shared = clone
+            .scene_manager()
+            .object(uid)
+            .unwrap()
+            .qsc_extra_data_shared(&source)
+            .unwrap();
+        assert!(std::sync::Arc::ptr_eq(&encoded, &shared));
+        #[cfg(feature = "scripting")]
+        {
+            restored.run_script_js("scene.startUndoTxn('rename');scene.setName('renamed');scene.commitUndoTxn();scene.undo(0)").unwrap();
+            let shared = restored
+                .scene_manager()
+                .object(uid)
+                .unwrap()
+                .qsc_extra_data_shared(&source)
+                .unwrap();
+            assert!(std::sync::Arc::ptr_eq(&encoded, &shared));
+            restored.apply_trajectory_frame(uid, 0).unwrap();
+            assert_eq!(
+                restored.scene_manager().object(uid).unwrap().mol().atoms()[0]
+                    .position
+                    .x,
+                2.
+            );
+        }
     }
 
     #[cfg(feature = "scripting")]

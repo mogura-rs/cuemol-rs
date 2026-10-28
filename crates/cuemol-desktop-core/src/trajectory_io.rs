@@ -158,7 +158,10 @@ impl DesktopAppState {
                     let source = format!("datachunk:trajectory-{}-{index}", uid.get());
                     node.set_str_attr("src", &source);
                     node.set_str_attr("srctype", "dcdtraj");
-                    extra.insert(source, block.frames.dcd_bytes(object.mol().atom_count())?);
+                    extra.insert(
+                        source,
+                        block.frames.dcd_bytes(object.mol().atom_count())?.into(),
+                    );
                 } else {
                     node.set_str_attr("src", relative_source(&block.source, base));
                     node.set_str_attr("srctype", reader_type(&block.format));
@@ -191,7 +194,7 @@ impl DesktopAppState {
                 object.remove_qsc_extra_attr("load_atom_count");
                 object.remove_qsc_extra_attr("load_atom_indices");
             }
-            object.replace_qsc_extensions(extensions, extra);
+            object.replace_shared_qsc_extensions(extensions, extra);
         }
         Ok(())
     }
@@ -268,23 +271,24 @@ impl DesktopAppState {
                     let lazy = options.is_none_or(|n| n.str_attr("lazy_load").as_str() != "false");
                     let (frames, source, format) = if source.starts_with("datachunk:") {
                         let bytes = object
-                            .qsc_extra_data(&source)
+                            .qsc_extra_data_shared(&source)
                             .ok_or_else(|| CueMolError::not_found("trajectory data chunk"))?;
                         let hint = if source_type == "mdcrd" {
                             "trajectory.mdcrd"
                         } else {
                             "trajectory"
                         };
-                        let indexed = cuemol_mdtools::IndexedTrajectory::from_bytes_with_name(
-                            bytes,
-                            hint,
-                            stride,
-                            if source_type == "mdcrd" {
-                                Some(molecule.atom_count())
-                            } else {
-                                None
-                            },
-                        )?;
+                        let indexed =
+                            cuemol_mdtools::IndexedTrajectory::from_shared_bytes_with_name(
+                                bytes,
+                                hint,
+                                stride,
+                                if source_type == "mdcrd" {
+                                    Some(molecule.atom_count())
+                                } else {
+                                    None
+                                },
+                            )?;
                         let format = indexed.format_name().to_string();
                         let frames = if lazy {
                             GuiTrajectoryFrames::File(std::sync::Arc::new(indexed))
