@@ -1,3 +1,4 @@
+mod ccp4_io;
 pub mod cif_map;
 pub mod fft;
 pub mod map_renderers;
@@ -137,6 +138,9 @@ pub struct Ccp4MapReader {
     min: f64,
     truncate_max: bool,
     max: f64,
+    subsample: usize,
+    max_voxels: f64,
+    use_header_stats: bool,
 }
 
 impl Ccp4MapReader {
@@ -152,6 +156,9 @@ impl Ccp4MapReader {
             min: 0.0,
             truncate_max: false,
             max: 5.0,
+            subsample: 1,
+            max_voxels: 0.,
+            use_header_stats: true,
         }
     }
 
@@ -219,59 +226,44 @@ impl Ccp4MapReader {
         }
     }
 
+    pub fn subsample(&self) -> usize {
+        self.subsample
+    }
+    pub fn set_subsample(&mut self, value: usize) {
+        self.subsample = value.max(1);
+    }
+    pub fn max_voxels(&self) -> f64 {
+        self.max_voxels
+    }
+    pub fn set_max_voxels(&mut self, value: f64) {
+        self.max_voxels = value;
+    }
+    pub fn use_header_stats(&self) -> bool {
+        self.use_header_stats
+    }
+    pub fn set_use_header_stats(&mut self, value: bool) {
+        self.use_header_stats = value;
+    }
+    pub fn probe_header(&self, path: impl AsRef<std::path::Path>) -> cuemol_core::Result<String> {
+        ccp4_io::probe(path.as_ref())
+    }
+    pub fn probe_header_bytes(&self, bytes: &[u8]) -> cuemol_core::Result<String> {
+        ccp4_io::probe_bytes(bytes)
+    }
     pub fn read_file(&self, path: impl AsRef<std::path::Path>) -> cuemol_core::Result<Ccp4Map> {
-        let mut map = read_ccp4_map_with_header_file(path)?;
-        self.apply_options(&mut map)?;
-        Ok(map)
+        ccp4_io::grid_file(self, path.as_ref())
     }
-
     pub fn read_bytes(&self, input: &[u8]) -> cuemol_core::Result<Ccp4Map> {
-        let mut map = read_ccp4_map_with_header_bytes(input)?;
-        self.apply_options(&mut map)?;
-        Ok(map)
+        ccp4_io::grid_bytes(self, input)
     }
-
     pub fn read_density_map_file(
         &self,
         path: impl AsRef<std::path::Path>,
     ) -> cuemol_core::Result<DensityMap> {
-        Ok(density_map_from_ccp4(self.read_file(path)?))
+        ccp4_io::density_file(self, path.as_ref())
     }
-
     pub fn read_density_map_bytes(&self, input: &[u8]) -> cuemol_core::Result<DensityMap> {
-        Ok(density_map_from_ccp4(self.read_bytes(input)?))
-    }
-
-    fn apply_options(&self, map: &mut Ccp4Map) -> cuemol_core::Result<()> {
-        if map.header.mode != 2 {
-            return Ok(());
-        }
-
-        let sigma = map.header.stats.rms;
-        if self.truncate_min {
-            let lower = self.min * sigma;
-            for value in &mut map.grid.values {
-                *value = value.max(lower);
-            }
-        }
-        if self.truncate_max {
-            let upper = self.max * sigma;
-            for value in &mut map.grid.values {
-                *value = value.min(upper);
-            }
-        }
-        if self.normalize {
-            if !sigma.is_finite() || sigma.abs() <= f64::EPSILON {
-                return Err(cuemol_core::CueMolError::parse(
-                    "cannot normalize CCP4 map with zero RMS",
-                ));
-            }
-            let mean = map.header.stats.mean;
-            for value in &mut map.grid.values {
-                *value = (*value - mean) / sigma;
-            }
-        }
-        Ok(())
+        ccp4_io::density_bytes(self, input)
     }
 }
 
@@ -355,17 +347,6 @@ fn density_map_from_brix(map: BrixMap) -> DensityMap {
         header.grid_intervals,
         header.cell,
         1,
-    )
-}
-
-fn density_map_from_ccp4(map: Ccp4Map) -> DensityMap {
-    let header = map.header;
-    DensityMap::from_crystallographic_grid(
-        map.grid,
-        header.start.map(|value| value as isize),
-        header.grid_intervals,
-        header.cell,
-        header.space_group,
     )
 }
 
@@ -660,7 +641,10 @@ mod tests {
         assert_eq!(map.grid.values, vec![-1.5, 1.5]);
 
         let zero_rms = ccp4_test_bytes(&[1.0], 1.0, 0.0);
-        assert!(reader.read_bytes(&zero_rms).is_err());
+        assert_eq!(reader.read_bytes(&zero_rms).unwrap().grid.values, vec![0.]);
+        reader.set_truncate_min(false);
+        reader.set_truncate_max(false);
+        assert_eq!(reader.read_bytes(&zero_rms).unwrap().grid.values, vec![1.]);
     }
 
     #[test]

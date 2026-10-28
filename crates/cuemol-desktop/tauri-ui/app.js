@@ -4456,6 +4456,9 @@ function showRendererSetup(setup) {
       ),
       truncateMin,
       truncateMax,
+      subsample: dialogField("Grid sampling stride:", String(ccp4Defaults.subsample ?? 1), "number", readerPage),
+      maxVoxels: dialogField("Maximum voxels (0 = unlimited):", String(ccp4Defaults.maxVoxels ?? 0), "number", readerPage),
+      useHeaderStats: dialogCheckbox("Use header density range", ccp4Defaults.useHeaderStats ?? true, readerPage),
     };
     readerPage.prepend(ccp4Controls.normalize.closest("label"));
   }
@@ -4670,9 +4673,12 @@ function showRendererSetup(setup) {
           ? {
               normalize: ccp4Controls.normalize.checked,
               truncateMin: ccp4Controls.truncateMin.enabled.checked,
-              min: Math.trunc(Number(ccp4Controls.truncateMin.input.value)),
+              min: Number(ccp4Controls.truncateMin.input.value),
               truncateMax: ccp4Controls.truncateMax.enabled.checked,
-              max: Math.trunc(Number(ccp4Controls.truncateMax.input.value)),
+              max: Number(ccp4Controls.truncateMax.input.value),
+              subsample: Math.max(1, Math.trunc(Number(ccp4Controls.subsample.value) || 1)),
+              maxVoxels: Math.max(0, Number(ccp4Controls.maxVoxels.value) || 0),
+              useHeaderStats: ccp4Controls.useHeaderStats.checked,
             }
           : null,
         mtzMapOptions: mtzControls

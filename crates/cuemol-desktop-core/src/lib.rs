@@ -1358,6 +1358,23 @@ pub struct GuiCcp4MapReaderOptions {
     pub min: f64,
     pub truncate_max: bool,
     pub max: f64,
+    pub subsample: usize,
+    pub max_voxels: f64,
+    pub use_header_stats: bool,
+}
+impl Default for GuiCcp4MapReaderOptions {
+    fn default() -> Self {
+        Self {
+            normalize: false,
+            truncate_min: false,
+            min: 0.,
+            truncate_max: false,
+            max: 5.,
+            subsample: 1,
+            max_voxels: 0.,
+            use_header_stats: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12420,6 +12437,7 @@ impl DesktopAppState {
                     min: 0.0,
                     truncate_max: false,
                     max: 5.0,
+                    ..GuiCcp4MapReaderOptions::default()
                 })),
                 "mtzmap" => Some(GuiDensityMapReaderOptions::Mtz(mtz_map_reader_options(
                     &read_mtz_metadata_file(path.as_ref())?,
@@ -12766,9 +12784,12 @@ impl DesktopAppState {
                 let mut reader = Ccp4MapReader::new();
                 reader.set_normalize(options.normalize);
                 reader.set_truncate_min(options.truncate_min);
-                reader.set_min(options.min.trunc());
+                reader.set_min(options.min);
                 reader.set_truncate_max(options.truncate_max);
-                reader.set_max(options.max.trunc());
+                reader.set_max(options.max);
+                reader.set_subsample(options.subsample);
+                reader.set_max_voxels(options.max_voxels);
+                reader.set_use_header_stats(options.use_header_stats);
                 reader.read_density_map_file(path)?
             }
             Some(GuiDensityMapReaderOptions::Mtz(options)) => {
@@ -41006,15 +41027,38 @@ impl DesktopAppState {
             );
             density
         }
+        fn js_ccp4_probe_header(
+            _this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let path = args
+                .first()
+                .cloned()
+                .unwrap_or_default()
+                .to_string(ctx)?
+                .to_std_string_escaped();
+            Ccp4MapReader::new()
+                .probe_header(path)
+                .map(|json| JsString::from(json).into())
+                .map_err(|error| script_error(error.to_string()))
+        }
         fn js_handler_read_density_map(
             this: &JsValue,
             class_name: &str,
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let handler = script_handler_io(this, ctx)?;
-            let bytes = handler
-                .read_bytes()
-                .map_err(|error| script_error(error.to_string()))?;
+            let stream_ccp4 = class_name == "CCP4MapReader"
+                && !handler.base64_flag()
+                && cfg!(not(target_arch = "wasm32"));
+            let bytes = if stream_ccp4 {
+                Vec::new()
+            } else {
+                handler
+                    .read_bytes()
+                    .map_err(|error| script_error(error.to_string()))?
+            };
             let mut potential_map = None;
             let map = match class_name {
                 "BrixMapReader" => BrixMapReader::new().read_density_map_bytes(&bytes),
@@ -41025,7 +41069,21 @@ impl DesktopAppState {
                     reader.set_min(handler_f64_prop(this, "min", 0.0, ctx)?);
                     reader.set_truncate_max(handler_bool_prop(this, "truncate_max", false, ctx));
                     reader.set_max(handler_f64_prop(this, "max", 5.0, ctx)?);
-                    reader.read_density_map_bytes(&bytes)
+                    reader.set_subsample(
+                            handler_i32_prop(this, "subsample", 1, ctx)?.max(1) as usize
+                        );
+                    reader.set_max_voxels(handler_f64_prop(this, "max_voxels", 0., ctx)?);
+                    reader.set_use_header_stats(handler_bool_prop(
+                        this,
+                        "use_header_stats",
+                        true,
+                        ctx,
+                    ));
+                    if stream_ccp4 {
+                        reader.read_density_map_file(handler.path())
+                    } else {
+                        reader.read_density_map_bytes(&bytes)
+                    }
                 }
                 "MmcifMapReader" => {
                     let input = std::str::from_utf8(&bytes).map_err(|error| {
@@ -41860,7 +41918,15 @@ impl DesktopAppState {
                         .property(js_string!("truncate_min"), false, Attribute::all())
                         .property(js_string!("min"), 0.0, Attribute::all())
                         .property(js_string!("truncate_max"), false, Attribute::all())
-                        .property(js_string!("max"), 5.0, Attribute::all());
+                        .property(js_string!("max"), 5.0, Attribute::all())
+                        .property(js_string!("subsample"), 1, Attribute::all())
+                        .property(js_string!("max_voxels"), 0., Attribute::all())
+                        .property(js_string!("use_header_stats"), true, Attribute::all())
+                        .function(
+                            NativeFunction::from_fn_ptr(js_ccp4_probe_header),
+                            js_string!("probeHeader"),
+                            1,
+                        );
                 }
                 "MmcifMapReader" => {
                     object
@@ -67415,6 +67481,33 @@ attribute \"dep\" string \"positions\"
         }
         fs::write(&path, bytes).unwrap();
 
+        #[cfg(feature = "scripting")]
+        {
+            let mut scripted = DesktopAppState::new();
+            scripted.ensure_active_scene();
+            let (log, _) = scripted.run_script_js(&format!(r#"
+                var reader = cuemol.CCP4MapReader();
+                var header = JSON.parse(reader.probeHeader({path:?}));
+                if (header.nvoxels !== 3 || header.mode !== 2 || !header.supported) throw 'header';
+                if (reader.subsample !== 1 || reader.max_voxels !== 0 || !reader.use_header_stats) throw 'defaults';
+                reader.path = {path:?};
+                var map = reader.createDefaultObj(); reader.attach(map);
+                reader.max_voxels = 2;
+                var rejected = false;
+                try {{ reader.read(); }} catch (error) {{ rejected = String(error).includes('max_voxels'); }}
+                if (!rejected) throw 'limit';
+                reader.max_voxels = 3; reader.normalize = true;
+                reader.truncate_min = true; reader.min = 0.25;
+                reader.truncate_max = true; reader.max = 1.75;
+                reader.use_header_stats = false; reader.read();
+                map.name = 'streamed'; cuemol.getScene().addObject(map);
+                print(map.den_min + ':' + map.den_max);
+            "#, path = path.to_string_lossy())).unwrap();
+            assert_eq!(log, "-0.25:1.25\n");
+            let map = scripted.density_maps.values().next().unwrap();
+            assert_eq!(map.map.byte_values(), &[0, 42, 255]);
+        }
+
         let mut app = DesktopAppState::new();
         let defaults = app
             .file_renderer_setup_for_path(&path)
@@ -67429,6 +67522,7 @@ attribute \"dep\" string \"positions\"
                 min: 0.0,
                 truncate_max: false,
                 max: 5.0,
+                ..GuiCcp4MapReaderOptions::default()
             }))
         );
         let options = GuiDensityMapReaderOptions::Ccp4(GuiCcp4MapReaderOptions {
@@ -67437,6 +67531,7 @@ attribute \"dep\" string \"positions\"
             min: 0.0,
             truncate_max: true,
             max: 2.0,
+            ..GuiCcp4MapReaderOptions::default()
         });
         let setup = GuiRendererSetup {
             object_name: "density".to_string(),

@@ -1,4 +1,5 @@
 use cuemol_core::{CueMolError, Result, Vector4};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -24,6 +25,8 @@ pub struct Ccp4Map {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ccp4Header {
     pub raw_counts: [usize; 3],
+    pub raw_start: [i32; 3],
+    pub raw_grid: [i32; 3],
     pub counts: [usize; 3],
     pub start: [i32; 3],
     pub grid_intervals: [usize; 3],
@@ -34,6 +37,11 @@ pub struct Ccp4Header {
     pub symmetry_bytes: usize,
     pub stats: MapStats,
     pub byte_swapped: bool,
+    pub origin: [f64; 3],
+    pub nversion: i32,
+    pub exttyp: String,
+    pub labels: Vec<String>,
+    pub signed_bytes: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -104,90 +112,110 @@ pub fn read_ccp4_map_with_header_file(path: impl AsRef<Path>) -> Result<Ccp4Map>
 }
 
 pub fn read_ccp4_map_with_header_bytes(bytes: &[u8]) -> Result<Ccp4Map> {
-    if bytes.len() < CCP4_HEADER_LEN {
-        return Err(CueMolError::parse("CCP4 header is too short"));
+    let header = Ccp4Header::parse(bytes)?;
+    if header.data_end()? > bytes.len() as u64 {
+        return Err(CueMolError::parse("CCP4 data is shorter than header count"));
     }
-    if bytes.get(CCP4_MARKER_OFFSET..CCP4_MARKER_OFFSET + 4) != Some(b"MAP ".as_slice()) {
-        return Err(CueMolError::parse("missing CCP4 MAP marker"));
-    }
-
-    let byte_swapped = detect_ccp4_byte_order(bytes)?;
-    let raw_counts = [
-        read_i32_word(bytes, 0, byte_swapped),
-        read_i32_word(bytes, 1, byte_swapped),
-        read_i32_word(bytes, 2, byte_swapped),
-    ];
-    let raw_counts_usize = [
-        valid_dim(raw_counts[0], "invalid CCP4 column count")?,
-        valid_dim(raw_counts[1], "invalid CCP4 row count")?,
-        valid_dim(raw_counts[2], "invalid CCP4 section count")?,
-    ];
-    let mode = read_i32_word(bytes, 3, byte_swapped);
-    let raw_start = [
-        read_i32_word(bytes, 4, byte_swapped),
-        read_i32_word(bytes, 5, byte_swapped),
-        read_i32_word(bytes, 6, byte_swapped),
-    ];
-    let grid_intervals = [
-        positive_or(raw_counts_usize[0], read_i32_word(bytes, 7, byte_swapped)),
-        positive_or(raw_counts_usize[1], read_i32_word(bytes, 8, byte_swapped)),
-        positive_or(raw_counts_usize[2], read_i32_word(bytes, 9, byte_swapped)),
-    ];
-    let cell = [
-        read_f32_word(bytes, 10, byte_swapped) as f64,
-        read_f32_word(bytes, 11, byte_swapped) as f64,
-        read_f32_word(bytes, 12, byte_swapped) as f64,
-        read_f32_word(bytes, 13, byte_swapped) as f64,
-        read_f32_word(bytes, 14, byte_swapped) as f64,
-        read_f32_word(bytes, 15, byte_swapped) as f64,
-    ];
-    let axis_order = parse_ccp4_axis_order([
-        read_i32_word(bytes, 16, byte_swapped),
-        read_i32_word(bytes, 17, byte_swapped),
-        read_i32_word(bytes, 18, byte_swapped),
-    ])?;
-    let stats = MapStats {
-        min: read_f32_word(bytes, 19, byte_swapped) as f64,
-        max: read_f32_word(bytes, 20, byte_swapped) as f64,
-        mean: read_f32_word(bytes, 21, byte_swapped) as f64,
-        rms: read_f32_word(bytes, 54, byte_swapped) as f64,
-    };
-    let space_group = read_i32_word(bytes, 22, byte_swapped);
-    let symmetry_bytes = read_i32_word(bytes, 23, byte_swapped);
-    if symmetry_bytes < 0 {
-        return Err(CueMolError::parse("invalid CCP4 symmetry byte count"));
-    }
-    let symmetry_bytes = symmetry_bytes as usize;
-
-    let raw_value_count = raw_counts_usize
-        .into_iter()
-        .try_fold(1_usize, |acc, value| acc.checked_mul(value))
-        .ok_or_else(|| CueMolError::parse("CCP4 map size overflow"))?;
-    let data_start = CCP4_HEADER_LEN
-        .checked_add(symmetry_bytes)
-        .ok_or_else(|| CueMolError::parse("CCP4 data offset overflow"))?;
-    let raw_values = read_ccp4_values(bytes, data_start, raw_value_count, mode, byte_swapped)?;
-
-    let counts = rotate_usize(raw_counts_usize, axis_order);
-    let start = rotate_i32(raw_start, axis_order);
-    let values = rotate_values(&raw_values, raw_counts_usize, axis_order, counts);
-    let delta = cell_delta_vectors(cell, grid_intervals)?;
-    let origin = delta[0]
-        .scale(start[0] as f64)
-        .add_vec(delta[1].scale(start[1] as f64))
-        .add_vec(delta[2].scale(start[2] as f64));
-
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(header.voxel_count()?)
+        .map_err(|e| CueMolError::parse(e.to_string()))?;
+    values.resize(header.voxel_count()?, 0.0);
+    header.visit_values(&mut std::io::Cursor::new(bytes), 1, |index, value| {
+        values[index] = f64::from(value);
+        Ok(())
+    })?;
+    let delta = cell_delta_vectors(header.cell, header.grid_intervals)?;
+    let origin = header.cell_origin()
+        + delta[0] * f64::from(header.start[0])
+        + delta[1] * f64::from(header.start[1])
+        + delta[2] * f64::from(header.start[2]);
     Ok(Ccp4Map {
         grid: GridMap {
-            counts,
+            counts: header.counts,
             origin,
             delta,
             values,
         },
-        header: Ccp4Header {
+        header,
+    })
+}
+
+impl Ccp4Header {
+    /// Parse the fixed header without accessing the voxel payload.
+    pub fn parse(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() < CCP4_HEADER_LEN {
+            return Err(CueMolError::parse("CCP4 header is too short"));
+        }
+        if bytes.get(CCP4_MARKER_OFFSET..CCP4_MARKER_OFFSET + 4) != Some(b"MAP ".as_slice()) {
+            return Err(CueMolError::parse("missing CCP4 MAP marker"));
+        }
+
+        let byte_swapped = detect_ccp4_byte_order(bytes)?;
+        let raw_counts = [
+            read_i32_word(bytes, 0, byte_swapped),
+            read_i32_word(bytes, 1, byte_swapped),
+            read_i32_word(bytes, 2, byte_swapped),
+        ];
+        let raw_counts_usize = [
+            valid_dim(raw_counts[0], "invalid CCP4 column count")?,
+            valid_dim(raw_counts[1], "invalid CCP4 row count")?,
+            valid_dim(raw_counts[2], "invalid CCP4 section count")?,
+        ];
+        let mode = read_i32_word(bytes, 3, byte_swapped);
+        let raw_start = [
+            read_i32_word(bytes, 4, byte_swapped),
+            read_i32_word(bytes, 5, byte_swapped),
+            read_i32_word(bytes, 6, byte_swapped),
+        ];
+        let raw_grid = std::array::from_fn(|axis| read_i32_word(bytes, 7 + axis, byte_swapped));
+        let grid_intervals = [
+            positive_or(raw_counts_usize[0], read_i32_word(bytes, 7, byte_swapped)),
+            positive_or(raw_counts_usize[1], read_i32_word(bytes, 8, byte_swapped)),
+            positive_or(raw_counts_usize[2], read_i32_word(bytes, 9, byte_swapped)),
+        ];
+        let cell = [
+            read_f32_word(bytes, 10, byte_swapped) as f64,
+            read_f32_word(bytes, 11, byte_swapped) as f64,
+            read_f32_word(bytes, 12, byte_swapped) as f64,
+            read_f32_word(bytes, 13, byte_swapped) as f64,
+            read_f32_word(bytes, 14, byte_swapped) as f64,
+            read_f32_word(bytes, 15, byte_swapped) as f64,
+        ];
+        let axis_order = parse_ccp4_axis_order([
+            read_i32_word(bytes, 16, byte_swapped),
+            read_i32_word(bytes, 17, byte_swapped),
+            read_i32_word(bytes, 18, byte_swapped),
+        ])?;
+        let stats = MapStats {
+            min: read_f32_word(bytes, 19, byte_swapped) as f64,
+            max: read_f32_word(bytes, 20, byte_swapped) as f64,
+            mean: read_f32_word(bytes, 21, byte_swapped) as f64,
+            rms: read_f32_word(bytes, 54, byte_swapped) as f64,
+        };
+        let space_group = read_i32_word(bytes, 22, byte_swapped);
+        let symmetry_bytes = read_i32_word(bytes, 23, byte_swapped);
+        if symmetry_bytes < 0 {
+            return Err(CueMolError::parse("invalid CCP4 symmetry byte count"));
+        }
+        let symmetry_bytes = symmetry_bytes as usize;
+
+        let origin =
+            std::array::from_fn(|axis| f64::from(read_f32_word(bytes, 49 + axis, byte_swapped)));
+        let nlabl = read_i32_word(bytes, 55, byte_swapped).clamp(0, 10) as usize;
+        let labels = (0..nlabl)
+            .map(|i| {
+                String::from_utf8_lossy(&bytes[224 + 80 * i..304 + 80 * i])
+                    .trim_end_matches(['\0', ' '])
+                    .to_owned()
+            })
+            .collect();
+        let mut header = Self {
             raw_counts: raw_counts_usize,
-            counts,
-            start,
+            raw_start,
+            raw_grid,
+            counts: rotate_usize(raw_counts_usize, axis_order),
+            start: rotate_i32(raw_start, axis_order),
             grid_intervals,
             cell,
             axis_order,
@@ -196,8 +224,189 @@ pub fn read_ccp4_map_with_header_bytes(bytes: &[u8]) -> Result<Ccp4Map> {
             symmetry_bytes,
             stats,
             byte_swapped,
-        },
-    })
+            origin,
+            nversion: read_i32_word(bytes, 27, byte_swapped),
+            exttyp: String::from_utf8_lossy(&bytes[104..108])
+                .trim_end_matches('\0')
+                .to_owned(),
+            labels,
+            signed_bytes: read_i32_word(bytes, 38, byte_swapped) == 1146047817
+                && read_i32_word(bytes, 39, byte_swapped) & 1 != 0,
+        };
+        if header.has_origin() {
+            header.start = [0; 3];
+        }
+        Ok(header)
+    }
+
+    pub fn has_origin(&self) -> bool {
+        self.origin.iter().all(|v| v.is_finite() && v.abs() <= 1e6)
+            && self.origin.iter().any(|v| *v != 0.0)
+    }
+
+    pub fn cell_origin(&self) -> Vector4 {
+        if self.has_origin() {
+            Vector4::new3(self.origin[0], self.origin[1], self.origin[2])
+        } else {
+            Vector4::ZERO
+        }
+    }
+
+    pub fn detected_map_type(&self) -> u8 {
+        let signature = self.labels.iter().any(|label| {
+            let label = label.to_ascii_lowercase();
+            [
+                "emdatabank",
+                "emdb",
+                "relion",
+                "cryosparc",
+                "eman",
+                "imod",
+                "motioncor",
+            ]
+            .iter()
+            .any(|word| label.contains(word))
+        });
+        let modern_volume = self.space_group == 1
+            && self.nversion >= 20140
+            && self.cell[3..].iter().all(|v| (v - 90.).abs() < 1e-3)
+            && self.raw_counts == self.raw_grid.map(|v| v.max(0) as usize)
+            && self.raw_start == [0; 3];
+        if self.space_group == 0
+            || self.space_group >= 401
+            || self.has_origin()
+            || signature
+            || modern_volume
+        {
+            2
+        } else {
+            1
+        }
+    }
+
+    pub fn bytes_per_voxel(&self) -> usize {
+        match self.mode {
+            0 => 1,
+            1 | 6 | 12 => 2,
+            2 => 4,
+            _ => 0,
+        }
+    }
+
+    pub fn voxel_count(&self) -> Result<usize> {
+        self.raw_counts
+            .iter()
+            .try_fold(1usize, |n, d| n.checked_mul(*d))
+            .ok_or_else(|| CueMolError::parse("CCP4 map size overflow"))
+    }
+
+    pub fn data_end(&self) -> Result<u64> {
+        let size = self.bytes_per_voxel();
+        if size == 0 {
+            return Err(CueMolError::parse(format!(
+                "unsupported CCP4 mode {}",
+                self.mode
+            )));
+        }
+        (self.voxel_count()? as u64)
+            .checked_mul(size as u64)
+            .and_then(|n| n.checked_add(1024 + self.symmetry_bytes as u64))
+            .ok_or_else(|| CueMolError::parse("CCP4 data size overflow"))
+    }
+
+    pub fn sampled(&self, stride: usize) -> Result<Self> {
+        let stride = stride.max(1);
+        if self
+            .raw_counts
+            .iter()
+            .chain(&self.grid_intervals)
+            .any(|n| n % stride != 0)
+            || self
+                .start
+                .iter()
+                .any(|n| i64::from(*n) % stride as i64 != 0)
+        {
+            return Err(CueMolError::parse(
+                "CCP4 subsample does not divide dimensions, cell grid, or start",
+            ));
+        }
+        let mut out = self.clone();
+        out.raw_counts = self.raw_counts.map(|n| n / stride);
+        out.counts = self.counts.map(|n| n / stride);
+        out.grid_intervals = self.grid_intervals.map(|n| n / stride);
+        out.start = self.start.map(|n| (i64::from(n) / stride as i64) as i32);
+        Ok(out)
+    }
+
+    /// Visit selected voxels in file order using one bounded row buffer.
+    pub fn visit_values<R: Read + Seek + ?Sized>(
+        &self,
+        input: &mut R,
+        stride: usize,
+        mut visit: impl FnMut(usize, f32) -> Result<()>,
+    ) -> Result<()> {
+        let stride = stride.max(1);
+        let sampled = self.sampled(stride)?;
+        let end = self.data_end()?;
+        if input.seek(SeekFrom::End(0))? < end {
+            return Err(CueMolError::parse("CCP4 data is shorter than header count"));
+        }
+        let size = self.bytes_per_voxel();
+        let row_bytes = self.raw_counts[0] * size;
+        let mut row = vec![0; row_bytes];
+        for z in (0..self.raw_counts[2]).step_by(stride) {
+            for y in (0..self.raw_counts[1]).step_by(stride) {
+                let row_index = z as u64 * self.raw_counts[1] as u64 + y as u64;
+                input.seek(SeekFrom::Start(
+                    1024 + self.symmetry_bytes as u64 + row_index * row_bytes as u64,
+                ))?;
+                input.read_exact(&mut row)?;
+                for x in (0..self.raw_counts[0]).step_by(stride) {
+                    let offset = x * size;
+                    let value = match self.mode {
+                        0 if self.signed_bytes => row[offset] as i8 as f32,
+                        0 => f32::from(row[offset]),
+                        1 => f32::from(read_i16(&row, offset, self.byte_swapped)),
+                        2 => read_f32(&row, offset, self.byte_swapped),
+                        6 => f32::from(read_u16(&row, offset, self.byte_swapped)),
+                        12 => half_to_float(read_u16(&row, offset, self.byte_swapped)),
+                        _ => unreachable!(),
+                    };
+                    if !value.is_finite() {
+                        return Err(CueMolError::parse("invalid CCP4 float data"));
+                    }
+                    let p = rotate_usize([x / stride, y / stride, z / stride], self.axis_order);
+                    let index = p[0] + (p[1] + p[2] * sampled.counts[1]) * sampled.counts[0];
+                    visit(index, value)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn ccp4_delta_vectors(header: &Ccp4Header) -> Result<[Vector4; 3]> {
+    cell_delta_vectors(header.cell, header.grid_intervals)
+}
+
+fn half_to_float(value: u16) -> f32 {
+    let sign = u32::from(value & 0x8000) << 16;
+    let exponent = u32::from((value >> 10) & 0x1f);
+    let mut mantissa = u32::from(value & 0x3ff);
+    let bits = if exponent == 0 {
+        if mantissa == 0 {
+            sign
+        } else {
+            let shift = mantissa.leading_zeros() - 21;
+            mantissa = (mantissa << shift) & 0x3ff;
+            sign | ((113 - shift) << 23) | (mantissa << 13)
+        }
+    } else if exponent == 31 {
+        sign | 0x7f800000 | (mantissa << 13)
+    } else {
+        sign | ((exponent + 112) << 23) | (mantissa << 13)
+    };
+    f32::from_bits(bits)
 }
 
 pub fn read_opendx_file(path: impl AsRef<Path>) -> Result<GridMap> {
@@ -866,8 +1075,7 @@ fn detect_ccp4_byte_order(bytes: &[u8]) -> Result<bool> {
         read_i32_word(bytes, 1, false),
         read_i32_word(bytes, 2, false),
     ];
-    let le_mode = read_i32_word(bytes, 3, false);
-    if plausible_ccp4_header(le_counts, le_mode) {
+    if plausible_ccp4_header(le_counts) {
         return Ok(false);
     }
 
@@ -876,19 +1084,17 @@ fn detect_ccp4_byte_order(bytes: &[u8]) -> Result<bool> {
         read_i32_word(bytes, 1, true),
         read_i32_word(bytes, 2, true),
     ];
-    let be_mode = read_i32_word(bytes, 3, true);
-    if plausible_ccp4_header(be_counts, be_mode) {
+    if plausible_ccp4_header(be_counts) {
         return Ok(true);
     }
 
     Err(CueMolError::parse("invalid CCP4 dimensions or mode"))
 }
 
-fn plausible_ccp4_header(counts: [i32; 3], mode: i32) -> bool {
+fn plausible_ccp4_header(counts: [i32; 3]) -> bool {
     counts
         .into_iter()
         .all(|value| (1..=CCP4_MAX_DIM).contains(&value))
-        && matches!(mode, 0 | 1 | 2 | 6)
 }
 
 fn valid_dim(value: i32, message: &'static str) -> Result<usize> {
@@ -922,70 +1128,6 @@ fn parse_ccp4_axis_order(values: [i32; 3]) -> Result<[usize; 3]> {
         axes[index] = axis;
     }
     Ok(axes)
-}
-
-fn read_ccp4_values(
-    bytes: &[u8],
-    data_start: usize,
-    count: usize,
-    mode: i32,
-    byte_swapped: bool,
-) -> Result<Vec<f64>> {
-    let item_size = match mode {
-        0 => 1,
-        1 | 6 => 2,
-        2 => 4,
-        _ => return Err(CueMolError::parse(format!("unsupported CCP4 mode {mode}"))),
-    };
-    let byte_len = count
-        .checked_mul(item_size)
-        .ok_or_else(|| CueMolError::parse("CCP4 data size overflow"))?;
-    let data_end = data_start
-        .checked_add(byte_len)
-        .ok_or_else(|| CueMolError::parse("CCP4 data end overflow"))?;
-    if bytes.len() < data_end {
-        return Err(CueMolError::parse("CCP4 data is shorter than header count"));
-    }
-
-    let mut values = Vec::with_capacity(count);
-    for index in 0..count {
-        let offset = data_start + index * item_size;
-        let value = match mode {
-            0 => bytes[offset] as f64,
-            1 => read_i16(bytes, offset, byte_swapped) as f64,
-            2 => {
-                let value = read_f32(bytes, offset, byte_swapped);
-                if !value.is_finite() {
-                    return Err(CueMolError::parse("invalid CCP4 float data"));
-                }
-                value as f64
-            }
-            6 => read_u16(bytes, offset, byte_swapped) as f64,
-            _ => unreachable!(),
-        };
-        values.push(value);
-    }
-    Ok(values)
-}
-
-fn rotate_values(
-    raw_values: &[f64],
-    raw_counts: [usize; 3],
-    axis_order: [usize; 3],
-    counts: [usize; 3],
-) -> Vec<f64> {
-    let mut values = vec![0.0; raw_values.len()];
-    for k in 0..raw_counts[2] {
-        for j in 0..raw_counts[1] {
-            for i in 0..raw_counts[0] {
-                let raw_index = i + (j + k * raw_counts[1]) * raw_counts[0];
-                let rotated = rotate_usize([i, j, k], axis_order);
-                let out_index = rotated[0] + (rotated[1] + rotated[2] * counts[1]) * counts[0];
-                values[out_index] = raw_values[raw_index];
-            }
-        }
-    }
-    values
 }
 
 fn rotate_usize(values: [usize; 3], axis_order: [usize; 3]) -> [usize; 3] {

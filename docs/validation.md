@@ -780,3 +780,43 @@ The full molecule and MD suites passed with the reference checkout present;
 209 application tests and 165 native GUI tests passed. Four browser tests
 covering trajectory playback, embedded scene export and script transactions
 also passed after rebuilding WASM.
+
+## Streamed CCP4 and MRC maps
+
+The shared reader now probes the fixed header before allocating voxel storage,
+checks `max_voxels` after strict grid subsampling, and decodes selected rows into
+one byte per stored voxel. It supports modes 0/1/2/6/12, IMOD signed bytes, both
+byte orders, axis permutations, MRC origin precedence, and header-based map-kind
+detection. Native gzip/bzip2/xz input is streamed into a temporary seekable file;
+invalid or stale header statistics can therefore be remeasured without retaining
+whole-map floating-point arrays. Compressed browser bytes require a decoded input
+buffer; the reader then uses the same row-based quantizer.
+
+`CCP4MapReader.probeHeader`, `subsample`, `max_voxels` and `use_header_stats` are
+available to scripts. Both desktop file dialogs expose the reader settings.
+Truncation retains real-valued thresholds, and zero header RMS skips normalization
+as in the C++ implementation. The earlier Rust test expected an error instead.
+
+The read-only C++ oracle compared 80 cases covering all supported modes, byte
+orders, permutations, subsampling, transforms, map-kind/origin evidence, and stale
+header statistics. Every stored byte, measured statistic, quantization parameter,
+and tested grid coordinate matched. Reproduce with
+`scripts/check-reference-ccp4.py --build-dir <reference-build> --config <sysconfig>`
+using `uv run --no-project python`.
+
+Two reference limitations are intentionally avoided. Nonseekable compressed C++
+input clips samples outside stale header ranges; native Rust spools the decoded
+input so those ranges can be repaired. Also, the reference QDF map reader derives
+quantization from measured minimum/maximum, which loses a distinct header-derived
+range. Optional `qbase`/`qstep` fields preserve that range in Rust QDF/QSC round
+trips; older reference readers ignore these fields and retain their old behavior.
+Old QDF headers remain readable. Binary map data sharing and the remaining map
+renderer/scalar scripting audit are separate follow-up work.
+
+The shared core passed 209 tests and native egui passed 165 tests after this
+change. The rebuilt browser passed the existing embedded-scene workflow and a
+new half-float MRC/QSC round-trip regression. The latter also compares the
+resulting density histogram. Linux could not check the optional Tauri shell
+because its JavaScriptCore GTK system library was unavailable; that shell is
+checked separately on Apple Silicon.
+The Apple Silicon Tauri suite passed 142 tests with one optional test ignored.

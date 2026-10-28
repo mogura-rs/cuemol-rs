@@ -12,13 +12,14 @@
 //!
 //! The optional map-kind and origin fields match current CueMol2 files.
 //! Older MAP1 headers remain readable. MAP2 splits samples into section chunks.
+//! Optional `qbase`/`qstep` preserve quantization independently of measured statistics.
 
 use std::path::Path;
 
 use cuemol_core::Result;
 use cuemol_qsys::{
     InOutHandler, ObjReader, ObjWriter, QdfReader, QdfWriter, ScalarObject, QDF_TYPE_FLOAT32,
-    QDF_TYPE_INT32, QDF_TYPE_INT8,
+    QDF_TYPE_FLOAT64, QDF_TYPE_INT32, QDF_TYPE_INT8,
 };
 
 use crate::map_renderers::DensityMap;
@@ -55,6 +56,8 @@ const MAP_KIND_RECORD: &[(&str, i8)] = &[
     ("orgx", QDF_TYPE_FLOAT32),
     ("orgy", QDF_TYPE_FLOAT32),
     ("orgz", QDF_TYPE_FLOAT32),
+    ("qbase", QDF_TYPE_FLOAT64),
+    ("qstep", QDF_TYPE_FLOAT64),
 ];
 
 const BMAP_RECORD: &[(&str, i8)] = &[("v", QDF_TYPE_INT8)];
@@ -120,6 +123,8 @@ fn write_map_chunks(map: &DensityMap, limit: usize, kind_fields: bool) -> Vec<u8
         w.f32(origin.x as f32);
         w.f32(origin.y as f32);
         w.f32(origin.z as f32);
+        w.f64(map.level_base());
+        w.f64(map.level_step());
     }
     if split {
         w.i32(chunks as i32);
@@ -202,12 +207,16 @@ pub fn read_qdf_denmap_bytes(input: &[u8]) -> Result<DensityMap> {
     let mut origin = cuemol_core::Vector4::ZERO;
     let mut chunks = 1;
     let mut sections = nz;
+    let mut base = rmin;
+    let mut step = (rmax - rmin) / 256.;
     for field in &fields[HDR_RECORD.len()..] {
         match (field.name.as_str(), field.type_tag) {
             ("mtype", QDF_TYPE_INT8) => map_type = r.read_i8()? as u8,
             ("orgx", QDF_TYPE_FLOAT32) => origin.x = r.read_f32()? as f64,
             ("orgy", QDF_TYPE_FLOAT32) => origin.y = r.read_f32()? as f64,
             ("orgz", QDF_TYPE_FLOAT32) => origin.z = r.read_f32()? as f64,
+            ("qbase", QDF_TYPE_FLOAT64) => base = r.read_f64()?,
+            ("qstep", QDF_TYPE_FLOAT64) => step = r.read_f64()?,
             ("nchk", QDF_TYPE_INT32) => chunks = r.read_nonnegative_i32()? as usize,
             ("csec", QDF_TYPE_INT32) => sections = r.read_nonnegative_i32()? as usize,
             _ => r.skip_field(field)?,
@@ -244,7 +253,21 @@ pub fn read_qdf_denmap_bytes(input: &[u8]) -> Result<DensityMap> {
     // Reconstruct: stats+bytes, then start/intervals, then cell-derived deltas,
     // then the space group (set_xtal_params resets it to 1).
     let mut map = DensityMap::new();
-    map.set_map_byte_array(&bytes, [nx, ny, nz], rmin, rmax, rmea, rsig);
+    if !base.is_finite() || !step.is_finite() || step < 0. {
+        return Err(CueMolError::parse("invalid QDF map quantization"));
+    }
+    map.set_quantized_data(
+        bytes,
+        [nx, ny, nz],
+        cuemol_molstr::MapStats {
+            min: rmin,
+            max: rmax,
+            mean: rmea,
+            rms: rsig,
+        },
+        base,
+        step,
+    );
     map.set_map_params(start, intervals);
     map.set_xtal_params(a, b, c, alpha, beta, gamma);
     map.set_space_group(sg);

@@ -708,3 +708,38 @@ test('direct-surface gradients keep live references and survive browser scene sa
   state=await call(page,'execute_script',{source:`var g=cuemol.getRenderer(${renderer}).multi_grad;print(g.size+':'+g.getColorAt(0).g()+':'+JSON.parse(g.getNodesJSON())[1].color);`});
   expect(JSON.parse(state.message).log).toBe('2:255:blue\n');
 });
+
+test('browser CCP4 header quantization survives embedded scene export',async({page})=>{
+  const errors=[];page.on('pageerror',error=>errors.push(error.message));
+  await ready(page);
+  const bytes=Buffer.alloc(1024+64*2);
+  for(let i=0;i<3;i++){
+    bytes.writeInt32LE(4,i*4);bytes.writeInt32LE(4,(i+7)*4);
+    bytes.writeFloatLE(4,(i+10)*4);bytes.writeFloatLE(90,(i+13)*4);
+    bytes.writeInt32LE(i+1,(i+16)*4);
+  }
+  bytes.writeInt32LE(12,12);bytes.write('MAP ',208);
+  bytes.writeFloatLE(-10,76);bytes.writeFloatLE(30,80);bytes.writeFloatLE(2,84);
+  bytes.writeFloatLE(2,216);bytes.writeFloatLE(8,196);
+  const half=[0,0x3c00,0x4000,0x4200,0x4400,0x4500,0x4600,0x4700];
+  for(let i=0;i<64;i++)bytes.writeUInt16LE(half[i%8],1024+i*2);
+  await load(page,'density.mrc',bytes);
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Loaded density.mrc');
+  const source=id=>`var map=cuemol.getObject(${id}); print(map.den_min+':'+map.den_max+':'+map.den_mean); print(map.getHistogramJSON(0,8,8));`;
+  let mapId=await page.evaluate(()=>window.cuemol.status().scene.maps[0].id);
+  let result=await call(page,'execute_script',{source:source(mapId)});
+  expect(result.message).toMatch(/^\{/);
+  const before=JSON.parse(result.message).log;
+  expect(before).toContain('0:7:3.5');
+  const download=page.waitForEvent('download');
+  const button=await page.evaluate(()=>window.cuemol.status().ui.rects['Save Scene']);
+  await page.mouse.click(button[0]+button[2]/2,button[1]+button[3]/2);
+  const saved=await download;const stream=await saved.createReadStream();const chunks=[];
+  for await(const chunk of stream)chunks.push(chunk);
+  await load(page,'density.qsc',Buffer.concat(chunks));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Loaded density.qsc');
+  mapId=await page.evaluate(()=>window.cuemol.status().scene.maps[0].id);
+  const after=JSON.parse((await call(page,'execute_script',{source:source(mapId)})).message).log;
+  expect(after).toBe(before);
+  expect(errors).toEqual([]);
+});

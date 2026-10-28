@@ -1750,13 +1750,18 @@ dependencies = [
 name = "cuemol-xtal"
 version = "0.1.0"
 dependencies = [
+ "bzip2",
  "cuemol-core",
  "cuemol-gfx",
  "cuemol-molstr",
  "cuemol-qsys",
  "cuemol-surface",
  "cuemol-symm",
+ "flate2",
+ "lzma-rs",
  "rustfft",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

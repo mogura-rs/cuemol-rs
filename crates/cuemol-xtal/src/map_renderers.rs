@@ -320,6 +320,25 @@ impl DensityMap {
         self.intervals = intervals;
     }
 
+    pub(crate) fn set_quantized_data(
+        &mut self,
+        bytes: Vec<u8>,
+        counts: [usize; 3],
+        stats: cuemol_molstr::MapStats,
+        base: f64,
+        step: f64,
+    ) {
+        self.counts = counts;
+        self.min_density = stats.min;
+        self.max_density = stats.max;
+        self.mean_density = stats.mean;
+        self.rmsd_density = stats.rms;
+        self.level_base = base;
+        self.level_step = step;
+        self.bytes = Arc::new(bytes);
+        self.rebuild_histogram();
+    }
+
     pub fn set_xtal_params(&mut self, a: f64, b: f64, c: f64, alpha: f64, beta: f64, gamma: f64) {
         self.cell = CrystalInfo::new(a, b, c, alpha, beta, gamma);
         self.delta = delta_from_cell(a, b, c, alpha, beta, gamma, self.intervals);

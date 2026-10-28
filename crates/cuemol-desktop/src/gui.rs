@@ -29058,6 +29058,21 @@ impl GuiApplication {
                     match options {
                         crate::GuiDensityMapReaderOptions::Ccp4(options) => {
                             ui.strong("CCP4Map options");
+                            ui.horizontal(|ui| {
+                                ui.label("Grid sampling stride");
+                                ui.add(
+                                    egui::DragValue::new(&mut options.subsample).range(1..=65536),
+                                );
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Maximum voxels (0 = unlimited)");
+                                ui.add(
+                                    egui::DragValue::new(&mut options.max_voxels)
+                                        .range(0.0..=f64::MAX)
+                                        .speed(1_000_000.),
+                                );
+                            });
+                            ui.checkbox(&mut options.use_header_stats, "Use header density range");
                             ui.checkbox(&mut options.normalize, "Normalize by mean and stdev");
                             ui.horizontal(|ui| {
                                 ui.checkbox(
@@ -29231,12 +29246,6 @@ impl GuiApplication {
             };
             if let Some(selection) = setup.selection.as_deref() {
                 self.remember_selection_history(selection);
-            }
-            if let Some(crate::GuiDensityMapReaderOptions::Ccp4(options)) =
-                draft.density_map_options.as_mut()
-            {
-                options.min = options.min.trunc();
-                options.max = options.max.trunc();
             }
             let _ = crate::save_renderer_setup_preferences(&setup.renderer_type, setup.recenter);
             match draft.action {

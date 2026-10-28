@@ -103,6 +103,12 @@ set or remove non-standard bonds. Each completed edit has one undo entry.
 The palette cap and **View > Tool palette** share a persisted collapse setting.
 Hover information and highlighting are configurable in Settings.
 
+CCP4/MRC density maps support header inspection, strict grid subsampling and
+voxel limits through `CCP4MapReader` and the desktop file dialogs. Native reads
+use a row buffer and quantized voxel storage; compressed files spool to a
+temporary seekable file. MRC origins and crystallographic/EM map-kind evidence
+are preserved. QDF/QSC saves retain the reader's quantization range.
+
 Load an MD topology and trajectory through the MD dialog or `load_trajectory`.
 GRO, PDB, mmCIF, PSF, AMBER topology, SDF, and MOL2 topologies are accepted.
 DCD, XTC, TRR, AMBER NetCDF and ASCII MDCRD trajectories retain a frame index and decode the

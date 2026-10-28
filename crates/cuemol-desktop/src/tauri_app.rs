@@ -334,12 +334,16 @@ impl From<MsmsReaderOptionsDto> for crate::GuiMsmsReaderOptions {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+#[serde(default)]
 struct Ccp4MapReaderOptionsDto {
     normalize: bool,
     truncate_min: bool,
     min: f64,
     truncate_max: bool,
     max: f64,
+    subsample: usize,
+    max_voxels: f64,
+    use_header_stats: bool,
 }
 
 impl From<crate::GuiCcp4MapReaderOptions> for Ccp4MapReaderOptionsDto {
@@ -350,6 +354,9 @@ impl From<crate::GuiCcp4MapReaderOptions> for Ccp4MapReaderOptionsDto {
             min: value.min,
             truncate_max: value.truncate_max,
             max: value.max,
+            subsample: value.subsample,
+            max_voxels: value.max_voxels,
+            use_header_stats: value.use_header_stats,
         }
     }
 }
@@ -362,7 +369,16 @@ impl From<Ccp4MapReaderOptionsDto> for crate::GuiCcp4MapReaderOptions {
             min: value.min,
             truncate_max: value.truncate_max,
             max: value.max,
+            subsample: value.subsample,
+            max_voxels: value.max_voxels,
+            use_header_stats: value.use_header_stats,
         }
+    }
+}
+
+impl Default for Ccp4MapReaderOptionsDto {
+    fn default() -> Self {
+        crate::GuiCcp4MapReaderOptions::default().into()
     }
 }
 
