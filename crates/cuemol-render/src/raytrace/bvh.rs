@@ -82,14 +82,20 @@ impl<'a> RayIndex<'a> {
             primitives: Vec::new(),
             nodes: Vec::new(),
             order: Vec::new(),
-            translucent_groups: snapshot
-                .transparency_groups
-                .iter()
-                .enumerate()
-                .filter(|(_, g)| g.alpha < 1.0 - 1e-4)
-                .map(|(i, g)| (i, f64::from(g.alpha)))
-                .collect(),
+            translucent_groups: Vec::new(),
         };
+        for (i, group) in snapshot.transparency_groups.iter().enumerate() {
+            if group.alpha < 1. - 1e-4
+                && !index
+                    .translucent_groups
+                    .iter()
+                    .any(|(_, a)| (*a - group.alpha as f64).abs() <= 1e-4)
+            {
+                index
+                    .translucent_groups
+                    .push((i, group.alpha.clamp(0., 1.) as f64));
+            }
+        }
         let mut entries = Vec::new();
         let mut add = |shape, group, bounds| {
             entries.push(Entry {
@@ -224,8 +230,13 @@ impl<'a> RayIndex<'a> {
         let group = primitive.group;
         if let Some(g) = group {
             if self.snapshot.transparency_groups[g].alpha < 1. - 1e-4
-                && group != visible_group
-                && visible_group != Some(usize::MAX)
+                && !visible_group.is_some_and(|selected| {
+                    selected == usize::MAX
+                        || (self.snapshot.transparency_groups[selected].alpha
+                            - self.snapshot.transparency_groups[g].alpha)
+                            .abs()
+                            <= 1e-4
+                })
             {
                 return None;
             }
@@ -324,6 +335,45 @@ impl<'a> RayIndex<'a> {
             false
         });
         hits
+    }
+    pub fn nearest(&self, ray: Ray, limit: f64, group: Option<usize>) -> Option<Hit> {
+        self.nearest_where(ray, limit, group, |_| true)
+    }
+    pub fn nearest_where(
+        &self,
+        ray: Ray,
+        mut limit: f64,
+        group: Option<usize>,
+        accept: impl Fn(Hit) -> bool,
+    ) -> Option<Hit> {
+        if self.nodes.is_empty() {
+            return None;
+        }
+        let mut result = None;
+        let mut stack = [0usize; usize::BITS as usize + 1];
+        let mut top = 1;
+        while top > 0 {
+            top -= 1;
+            let node = &self.nodes[stack[top]];
+            if !node.bounds.intersects(ray, limit) {
+                continue;
+            }
+            if node.count != 0 {
+                for &id in &self.order[node.first..node.first + node.count] {
+                    if let Some(hit) = self.hit(id, ray, group) {
+                        if hit.distance > 1e-4 && hit.distance <= limit && accept(hit) {
+                            limit = hit.distance;
+                            result = Some(hit);
+                        }
+                    }
+                }
+            } else {
+                stack[top] = node.first;
+                stack[top + 1] = node.right;
+                top += 2;
+            }
+        }
+        result
     }
     pub fn occluded(&self, ray: Ray, limit: f64, group: Option<usize>) -> bool {
         let mut found = false;

@@ -229,3 +229,19 @@ test('browser NPR styles and edited hatch layers produce distinct transparent im
   state=await call(page,'get_screenshot',{});expect(images).not.toContain(JSON.parse(state.message)._image);
   expect(errors).toEqual([]);
 });
+
+test('browser lighting settings alter traced illumination',async({page})=>{
+  await ready(page);await load(page,'lighting.pdb',Buffer.from(structure));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  const image=async settings=>{
+    await call(page,'set_render_settings',{settings:`width=48; height=48; umbreon.supersample=1; umbreon.denoise=None; ${settings}`});
+    const state=await call(page,'get_screenshot');return JSON.parse(state.message)._image;
+  };
+  const dark=await image('umbreon.useGI=false; umbreon.lightIntensity=0.2; umbreon.flashFraction=1; umbreon.ambientFraction=0');
+  const bright=await image('umbreon.lightIntensity=1.8');
+  expect(bright).not.toBe(dark);
+  const gi=await image('umbreon.useGI=true; umbreon.giSamples=8; umbreon.giBounces=2; umbreon.giSkyGradient=true; umbreon.giGroundColor=#7799aa; umbreon.ambientFraction=0.6');
+  expect(gi).not.toBe(bright);
+  const mean=data=>{const p=PNG.sync.read(Buffer.from(data,'base64')).data;let sum=0;for(let i=0;i<p.length;i+=4)sum+=p[i]+p[i+1]+p[i+2];return sum;};
+  expect(mean(bright)).toBeGreaterThan(mean(dark));
+});

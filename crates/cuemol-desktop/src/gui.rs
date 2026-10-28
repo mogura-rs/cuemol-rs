@@ -1423,7 +1423,7 @@ struct GuiApplication {
     ray_hatching: bool,
     ray_hatch: cuemol_render::HatchRenderParams,
     ray_transparent: bool,
-    ray_samples: u32,
+    ray_lighting: cuemol_render::UmbreonRenderParams,
     ray_job: Option<mpsc::Receiver<std::result::Result<serde_json::Value, String>>>,
     pov_render_settings: NativePovRenderSettings,
     pov_render_job: Option<NativePovRenderJob>,
@@ -5065,7 +5065,8 @@ impl GuiApplication {
             ray_hatching: false,
             ray_hatch: Default::default(),
             ray_transparent: false,
-            ray_samples: 8,
+            ray_lighting: cuemol_command::rendering_params(&serde_json::Map::new(), "umbreon")
+                .unwrap(),
             ray_job: None,
             pov_render_settings: NativePovRenderSettings::default(),
             pov_render_job: None,
@@ -17322,6 +17323,16 @@ impl GuiApplication {
                 }
             }
             self.ray_hatching = settings.get("backend").is_some_and(|v| v == "umbreon_npr");
+            if let Ok(params) = cuemol_command::rendering_params(
+                &settings,
+                if self.ray_hatching {
+                    "umbreon_npr"
+                } else {
+                    "umbreon"
+                },
+            ) {
+                self.ray_lighting = params;
+            }
             if let Ok(hatch) = cuemol_command::hatch_params(&settings, "umbreon_npr") {
                 self.ray_hatch = hatch;
             }
@@ -17364,48 +17375,64 @@ impl GuiApplication {
                 });
                 ui.checkbox(&mut self.ray_hatching, "Hatched illustration");
                 ui.checkbox(&mut self.ray_transparent, "Transparent background");
-                if self.ray_hatching {cuemol_ui::hatch_controls(ui,&mut self.ray_hatch);}
-                ui.add_enabled_ui(!self.ray_hatching, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("Lighting samples");
-                        ui.add(egui::DragValue::new(&mut self.ray_samples).range(1..=256));
-                    });
-                });
+                if self.ray_hatching {
+                    cuemol_ui::hatch_controls(ui, &mut self.ray_hatch);
+                }
+                cuemol_ui::lighting_controls(ui, &mut self.ray_lighting, self.ray_hatching);
                 if self.ray_job.is_some() {
                     ui.horizontal(|ui| {
                         ui.spinner();
                         ui.label("Rendering...");
                     });
                 }
-                if ui.add_enabled(self.ray_job.is_none(), egui::Button::new("Render")).clicked() {
+                if ui
+                    .add_enabled(self.ray_job.is_none(), egui::Button::new("Render"))
+                    .clicked()
+                {
                     let mut current = camera.to_qsys_camera("__current");
-                    let backend = if self.ray_hatching { "umbreon_npr" } else { "umbreon" };
+                    let backend = if self.ray_hatching {
+                        "umbreon_npr"
+                    } else {
+                        "umbreon"
+                    };
                     let mut settings = format!(
-                        "width={}; height={}; unit=px; transparentBg={}; backend={backend}; umbreon.giSamples={}",
-                        self.ray_size[0], self.ray_size[1], self.ray_transparent, self.ray_samples
+                        "width={}; height={}; unit=px; transparentBg={}; backend={backend}",
+                        self.ray_size[0], self.ray_size[1], self.ray_transparent
                     );
-                    if self.ray_hatching {settings.push_str("; ");settings.push_str(&cuemol_command::hatch_settings(&self.ray_hatch));}
+                    settings.push_str("; ");
+                    settings.push_str(&cuemol_command::rendering_settings(
+                        &self.ray_lighting,
+                        backend,
+                    ));
+                    if self.ray_hatching {
+                        settings.push_str("; ");
+                        settings.push_str(&cuemol_command::hatch_settings(&self.ray_hatch));
+                    }
                     let result = cuemol_command::call_tool(
                         &mut self.state,
                         &mut current,
                         "set_render_settings",
                         &serde_json::json!({"settings": settings}),
-                    ).and_then(|_| cuemol_command::prepare_render(
-                        &self.state,
-                        &current,
-                        "render_image",
-                        &serde_json::json!({
-                            "fileName": self.export_path,
-                            "width": self.ray_size[0],
-                            "height": self.ray_size[1],
-                            "style": if self.ray_hatching { "npr" } else { "gi" },
-                        }),
-                    ));
+                    )
+                    .and_then(|_| {
+                        cuemol_command::prepare_render(
+                            &self.state,
+                            &current,
+                            "render_image",
+                            &serde_json::json!({
+                                "fileName": self.export_path,
+                                "width": self.ray_size[0],
+                                "height": self.ray_size[1],
+                                "style": if self.ray_hatching { "npr" } else { "gi" },
+                            }),
+                        )
+                    });
                     match result {
                         Ok(prepared) => {
                             let (sender, receiver) = mpsc::channel();
                             std::thread::spawn(move || {
-                                let _ = sender.send(prepared.run().map_err(|error| error.to_string()));
+                                let _ =
+                                    sender.send(prepared.run().map_err(|error| error.to_string()));
                             });
                             self.ray_job = Some(receiver);
                             self.set_status("Rendering image...");

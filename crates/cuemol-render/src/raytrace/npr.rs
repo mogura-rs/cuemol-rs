@@ -3,12 +3,9 @@ mod params;
 #[cfg(test)]
 mod tests;
 
-use super::{
-    cone_sample, hemisphere_visibility, normalize, transform_direction, Hit, Ray, RayIndex,
-    UmbreonFrame, UmbreonRenderParams,
-};
+use super::{lighting, normalize, Hit, Ray, RayIndex, UmbreonFrame, UmbreonRenderParams};
 use crate::RenderSceneSnapshot;
-use cuemol_core::{CueMolError, Result, Vector4};
+use cuemol_core::{CueMolError, Result};
 use cuemol_qsys::Camera;
 use ink::{smooth, NormalizedLayer};
 use params::Look;
@@ -254,86 +251,32 @@ fn hit_tone(
     camera: &Camera,
     p: &UmbreonRenderParams,
     hatch: &ResolvedHatch,
+    group: Option<usize>,
+    cache: Option<&std::cell::RefCell<lighting::PixelCache>>,
 ) -> f32 {
     let tr = &hatch.look.tone;
-    let rot = camera
-        .rotation()
-        .inv()
-        .unwrap_or(cuemol_core::Quat::IDENTITY)
-        .to_matrix();
     let view = normalize(ray.direction * -1.);
-    let key = normalize(transform_direction(rot, Vector4::new3(1., 1., 1.)));
-    let flash = normalize(transform_direction(rot, Vector4::new3(0., 0., 1.)));
-    let intensity = if p.light_intensity >= 0. {
-        p.light_intensity
-    } else {
-        1.55
-    };
-    let af = if p.ambient_fraction >= 0. {
-        p.ambient_fraction.clamp(0., 1.)
-    } else {
-        0.
-    };
-    let ff = if p.flash_fraction >= 0. {
-        p.flash_fraction.clamp(0., 1.)
-    } else {
-        0.6
-    };
+    let mut settings = p.clone();
+    if settings.light_intensity < 0. {
+        settings.light_intensity = 1.55;
+    }
     let wrap = (tr.wrap as f64).max(0.);
     let mut diffuse = 0.;
     let mut specular = 0.;
-    for (direction, energy, shadow) in [
-        (key, intensity * (1. - af) * (1. - ff), true),
-        (flash, intensity * (1. - af) * ff, false),
-    ] {
-        let mut visibility = 1.;
-        if shadow && p.shadows {
-            let count = p.shadow_samples.clamp(1, 256) as usize;
-            visibility = (0..count)
-                .filter(|&i| {
-                    !index.occluded(
-                        Ray {
-                            origin: hit.position + hit.normal * 1e-4,
-                            direction: cone_sample(
-                                direction,
-                                p.light_radius.max(0.).to_radians(),
-                                i,
-                                count,
-                            ),
-                        },
-                        f64::INFINITY,
-                        None,
-                    )
-                })
-                .count() as f64
-                / count as f64;
-        }
-        diffuse += ((hit.normal.dot3d(direction) + wrap) / (1. + wrap)).clamp(0., 1.)
-            * energy
+    for light in lighting::lights(camera, &settings) {
+        let visibility = lighting::shadow(index, hit, light, p, group);
+        diffuse += ((hit.normal.dot3d(light.direction) + wrap) / (1. + wrap)).clamp(0., 1.)
+            * light.energy
             * visibility;
-        if shadow {
-            let reflected = normalize(hit.normal * (2. * hit.normal.dot3d(direction)) - direction);
-            specular += reflected.dot3d(view).max(0.).powf(30.) * energy * visibility;
+        if light.shadow {
+            let reflected =
+                normalize(hit.normal * (2. * hit.normal.dot3d(light.direction)) - light.direction);
+            specular += reflected.dot3d(view).max(0.).powf(30.) * light.energy * visibility;
         }
     }
-    let ao = if p.ao_samples > 0 {
-        hemisphere_visibility(
-            snapshot,
-            index,
-            hit,
-            p.ao_samples.clamp(1, 256) as usize,
-            if p.ao_distance > 0. {
-                p.ao_distance
-            } else {
-                10.
-            },
-            None,
-        )
-    } else {
-        1.
-    };
+    let ao = lighting::cached_occlusion(snapshot, index, hit, p, group, cache);
     let mut t = tr.ambient as f64 + tr.diffuse as f64 * diffuse;
-    t *= ao.powf(tr.contact.max(0.) as f64) * ao.powf(tr.shape.max(0.) as f64);
+    t *= ao.contact.powf(tr.contact.max(0.) as f64) * ao.shape.powf(tr.shape.max(0.) as f64);
     if tr.rim > 0. {
         let edge = (1. - hit.normal.dot3d(view).clamp(0., 1.)).powf(tr.rimpow.max(0.01) as f64);
         t *= 1. - tr.rim.min(1.) as f64 * edge * (1. - tr.rimbias as f64 * t.clamp(0., 1.));
@@ -353,61 +296,49 @@ pub(super) fn trace_npr(
     h: &ResolvedHatch,
     x: f32,
     y: f32,
+    cache: Option<&std::cell::RefCell<lighting::PixelCache>>,
 ) -> [f64; 4] {
-    let mut hits = index.hits(ray, Some(usize::MAX));
-    if p.use_clip_z {
-        let rotation = camera.rotation().to_matrix();
-        let half = camera.slab_depth() * 0.5;
-        hits.retain(|hit| {
-            let eye = transform_direction(rotation, hit.position - camera.center());
-            (-half..=half).contains(&eye.z)
-        });
-    }
-    hits.sort_by(|a, b| {
-        a.distance
-            .total_cmp(&b.distance)
-            .then(a.order.cmp(&b.order))
-    });
-    let mut output = if p.transparent_background {
-        [0.; 4]
-    } else {
-        [
-            background[0] as f64,
-            background[1] as f64,
-            background[2] as f64,
-            1.,
-        ]
-    };
-    for &hit in hits.iter().rev() {
-        let eye = transform_direction(
-            camera.rotation().to_matrix(),
-            hit.position - camera.center(),
-        );
-        let fog = if camera.slab_depth() > 0. {
-            (1. + eye.z / (0.5 * camera.slab_depth())).clamp(0., 1.)
-        } else {
-            1.
-        };
-        let mut color = if hit.unlit {
+    super::blend_sample(index, p, |group| {
+        trace_npr_pass(
+            snapshot, index, ray, camera, background, p, h, x, y, group, cache,
+        )
+    })
+}
+fn trace_npr_pass(
+    snapshot: &RenderSceneSnapshot,
+    index: &RayIndex<'_>,
+    ray: Ray,
+    camera: &Camera,
+    background: [f32; 4],
+    p: &UmbreonRenderParams,
+    h: &ResolvedHatch,
+    x: f32,
+    y: f32,
+    group: Option<usize>,
+    cache: Option<&std::cell::RefCell<lighting::PixelCache>>,
+) -> ([f64; 4], f64) {
+    let hits = super::visible_hits(index, ray, camera, p, group);
+    let depth = hits.first().map(|h| h.distance).unwrap_or(f64::INFINITY);
+    let mut output = [0.; 4];
+    for &hit in &hits {
+        let fog = super::fog_at(hit, camera);
+        let color = if hit.unlit {
             [
                 hit.color[0] as f32,
                 hit.color[1] as f32,
                 hit.color[2] as f32,
             ]
         } else {
-            let mut raw = hit_tone(snapshot, index, hit, ray, camera, p, h);
+            let mut raw = hit_tone(snapshot, index, hit, ray, camera, p, h, group, cache);
             if h.look.tonefog {
                 raw = 1. - (1. - raw) * fog as f32;
             }
             let shaded = if h.look.over {
-                super::shade_hit(snapshot, index, hit, ray, camera, p, None).map(|v| v as f32)
+                lighting::shade(snapshot, index, hit, ray, camera, p, group, cache)
+                    .map(|v| v as f32)
             } else {
                 [0.; 3]
             };
-            let edge = h.default_edges
-                && p.show_edge_lines
-                && hit.normal.dot3d(ray.direction * -1.).abs()
-                    < (0.025 + p.edge_rise.max(0.) * 0.02).min(0.2);
             h.composite(
                 x,
                 y,
@@ -418,21 +349,30 @@ pub(super) fn trace_npr(
                     hit.color[2] as f32,
                 ],
                 shaded,
-                edge,
+                h.default_edges && super::edge_at(index, hit, ray, camera, p, group, true),
             )
         };
-        let mut alpha = hit.color[3].clamp(0., 1.);
-        if p.transparent_background {
-            alpha *= fog;
-        } else {
-            for i in 0..3 {
-                color[i] = background[i] * (1. - fog as f32) + color[i] * fog as f32;
-            }
-        }
+        let alpha =
+            super::section_alpha(snapshot, hit) * if p.transparent_background { fog } else { 1. };
+        let weight = alpha * (1. - output[3]);
         for c in 0..3 {
-            output[c] = color[c] as f64 * alpha + output[c] * (1. - alpha);
+            let color = if p.transparent_background {
+                color[c] as f64
+            } else {
+                background[c] as f64 * (1. - fog) + color[c] as f64 * fog
+            };
+            output[c] += color * weight;
         }
-        output[3] = alpha + output[3] * (1. - alpha);
+        output[3] += weight;
+        if output[3] >= 1. - 1e-6 {
+            break;
+        }
     }
-    output
+    if !p.transparent_background {
+        for c in 0..3 {
+            output[c] += background[c] as f64 * (1. - output[3]);
+        }
+        output[3] = 1.;
+    }
+    (output, depth)
 }

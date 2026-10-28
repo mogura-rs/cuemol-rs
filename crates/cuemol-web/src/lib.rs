@@ -130,6 +130,7 @@ struct App {
     show_render: bool,
     render_hatching: bool,
     render_hatch: cuemol_render::HatchRenderParams,
+    render_lighting: cuemol_render::UmbreonRenderParams,
     render_size: [u32; 2],
     render_transparent: bool,
     show_timeline: bool,
@@ -228,6 +229,8 @@ impl App {
             show_render: false,
             render_hatching: false,
             render_hatch: Default::default(),
+            render_lighting: cuemol_command::rendering_params(&serde_json::Map::new(), "umbreon")
+                .unwrap(),
             render_size: [1200, 900],
             render_transparent: false,
             show_timeline: false,
@@ -558,6 +561,16 @@ impl App {
                     if let Ok(settings) = cuemol_command::render_settings(&self.state) {
                         self.render_hatching =
                             settings.get("backend").is_some_and(|v| v == "umbreon_npr");
+                        if let Ok(params) = cuemol_command::rendering_params(
+                            &settings,
+                            if self.render_hatching {
+                                "umbreon_npr"
+                            } else {
+                                "umbreon"
+                            },
+                        ) {
+                            self.render_lighting = params;
+                        }
                         self.render_transparent =
                             settings.get("transparentBg").is_some_and(|v| v == true);
                         if let Ok(hatch) = cuemol_command::hatch_params(&settings, "umbreon_npr") {

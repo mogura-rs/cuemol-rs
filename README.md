@@ -219,8 +219,11 @@ the MeshMS and BALL engines on native and browser targets, with `auto` selecting
 MeshMS and BALL as its fallback. The `rust` backend retains grid-based SES.
 The generation backend, density, and probe radius survive embedded scene saves. NPR rendering includes the nine reference styles and editable line, dot, and
 stipple layers, with shared native/browser controls for ink, paper, and tone.
-Hatch and tone specifications use the reference syntax. Some upstream lighting
-settings remain unimplemented. Native denoising uses bilateral or color-guided A-trous
+Hatch and tone specifications use the reference syntax. The Rust ray tracer
+uses bounded diffuse path tracing, metallic reflection, camera-relative lights,
+and a sky/ground environment. AO supports multiple distance scales and bent
+normals; compatible supersamples reuse lighting within each output pixel.
+Contact/crease contours and both section-alpha blend modes are configurable. Native denoising uses bilateral or color-guided A-trous
 filters. Intel OIDN is not bundled; old GUI preferences carrying that label
 migrate to the bilateral filter, and new MCP OIDN requests return an error.
 The A-trous implementation uses increasing B3-spline sample spacing, following

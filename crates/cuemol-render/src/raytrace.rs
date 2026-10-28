@@ -1,4 +1,7 @@
 mod bvh;
+mod lighting;
+#[cfg(test)]
+mod lighting_tests;
 mod npr;
 use bvh::RayIndex;
 use cuemol_core::clock::Instant;
@@ -74,6 +77,12 @@ pub struct UmbreonRenderParams {
     pub ao_samples: i32,
     pub ao_distance: f64,
     pub ao_intensity: f64,
+    pub ao_diffuse_factor: f64,
+    pub ao_multi_scale: bool,
+    pub ao_bent_normal: bool,
+    pub ao_low_discrepancy: bool,
+    pub ao_falloff_power: f64,
+    pub ao_per_pixel: bool,
     pub shadows: bool,
     pub shadow_samples: i32,
     pub light_radius: f64,
@@ -88,6 +97,12 @@ pub struct UmbreonRenderParams {
     pub gi_samples: i32,
     pub gi_intensity: f64,
     pub gi_env_intensity: f64,
+    pub gi_sky_gradient: bool,
+    pub gi_ground_color: [f64; 3],
+    pub gi_bounces: i32,
+    pub per_pixel_blend: bool,
+    pub contact_edges: bool,
+    pub outline_far_depth: f64,
     pub gi_denoise: bool,
     pub denoiser: i32,
 }
@@ -103,6 +118,12 @@ impl Default for UmbreonRenderParams {
             ao_samples: 0,
             ao_distance: 1.0e20,
             ao_intensity: 1.0,
+            ao_diffuse_factor: 1.,
+            ao_multi_scale: true,
+            ao_bent_normal: true,
+            ao_low_discrepancy: true,
+            ao_falloff_power: 0.,
+            ao_per_pixel: true,
             shadows: false,
             shadow_samples: 1,
             light_radius: 0.0,
@@ -117,6 +138,12 @@ impl Default for UmbreonRenderParams {
             gi_samples: 32,
             gi_intensity: 1.0,
             gi_env_intensity: 1.0,
+            gi_sky_gradient: true,
+            gi_ground_color: [0.4; 3],
+            gi_bounces: 4,
+            per_pixel_blend: true,
+            contact_edges: true,
+            outline_far_depth: 0.2,
             gi_denoise: true,
             denoiser: 0,
         }
@@ -589,6 +616,7 @@ fn render_with_hatch(
 
     let render_row = |y: usize, row: &mut [u8]| {
         for x in 0..width {
+            let cache = lighting::PixelCache::new(camera.zoom() / height as f64);
             let mut accumulated = [0.0_f64; 4];
             for sy in 0..samples {
                 for sx in 0..samples {
@@ -621,9 +649,18 @@ fn render_with_hatch(
                             hatch,
                             (x * samples + sx) as f32 + 0.5,
                             (y * samples + sy) as f32 + 0.5,
+                            Some(&cache),
                         )
                     } else {
-                        trace_sample(snapshot, &index, ray, camera, background, params)
+                        trace_sample(
+                            snapshot,
+                            &index,
+                            ray,
+                            camera,
+                            background,
+                            params,
+                            Some(&cache),
+                        )
                     };
                     for index in 0..4 {
                         accumulated[index] += sample[index];
@@ -834,38 +871,115 @@ fn trace_sample(
     camera: &Camera,
     background: [f32; 4],
     params: &UmbreonRenderParams,
+    cache: Option<&std::cell::RefCell<lighting::PixelCache>>,
 ) -> [f64; 4] {
-    let translucent_groups = &index.translucent_groups;
-    if translucent_groups.is_empty() {
-        return trace_sample_pass(snapshot, index, ray, camera, background, params, None);
-    }
-
-    let alpha_sum = translucent_groups
-        .iter()
-        .map(|(_, alpha)| *alpha)
-        .sum::<f64>();
-    let background_pass = trace_sample_pass(snapshot, index, ray, camera, background, params, None);
-    let mut out = background_pass.map(|channel| channel * (1.0 - alpha_sum));
-    for &(group_index, alpha) in translucent_groups {
-        if alpha <= 0.0 {
-            continue;
-        }
-        let pass = trace_sample_pass(
-            snapshot,
-            index,
-            ray,
-            camera,
-            background,
-            params,
-            Some(group_index),
-        );
-        for channel in 0..4 {
-            out[channel] += pass[channel] * alpha;
-        }
-    }
-    out
+    blend_sample(index, params, |group| {
+        trace_sample_pass(
+            snapshot, index, ray, camera, background, params, group, cache,
+        )
+    })
 }
 
+fn blend_sample(
+    index: &RayIndex<'_>,
+    params: &UmbreonRenderParams,
+    mut pass: impl FnMut(Option<usize>) -> ([f64; 4], f64),
+) -> [f64; 4] {
+    let (bg, depth) = pass(None);
+    if index.translucent_groups.is_empty() {
+        return bg;
+    }
+    let mut weighted = [0.; 4];
+    let mut alpha_sum = 0.;
+    let mut transmittance = 1.;
+    for &(group, alpha) in &index.translucent_groups {
+        if alpha <= 0. {
+            continue;
+        }
+        let (layer, layer_depth) = pass(Some(group));
+        if params.per_pixel_blend && !(layer_depth < depth * (1. - 1e-5)) {
+            continue;
+        }
+        alpha_sum += alpha;
+        transmittance *= 1. - alpha;
+        for c in 0..4 {
+            weighted[c] += layer[c] * alpha;
+        }
+    }
+    if alpha_sum <= 0. {
+        return bg;
+    }
+    if params.per_pixel_blend {
+        std::array::from_fn(|c| {
+            bg[c] * transmittance + weighted[c] * (1. - transmittance) / alpha_sum
+        })
+    } else {
+        std::array::from_fn(|c| bg[c] * (1. - alpha_sum) + weighted[c])
+    }
+}
+
+fn visible_hits(
+    index: &RayIndex<'_>,
+    ray: Ray,
+    camera: &Camera,
+    params: &UmbreonRenderParams,
+    group: Option<usize>,
+) -> Vec<Hit> {
+    let mut hits = index.hits(ray, group);
+    if params.use_clip_z {
+        let rot = camera.rotation().to_matrix();
+        let half = camera.slab_depth() * 0.5;
+        hits.retain(|hit| {
+            (-half..=half).contains(&transform_direction(rot, hit.position - camera.center()).z)
+        });
+    }
+    if !params.show_edge_lines {
+        hits.retain(|h| !h.unlit);
+    }
+    let front = hits
+        .iter()
+        .filter(|h| !h.unlit)
+        .min_by(|a, b| a.distance.total_cmp(&b.distance))
+        .copied();
+    for h in &mut hits {
+        if h.unlit && h.distance == f64::MAX {
+            let own_distance = (h.position - ray.origin).length3d();
+            if front.is_some_and(|f| {
+                f.transparency_group != h.transparency_group
+                    || 1. - fog_at(f, camera) > params.outline_far_depth
+            }) {
+                h.distance = own_distance;
+            }
+        }
+    }
+    hits.sort_by(|a, b| {
+        a.distance
+            .total_cmp(&b.distance)
+            .then(a.order.cmp(&b.order))
+    });
+    hits
+}
+fn section_alpha(snapshot: &RenderSceneSnapshot, hit: Hit) -> f64 {
+    let alpha = hit
+        .transparency_group
+        .map(|i| snapshot.transparency_groups[i].alpha as f64)
+        .unwrap_or(1.);
+    if alpha > 0. {
+        (hit.color[3] / alpha).clamp(0., 1.)
+    } else {
+        0.
+    }
+}
+fn fog_at(hit: Hit, camera: &Camera) -> f64 {
+    if camera.slab_depth() <= 0. {
+        return 1.;
+    }
+    let eye = transform_direction(
+        camera.rotation().to_matrix(),
+        hit.position - camera.center(),
+    );
+    (1. + eye.z / (0.5 * camera.slab_depth())).clamp(0., 1.)
+}
 fn trace_sample_pass(
     snapshot: &RenderSceneSnapshot,
     index: &RayIndex<'_>,
@@ -874,52 +988,121 @@ fn trace_sample_pass(
     background: [f32; 4],
     params: &UmbreonRenderParams,
     visible_group: Option<usize>,
-) -> [f64; 4] {
-    let mut hits = index.hits(ray, visible_group);
-    if params.use_clip_z {
-        let rotation = camera.rotation().to_matrix();
-        let half_slab = camera.slab_depth() * 0.5;
-        hits.retain(|hit| {
-            let eye = transform_direction(rotation, hit.position - camera.center());
-            (-half_slab..=half_slab).contains(&eye.z)
-        });
-    }
-    hits.sort_by(|left, right| {
-        left.distance
-            .total_cmp(&right.distance)
-            .then(left.order.cmp(&right.order))
-    });
-    let mut out = if params.transparent_background {
-        [0.0, 0.0, 0.0, 0.0]
-    } else {
-        [
-            f64::from(background[0]),
-            f64::from(background[1]),
-            f64::from(background[2]),
-            1.0,
-        ]
-    };
-    for hit in hits.iter_mut().rev() {
-        if let Some(group_index) = hit.transparency_group {
-            let group_alpha = f64::from(snapshot.transparency_groups[group_index].alpha);
-            if group_alpha < 1.0 - 1.0e-4 {
-                hit.color[3] = if group_alpha > 0.0 {
-                    (hit.color[3] / group_alpha).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-            }
+    cache: Option<&std::cell::RefCell<lighting::PixelCache>>,
+) -> ([f64; 4], f64) {
+    let hits = visible_hits(index, ray, camera, params, visible_group);
+    let depth = hits.first().map(|h| h.distance).unwrap_or(f64::INFINITY);
+    let mut out = [0.; 4];
+    for &hit in &hits {
+        let mut shaded = lighting::shade(
+            snapshot,
+            index,
+            hit,
+            ray,
+            camera,
+            params,
+            visible_group,
+            cache,
+        );
+        if !hit.unlit && edge_at(index, hit, ray, camera, params, visible_group, false) {
+            shaded = [0.; 3];
         }
-        let shaded = shade_hit(snapshot, index, *hit, ray, camera, params, visible_group);
-        let alpha = hit.color[3].clamp(0.0, 1.0);
-        for channel in 0..3 {
-            out[channel] = shaded[channel] * alpha + out[channel] * (1.0 - alpha);
+        let fog = fog_at(hit, camera);
+        let alpha = section_alpha(snapshot, hit)
+            * if params.transparent_background {
+                fog
+            } else {
+                1.
+            };
+        let weight = alpha * (1. - out[3]);
+        for c in 0..3 {
+            let color = if params.transparent_background {
+                shaded[c]
+            } else {
+                background[c] as f64 * (1. - fog) + shaded[c] * fog
+            };
+            out[c] += color * weight;
         }
-        out[3] = alpha + out[3] * (1.0 - alpha);
+        out[3] += weight;
+        if out[3] >= 1. - 1e-6 {
+            break;
+        }
     }
-    out
+    if !params.transparent_background {
+        for c in 0..3 {
+            out[c] += background[c] as f64 * (1. - out[3]);
+        }
+        out[3] = 1.;
+    }
+    (out, depth)
 }
 
+fn edge_at(
+    index: &RayIndex<'_>,
+    hit: Hit,
+    ray: Ray,
+    camera: &Camera,
+    p: &UmbreonRenderParams,
+    group: Option<usize>,
+    default_edges: bool,
+) -> bool {
+    if !p.show_edge_lines || (!default_edges && p.crease_limit <= 0. && !p.contact_edges) {
+        return false;
+    }
+    let rotation = camera.rotation().to_matrix();
+    let inverse = camera
+        .rotation()
+        .inv()
+        .unwrap_or(cuemol_core::Quat::IDENTITY)
+        .to_matrix();
+    let step = camera.zoom() / p.height.max(1) as f64 * (0.5 + p.edge_rise.clamp(0., 2.));
+    let half = camera.slab_depth() * 0.5;
+    for (x, y) in [(step, 0.), (-step, 0.), (0., step), (0., -step)] {
+        let offset = transform_direction(inverse, Vector4::new3(x, y, 0.));
+        let r = if p.perspective {
+            Ray {
+                origin: ray.origin,
+                direction: normalize(ray.direction + offset / camera.cam_dist().max(1e-6)),
+            }
+        } else {
+            Ray {
+                origin: ray.origin + offset,
+                direction: ray.direction,
+            }
+        };
+        let adjacent = index.nearest_where(r, f64::INFINITY, group, |h| {
+            !h.unlit
+                && (!p.use_clip_z
+                    || (-half..=half)
+                        .contains(&transform_direction(rotation, h.position - camera.center()).z))
+        });
+        let Some(other) = adjacent else {
+            if default_edges {
+                return true;
+            } else {
+                continue;
+            }
+        };
+        let depth_jump = (other.distance - hit.distance).abs();
+        if depth_jump > step * 4. {
+            if default_edges && other.distance > hit.distance {
+                return true;
+            } else {
+                continue;
+            }
+        }
+        if p.contact_edges && other.transparency_group != hit.transparency_group {
+            return true;
+        }
+        if p.crease_limit > 0. && hit.normal.dot3d(other.normal) < p.crease_limit.to_radians().cos()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
 fn shade_hit(
     snapshot: &RenderSceneSnapshot,
     index: &RayIndex<'_>,
@@ -929,144 +1112,19 @@ fn shade_hit(
     params: &UmbreonRenderParams,
     visible_group: Option<usize>,
 ) -> [f64; 3] {
-    if hit.unlit {
-        return [hit.color[0], hit.color[1], hit.color[2]];
-    }
-    let material = hit
-        .transparency_group
-        .and_then(|index| snapshot.transparency_groups.get(index))
-        .map(|group| named_material(group.material.as_str()));
-    let camera_position = camera.center()
-        + transform_direction(
-            camera
-                .rotation()
-                .inv()
-                .unwrap_or(cuemol_core::Quat::IDENTITY)
-                .to_matrix(),
-            Vector4::new3(0.0, 0.0, camera.cam_dist()),
-        );
-    let camera_direction = normalize(camera_position - hit.position);
-    let light = normalize(Vector4::new3(0.35, 0.55, 1.0) + camera_direction * 0.5);
-    let normal_light = hit.normal.dot3d(light).max(0.0);
-    let (mut illumination, mut material_specular) = match material {
-        None => (0.24 + 0.76 * normal_light, [0.0; 3]),
-        Some(MaterialPreset::Toon {
-            ambient,
-            diffuse,
-            phong,
-            phong_size,
-        }) => {
-            let reflected = normalize(hit.normal * (2.0 * hit.normal.dot3d(light)) - light);
-            let highlight = phong * reflected.dot3d(camera_direction).max(0.0).powf(phong_size);
-            (ambient + diffuse * normal_light, [highlight; 3])
-        }
-        Some(MaterialPreset::Physical {
-            ambient,
-            diffuse,
-            metallic,
-            roughness,
-            specular,
-        }) => {
-            let half_vector = normalize(light + camera_direction);
-            let exponent = (2.0 / roughness.max(0.02).powi(2) - 2.0).clamp(1.0, 5_000.0);
-            let highlight = specular * hit.normal.dot3d(half_vector).max(0.0).powf(exponent);
-            let specular_color = if metallic > 0.5 {
-                [
-                    hit.color[0] * highlight,
-                    hit.color[1] * highlight,
-                    hit.color[2] * highlight,
-                ]
-            } else {
-                [0.04 * highlight; 3]
-            };
-            (
-                ambient + diffuse * (1.0 - metallic) * normal_light,
-                specular_color,
-            )
-        }
-    };
-    if params.use_gi && !matches!(material, Some(MaterialPreset::Toon { .. })) {
-        let openness = hemisphere_visibility(
-            snapshot,
-            index,
-            hit,
-            params.gi_samples.clamp(1, 64) as usize,
-            f64::INFINITY,
-            visible_group,
-        );
-        illumination +=
-            0.18 * params.gi_intensity.max(0.0) * params.gi_env_intensity.max(0.0) * openness;
-    }
-    if params.shadows {
-        let sample_count = params.shadow_samples.clamp(1, 64) as usize;
-        let angular_radius = params.light_radius.max(0.0).to_radians();
-        let mut visible = 0_usize;
-        for sample in 0..sample_count {
-            let direction = cone_sample(light, angular_radius, sample, sample_count);
-            let shadow_ray = Ray {
-                origin: hit.position + hit.normal * 1.0e-4,
-                direction,
-            };
-            if !index.occluded(shadow_ray, f64::INFINITY, visible_group) {
-                visible += 1;
-            }
-        }
-        let visibility = visible as f64 / sample_count as f64;
-        let shadow_factor = 0.45 + 0.55 * visibility;
-        illumination *= shadow_factor;
-        for channel in &mut material_specular {
-            *channel *= shadow_factor;
-        }
-    }
-    if params.ao_samples > 0 {
-        let openness = hemisphere_visibility(
-            snapshot,
-            index,
-            hit,
-            params.ao_samples.clamp(1, 64) as usize,
-            params.ao_distance.max(0.0),
-            visible_group,
-        );
-        let occlusion = 1.0 - openness;
-        illumination *= 1.0 - 0.55 * params.ao_intensity.clamp(0.0, 1.0) * occlusion;
-    }
-    if params.show_edge_lines {
-        let rim = hit.normal.dot3d(ray.direction * -1.0).abs();
-        if rim < (0.08 + params.edge_rise.max(0.0) * 0.08).min(0.45) {
-            illumination *= 0.12;
-            for channel in &mut material_specular {
-                *channel *= 0.12;
-            }
-        }
-    }
-    [
-        hit.color[0] * illumination + material_specular[0],
-        hit.color[1] * illumination + material_specular[1],
-        hit.color[2] * illumination + material_specular[2],
-    ]
+    lighting::shade(
+        snapshot,
+        index,
+        hit,
+        ray,
+        camera,
+        params,
+        visible_group,
+        None,
+    )
 }
 
-fn hemisphere_visibility(
-    _snapshot: &RenderSceneSnapshot,
-    index: &RayIndex<'_>,
-    hit: Hit,
-    sample_count: usize,
-    max_distance: f64,
-    visible_group: Option<usize>,
-) -> f64 {
-    let mut visible = 0_usize;
-    for sample in 0..sample_count {
-        let ray = Ray {
-            origin: hit.position + hit.normal * 1.0e-4,
-            direction: hemisphere_sample(hit.normal, sample, sample_count),
-        };
-        if !index.occluded(ray, max_distance, visible_group) {
-            visible += 1;
-        }
-    }
-    visible as f64 / sample_count as f64
-}
-
+#[cfg(test)]
 fn hemisphere_sample(normal: Vector4, sample: usize, sample_count: usize) -> Vector4 {
     let z = (sample as f64 + 0.5) / sample_count as f64;
     let radius = (1.0 - z * z).sqrt();

@@ -2249,7 +2249,7 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(TAURI_APP_RS.contains("ModelRequest::CreateMolecularSurface"));
     assert!(TAURI_APP_RS.contains("fn create_molecular_surface("));
     assert!(NATIVE_GUI_RS.contains("fn open_surface_generation_tool(&mut self)"));
-    assert!(NATIVE_GUI_RS.contains("create_molecular_surface_object("));
+    assert!(NATIVE_GUI_RS.contains("create_molecular_surface_object_with_backend("));
     assert!(CSS.contains(".workspace-context-menu.has-submenu"));
     assert!(JS.contains("WORKSPACE_PAINT_MONOCHROME"));
     assert!(JS.contains("function workspacePaintMenuChildren(action)"));

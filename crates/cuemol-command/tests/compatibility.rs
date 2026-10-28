@@ -432,3 +432,53 @@ fn edited_hatch_specs_and_labels_roundtrip_and_invalid_edits_are_atomic() {
     restored.open_bytes("edited.qsc", &bytes).unwrap();
     assert_eq!(before, cuemol_command::render_settings(&restored).unwrap());
 }
+
+#[test]
+fn lighting_settings_roundtrip_and_ground_color_validation_are_atomic() {
+    let mut state = DesktopAppState::new();
+    let mut camera = Camera::new();
+    molecule(&mut state, &mut camera, "lighting", 0.);
+    let settings="umbreon.lightIntensity=2; umbreon.flashFraction=0.3; umbreon.ambientFraction=0.4; umbreon.aoEnabled=true; umbreon.aoMultiScale=false; umbreon.aoGather=Per shading hit; umbreon.giSkyGradient=true; umbreon.giGroundColor=#aabbcc; umbreon.giBounces=3; umbreon.contactEdges=false; umbreon.perPixelBlend=false; umbreon.outlineFarDepth=0.7";
+    call(
+        &mut state,
+        &mut camera,
+        "set_render_settings",
+        json!({"settings":settings}),
+    );
+    let saved = cuemol_command::render_settings(&state).unwrap();
+    let params = cuemol_command::rendering_params(&saved, "umbreon").unwrap();
+    assert_eq!(params.light_intensity, 2.);
+    assert_eq!(params.ao_samples, 64);
+    assert!(!params.ao_per_pixel);
+    assert!(!params.ao_multi_scale);
+    assert_eq!(
+        params.gi_ground_color,
+        [170. / 255., 187. / 255., 204. / 255.]
+    );
+    assert_eq!(params.gi_bounces, 3);
+    assert!(!params.per_pixel_blend);
+    let encoded = cuemol_command::rendering_settings(&params, "umbreon");
+    call(
+        &mut state,
+        &mut camera,
+        "set_render_settings",
+        json!({"settings":encoded}),
+    );
+    assert_eq!(
+        params,
+        cuemol_command::rendering_params(
+            &cuemol_command::render_settings(&state).unwrap(),
+            "umbreon"
+        )
+        .unwrap()
+    );
+    let before = cuemol_command::render_settings(&state).unwrap();
+    assert!(call_tool(
+        &mut state,
+        &mut camera,
+        "set_render_settings",
+        &json!({"settings":"umbreon.giGroundColor=#bad; umbrella=1"})
+    )
+    .is_err());
+    assert_eq!(before, cuemol_command::render_settings(&state).unwrap());
+}

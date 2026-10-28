@@ -106,3 +106,17 @@ ray-traced lighting result. Layer/tone serialization, deterministic marks, and
 increasing coverage as tone darkens passed. The native GUI suite passed all
 157 tests, and all nine browser tests passed, including custom hatch edits,
 style differences, and transparent PNG output.
+
+## Lighting and transparent sections
+
+The diffuse path tracer is checked against an analytic uniform environment and
+against red light reflected from a wall. Other regressions check direct-light
+energy, AO radius and contact/shape scales, the nearest BVH hit, crease-angle
+thresholds, and nonnegative per-pixel weights for overlapping transparent
+sections. Equal-alpha sections share one veil pass, and the legacy affine blend
+remains selectable. These tests establish the listed properties, not pixelwise
+equivalence with Umbreon's Embree integrator or convergence for every scene.
+The affected render suite passed 65 tests and the command integration suites
+passed 12. All 157 native GUI tests and 10 browser tests passed. An older shell
+compatibility assertion still named the pre-backend surface API; it was updated
+to the current call, after which all 69 shell tests passed.

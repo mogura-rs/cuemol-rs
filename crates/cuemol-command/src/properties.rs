@@ -98,15 +98,21 @@ pub fn call_tool(
                     "unit" => parsed
                         .as_str()
                         .is_some_and(|v| matches!(v, "px" | "in" | "cm" | "mm")),
+                    "aoGather" => parsed
+                        .as_str()
+                        .is_some_and(|v| matches!(v, "Per output pixel" | "Per shading hit")),
                     "denoise" => parsed
                         .as_str()
                         .is_some_and(|v| matches!(v, "Bilateral" | "A-trous" | "None")),
-                    "hatchInkColor" | "hatchPaperColor" | "hatchColoring" | "hatchStyle"
-                    | "hatchLayersSpec" | "hatchToneSpec" => parsed.is_string(),
+                    "giGroundColor" | "hatchInkColor" | "hatchPaperColor" | "hatchColoring"
+                    | "hatchStyle" | "hatchLayersSpec" | "hatchToneSpec" => parsed.is_string(),
                     "transparent" | "transparentBg" | "perspective" | "useClipZ" | "clipPlane"
                     | "shadows" | "showEdgeLines" | "edgeLines" | "useGi" | "useGI"
                     | "giDenoise" | "aoEnabled" | "hatchCustomInk" | "hatchCustomPaper"
-                    | "hatchDefaultEdges" => parsed.is_boolean(),
+                    | "hatchDefaultEdges" | "aoMultiScale" | "aoBentNormal"
+                    | "aoLowDiscrepancy" | "giSkyGradient" | "perPixelBlend" | "contactEdges" => {
+                        parsed.is_boolean()
+                    }
                     "width" | "height" | "dpi" | "hatchDensity" | "hatchWidthScale" => {
                         parsed.as_f64().is_some_and(|n| n.is_finite() && n > 0.)
                     }
@@ -120,6 +126,8 @@ pub fn call_tool(
                 settings.insert(key.into(), parsed);
             }
             crate::commands::hatch_params(&settings, "umbreon_npr")?;
+            crate::commands::rendering_params(&settings, "umbreon")?;
+            crate::commands::rendering_params(&settings, "umbreon_npr")?;
             state
                 .scene_manager_mut()
                 .scene_mut(sid)
@@ -181,6 +189,18 @@ fn split_settings(input: &str) -> Result<Vec<&str>> {
 }
 
 const RENDER_KEYS: &[&str] = &[
+    "aoDiffuseFactor",
+    "aoMultiScale",
+    "aoBentNormal",
+    "aoLowDiscrepancy",
+    "aoFalloffPower",
+    "aoGather",
+    "giSkyGradient",
+    "giGroundColor",
+    "giBounces",
+    "perPixelBlend",
+    "contactEdges",
+    "outlineFarDepth",
     "hatchStyle",
     "hatchLayersSpec",
     "hatchToneSpec",

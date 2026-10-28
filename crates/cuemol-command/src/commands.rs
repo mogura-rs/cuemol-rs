@@ -445,55 +445,31 @@ pub fn prepare_render(
         .map(|style| style == "npr")
         .unwrap_or(settings.get("backend").is_some_and(|v| v == "umbreon_npr"));
     let prefix = if npr { "umbreon_npr" } else { "umbreon" };
-    let setting = |key: &str| {
-        settings
-            .get(&format!("{prefix}.{key}"))
-            .or_else(|| settings.get(key))
-    };
-    let number = |key: &str, default: f64| setting(key).and_then(Value::as_f64).unwrap_or(default);
-    let flag = |key: &str, default: bool| setting(key).and_then(Value::as_bool).unwrap_or(default);
-    let defaults = cuemol_render::UmbreonRenderParams::default();
-    let params = cuemol_render::UmbreonRenderParams {
-        width: width as i32,
-        height: height as i32,
-        perspective: settings
-            .get("projection")
-            .and_then(Value::as_str)
-            .map(|p| p == "perspective")
-            .unwrap_or(flag("perspective", camera.is_perspective())),
-        use_clip_z: flag("clipPlane", flag("useClipZ", defaults.use_clip_z)),
-        supersample: number("supersample", if npr { 3. } else { 1. }).clamp(1., 4.) as i32,
-        ao_samples: if flag("aoEnabled", setting("aoSamples").is_some()) {
-            number("aoSamples", 64.).clamp(0., 256.) as i32
-        } else {
-            0
-        },
-        ao_distance: number("aoDistance", defaults.ao_distance),
-        ao_intensity: number("aoIntensity", defaults.ao_intensity),
-        shadows: flag("shadows", defaults.shadows),
-        shadow_samples: number("shadowSamples", defaults.shadow_samples as f64).clamp(0., 256.)
-            as i32,
-        light_radius: number("lightRadius", defaults.light_radius),
-        light_intensity: number("lightIntensity", defaults.light_intensity),
-        flash_fraction: number("flashFraction", defaults.flash_fraction),
-        ambient_fraction: number("ambientFraction", defaults.ambient_fraction),
-        show_edge_lines: flag("edgeLines", flag("showEdgeLines", defaults.show_edge_lines)),
-        crease_limit: number("creaseLimit", defaults.crease_limit),
-        edge_rise: number("edgeRise", defaults.edge_rise),
-        transparent_background: flag("transparentBg", flag("transparent", false)),
-        use_gi: flag("useGI", flag("useGi", name == "render_image" && !npr)),
-        gi_samples: number("giSamples", 8.).clamp(1., 256.) as i32,
-        gi_intensity: number("giIntensity", defaults.gi_intensity),
-        gi_env_intensity: number("giEnvIntensity", defaults.gi_env_intensity),
-        gi_denoise: setting("denoise")
-            .and_then(Value::as_str)
-            .map(|v| v == "Bilateral")
-            .unwrap_or(flag("giDenoise", defaults.gi_denoise)),
-        denoiser: setting("denoise")
-            .and_then(Value::as_str)
-            .map(|v| i32::from(v == "A-trous"))
-            .unwrap_or(number("denoiser", defaults.denoiser as f64) as i32),
-    };
+    let mut params = rendering_params(&settings, prefix)?;
+    params.width = width as i32;
+    params.height = height as i32;
+    params.perspective = settings
+        .get("projection")
+        .and_then(Value::as_str)
+        .map(|v| v == "perspective")
+        .unwrap_or(camera.is_perspective());
+    if name != "render_image"
+        && !settings.get("backend").is_some_and(|v| v == "umbreon")
+        && settings.get("useGI").is_none()
+        && settings.get("umbreon.useGI").is_none()
+    {
+        params.use_gi = false;
+        if settings.get("flashFraction").is_none()
+            && settings.get(&format!("{prefix}.flashFraction")).is_none()
+        {
+            params.flash_fraction = 0.6;
+        }
+        if settings.get("ambientFraction").is_none()
+            && settings.get(&format!("{prefix}.ambientFraction")).is_none()
+        {
+            params.ambient_fraction = 0.16;
+        }
+    }
     let background = state.active_background_color()?;
     let hatch = if npr {
         Some(hatch_params(&settings, prefix)?)
@@ -513,6 +489,101 @@ pub fn prepare_render(
         hatch,
         output,
     })
+}
+
+pub fn rendering_params(
+    settings: &serde_json::Map<String, Value>,
+    prefix: &str,
+) -> Result<cuemol_render::UmbreonRenderParams> {
+    let get = |key: &str| {
+        settings
+            .get(&format!("{prefix}.{key}"))
+            .or_else(|| settings.get(key))
+    };
+    let number = |key: &str, default: f64| get(key).and_then(Value::as_f64).unwrap_or(default);
+    let flag = |key: &str, default: bool| get(key).and_then(Value::as_bool).unwrap_or(default);
+    let use_gi = flag("useGI", flag("useGi", prefix != "umbreon_npr"));
+    let defaults = cuemol_render::UmbreonRenderParams::default();
+    let ground = get("giGroundColor")
+        .and_then(Value::as_str)
+        .unwrap_or("#666666");
+    let hex = ground.strip_prefix('#').unwrap_or(ground);
+    let rgb = u32::from_str_radix(hex, 16)
+        .ok()
+        .filter(|_| hex.len() == 6)
+        .ok_or_else(|| CueMolError::invalid_argument("GI ground color must be #rrggbb"))?;
+    Ok(cuemol_render::UmbreonRenderParams {
+        use_clip_z: flag("clipPlane", flag("useClipZ", defaults.use_clip_z)),
+        supersample: number("supersample", 3.).clamp(1., 8.) as i32,
+        ao_samples: if flag("aoEnabled", get("aoSamples").is_some()) {
+            number("aoSamples", 64.).clamp(0., 256.) as i32
+        } else {
+            0
+        },
+        ao_distance: number("aoDistance", 0.),
+        ao_intensity: number("aoIntensity", 1.),
+        ao_diffuse_factor: number("aoDiffuseFactor", 1.),
+        ao_multi_scale: flag("aoMultiScale", true),
+        ao_bent_normal: flag("aoBentNormal", true),
+        ao_low_discrepancy: flag("aoLowDiscrepancy", true),
+        ao_falloff_power: number("aoFalloffPower", 0.),
+        ao_per_pixel: get("aoGather").and_then(Value::as_str) != Some("Per shading hit"),
+        shadows: flag("shadows", false),
+        shadow_samples: number("shadowSamples", 1.).clamp(1., 256.) as i32,
+        light_radius: number("lightRadius", 0.),
+        light_intensity: number(
+            "lightIntensity",
+            if prefix == "umbreon_npr" { 1.55 } else { 1.3 },
+        ),
+        flash_fraction: number("flashFraction", if use_gi { 0. } else { 0.6 }),
+        ambient_fraction: number("ambientFraction", if use_gi { 0.6 } else { 0.16 }),
+        show_edge_lines: flag("edgeLines", flag("showEdgeLines", true)),
+        crease_limit: number("creaseLimit", -1.),
+        edge_rise: number("edgeRise", 0.5),
+        contact_edges: flag("contactEdges", true),
+        outline_far_depth: number("outlineFarDepth", 0.2),
+        per_pixel_blend: flag("perPixelBlend", true),
+        transparent_background: flag("transparentBg", flag("transparent", false)),
+        use_gi,
+        gi_samples: number("giSamples", 32.).clamp(1., 256.) as i32,
+        gi_bounces: number("giBounces", 4.).clamp(1., 8.) as i32,
+        gi_intensity: number("giIntensity", 1.),
+        gi_env_intensity: number("giEnvIntensity", 1.),
+        gi_sky_gradient: flag("giSkyGradient", true),
+        gi_ground_color: [
+            (rgb >> 16) as u8 as f64 / 255.,
+            (rgb >> 8) as u8 as f64 / 255.,
+            rgb as u8 as f64 / 255.,
+        ],
+        gi_denoise: get("denoise")
+            .and_then(Value::as_str)
+            .map(|v| v == "Bilateral")
+            .unwrap_or(flag("giDenoise", true)),
+        denoiser: get("denoise")
+            .and_then(Value::as_str)
+            .map(|v| i32::from(v == "A-trous"))
+            .unwrap_or(number("denoiser", 0.) as i32),
+        ..defaults
+    })
+}
+pub fn rendering_settings(p: &cuemol_render::UmbreonRenderParams, prefix: &str) -> String {
+    let ground = p
+        .gi_ground_color
+        .map(|v| (v.clamp(0., 1.) * 255.).round() as u8);
+    let settings = json!({"supersample":p.supersample,"aoEnabled":p.ao_samples>0,"aoSamples":p.ao_samples,"aoDistance":p.ao_distance,"aoIntensity":p.ao_intensity,
+        "aoDiffuseFactor":p.ao_diffuse_factor,"aoMultiScale":p.ao_multi_scale,"aoBentNormal":p.ao_bent_normal,"aoLowDiscrepancy":p.ao_low_discrepancy,"aoFalloffPower":p.ao_falloff_power,
+        "aoGather":if p.ao_per_pixel {"Per output pixel"} else {"Per shading hit"},"shadows":p.shadows,"shadowSamples":p.shadow_samples,"lightRadius":p.light_radius,
+        "lightIntensity":p.light_intensity,"flashFraction":p.flash_fraction,"ambientFraction":p.ambient_fraction,"edgeLines":p.show_edge_lines,"creaseLimit":p.crease_limit,"edgeRise":p.edge_rise,
+        "contactEdges":p.contact_edges,"outlineFarDepth":p.outline_far_depth,"perPixelBlend":p.per_pixel_blend,"useGI":p.use_gi,"giSamples":p.gi_samples,"giBounces":p.gi_bounces,
+        "giIntensity":p.gi_intensity,"giEnvIntensity":p.gi_env_intensity,"giSkyGradient":p.gi_sky_gradient,"giGroundColor":format!("#{:02x}{:02x}{:02x}",ground[0],ground[1],ground[2]),
+        "denoise":if p.denoiser>0 {"A-trous"} else if p.gi_denoise {"Bilateral"} else {"None"}});
+    settings
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(k, v)| format!("{prefix}.{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 pub fn hatch_params(

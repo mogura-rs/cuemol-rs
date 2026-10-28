@@ -22,6 +22,7 @@ impl App {
                 if self.render_hatching {
                     cuemol_ui::hatch_controls(ui, &mut self.render_hatch);
                 }
+                cuemol_ui::lighting_controls(ui, &mut self.render_lighting, self.render_hatching);
                 render = ui.button("Render PNG").clicked();
             });
         self.show_render = open;
@@ -35,6 +36,11 @@ impl App {
                 "backend={backend}; width={}; height={}; unit=px; transparentBg={}",
                 self.render_size[0], self.render_size[1], self.render_transparent
             );
+            settings.push_str("; ");
+            settings.push_str(&cuemol_command::rendering_settings(
+                &self.render_lighting,
+                backend,
+            ));
             if self.render_hatching {
                 settings.push_str("; ");
                 settings.push_str(&cuemol_command::hatch_settings(&self.render_hatch));
