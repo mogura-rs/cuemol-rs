@@ -948,6 +948,7 @@ struct ViewportLineDto {
 #[serde(rename_all = "camelCase")]
 struct ViewportDto {
     labels_embedded: bool,
+    map_refine_pending: bool,
     image: Option<String>,
     width: u32,
     height: u32,
@@ -6251,15 +6252,38 @@ impl AppModel {
     }
 
     fn render(&mut self, width: u32, height: u32) -> ViewportDto {
+        self.render_navigation_frame(width, height, false)
+    }
+
+    fn render_navigation_frame(&mut self, width: u32, height: u32, dragging: bool) -> ViewportDto {
+        static CLOCK: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        let now = CLOCK
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_secs_f64();
+        let map_update = self.desktop.sync_density_view(
+            &self.camera,
+            f64::from(width) / f64::from(height.max(1)),
+            dragging,
+            Some(now),
+        );
+        if map_update.geometry_changed {
+            self.invalidate_snapshot(false);
+        }
         if let Err(error) = self.prepare_snapshot_if_needed() {
             self.status = format!("Render state failed: {error}");
         }
         let mut viewport = self.viewport_metadata(width, height);
+        viewport.map_refine_pending = map_update.pending;
         let width = viewport.width;
         let height = viewport.height;
         if self.renderer.is_none()
             && self.render_snapshot.as_ref().is_some_and(|snapshot| {
-                snapshot.atom_count() + snapshot.bond_count() + snapshot.mesh_triangle_count() > 0
+                snapshot.atom_count()
+                    + snapshot.bond_count()
+                    + snapshot.mesh_triangle_count()
+                    + snapshot.volumes.len()
+                    > 0
             })
         {
             self.finish_renderer_warmup();
@@ -6269,7 +6293,10 @@ impl AppModel {
             .as_ref()
             .zip(self.render_snapshot.as_ref())
             .and_then(|(renderer, snapshot)| {
-                if snapshot.atom_count() + snapshot.bond_count() + snapshot.mesh_triangle_count()
+                if snapshot.atom_count()
+                    + snapshot.bond_count()
+                    + snapshot.mesh_triangle_count()
+                    + snapshot.volumes.len()
                     == 0
                 {
                     return None;
@@ -6299,6 +6326,7 @@ impl AppModel {
         );
         ViewportDto {
             labels_embedded: true,
+            map_refine_pending: false,
             image: None,
             width,
             height,
@@ -12740,9 +12768,11 @@ fn handle_model_request(
             model.update_camera(&action, x, y, height)?;
             let (render_width, render_height) =
                 scaled_viewport_dimensions(width, height, render_scale);
-            Ok(ModelResponse::Viewport(
-                model.render(render_width, render_height),
-            ))
+            Ok(ModelResponse::Viewport(model.render_navigation_frame(
+                render_width,
+                render_height,
+                true,
+            )))
         }
         ModelRequest::SaveScene { path, options } => {
             model.persist_camera()?;
@@ -16390,6 +16420,46 @@ mod tests {
         assert_eq!(restored.stereo_mode(), StereoMode::Cross);
         assert_eq!(restored.stereo_distance(), 2.5);
         assert_eq!(restored.center_mark(), CenterMark::Axis);
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn volume_only_scenes_produce_a_tauri_viewport_image() {
+        let mut model = model_without_gpu();
+        let mut map = cuemol_xtal::DensityMap::new();
+        map.set_map_byte_array(&vec![150; 512], [8; 3], 0., 256., 150., 1.);
+        map.set_map_params([0; 3], [8; 3]);
+        map.set_xtal_params(8., 8., 8., 90., 90., 90.);
+        map.set_detected_map_type(2);
+        let scene = model.desktop.active_scene().unwrap();
+        let uid = model.desktop.add_density_map(scene, "volume", map);
+        model
+            .desktop
+            .add_density_renderer(uid, "gpu_mapvol")
+            .unwrap();
+        model.invalidate_snapshot(true);
+        model.renderer = shared_scene_renderer();
+        assert!(
+            model.renderer.is_some(),
+            "a GPU adapter is required for this test"
+        );
+        let viewport = model.render(64, 64);
+        assert!(viewport
+            .image
+            .as_ref()
+            .is_some_and(|image| image.starts_with("data:image/png;base64,")));
+        let snapshot = model.render_snapshot.as_ref().unwrap();
+        assert_eq!(snapshot.mesh_triangle_count(), 0);
+        assert_eq!(snapshot.volumes.len(), 1);
+        let rgba = model
+            .render_snapshot_rgba(model.renderer.as_ref().unwrap(), snapshot, 64, 64)
+            .unwrap();
+        assert!(
+            rgba.chunks_exact(4)
+                .filter(|p| p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2]) > 40)
+                .count()
+                > 100
+        );
     }
 
     #[test]

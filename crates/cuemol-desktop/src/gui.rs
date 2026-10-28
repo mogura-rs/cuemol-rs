@@ -5550,6 +5550,21 @@ impl GuiApplication {
             camera.target.y as f64,
             camera.target.z as f64,
         );
+        let aspect = self
+            .viewport_rect
+            .map_or(1., |r| f64::from(r.width() / r.height().max(1.)));
+        let map_update = self.state.sync_density_view(
+            &camera.to_qsys_camera("__current"),
+            aspect,
+            ctx.input(|i| i.pointer.any_down()),
+            Some(ctx.input(|i| i.time)),
+        );
+        if map_update.geometry_changed {
+            self.rebuild_snapshot();
+        }
+        if map_update.pending {
+            ctx.request_repaint_after(Duration::from_millis(150));
+        }
         if self.state.sync_auto_symmetry_center(view_center) {
             if let Some(scene_uid) = self.state.active_scene() {
                 self.modified_scenes.insert(scene_uid);
@@ -22795,6 +22810,43 @@ impl GuiApplication {
 
     fn renderer_map_properties_ui(ui: &mut egui::Ui, draft: &mut NativeRendererProperties) {
         Self::renderer_specific_group(ui, "Map", |ui| {
+            Self::renderer_specific_choice(
+                ui,
+                draft,
+                "region_mode",
+                "Region:",
+                "auto",
+                &[("auto", "Automatic"), ("box", "Box"), ("full", "Full map")],
+            );
+            Self::renderer_specific_choice(
+                ui,
+                draft,
+                "lod",
+                "Grid sampling:",
+                "auto",
+                &[
+                    ("auto", "Automatic"),
+                    ("step1", "Every node"),
+                    ("step2", "Every 2 nodes"),
+                    ("step4", "Every 4 nodes"),
+                    ("step8", "Every 8 nodes"),
+                ],
+            );
+            let budget = if draft.renderer_type == "contour" {
+                2
+            } else {
+                16
+            };
+            Self::renderer_specific_i32(
+                ui,
+                draft,
+                "lod_budget",
+                "Cell budget (Mi):",
+                budget,
+                1,
+                1024,
+            );
+            Self::renderer_specific_bool(ui, draft, "zoom_refine", "Refine with view", true);
             let auto = draft
                 .specific
                 .get("autoupdate")

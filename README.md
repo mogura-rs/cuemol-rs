@@ -121,6 +121,11 @@ absolute or native level range.
 opacity table. Native, WebGL and WebGPU views share the same volume pipeline;
 CPU rendering also composites volume samples with molecular geometry. Volume
 opacity, transforms and scene storage remain editable through the shared API.
+Map regions default to the whole block for EM and a centered box for other
+scalar maps. `region_mode`, `lod`, `lod_budget` and `zoom_refine` control the
+shared extraction. Automatic full-region sampling uses a cell budget, and view
+refinement retains existing geometry while it covers the visible area. Native,
+Tauri and browser navigation debounce region updates by 150 ms.
 
 Load an MD topology and trajectory through the MD dialog or `load_trajectory`.
 GRO, PDB, mmCIF, PSF, AMBER topology, SDF, and MOL2 topologies are accepted.

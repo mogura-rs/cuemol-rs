@@ -916,6 +916,18 @@ impl App {
             ],
         );
         self.mouse(ui, &response);
+        let map_update = self.state.sync_density_view(
+            &self.camera,
+            f64::from(size.x / size.y.max(1.)),
+            ui.input(|i| i.pointer.any_down()),
+            Some(ui.input(|i| i.time)),
+        );
+        self.dirty |= map_update.geometry_changed;
+        if map_update.pending {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(150));
+        }
+        self.rebuild();
         self.navigation_feedback(ui, &response);
         let target = self.target.as_ref().unwrap();
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());

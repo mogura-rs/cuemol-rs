@@ -32,9 +32,12 @@ impl GlslMapVolRenderer {
     }
 
     pub fn volume_data(&self, map: &DensityMap) -> Option<MapVolumeData> {
-        let range = self.map.grid_range(map)?;
+        let region = self
+            .map
+            .sampling_region(map, None, self.map.extent(), None, 1, false)?;
+        let range = region.range();
         let original = range.node_counts();
-        let mut counts = original;
+        let mut counts = region.sampled_counts();
         while counts.iter().try_fold(1usize, |n, &v| n.checked_mul(v))? > 16 * 1024 * 1024 {
             counts = counts.map(|n| n.div_ceil(2));
         }

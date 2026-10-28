@@ -314,6 +314,12 @@ impl App {
             self.message = error.to_string();
             return;
         }
+        let mut saved_camera = self.camera.clone();
+        saved_camera.set_name("__current");
+        if let Err(error) = self.state.set_active_scene_camera(saved_camera) {
+            self.message = error.to_string();
+            return;
+        }
         let result = if let Some((id, trajectory)) = &self.trajectory {
             self.state
                 .active_scene_bytes_with_external_trajectory(*id, trajectory.source_type())

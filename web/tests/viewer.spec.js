@@ -863,3 +863,47 @@ for(const backend of ['webgl','webgpu']){
     expect(errors).toEqual([]);
   });
 }
+
+test('browser map regions update geometry and retain LOD after scene export',async({page})=>{
+  await ready(page);
+  const n=33,bytes=Buffer.alloc(1024+n*n*n*4);
+  for(let i=0;i<3;i++){
+    bytes.writeInt32LE(n,i*4);bytes.writeInt32LE(n,(i+7)*4);
+    bytes.writeFloatLE(n,(i+10)*4);bytes.writeFloatLE(90,(i+13)*4);
+    bytes.writeInt32LE(i+1,(i+16)*4);
+  }
+  bytes.writeInt32LE(2,12);bytes.write('MAP ',208);
+  bytes.writeFloatLE(256,80);bytes.writeFloatLE(20,84);bytes.writeFloatLE(10,216);
+  bytes.writeFloatLE(80,196);
+  for(let z=0;z<n;z++)for(let y=0;y<n;y++)for(let x=0;x<n;x++)
+    bytes.writeFloatLE(Math.max(0,200-10*Math.hypot(x-16,y-16,z-16)),1024+4*(x+n*(y+n*z)));
+  await load(page,'regions.mrc',bytes);
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Loaded regions.mrc');
+  let uid=await page.evaluate(()=>window.cuemol.status().scene.maps[0].id);
+  await call(page,'execute_script',{source:`var m=cuemol.getObject(${uid});m.rend_uids.split(',').filter(Boolean).forEach(id=>cuemol.getRenderer(Number(id)).visible=false);var r=m.createRenderer('isosurf');r.name='region';r.color=cuemol.Color('#ff00ff');r.autoupdate=false;r.dragupdate=false;r.level=70;r.center=cuemol.Vector('(0,0,0)');r.extent=2;print(r.region_mode_resolved);`});
+  await call(page,'set_view',{center:[96,16,16],zoom:40,slab:100,distance:100});
+  const rect=await page.evaluate(()=>window.cuemol.status().ui.rects.Viewport);
+  const magenta=async()=>{
+    const png=PNG.sync.read(await page.screenshot({clip:{x:rect[0],y:rect[1],width:rect[2],height:rect[3]}}));
+    let count=0;for(let i=0;i<png.data.length;i+=4)if(png.data[i]>png.data[i+1]+40&&png.data[i+2]>png.data[i+1]+40)count++;
+    return count;
+  };
+  await expect.poll(magenta).toBeGreaterThan(100);
+  await call(page,'execute_script',{source:`cuemol.getObject(${uid}).getRendererByType('isosurf').region_mode='box';`});
+  await expect.poll(magenta).toBe(0);
+  await call(page,'execute_script',{source:`var r=cuemol.getObject(${uid}).getRendererByType('isosurf');r.region_mode='full';r.lod='step4';r.zoom_refine=false;`});
+  await expect.poll(magenta).toBeGreaterThan(100);
+  const savedView=await page.evaluate(()=>window.cuemol.status().view);
+  const download=page.waitForEvent('download');
+  const button=await page.evaluate(()=>window.cuemol.status().ui.rects['Save Scene']);
+  await page.mouse.click(button[0]+button[2]/2,button[1]+button[3]/2);
+  const stream=await(await download).createReadStream(),chunks=[];
+  for await(const chunk of stream)chunks.push(chunk);
+  await load(page,'regions.qsc',Buffer.concat(chunks));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Loaded regions.qsc');
+  expect(await page.evaluate(()=>window.cuemol.status().view)).toEqual(savedView);
+  uid=await page.evaluate(()=>window.cuemol.status().scene.maps[0].id);
+  const result=await call(page,'execute_script',{source:`var r=cuemol.getObject(${uid}).getRendererByType('isosurf');print(r.region_mode_resolved+':'+r.lod+':'+r.zoom_refine);`});
+  expect(JSON.parse(result.message).log).toBe('full:step4:false\n');
+  await expect.poll(magenta).toBeGreaterThan(100);
+});

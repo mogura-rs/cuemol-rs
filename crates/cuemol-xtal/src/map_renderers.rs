@@ -6,6 +6,10 @@ use cuemol_surface::{build_grid_isosurface_masked, MolSurfObj, ScalarField, Surf
 use cuemol_symm::CrystalInfo;
 use std::sync::Arc;
 
+mod region;
+pub use region::{
+    lod_align_range, lod_cell_count, lod_step_for_budget, MapRegionMode, MapSamplingRegion,
+};
 mod volume;
 pub use volume::MapVolumeData;
 
@@ -924,6 +928,12 @@ pub struct MapRenderer {
     extent: f64,
     center: Vector4,
     use_pbc: bool,
+    region_mode: MapRegionMode,
+    lod: usize,
+    lod_budget: u32,
+    zoom_refine: bool,
+    view_box: Option<(Vector4, f64)>,
+    world_transform: Matrix4,
     use_abslevel: bool,
     bndry_rng: f64,
     bndry_molname: String,
@@ -944,6 +954,12 @@ impl Default for MapRenderer {
             extent: 15.0,
             center: Vector4::ZERO,
             use_pbc: true,
+            region_mode: MapRegionMode::Auto,
+            lod: 0,
+            lod_budget: 16,
+            zoom_refine: true,
+            view_box: None,
+            world_transform: Matrix4::IDENTITY,
             use_abslevel: false,
             bndry_rng: 5.0,
             bndry_molname: String::new(),
@@ -1187,10 +1203,6 @@ impl MapRenderer {
         self.set_use_abslevel(value);
     }
 
-    fn grid_range(&self, scalar: &impl ScalarObject) -> Option<GridRange> {
-        GridRange::from_center_extent(scalar, self.center, self.extent, self.use_pbc)
-    }
-
     pub fn bndry_rng(&self) -> f64 {
         self.bndry_rng
     }
@@ -1403,8 +1415,10 @@ pub struct MapMeshRenderer {
 
 impl Default for MapMeshRenderer {
     fn default() -> Self {
+        let mut map = MapRenderer::new();
+        map.set_lod_budget(2);
         Self {
-            map: MapRenderer::new(),
+            map,
             width: 1.0,
             bufsize: 100,
             autoupdate: true,
@@ -1517,11 +1531,18 @@ impl MapMeshRenderer {
         boundary_points: Option<&[Vector4]>,
     ) -> Vec<[Vector4; 2]> {
         let level = self.map.level_from(scalar);
-        let Some(mut range) = self.map.grid_range(scalar) else {
+        let Some(region) = self.map.sampling_region(
+            scalar,
+            boundary_points,
+            self.map.extent(),
+            Some([self.bufsize as usize; 3]),
+            1,
+            false,
+        ) else {
             return Vec::new();
         };
-        range.limit_node_counts([self.bufsize as usize; 3]);
-        let [nc, nr, ns] = range.node_counts();
+        let range = region.range();
+        let [nc, nr, ns] = region.sampled_counts();
         if nc < 2 || nr < 2 || ns < 2 {
             return Vec::new();
         }
@@ -1531,9 +1552,9 @@ impl MapMeshRenderer {
         let boundary = BoundaryFilter::new(boundary_points, self.map.bndry_rng());
         let node = |i: usize, j: usize, k: usize| -> (f64, Vector4, bool) {
             let logical = [
-                i as isize + range.start[0],
-                j as isize + range.start[1],
-                k as isize + range.start[2],
+                (i * region.step) as isize + range.start[0],
+                (j * region.step) as isize + range.start[1],
+                (k * region.step) as isize + range.start[2],
             ];
             let [i, j, k] = range.map_indices(scalar, logical);
             let value = level - scalar.at_float(i, j, k);
@@ -1892,7 +1913,7 @@ impl MapSurfRenderer {
     /// Contour the density into a triangle isosurface at the renderer's level.
     ///
     /// Ports C++ `MapSurfRenderer`: the surface is the iso-level set of the
-    /// electron density, `density(p) == level` where `level = siglevel * sigma`.
+    /// electron density, with the native level resolved through the map kind.
     /// The mesh is extracted by marching the map's own grid (corners are grid
     /// nodes, crossings are mapped to Cartesian via the map transform), reusing
     /// the shared marching-tetrahedra core in `cuemol-surface`. This is the
@@ -1917,17 +1938,22 @@ impl MapSurfRenderer {
         let mut object = MolSurfObj::new();
         let level = self.map.level_from(scalar);
         let extent = self.map.extent().min(self.max_extent_from(scalar));
-        let Some(range) =
-            GridRange::from_center_extent(scalar, self.map.center(), extent, self.map.use_pbc())
-        else {
+        let Some(region) = self.map.sampling_region(
+            scalar,
+            boundary_points,
+            extent,
+            None,
+            self.binning as usize,
+            true,
+        ) else {
             return object;
         };
         build_density_isosurface(
             object.mesh_mut(),
             scalar,
             level,
-            range,
-            self.binning as usize,
+            region.range(),
+            region.step,
             BoundaryFilter::new(boundary_points, self.map.bndry_rng()),
         );
         object
@@ -2101,40 +2127,16 @@ impl GridRange {
         center: Vector4,
         extent: f64,
         use_pbc: bool,
+        world_transform: Matrix4,
     ) -> Option<Self> {
         if !extent.is_finite() || extent <= 0.0 {
             return None;
         }
 
-        let grid_origin = map.origin();
-        let relative_origin = map.conv_to_orth(Vector4::ZERO);
-        let axes = [
-            map.conv_to_orth(Vector4::new3(1.0, 0.0, 0.0)) - relative_origin,
-            map.conv_to_orth(Vector4::new3(0.0, 1.0, 0.0)) - relative_origin,
-            map.conv_to_orth(Vector4::new3(0.0, 0.0, 1.0)) - relative_origin,
-        ];
-        let orth_to_grid = Matrix3::new([
-            [axes[0].x, axes[1].x, axes[2].x],
-            [axes[0].y, axes[1].y, axes[2].y],
-            [axes[0].z, axes[1].z, axes[2].z],
-        ])
-        .invert()
-        .ok()?;
-        let lower_orth = center - Vector4::new3(extent, extent, extent);
-        let upper_orth = center + Vector4::new3(extent, extent, extent);
-        let first = orth_to_grid.mul_vec(lower_orth - grid_origin);
-        let second = orth_to_grid.mul_vec(upper_orth - grid_origin);
-        let grid_lower = [
-            first.x.min(second.x),
-            first.y.min(second.y),
-            first.z.min(second.z),
-        ];
-        let grid_upper = [
-            first.x.max(second.x),
-            first.y.max(second.y),
-            first.z.max(second.z),
-        ];
-        let map_start = [map.start_col(), map.start_row(), map.start_sec()];
+        let d = Vector4::new3(extent, extent, extent);
+        let (grid_lower, grid_upper) =
+            region::grid_box(map, center - d, center + d, world_transform)?;
+        let map_start = [0isize; 3];
         let map_counts = [map.col_no(), map.row_no(), map.sec_no()];
         let periodic = use_pbc && map.is_periodic_grid();
         let mut start = [0; 3];
@@ -2221,7 +2223,6 @@ fn build_density_isosurface<S: ScalarObject>(
     binning: usize,
     boundary: BoundaryFilter<'_>,
 ) {
-    let range = range.with_upper_boundary_nodes(map);
     let sample_axis = |axis: usize| {
         let mut indices = Vec::new();
         let last = range.end[axis] - 1;

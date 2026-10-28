@@ -1,4 +1,7 @@
 mod command_support;
+mod density_view;
+pub use density_view::DensityViewSync;
+use density_view::DensityViewUpdate;
 pub mod property_catalog;
 pub use command_support::GuiPastedNode;
 use cuemol_anim::{AnimMgr, MorphFrame, MorphMol};
@@ -47,8 +50,8 @@ use cuemol_surface::{MolSurfObj, PqrFileWriter, XyzrFileWriter};
 use cuemol_xtal::{
     density_map_from_cif, read_mmcif_map_file, read_mtz_metadata_file, read_opendx_file,
     read_opendx_str, BrixMapReader, Ccp4MapReader, GlslMapVolRenderer, MapColorMode,
-    MapMeshRenderer, MapRenderer, MapSurfRenderer, MapSurfaceDrawMode, Mtz2MapReader, MtzFile,
-    QdfDenMapReader, XplorMapReader,
+    MapMeshRenderer, MapRegionMode, MapRenderer, MapSurfRenderer, MapSurfaceDrawMode,
+    Mtz2MapReader, MtzFile, QdfDenMapReader, XplorMapReader,
 };
 // Re-exported so consumers (and tests) can name the scalar-field types the surface
 // potential API takes — e.g. `set_surface_potential_map(DensityMap)`.
@@ -641,6 +644,8 @@ pub struct DesktopAppState {
     last_qsc_status: Option<QscLoadStatus>,
     morphs: BTreeMap<Uid, MorphMol>,
     density_maps: BTreeMap<Uid, GuiDensityMapObject>,
+    density_view_updates: BTreeMap<Uid, DensityViewUpdate>,
+    density_view_boxes: BTreeMap<Uid, (Vector4, f64)>,
     next_density_map_uid: u64,
     next_density_renderer_uid: u64,
     /// Per-object MD trajectory blocks for MolAnim playback and block editing.
@@ -1855,6 +1860,8 @@ impl Default for DesktopAppState {
             last_qsc_status: None,
             morphs: BTreeMap::new(),
             density_maps: BTreeMap::new(),
+            density_view_updates: BTreeMap::new(),
+            density_view_boxes: BTreeMap::new(),
             next_density_map_uid: 1,
             next_density_renderer_uid: 4_000_000_000,
             trajectories: BTreeMap::new(),
@@ -5506,6 +5513,29 @@ impl DesktopAppState {
         edge_color: impl Into<String>,
         specific: &BTreeMap<String, String>,
     ) -> Result<()> {
+        for (key, value) in specific {
+            match key.as_str() {
+                "region_mode" if !matches!(value.as_str(), "auto" | "box" | "full") => {
+                    return Err(CueMolError::invalid_argument(format!(
+                        "invalid map region_mode: {value}"
+                    )))
+                }
+                "lod"
+                    if !matches!(
+                        value.as_str(),
+                        "auto" | "step1" | "step2" | "step4" | "step8"
+                    ) =>
+                {
+                    return Err(CueMolError::invalid_argument(format!(
+                        "invalid map lod: {value}"
+                    )))
+                }
+                "lod_budget" => {
+                    parse_density_i32(key, value)?;
+                }
+                _ => {}
+            }
+        }
         let style_scope_id = self
             .density_maps
             .get(&map_uid)
@@ -5560,10 +5590,18 @@ impl DesktopAppState {
                     | "ui_level_max"
                     | "siglevel_effective"
                     | "map_type_resolved"
+                    | "region_mode_resolved"
             ) {
                 continue;
             }
             match key.as_str() {
+                "lod_budget" => {
+                    renderer.attributes.insert(
+                        key.clone(),
+                        parse_density_i32(key, value)?.max(1).to_string(),
+                    );
+                    continue;
+                }
                 "siglevel" => {
                     let level = parse_density_f64(key, value)?;
                     renderer.siglevel = level;
@@ -6899,30 +6937,12 @@ impl DesktopAppState {
                             styles.resolve_style_attr(DEFAULT_STYLE_SCOPE, style_list, name)
                         })
                 };
-                let boundary_points = if config.bndry_molname.is_empty() {
-                    None
-                } else {
-                    self.scene_manager()
-                        .scene(scene_uid)
-                        .and_then(|scene| {
-                            scene
-                                .objects()
-                                .iter()
-                                .find(|object| object.name() == config.bndry_molname)
-                        })
-                        .map(|object| {
-                            object
-                                .mol()
-                                .select_indices(&config.bndry_sel)
-                                .into_iter()
-                                .map(|index| object.mol().atoms()[index].position)
-                                .collect::<Vec<_>>()
-                        })
-                };
+                let boundary_points = self.density_boundary_points(map_object, config);
                 match config.kind {
                     GuiDensityRendererKind::Contour => {
                         let mut renderer = MapMeshRenderer::new();
                         configure_density_level(renderer.map_mut(), config);
+                        self.configure_density_view(renderer.map_mut(), map_object, config);
                         renderer.map_mut().set_extent(config.extent);
                         renderer.map_mut().set_center(config.center);
                         renderer.map_mut().set_use_pbc(config.use_pbc);
@@ -6968,6 +6988,7 @@ impl DesktopAppState {
                     GuiDensityRendererKind::Volume => {
                         let mut renderer = GlslMapVolRenderer::new();
                         configure_density_level(renderer.map_mut(), config);
+                        self.configure_density_view(renderer.map_mut(), map_object, config);
                         renderer.set_center(config.center);
                         renderer.set_extent(config.extent);
                         renderer.set_use_pbc(config.use_pbc);
@@ -6990,6 +7011,7 @@ impl DesktopAppState {
                     GuiDensityRendererKind::IsoSurface => {
                         let mut renderer = MapSurfRenderer::new();
                         configure_density_level(renderer.map_mut(), config);
+                        self.configure_density_view(renderer.map_mut(), map_object, config);
                         renderer.map_mut().set_extent(config.extent);
                         renderer.map_mut().set_center(config.center);
                         renderer.map_mut().set_use_pbc(config.use_pbc);
@@ -34285,6 +34307,21 @@ impl DesktopAppState {
             if pending_renderer_is_attached(this, ctx)? {
                 return map_renderer_property_get(property, this, args, ctx);
             }
+            if matches!(property, MapRendererProperty::RegionModeResolved) {
+                let mode = map_renderer_fallback_property(
+                    "MapRenderer",
+                    "region_mode",
+                    MapRendererProperty::RegionMode,
+                    true,
+                );
+                let value = pending_renderer_attr_get(mode, this, args, ctx)?.to_string(ctx)?;
+                return Ok(JsString::from(if value.to_std_string_escaped() == "full" {
+                    "full"
+                } else {
+                    "box"
+                })
+                .into());
+            }
             if matches!(property, MapRendererProperty::MultiGradient) {
                 let object = iterator_object(this)?;
                 let existing = object.get(js_string!("_pending_multi_gradient"), ctx)?;
@@ -34311,6 +34348,16 @@ impl DesktopAppState {
         ) -> JsResult<JsValue> {
             if pending_renderer_is_attached(this, ctx)? {
                 return map_renderer_property_set(property, this, args, ctx);
+            }
+            if let Some((_, value)) = map_region_property_value(property, args, ctx)? {
+                let input = match property {
+                    MapRendererProperty::ZoomRefine => JsValue::new(value == "true"),
+                    MapRendererProperty::LodBudget => {
+                        JsValue::new(value.parse::<i32>().unwrap_or(1))
+                    }
+                    _ => JsString::from(value.as_str()).into(),
+                };
+                return pending_renderer_attr_set(fallback, this, &[input], ctx);
             }
             pending_renderer_attr_set(fallback, this, args, ctx)
         }
@@ -36623,6 +36670,11 @@ impl DesktopAppState {
             UiMax,
             EffectiveSigLevel,
             MapTypeResolved,
+            RegionMode,
+            RegionModeResolved,
+            Lod,
+            LodBudget,
+            ZoomRefine,
             MaxLevel,
             MinLevel,
             ColorMode,
@@ -36678,6 +36730,15 @@ impl DesktopAppState {
                     MapRendererProperty::MapTypeResolved,
                     false,
                 ),
+                ("region_mode", MapRendererProperty::RegionMode, true),
+                (
+                    "region_mode_resolved",
+                    MapRendererProperty::RegionModeResolved,
+                    false,
+                ),
+                ("lod", MapRendererProperty::Lod, true),
+                ("lod_budget", MapRendererProperty::LodBudget, true),
+                ("zoom_refine", MapRendererProperty::ZoomRefine, true),
                 ("maxLevel", MapRendererProperty::MaxLevel, false),
                 ("minLevel", MapRendererProperty::MinLevel, false),
                 ("colormode", MapRendererProperty::ColorMode, true),
@@ -36734,6 +36795,19 @@ impl DesktopAppState {
                 MapRendererProperty::UiMax => ("ui_level_max", Real, "0"),
                 MapRendererProperty::EffectiveSigLevel => ("siglevel_effective", Real, "1.1"),
                 MapRendererProperty::MapTypeResolved => ("map_type_resolved", Text, ""),
+                MapRendererProperty::RegionMode => ("region_mode", Text, "auto"),
+                MapRendererProperty::RegionModeResolved => ("region_mode_resolved", Text, "box"),
+                MapRendererProperty::Lod => ("lod", Text, "auto"),
+                MapRendererProperty::LodBudget => (
+                    "lod_budget",
+                    Integer,
+                    if matches!(renderer_type, "contour" | "MapMeshRenderer") {
+                        "2"
+                    } else {
+                        "16"
+                    },
+                ),
+                MapRendererProperty::ZoomRefine => ("zoom_refine", Boolean, "true"),
                 MapRendererProperty::MaxLevel => ("maxLevel", Real, "0"),
                 MapRendererProperty::MinLevel => ("minLevel", Real, "0"),
                 MapRendererProperty::ColorMode => ("colormode", Text, "solid"),
@@ -36956,6 +37030,23 @@ impl DesktopAppState {
             if !level.is_empty() {
                 state.set_siglevel(level.parse().unwrap_or(1.1));
             }
+            state.set_region_mode(parse_map_region_mode(&renderer_effective_attr(
+                renderer,
+                "region_mode",
+                "auto",
+            )));
+            state.set_lod(parse_map_lod(&renderer_effective_attr(
+                renderer, "lod", "auto",
+            )));
+            state.set_lod_budget(
+                map_renderer_number(
+                    renderer,
+                    "lod_budget",
+                    if renderer.rtype == "contour" { 2. } else { 16. },
+                )
+                .max(1.) as u32,
+            );
+            state.set_zoom_refine(map_renderer_bool(renderer, "zoom_refine", true));
             Ok(state)
         }
         fn map_renderer_property_get(
@@ -36966,6 +37057,24 @@ impl DesktopAppState {
         ) -> JsResult<JsValue> {
             let renderer = script_renderer(renderer_proxy_uid(this, ctx)?)?;
             match property {
+                MapRendererProperty::RegionModeResolved => Ok(JsString::from(
+                    script_map_level_state(&renderer)?.region_mode_resolved(),
+                )
+                .into()),
+                MapRendererProperty::RegionMode => Ok(JsString::from(
+                    renderer_effective_attr(&renderer, "region_mode", "auto").as_str(),
+                )
+                .into()),
+                MapRendererProperty::Lod => Ok(JsString::from(
+                    renderer_effective_attr(&renderer, "lod", "auto").as_str(),
+                )
+                .into()),
+                MapRendererProperty::LodBudget => Ok(JsValue::new(
+                    script_map_level_state(&renderer)?.lod_budget(),
+                )),
+                MapRendererProperty::ZoomRefine => {
+                    Ok(map_renderer_bool(&renderer, "zoom_refine", true).into())
+                }
                 MapRendererProperty::MaxLevel => {
                     Ok(script_map_level_state(&renderer)?.max_level().into())
                 }
@@ -37180,6 +37289,41 @@ impl DesktopAppState {
                 .into()),
             }
         }
+        fn map_region_property_value(
+            property: MapRendererProperty,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<Option<(&'static str, String)>> {
+            let input = args.first().cloned().unwrap_or(JsValue::undefined());
+            Ok(Some(match property {
+                MapRendererProperty::RegionMode | MapRendererProperty::Lod => {
+                    let value = input.to_string(ctx)?.to_std_string_escaped();
+                    let (key, valid) = if matches!(property, MapRendererProperty::RegionMode) {
+                        (
+                            "region_mode",
+                            matches!(value.as_str(), "auto" | "box" | "full"),
+                        )
+                    } else {
+                        (
+                            "lod",
+                            matches!(
+                                value.as_str(),
+                                "auto" | "step1" | "step2" | "step4" | "step8"
+                            ),
+                        )
+                    };
+                    if !valid {
+                        return Err(script_error(format!("invalid map {key}: {value}")));
+                    }
+                    (key, value)
+                }
+                MapRendererProperty::LodBudget => {
+                    ("lod_budget", input.to_i32(ctx)?.max(1).to_string())
+                }
+                MapRendererProperty::ZoomRefine => ("zoom_refine", input.to_boolean().to_string()),
+                _ => return Ok(None),
+            }))
+        }
         fn map_renderer_property_set(
             property: MapRendererProperty,
             this: &JsValue,
@@ -37190,7 +37334,14 @@ impl DesktopAppState {
             let renderer = script_renderer(uid)?;
             let input = args.first().cloned().unwrap_or(JsValue::undefined());
             let (key, value) = match property {
-                MapRendererProperty::UiAbsMin
+                MapRendererProperty::RegionMode
+                | MapRendererProperty::Lod
+                | MapRendererProperty::LodBudget
+                | MapRendererProperty::ZoomRefine => {
+                    map_region_property_value(property, args, ctx)?.expect("region property")
+                }
+                MapRendererProperty::RegionModeResolved
+                | MapRendererProperty::UiAbsMin
                 | MapRendererProperty::UiAbsMax
                 | MapRendererProperty::UiMin
                 | MapRendererProperty::UiMax
@@ -50527,6 +50678,7 @@ fn density_renderer_qsc_node(renderer: &GuiDensityRenderer) -> LDom2Node {
                 | "ui_level_max"
                 | "siglevel_effective"
                 | "map_type_resolved"
+                | "region_mode_resolved"
         ) {
             continue;
         }
@@ -51591,7 +51743,52 @@ fn parse_density_i32(name: &str, value: &str) -> Result<i32> {
     })
 }
 
+fn parse_map_region_mode(value: &str) -> MapRegionMode {
+    match value {
+        "full" => MapRegionMode::Full,
+        "box" => MapRegionMode::Box,
+        _ => MapRegionMode::Auto,
+    }
+}
+
+fn parse_map_lod(value: &str) -> usize {
+    match value {
+        "step1" => 1,
+        "step2" => 2,
+        "step4" => 4,
+        "step8" => 8,
+        _ => 0,
+    }
+}
+
 fn configure_density_level(renderer: &mut MapRenderer, config: &GuiDensityRenderer) {
+    renderer.set_region_mode(parse_map_region_mode(
+        config
+            .attributes
+            .get("region_mode")
+            .map_or("auto", String::as_str),
+    ));
+    renderer.set_lod(parse_map_lod(
+        config.attributes.get("lod").map_or("auto", String::as_str),
+    ));
+    renderer.set_lod_budget(
+        config
+            .attributes
+            .get("lod_budget")
+            .and_then(|v| v.parse::<i32>().ok())
+            .map(|v| v.max(1) as u32)
+            .unwrap_or(if config.renderer_type == "contour" {
+                2
+            } else {
+                16
+            }),
+    );
+    renderer.set_zoom_refine(
+        config
+            .attributes
+            .get("zoom_refine")
+            .is_none_or(|v| qsc_bool(v)),
+    );
     if config.attributes.contains_key("siglevel") || config.siglevel != 1.1 {
         renderer.set_siglevel(config.siglevel);
     } else {
@@ -51677,6 +51874,23 @@ fn density_renderer_summary(
         "map_type_resolved".to_string(),
         level_state.map_type_resolved().to_string(),
     );
+    specific.insert(
+        "region_mode_resolved".to_string(),
+        level_state.region_mode_resolved().to_string(),
+    );
+    specific
+        .entry("region_mode".to_string())
+        .or_insert_with(|| "auto".to_string());
+    specific
+        .entry("lod".to_string())
+        .or_insert_with(|| "auto".to_string());
+    specific.insert(
+        "lod_budget".to_string(),
+        level_state.lod_budget().to_string(),
+    );
+    specific
+        .entry("zoom_refine".to_string())
+        .or_insert_with(|| "true".to_string());
     let col_extent = map.col_no() as f64 * map.col_grid_size() / 2.0;
     let row_extent = map.row_no() as f64 * map.row_grid_size() / 2.0;
     let sec_extent = map.sec_no() as f64 * map.sec_grid_size() / 2.0;
@@ -63867,7 +64081,7 @@ end_header
             "<scene>\n\
              <object type=\"MolCoord\" name=\"clip-mol\" src=\"datachunk:00001\" srctype=\"qdfmol\"/>\n\
              <object type=\"DensityMap\" name=\"native-map\" src=\"datachunk:00000\" srctype=\"qdfmap\">\n\
-             <renderer type=\"contour\" name=\"wire\" siglevel=\"0\" color=\"Red\" width=\"2\" bndry_molname=\"clip-mol\" bndry_sel=\"name CA\" bndry_rng=\"100\"/>\n\
+             <renderer type=\"contour\" name=\"wire\" region_mode=\"full\" siglevel=\"0\" color=\"Red\" width=\"2\" bndry_molname=\"clip-mol\" bndry_sel=\"name CA\" bndry_rng=\"1000\"/>\n\
              <renderer type=\"isosurf\" name=\"solid\" siglevel=\"0\" color=\"#0000ff\" binning=\"2\" max_grids=\"77\" use_pbc=\"false\" bndry_molname=\"clip-mol\" bndry_sel=\"name CA\" bndry_rng=\"100\" colormode=\"multigrad\" color_mapname=\"native-map\" cullface=\"true\" style=\"EgLineThin\" egcolor=\"#123456\">\n\
              <multi_grad><gradnode par=\"-1\"><col value=\"#ff0000\"/></gradnode><gradnode par=\"1\"><col value=\"#00ff00\"/></gradnode></multi_grad>\n\
              </renderer>\n\

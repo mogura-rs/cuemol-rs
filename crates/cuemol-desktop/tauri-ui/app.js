@@ -2781,6 +2781,10 @@ function rendererPropertiesEditor(object, renderer, styleOptions = []) {
     const settingsLegend = document.createElement("legend");
     settingsLegend.textContent = "Map";
     settings.append(settingsLegend);
+    addSpecificSelect(settings, "region_mode", "Region:", [["auto", "Automatic"], ["box", "Box"], ["full", "Full map"]], "auto");
+    addSpecificSelect(settings, "lod", "Grid sampling:", [["auto", "Automatic"], ["step1", "Every node"], ["step2", "Every 2 nodes"], ["step4", "Every 4 nodes"], ["step8", "Every 8 nodes"]], "auto");
+    addSpecificNumber(settings, "lod_budget", "Cell budget (Mi):", 1, 1024, 1, renderer.rendererType === "contour" ? "2" : "16");
+    addSpecificCheckbox(settings, "zoom_refine", "Refine with view", true);
 
     const updateMode = document.createElement("select");
     for (const [value, label] of [
@@ -17324,6 +17328,7 @@ function applyViewport(result, sequence) {
     statusText.textContent = result.status;
     recordStatus(result.status);
   }
+  if (result.mapRefinePending) scheduleRender(150);
 }
 
 async function renderViewport() {

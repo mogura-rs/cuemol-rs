@@ -946,3 +946,48 @@ backends plus existing molecule and label display. Browser texture dimensions
 respect the adapter limit. Volume extraction is bounded to 16 Mi samples and
 4096 view slices, so very large maps may be sampled more coarsely than the
 uncapped reference. Region/LOD controls are the next map audit item.
+
+### Map regions, LOD and view updates
+
+The map renderers now apply `region_mode`, `lod`, `lod_budget`, and
+`zoom_refine` to actual mesh/volume extraction. `auto` selects full-block display
+for EM and the historical centered box for other scalar maps. Full regions
+suppress periodic wrapping, ignore the old 100-node box limits, and align sample
+nodes to block-relative stride multiples. Automatic sampling uses the smallest
+power-of-two stride within the cell budget (16 Mi cells, or 2 Mi for the CPU
+contour renderer). Explicit strides are 1, 2, 4 and 8. The separate volume memory
+and adapter limits described above still apply.
+
+Native, browser and Tauri navigation share a 150 ms debounce and the reference
+1.5 view-box padding. Smaller pans retain geometry; zooming can select a finer
+stride, and a view leaving the map retains its last useful region. Map centers
+follow the automatic/drag-update controls, including the box mode. Boundary
+molecule coordinates are converted through their object transform into the map
+frame. Display properties retain their values through scripting, reset and QSC
+storage, and the desktop property dialogs expose the region and LOD controls.
+
+The C++ scalar comparison now also runs `reference_map_regions.cpp`: all 21
+regions and 15 budget decisions match, including skewed cells, nonzero map
+origin/start, object scaling/rotation, missed view boxes, explicit stride and
+disabled refinement. These comparisons cover the full-region policy. The Rust
+box path uses all eight transformed box corners as well; the legacy C++ box
+path only transforms the center and two opposing corners. This deliberate
+geometric correction can enlarge a box region in a skewed or transformed grid.
+The older transform regression now fixes the region to `full` and uses a broad
+molecular boundary so it tests geometry transforms independently of cropping.
+
+A browser scene-save defect was found during the region round trip: updating
+the live view did not create the scene's `__current` camera. Saving now records
+that camera, and the browser test checks both restored view values and visible
+geometry. A separate Tauri defect treated volume-only snapshots as empty;
+volume primitives now participate in the image-availability checks. The actual
+Metal test returns a PNG and checks colored volume pixels without any mesh.
+
+Validation passed: the C++ region/LOD comparison, 215 shared-core tests, all map
+crate tests with the reference checkout available, 166 native GUI tests, 143
+Tauri tests, the explicit Tauri Metal volume test, and five rebuilt-browser
+tests covering scene/camera storage, sparse EM levels, region/LOD edits and both
+volume backends. Two Tauri tests require an explicit GPU run; the volume test
+was run successfully, while the pre-existing animation export test remains
+outside this phase. The broader QIF audit still tracks surface cap/coloring,
+hover state and exporter settings separately.
