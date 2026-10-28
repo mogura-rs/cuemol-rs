@@ -458,6 +458,7 @@ pub struct NameLabel {
     aid: Option<i32>,
     str_aid: Option<String>,
     text: String,
+    format: String,
     cache_id: Option<i32>,
 }
 
@@ -467,6 +468,7 @@ impl NameLabel {
             aid: Some(aid),
             str_aid: None,
             text: text.into(),
+            format: String::new(),
             cache_id: None,
         }
     }
@@ -476,6 +478,7 @@ impl NameLabel {
             aid: None,
             str_aid: Some(aid.into()),
             text: String::new(),
+            format: String::new(),
             cache_id: None,
         }
     }
@@ -516,6 +519,10 @@ pub struct NameLabelRenderer {
     font_style: String,
     font_weight: String,
     labels: VecDeque<NameLabel>,
+    format: String,
+    label_on_top: bool,
+    halign: String,
+    valign: String,
     cache_revision: u64,
 }
 
@@ -531,6 +538,10 @@ impl Default for NameLabelRenderer {
             font_style: "normal".to_string(),
             font_weight: "normal".to_string(),
             labels: VecDeque::new(),
+            format: String::new(),
+            label_on_top: false,
+            halign: "left".into(),
+            valign: "bottom".into(),
             cache_revision: 0,
         }
     }
@@ -543,6 +554,69 @@ impl NameLabelRenderer {
 
     pub fn type_name(&self) -> &'static str {
         "*namelabel"
+    }
+
+    pub fn format(&self) -> &str {
+        &self.format
+    }
+
+    pub fn set_format(&mut self, value: impl Into<String>) -> Result<()> {
+        let value = value.into();
+        crate::label_format::LabelFormat::new(&value)?;
+        self.format = value;
+        self.invalidate_all();
+        Ok(())
+    }
+
+    pub fn label_on_top(&self) -> bool {
+        self.label_on_top
+    }
+    pub fn set_label_on_top(&mut self, value: bool) {
+        self.label_on_top = value;
+    }
+    pub fn halign(&self) -> &str {
+        &self.halign
+    }
+    pub fn valign(&self) -> &str {
+        &self.valign
+    }
+    pub fn set_halign(&mut self, value: &str) -> Result<()> {
+        if !matches!(value, "left" | "center" | "right") {
+            return Err(cuemol_core::CueMolError::invalid_argument(
+                "invalid horizontal label alignment",
+            ));
+        }
+        self.halign = value.into();
+        Ok(())
+    }
+    pub fn set_valign(&mut self, value: &str) -> Result<()> {
+        if !matches!(value, "bottom" | "middle" | "top") {
+            return Err(cuemol_core::CueMolError::invalid_argument(
+                "invalid vertical label alignment",
+            ));
+        }
+        self.valign = value.into();
+        Ok(())
+    }
+
+    pub fn set_label_format(
+        &mut self,
+        molecule: &MolCoord,
+        aid: i32,
+        format: &str,
+    ) -> Result<bool> {
+        crate::label_format::LabelFormat::new(format)?;
+        if molecule.atom_by_serial(aid).is_none() {
+            return Ok(false);
+        }
+        self.add_label_by_id(aid);
+        if let Some(label) = self.labels.iter_mut().find(|label| label.aid == Some(aid)) {
+            label.text.clear();
+            label.format = format.into();
+            label.cache_id = None;
+        }
+        self.invalidate_all();
+        Ok(true)
     }
 
     pub fn max_label(&self) -> i32 {
@@ -713,27 +787,34 @@ impl NameLabelRenderer {
     }
 
     pub fn default_label_for_atom(atom: &Atom) -> String {
-        let mut residue = atom.res_id.to_string();
-        if let Some(ins_code) = atom.ins_code {
-            residue.push(ins_code);
-        }
-        let mut label = format!(
-            "{} {}{} {}",
-            atom.chain_id, atom.res_name, residue, atom.name
-        );
-        if let Some(alt_loc) = atom.alt_loc {
-            label.push(':');
-            label.push(alt_loc);
-        }
-        label
+        crate::label_format::builtin_label(atom)
     }
 
     pub fn label_text_for_atom(&self, label: &NameLabel, atom: &Atom) -> String {
-        if label.text.is_empty() {
-            Self::default_label_for_atom(atom)
-        } else {
-            label.text.clone()
+        self.label_text(label, atom, &MolCoord::new(), "")
+    }
+
+    pub fn label_text(
+        &self,
+        label: &NameLabel,
+        atom: &Atom,
+        molecule: &MolCoord,
+        molecule_name: &str,
+    ) -> String {
+        if !label.text.is_empty() {
+            return label.text.clone();
         }
+        let format = if label.format.is_empty() {
+            &self.format
+        } else {
+            &label.format
+        };
+        if !format.is_empty() {
+            if let Ok(format) = crate::label_format::LabelFormat::new(format) {
+                return format.apply(atom, molecule, molecule_name);
+            }
+        }
+        Self::default_label_for_atom(atom)
     }
 
     pub fn write_to_ldom2_node(&self, node: &mut LDom2Node) -> usize {
@@ -748,6 +829,12 @@ impl NameLabelRenderer {
             let child = node.append_child("label");
             child.set_attr_flag(false);
             child.set_str_attr("aid", aid);
+            if !label.text.is_empty() {
+                child.set_str_attr("str", &label.text);
+            }
+            if !label.format.is_empty() {
+                child.set_str_attr("format", &label.format);
+            }
             count += 1;
         }
         count
@@ -764,7 +851,13 @@ impl NameLabelRenderer {
             if aid.is_empty() {
                 continue;
             }
-            self.labels.push_back(NameLabel::by_str_aid(aid));
+            let mut label = NameLabel::by_str_aid(aid);
+            label.text = child.str_attr("str").to_string();
+            if label.text.is_empty() {
+                label.text = child.str_attr("text").to_string();
+            }
+            label.format = child.str_attr("format").to_string();
+            self.labels.push_back(label);
             count += 1;
         }
         count
@@ -1596,6 +1689,39 @@ mod tests {
         let before = loaded.cache_revision();
         loaded.set_font_name("serif");
         assert_eq!(loaded.cache_revision(), before + 1);
+        renderer.set_format("{resn}{resi} {name}:{alt}").unwrap();
+        let molecule = MolCoord::with_atoms(vec![atom.clone()]);
+        assert_eq!(
+            renderer.label_text(&renderer.labels()[0], &atom, &molecule, "mol"),
+            "ALA10I CA:B"
+        );
+        assert!(renderer
+            .set_label_format(&molecule, 42, "{bfac:.2f}")
+            .unwrap());
+        assert!(renderer
+            .set_label_format(&molecule, 42, "{name:d}")
+            .is_err());
+        assert!(!renderer.set_label_format(&molecule, 999, "{name}").unwrap());
+        assert_eq!(
+            renderer.label_text(&renderer.labels()[0], &atom, &molecule, "mol"),
+            "0.00"
+        );
+        let mut node = LDom2Node::new();
+        renderer.write_to_ldom2_node(&mut node);
+        let mut loaded = NameLabelRenderer::new();
+        loaded.read_from_ldom2_node(&node);
+        assert_eq!(
+            loaded.label_text(&loaded.labels()[0], &atom, &molecule, "mol"),
+            "0.00"
+        );
+        let mut node = LDom2Node::new();
+        let mut literal = NameLabelRenderer::new();
+        literal.add_label_by_id_with_text(42, "literal text");
+        literal.write_to_ldom2_node(&mut node);
+        assert_eq!(
+            node.children()[0].str_attr("str").to_string(),
+            "literal text"
+        );
     }
 
     #[test]

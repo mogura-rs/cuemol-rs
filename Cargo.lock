@@ -1482,7 +1482,6 @@ dependencies = [
 name = "cuemol-desktop"
 version = "0.1.0"
 dependencies = [
- "ab_glyph",
  "bytemuck",
  "cuemol-agent",
  "cuemol-anim",
@@ -1503,7 +1502,6 @@ dependencies = [
  "egui-wgpu",
  "egui-winit",
  "egui_kittest",
- "epaint_default_fonts",
  "glam",
  "image",
  "pollster",
@@ -1524,6 +1522,7 @@ dependencies = [
 name = "cuemol-desktop-core"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "boa_engine",
  "bytemuck",
  "cuemol-anim",
@@ -1542,6 +1541,7 @@ dependencies = [
  "cuemol-surface",
  "cuemol-symm",
  "cuemol-xtal",
+ "epaint_default_fonts",
  "glam",
  "naga",
  "png 0.17.16",

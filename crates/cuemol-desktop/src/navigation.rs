@@ -287,29 +287,13 @@ mod tests {
                 .count(),
             1
         );
-        let ctx = egui::Context::default();
-        let viewport = app.viewport_rect.unwrap();
-        let output = ctx.run(
-            egui::RawInput {
-                screen_rect: Some(viewport),
-                ..Default::default()
-            },
-            |ctx| {
-                egui::CentralPanel::default()
-                    .show(ctx, |ui| app.draw_name_labels(ui, &camera, viewport));
-            },
-        );
-        fn has_value(shape: &egui::Shape) -> bool {
-            match shape {
-                egui::Shape::Text(text) => text.galley.text() == "135.00",
-                egui::Shape::Vec(shapes) => shapes.iter().any(has_value),
-                _ => false,
-            }
-        }
-        assert!(
-            output.shapes.iter().any(|shape| has_value(&shape.shape)),
-            "measurement value must be painted in the viewport"
-        );
+        let labels = app.renderer_labels(&camera);
+        let value = labels
+            .iter()
+            .find(|label| label.text == "135.00")
+            .expect("measurement value reaches the GPU label batch");
+        assert!((0.0..=1.0).contains(&value.depth));
+        assert!(!value.on_top);
         assert_eq!(app.undo_stack.len(), 1);
         app.undo(&mut camera);
         assert!(!app

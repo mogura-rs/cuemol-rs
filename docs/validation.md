@@ -509,7 +509,8 @@ The optional Tauri shell now reads back the same molecular GPU pipeline, includi
 AO, spatial AA and a converged temporal average. The worker reads pixels only
 once after convergence. It retains the scene primitives instead of tessellating
 all atoms and cylinders into an extra CPU mesh. Screen lines stay in the scene
-snapshot and depth-test with the molecule; the HTML overlay carries labels.
+snapshot and depth-test with the molecule. Labels now use the shared GPU pass
+described below.
 Scene editing includes the SMAA threshold. Point and rectangle picking use the
 reference picking slab rather than the farther display plane.
 
@@ -580,3 +581,30 @@ The `Renderer.qif` comment describes unnamed groups as object-specific, but
 the executable code. The 71 render tests include pixel comparisons for merged
 contact lines and shared styles. The focused scripting roundtrip test, 13 command
 integration tests and 165 native GUI tests passed with the reference present.
+
+
+## Atom label formatting and depth
+
+NameLabelRenderer implements renderer and per-atom formats, alignment,
+`label_on_top`, default resets and `setLabel`. The parser validates built-in
+field types when a format is assigned. Runtime custom-property type errors
+produce the reference placeholder, and missing properties produce empty text.
+The default label includes alternate conformations and residue insertion codes.
+QSC uses the reference `str` literal attribute and reads older `text` attributes.
+
+The C++ oracle compared 651 field, Unicode, padding, integer, floating-point and
+invalid-format cases with the read-only reference. Shared script tests cover
+invalid assignments, per-atom overrides, reset and embedded scene roundtrips.
+The shared GPU label pass uses cached glyph textures and compares each fragment
+with packed scene depth. Native, browser, Tauri and camera image rendering share
+that pass; explicit on-top labels bypass only the depth comparison. Pixel tests
+verify partial occlusion, overlay display and alignment on Metal. The font
+rasterizer uses bundled proportional and monospaced fonts, with synthetic bold
+and italic; arbitrary operating-system fonts and exact reference glyph pixels
+are not reproduced.
+
+All 33 browser tests passed, including label depth, overlay and displacement.
+The native GUI suite passed 165 tests. The Tauri suite passed 142 tests with one
+optional fixture-dependent test ignored in this run. A real Linux window showed
+no magenta label pixels behind the sphere, 171 when on-top was enabled and 220
+after alignment and displacement changes. The final screenshots were inspected.

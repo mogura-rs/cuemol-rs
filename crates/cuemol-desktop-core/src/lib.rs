@@ -63,6 +63,8 @@ use std::sync::{Mutex, OnceLock};
 // GPU-free; GUI crates that show a 3D view enable it.
 #[cfg(feature = "offscreen")]
 pub mod effects;
+#[cfg(feature = "offscreen")]
+pub mod labels;
 mod memory_io;
 #[cfg(feature = "offscreen")]
 pub mod offscreen;
@@ -959,6 +961,9 @@ pub struct GuiAtomLabel {
     pub font_name: String,
     pub font_style: String,
     pub font_weight: String,
+    pub anchor: [f32; 2],
+    pub depth: f32,
+    pub on_top: bool,
 }
 
 /// A projected screen-space line for renderers whose width is defined in pixels.
@@ -980,6 +985,8 @@ struct GuiLabelStyle {
     font_name: String,
     font_style: String,
     font_weight: String,
+    anchor: [f32; 2],
+    on_top: bool,
 }
 
 impl Default for GuiLabelStyle {
@@ -990,6 +997,8 @@ impl Default for GuiLabelStyle {
             font_name: "sans-serif".to_string(),
             font_style: "normal".to_string(),
             font_weight: "normal".to_string(),
+            anchor: [0., 1.],
+            on_top: true,
         }
     }
 }
@@ -1005,6 +1014,9 @@ impl GuiAtomLabel {
             font_name: style.font_name.clone(),
             font_style: style.font_style.clone(),
             font_weight: style.font_weight.clone(),
+            anchor: style.anchor,
+            depth: 0.,
+            on_top: style.on_top,
         }
     }
 }
@@ -1022,6 +1034,19 @@ fn gui_renderer_label_style(renderer: &MolRenderer, styles: &StyleManager) -> Gu
         font_name: resolved("font_name").unwrap_or_else(|| "sans-serif".to_string()),
         font_style: resolved("font_style").unwrap_or_else(|| "normal".to_string()),
         font_weight: resolved("font_weight").unwrap_or_else(|| "normal".to_string()),
+        anchor: [
+            match resolved("halign").as_deref() {
+                Some("center") => 0.5,
+                Some("right") => 1.,
+                _ => 0.,
+            },
+            match resolved("valign").as_deref() {
+                Some("middle") => 0.5,
+                Some("top") => 0.,
+                _ => 1.,
+            },
+        ],
+        on_top: resolved("label_on_top").is_some_and(|value| qsc_bool(&value)),
     }
 }
 
@@ -10761,6 +10786,8 @@ impl DesktopAppState {
         let renderer = object
             .renderer_mut(renderer_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
+        let (key, value) = (key.into(), value.into());
+        property_catalog::validate_renderer_attr(renderer.renderer_type(), &key, &value)?;
         renderer.set_qsc_attr(key, value);
         Ok(())
     }
@@ -13878,7 +13905,7 @@ impl DesktopAppState {
                     if xform != Matrix4::IDENTITY {
                         xform.xform3d(&mut position);
                     }
-                    let Some((x, y)) = project_to_image(
+                    let Some((x, y, depth)) = project_label(
                         mvp,
                         [position.x as f32, position.y as f32, position.z as f32],
                         width,
@@ -13886,7 +13913,9 @@ impl DesktopAppState {
                     ) else {
                         continue;
                     };
-                    out.push(GuiAtomLabel::with_style(x, y, text, &label_style));
+                    let mut label = GuiAtomLabel::with_style(x, y, text, &label_style);
+                    label.depth = depth;
+                    out.push(label);
                 }
             }
         }
@@ -14009,14 +14038,18 @@ impl DesktopAppState {
                     .and_then(|value| value.trim().parse::<f32>().ok())
                     .unwrap_or(0.0);
                 let xform = renderer.xform_matrix().mul_mat(object.xform_matrix());
-                for (mut position, text) in object.name_label_entries(renderer) {
+                let format = renderer
+                    .resolved_attr("format", &styles, DEFAULT_STYLE_SCOPE)
+                    .unwrap_or_default();
+                for (mut position, text) in object.name_label_entries_with_format(renderer, &format)
+                {
                     if out.len() >= max {
                         return out;
                     }
                     if xform != Matrix4::IDENTITY {
                         xform.xform3d(&mut position);
                     }
-                    let Some((x, y)) = project_to_image(
+                    let Some((x, y, depth)) = project_label(
                         mvp,
                         [position.x as f32, position.y as f32, position.z as f32],
                         width,
@@ -14024,12 +14057,10 @@ impl DesktopAppState {
                     ) else {
                         continue;
                     };
-                    out.push(GuiAtomLabel::with_style(
-                        x + dispx,
-                        y + dispy,
-                        text,
-                        &label_style,
-                    ));
+                    let mut label =
+                        GuiAtomLabel::with_style(x + dispx, y - dispy, text, &label_style);
+                    label.depth = depth;
+                    out.push(label);
                 }
             }
         }
@@ -33130,6 +33161,12 @@ impl DesktopAppState {
                 }
                 RendererAttrKind::Vector => vector_string(vector_from_value(&input, ctx)?),
             };
+            property_catalog::validate_renderer_attr(
+                &this_string_prop(this, "_renderer_type", ctx),
+                property.name,
+                &value,
+            )
+            .map_err(|error| script_error(error.to_string()))?;
             iterator_object(this)?.set(
                 pending_renderer_attr_key(property),
                 JsString::from(value.as_str()),
@@ -33824,6 +33861,11 @@ impl DesktopAppState {
                         NativeFunction::from_fn_ptr(renderer_remove_label),
                         js_string!("removeLabel"),
                         1,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(renderer_set_label),
+                        js_string!("setLabel"),
+                        2,
                     );
             }
             if renderer_type == "symm" {
@@ -34056,6 +34098,8 @@ impl DesktopAppState {
                 }
                 RendererAttrKind::Vector => vector_string(vector_from_value(&input, ctx)?),
             };
+            property_catalog::validate_renderer_attr(&renderer.rtype, property.name, &value)
+                .map_err(|error| script_error(error.to_string()))?;
             script_env::with_mut(|env| {
                 if let Some(entry) = env
                     .objects
@@ -35392,10 +35436,20 @@ impl DesktopAppState {
                     .map(|molecule| molecule.molecule.to_str_aid(atom_id))
             })
             .unwrap_or_default();
-            if aid.is_empty() {
-                return Err(script_error(format!("atom id {atom_id} is not available")));
-            }
             Ok(aid)
+        }
+        fn queue_renderer_labels(uid: u64) -> JsResult<()> {
+            let renderer = script_renderer(uid)?;
+            script_cmds::push(ScriptCmd::SetNameLabels {
+                object_uid: renderer.object_uid,
+                renderer_uid: uid,
+                labels: renderer
+                    .children
+                    .into_iter()
+                    .filter(|child| child.tag_name() == "label")
+                    .collect(),
+            });
+            Ok(())
         }
         fn renderer_add_label(
             this: &JsValue,
@@ -35405,6 +35459,9 @@ impl DesktopAppState {
             let uid = renderer_proxy_uid(this, ctx)?;
             let renderer = script_renderer(uid)?;
             let aid = renderer_label_aid(&renderer, args, ctx)?;
+            if aid.is_empty() {
+                return Ok(JsValue::new(false));
+            }
             let mut added = false;
             script_env::with_mut(|env| {
                 let Some(renderer) = env.objects.iter_mut().find_map(|object| {
@@ -35445,7 +35502,54 @@ impl DesktopAppState {
                 }
                 added = true;
             });
+            if added {
+                queue_renderer_labels(uid)?;
+            }
             Ok(JsValue::new(added))
+        }
+        fn renderer_set_label(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let format = args
+                .get(1)
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_string(ctx)?
+                .to_std_string_escaped();
+            cuemol_molstr::label_format::LabelFormat::new(&format)
+                .map_err(|error| script_error(error.to_string()))?;
+            let uid = renderer_proxy_uid(this, ctx)?;
+            let renderer = script_renderer(uid)?;
+            let aid = renderer_label_aid(&renderer, args, ctx)?;
+            if aid.is_empty() {
+                return Ok(JsValue::new(false));
+            }
+            renderer_add_label(this, args, ctx)?;
+            script_env::with_mut(|env| {
+                if let Some(label) = env
+                    .objects
+                    .iter_mut()
+                    .flat_map(|object| &mut object.renderers)
+                    .find(|renderer| renderer.uid == uid)
+                    .and_then(|renderer| {
+                        renderer.children.iter_mut().find(|child| {
+                            child.tag_name() == "label" && child.str_attr("aid").to_string() == aid
+                        })
+                    })
+                {
+                    if format.is_empty() {
+                        label.remove_child("format");
+                    } else {
+                        label.set_str_attr("format", &format);
+                    }
+                    label.remove_child("text");
+                    label.remove_child("str");
+                }
+            });
+            queue_renderer_labels(uid)?;
+            Ok(JsValue::new(true))
         }
         fn renderer_remove_label(
             this: &JsValue,
@@ -35455,6 +35559,9 @@ impl DesktopAppState {
             let uid = renderer_proxy_uid(this, ctx)?;
             let renderer = script_renderer(uid)?;
             let aid = renderer_label_aid(&renderer, args, ctx)?;
+            if aid.is_empty() {
+                return Ok(JsValue::new(false));
+            }
             let mut removed = false;
             script_env::with_mut(|env| {
                 let Some(renderer) = env.objects.iter_mut().find_map(|object| {
@@ -35471,6 +35578,9 @@ impl DesktopAppState {
                 });
                 removed = renderer.children.len() != before;
             });
+            if removed {
+                queue_renderer_labels(uid)?;
+            }
             Ok(JsValue::new(removed))
         }
         fn renderer_symmetry_xform(
@@ -37267,6 +37377,11 @@ impl DesktopAppState {
                         NativeFunction::from_fn_ptr(renderer_remove_label),
                         js_string!("removeLabel"),
                         1,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(renderer_set_label),
+                        js_string!("setLabel"),
+                        2,
                     );
             }
             if renderer.rtype == "symm" {
@@ -45420,6 +45535,22 @@ impl DesktopAppState {
                         }
                     }
                 }
+                ScriptCmd::SetNameLabels {
+                    object_uid,
+                    renderer_uid,
+                    labels,
+                } => {
+                    if let Some(renderer) = self
+                        .scene_manager_mut()
+                        .object_mut(Uid::new(object_uid))
+                        .and_then(|object| object.renderer_mut(Uid::new(renderer_uid)))
+                    {
+                        let mut children = renderer.qsc_children().to_vec();
+                        children.retain(|child| child.tag_name() != "label");
+                        children.extend(labels);
+                        renderer.set_qsc_children(children);
+                    }
+                }
                 ScriptCmd::SetRendererChildren {
                     object_uid,
                     object,
@@ -46523,6 +46654,11 @@ enum ScriptCmd {
         object: String,
         renderer_type: String,
         name: String,
+    },
+    SetNameLabels {
+        object_uid: u64,
+        renderer_uid: u64,
+        labels: Vec<LDom2Node>,
     },
     SetRendererChildren {
         object_uid: u64,
@@ -49805,6 +49941,20 @@ fn renderer_render_options(
 /// Project a world point through a column-major view-projection `mvp` to image-pixel
 /// coordinates `(x, y)` (origin top-left), or `None` if it is behind the camera or
 /// outside the `width`×`height` image. The screen-space mapping used by atom labels.
+fn project_label(
+    mvp: [[f32; 4]; 4],
+    point: [f32; 3],
+    width: f32,
+    height: f32,
+) -> Option<(f32, f32, f32)> {
+    let (x, y) = project_to_image(mvp, point, width, height)?;
+    let v = [point[0], point[1], point[2], 1.];
+    let clip_z: f32 = (0..4).map(|i| mvp[i][2] * v[i]).sum();
+    let clip_w: f32 = (0..4).map(|i| mvp[i][3] * v[i]).sum();
+    let depth = clip_z / clip_w;
+    (depth.is_finite() && (0.0..=1.0).contains(&depth)).then_some((x, y, depth))
+}
+
 fn project_to_image(
     mvp: [[f32; 4]; 4],
     point: [f32; 3],
@@ -49956,7 +50106,7 @@ fn pse_atom_label_node(atom_index: usize, text: &str) -> LDom2Node {
     node.set_tag_name("label");
     node.set_attr_flag(false);
     node.set_str_attr("aid", atom_index.to_string());
-    node.set_str_attr("text", text);
+    node.set_str_attr("str", text);
     node
 }
 
@@ -57331,6 +57481,90 @@ end_header
 
     #[cfg(feature = "scripting")]
     #[test]
+    fn script_label_formats_validate_and_roundtrip_per_atom_overrides() {
+        let mut app = DesktopAppState::new();
+        let scene = app.new_scene("labels", true).result_scene;
+        let molecule = cuemol_molstr::read_pdb_str("ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00           C  \nATOM      2  N   ALA A   2       1.000   0.000   0.000  1.00 11.00           N  \nEND\n").unwrap();
+        let object = app
+            .scene_manager_mut()
+            .scene_mut(scene)
+            .unwrap()
+            .add_molecule("mol", molecule);
+        let (log, _) = app.run_script_js(r#"
+            var pending = cuemol.createObj('NameLabelRenderer');
+            pending.format = '{resn}{resi} {name}';
+            try { pending.format = '{name:.2f}'; } catch(e) { print('pending rejected'); }
+            var sphere = cuemol.getObject('mol').createRenderer('cpk'); sphere.sel = cuemol.makeSel('aid 1');
+            var renderer = cuemol.getObject('mol').createRenderer('*namelabel');
+            renderer.name = 'labels'; renderer.format = pending.format;
+            renderer.halign = 'center'; renderer.valign = 'top'; renderer.dispy = 3;
+            print(renderer.addLabel(1) + ':' + renderer.setLabel(2, '{name} {bfac:.1f}') + ':' + renderer.setLabel(999, '{name}'));
+            try { renderer.format = '{unknown}'; } catch(e) { print('attached rejected'); }
+            try { renderer.setLabel(1, '{resi:d}'); } catch(e) { print('override rejected'); }
+            try { renderer.halign = 'invalid'; } catch(e) { print('alignment rejected'); }
+            print(renderer.format + ':' + renderer.label_on_top);
+        "#).unwrap();
+        assert_eq!(log, "pending rejected\ntrue:true:false\nattached rejected\noverride rejected\nalignment rejected\n{resn}{resi} {name}:false\n");
+        let entries = |app: &DesktopAppState| {
+            let object = app.scene_manager().object(object).unwrap();
+            object
+                .name_label_entries(
+                    object
+                        .renderers()
+                        .iter()
+                        .find(|r| r.name() == "labels")
+                        .unwrap(),
+                )
+                .into_iter()
+                .map(|(_, text)| text)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(entries(&app), ["GLY1 CA", "N 11.0"]);
+        let sphere = app
+            .scene_manager()
+            .object(object)
+            .unwrap()
+            .renderers()
+            .iter()
+            .find(|r| r.renderer_type() == "cpk")
+            .unwrap();
+        assert_eq!(sphere.qsc_attr("sel"), Some("aid 1"));
+        assert_eq!(
+            app.active_render_snapshot("")
+                .unwrap()
+                .atoms
+                .iter()
+                .filter(|atom| atom.hit.is_none())
+                .count(),
+            1
+        );
+        let bytes = app.active_scene_bytes().unwrap();
+        let mut loaded = DesktopAppState::new();
+        loaded.open_bytes("labels.qsc", &bytes).unwrap();
+        let object = &loaded
+            .scene_manager()
+            .scene(loaded.active_scene().unwrap())
+            .unwrap()
+            .objects()[0];
+        let renderer = object
+            .renderers()
+            .iter()
+            .find(|r| r.name() == "labels")
+            .unwrap();
+        assert_eq!(
+            object
+                .name_label_entries(renderer)
+                .into_iter()
+                .map(|(_, s)| s)
+                .collect::<Vec<_>>(),
+            ["GLY1 CA", "N 11.0"]
+        );
+        let (log, _) = loaded.run_script_js("var r=cuemol.getRenderer('mol','labels'); print(r.setLabel(2, '')); cuemol.resetProp(r, 'format'); print(r.format);").unwrap();
+        assert_eq!(log, "true\n\n");
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
     fn run_script_js_exposes_remaining_renderer_qif_properties_and_label_methods() {
         let mut app = DesktopAppState::new();
         let created = app.new_scene("renderer-extra-qif", true);
@@ -62350,7 +62584,7 @@ end_header
         assert_eq!(labels.len(), 2);
         assert_eq!(labels[0].text, "PyMOL label");
         assert!((labels[0].x - 55.0).abs() < 1.0e-6);
-        assert!((labels[0].y - 47.0).abs() < 1.0e-6);
+        assert!((labels[0].y - 53.0).abs() < 1.0e-6);
         assert_eq!(labels[0].color, "#123456");
         assert_eq!(labels[0].font_size, 16.0);
         assert_eq!(labels[0].font_name, "monospace");
@@ -62358,6 +62592,20 @@ end_header
         assert_eq!(labels[0].font_weight, "bold");
         assert_eq!(labels[1].text, "Second label");
         assert!((labels[1].x - 65.0).abs() < 1.0e-6);
+        let renderer = app
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .unwrap()
+            .renderer_mut(renderer_uid)
+            .unwrap();
+        let mut children = renderer.qsc_children().to_vec();
+        children[0].remove_child("str");
+        children[0].set_str_attr("text", "Legacy text");
+        renderer.set_qsc_children(children);
+        let bytes = app.active_scene_bytes().unwrap();
+        let xml = String::from_utf8_lossy(&bytes);
+        assert!(xml.contains("str=\"Legacy text\""));
+        assert!(!xml.contains("text=\"Legacy text\""));
     }
 
     #[test]

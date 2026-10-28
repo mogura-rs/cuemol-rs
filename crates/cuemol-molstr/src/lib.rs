@@ -4,6 +4,7 @@ pub mod cns_par;
 pub mod evaluator;
 mod fileio;
 pub mod iterators;
+pub mod label_format;
 pub mod map;
 pub mod mmcif;
 pub mod mol2;

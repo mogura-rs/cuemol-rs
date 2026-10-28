@@ -931,6 +931,7 @@ struct ViewportLineDto {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ViewportDto {
+    labels_embedded: bool,
     image: Option<String>,
     width: u32,
     height: u32,
@@ -6199,13 +6200,24 @@ impl AppModel {
     ) -> Option<Vec<u8>> {
         let mut background = background_rgba(&self.background).unwrap_or([0.0, 0.0, 0.0, 1.0]);
         background[3] = 1.0;
-        renderer.render_viewport(
+        let mvp = camera_mvp(&self.camera, f64::from(width) / f64::from(height.max(1)));
+        let labels = self
+            .desktop
+            .active_name_labels(mvp, width as f32, height as f32, 1000)
+            .into_iter()
+            .chain(
+                self.desktop
+                    .active_atom_intr_labels(mvp, width as f32, height as f32, 1000),
+            )
+            .collect::<Vec<_>>();
+        renderer.render_viewport_with_labels(
             snapshot,
             &self.camera,
             width,
             height,
             background,
             ViewportOptions::from_state(&self.desktop),
+            &labels,
         )
     }
 
@@ -6257,6 +6269,7 @@ impl AppModel {
                 .active_name_labels(mvp, width as f32, height as f32, remaining),
         );
         ViewportDto {
+            labels_embedded: true,
             image: None,
             width,
             height,
@@ -23578,6 +23591,9 @@ mod tests {
             cancel: Arc::new(AtomicBool::new(false)),
             work_dir: work_dir.clone(),
             labels: vec![GuiAtomLabel {
+                anchor: [0., 1.],
+                depth: 0.,
+                on_top: true,
                 x: 8.0,
                 y: 24.0,
                 text: "CA".to_string(),

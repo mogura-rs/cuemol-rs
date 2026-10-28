@@ -187,6 +187,7 @@ pub struct SceneRenderer {
     bind_layout: wgpu::BindGroupLayout,
     viewport: std::sync::Mutex<crate::viewport::ViewportRenderer>,
     effects: std::sync::Mutex<crate::effects::ViewportEffects>,
+    labels: std::sync::Mutex<crate::labels::LabelRenderer>,
 }
 
 impl SceneRenderer {
@@ -206,6 +207,7 @@ impl SceneRenderer {
         ));
         Some(Self {
             viewport,
+            labels: std::sync::Mutex::new(crate::labels::LabelRenderer::new(&device, COLOR_FORMAT)),
             effects: std::sync::Mutex::new(crate::effects::ViewportEffects::new(
                 &device,
                 &queue,
@@ -239,6 +241,7 @@ impl SceneRenderer {
             background,
             level,
             crate::viewport_readback::Effects::None,
+            None,
         )
     }
 
@@ -264,6 +267,7 @@ impl SceneRenderer {
             background,
             level,
             crate::viewport_readback::Effects::Export(&mut effects, options),
+            None,
         )
     }
 
@@ -289,6 +293,34 @@ impl SceneRenderer {
             background,
             0,
             crate::viewport_readback::Effects::Live(&mut effects, options),
+            None,
+        )
+    }
+
+    pub fn render_viewport_with_labels(
+        &self,
+        snapshot: &RenderSceneSnapshot,
+        camera: &Camera,
+        width: u32,
+        height: u32,
+        background: [f64; 4],
+        options: crate::effects::ViewportOptions,
+        labels: &[crate::GuiAtomLabel],
+    ) -> Option<Vec<u8>> {
+        let mut viewport = self.viewport.lock().ok()?;
+        let mut effects = self.effects.lock().ok()?;
+        let mut renderer = self.labels.lock().ok()?;
+        crate::viewport_readback::draw(
+            &mut viewport,
+            &self.device,
+            &self.queue,
+            snapshot,
+            camera,
+            [width, height],
+            background,
+            0,
+            crate::viewport_readback::Effects::Live(&mut effects, options),
+            Some((&mut renderer, labels)),
         )
     }
 

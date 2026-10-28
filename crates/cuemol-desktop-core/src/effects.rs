@@ -583,6 +583,11 @@ impl ViewportEffects {
         }
     }
 
+    /// Packed depth from the most recent scene pass, including primitive impostors.
+    pub fn label_depth(&self) -> Option<&wgpu::TextureView> {
+        self.targets.as_ref().map(|targets| &targets.encoded_depth)
+    }
+
     /// Returns whether another frame is needed to refine AO or temporal AA.
     #[allow(clippy::too_many_arguments)]
     pub fn render(

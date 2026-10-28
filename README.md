@@ -63,6 +63,10 @@ share the same application state and command API.
 Atom-based measurements retain their object and atom references across scene
 saves, so their geometry and displayed values follow coordinate and transform
 changes, including measurements between different molecules.
+Atom labels support per-renderer and per-atom formats, horizontal and vertical
+alignment, pixel offsets and optional display above molecular geometry.
+The shared GPU path clips label pixels against scene depth in native, browser
+and Tauri viewports. Label text and settings survive embedded scene saves.
 
 | Input | Action |
 | --- | --- |

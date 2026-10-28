@@ -17274,7 +17274,7 @@ function applyViewport(result, sequence) {
       viewportLines.append(path);
     }
     viewportLabels.replaceChildren();
-    for (const label of labels) {
+    for (const label of result.labelsEmbedded ? [] : labels) {
       const element = document.createElement("span");
       element.className = "viewport-label";
       element.textContent = label.text;

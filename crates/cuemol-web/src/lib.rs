@@ -187,6 +187,7 @@ struct App {
     gpu: egui_wgpu::RenderState,
     renderer: ViewportRenderer,
     effects: ViewportEffects,
+    labels: cuemol_desktop_core::labels::LabelRenderer,
     target: Option<Target>,
     snapshot: Option<RenderSceneSnapshot>,
     dirty: bool,
@@ -284,6 +285,10 @@ impl App {
         let renderer = ViewportRenderer::new(&gpu.device, wgpu::TextureFormat::Rgba8Unorm);
         let effects =
             ViewportEffects::new(&gpu.device, &gpu.queue, wgpu::TextureFormat::Rgba8Unorm);
+        let labels = cuemol_desktop_core::labels::LabelRenderer::new(
+            &gpu.device,
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
         let mut agent = cuemol_ui::AgentPanel::default();
         if let Some(text) = storage
             .as_ref()
@@ -321,6 +326,7 @@ impl App {
             gpu,
             renderer,
             effects,
+            labels,
             target: None,
             snapshot: None,
             dirty: true,
@@ -900,6 +906,35 @@ impl App {
             None,
             ViewportOptions::from_state(&self.state),
         );
+        let mvp = cuemol_desktop_core::offscreen::camera_mvp(
+            &self.camera,
+            f64::from(size.x / size.y.max(1.)),
+        );
+        let labels = self
+            .state
+            .active_name_labels(mvp, size.x, size.y, 1000)
+            .into_iter()
+            .chain(
+                self.state
+                    .active_atom_intr_labels(mvp, size.x, size.y, 1000),
+            )
+            .collect::<Vec<_>>();
+        self.labels.prepare(
+            &self.gpu.device,
+            &self.gpu.queue,
+            &labels,
+            [size.x, size.y],
+            pixels,
+        );
+        if let Some(depth) = self.effects.label_depth() {
+            self.labels.render(
+                &self.gpu.device,
+                &mut encoder,
+                &target.view,
+                depth,
+                [0., 0., resolution[0] as f32, resolution[1] as f32],
+            );
+        }
         self.gpu.queue.submit([encoder.finish()]);
         if pending {
             ui.ctx().request_repaint();

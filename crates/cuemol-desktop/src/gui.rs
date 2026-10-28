@@ -605,8 +605,10 @@ impl NativeRunner {
                 let paint_jobs = self
                     .egui_ctx
                     .tessellate(full_output.shapes, full_output.pixels_per_point);
+                let labels = app.renderer_labels(&gpu.camera);
                 match gpu.render(
                     GpuSceneFrame {
+                        labels: &labels,
                         snapshot: &app.snapshot,
                         revision: app.snapshot_revision,
                         background: app.background.clear_color(),
@@ -5581,7 +5583,6 @@ impl GuiApplication {
                 let rect = ui.max_rect();
                 self.viewport_rect = Some(rect);
                 self.draw_center_mark(ui, rect, camera);
-                self.draw_name_labels(ui, camera, rect);
                 self.draw_atom_labels(ui, camera, rect);
                 ui.allocate_ui(rect.size(), |ui| {
                     ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
@@ -19952,47 +19953,21 @@ impl GuiApplication {
         }
     }
 
-    /// Draw serialized atom names and measurement values independently of the
-    /// temporary selection-label toggle.
-    fn draw_name_labels(&self, ui: &egui::Ui, camera: &CameraController, rect: egui::Rect) {
-        if rect.width() <= 0.0 || rect.height() <= 0.0 {
-            return;
-        }
+    fn renderer_labels(&self, camera: &CameraController) -> Vec<GuiAtomLabel> {
+        let Some(rect) = self.viewport_rect else {
+            return Vec::new();
+        };
         let mvp = camera
-            .view_projection(rect.width() / rect.height().max(1.0))
+            .view_projection(rect.width() / rect.height().max(1.))
             .to_cols_array_2d();
-        let labels = self
-            .state
-            .active_name_labels(mvp, rect.width(), rect.height(), 1_000)
+        self.state
+            .active_name_labels(mvp, rect.width(), rect.height(), 1000)
             .into_iter()
             .chain(
                 self.state
-                    .active_atom_intr_labels(mvp, rect.width(), rect.height(), 1_000),
-            );
-        let painter = ui.painter();
-        for label in labels {
-            let rgba = cuemol_gfx::parse_color(&label.color)
-                .ok()
-                .and_then(|color| color.rgba8())
-                .unwrap_or(cuemol_gfx::Rgba8 {
-                    r: 255,
-                    g: 255,
-                    b: 0,
-                    a: 255,
-                });
-            let family = if label.font_name.to_ascii_lowercase().contains("mono") {
-                egui::FontFamily::Monospace
-            } else {
-                egui::FontFamily::Proportional
-            };
-            painter.text(
-                egui::pos2(rect.left() + label.x, rect.top() + label.y),
-                egui::Align2::LEFT_BOTTOM,
-                label.text,
-                egui::FontId::new(label.font_size.max(1.0) as f32, family),
-                egui::Color32::from_rgba_unmultiplied(rgba.r, rgba.g, rgba.b, rgba.a),
-            );
-        }
+                    .active_atom_intr_labels(mvp, rect.width(), rect.height(), 1000),
+            )
+            .collect()
     }
 
     fn draw_center_mark(&self, ui: &egui::Ui, rect: egui::Rect, camera: &CameraController) {
@@ -33706,6 +33681,7 @@ fn encode_animation_movie(
 }
 
 struct GpuSceneFrame<'a> {
+    labels: &'a [GuiAtomLabel],
     options: ViewportOptions,
     snapshot: &'a RenderSceneSnapshot,
     revision: u64,
@@ -33740,6 +33716,7 @@ struct GpuState {
     size: PhysicalSize<u32>,
     camera: CameraController,
     viewport_renderer: ViewportRenderer,
+    labels: cuemol_desktop_core::labels::LabelRenderer,
     effects: ViewportEffects,
     effects_pending: bool,
     uploaded_snapshot_revision: Option<u64>,
@@ -33803,6 +33780,7 @@ impl GpuState {
         );
 
         let effects = ViewportEffects::new(&device, &queue, config.format);
+        let labels = cuemol_desktop_core::labels::LabelRenderer::new(&device, config.format);
         Ok(Self {
             surface,
             device,
@@ -33811,6 +33789,7 @@ impl GpuState {
             size,
             camera,
             viewport_renderer,
+            labels,
             effects,
             effects_pending: false,
             uploaded_snapshot_revision: None,
@@ -33900,6 +33879,17 @@ impl GpuState {
             Some([vx, vy, vw, vh]),
             scene.options,
         );
+        self.labels.prepare(
+            &self.device,
+            &self.queue,
+            scene.labels,
+            [vw / pixels_per_point, vh / pixels_per_point],
+            pixels_per_point,
+        );
+        if let Some(depth) = self.effects.label_depth() {
+            self.labels
+                .render(&self.device, &mut encoder, &view, depth, [vx, vy, vw, vh]);
+        }
         {
             let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("egui-render-pass"),
@@ -34907,6 +34897,9 @@ mod tests {
             .save(&path)
             .expect("write label target");
         let label = GuiAtomLabel {
+            anchor: [0., 1.],
+            depth: 0.,
+            on_top: true,
             x: 10.0,
             y: 60.0,
             text: "CueMol".to_string(),

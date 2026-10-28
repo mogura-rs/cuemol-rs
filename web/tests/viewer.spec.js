@@ -554,3 +554,33 @@ test('input settings capture their own events and persist across reloads',async(
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().view.center)).not.toEqual(initial.center);
   expect((await page.evaluate(()=>window.cuemol.status())).view.zoom).toBe(initial.zoom);
 });
+
+
+test('browser labels validate formats and depth-test glyph pixels',async({page},testInfo)=>{
+  const errors=[];page.on('pageerror',e=>errors.push(e.message));
+  await ready(page);
+  await load(page,'label.pdb',Buffer.from('HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C  \nEND\n'));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  const object=(await page.evaluate(()=>window.cuemol.status())).scene.objects[0];
+  const hide=object.renderers.map(r=>`cuemol.getRenderer(${r.id}).visible=false;`).join('');
+  let state=await call(page,'execute_script',{source:hide+`var o=cuemol.getObject(${object.id}); o.createRenderer('cpk'); var r=o.createRenderer('*namelabel'); r.name='labels'; r.font_size=32; r.halign='center'; r.valign='middle'; r.color=cuemol.makeColor('#ff00ff'); r.setLabel(1,'{name}'); print(r.label_on_top); try { r.format='{name:.2f}'; } catch(e) { print('invalid'); }`});
+  expect(JSON.parse(state.message).log).toBe('false\ninvalid\n');
+  await call(page,'set_view',{zoom:5,slab:30,distance:20});
+  const rect=state.ui.rects.Viewport;
+  const labelId=state.scene.objects[0].renderers.find(r=>r.name==='labels').id;
+  const ink=async()=>{
+    const image=PNG.sync.read(await page.screenshot({clip:{x:rect[0],y:rect[1],width:rect[2],height:rect[3]}}));
+    let count=0;for(let i=0;i<image.data.length;i+=4)if(image.data[i]>220&&image.data[i+1]<35&&image.data[i+2]>220)count++;
+    return count;
+  };
+  await expect.poll(ink).toBe(0);
+  state=await call(page,'execute_script',{source:`var r=cuemol.getRenderer(${labelId}); r.label_on_top=true; print(r.label_on_top);`});
+  expect(JSON.parse(state.message).log).toBe('true\n');
+  await expect.poll(ink).toBeGreaterThan(30);
+  await page.screenshot({path:testInfo.outputPath('labels-on-top.png')});
+  await call(page,'undo'); await expect.poll(ink).toBe(0);
+  await call(page,'redo'); await expect.poll(ink).toBeGreaterThan(30);
+  await call(page,'execute_script',{source:`var r=cuemol.getRenderer(${labelId}); r.label_on_top=false; r.dispx=300; r.halign='left';`});
+  await expect.poll(ink).toBeGreaterThan(30);
+  expect(errors).toEqual([]);
+});

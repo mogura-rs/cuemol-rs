@@ -1,6 +1,5 @@
 use std::path::Path;
 
-use ab_glyph::{point, Font, FontRef, ScaleFont};
 use cuemol_core::Uid;
 use cuemol_gfx::Rgba8;
 
@@ -60,16 +59,9 @@ pub(crate) fn overlay_pov_labels(path: &Path, labels: &[GuiAtomLabel]) -> Result
 }
 
 fn draw_label(frame: &mut image::RgbaImage, label: &GuiAtomLabel) {
-    let monospace = label.font_name.to_ascii_lowercase().contains("mono");
-    let font_data = if monospace {
-        epaint_default_fonts::HACK_REGULAR
-    } else {
-        epaint_default_fonts::UBUNTU_LIGHT
-    };
-    let font = FontRef::try_from_slice(font_data).expect("embedded label font is valid");
-    let scale = label.font_size.clamp(1.0, 512.0) as f32;
-    let scaled = font.as_scaled(scale);
-    let line_height = (scaled.height() + scaled.line_gap()).max(1.0);
+    let image = cuemol_desktop_core::labels::rasterize_label(label, 1.);
+    let left = (label.x - label.anchor[0] * image.logical_size[0] - 2.).round() as i32;
+    let top = (label.y - label.anchor[1] * image.logical_size[1] - 2.).round() as i32;
     let color = cuemol_gfx::parse_color(&label.color)
         .ok()
         .and_then(|color| color.rgba8())
@@ -79,46 +71,17 @@ fn draw_label(frame: &mut image::RgbaImage, label: &GuiAtomLabel) {
             b: 0,
             a: 255,
         });
-    let style = label.font_style.to_ascii_lowercase();
-    let italic = style.contains("italic") || style.contains("oblique");
-    let weight = label.font_weight.trim().to_ascii_lowercase();
-    let bold = weight.contains("bold")
-        || weight
-            .parse::<u16>()
-            .is_ok_and(|numeric_weight| numeric_weight >= 600);
-    let mut caret_x = label.x;
-    let mut baseline_y = label.y + scaled.descent();
-    let mut previous = None;
-    for character in label.text.chars() {
-        if character == '\n' {
-            caret_x = label.x;
-            baseline_y += line_height;
-            previous = None;
+    for (i, coverage) in image.alpha.iter().enumerate() {
+        if *coverage == 0 {
             continue;
         }
-        let glyph_id = font.glyph_id(character);
-        if let Some(previous) = previous {
-            caret_x += scaled.kern(previous, glyph_id);
-        }
-        let glyph = glyph_id.with_scale_and_position(scale, point(caret_x, baseline_y));
-        if let Some(outlined) = font.outline_glyph(glyph) {
-            let bounds = outlined.px_bounds();
-            outlined.draw(|x, y, coverage| {
-                let italic_offset = if italic {
-                    ((bounds.height() - y as f32) * 0.18).round() as i32
-                } else {
-                    0
-                };
-                let pixel_x = bounds.min.x as i32 + x as i32 + italic_offset;
-                let pixel_y = bounds.min.y as i32 + y as i32;
-                blend_label_pixel(frame, pixel_x, pixel_y, color, coverage);
-                if bold {
-                    blend_label_pixel(frame, pixel_x + 1, pixel_y, color, coverage);
-                }
-            });
-        }
-        caret_x += scaled.h_advance(glyph_id);
-        previous = Some(glyph_id);
+        blend_label_pixel(
+            frame,
+            left + (i % image.width as usize) as i32,
+            top + (i / image.width as usize) as i32,
+            color,
+            f32::from(*coverage) / 255.,
+        );
     }
 }
 
@@ -160,6 +123,9 @@ mod tests {
         overlay_pov_labels(
             &path,
             &[GuiAtomLabel {
+                anchor: [0., 1.],
+                depth: 0.,
+                on_top: true,
                 x: 8.0,
                 y: 24.0,
                 text: "CA".to_string(),

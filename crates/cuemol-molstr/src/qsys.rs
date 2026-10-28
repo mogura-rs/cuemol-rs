@@ -1492,9 +1492,22 @@ impl MolObject {
     }
 
     /// Atom positions and text held by a `*namelabel` renderer. CueMol's QSC
-    /// format normally stores only `aid`; the optional `text` attribute keeps
-    /// labels imported from PyMOL while remaining readable by CueMol2.
+    /// format stores atom IDs, optional literal `str` text and per-atom formats.
+    /// The legacy `text` attribute remains readable.
     pub fn name_label_entries(&self, renderer: &MolRenderer) -> Vec<(Vector4, String)> {
+        self.name_label_entries_with_format(
+            renderer,
+            renderer.qsc_attr("format").unwrap_or_default(),
+        )
+    }
+
+    pub fn name_label_entries_with_format(
+        &self,
+        renderer: &MolRenderer,
+        format: &str,
+    ) -> Vec<(Vector4, String)> {
+        use crate::label_format::{builtin_label, LabelFormat};
+        let default_format = LabelFormat::new(format).ok().filter(|_| !format.is_empty());
         renderer
             .qsc_children()
             .iter()
@@ -1502,19 +1515,25 @@ impl MolObject {
             .filter_map(|child| {
                 let aid = child.str_attr("aid").to_string();
                 let atom = self.resolve_atom(&aid)?;
-                let text = child.str_attr("text").to_string();
+                let text = child.str_attr("str").to_string();
                 let text = if text.is_empty() {
-                    let mut residue = atom.res_id.to_string();
-                    if let Some(insertion) = atom.ins_code {
-                        residue.push(insertion);
-                    }
-                    format!(
-                        "{} {}{} {}",
-                        atom.chain_id,
-                        atom.res_name,
-                        residue,
-                        atom.name.trim()
-                    )
+                    child.str_attr("text").to_string()
+                } else {
+                    text
+                };
+                let text = if text.is_empty() {
+                    let own_text = child.str_attr("format").to_string();
+                    let own_format = (!own_text.is_empty())
+                        .then(|| LabelFormat::new(&own_text).ok())
+                        .flatten();
+                    let selected = if own_text.is_empty() {
+                        default_format.as_ref()
+                    } else {
+                        own_format.as_ref()
+                    };
+                    selected
+                        .map(|format| format.apply(atom, self.mol(), self.name()))
+                        .unwrap_or_else(|| builtin_label(atom))
                 } else {
                     text
                 };
@@ -2860,7 +2879,7 @@ impl MolScene {
                         output.push_str(&format!("\t\t\t<{}{attrs}/>\n", line.kind.tag()));
                     }
                     for child in renderer.qsc_children() {
-                        for line in qsc_node_lines(child) {
+                        for line in renderer_child_lines(renderer, child) {
                             output.push_str("\t\t\t");
                             output.push_str(&line);
                             output.push('\n');
@@ -2878,7 +2897,7 @@ impl MolScene {
                         format_renderer_attrs(renderer, None)
                     ));
                     for child in renderer.qsc_children() {
-                        for line in qsc_node_lines(child) {
+                        for line in renderer_child_lines(renderer, child) {
                             output.push_str("\t\t\t");
                             output.push_str(&line);
                             output.push('\n');
@@ -3747,6 +3766,22 @@ fn trim_ascii_bytes(mut value: &[u8]) -> &[u8] {
         value = &value[..value.len() - 1];
     }
     value
+}
+
+fn renderer_child_lines(renderer: &MolRenderer, child: &LDom2Node) -> Vec<String> {
+    if matches!(renderer.renderer_type(), "*namelabel" | "name_label")
+        && child.tag_name() == "label"
+    {
+        let mut child = child.clone();
+        let legacy = child.str_attr("text").to_string();
+        if !legacy.is_empty() && child.str_attr("str").is_empty() {
+            child.set_str_attr("str", legacy);
+        }
+        child.remove_child("text");
+        qsc_node_lines(&child)
+    } else {
+        qsc_node_lines(child)
+    }
 }
 
 fn qsc_node_lines(node: &LDom2Node) -> Vec<String> {

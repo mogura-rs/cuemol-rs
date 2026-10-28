@@ -25,6 +25,7 @@ pub(crate) fn draw(
     background: [f64; 4],
     level: i32,
     mut effects: Effects<'_>,
+    mut labels: Option<(&mut crate::labels::LabelRenderer, &[crate::GuiAtomLabel])>,
 ) -> Option<Vec<u8>> {
     let [width, height] = size.map(|n| n.max(1));
     let extent = wgpu::Extent3d {
@@ -72,6 +73,9 @@ pub(crate) fn draw(
     };
     let camera_uniform = CameraUniform::new(camera, [width, height], background, false);
     renderer.upload(device, queue, snapshot);
+    if let Some((renderer, labels)) = &mut labels {
+        renderer.prepare(device, queue, labels, [width as f32, height as f32], 1.);
+    }
     let level = level.clamp(0, 5);
     let live = matches!(effects, Effects::Live(..));
     let count = if live { 33 } else { jitter_sample_count(level) };
@@ -137,6 +141,21 @@ pub(crate) fn draw(
         if pending {
             queue.submit([encoder.finish()]);
             continue;
+        }
+        if let Some((renderer, _)) = &labels {
+            let depth = match &effects {
+                Effects::Live(effects, _) | Effects::Export(effects, _) => effects.label_depth(),
+                Effects::None => None,
+            };
+            if let Some(depth) = depth {
+                renderer.render(
+                    device,
+                    &mut encoder,
+                    &color_view,
+                    depth,
+                    [0., 0., width as f32, height as f32],
+                );
+            }
         }
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {

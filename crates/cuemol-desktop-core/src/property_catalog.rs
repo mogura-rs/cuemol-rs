@@ -16,6 +16,32 @@ pub struct RendererAttrProperty {
     pub default: &'static str,
     pub writable: bool,
 }
+
+pub fn validate_renderer_attr(
+    renderer_type: &str,
+    name: &str,
+    value: &str,
+) -> cuemol_core::Result<()> {
+    if matches!(renderer_type, "*namelabel" | "name_label") {
+        match name {
+            "format" => {
+                cuemol_molstr::label_format::LabelFormat::new(value)?;
+            }
+            "halign" if !matches!(value, "left" | "center" | "right") => {
+                return Err(cuemol_core::CueMolError::invalid_argument(
+                    "halign must be left, center or right",
+                ));
+            }
+            "valign" if !matches!(value, "bottom" | "middle" | "top") => {
+                return Err(cuemol_core::CueMolError::invalid_argument(
+                    "valign must be bottom, middle or top",
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
 pub fn renderer_attr_properties(renderer_type: &str) -> Vec<RendererAttrProperty> {
     use RendererAttrKind::{Boolean, Color, Integer, Real, Selection, String as Text, Vector};
 
@@ -74,6 +100,10 @@ pub fn renderer_attr_properties(renderer_type: &str) -> Vec<RendererAttrProperty
         }
         "*namelabel" | "name_label" => {
             add("maxlabel", Integer, "50");
+            add("format", Text, "");
+            add("halign", Text, "left");
+            add("valign", Text, "bottom");
+            add("label_on_top", Boolean, "false");
             add("dispx", Real, "0");
             add("dispy", Real, "0");
             add("color", Color, "#ffff00");
@@ -184,6 +214,7 @@ pub fn renderer_attr_properties(renderer_type: &str) -> Vec<RendererAttrProperty
         "atomintr" => {
             add("mode", Text, "fancy");
             add("showlabel", Boolean, "false");
+            add("label_on_top", Boolean, "false");
             add("detail", Integer, "5");
             for (name, default) in [
                 ("stipple0", "1"),

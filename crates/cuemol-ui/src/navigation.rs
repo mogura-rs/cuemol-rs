@@ -435,17 +435,4 @@ pub fn annotations(ui: &Ui, state: &DesktopAppState, mvp: [[f32; 4]; 4], rect: R
             painter.line_segment([a, b], stroke);
         }
     }
-    for label in state
-        .active_name_labels(mvp, rect.width(), rect.height(), 1000)
-        .into_iter()
-        .chain(state.active_atom_intr_labels(mvp, rect.width(), rect.height(), 1000))
-    {
-        painter.text(
-            rect.min + egui::vec2(label.x, label.y),
-            egui::Align2::LEFT_BOTTOM,
-            label.text,
-            egui::FontId::proportional(label.font_size.max(1.) as f32),
-            color(&label.color),
-        );
-    }
 }
