@@ -584,3 +584,36 @@ test('browser labels validate formats and depth-test glyph pixels',async({page},
   await expect.poll(ink).toBeGreaterThan(30);
   expect(errors).toEqual([]);
 });
+
+test('unnamed renderers and selection measurements persist through browser scene saves',async({page})=>{
+  await ready(page);await load(page,'identity.pdb',Buffer.from(structure));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  const objId=(await page.evaluate(()=>window.cuemol.status())).scene.objects[0].id;
+  let state=await call(page,'execute_script',{source:`
+    var mol=cuemol.getObject(${objId});
+    var first=mol.createRenderer('cpk'), second=mol.createRenderer('cpk');
+    first.sel=cuemol.makeSel('aid 1'); second.sel=cuemol.makeSel('aid 2');
+    first.visible=false; second.visible=true;
+    var measure=mol.createRenderer('atomintr','measure');
+    print(measure.append('name C1','name O1'));
+    print(measure.appendAngle('name C1','name O1','name N1'));
+    print(measure.getValue(0).toFixed(1)+':'+measure.getValue(1).toFixed(2));
+    print(measure.append('name absent','*'));
+  `});
+  expect(JSON.parse(state.message).log).toBe('0\n1\n2.0:142.43\n-1\n');
+  const cpks=state.scene.objects[0].renderers.filter(r=>r.type==='cpk');
+  state=await call(page,'execute_script',{source:`print(cuemol.getRenderer(${cpks[0].id}).sel+':'+cuemol.getRenderer(${cpks[1].id}).sel);`});
+  expect(JSON.parse(state.message).log).toBe('aid 1:aid 2\n');
+  const download=page.waitForEvent('download'),button=state.ui.rects['Save Scene'];
+  await page.mouse.click(button[0]+button[2]/2,button[1]+button[3]/2);
+  const stream=await(await download).createReadStream(),chunks=[];
+  for await(const chunk of stream)chunks.push(chunk);
+  const bytes=Buffer.concat(chunks);
+  expect(bytes.toString().match(/<renderer\b[^>]*type="cpk"[^>]*>/g)).toHaveLength(2);
+  await load(page,'identity-roundtrip.qsc',bytes);
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Loaded identity-roundtrip.qsc');
+  const loaded=(await page.evaluate(()=>window.cuemol.status())).scene.objects[0];
+  state=await call(page,'execute_script',{source:`var r=cuemol.getRenderer(${loaded.renderers.find(r=>r.name==='measure').id}); print(r.getValue(0).toFixed(1)+':'+r.getValue(1).toFixed(2));`});
+  expect(JSON.parse(state.message).log).toBe('2.0:142.43\n');
+  expect(state.scene.objects[0].renderers.filter(r=>r.type==='cpk')).toHaveLength(2);
+});

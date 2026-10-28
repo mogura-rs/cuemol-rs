@@ -608,3 +608,32 @@ The native GUI suite passed 165 tests. The Tauri suite passed 142 tests with one
 optional fixture-dependent test ignored in this run. A real Linux window showed
 no magenta label pixels behind the sphere, 171 when on-top was enabled and 220
 after alignment and displacement changes. The final screenshots were inspected.
+
+
+## Measurement selections and renderer identity
+
+AtomIntr selection calls now validate nonempty selections before storing a
+measurement and use their centroids for distances, angles and torsions.
+`getValue` returns live world-space values and rejects missing or removed IDs.
+Literal vector measurements retain their world coordinates when their owning
+molecule is transformed. Shared tests cover these behaviors, coordinate edits,
+invalid selections, detached vector measurements and QSC reloads.
+
+Queued renderer edits now retain the renderer ID for properties, visibility,
+reset and nested coloring. Previously, an unnamed CPK renderer could redirect
+its selection to the unnamed selection renderer. Detached property changes no
+longer edit a scene renderer with an empty name. QSC import also retains unnamed
+renderers and assigns nested properties to each duplicate in document order.
+The regression stores two unnamed CPK renderers with distinct selections,
+coloring and visibility, then verifies that the displayed atom survives reload.
+A real native window now shows only the selected CPK sphere; its saved renderer
+contains `sel="aid 1"` while the selection overlay does not.
+
+The shared core passed 196 tests on Linux and Apple Silicon, excluding the seven
+separate registry audit tests. The native GUI passed 165 tests. The registry
+member/default audit remains unfinished for maps, trajectory readers and
+exporters; those gaps are not covered by these passing suites.
+Nine QSC compatibility tests passed with the C++ reference fixtures present.
+All 33 existing browser tests passed; after the final QSC fix, five save/load
+and label tests passed, including the new unnamed-renderer and measurement API
+regression. The unchanged tests were not repeated after that focused correction.

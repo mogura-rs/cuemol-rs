@@ -80,8 +80,26 @@ impl AtomIntrKind {
         }
     }
 
-    fn atom_count(self) -> usize {
+    pub fn atom_count(self) -> usize {
         usize::from(self.mode()) + 1
+    }
+
+    pub fn value(self, points: &[Vector4]) -> Option<f64> {
+        if points.len() != self.atom_count() {
+            return None;
+        }
+        match self {
+            Self::Distance => Some((points[0] - points[1]).length3d()),
+            Self::Angle => points[0]
+                .sub_vec(points[1])
+                .angle(points[2].sub_vec(points[1]))
+                .ok()
+                .map(f64::to_degrees),
+            Self::Torsion => Vector4::torsion(points[0], points[1], points[2], points[3])
+                .ok()
+                .map(f64::to_degrees),
+        }
+        .filter(|value| value.is_finite())
     }
 }
 
@@ -100,6 +118,10 @@ impl AtomIntrLine {
 
     pub fn selectors(&self) -> &[String] {
         &self.selectors
+    }
+
+    pub fn object_references(&self) -> &[(Option<Uid>, String)] {
+        &self.object_refs
     }
 
     pub fn is_active(&self) -> bool {
@@ -1415,19 +1437,7 @@ impl MolObject {
             .iter()
             .map(|line| {
                 let points = self.atom_intr_points(line)?;
-                match line.kind {
-                    AtomIntrKind::Distance => Some((points[0] - points[1]).length3d()),
-                    AtomIntrKind::Angle => points[0]
-                        .sub_vec(points[1])
-                        .angle(points[2].sub_vec(points[1]))
-                        .ok()
-                        .map(f64::to_degrees),
-                    AtomIntrKind::Torsion => {
-                        Vector4::torsion(points[0], points[1], points[2], points[3])
-                            .ok()
-                            .map(f64::to_degrees)
-                    }
-                }
+                line.kind.value(&points)
             })
             .collect()
     }
@@ -2557,7 +2567,7 @@ impl MolScene {
                     current_atomintr = Some((renderer_name, Vec::new()));
                 } else if renderer_type == "atomintr" {
                     object.add_atom_intr_renderer_defs_with_attrs(renderer_name, &[], attrs)?;
-                } else if !renderer_name.is_empty() {
+                } else if !renderer_type.is_empty() {
                     object.add_renderer_with_attrs(renderer_type, renderer_name, attrs);
                 }
             } else if let Some(kind) = atom_intr_kind_from_line(line) {
@@ -2659,6 +2669,7 @@ impl MolScene {
             .children()
             .iter()
             .filter(|node| !node.is_attr() && node.tag_name() == "renderer");
+        let mut assigned = std::collections::BTreeSet::new();
         for node in renderer_nodes {
             let name = node.str_attr("name").to_string();
             let renderer_type = if node.type_name().is_empty() {
@@ -2667,14 +2678,16 @@ impl MolScene {
                 node.type_name().to_string()
             };
             let renderer = object.renderers.iter_mut().find(|renderer| {
-                (!name.is_empty() && renderer.name == name)
-                    || (name.is_empty()
-                        && !renderer_type.is_empty()
-                        && renderer.renderer_type == renderer_type)
+                !assigned.contains(&renderer.uid)
+                    && ((!name.is_empty() && renderer.name == name)
+                        || (name.is_empty()
+                            && !renderer_type.is_empty()
+                            && renderer.renderer_type == renderer_type))
             });
             let Some(renderer) = renderer else {
                 continue;
             };
+            assigned.insert(renderer.uid);
             renderer.qsc_children = node
                 .children()
                 .iter()

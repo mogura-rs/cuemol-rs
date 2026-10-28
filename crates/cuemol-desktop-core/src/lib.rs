@@ -16165,6 +16165,7 @@ impl DesktopAppState {
                 }
             });
             script_cmds::push(ScriptCmd::SetRendererVisible {
+                renderer_uid: None,
                 scene_uid: None,
                 object,
                 renderer,
@@ -16198,6 +16199,7 @@ impl DesktopAppState {
                 }
             });
             script_cmds::push(ScriptCmd::SetRendererProp {
+                renderer_uid: None,
                 scene_uid: None,
                 object,
                 renderer,
@@ -16563,6 +16565,7 @@ impl DesktopAppState {
                 });
                 if !renderer.children.is_empty() {
                     script_cmds::push(ScriptCmd::SetRendererChildren {
+                        renderer_uid: renderer.uid,
                         object_uid,
                         object: object.name.clone(),
                         renderer: renderer.name.clone(),
@@ -16571,6 +16574,7 @@ impl DesktopAppState {
                 }
                 for (key, value) in renderer.attributes {
                     script_cmds::push(ScriptCmd::SetRendererProp {
+                        renderer_uid: Some(renderer.uid),
                         scene_uid: Some(object.scene_uid),
                         object: object.name.clone(),
                         renderer: renderer.name.clone(),
@@ -16580,6 +16584,7 @@ impl DesktopAppState {
                 }
                 if !renderer.visible {
                     script_cmds::push(ScriptCmd::SetRendererVisible {
+                        renderer_uid: Some(renderer.uid),
                         scene_uid: Some(object.scene_uid),
                         object: object.name.clone(),
                         renderer: renderer.name,
@@ -16598,6 +16603,7 @@ impl DesktopAppState {
                 return renderer_property_set(RendererProperty::Visible, this, args, ctx);
             }
             script_cmds::push(ScriptCmd::SetRendererVisible {
+                renderer_uid: None,
                 scene_uid: None,
                 object: this_string_prop(this, "objectName", ctx),
                 renderer: this_string_prop(this, "name", ctx),
@@ -16623,6 +16629,7 @@ impl DesktopAppState {
                     }
                 });
                 script_cmds::push(ScriptCmd::SetRendererProp {
+                    renderer_uid: Some(renderer.uid),
                     scene_uid: Some(renderer.scene_uid),
                     object: script_object(renderer.object_uid)?.name,
                     renderer: renderer.name,
@@ -16632,6 +16639,7 @@ impl DesktopAppState {
                 return Ok(JsValue::undefined());
             }
             script_cmds::push(ScriptCmd::SetRendererProp {
+                renderer_uid: None,
                 scene_uid: None,
                 object: this_string_prop(this, "objectName", ctx),
                 renderer: this_string_prop(this, "name", ctx),
@@ -28592,6 +28600,7 @@ impl DesktopAppState {
                             }
                         });
                         script_cmds::push(ScriptCmd::SetRendererProp {
+                            renderer_uid: Some(renderer.uid),
                             scene_uid: Some(renderer.scene_uid),
                             object: object_name,
                             renderer: renderer_name,
@@ -29437,6 +29446,7 @@ impl DesktopAppState {
                     }
                     if !renderer_children.is_empty() {
                         script_cmds::push(ScriptCmd::SetRendererChildren {
+                            renderer_uid: renderer_uid,
                             object_uid: expected_uid,
                             object: name.clone(),
                             renderer: renderer_name.clone(),
@@ -29445,6 +29455,7 @@ impl DesktopAppState {
                     }
                     for (key, value) in attributes {
                         script_cmds::push(ScriptCmd::SetRendererProp {
+                            renderer_uid: Some(renderer_uid),
                             scene_uid: Some(target_scene),
                             object: name.clone(),
                             renderer: renderer_name.clone(),
@@ -29454,6 +29465,7 @@ impl DesktopAppState {
                     }
                     if !visible {
                         script_cmds::push(ScriptCmd::SetRendererVisible {
+                            renderer_uid: Some(renderer_uid),
                             scene_uid: Some(target_scene),
                             object: name.clone(),
                             renderer: renderer_name.clone(),
@@ -30006,6 +30018,7 @@ impl DesktopAppState {
                 });
                 if let Some(children) = children {
                     script_cmds::push(ScriptCmd::SetRendererChildren {
+                        renderer_uid: renderer.uid,
                         object_uid: renderer.object_uid,
                         object: script_object(renderer.object_uid)?.name,
                         renderer: renderer.name,
@@ -30051,6 +30064,7 @@ impl DesktopAppState {
                 }
             });
             script_cmds::push(ScriptCmd::ResetRendererProp {
+                renderer_uid: Some(renderer.uid),
                 scene_uid: renderer.scene_uid,
                 object: script_object(renderer.object_uid)?.name,
                 renderer: renderer.name,
@@ -30818,6 +30832,7 @@ impl DesktopAppState {
                 }
                 if !renderer_children.is_empty() {
                     script_cmds::push(ScriptCmd::SetRendererChildren {
+                        renderer_uid: next_uid,
                         object_uid: target_uid,
                         object: target.name.clone(),
                         renderer: name.clone(),
@@ -30826,6 +30841,7 @@ impl DesktopAppState {
                 }
                 for (key, value) in attributes {
                     script_cmds::push(ScriptCmd::SetRendererProp {
+                        renderer_uid: Some(next_uid),
                         scene_uid: Some(target.scene_uid),
                         object: target.name.clone(),
                         renderer: name.clone(),
@@ -30835,6 +30851,7 @@ impl DesktopAppState {
                 }
                 if !visible {
                     script_cmds::push(ScriptCmd::SetRendererVisible {
+                        renderer_uid: Some(next_uid),
                         scene_uid: Some(target.scene_uid),
                         object: target.name.clone(),
                         renderer: name.clone(),
@@ -33173,13 +33190,6 @@ impl DesktopAppState {
                 true,
                 ctx,
             )?;
-            script_cmds::push(ScriptCmd::SetRendererProp {
-                scene_uid: None,
-                object: this_string_prop(this, "_object_name", ctx),
-                renderer: this_string_prop(this, "_renderer_name", ctx),
-                key: property.key.to_string(),
-                value,
-            });
             Ok(JsValue::undefined())
         }
         fn pending_renderer_visible_get(
@@ -33883,6 +33893,21 @@ impl DesktopAppState {
                         2,
                     )
                     .function(
+                        NativeFunction::from_fn_ptr(js_atom_intr_append_angle),
+                        js_string!("appendAngle"),
+                        3,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_atom_intr_append_torsion),
+                        js_string!("appendTorsion"),
+                        4,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_atom_intr_get_value),
+                        js_string!("getValue"),
+                        1,
+                    )
+                    .function(
                         NativeFunction::from_fn_ptr(js_atom_intr_append_by_id),
                         js_string!("appendById"),
                         4,
@@ -34112,6 +34137,7 @@ impl DesktopAppState {
                 }
             });
             script_cmds::push(ScriptCmd::SetRendererProp {
+                renderer_uid: Some(renderer.uid),
                 scene_uid: Some(renderer.scene_uid),
                 object: script_object(renderer.object_uid)?.name,
                 renderer: renderer.name,
@@ -34269,6 +34295,7 @@ impl DesktopAppState {
             });
             let renderer = script_renderer(uid)?;
             script_cmds::push(ScriptCmd::SetRendererChildren {
+                renderer_uid: renderer.uid,
                 object_uid: renderer.object_uid,
                 object: script_object(renderer.object_uid)?.name,
                 renderer: renderer.name,
@@ -34535,6 +34562,7 @@ impl DesktopAppState {
             if let Ok(renderer) = script_renderer(uid) {
                 if let Ok(object) = script_object(renderer.object_uid) {
                     script_cmds::push(ScriptCmd::SetRendererChildren {
+                        renderer_uid: renderer.uid,
                         object_uid: renderer.object_uid,
                         object: object.name,
                         renderer: renderer.name,
@@ -35016,6 +35044,7 @@ impl DesktopAppState {
             });
             let renderer = script_renderer(uid)?;
             script_cmds::push(ScriptCmd::SetRendererChildren {
+                renderer_uid: renderer.uid,
                 object_uid: renderer.object_uid,
                 object: script_object(renderer.object_uid)?.name,
                 renderer: renderer.name,
@@ -35745,6 +35774,7 @@ impl DesktopAppState {
                     }
                 });
                 script_cmds::push(ScriptCmd::SetRendererVisible {
+                    renderer_uid: Some(renderer.uid),
                     scene_uid: Some(renderer.scene_uid),
                     object: script_object(renderer.object_uid)?.name,
                     renderer: renderer.name,
@@ -35794,6 +35824,7 @@ impl DesktopAppState {
                 }
             });
             script_cmds::push(ScriptCmd::SetRendererProp {
+                renderer_uid: Some(renderer.uid),
                 scene_uid: Some(renderer.scene_uid),
                 object: script_object(renderer.object_uid)?.name,
                 renderer: renderer.name,
@@ -36454,6 +36485,7 @@ impl DesktopAppState {
                 }
             });
             script_cmds::push(ScriptCmd::SetRendererProp {
+                renderer_uid: Some(renderer.uid),
                 scene_uid: Some(renderer.scene_uid),
                 object: script_object(renderer.object_uid)?.name,
                 renderer: renderer.name,
@@ -36659,6 +36691,7 @@ impl DesktopAppState {
                 }
             });
             script_cmds::push(ScriptCmd::SetRendererProp {
+                renderer_uid: Some(renderer.uid),
                 scene_uid: Some(renderer.scene_uid),
                 object: script_object(renderer.object_uid)?.name,
                 renderer: renderer.name,
@@ -36838,29 +36871,134 @@ impl DesktopAppState {
                 ctx,
             )
         }
-        fn js_atom_intr_append(
+        fn script_atom_intr_value(
+            renderer: Option<&ScriptRend>,
+            line: &AtomIntrLine,
+        ) -> Option<f64> {
+            if !line.is_active() {
+                return None;
+            }
+            if !line.positions().is_empty() {
+                return line.kind().value(line.positions());
+            }
+            let renderer = renderer?;
+            let points = (0..line.kind().atom_count())
+                .map(|index| {
+                    let selector = match line.selectors().get(index) {
+                        Some(text) => Some(parse_script_selector(text, renderer.scene_uid).ok()?),
+                        None => None,
+                    };
+                    script_env::with(|env| {
+                        let reference = line.object_references().get(index);
+                        let object = match reference {
+                            Some((Some(uid), _)) => env.objects.iter().find(|o| o.uid == uid.get()),
+                            Some((None, name)) if !name.is_empty() => env
+                                .objects
+                                .iter()
+                                .find(|o| o.scene_uid == renderer.scene_uid && o.name == *name),
+                            _ => env.objects.iter().find(|o| o.uid == renderer.object_uid),
+                        }?;
+                        let molecule =
+                            &env.molecules.iter().find(|m| m.uid == object.uid)?.molecule;
+                        let mut point = if let Some(selector) = &selector {
+                            let indices = molecule.select_indices(selector);
+                            if indices.is_empty() {
+                                return None;
+                            }
+                            indices
+                                .iter()
+                                .map(|i| molecule.atoms()[*i].position)
+                                .fold(Vector4::ZERO, |sum, p| sum + p)
+                                / indices.len() as f64
+                        } else {
+                            let aid = line.aids().get(index)?;
+                            let aid = aid.parse().unwrap_or_else(|_| molecule.from_str_aid(aid));
+                            molecule.get_atom_by_id(aid)?.position
+                        };
+                        object.xform.xform3d(&mut point);
+                        Some(point)
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?;
+            line.kind().value(&points)
+        }
+        fn atom_intr_by_selections(
             this: &JsValue,
             args: &[JsValue],
+            kind: AtomIntrKind,
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            let renderer_uid = renderer_proxy_uid(this, ctx)?;
-            let scope_id = script_renderer(renderer_uid)
-                .map(|renderer| renderer.scene_uid)
-                .unwrap_or_else(|_| script_env::with(|env| env.scene_uid));
-            let selections = [arg0(args, ctx), argn(args, 1, ctx)]
-                .into_iter()
-                .map(|selection| {
-                    parse_script_selector(&selection, scope_id).map(|selector| selector.to_string())
+            if !pending_renderer_is_attached(this, ctx)? {
+                return Ok(JsValue::new(-1));
+            }
+            let renderer = atom_intr_renderer(this, ctx)?;
+            let selections = (0..kind.atom_count())
+                .map(|index| {
+                    let text = argn(args, index, ctx);
+                    parse_script_selector(&text, renderer.scene_uid)
+                        .map(|selector| selector.to_string())
                 })
                 .collect::<JsResult<Vec<_>>>();
             let Ok(selections) = selections else {
                 return Ok(JsValue::new(-1));
             };
-            append_atom_intr_line(
-                this,
-                AtomIntrLine::from_selections(AtomIntrKind::Distance, selections),
-                ctx,
-            )
+            let line = AtomIntrLine::from_selections(kind, selections);
+            if script_atom_intr_value(Some(&renderer), &line).is_none() {
+                return Ok(JsValue::new(-1));
+            }
+            append_atom_intr_line(this, line, ctx)
+        }
+        fn js_atom_intr_append(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            atom_intr_by_selections(this, args, AtomIntrKind::Distance, ctx)
+        }
+        fn js_atom_intr_append_angle(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            atom_intr_by_selections(this, args, AtomIntrKind::Angle, ctx)
+        }
+        fn js_atom_intr_append_torsion(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            atom_intr_by_selections(this, args, AtomIntrKind::Torsion, ctx)
+        }
+        fn js_atom_intr_get_value(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let id = args
+                .first()
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_i32(ctx)?;
+            let renderer = if pending_renderer_is_attached(this, ctx)? {
+                Some(atom_intr_renderer(this, ctx)?)
+            } else {
+                None
+            };
+            let line = if let Some(renderer) = &renderer {
+                renderer.atom_intr_lines.get(id as usize).cloned()
+            } else {
+                let storage = pending_atom_intr_storage_id(this, ctx)?;
+                script_env::with(|env| {
+                    env.pending_atom_intr_lines
+                        .get(&storage)
+                        .and_then(|lines| lines.get(id as usize))
+                        .cloned()
+                })
+            }
+            .ok_or_else(|| script_error(format!("AtomIntr: no label with ID {id}")))?;
+            script_atom_intr_value(renderer.as_ref(), &line)
+                .map(JsValue::new)
+                .ok_or_else(|| script_error(format!("AtomIntr: label {id} cannot be evaluated")))
         }
         fn js_atom_intr_append_by_vectors(
             this: &JsValue,
@@ -37397,6 +37535,21 @@ impl DesktopAppState {
                         NativeFunction::from_fn_ptr(js_atom_intr_append),
                         js_string!("append"),
                         2,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_atom_intr_append_angle),
+                        js_string!("appendAngle"),
+                        3,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_atom_intr_append_torsion),
+                        js_string!("appendTorsion"),
+                        4,
+                    )
+                    .function(
+                        NativeFunction::from_fn_ptr(js_atom_intr_get_value),
+                        js_string!("getValue"),
+                        1,
                     )
                     .function(
                         NativeFunction::from_fn_ptr(js_atom_intr_append_by_id),
@@ -44597,6 +44750,7 @@ impl DesktopAppState {
                     }
                 }
                 ScriptCmd::SetRendererVisible {
+                    renderer_uid,
                     scene_uid,
                     object,
                     renderer,
@@ -44604,7 +44758,7 @@ impl DesktopAppState {
                 } => {
                     let target_scene = scene_uid.map(Uid::new).or(self.active_scene());
                     if let Some((obj_uid, rend_uid)) = target_scene.and_then(|scene_uid| {
-                        self.renderer_uid_by_name_in_scene(scene_uid, &object, &renderer)
+                        self.script_renderer_target(scene_uid, &object, &renderer, renderer_uid)
                     }) {
                         let _ = self.set_renderer_visible(obj_uid, rend_uid, visible);
                     } else {
@@ -44648,9 +44802,12 @@ impl DesktopAppState {
                                     Some(map.scene_uid) == target_scene && map.name == object
                                 })
                                 .and_then(|map| {
-                                    map.renderers
-                                        .iter_mut()
-                                        .find(|config| config.name == renderer)
+                                    map.renderers.iter_mut().find(|config| {
+                                        renderer_uid.map_or_else(
+                                            || config.name == renderer,
+                                            |uid| config.uid.get() == uid,
+                                        )
+                                    })
                                 })
                             {
                                 config.visible = visible;
@@ -44659,6 +44816,7 @@ impl DesktopAppState {
                     }
                 }
                 ScriptCmd::SetRendererProp {
+                    renderer_uid,
                     scene_uid,
                     object,
                     renderer,
@@ -44667,7 +44825,7 @@ impl DesktopAppState {
                 } => {
                     let target_scene = scene_uid.map(Uid::new).or(self.active_scene());
                     if let Some((obj_uid, rend_uid)) = target_scene.and_then(|scene_uid| {
-                        self.renderer_uid_by_name_in_scene(scene_uid, &object, &renderer)
+                        self.script_renderer_target(scene_uid, &object, &renderer, renderer_uid)
                     }) {
                         let _ = self.set_renderer_property(obj_uid, rend_uid, key, value);
                     } else {
@@ -44704,7 +44862,12 @@ impl DesktopAppState {
                                 .and_then(|map| {
                                     map.renderers
                                         .iter()
-                                        .find(|config| config.name == renderer)
+                                        .find(|config| {
+                                            renderer_uid.map_or_else(
+                                                || config.name == renderer,
+                                                |uid| config.uid.get() == uid,
+                                            )
+                                        })
                                         .map(|config| {
                                             let mut scripted =
                                                 density_renderer_to_script(map, config);
@@ -44736,6 +44899,7 @@ impl DesktopAppState {
                     }
                 }
                 ScriptCmd::ResetRendererProp {
+                    renderer_uid,
                     scene_uid,
                     object,
                     renderer,
@@ -44743,7 +44907,7 @@ impl DesktopAppState {
                 } => {
                     let target_scene = Uid::new(scene_uid);
                     if let Some((obj_uid, rend_uid)) =
-                        self.renderer_uid_by_name_in_scene(target_scene, &object, &renderer)
+                        self.script_renderer_target(target_scene, &object, &renderer, renderer_uid)
                     {
                         self.reset_renderer_property(obj_uid, rend_uid, &key)?;
                     } else {
@@ -44779,7 +44943,12 @@ impl DesktopAppState {
                                 .and_then(|map| {
                                     map.renderers
                                         .iter()
-                                        .find(|config| config.name == renderer)
+                                        .find(|config| {
+                                            renderer_uid.map_or_else(
+                                                || config.name == renderer,
+                                                |uid| config.uid.get() == uid,
+                                            )
+                                        })
                                         .map(|config| {
                                             let mut scripted =
                                                 density_renderer_to_script(map, config);
@@ -45552,6 +45721,7 @@ impl DesktopAppState {
                     }
                 }
                 ScriptCmd::SetRendererChildren {
+                    renderer_uid,
                     object_uid,
                     object,
                     renderer,
@@ -45561,7 +45731,7 @@ impl DesktopAppState {
                     let renderer_uid = self
                         .scene_manager()
                         .object(object_uid)
-                        .and_then(|object| object.renderer_by_name(&renderer))
+                        .and_then(|object| object.renderer(Uid::new(renderer_uid)))
                         .map(MolRenderer::uid);
                     let applied = renderer_uid.is_some_and(|renderer_uid| {
                         self.scene_manager_mut()
@@ -46437,14 +46607,34 @@ impl DesktopAppState {
         }
     }
 
-    /// Resolve an object's Uid from its scene name (script mutations carry names, not
-    /// Uids, and resolve at apply time against the live scene).
+    /// Resolve the legacy name-based scripting API against the active scene.
     #[cfg(feature = "scripting")]
     fn object_uid_by_name(&self, name: &str) -> Option<Uid> {
         self.active_object_summaries()
             .into_iter()
             .find(|object| object.name == name)
             .map(|object| object.uid)
+    }
+
+    #[cfg(feature = "scripting")]
+    fn script_renderer_target(
+        &self,
+        scene_uid: Uid,
+        object: &str,
+        renderer: &str,
+        renderer_uid: Option<u64>,
+    ) -> Option<(Uid, Uid)> {
+        if let Some(uid) = renderer_uid {
+            let uid = Uid::new(uid);
+            return self
+                .scene_manager()
+                .scene(scene_uid)?
+                .objects()
+                .iter()
+                .find(|object| object.renderer(uid).is_some())
+                .map(|object| (object.uid(), uid));
+        }
+        self.renderer_uid_by_name_in_scene(scene_uid, object, renderer)
     }
 
     #[cfg(feature = "scripting")]
@@ -46522,12 +46712,14 @@ enum ScriptCmd {
         scheme: String,
     },
     SetRendererVisible {
+        renderer_uid: Option<u64>,
         scene_uid: Option<u64>,
         object: String,
         renderer: String,
         visible: bool,
     },
     SetRendererProp {
+        renderer_uid: Option<u64>,
         scene_uid: Option<u64>,
         object: String,
         renderer: String,
@@ -46535,6 +46727,7 @@ enum ScriptCmd {
         value: String,
     },
     ResetRendererProp {
+        renderer_uid: Option<u64>,
         scene_uid: u64,
         object: String,
         renderer: String,
@@ -46661,6 +46854,7 @@ enum ScriptCmd {
         labels: Vec<LDom2Node>,
     },
     SetRendererChildren {
+        renderer_uid: u64,
         object_uid: u64,
         object: String,
         renderer: String,
@@ -54555,6 +54749,138 @@ end_header
 
     #[cfg(feature = "scripting")]
     #[test]
+    fn script_atom_intr_selection_values_follow_coordinates_and_persist() {
+        let mut app = DesktopAppState::new();
+        let scene = app.ensure_active_scene();
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  N   GLY A   1       0.000   1.000   0.000  1.00 10.00           N\n\
+             ATOM      2  CA  GLY A   1       1.000   0.000   0.000  1.00 10.00           C\n\
+             ATOM      3  C   GLY A   1       1.000   1.000   0.000  1.00 10.00           C\n\
+             ATOM      4  O   GLY A   1       1.000   1.000   1.000  1.00 10.00           O\n\
+             ATOM      5  N   GLY A   2       0.000  -1.000   0.000  1.00 10.00           N\n",
+        )
+        .unwrap();
+        let uid = app
+            .scene_manager_mut()
+            .scene_mut(scene)
+            .unwrap()
+            .add_molecule("mol", molecule);
+        let (log, _) = app
+            .run_script_js(
+                r#"
+            var mol=cuemol.getObject('mol'), r=mol.createRenderer('atomintr','measure');
+            var ids=[r.append('name N','name CA'), r.appendAngle('name N','name CA','name C'),
+                r.appendTorsion('name N','name CA','name C','name O')];
+            print(ids.join(','));
+            print(ids.map(id=>r.getValue(id).toFixed(1)).join(','));
+            print(r.append('name missing','name CA') + ':' + r.appendAngle('(', '*', '*'));
+            mol.getAtomByID(2).pos=cuemol.Vector('(2,0,0)');
+            print(r.getValue(0).toFixed(1));
+            var literal=r.appendBy2Vecs(cuemol.Vector('(0,0,0)'),cuemol.Vector('(1,0,0)'));
+            var transform=cuemol.Matrix(); transform.setAt(1,1,2); mol.xformMat=transform;
+            print(r.getValue(0).toFixed(1)+':'+r.getValue(literal).toFixed(1));
+            print(r.remove(2));
+            for (var id of [-1,2,99]) { try { r.getValue(id); } catch(e) { print('rejected'); } }
+        "#,
+            )
+            .unwrap();
+        assert_eq!(
+            log,
+            "0,1,2\n1.0,90.0,90.0\n-1:-1\n2.0\n4.0:1.0\ntrue\nrejected\nrejected\nrejected\n"
+        );
+        let object = app.scene_manager().object(uid).unwrap();
+        let renderer = object.renderer_by_name("measure").unwrap();
+        let resolved = app
+            .scene_manager()
+            .scene(scene)
+            .unwrap()
+            .resolve_atom_intr_renderer(object, renderer);
+        let values = object.atom_intr_values(&resolved);
+        assert_eq!(values[0], Some(4.));
+        assert_eq!(values[2], None);
+        assert_eq!(values[3], Some(1.));
+        let bytes = app.active_scene_bytes().unwrap();
+        let mut reloaded = DesktopAppState::new();
+        reloaded.open_bytes("measure.qsc", &bytes).unwrap();
+        let (log,_)=reloaded.run_script_js("var r=cuemol.getRenderer('mol','measure'); print(r.getValue(0)+':'+r.getValue(2));").unwrap();
+        assert_eq!(log, "4:1\n");
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_unnamed_renderers_keep_distinct_property_targets() {
+        let mut app = DesktopAppState::new();
+        app.open_bytes("unnamed.pdb", b"HETATM    1  C1  LIG A   1      -4.000   0.000   0.000  1.00 10.00           C\nHETATM    2  C2  LIG A   1      -1.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let uid = app
+            .scene_manager()
+            .scene(app.active_scene().unwrap())
+            .unwrap()
+            .objects()[0]
+            .uid();
+        app.scene_manager_mut()
+            .object_mut(uid)
+            .unwrap()
+            .add_renderer("*selection", "");
+        let (log, _) = app
+            .run_script_js(
+                &r#"
+            var mol=cuemol.getObject('unnamed'); var other=mol.getRendererByName('other'); if(other) other.visible=false;
+            var first=mol.createRenderer('cpk'), second=mol.createRenderer('cpk');
+            first.sel=cuemol.makeSel('aid 1'); second.sel=cuemol.makeSel('aid 2');
+            first.coloring=cuemol.RainbowColoring(); first.coloring.start_hue=100;
+            second.coloring=cuemol.RainbowColoring(); second.coloring.start_hue=200;
+            first.alpha=0.3; second.alpha=0.5; cuemol.resetProp(second,'alpha');
+            first.visible=false; second.visible=true;
+            var detached=cuemol.CPKRenderer(); detached.sel=cuemol.makeSel('*');
+            print(first.uid+':'+second.uid);
+        "#.replace("'unnamed'", &uid.get().to_string()),
+            )
+            .unwrap();
+        let ids = log
+            .trim()
+            .split(':')
+            .map(|v| Uid::new(v.parse().unwrap()))
+            .collect::<Vec<_>>();
+        let object = &app
+            .scene_manager()
+            .scene(app.active_scene().unwrap())
+            .unwrap()
+            .objects()[0];
+        let first = object.renderer(ids[0]).unwrap();
+        let second = object.renderer(ids[1]).unwrap();
+        assert_eq!(first.qsc_attr("sel"), Some("aid 1"));
+        assert_eq!(second.qsc_attr("sel"), Some("aid 2"));
+        assert_eq!(first.qsc_attr("alpha"), Some("0.3"));
+        assert_eq!(second.qsc_attr("alpha"), None);
+        assert!(!first.is_visible());
+        assert!(second.is_visible());
+        for (renderer, hue) in [(first, "100"), (second, "200")] {
+            assert_eq!(
+                renderer
+                    .qsc_children()
+                    .iter()
+                    .find(|n| n.tag_name() == "coloring")
+                    .unwrap()
+                    .str_attr("start_hue")
+                    .as_str(),
+                hue
+            );
+        }
+        let selection = object
+            .renderers()
+            .iter()
+            .find(|r| r.renderer_type() == "*selection")
+            .unwrap();
+        assert_ne!(selection.qsc_attr("sel"), Some("aid 1"));
+        assert_eq!(app.active_render_snapshot("").unwrap().atom_count(), 1);
+        let bytes = app.active_scene_bytes().unwrap();
+        let mut loaded = DesktopAppState::new();
+        loaded.open_bytes("unnamed.qsc", &bytes).unwrap();
+        assert_eq!(loaded.active_render_snapshot("").unwrap().atom_count(), 1);
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
     fn script_detached_atom_intr_lines_keep_ids_when_attached() {
         let mut app = DesktopAppState::new();
         let scene_uid = app.ensure_active_scene();
@@ -54575,7 +54901,8 @@ end_header
                  var renderer = cuemol.AtomIntrRenderer(); renderer.name = 'detached'; \
                  var id0 = renderer.appendBy2Vecs(cuemol.Vector('(0,0,0)'), \
                                                    cuemol.Vector('(1,0,0)')); \
-                 var id1 = renderer.append('name CA', 'name N'); \
+                 print('unattached=' + renderer.append('name CA', 'name N')); \
+                 var id1 = renderer.appendBy2Vecs(cuemol.Vector('(1,0,0)'), cuemol.Vector('(2,0,0)')); \
                  var removed = renderer.remove(id0); \
                  var before = JSON.parse(renderer.getDefsJSON()); \
                  mol.attachRenderer(renderer); \
@@ -54593,7 +54920,10 @@ end_header
                        (pendingRenderer.uid !== 0));",
             )
             .unwrap();
-        assert_eq!(log, "direct=0:1:true:1:1:true\npending=1:true\n");
+        assert_eq!(
+            log,
+            "unattached=-1\ndirect=0:1:true:1:1:true\npending=1:true\n"
+        );
 
         let object = app.scene_manager().object(object_uid).unwrap();
         let renderer = object.renderer_by_name("detached").unwrap();

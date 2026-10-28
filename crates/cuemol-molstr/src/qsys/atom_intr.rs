@@ -38,7 +38,9 @@ impl MolScene {
         }
         let mut resolved = renderer.clone();
         for line in &mut resolved.atom_intr_lines {
-            let points = if line.object_refs.is_empty() {
+            let points = if !line.positions.is_empty() {
+                Some(line.positions.clone())
+            } else if line.object_refs.is_empty() {
                 owner.atom_intr_points(line).map(|points| {
                     points
                         .into_iter()
