@@ -510,84 +510,72 @@ pub fn rendering_params(
             .get(&format!("{prefix}.{key}"))
             .or_else(|| settings.get(key))
     };
-    let number = |key: &str, default: f64| get(key).and_then(Value::as_f64).unwrap_or(default);
-    let flag = |key: &str, default: bool| get(key).and_then(Value::as_bool).unwrap_or(default);
-    let use_gi = flag("useGI", flag("useGi", prefix != "umbreon_npr"));
-    let defaults = cuemol_render::UmbreonRenderParams::default();
-    let ground = get("giGroundColor")
-        .and_then(Value::as_str)
-        .unwrap_or("#666666");
-    let hex = ground.strip_prefix('#').unwrap_or(ground);
-    let rgb = u32::from_str_radix(hex, 16)
-        .ok()
-        .filter(|_| hex.len() == 6)
-        .ok_or_else(|| CueMolError::invalid_argument("GI ground color must be #rrggbb"))?;
-    Ok(cuemol_render::UmbreonRenderParams {
-        use_clip_z: flag("clipPlane", flag("useClipZ", defaults.use_clip_z)),
-        supersample: number("supersample", 3.).clamp(1., 8.) as i32,
-        ao_samples: if flag("aoEnabled", get("aoSamples").is_some()) {
-            number("aoSamples", 64.).clamp(0., 256.) as i32
-        } else {
-            0
-        },
-        ao_distance: number("aoDistance", 0.),
-        ao_intensity: number("aoIntensity", 1.),
-        ao_diffuse_factor: number("aoDiffuseFactor", 1.),
-        ao_multi_scale: flag("aoMultiScale", true),
-        ao_bent_normal: flag("aoBentNormal", true),
-        ao_low_discrepancy: flag("aoLowDiscrepancy", true),
-        ao_falloff_power: number("aoFalloffPower", 0.),
-        ao_per_pixel: get("aoGather").and_then(Value::as_str) != Some("Per shading hit"),
-        shadows: flag("shadows", false),
-        shadow_samples: number("shadowSamples", 1.).clamp(1., 256.) as i32,
-        light_radius: number("lightRadius", 0.),
-        light_intensity: number(
-            "lightIntensity",
-            if prefix == "umbreon_npr" { 1.55 } else { 1.3 },
-        ),
-        flash_fraction: number("flashFraction", if use_gi { 0. } else { 0.6 }),
-        ambient_fraction: number("ambientFraction", if use_gi { 0.6 } else { 0.16 }),
-        show_edge_lines: flag("edgeLines", flag("showEdgeLines", true)),
-        crease_limit: number("creaseLimit", -1.),
-        edge_rise: number("edgeRise", 0.5),
-        contact_edges: flag("contactEdges", true),
-        outline_far_depth: number("outlineFarDepth", 0.2),
-        per_pixel_blend: flag("perPixelBlend", true),
-        transparent_background: flag("transparentBg", flag("transparent", false)),
-        use_gi,
-        gi_samples: number("giSamples", 32.).clamp(1., 256.) as i32,
-        gi_bounces: number("giBounces", 4.).clamp(1., 8.) as i32,
-        gi_intensity: number("giIntensity", 1.),
-        gi_env_intensity: number("giEnvIntensity", 1.),
-        gi_sky_gradient: flag("giSkyGradient", true),
-        gi_ground_color: [
-            (rgb >> 16) as u8 as f64 / 255.,
-            (rgb >> 8) as u8 as f64 / 255.,
-            rgb as u8 as f64 / 255.,
-        ],
-        gi_denoise: get("denoise")
-            .and_then(Value::as_str)
-            .map(|v| matches!(v, "OIDN" | "Bilateral"))
-            .unwrap_or(flag("giDenoise", true)),
-        gi_denoiser: if get("denoise").and_then(Value::as_str) == Some("Bilateral") {
-            0
-        } else {
-            2
-        },
-        denoiser: get("denoise")
-            .and_then(Value::as_str)
-            .map(|v| i32::from(v == "A-trous"))
-            .unwrap_or(number("denoiser", 0.) as i32),
-        ..defaults
-    })
+    if let Some(color) = get("giGroundColor").and_then(Value::as_str) {
+        let hex = color.strip_prefix('#').unwrap_or(color);
+        if hex.len() != 6 || u32::from_str_radix(hex, 16).is_err() {
+            return Err(CueMolError::invalid_argument(
+                "GI ground color must be #rrggbb",
+            ));
+        }
+    }
+    let mut typed = cuemol_qsys::RenderSettings::default();
+    let class = if prefix == "umbreon_npr" {
+        cuemol_qsys::SettingsClass::UmbreonNpr
+    } else {
+        cuemol_qsys::SettingsClass::Umbreon
+    };
+    for (block, class) in [("", cuemol_qsys::SettingsClass::Render), (prefix, class)] {
+        for property in class.properties() {
+            let value = get(property.name).or_else(|| match property.name {
+                "useGI" => get("useGi"),
+                "clipPlane" => get("useClipZ"),
+                "edgeLines" => get("showEdgeLines"),
+                "transparentBg" => get("transparent"),
+                _ => None,
+            });
+            if let Some(value) = value {
+                let path = if block.is_empty() {
+                    property.name.into()
+                } else {
+                    format!("{block}.{}", property.name)
+                };
+                let value = value
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| value.to_string());
+                typed.set(&path, &value)?;
+            }
+        }
+    }
+    if get("aoEnabled").is_none() && get("aoSamples").is_some() {
+        typed.set(&format!("{prefix}.aoEnabled"), "true")?;
+    }
+    let mut exporter = cuemol_render::UmbreonSceneExporter::new();
+    exporter.apply_render_settings(&typed, prefix)?;
+    let mut params = exporter.params().clone();
+    let number = |key: &str, fallback: f64| get(key).and_then(Value::as_f64).unwrap_or(fallback);
+    params.aa_mode = number("aaMode", 0.) as i32;
+    params.aa_depth = number("aaDepth", 0.) as i32;
+    params.ao_res_div = number("aoResDiv", params.ao_res_div as f64) as i32;
+    params.ao_falloff_power = number("aoFalloffPower", 0.);
+    params.gi_bounces = number("giBounces", 4.).clamp(1., 8.) as i32;
+    params.gi_intensity = number("giIntensity", 1.);
+    params.gi_env_intensity = number("giEnvIntensity", 1.);
+    if get("denoise").is_none() {
+        params.gi_denoise = get("giDenoise")
+            .and_then(Value::as_bool)
+            .unwrap_or(params.gi_denoise);
+        params.denoiser = number("denoiser", 0.) as i32;
+    }
+    Ok(params)
 }
 pub fn rendering_settings(p: &cuemol_render::UmbreonRenderParams, prefix: &str) -> String {
     let ground = p
         .gi_ground_color
         .map(|v| (v.clamp(0., 1.) * 255.).round() as u8);
-    let settings = json!({"supersample":p.supersample,"aoEnabled":p.ao_samples>0,"aoSamples":p.ao_samples,"aoDistance":p.ao_distance,"aoIntensity":p.ao_intensity,
+    let settings = json!({"supersample":p.supersample,"aaMode":p.aa_mode,"aaDepth":p.aa_depth,"aoResDiv":p.ao_res_div,"aoEnabled":p.ao_samples>0,"aoSamples":p.ao_samples,"aoDistance":p.ao_distance,"aoIntensity":p.ao_intensity,
         "aoDiffuseFactor":p.ao_diffuse_factor,"aoMultiScale":p.ao_multi_scale,"aoBentNormal":p.ao_bent_normal,"aoLowDiscrepancy":p.ao_low_discrepancy,"aoFalloffPower":p.ao_falloff_power,
-        "aoGather":if p.ao_per_pixel {"Per output pixel"} else {"Per shading hit"},"shadows":p.shadows,"shadowSamples":p.shadow_samples,"lightRadius":p.light_radius,
+        "aoGather":if p.ao_res_div < 0 || p.ao_res_div > 1 {"Per output pixel"} else {"Per shading hit"},"shadows":p.shadows,"shadowSamples":p.shadow_samples,"lightRadius":p.light_radius,
         "lightIntensity":p.light_intensity,"flashFraction":p.flash_fraction,"ambientFraction":p.ambient_fraction,"edgeLines":p.show_edge_lines,"creaseLimit":p.crease_limit,"edgeRise":p.edge_rise,
         "contactEdges":p.contact_edges,"outlineFarDepth":p.outline_far_depth,"perPixelBlend":p.per_pixel_blend,"useGI":p.use_gi,"giSamples":p.gi_samples,"giBounces":p.gi_bounces,
         "giIntensity":p.gi_intensity,"giEnvIntensity":p.gi_env_intensity,"giSkyGradient":p.gi_sky_gradient,"giGroundColor":format!("#{:02x}{:02x}{:02x}",ground[0],ground[1],ground[2]),
@@ -645,6 +633,8 @@ pub fn hatch_params(
         tone_strength: number("hatchToneStrength", 1.),
         tone_curve: number("hatchToneCurve", 1.),
         colored: false,
+        base: String::new(),
+        ink_model: String::new(),
     };
     cuemol_render::validate_hatch_params(&params)?;
     Ok(params)

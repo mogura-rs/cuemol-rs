@@ -600,7 +600,7 @@ fn lighting_settings_roundtrip_and_ground_color_validation_are_atomic() {
     let params = cuemol_command::rendering_params(&saved, "umbreon").unwrap();
     assert_eq!(params.light_intensity, 2.);
     assert_eq!(params.ao_samples, 64);
-    assert!(!params.ao_per_pixel);
+    assert_eq!(params.ao_res_div, 0);
     assert!(!params.ao_multi_scale);
     assert_eq!(
         params.gi_ground_color,

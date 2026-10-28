@@ -21,6 +21,8 @@ pub struct HatchRenderParams {
     pub colored: bool,
     pub style: String,
     pub coloring: String,
+    pub base: String,
+    pub ink_model: String,
     pub layers_spec: String,
     pub tone_spec: String,
     pub custom_ink: bool,
@@ -39,6 +41,8 @@ impl Default for HatchRenderParams {
             colored: false,
             style: "richardson".into(),
             coloring: "Style default".into(),
+            base: String::new(),
+            ink_model: String::new(),
             layers_spec: String::new(),
             tone_spec: String::new(),
             custom_ink: false,
@@ -99,6 +103,25 @@ fn resolve_look(p: &HatchRenderParams) -> Result<Look> {
     if p.custom_ink {
         look.ink = p.ink.map(|v| v as f32 / 255.);
         look.albedo_ink = false;
+    }
+    match p.coloring.to_ascii_lowercase().as_str() {
+        "colored" | "colored ink" | "colored ink on paper" | "colored ink on color fill" => {
+            look.albedo_ink = true
+        }
+        "monochrome" | "ink on paper" | "flat color" | "color fill" | "ink on color fill" => {
+            look.albedo_ink = false
+        }
+        _ => {}
+    }
+    match p.base.to_ascii_lowercase().as_str() {
+        "paper" => look.albedo_base = false,
+        "albedo" => look.albedo_base = true,
+        _ => {}
+    }
+    match p.ink_model.to_ascii_lowercase().as_str() {
+        "fixed" => look.albedo_ink = false,
+        "albedo" => look.albedo_ink = true,
+        _ => {}
     }
     if p.custom_paper {
         look.paper = p.paper.map(|v| v as f32 / 255.);

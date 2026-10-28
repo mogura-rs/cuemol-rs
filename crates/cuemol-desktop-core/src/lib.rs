@@ -28493,6 +28493,35 @@ impl DesktopAppState {
         #[derive(Clone, Copy)]
         enum UmbreonProperty {
             Camera,
+            AaMode,
+            AaDepth,
+            AoDiffuseFactor,
+            AoMultiScale,
+            AoBentNormal,
+            AoLowDiscrepancy,
+            AoResDiv,
+            LightIntensity,
+            FlashFraction,
+            AmbientFraction,
+            ContactEdges,
+            OutlineFarDepth,
+            PerPixelBlend,
+            GiSkyGradient,
+            GiGroundColor,
+            HatchEnable,
+            HatchStyle,
+            HatchDensity,
+            HatchWidthScale,
+            HatchLayersSpec,
+            HatchToneSpec,
+            HatchToneStrength,
+            HatchToneCurve,
+            HatchBase,
+            HatchInk,
+            HatchInkColor,
+            HatchPaperColor,
+            HatchDefaultEdges,
+
             Width,
             Height,
             Perspective,
@@ -28543,6 +28572,66 @@ impl DesktopAppState {
         ) -> JsResult<JsValue> {
             let id = umbreon_proxy_id(this, ctx)?;
             with_script_umbreon(id, |exporter| match property {
+                UmbreonProperty::AaMode => JsValue::new(exporter.params().aa_mode),
+                UmbreonProperty::AaDepth => JsValue::new(exporter.params().aa_depth),
+                UmbreonProperty::AoDiffuseFactor => {
+                    JsValue::new(exporter.params().ao_diffuse_factor)
+                }
+                UmbreonProperty::AoMultiScale => JsValue::new(exporter.params().ao_multi_scale),
+                UmbreonProperty::AoBentNormal => JsValue::new(exporter.params().ao_bent_normal),
+                UmbreonProperty::AoLowDiscrepancy => {
+                    JsValue::new(exporter.params().ao_low_discrepancy)
+                }
+                UmbreonProperty::AoResDiv => JsValue::new(exporter.params().ao_res_div),
+                UmbreonProperty::LightIntensity => JsValue::new(exporter.params().light_intensity),
+                UmbreonProperty::FlashFraction => JsValue::new(exporter.params().flash_fraction),
+                UmbreonProperty::AmbientFraction => {
+                    JsValue::new(exporter.params().ambient_fraction)
+                }
+                UmbreonProperty::ContactEdges => JsValue::new(exporter.params().contact_edges),
+                UmbreonProperty::OutlineFarDepth => {
+                    JsValue::new(exporter.params().outline_far_depth)
+                }
+                UmbreonProperty::PerPixelBlend => JsValue::new(exporter.params().per_pixel_blend),
+                UmbreonProperty::GiSkyGradient => JsValue::new(exporter.params().gi_sky_gradient),
+                UmbreonProperty::GiGroundColor => {
+                    JsString::from(exporter.options().gi_ground_color.as_str()).into()
+                }
+                UmbreonProperty::HatchEnable => JsValue::new(exporter.options().hatch_enable),
+                UmbreonProperty::HatchStyle => {
+                    JsString::from(exporter.options().hatch.style.as_str()).into()
+                }
+                UmbreonProperty::HatchDensity => JsValue::new(exporter.options().hatch.density),
+                UmbreonProperty::HatchWidthScale => {
+                    JsValue::new(exporter.options().hatch.width_scale)
+                }
+                UmbreonProperty::HatchLayersSpec => {
+                    JsString::from(exporter.options().hatch.layers_spec.as_str()).into()
+                }
+                UmbreonProperty::HatchToneSpec => {
+                    JsString::from(exporter.options().hatch.tone_spec.as_str()).into()
+                }
+                UmbreonProperty::HatchToneStrength => {
+                    JsValue::new(exporter.options().hatch.tone_strength)
+                }
+                UmbreonProperty::HatchToneCurve => {
+                    JsValue::new(exporter.options().hatch.tone_curve)
+                }
+                UmbreonProperty::HatchBase => {
+                    JsString::from(exporter.options().hatch.base.as_str()).into()
+                }
+                UmbreonProperty::HatchInk => {
+                    JsString::from(exporter.options().hatch.ink_model.as_str()).into()
+                }
+                UmbreonProperty::HatchInkColor => {
+                    JsString::from(exporter.options().hatch_ink_color.as_str()).into()
+                }
+                UmbreonProperty::HatchPaperColor => {
+                    JsString::from(exporter.options().hatch_paper_color.as_str()).into()
+                }
+                UmbreonProperty::HatchDefaultEdges => {
+                    JsValue::new(exporter.options().hatch.default_edges)
+                }
                 UmbreonProperty::Camera => JsString::from(exporter.scene().camera_name()).into(),
                 UmbreonProperty::Width => JsValue::new(exporter.width()),
                 UmbreonProperty::Height => JsValue::new(exporter.height()),
@@ -28583,6 +28672,168 @@ impl DesktopAppState {
             let id = umbreon_proxy_id(this, ctx)?;
             let value = args.first().cloned().unwrap_or(JsValue::undefined());
             match property {
+                UmbreonProperty::AaMode => {
+                    let value = value.to_i32(ctx)?;
+                    with_script_umbreon_mut(id, |exporter| exporter.params_mut().aa_mode = value)?;
+                }
+                UmbreonProperty::AaDepth => {
+                    let value = value.to_i32(ctx)?;
+                    with_script_umbreon_mut(id, |exporter| exporter.params_mut().aa_depth = value)?;
+                }
+                UmbreonProperty::AoDiffuseFactor => {
+                    let value = value.to_number(ctx)?;
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.params_mut().ao_diffuse_factor = value
+                    })?;
+                }
+                UmbreonProperty::AoMultiScale => {
+                    let value = value.to_boolean();
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.params_mut().ao_multi_scale = value
+                    })?;
+                }
+                UmbreonProperty::AoBentNormal => {
+                    let value = value.to_boolean();
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.params_mut().ao_bent_normal = value
+                    })?;
+                }
+                UmbreonProperty::AoLowDiscrepancy => {
+                    let value = value.to_boolean();
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.params_mut().ao_low_discrepancy = value
+                    })?;
+                }
+                UmbreonProperty::AoResDiv => {
+                    let value = value.to_i32(ctx)?;
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.params_mut().ao_res_div = value
+                    })?;
+                }
+                UmbreonProperty::LightIntensity => {
+                    let value = value.to_number(ctx)?;
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.params_mut().light_intensity = value
+                    })?;
+                }
+                UmbreonProperty::FlashFraction => {
+                    let value = value.to_number(ctx)?;
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.params_mut().flash_fraction = value
+                    })?;
+                }
+                UmbreonProperty::AmbientFraction => {
+                    let value = value.to_number(ctx)?;
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.params_mut().ambient_fraction = value
+                    })?;
+                }
+                UmbreonProperty::ContactEdges => {
+                    let value = value.to_boolean();
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.params_mut().contact_edges = value
+                    })?;
+                }
+                UmbreonProperty::OutlineFarDepth => {
+                    let value = value.to_number(ctx)?;
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.params_mut().outline_far_depth = value
+                    })?;
+                }
+                UmbreonProperty::PerPixelBlend => {
+                    let value = value.to_boolean();
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.params_mut().per_pixel_blend = value
+                    })?;
+                }
+                UmbreonProperty::GiSkyGradient => {
+                    let value = value.to_boolean();
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.params_mut().gi_sky_gradient = value
+                    })?;
+                }
+                UmbreonProperty::GiGroundColor => {
+                    let value = value.to_string(ctx)?.to_std_string_escaped();
+                    with_script_umbreon_mut(id, |exporter| exporter.set_gi_ground_color(value))?;
+                }
+                UmbreonProperty::HatchEnable => {
+                    let value = value.to_boolean();
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.options_mut().hatch_enable = value
+                    })?;
+                }
+                UmbreonProperty::HatchStyle => {
+                    let value = value.to_string(ctx)?.to_std_string_escaped();
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.options_mut().hatch.style = value
+                    })?;
+                }
+                UmbreonProperty::HatchDensity => {
+                    let value = value.to_number(ctx)?;
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.options_mut().hatch.density = value
+                    })?;
+                }
+                UmbreonProperty::HatchWidthScale => {
+                    let value = value.to_number(ctx)?;
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.options_mut().hatch.width_scale = value
+                    })?;
+                }
+                UmbreonProperty::HatchLayersSpec => {
+                    let value = value.to_string(ctx)?.to_std_string_escaped();
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.options_mut().hatch.layers_spec = value
+                    })?;
+                }
+                UmbreonProperty::HatchToneSpec => {
+                    let value = value.to_string(ctx)?.to_std_string_escaped();
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.options_mut().hatch.tone_spec = value
+                    })?;
+                }
+                UmbreonProperty::HatchToneStrength => {
+                    let value = value.to_number(ctx)?;
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.options_mut().hatch.tone_strength = value
+                    })?;
+                }
+                UmbreonProperty::HatchToneCurve => {
+                    let value = value.to_number(ctx)?;
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.options_mut().hatch.tone_curve = value
+                    })?;
+                }
+                UmbreonProperty::HatchBase => {
+                    let value = value.to_string(ctx)?.to_std_string_escaped();
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.options_mut().hatch.base = value
+                    })?;
+                }
+                UmbreonProperty::HatchInk => {
+                    let value = value.to_string(ctx)?.to_std_string_escaped();
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.options_mut().hatch.ink_model = value
+                    })?;
+                }
+                UmbreonProperty::HatchInkColor => {
+                    let value = value.to_string(ctx)?.to_std_string_escaped();
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.options_mut().hatch_ink_color = value
+                    })?;
+                }
+                UmbreonProperty::HatchPaperColor => {
+                    let value = value.to_string(ctx)?.to_std_string_escaped();
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.options_mut().hatch_paper_color = value
+                    })?;
+                }
+                UmbreonProperty::HatchDefaultEdges => {
+                    let value = value.to_boolean();
+                    with_script_umbreon_mut(id, |exporter| {
+                        exporter.options_mut().hatch.default_edges = value
+                    })?;
+                }
                 UmbreonProperty::Camera => {
                     let value = value.to_string(ctx)?.to_std_string_escaped();
                     with_script_umbreon_mut(id, |exporter| {
@@ -28698,7 +28949,8 @@ impl DesktopAppState {
             }
             Ok(JsValue::undefined())
         }
-        fn prepare_script_umbreon(id: u64) -> JsResult<()> {
+        fn prepare_script_umbreon(id: u64, ctx: &mut Context) -> JsResult<()> {
+            with_flushed_script_app(ctx, None, |_| ())?;
             let prepared = script_env::with_mut(|env| {
                 let exporter = env.umbreon_exporters.get(&id)?;
                 let scene_uid = exporter.scene().client_scene()?.get();
@@ -28804,7 +29056,7 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let id = umbreon_proxy_id(this, ctx)?;
-            prepare_script_umbreon(id)?;
+            prepare_script_umbreon(id, ctx)?;
             with_script_umbreon_mut(id, UmbreonSceneExporter::write)?
                 .map_err(|error| script_error(error.to_string()))?;
             Ok(JsValue::undefined())
@@ -28815,7 +29067,7 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let id = umbreon_proxy_id(this, ctx)?;
-            prepare_script_umbreon(id)?;
+            prepare_script_umbreon(id, ctx)?;
             with_script_umbreon_mut(id, UmbreonSceneExporter::begin_render)?
                 .map_err(|error| script_error(error.to_string()))?;
             Ok(JsValue::undefined())
@@ -28884,6 +29136,78 @@ impl DesktopAppState {
                 UmbreonSceneExporter::was_render_cancelled,
             )?))
         }
+        fn js_umbreon_apply_settings(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let value = args.first().cloned().unwrap_or(JsValue::undefined());
+            if object_optional_string_prop(&value, "_class", ctx).as_deref()
+                != Some("RenderSettings")
+            {
+                return Err(script_error("applyRenderSettings requires RenderSettings"));
+            }
+            let object = iterator_object(&value)?;
+            let class = cuemol_qsys::SettingsClass::Render;
+            let mut settings = cuemol_qsys::RenderSettings::new(class);
+            for (prefix, child_class) in
+                std::iter::once(("", class)).chain(class.children().iter().copied())
+            {
+                let child = if prefix.is_empty() {
+                    object.clone()
+                } else {
+                    iterator_object(&object.get(JsString::from(prefix), ctx)?)?.clone()
+                };
+                for property in child_class.properties() {
+                    let value = child
+                        .get(JsString::from(property.name), ctx)?
+                        .to_string(ctx)?
+                        .to_std_string_escaped();
+                    let path = if prefix.is_empty() {
+                        property.name.to_string()
+                    } else {
+                        format!("{prefix}.{}", property.name)
+                    };
+                    settings
+                        .set(&path, &value)
+                        .map_err(|error| script_error(error.to_string()))?;
+                }
+            }
+            let backend = args
+                .get(1)
+                .filter(|v| !v.is_undefined())
+                .map(|v| v.to_string(ctx).map(|s| s.to_std_string_escaped()))
+                .transpose()?
+                .unwrap_or_default();
+            let backend = with_script_umbreon_mut(umbreon_proxy_id(this, ctx)?, |exporter| {
+                exporter.apply_render_settings(&settings, &backend)
+            })?
+            .map_err(|error| script_error(error.to_string()))?;
+            Ok(JsString::from(backend).into())
+        }
+        fn js_umbreon_hatch_style(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let name = arg0(args, ctx);
+            Ok(JsString::from(with_script_umbreon(
+                umbreon_proxy_id(this, ctx)?,
+                |exporter| exporter.get_hatch_style_spec(&name),
+            )?)
+            .into())
+        }
+        fn js_umbreon_log(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            Ok(JsString::from(with_script_umbreon(
+                umbreon_proxy_id(this, ctx)?,
+                UmbreonSceneExporter::get_render_log,
+            )?)
+            .into())
+        }
         fn make_umbreon_exporter(ctx: &mut Context) -> JsValue {
             fn accessor(
                 name: &str,
@@ -28924,6 +29248,34 @@ impl DesktopAppState {
                 id
             });
             let properties = [
+                ("aaMode", UmbreonProperty::AaMode),
+                ("aaDepth", UmbreonProperty::AaDepth),
+                ("aoDiffuseFactor", UmbreonProperty::AoDiffuseFactor),
+                ("aoMultiScale", UmbreonProperty::AoMultiScale),
+                ("aoBentNormal", UmbreonProperty::AoBentNormal),
+                ("aoLowDiscrepancy", UmbreonProperty::AoLowDiscrepancy),
+                ("aoResDiv", UmbreonProperty::AoResDiv),
+                ("lightIntensity", UmbreonProperty::LightIntensity),
+                ("flashFraction", UmbreonProperty::FlashFraction),
+                ("ambientFraction", UmbreonProperty::AmbientFraction),
+                ("contactEdges", UmbreonProperty::ContactEdges),
+                ("outlineFarDepth", UmbreonProperty::OutlineFarDepth),
+                ("perPixelBlend", UmbreonProperty::PerPixelBlend),
+                ("giSkyGradient", UmbreonProperty::GiSkyGradient),
+                ("giGroundColor", UmbreonProperty::GiGroundColor),
+                ("hatchEnable", UmbreonProperty::HatchEnable),
+                ("hatchStyle", UmbreonProperty::HatchStyle),
+                ("hatchDensity", UmbreonProperty::HatchDensity),
+                ("hatchWidthScale", UmbreonProperty::HatchWidthScale),
+                ("hatchLayersSpec", UmbreonProperty::HatchLayersSpec),
+                ("hatchToneSpec", UmbreonProperty::HatchToneSpec),
+                ("hatchToneStrength", UmbreonProperty::HatchToneStrength),
+                ("hatchToneCurve", UmbreonProperty::HatchToneCurve),
+                ("hatchBase", UmbreonProperty::HatchBase),
+                ("hatchInk", UmbreonProperty::HatchInk),
+                ("hatchInkColor", UmbreonProperty::HatchInkColor),
+                ("hatchPaperColor", UmbreonProperty::HatchPaperColor),
+                ("hatchDefaultEdges", UmbreonProperty::HatchDefaultEdges),
                 ("camera", UmbreonProperty::Camera),
                 ("width", UmbreonProperty::Width),
                 ("height", UmbreonProperty::Height),
@@ -28993,6 +29345,21 @@ impl DesktopAppState {
                 object.accessor(name, Some(getter), Some(setter), Attribute::all());
             }
             object
+                .function(
+                    NativeFunction::from_fn_ptr(js_umbreon_apply_settings),
+                    js_string!("applyRenderSettings"),
+                    2,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_umbreon_hatch_style),
+                    js_string!("getHatchStyleSpec"),
+                    1,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_umbreon_log),
+                    js_string!("getRenderLog"),
+                    0,
+                )
                 .function(
                     NativeFunction::from_fn_ptr(js_umbreon_attach),
                     js_string!("attach"),
@@ -62772,6 +63139,52 @@ end_header
             .unwrap()
             .starts_with(b"\x89PNG\r\n\x1a\n"));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_umbreon_settings_drive_real_hatching_and_drain_diagnostics() {
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        app.open_bytes("sphere.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hatch.png");
+        let source = r#"
+            var settings = scene.getCreateAppData('render', 'RenderSettings');
+            var exporter = cuemol.UmbreonSceneExporter();
+            print('legacy=' + exporter.aoDiffuseFactor + ':' + exporter.aoMultiScale + ':' + exporter.aoBentNormal + ':' + exporter.aoLowDiscrepancy + ':' + exporter.aoResDiv);
+            settings.width = 25.4; settings.height = 12.7; settings.unit = 'mm'; settings.dpi = 24;
+            settings.umbreon.aoEnabled = true; settings.umbreon.aoSamples = 8; settings.umbreon.aoDistance = 7;
+            settings.umbreon.useGI = false; settings.umbreon.ambientFraction = 0.9;
+            exporter.camera = 'saved';
+            print('plain=' + exporter.applyRenderSettings(settings, '') + ':' + exporter.width + ':' + exporter.height + ':' + exporter.camera + ':' + exporter.ambientFraction + ':' + exporter.aoResDiv);
+            settings.umbreon.aoEnabled = false; settings.umbreon.aoDistance = 99;
+            exporter.applyRenderSettings(settings, 'umbreon');
+            print('ao=' + exporter.aoSamples + ':' + exporter.aoDistance);
+            try { exporter.applyRenderSettings(settings, 'povray'); } catch(e) { print('invalid-backend'); }
+            try { exporter.applyRenderSettings(null, ''); } catch(e) { print('invalid-settings'); }
+            settings.backend = 'umbreon_npr'; settings.umbreon_npr.useGI = true;
+            settings.umbreon_npr.hatchColoring = 'Colored ink on color fill';
+            settings.umbreon_npr.hatchCustomPaper = true; settings.umbreon_npr.hatchPaperColor = '#00ff00';
+            settings.umbreon_npr.supersample = 1;
+            print('npr=' + exporter.applyRenderSettings(settings, '') + ':' + exporter.useGI + ':' + exporter.hatchEnable + ':' + exporter.hatchBase + ':' + exporter.hatchInk);
+            exporter.aaMode = 1; exporter.aaDepth = 2; exporter.hatchToneStrength = 1.2;
+            exporter.hatchStyle = 'missing-look'; exporter.hatchLayersSpec = 'layer: invalid=1';
+            print('template=' + exporter.getHatchStyleSpec('manga').includes('layer:') + ':' + (exporter.getHatchStyleSpec('missing-look') === ''));
+            exporter.camera = ''; exporter.attach(scene); exporter.path = $OUTPUT;
+            exporter.write();
+            var diagnostics = exporter.getRenderLog();
+            print('log=' + diagnostics.includes('Unknown hatch style') + ':' + diagnostics.includes('layers spec ignored') + ':' + diagnostics.includes('Rendered 24x12') + ':' + (exporter.getRenderLog() === ''));
+            cuemol.resetProp(exporter, 'hatchEnable'); cuemol.resetProp(exporter, 'aoResDiv');
+            print('reset=' + exporter.hatchEnable + ':' + exporter.aoResDiv);
+        "#.replace("$OUTPUT", &serde_json::to_string(&path.to_string_lossy()).unwrap());
+        let (log, _) = app.run_script_js(&source).unwrap();
+        assert_eq!(log, "legacy=0:false:false:false:0\nplain=umbreon:24:12:saved:0.16:-1\nao=0:7\ninvalid-backend\ninvalid-settings\nnpr=umbreon_npr:false:true:albedo:albedo\ntemplate=true:true\nlog=true:true:true:true\nreset=false:0\n");
+        let bytes = std::fs::read(path).unwrap();
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(u32::from_be_bytes(bytes[16..20].try_into().unwrap()), 24);
+        assert_eq!(u32::from_be_bytes(bytes[20..24].try_into().unwrap()), 12);
+        assert!(bytes.windows(4).any(|value| value == b"pHYs"));
     }
 
     #[cfg(feature = "scripting")]

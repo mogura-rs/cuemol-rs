@@ -80,7 +80,13 @@ pub fn lighting_controls(ui: &mut egui::Ui, p: &mut UmbreonRenderParams, npr: bo
             ui.checkbox(&mut p.ao_multi_scale, "Contact and shape scales");
             ui.checkbox(&mut p.ao_bent_normal, "Directional ambient");
             ui.checkbox(&mut p.ao_low_discrepancy, "Low discrepancy sampling");
-            ui.checkbox(&mut p.ao_per_pixel, "Gather once per output pixel");
+            let mut per_pixel = p.ao_res_div < 0 || p.ao_res_div > 1;
+            if ui
+                .checkbox(&mut per_pixel, "Gather once per output pixel")
+                .changed()
+            {
+                p.ao_res_div = if per_pixel { -1 } else { 0 };
+            }
         }
         let mut denoise = if p.denoiser == 2 || (p.gi_denoise && p.gi_denoiser == 2) {
             "OIDN"

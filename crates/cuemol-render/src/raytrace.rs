@@ -1,7 +1,10 @@
 mod bvh;
 mod denoise;
 mod edges;
+mod exporter_settings;
+pub use exporter_settings::UmbreonExportOptions;
 mod lighting;
+mod sampling;
 #[cfg(target_arch = "wasm32")]
 pub use denoise::render_umbreon_snapshot_async;
 pub use denoise::{prepare_oidn_render, OidnRender};
@@ -19,7 +22,9 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU32, Ordering},
     Arc, Mutex,
 };
-use std::thread::{self, JoinHandle};
+#[cfg(not(target_arch = "wasm32"))]
+use std::thread;
+use std::thread::JoinHandle;
 
 use cuemol_core::{CueMolError, Result, Vector4};
 use cuemol_gfx::ColorSpec;
@@ -81,6 +86,8 @@ pub struct UmbreonRenderParams {
     pub perspective: bool,
     pub use_clip_z: bool,
     pub supersample: i32,
+    pub aa_mode: i32,
+    pub aa_depth: i32,
     pub ao_samples: i32,
     pub ao_distance: f64,
     pub ao_intensity: f64,
@@ -89,7 +96,7 @@ pub struct UmbreonRenderParams {
     pub ao_bent_normal: bool,
     pub ao_low_discrepancy: bool,
     pub ao_falloff_power: f64,
-    pub ao_per_pixel: bool,
+    pub ao_res_div: i32,
     pub shadows: bool,
     pub shadow_samples: i32,
     pub light_radius: f64,
@@ -123,6 +130,8 @@ impl Default for UmbreonRenderParams {
             perspective: true,
             use_clip_z: true,
             supersample: 3,
+            aa_mode: 0,
+            aa_depth: 0,
             ao_samples: 0,
             ao_distance: 1.0e20,
             ao_intensity: 1.0,
@@ -131,7 +140,7 @@ impl Default for UmbreonRenderParams {
             ao_bent_normal: true,
             ao_low_discrepancy: true,
             ao_falloff_power: 0.,
-            ao_per_pixel: true,
+            ao_res_div: -1,
             shadows: false,
             shadow_samples: 1,
             light_radius: 0.0,
@@ -190,6 +199,8 @@ pub struct UmbreonSceneExporter {
     input: Option<UmbreonRenderInput>,
     async_render: Option<AsyncRender>,
     was_cancelled: bool,
+    options: UmbreonExportOptions,
+    render_log: Arc<Mutex<String>>,
 }
 
 impl Default for UmbreonSceneExporter {
@@ -202,10 +213,19 @@ impl UmbreonSceneExporter {
     pub fn new() -> Self {
         Self {
             state: ExportState::new("umbreon", "Umbreon ray-traced image (*.png)", "*.png"),
-            params: UmbreonRenderParams::default(),
+            params: UmbreonRenderParams {
+                ao_diffuse_factor: 0.,
+                ao_multi_scale: false,
+                ao_bent_normal: false,
+                ao_low_discrepancy: false,
+                ao_res_div: 0,
+                ..Default::default()
+            },
             input: None,
             async_render: None,
             was_cancelled: false,
+            options: UmbreonExportOptions::default(),
+            render_log: Arc::default(),
         }
     }
 
@@ -450,52 +470,65 @@ impl UmbreonSceneExporter {
             .as_ref()
             .ok_or_else(|| CueMolError::invalid_argument("umbreon render input is not set"))?;
         let params = self.resolved_params();
-        let frame =
-            render_umbreon_snapshot(&input.snapshot, &input.camera, input.background, &params)?;
+        let hatch = self.prepared_hatch();
+        self.log_start(&params);
+        let result = exporter_settings::render(input, &params, hatch.as_ref(), None);
+        Self::log_result(&self.render_log, &result, false);
+        let frame = result?;
         self.write_frame(&frame)?;
         Ok(frame)
     }
 
     pub fn begin_render(&mut self) -> Result<()> {
-        if self.async_render.is_some() {
-            return Err(CueMolError::invalid_argument(
-                "umbreon render already in progress",
-            ));
+        #[cfg(target_arch = "wasm32")]
+        {
+            Err(CueMolError::invalid_argument("Asynchronous file exporters require a native filesystem; use browser rendering commands"))
         }
-        let input = self
-            .input
-            .clone()
-            .ok_or_else(|| CueMolError::invalid_argument("umbreon render input is not set"))?;
-        let params = self.resolved_params();
-        let progress = Arc::new(AtomicU32::new(0));
-        let phase = Arc::new(Mutex::new("Rendering"));
-        let cancel = Arc::new(AtomicBool::new(false));
-        let thread_progress = Arc::clone(&progress);
-        let thread_phase = Arc::clone(&phase);
-        let thread_cancel = Arc::clone(&cancel);
-        let handle = thread::spawn(move || {
-            let result = render_umbreon_snapshot_impl(
-                &input.snapshot,
-                &input.camera,
-                input.background,
-                &params,
-                Some((&thread_progress, &thread_cancel)),
-            );
-            *thread_phase.lock().unwrap() = if thread_cancel.load(Ordering::Relaxed) {
-                "Cancelled"
-            } else {
-                "Done"
-            };
-            result
-        });
-        self.was_cancelled = false;
-        self.async_render = Some(AsyncRender {
-            handle,
-            progress,
-            phase,
-            cancel,
-        });
-        Ok(())
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if self.async_render.is_some() {
+                return Err(CueMolError::invalid_argument(
+                    "umbreon render already in progress",
+                ));
+            }
+            let input = self
+                .input
+                .clone()
+                .ok_or_else(|| CueMolError::invalid_argument("umbreon render input is not set"))?;
+            let params = self.resolved_params();
+            let hatch = self.prepared_hatch();
+            self.log_start(&params);
+            let render_log = Arc::clone(&self.render_log);
+            let progress = Arc::new(AtomicU32::new(0));
+            let phase = Arc::new(Mutex::new("Rendering"));
+            let cancel = Arc::new(AtomicBool::new(false));
+            let thread_progress = Arc::clone(&progress);
+            let thread_phase = Arc::clone(&phase);
+            let thread_cancel = Arc::clone(&cancel);
+            let handle = thread::spawn(move || {
+                let result = exporter_settings::render(
+                    &input,
+                    &params,
+                    hatch.as_ref(),
+                    Some((&thread_progress, &thread_cancel)),
+                );
+                Self::log_result(&render_log, &result, thread_cancel.load(Ordering::Relaxed));
+                *thread_phase.lock().unwrap() = if thread_cancel.load(Ordering::Relaxed) {
+                    "Cancelled"
+                } else {
+                    "Done"
+                };
+                result
+            });
+            self.was_cancelled = false;
+            self.async_render = Some(AsyncRender {
+                handle,
+                progress,
+                phase,
+                cancel,
+            });
+            Ok(())
+        }
     }
 
     pub fn get_render_progress(&self) -> f64 {
@@ -568,7 +601,7 @@ impl UmbreonSceneExporter {
                 "umbreon output path is empty",
             ));
         }
-        fs::write(path, encode_umbreon_png(frame)?)?;
+        fs::write(path, encode_umbreon_png_with_dpi(frame, self.options.dpi)?)?;
         self.state.write();
         Ok(())
     }
@@ -693,6 +726,50 @@ fn render_float(
     async_state: Option<(&AtomicU32, &AtomicBool)>,
     hatch: Option<&npr::ResolvedHatch>,
 ) -> Result<FloatFrame> {
+    let spatial_sampling = !params.use_gi
+        && ((params.aa_mode > 0 && (params.supersample > 1 || params.aa_depth > 1))
+            || (params.ao_samples > 0
+                && (params.ao_res_div > 1 || (params.ao_res_div < 0 && params.supersample > 1))));
+    if params.height > 128 && spatial_sampling {
+        let started = Instant::now();
+        let components = if params.transparent_background { 4 } else { 3 };
+        let length = usize::try_from(params.width)
+            .ok()
+            .and_then(|width| width.checked_mul(params.height as usize))
+            .and_then(|pixels| pixels.checked_mul(components))
+            .filter(|length| *length > 0)
+            .ok_or_else(|| CueMolError::invalid_argument("Invalid render dimensions"))?;
+        let mut pixels = Vec::new();
+        pixels
+            .try_reserve_exact(length)
+            .map_err(|e| CueMolError::invalid_argument(format!("cannot allocate render: {e}")))?;
+        let index =
+            RayIndex::with_pixel_scale(snapshot, (camera.zoom() / params.height as f64) as f32);
+        for start in (0..params.height as usize).step_by(128) {
+            let tile = render_float_region(
+                snapshot,
+                camera,
+                background,
+                params,
+                async_state,
+                hatch,
+                start..(start + 128).min(params.height as usize),
+                Some(&index),
+            )?;
+            if tile.pixels.is_empty() {
+                pixels.clear();
+                break;
+            }
+            pixels.extend(tile.pixels);
+        }
+        return Ok(FloatFrame {
+            width: params.width,
+            height: params.height,
+            components: components as i32,
+            pixels,
+            render_seconds: started.elapsed().as_secs_f64(),
+        });
+    }
     render_float_region(
         snapshot,
         camera,
@@ -742,11 +819,7 @@ fn render_float_region(
         .map_err(|e| CueMolError::invalid_argument(format!("cannot allocate render: {e}")))?;
     pixels.resize(length, 0f32);
     let started = Instant::now();
-    let aspect = width as f64 / height as f64;
-    let half_h = camera.zoom() * 0.5;
-    let half_w = half_h * aspect;
-    let inverse_rotation = camera.rotation().inv()?.to_matrix();
-    let camera_center = camera.center();
+    let rays = sampling::CameraRays::new(camera, width, height, params.perspective)?;
     let owned_index;
     let index = if let Some(index) = supplied_index {
         index
@@ -758,71 +831,95 @@ fn render_float_region(
         &owned_index
     };
 
+    let cancel = async_state.map(|(_, cancel)| cancel);
+    let margin = if params.aa_mode > 0 && !params.use_gi {
+        3
+    } else {
+        0
+    };
+    let ao_region = region.start.saturating_sub(margin)..(region.end + margin).min(height);
+    let ao_grid =
+        sampling::AoGrid::build(snapshot, index, camera, params, &rays, ao_region, cancel)?;
+    let shade = |x: f64, y: f64, cache: &std::cell::RefCell<lighting::PixelCache>| {
+        cache
+            .borrow_mut()
+            .set_position([x / width as f64, y / height as f64]);
+        let ray = rays.at(x, y);
+        if let Some(hatch) = hatch {
+            npr::trace_npr(
+                snapshot,
+                index,
+                ray,
+                camera,
+                background,
+                params,
+                hatch,
+                (x * samples as f64) as f32,
+                (y * samples as f64) as f32,
+                Some(cache),
+            )
+        } else {
+            trace_sample(
+                snapshot,
+                index,
+                ray,
+                camera,
+                background,
+                params,
+                Some(cache),
+            )
+        }
+    };
+    let adaptive = sampling::AdaptiveGrid::build(
+        index,
+        camera,
+        params,
+        &rays,
+        region.clone(),
+        |x, y| {
+            shade(
+                x,
+                y,
+                &lighting::PixelCache::with_grid(camera.zoom() / height as f64, ao_grid.as_ref()),
+            )
+        },
+        cancel,
+    )?;
     let render_row = |y: usize, row: &mut [f32]| {
         for x in 0..width {
-            if async_state.is_some_and(|(_, cancel)| cancel.load(Ordering::Relaxed)) {
+            if cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed)) {
                 return;
             }
-            let cache = lighting::PixelCache::new(camera.zoom() / height as f64);
-            let mut accumulated = [0.0_f64; 4];
-            for sy in 0..samples {
-                for sx in 0..samples {
-                    let fx = (x as f64 + (sx as f64 + 0.5) / samples as f64) / width as f64;
-                    let fy = (y as f64 + (sy as f64 + 0.5) / samples as f64) / height as f64;
-                    let eye_x = (fx * 2.0 - 1.0) * half_w;
-                    let eye_y = (1.0 - fy * 2.0) * half_h;
-                    let (eye_origin, eye_direction) = if params.perspective {
-                        (
-                            Vector4::new3(0.0, 0.0, camera.cam_dist()),
-                            normalize(Vector4::new3(eye_x, eye_y, -camera.cam_dist())),
-                        )
-                    } else {
-                        (
-                            Vector4::new3(eye_x, eye_y, camera.cam_dist()),
-                            Vector4::new3(0.0, 0.0, -1.0),
-                        )
-                    };
-                    let origin = camera_center + transform_direction(inverse_rotation, eye_origin);
-                    let direction = normalize(transform_direction(inverse_rotation, eye_direction));
-                    let ray = Ray { origin, direction };
-                    let sample = if let Some(hatch) = hatch {
-                        npr::trace_npr(
-                            snapshot,
-                            &index,
-                            ray,
-                            camera,
-                            background,
-                            params,
-                            hatch,
-                            (x * samples + sx) as f32 + 0.5,
-                            (y * samples + sy) as f32 + 0.5,
-                            Some(&cache),
-                        )
-                    } else {
-                        trace_sample(
-                            snapshot,
-                            &index,
-                            ray,
-                            camera,
-                            background,
-                            params,
-                            Some(&cache),
-                        )
-                    };
-                    for index in 0..4 {
-                        accumulated[index] += sample[index];
+            let cache =
+                lighting::PixelCache::with_grid(camera.zoom() / height as f64, ao_grid.as_ref());
+            let center = adaptive.as_ref().and_then(|grid| grid.center(x, y));
+            let (accumulated, divisor) = if let Some(center) = center {
+                (center, 1.)
+            } else {
+                let samples = adaptive.as_ref().map_or(samples, |grid| grid.samples);
+                let mut accumulated = [0.; 4];
+                for sy in 0..samples {
+                    for sx in 0..samples {
+                        let sample = shade(
+                            x as f64 + (sx as f64 + 0.5) / samples as f64,
+                            y as f64 + (sy as f64 + 0.5) / samples as f64,
+                            &cache,
+                        );
+                        for i in 0..4 {
+                            accumulated[i] += sample[i];
+                        }
                     }
                 }
-            }
-            let divisor = (samples * samples) as f64;
+                (accumulated, (samples * samples) as f64)
+            };
             let offset = x * components;
-            for index in 0..components {
-                let denominator = if components == 4 && index < 3 {
+            for i in 0..components {
+                let denominator = if components == 4 && i < 3 {
                     accumulated[3].max(1e-12)
                 } else {
                     divisor
                 };
-                row[offset + index] = (accumulated[index] / denominator).max(0.0) as f32;
+                row[offset + i] = (accumulated[i] / denominator).max(0.) as f32;
             }
         }
     };
@@ -837,7 +934,7 @@ fn render_float_region(
             let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
             if let Some((progress, _)) = async_state {
                 progress.fetch_max(
-                    ((done as f64 / height as f64) * 1_000_000.).round() as u32,
+                    (((region.start + done) as f64 / height as f64) * 1_000_000.).round() as u32,
                     Ordering::Relaxed,
                 );
             }
@@ -1716,7 +1813,12 @@ fn cross(left: Vector4, right: Vector4) -> Vector4 {
     )
 }
 
+#[cfg(test)]
 fn encode_umbreon_png(frame: &UmbreonFrame) -> Result<Vec<u8>> {
+    encode_umbreon_png_with_dpi(frame, 0.)
+}
+
+fn encode_umbreon_png_with_dpi(frame: &UmbreonFrame, dpi: f64) -> Result<Vec<u8>> {
     let width = u32::try_from(frame.width)
         .map_err(|_| CueMolError::invalid_argument("invalid Umbreon frame width"))?;
     let height = u32::try_from(frame.height)
@@ -1733,6 +1835,14 @@ fn encode_umbreon_png(frame: &UmbreonFrame) -> Result<Vec<u8>> {
                 ));
             }
         });
+        if dpi.is_finite() && dpi > 0. {
+            let ppm = (39.37 * dpi + 0.5) as u32;
+            encoder.set_pixel_dims(Some(png::PixelDimensions {
+                xppu: ppm,
+                yppu: ppm,
+                unit: png::Unit::Meter,
+            }));
+        }
         encoder.set_depth(png::BitDepth::Eight);
         encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
         let mut writer = encoder

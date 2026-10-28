@@ -124,6 +124,9 @@ pub fn call_tool(
                         "aoGather" => parsed
                             .as_str()
                             .is_some_and(|v| matches!(v, "Per output pixel" | "Per shading hit")),
+                        "aaMode" => parsed.as_i64().is_some_and(|v| (0..=1).contains(&v)),
+                        "aaDepth" => parsed.as_i64().is_some_and(|v| (0..=128).contains(&v)),
+                        "aoResDiv" => parsed.as_i64().is_some_and(|v| (-1..=128).contains(&v)),
                         "denoiser" => parsed.as_i64().is_some_and(|v| (0..=2).contains(&v)),
                         "denoise" => parsed.as_str().is_some_and(|v| {
                             matches!(v, "OIDN" | "Bilateral" | "A-trous" | "None")
@@ -231,6 +234,9 @@ fn split_settings(input: &str) -> Result<Vec<&str>> {
 }
 
 const RENDER_KEYS: &[&str] = &[
+    "aaMode",
+    "aaDepth",
+    "aoResDiv",
     "aoDiffuseFactor",
     "aoMultiScale",
     "aoBentNormal",

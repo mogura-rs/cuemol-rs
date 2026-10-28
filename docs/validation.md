@@ -1115,3 +1115,43 @@ longer publish button rectangles to the UI test interface. Previously a click
 could use the preceding menu's coordinates and toggle a label instead of
 centering. Remaining exporter declarations are tracked by the QIF audit; this
 phase does not claim that the full reference API has already passed.
+
+### Exporter settings, adaptive sampling and complete QIF declaration coverage
+
+The Umbreon exporter now exposes the remaining 28 properties and three methods
+through live typed bindings. `applyRenderSettings` uses the same settings mapper
+as the command layer, retains the camera, converts physical dimensions with DPI,
+and applies the reference AO/GI/NPR switches. Disabling AO retains its inactive
+parameters. Non-GI lighting uses the reference ambient fraction, and NPR disables
+GI. Native synchronous and asynchronous exports use the actual hatching renderer,
+including independently selected paper and ink models, custom layers and tone
+curves. PNG output includes physical pixel density. Invalid optional presets or
+specifications fall back with diagnostics; `getRenderLog` drains these messages
+and actual render timing instead of returning a placeholder.
+
+Adaptive AA detects geometry, color, normal and depth boundaries and refines their
+neighborhoods. Additional primary-ray probes preserve thin geometry. Reduced AO
+gathers a separate grid, interpolates with depth/normal guidance and falls back to
+per-hit AO when a sample is incompatible. GI uses grid AA and per-hit AO. Native
+auxiliary buffers cover at most 128 output rows plus sampling margins; browser
+tiles share global sample coordinates. Tests compare tiled and untiled output
+exactly, including a 259-row image. This is the Rust BVH implementation; these
+checks do not establish pixel identity with the external Embree integrator.
+
+The seven reference-QIF audits now pass for all 166 registered classes, including
+properties, defaults, methods, inheritance and script construction. These audits
+check the declared API; individual behavior still requires the domain, script,
+image and interaction checks recorded here. The complete shared scripting suite
+passes 225 tests, native GUI passes 167, and Tauri passes 144 with three explicit
+GPU checks excluded. Renderer tests pass 77 cases, including the independent C++
+hatch comparisons, real PNG color/DPI output, settings retention, adaptive edges,
+guided AO, buffer bounds and diagnostic draining. Command compatibility passes
+14 cases. All 49 browser tests pass, including both GPU backends, OIDN, navigation,
+trajectory access, maps, scripts, rendering cancellation and mock AI providers.
+
+Browser image commands use the shared renderer and browser downloads. The script
+exporter's native file thread API now returns a descriptive error on WASM instead
+of attempting unsupported thread creation. Rebuilt browser checks exercise this
+guard along with exporter settings, adaptive AA/AO, lighting and NPR output.
+Public workflows and release installation remain unexecuted because these
+changes have not been pushed.

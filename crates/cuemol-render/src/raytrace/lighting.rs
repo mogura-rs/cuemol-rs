@@ -442,19 +442,30 @@ pub(super) fn shade(
 struct CachedSample {
     hit: Hit,
     group: Option<usize>,
-    ao: Occlusion,
     indirect: Option<[f64; 3]>,
 }
-pub(super) struct PixelCache {
+pub(super) struct PixelCache<'a> {
+    grid: Option<&'a super::sampling::AoGrid>,
+    uv: [f64; 2],
     radius: f64,
     values: Vec<CachedSample>,
 }
-impl PixelCache {
+impl<'a> PixelCache<'a> {
     pub fn new(radius: f64) -> RefCell<Self> {
         RefCell::new(Self {
+            grid: None,
+            uv: [0.; 2],
             radius,
             values: Vec::with_capacity(4),
         })
+    }
+    pub fn with_grid(radius: f64, grid: Option<&'a super::sampling::AoGrid>) -> RefCell<Self> {
+        let cache = Self::new(radius);
+        cache.borrow_mut().grid = grid;
+        cache
+    }
+    pub fn set_position(&mut self, uv: [f64; 2]) {
+        self.uv = uv;
     }
     fn matching(&self, hit: Hit, group: Option<usize>) -> Option<CachedSample> {
         self.values.iter().copied().find(|v| {
@@ -475,20 +486,13 @@ pub(super) fn cached_occlusion(
     group: Option<usize>,
     cache: Option<&RefCell<PixelCache>>,
 ) -> Occlusion {
-    let cache = cache.filter(|_| p.ao_per_pixel);
-    if let Some(v) = cache.and_then(|c| c.borrow().matching(hit, group)) {
-        return v.ao;
+    if let Some(cache) = cache {
+        let cache = cache.borrow();
+        if let Some(ao) = cache.grid.and_then(|grid| grid.sample(cache.uv, hit)) {
+            return ao;
+        }
     }
-    let ao = occlusion(snapshot, index, hit, p, group);
-    if let Some(c) = cache {
-        c.borrow_mut().values.push(CachedSample {
-            hit,
-            group,
-            ao,
-            indirect: None,
-        });
-    }
-    ao
+    occlusion(snapshot, index, hit, p, group)
 }
 fn cached_indirect(
     snapshot: &RenderSceneSnapshot,
@@ -518,12 +522,6 @@ fn cached_indirect(
             c.values.push(CachedSample {
                 hit,
                 group,
-                ao: Occlusion {
-                    open: 1.,
-                    contact: 1.,
-                    shape: 1.,
-                    bent: hit.normal,
-                },
                 indirect: Some(e),
             });
         }

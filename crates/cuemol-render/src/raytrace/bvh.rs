@@ -78,6 +78,16 @@ pub(super) struct RayIndex<'a> {
     pub edges: super::edges::EdgeGroups,
 }
 impl<'a> RayIndex<'a> {
+    pub fn geometry_id(&self, hit: Hit) -> (u8, usize) {
+        match self.primitives.get(hit.order).map(|p| p.shape) {
+            Some(Shape::Atom(id)) => (0, id),
+            Some(Shape::Bond(id)) => (1, id),
+            Some(Shape::Triangle(id, _)) => (2, id),
+            Some(Shape::OutlineTriangle(id, _)) => (3, id),
+            None => (4, hit.order),
+        }
+    }
+
     pub fn snapshot(&self) -> &'a RenderSceneSnapshot {
         self.snapshot
     }

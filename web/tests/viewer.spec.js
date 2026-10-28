@@ -352,6 +352,36 @@ test('browser NPR styles and edited hatch layers produce distinct transparent im
   expect(errors).toEqual([]);
 });
 
+test('scripted exporter settings and adaptive AO share browser rendering behavior',async({page},testInfo)=>{
+  await ready(page);await load(page,'adaptive.pdb',Buffer.from(structure));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  let state=await call(page,'execute_script',{source:`
+    var settings=scene.getCreateAppData('render','RenderSettings');
+    settings.width=48;settings.height=48;settings.backend='umbreon';
+    settings.umbreon.useGI=false;settings.umbreon.ambientFraction=0.9;
+    settings.umbreon.aoEnabled=true;settings.umbreon.aoSamples=8;
+    settings.umbreon.aoDistance=3;settings.umbreon.supersample=3;settings.umbreon.denoise='None';
+    var exporter=cuemol.UmbreonSceneExporter();
+    print(exporter.applyRenderSettings(settings,'')+':'+exporter.ambientFraction+':'+exporter.aoResDiv+':'+exporter.aoMultiScale);
+    exporter.aaMode=1;exporter.aaDepth=6;exporter.hatchEnable=true;
+    exporter.hatchBase='albedo';exporter.hatchInk='fixed';exporter.hatchToneCurve=1.5;
+    print(exporter.aaMode+':'+exporter.aaDepth+':'+exporter.hatchBase+':'+exporter.hatchInk+':'+exporter.hatchToneCurve);
+    print(exporter.getHatchStyleSpec('manga').includes('layer:')+':'+(exporter.getHatchStyleSpec('missing')==='')+':'+(exporter.getRenderLog()===''));
+    cuemol.resetProp(exporter,'hatchEnable');print(exporter.hatchEnable);
+    exporter.attach(scene);try{exporter.beginRender();}catch(error){print(error.message.includes('native filesystem'));}
+  `});
+  expect(JSON.parse(state.message).log).toBe('umbreon:0.16:-1:true\n1:6:albedo:fixed:1.5\ntrue:true:true\nfalse\ntrue\n');
+  await call(page,'set_render_settings',{settings:'umbreon.aaMode=1; umbreon.aaDepth=6; umbreon.aoResDiv=-1; transparentBg=true'});
+  const adaptive=JSON.parse((await call(page,'get_screenshot')).message)._image;
+  const decoded=PNG.sync.read(Buffer.from(adaptive,'base64'));
+  expect(decoded.width).toBe(48);expect(decoded.height).toBe(48);
+  expect(Array.from({length:48*48},(_,i)=>decoded.data[i*4+3]).some(alpha=>alpha>0&&alpha<255)).toBe(true);
+  await call(page,'set_render_settings',{settings:'umbreon.aaMode=0; umbreon.aoResDiv=0'});
+  const grid=JSON.parse((await call(page,'get_screenshot')).message)._image;
+  expect(grid).not.toBe(adaptive);
+  await testInfo.attach('adaptive-ao',{body:Buffer.from(adaptive,'base64'),contentType:'image/png'});
+});
+
 test('browser lighting settings alter traced illumination',async({page})=>{
   await ready(page);await load(page,'lighting.pdb',Buffer.from(structure));
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);

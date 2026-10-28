@@ -216,7 +216,17 @@ Configuration inspection does not execute startup scripts. Download caches use
 `$XDG_CACHE_HOME/cuemol` or `~/.cache/cuemol`, with `CUEMOL_CACHE_DIR` as an override.
 
 Umbreon is implemented in Rust and uses a BVH for primary, shadow, AO, and GI
-rays. USalign is compiled from the vendored reference implementation; its source
+rays. Its script exporter applies typed scene render settings, including physical
+image size, DPI, lighting, adaptive antialiasing, reduced-resolution AO and NPR
+styles. `getRenderLog()` drains actual render diagnostics; `getHatchStyleSpec()`
+returns an editable preset. Adaptive sampling preserves silhouette detail, and
+AO interpolation rejects depth or normal discontinuities. Auxiliary sampling
+buffers are bounded to strips. Native file exporters support asynchronous
+rendering; browser image commands use the same renderer and browser downloads.
+Script file-export threads require a native filesystem and report an error in
+the browser. The Rust integrator does not promise pixel identity with Embree.
+
+USalign is compiled from the vendored reference implementation; its source
 and license are retained. Release tool bundles contain APBS, PDB2PQR, FFmpeg, and the Intel OIDN runtime,
 including a private PDB2PQR runtime. They do not require a system Python install.
 Tool lookup checks configured paths, `CUEMOL_TOOLS_DIR`, the binary/application
