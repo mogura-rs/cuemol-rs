@@ -7,7 +7,7 @@ export function installViewInput(canvas, send, status) {
       if (event.clientX >= r[0] && event.clientX <= r[0]+r[2] && event.clientY >= r[1] && event.clientY <= r[1]+r[3]) return false;
     }
     const rects = ui?.rects;
-    for (const name of ['Navigate', 'Rect Select', 'Measure selection', 'Fit scene']) {
+    for (const name of ['Navigate', 'Rect Select', 'Lasso', 'Distance', 'Angle', 'Torsion', 'Add Bond', 'Fit scene']) {
       const r = rects?.[name];
       if (r && event.clientX >= r[0] && event.clientX <= r[0]+r[2] && event.clientY >= r[1] && event.clientY <= r[1]+r[3]) return false;
     }

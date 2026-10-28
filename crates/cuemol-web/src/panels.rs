@@ -233,6 +233,11 @@ impl App {
             }
             let mut momentum = self.state.config_value("cuemol2.ui.mouse-momentum-scroll") == "true";
             if ui.checkbox(&mut momentum, "Momentum scroll").changed() { self.state.put_config_value("cuemol2.ui.mouse-momentum-scroll", momentum.to_string()); input_changed = true; }
+            for (key,label,default) in [("view_input:hover-info","Hover info",true),("view_input:hover-highlight","Hover highlight",true),("cuemol2.ui.mouse-emulate-rbutton","Emulate mouse R button",false)] {
+                let raw=self.state.config_value(key); let mut value=if raw.is_empty(){default}else{raw=="true"};
+                let response=ui.checkbox(&mut value,label); self.record_ui_rect(label,&response);
+                if response.changed(){self.state.put_config_value(key,value.to_string());input_changed=true;}
+            }
             if input_changed {
                 self.state.view_input_config_mut().set_style("");
                 self.settings_text = self.state.config_text();

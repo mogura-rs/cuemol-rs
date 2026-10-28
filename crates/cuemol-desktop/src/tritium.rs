@@ -341,6 +341,8 @@ impl GuiApplication {
                         }
                     });
                     egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .min_scrolled_height(0.0)
                         .stick_to_bottom(true)
                         .show(ui, |ui| {
                             for line in &self.log_lines {
@@ -376,54 +378,18 @@ impl GuiApplication {
                 egui::Frame::popup(ui.style())
                     .inner_margin(3)
                     .show(ui, |ui| {
-                        if shell::icon_button(
+                        let (_, command, changed) = cuemol_ui::navigation::palette(
                             ui,
-                            Icon::Rotate,
-                            "Navigate (N)",
-                            self.interaction_mode == InteractionMode::Rotate,
-                            egui::vec2(30., 30.),
-                        )
-                        .clicked()
-                        {
-                            self.interaction_mode = InteractionMode::Rotate;
+                            &mut self.navigation,
+                            &mut self.state,
+                        );
+                        if let Some(command) = command {
+                            self.apply_navigation_commands(camera, vec![command]);
                         }
-                        if shell::icon_button(
-                            ui,
-                            Icon::Selection,
-                            "Rect Select (B)",
-                            self.interaction_mode == InteractionMode::RectSelect,
-                            egui::vec2(30., 30.),
-                        )
-                        .clicked()
-                        {
-                            self.interaction_mode = InteractionMode::RectSelect;
-                        }
-                        ui.separator();
-                        if shell::icon_button(
-                            ui,
-                            Icon::Measure,
-                            "Measure selection",
-                            false,
-                            egui::vec2(30., 30.),
-                        )
-                        .clicked()
-                        {
-                            if let Some(value) = self.measure_selection() {
-                                self.set_status(value);
-                            } else {
-                                self.activity = Some(Activity::Selection);
+                        if changed {
+                            if let Err(error) = self.persist_config_state() {
+                                self.set_status(error);
                             }
-                        }
-                        if shell::icon_button(
-                            ui,
-                            Icon::Fit,
-                            "Fit scene",
-                            false,
-                            egui::vec2(30., 30.),
-                        )
-                        .clicked()
-                        {
-                            camera.fit_snapshot(&self.snapshot);
                         }
                     });
             });
@@ -467,6 +433,34 @@ mod tests {
             .viewport_rect
             .is_some_and(|rect| rect.left() >= 44. && rect.width() > 300. && rect.height() > 100.));
     }
+    #[test]
+    fn log_growth_keeps_the_viewport_fixed_during_atom_clicks() {
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.bottom_tab = BottomTab::Console;
+        app.show_bottom_panel = true;
+        app.bottom_panel_height = 200.0;
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1024., 768.),
+            )),
+            ..Default::default()
+        };
+        for _ in 0..4 {
+            let _ = ctx.run(input.clone(), |ctx| app.ui(ctx, &mut camera));
+        }
+        let viewport = app.viewport_rect.unwrap();
+        for i in 0..100 {
+            app.log_lines.push(format!("Picked atom {i}"));
+        }
+        for _ in 0..4 {
+            let _ = ctx.run(input.clone(), |ctx| app.ui(ctx, &mut camera));
+        }
+        assert_eq!(app.viewport_rect.unwrap(), viewport);
+    }
+
     #[test]
     fn inspector_property_edits_form_a_reversible_scene_change() {
         let mut app = GuiApplication::new();

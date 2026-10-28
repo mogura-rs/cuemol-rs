@@ -63,7 +63,10 @@ share the same application state and command API.
 | Shift + left drag, vertical | Zoom |
 | Left + right drag, horizontal | Move the view depth |
 | Left + right drag, vertical | Roll the view |
-| Double-click an atom | Center on the atom |
+| Click an atom | Toggle its name label |
+| Double-click an atom | Toggle its residue selection |
+| Shift + double-click | Extend selection from the previous residue in the same chain |
+| Atom context menu | Center, select, or expand the selection |
 | `C` | Center the selection |
 | `F` | Fit the selection |
 | `Home` | Fit the scene |
@@ -75,6 +78,16 @@ to zoom. Preset bindings and custom `UserViewConf` styles use the same resolver 
 scripted `ViewInputConfig` changes. Dragging starts at two logical pixels; mixed
 operations lock to the dominant axis until release. The native and browser
 viewports share this input calculation.
+
+The viewport palette and `N`, `B`, `L`, `D`, `A`, `T`, `E` keys select navigation,
+rectangle selection, lasso selection, distance, angle, torsion, and bond editing.
+Rectangle and lasso drags replace the selection; hold Shift to add atoms. A click
+without a drag retains the atom-label behavior. Measurement tools collect two,
+three, or four atoms, and Escape cancels a pending set. Bond editing requires two
+different atoms in one molecule. The options buttons choose a measurement label
+set or remove non-standard bonds. Each completed edit has one undo entry.
+The palette cap and **View > Tool palette** share a persisted collapse setting.
+Hover information and highlighting are configurable in Settings.
 
 Load an MD topology and trajectory through the MD dialog or `load_trajectory`.
 GRO, PDB, mmCIF, PSF, AMBER topology, SDF, and MOL2 topologies are accepted.

@@ -1305,17 +1305,25 @@ impl MolObject {
         if let Ok(index) = aid.parse::<usize>() {
             self.mol.atoms().get(index)
         } else {
-            let parts = aid.split('.').collect::<Vec<_>>();
+            let parts = aid.rsplitn(3, '.').collect::<Vec<_>>();
             if parts.len() != 3 {
                 return None;
             }
-            let chain = parts[0];
-            let resid = parts[1].parse::<i32>().ok();
-            let name = parts[2];
+            let chain = parts[2];
+            let resid = parts[1];
+            let (name, alt) = parts[0]
+                .rsplit_once(':')
+                .map(|(name, alt)| (name, alt.chars().next()))
+                .unwrap_or((parts[0], None));
             self.mol.atoms().iter().find(|atom| {
                 atom.chain_id == chain
-                    && Some(atom.res_id) == resid
+                    && format!(
+                        "{}{}",
+                        atom.res_id,
+                        atom.ins_code.map(|c| c.to_string()).unwrap_or_default()
+                    ) == resid
                     && atom.name.trim().eq_ignore_ascii_case(name)
+                    && alt.is_none_or(|alt| atom.alt_loc == Some(alt))
             })
         }
     }

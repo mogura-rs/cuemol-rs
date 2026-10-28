@@ -17,6 +17,9 @@ pub use agent::{AgentCall, AgentPanel};
 pub mod shell;
 
 #[cfg(feature = "egui")]
+pub mod navigation;
+
+#[cfg(feature = "egui")]
 mod inspector;
 #[cfg(feature = "egui")]
 pub use inspector::{Inspector, InspectorTarget};

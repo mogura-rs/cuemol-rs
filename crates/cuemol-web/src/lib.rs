@@ -1,5 +1,7 @@
 #![cfg(target_arch = "wasm32")]
 mod input;
+mod navigation;
+use cuemol_command::navigation::{AtomHit, Navigation, Tool as ViewportTool};
 mod panels;
 mod trajectory;
 mod tritium;
@@ -153,7 +155,12 @@ struct App {
     agent: cuemol_ui::AgentPanel,
     activity: Option<cuemol_ui::shell::Activity>,
     inspector: cuemol_ui::Inspector,
-    rectangle_select: bool,
+    navigation: Navigation,
+    lasso_points: Vec<egui::Pos2>,
+    hover_hit: Option<AtomHit>,
+    hover_sample: Option<(egui::Pos2, u64)>,
+    pick_atoms: Vec<cuemol_render::RenderAtom>,
+    viewport_menu: Option<(egui::Pos2, AtomHit)>,
     rectangle_start: Option<egui::Pos2>,
     inspector_target: Option<cuemol_ui::InspectorTarget>,
     bottom_tab: String,
@@ -278,7 +285,12 @@ impl App {
                 .map(|s| cuemol_ui::shell::Activity::parse(&s))
                 .unwrap_or(Some(cuemol_ui::shell::Activity::Explorer)),
             inspector: Default::default(),
-            rectangle_select: false,
+            navigation: Navigation::default(),
+            lasso_points: Vec::new(),
+            hover_hit: None,
+            hover_sample: None,
+            pick_atoms: Vec::new(),
+            viewport_menu: None,
             rectangle_start: None,
             inspector_target: None,
             bottom_tab: "Console".into(),
@@ -347,6 +359,7 @@ impl App {
         }
     }
     fn restore_history(&mut self, snapshot: HistoryEntry) {
+        self.navigation.cancel();
         self.selection = snapshot.selection;
         self.state = snapshot.state;
         self.camera = snapshot.camera;
@@ -357,6 +370,7 @@ impl App {
         self.dirty = true;
     }
     fn checkpoint(&mut self) {
+        self.navigation.cancel();
         self.revision = self.revision.wrapping_add(1);
         self.history.push(self.capture_history());
         if self.history.len() > 12 {
@@ -706,6 +720,8 @@ impl App {
         if !self.dirty {
             return;
         }
+        self.hover_sample = None;
+        self.pick_atoms = self.state.active_pick_atoms("").unwrap_or_default();
         match self.state.active_render_snapshot(&self.selection) {
             Ok(mut snapshot) => {
                 if let Err(error) = self.state.apply_scene_color_proof(&mut snapshot) {
@@ -846,6 +862,7 @@ impl App {
             ],
         );
         self.mouse(ui, &response);
+        self.navigation_feedback(ui, &response);
         let target = self.target.as_ref().unwrap();
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
         let rgba = self
@@ -874,38 +891,39 @@ impl App {
         if !(response.hovered() || self.input.is_pressed() || !clicks.is_empty()) {
             return;
         }
-        if !ui.ctx().wants_keyboard_input() {
-            if ui.input(|i| i.key_pressed(egui::Key::B)) {
-                self.rectangle_select = true;
-            }
-            if ui.input(|i| i.key_pressed(egui::Key::N)) {
-                self.rectangle_select = false;
-            }
-        }
-        if self.rectangle_select && response.drag_started_by(egui::PointerButton::Primary) {
-            self.rectangle_start = ui.input(|i| i.pointer.press_origin());
-        }
         if let Some(start) = self.rectangle_start {
             if let Some(current) = ui.input(|i| i.pointer.interact_pos()) {
-                let rect = egui::Rect::from_two_pos(start, current).intersect(response.rect);
-                ui.painter().rect_stroke(
-                    rect,
-                    0.,
-                    egui::Stroke::new(1., egui::Color32::LIGHT_BLUE),
-                    egui::StrokeKind::Inside,
-                );
-                if response.drag_stopped_by(egui::PointerButton::Primary) {
-                    self.rectangle_start = None;
-                    self.select_screen_rect(response.rect, rect);
+                if self.navigation.tool == ViewportTool::LassoSelect {
+                    let mut points = self.lasso_points.clone();
+                    if let Some(first) = points.first().copied() {
+                        points.push(first);
+                    }
+                    ui.painter().add(egui::Shape::line(
+                        points,
+                        egui::Stroke::new(1., egui::Color32::LIGHT_BLUE),
+                    ));
+                } else {
+                    ui.painter().rect_stroke(
+                        egui::Rect::from_two_pos(start, current),
+                        0.,
+                        egui::Stroke::new(1., egui::Color32::LIGHT_BLUE),
+                        egui::StrokeKind::Inside,
+                    );
                 }
             }
-            return;
         }
-        for (position, double) in clicks {
-            if double {
-                self.center_screen_atom(response.rect, position);
-            } else {
-                self.pick_screen_atom(response.rect, position);
+        for (position, double, button, modifiers) in clicks {
+            if button == cuemol_qsys::view_input::LEFT {
+                self.navigation_click(
+                    response.rect,
+                    position,
+                    double,
+                    modifiers & cuemol_qsys::view_input::SHIFT != 0,
+                );
+            } else if button == cuemol_qsys::view_input::RIGHT {
+                self.viewport_menu = self
+                    .screen_hit(response.rect, position)
+                    .map(|hit| (position, hit));
             }
         }
         if ui.ctx().wants_keyboard_input() {
@@ -927,6 +945,15 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.events();
+        if let Some(tool) = cuemol_ui::navigation::tool_shortcut(ctx) {
+            self.navigation.set_tool(tool);
+        }
+        if !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.navigation.cancel();
+            self.input.cancel();
+            self.rectangle_start = None;
+            self.lasso_points.clear();
+        }
         self.ui_rects.clear();
         self.agent_ui(ctx);
         if cuemol_command::advance_animation(&mut self.state, &mut self.camera).unwrap_or(false) {
@@ -955,7 +982,8 @@ impl eframe::App for App {
             .frame(egui::Frame::NONE)
             .show(ctx, |ui| self.viewport(ui));
         self.viewport_palette(ctx);
-        egui::Window::new("Mouse and keyboard").open(&mut self.show_help).show(ctx,|ui|{ui.label("Default preset: left drag rotates, right drag pans\nWheel: zoom\nShift + left drag: horizontal slab, vertical zoom\nLeft + right drag: horizontal depth, vertical roll\nTrackpad: two-finger pan, pinch zoom\nChoose Default, Coot, PyMOL or Trackpad in Settings\nDouble-click atom: center\nHome: fit scene · F: fit selection · C: center selection\nDrop structure files onto the window. Load a topology before a trajectory.\nCommands use the same tool names and JSON arguments as cuemol exec and MCP.");});
+        self.viewport_context_menu(ctx);
+        egui::Window::new("Mouse and keyboard").open(&mut self.show_help).show(ctx,|ui|{ui.label("Default preset: left drag rotates, right drag pans\nWheel: zoom\nShift + left drag: horizontal slab, vertical zoom\nLeft + right drag: horizontal depth, vertical roll\nTrackpad: two-finger pan, pinch zoom\nChoose Default, Coot, PyMOL or Trackpad in Settings\nClick atom: toggle label · Double-click: toggle residue selection\nShift + double-click: extend residue selection\nB: rectangle · L: lasso · N: navigate · Esc: cancel picks\nHome: fit scene · F: fit selection · C: center selection\nDrop structure files onto the window. Load a topology before a trajectory.\nCommands use the same tool names and JSON arguments as cuemol exec and MCP.");});
         for file in ctx.input(|i| i.raw.dropped_files.clone()) {
             if let Some(bytes) = file.bytes {
                 enqueue(Event::Data(file.name, bytes.to_vec()));
@@ -979,6 +1007,6 @@ impl eframe::App for App {
                 [rect.min.x, rect.min.y, rect.width(), rect.height()]
             })
             .collect();
-        STATUS.with(|status|*status.borrow_mut()=json!({"scene":state,"selection":self.selection,"view":cuemol_command::view_json(&self.camera),"message":self.message,"frame":self.frame,"busy":self.busy,"agent":self.agent.status(),"ui":{"overlays":overlays,"rects":self.ui_rects,"activity":self.activity.map(cuemol_ui::shell::Activity::key),"bottom":self.bottom_tab,"inspector":self.inspector.rects}}).to_string());
+        STATUS.with(|status|*status.borrow_mut()=json!({"scene":state,"selection":self.selection,"view":cuemol_command::view_json(&self.camera),"message":self.message,"frame":self.frame,"busy":self.busy,"agent":self.agent.status(),"ui":{"overlays":overlays,"rects":self.ui_rects,"activity":self.activity.map(cuemol_ui::shell::Activity::key),"bottom":self.bottom_tab,"inspector":self.inspector.rects,"navigation":{"tool":self.navigation.tool.label(),"picks":self.navigation.picks.len(),"hover":self.hover_hit.map(|hit|json!({"object":hit.object.get(),"index":hit.index})),"labels":self.state.active_name_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).len()}}}).to_string());
     }
 }

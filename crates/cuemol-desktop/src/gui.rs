@@ -1,7 +1,12 @@
+#[path = "navigation.rs"]
+mod navigation;
 #[path = "tritium.rs"]
 mod tritium;
 #[path = "updates.rs"]
 mod updates;
+#[cfg(test)]
+use cuemol_command::navigation::{add_selection_expression, atom_id_selection};
+use cuemol_command::navigation::{AtomHit, Navigation, Tool as ViewportTool};
 
 use crate::{
     collect_pov_labels, collect_scene_pov_labels, create_apbs_work_dir, create_pov_work_dir,
@@ -1440,7 +1445,11 @@ struct GuiApplication {
     pov_preview_texture: Option<AnimationPreviewTexture>,
     pov_preview_zoom: u32,
     pov_close_confirmation: bool,
-    interaction_mode: InteractionMode,
+    navigation: Navigation,
+    lasso_points: Vec<egui::Pos2>,
+    hover_hit: Option<AtomHit>,
+    hover_sample: Option<(egui::Pos2, u64)>,
+    pick_atoms: Vec<cuemol_render::RenderAtom>,
     show_toolbar: bool,
     show_workspace: bool,
     left_panel_visible: [bool; LeftPanel::ALL.len()],
@@ -2663,14 +2672,6 @@ fn native_renderer_supports_coloring(renderer_type: &str) -> bool {
     )
 }
 
-/// Home-tab interaction mode radio group (CueMol2 `navi-toolribbon.js`):
-/// Rotate (default) vs rectangle select.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InteractionMode {
-    Rotate,
-    RectSelect,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NativeFileDialog {
     OpenObject,
@@ -2815,6 +2816,8 @@ struct NativePreferences {
     hit_precision: f64,
     momentum_scroll: bool,
     emulate_right_button: bool,
+    hover_info: bool,
+    hover_highlight: bool,
     shortcuts: Vec<NativeShortcut>,
 }
 
@@ -4731,6 +4734,8 @@ impl NativePreferences {
             hit_precision: input.hitprec(),
             momentum_scroll: config_bool(state, "cuemol2.ui.mouse-momentum-scroll", false),
             emulate_right_button: config_bool(state, "cuemol2.ui.mouse-emulate-rbutton", false),
+            hover_info: config_bool(state, "view_input:hover-info", true),
+            hover_highlight: config_bool(state, "view_input:hover-highlight", true),
             shortcuts: ["view-trans-plusx", "view-trans-minusx"]
                 .into_iter()
                 .map(|id| NativeShortcut {
@@ -5101,7 +5106,11 @@ impl GuiApplication {
             pov_preview_texture: None,
             pov_preview_zoom: 100,
             pov_close_confirmation: false,
-            interaction_mode: InteractionMode::Rotate,
+            navigation: Navigation::default(),
+            lasso_points: Vec::new(),
+            hover_hit: None,
+            hover_sample: None,
+            pick_atoms: Vec::new(),
             show_toolbar,
             show_workspace: true,
             left_panel_visible,
@@ -5563,11 +5572,21 @@ impl GuiApplication {
                     });
                 });
                 self.draw_rect_selection(ui);
+                self.navigation_feedback(ui, camera, rect);
             });
         self.viewport_context_menu(ctx, camera);
     }
 
     fn draw_rect_selection(&self, ui: &egui::Ui) {
+        if self.navigation.tool == ViewportTool::LassoSelect && self.lasso_points.len() >= 2 {
+            let mut points = self.lasso_points.clone();
+            points.push(points[0]);
+            ui.painter().add(egui::Shape::line(
+                points,
+                egui::Stroke::new(1., egui::Color32::LIGHT_BLUE),
+            ));
+            return;
+        }
         let (Some(start), Some(current)) = (self.rect_select_start, self.rect_select_current)
         else {
             return;
@@ -5587,268 +5606,56 @@ impl GuiApplication {
         );
     }
 
-    /// Right-click atom context menu over the 3D view (CueMol2 `navi-ctxtmenu-atom`).
     fn viewport_context_menu(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         let Some(menu) = self.viewport_menu else {
             return;
         };
-        // Resolve the picked atom up front so the menu closure stays self-borrow-free.
-        let atom_info = menu.hit.and_then(|hit| {
-            let PickHit::Atom {
-                object_uid,
-                atom_index,
-            } = hit
-            else {
-                return None;
-            };
-            let object_uid = cuemol_core::Uid::new(object_uid);
-            let atom = self.state.atom_summary(object_uid, atom_index).ok()?;
-            let object_name = self
-                .state
-                .active_object_summaries()
-                .into_iter()
-                .find(|object| object.uid == object_uid)
-                .map(|object| object.name)
-                .unwrap_or_default();
-            let renderer_label = self
-                .state
-                .renderer_summaries(object_uid)
-                .into_iter()
-                .find(|renderer| renderer.visible && !renderer.renderer_type.starts_with('*'))
-                .map(|renderer| format!("{} ({})", renderer.name, renderer.renderer_type));
-            let center = self
-                .snapshot
-                .atoms
-                .iter()
-                .find(|a| {
-                    a.object_uid == Some(object_uid.get()) && a.atom_index == Some(atom_index)
-                })
-                .map(|a| vec3_from_vector(a.center));
-            Some((atom, center, object_name, renderer_label))
-        });
-        let lightweight_info = menu.hit.and_then(|hit| {
-            let PickHit::Lightweight { snapshot_index } = hit else {
-                return None;
-            };
-            let atom = self.snapshot.atoms.get(snapshot_index)?;
-            let hit = atom.hit.as_ref()?;
-            let object_name = atom
-                .object_uid
-                .map(cuemol_core::Uid::new)
-                .and_then(|uid| self.state.lw_object_summary(uid))
-                .map(|object| object.name)
-                .unwrap_or_default();
-            Some((
-                format!("{object_name}: {}", hit.message),
-                vec3_from_vector(atom.center),
-            ))
-        });
-
-        enum Choice {
-            Center {
-                point: Vec3,
-                status: &'static str,
-            },
-            Select {
-                object_uid: cuemol_core::Uid,
-                expression: String,
-                status: &'static str,
-            },
-        }
-        let mut chosen: Option<Choice> = None;
-        let mut close = false;
-
+        let mut action = None;
+        let mut center = None;
         egui::Area::new(egui::Id::new("viewport_ctx_menu"))
             .order(egui::Order::Foreground)
             .fixed_pos(menu.pos)
             .show(ctx, |ui| {
-                egui::Frame::menu(ui.style()).show(ui, |ui| {
-                    ui.set_max_width(240.0);
-                    if let Some((atom, center, object_name, renderer_label)) = &atom_info {
-                        let chain = if atom.chain_id.is_empty() {
-                            "_"
-                        } else {
-                            atom.chain_id.as_str()
-                        };
-                        let object_uid = atom.object_uid;
-                        let stored_selection = self
-                            .state
-                            .molecule_selection_text(object_uid)
-                            .unwrap_or_default();
-                        let current_selection = if stored_selection.trim().is_empty()
-                            && self.selected_object == Some(object_uid)
-                        {
-                            self.selection_text.trim()
-                        } else {
-                            stored_selection.trim()
-                        }
-                        .to_string();
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "{object_name}: {}{}:{}  (chain {chain})",
-                                atom.residue_name, atom.residue_id, atom.name
-                            ))
-                            .strong(),
-                        );
-                        if let Some(renderer_label) = renderer_label {
-                            ui.label(renderer_label);
-                        }
-                        ui.separator();
-                        let atom_sel = format!("aid {}", atom.serial);
-                        let resid_sel = if atom.chain_id.is_empty() {
-                            format!("resid {}", atom.residue_id)
-                        } else {
-                            format!("chain {} and resid {}", atom.chain_id, atom.residue_id)
-                        };
-                        let chain_sel = if atom.chain_id.is_empty() {
-                            "''.*.*".to_string()
-                        } else {
-                            format!("chain {}", atom.chain_id)
-                        };
-                        if let Some(center) = center {
-                            if ui.button("Center at this atom").clicked() {
-                                chosen = Some(Choice::Center {
-                                    point: *center,
-                                    status: "Centered at atom",
-                                });
-                                close = true;
+                egui::Frame::menu(ui.style()).show(ui, |ui| match menu.hit {
+                    Some(PickHit::Atom {
+                        object_uid,
+                        atom_index,
+                    }) => {
+                        let hit = AtomHit::from((object_uid, atom_index));
+                        action = cuemol_ui::navigation::context_menu(ui, &self.state, hit).0;
+                        center = hit.position(&self.state);
+                    }
+                    Some(PickHit::Lightweight { snapshot_index }) => {
+                        if let Some(atom) = self.snapshot.atoms.get(snapshot_index) {
+                            if let Some(hit) = &atom.hit {
+                                ui.label(&hit.message);
+                            }
+                            if ui.button("Center at this point").clicked() {
+                                center = Some(atom.center);
+                                action = Some(cuemol_ui::navigation::ContextAction::Center);
                             }
                         }
-                        if ui.button("Select this atom").clicked() {
-                            chosen = Some(Choice::Select {
-                                object_uid,
-                                expression: atom_sel.clone(),
-                                status: "Selected atom",
-                            });
-                            close = true;
-                        }
-                        if ui.button("Select this residue").clicked() {
-                            chosen = Some(Choice::Select {
-                                object_uid,
-                                expression: resid_sel.clone(),
-                                status: "Selected residue",
-                            });
-                            close = true;
-                        }
-                        if ui.button("Select this chain").clicked() {
-                            chosen = Some(Choice::Select {
-                                object_uid,
-                                expression: chain_sel.clone(),
-                                status: "Selected chain",
-                            });
-                            close = true;
-                        }
-                        if ui.button("Select this molecule").clicked() {
-                            chosen = Some(Choice::Select {
-                                object_uid,
-                                expression: "*".to_string(),
-                                status: "Selected molecule",
-                            });
-                            close = true;
-                        }
-                        ui.menu_button("Add Select", |ui| {
-                            for (label, expression) in [
-                                ("This atom", atom_sel.as_str()),
-                                ("This residue", resid_sel.as_str()),
-                                ("This chain", chain_sel.as_str()),
-                            ] {
-                                if ui.button(label).clicked() {
-                                    chosen = Some(Choice::Select {
-                                        object_uid,
-                                        expression: add_selection_expression(
-                                            &current_selection,
-                                            expression,
-                                        ),
-                                        status: "Added to selection",
-                                    });
-                                    close = true;
-                                    ui.close();
-                                }
-                            }
-                        });
-                        ui.separator();
-                        if ui.button("Unselect").clicked() {
-                            chosen = Some(Choice::Select {
-                                object_uid,
-                                expression: String::new(),
-                                status: "Cleared molecule selection",
-                            });
-                            close = true;
-                        }
-                        if ui.button("Invert Sel").clicked() {
-                            chosen = Some(Choice::Select {
-                                object_uid,
-                                expression: invert_selection_expression(&current_selection),
-                                status: "Inverted molecule selection",
-                            });
-                            close = true;
-                        }
-                        if ui.button("Toggle Sidechain").clicked() {
-                            if !current_selection.is_empty() {
-                                chosen = Some(Choice::Select {
-                                    object_uid,
-                                    expression: toggle_sidechain_expression(&current_selection),
-                                    status: "Toggled sidechain selection",
-                                });
-                            }
-                            close = true;
-                        }
-                        for (label, by_residue) in [("Around Byresid", true), ("Around", false)] {
-                            ui.menu_button(label, |ui| {
-                                for radius in [3.0_f64, 5.0, 7.0, 10.0] {
-                                    if ui.button(format!("{radius:.0} Å")).clicked() {
-                                        if !current_selection.is_empty() {
-                                            chosen = Some(Choice::Select {
-                                                object_uid,
-                                                expression: around_selection_expression(
-                                                    &current_selection,
-                                                    radius,
-                                                    by_residue,
-                                                ),
-                                                status: "Expanded molecule selection",
-                                            });
-                                        }
-                                        close = true;
-                                        ui.close();
-                                    }
-                                }
-                            });
-                        }
-                        ui.separator();
-                    } else if let Some((label, center)) = &lightweight_info {
-                        ui.label(egui::RichText::new(label).strong());
-                        ui.separator();
-                        if ui.button("Center at this point").clicked() {
-                            chosen = Some(Choice::Center {
-                                point: *center,
-                                status: "Centered at lightweight hit",
-                            });
-                            close = true;
-                        }
-                        ui.separator();
-                    } else {
-                        ui.label("(no atom under cursor)");
-                        ui.separator();
+                    }
+                    None => {
+                        ui.label("No atom under cursor");
                     }
                 });
             });
-
-        if let Some(choice) = chosen {
-            match choice {
-                Choice::Center { point, status } => {
-                    camera.target = point;
-                    self.set_status(status);
+        if let Some(action) = action {
+            match action {
+                cuemol_ui::navigation::ContextAction::Center => {
+                    if let Some(center) = center {
+                        camera.target = vec3_from_vector(center);
+                        self.input.cancel();
+                    }
                 }
-                Choice::Select {
-                    object_uid,
-                    expression,
-                    status,
-                } => {
-                    self.apply_molecule_selection(object_uid, expression, status);
+                cuemol_ui::navigation::ContextAction::Command(command) => {
+                    self.apply_navigation_commands(camera, vec![command]);
                 }
             }
+            self.viewport_menu = None;
         }
-        if close || ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.viewport_menu = None;
         }
     }
@@ -6153,6 +5960,12 @@ impl GuiApplication {
                     }
                 });
                 ui.menu_button("View", |ui| {
+                    if cuemol_ui::navigation::palette_menu(ui, &mut self.state) {
+                        if let Err(error) = self.persist_config_state() {
+                            self.set_status(error);
+                        }
+                    }
+                    ui.separator();
                     if ui
                         .radio_value(&mut camera.perspective, true, "Perspective")
                         .clicked()
@@ -6305,44 +6118,6 @@ impl GuiApplication {
                 });
             });
         });
-    }
-
-    /// Ribbon toolbar (CueMol2 base ribbon + `anim-ribbon.xul`): Home, Measure,
-    /// and Animation tabs sitting directly below the menu bar.
-
-    /// Distance / angle / torsion of the currently selected atoms (in atom-index order),
-    /// the CueMol2 AtomIntr measurement computed over a 2 / 3 / 4-atom selection.
-    fn measure_selection(&self) -> Option<String> {
-        if let Some(measurement) = self.state.active_measure(&self.selection_text) {
-            return Some(measurement);
-        }
-        let points: Vec<Vec3> = self
-            .snapshot
-            .atoms
-            .iter()
-            .filter(|atom| atom.selected)
-            .map(|atom| vec3_from_vector(atom.center))
-            .collect();
-        match points.as_slice() {
-            [a, b] => Some(format!("Distance: {:.3} Å", (*b - *a).length())),
-            [a, b, c] => {
-                let u = (*a - *b).normalize_or_zero();
-                let v = (*c - *b).normalize_or_zero();
-                let angle = u.dot(v).clamp(-1.0, 1.0).acos().to_degrees();
-                Some(format!("Angle: {angle:.2}°"))
-            }
-            [a, b, c, d] => {
-                let b1 = *b - *a;
-                let b2 = *c - *b;
-                let b3 = *d - *c;
-                let n1 = b1.cross(b2);
-                let n2 = b2.cross(b3);
-                let m = n1.cross(b2.normalize_or_zero());
-                let torsion = m.dot(n2).atan2(n1.dot(n2)).to_degrees();
-                Some(format!("Torsion: {torsion:.2}°"))
-            }
-            _ => None,
-        }
     }
 
     fn animation_playback_controls(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
@@ -15155,6 +14930,8 @@ impl GuiApplication {
     fn output_tab(&mut self, ui: &mut egui::Ui) {
         let log_height = (ui.available_height() - 26.0).max(20.0);
         egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .min_scrolled_height(0.0)
             .stick_to_bottom(true)
             .max_height(log_height)
             .show(ui, |ui| {
@@ -17919,6 +17696,16 @@ impl GuiApplication {
         if ctx.wants_keyboard_input() {
             return;
         }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.navigation.cancel();
+            self.rect_select_start = None;
+            self.rect_select_current = None;
+            self.lasso_points.clear();
+            self.input.cancel();
+        }
+        if let Some(tool) = cuemol_ui::navigation::tool_shortcut(ctx) {
+            self.navigation.set_tool(tool);
+        }
         for (id, direction) in [("view-trans-plusx", 1.0_f32), ("view-trans-minusx", -1.0)] {
             let Some(shortcut) = self.configured_view_shortcut(id) else {
                 continue;
@@ -19872,6 +19659,9 @@ impl GuiApplication {
     }
 
     fn rebuild_snapshot(&mut self) {
+        self.navigation.cancel();
+        self.hover_sample = None;
+        self.pick_atoms = self.state.active_pick_atoms("").unwrap_or_default();
         match self.state.active_render_snapshot(&self.selection_text) {
             Ok(snapshot) => self.snapshot = snapshot,
             Err(error) => self.set_error(error),
@@ -21159,6 +20949,8 @@ impl GuiApplication {
             });
         ui.checkbox(&mut draft.momentum_scroll, "Momentum scroll");
         ui.checkbox(&mut draft.emulate_right_button, "Emulate mouse R button");
+        ui.checkbox(&mut draft.hover_info, "Hover info");
+        ui.checkbox(&mut draft.hover_highlight, "Hover highlight");
     }
 
     fn apply_preferences(
@@ -21248,6 +21040,11 @@ impl GuiApplication {
             ("view_input:device", preferences.input_device.clone()),
             ("view_input:tbrad", preferences.trackball_radius.to_string()),
             ("view_input:hitprec", preferences.hit_precision.to_string()),
+            ("view_input:hover-info", preferences.hover_info.to_string()),
+            (
+                "view_input:hover-highlight",
+                preferences.hover_highlight.to_string(),
+            ),
             (
                 "cuemol2.ui.mouse-momentum-scroll",
                 preferences.momentum_scroll.to_string(),
@@ -29693,8 +29490,6 @@ impl GuiApplication {
         self.restore_gui_undo_state(snapshot);
         if let Some(view) = view {
             *camera = CameraController::from_qsys_camera(&view);
-        } else {
-            camera.fit_snapshot(&self.snapshot);
         }
     }
 
@@ -31156,46 +30951,78 @@ impl GuiApplication {
                     {
                         self.viewport_menu = None;
                         if *button == MouseButton::Left
-                            && self.interaction_mode == InteractionMode::RectSelect
+                            && self.navigation.tool.is_selection()
+                            && !(self.ctrl_down
+                                && config_bool(
+                                    &self.state,
+                                    "cuemol2.ui.mouse-emulate-rbutton",
+                                    false,
+                                ))
                         {
-                            self.input.cancel();
                             self.rect_select_start = Some(position);
                             self.rect_select_current = Some(position);
-                        } else {
-                            self.input.pointer_down(time, local(position));
+                            self.lasso_points = vec![position];
                         }
+                        self.input.pointer_down(time, local(position));
                         true
                     } else {
                         false
                     }
                 } else {
                     self.input_buttons &= !bit;
-                    if let Some(start) = self
-                        .rect_select_start
-                        .take()
-                        .filter(|_| *button == MouseButton::Left)
+                    if let Some(start) = (*button == MouseButton::Left)
+                        .then(|| self.rect_select_start.take())
+                        .flatten()
                     {
                         let current = self
                             .rect_select_current
                             .take()
                             .or(self.last_cursor)
                             .unwrap_or(start);
-                        self.select_atoms_in_screen_rect(
-                            camera,
-                            egui::Rect::from_two_pos(start, current),
-                        );
-                        true
-                    } else if let Some(position) = self.last_cursor {
+                        let dragged = start.distance(current) >= 3.
+                            || (self.navigation.tool == ViewportTool::LassoSelect
+                                && self
+                                    .lasso_points
+                                    .iter()
+                                    .any(|point| start.distance(*point) >= 3.));
+                        if dragged {
+                            if self.pointer_in_viewport(Some(current)) {
+                                self.select_navigation_region(camera, start, current);
+                            }
+                            self.lasso_points.clear();
+                            self.input.cancel();
+                            return true;
+                        }
+                        self.lasso_points.clear();
+                    }
+                    if let Some(position) = self.last_cursor {
                         let release =
                             self.input
                                 .pointer_up(&value, &config, size, time, local(position));
                         if self.pointer_in_viewport(Some(position)) {
+                            let button = if *button == MouseButton::Left
+                                && self.ctrl_down
+                                && config_bool(
+                                    &self.state,
+                                    "cuemol2.ui.mouse-emulate-rbutton",
+                                    false,
+                                ) {
+                                MouseButton::Right
+                            } else {
+                                *button
+                            };
                             match (button, release) {
                                 (MouseButton::Left, PointerRelease::Click) => {
-                                    self.pick_atom_at(camera, position);
+                                    if self.bond_picker_target.is_some()
+                                        && self.tool_dialog.as_deref() == Some("Mol bond editor")
+                                    {
+                                        self.pick_atom_at(camera, position);
+                                    } else {
+                                        self.navigation_click(camera, position, false);
+                                    }
                                 }
                                 (MouseButton::Left, PointerRelease::DoubleClick) => {
-                                    self.center_at_pointer(camera, position);
+                                    self.navigation_click(camera, position, true);
                                 }
                                 (
                                     MouseButton::Right,
@@ -31220,9 +31047,17 @@ impl GuiApplication {
                 self.input_buttons = 0;
                 self.rect_select_start = None;
                 self.rect_select_current = None;
+                self.lasso_points.clear();
+                self.hover_hit = None;
                 true
             }
             WindowEvent::CursorLeft { .. } => {
+                if self.rect_select_start.take().is_some() {
+                    self.rect_select_current = None;
+                    self.lasso_points.clear();
+                    self.input.cancel();
+                }
+                self.hover_hit = None;
                 if !self.input.is_pressed() && self.rect_select_start.is_none() {
                     self.last_cursor = None;
                 }
@@ -31233,6 +31068,13 @@ impl GuiApplication {
                 self.last_cursor = Some(point);
                 if self.rect_select_start.is_some() {
                     self.rect_select_current = Some(point);
+                    if self
+                        .lasso_points
+                        .last()
+                        .is_none_or(|p| p.distance(point) >= 2.)
+                    {
+                        self.lasso_points.push(point);
+                    }
                     true
                 } else {
                     let mut modifiers = self.input_buttons | keys;
@@ -31316,104 +31158,6 @@ impl GuiApplication {
             }
             (None, _) => true,
             _ => false,
-        }
-    }
-
-    fn select_atoms_in_screen_rect(
-        &mut self,
-        camera: &CameraController,
-        selection_rect: egui::Rect,
-    ) -> usize {
-        let Some(viewport) = self.viewport_rect else {
-            return 0;
-        };
-        let selection_rect = selection_rect.intersect(viewport);
-        if !selection_rect.is_positive() {
-            return 0;
-        }
-        let mut selected_by_object = std::collections::BTreeMap::<u64, Vec<i32>>::new();
-        for atom in self.state.active_pick_atoms("").unwrap_or_default() {
-            let (Some(object_uid), Some(atom_index)) = (atom.object_uid, atom.atom_index) else {
-                continue;
-            };
-            let Some((screen, _)) =
-                camera.project_to_viewport(vec3_from_vector(atom.center), viewport)
-            else {
-                continue;
-            };
-            if !selection_rect.contains(screen) {
-                continue;
-            }
-            let object_uid = cuemol_core::Uid::new(object_uid);
-            if let Ok(summary) = self.state.atom_summary(object_uid, atom_index) {
-                selected_by_object
-                    .entry(object_uid.get())
-                    .or_default()
-                    .push(summary.serial);
-            }
-        }
-        if selected_by_object.is_empty() {
-            self.set_status("No atoms in rectangle");
-            return 0;
-        }
-
-        let undo = self.capture_undo();
-        let mut primary = None;
-        let mut total = 0;
-        for (object_uid, mut serials) in selected_by_object {
-            serials.sort_unstable();
-            serials.dedup();
-            total += serials.len();
-            let selection = atom_id_selection(&serials);
-            let object_uid = cuemol_core::Uid::new(object_uid);
-            if let Err(error) = self
-                .state
-                .set_molecule_selection_text(object_uid, &selection)
-            {
-                self.state = undo.state;
-                self.set_error(error);
-                return 0;
-            }
-            primary.get_or_insert((object_uid, selection));
-        }
-        self.push_undo_snapshot(undo);
-        if let Some((object_uid, selection)) = primary {
-            self.selected_object = Some(object_uid);
-            self.molstruct_object = Some(object_uid);
-            self.selected_renderer = None;
-            self.workspace_aux_selection = None;
-            self.selection_text = selection;
-            self.push_selection_history();
-        }
-        self.rebuild_snapshot();
-        self.set_status(format!("Selected {total} atoms in rectangle"));
-        total
-    }
-
-    fn center_at_pointer(&mut self, camera: &mut CameraController, position: egui::Pos2) -> bool {
-        let target = match self.pick_hit(camera, position) {
-            Some(PickHit::Atom {
-                object_uid,
-                atom_index,
-            }) => self
-                .state
-                .scene_manager()
-                .object(cuemol_core::Uid::new(object_uid))
-                .and_then(|object| object.mol().atoms().get(atom_index))
-                .map(|atom| vec3_from_vector(atom.position)),
-            Some(PickHit::Lightweight { snapshot_index }) => self
-                .snapshot
-                .atoms
-                .get(snapshot_index)
-                .map(|atom| vec3_from_vector(atom.center)),
-            None => None,
-        };
-        if let Some(target) = target {
-            camera.target = target;
-            self.set_status("Centered on picked atom");
-            true
-        } else {
-            false
         }
     }
 
@@ -31505,18 +31249,8 @@ impl GuiApplication {
             .resolved_view_input(self.input_device.trackpad)
             .hitprec() as f32;
         let mut best: Option<(f32, PickHit)> = None;
-        let selection = if object_filter.is_some() {
-            ""
-        } else {
-            &self.selection_text
-        };
-        let atoms = self
-            .state
-            .active_pick_atoms(selection)
-            .ok()
-            .filter(|atoms| !atoms.is_empty())
-            .unwrap_or_else(|| self.snapshot.atoms.clone());
-        for atom in &atoms {
+        let atoms = &self.pick_atoms;
+        for atom in atoms {
             let (Some(object_uid), Some(atom_index)) = (atom.object_uid, atom.atom_index) else {
                 continue;
             };
@@ -33441,38 +33175,6 @@ fn apply_default_extension(mut path: PathBuf, spec: NativeFileDialogSpec) -> Pat
         }
     }
     path
-}
-
-fn atom_id_selection(serials: &[i32]) -> String {
-    let mut serials = serials.to_vec();
-    serials.sort_unstable();
-    serials.dedup();
-    let mut ranges = Vec::new();
-    let mut index = 0;
-    while index < serials.len() {
-        let start = serials[index];
-        let mut end = start;
-        while index + 1 < serials.len() && end.checked_add(1) == Some(serials[index + 1]) {
-            index += 1;
-            end = serials[index];
-        }
-        if start == end {
-            ranges.push(start.to_string());
-        } else {
-            ranges.push(format!("{start}:{end}"));
-        }
-        index += 1;
-    }
-    format!("aid {}", ranges.join(","))
-}
-
-fn add_selection_expression(current: &str, addition: &str) -> String {
-    let current = current.trim();
-    if current.is_empty() {
-        addition.trim().to_string()
-    } else {
-        format!("({current}) or ({})", addition.trim())
-    }
 }
 
 fn invert_selection_expression(current: &str) -> String {
@@ -39804,6 +39506,7 @@ mod tests {
             edge: None,
             hit: None,
         });
+        app.pick_atoms = app.snapshot.atoms.clone();
         assert_eq!(
             app.pick_hit(&camera, egui::pos2(400.0, 300.0)),
             Some(PickHit::Atom {
@@ -40272,12 +39975,13 @@ mod tests {
             .project_to_viewport(vec3_from_vector(first.center), viewport)
             .expect("project first atom");
 
-        let selected = app.select_atoms_in_screen_rect(
+        app.navigation.set_tool(ViewportTool::RectSelect);
+        app.select_navigation_region(
             &camera,
-            egui::Rect::from_center_size(screen, egui::vec2(4.0, 4.0)),
+            screen - egui::vec2(2., 2.),
+            screen + egui::vec2(2., 2.),
         );
 
-        assert_eq!(selected, 1);
         assert_eq!(
             app.state.molecule_selection_text(object_uid).unwrap(),
             "aid 1"
@@ -40515,57 +40219,6 @@ mod tests {
                 .map(String::as_str),
             Some("potential")
         );
-    }
-
-    #[test]
-    fn measure_selection_computes_distance_angle_torsion() {
-        // Synthetic, controlled-geometry oracle (independent of any molecule): 2 selected
-        // atoms → distance, 3 → angle, 4 → torsion.
-        let mut app = GuiApplication::new();
-        let atom = |x: f64, y: f64, z: f64| RenderAtom {
-            center: Vector4::new3(x, y, z),
-            radius: 0.3,
-            color: None,
-            object_uid: None,
-            atom_index: None,
-            selected: true,
-            detail: None,
-            edge: None,
-            hit: None,
-        };
-        // 3-4-5 right triangle legs → distance 5.
-        app.snapshot.atoms = vec![atom(0.0, 0.0, 0.0), atom(3.0, 4.0, 0.0)];
-        assert!(
-            app.measure_selection().unwrap().contains("5.000"),
-            "distance: {:?}",
-            app.measure_selection()
-        );
-        // Right angle at the central atom → 90°.
-        app.snapshot.atoms = vec![
-            atom(1.0, 0.0, 0.0),
-            atom(0.0, 0.0, 0.0),
-            atom(0.0, 1.0, 0.0),
-        ];
-        assert!(
-            app.measure_selection().unwrap().contains("90.00"),
-            "angle: {:?}",
-            app.measure_selection()
-        );
-        // A ±90° dihedral.
-        app.snapshot.atoms = vec![
-            atom(1.0, 0.0, 0.0),
-            atom(0.0, 0.0, 0.0),
-            atom(0.0, 0.0, 1.0),
-            atom(0.0, 1.0, 1.0),
-        ];
-        let torsion = app.measure_selection().unwrap();
-        assert!(
-            torsion.contains("Torsion") && torsion.contains("90.00"),
-            "torsion: {torsion}"
-        );
-        // A single selected atom yields no measurement.
-        app.snapshot.atoms = vec![atom(0.0, 0.0, 0.0)];
-        assert!(app.measure_selection().is_none());
     }
 
     #[test]
@@ -42103,7 +41756,7 @@ mod tests {
             let mut app = GuiApplication::new();
             let mut camera = CameraController::default();
             load(&mut app, &mut camera);
-            app.interaction_mode = InteractionMode::RectSelect;
+            app.navigation.set_tool(ViewportTool::RectSelect);
             app.rect_select_start = Some(egui::pos2(430.0, 190.0));
             app.rect_select_current = Some(egui::pos2(730.0, 470.0));
             app.viewport_menu = app.state.active_pick_atoms("").ok().and_then(|atoms| {

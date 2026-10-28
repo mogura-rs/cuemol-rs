@@ -14072,9 +14072,19 @@ impl DesktopAppState {
                     || object.renderers().iter().any(|renderer| {
                         renderer.is_visible()
                             && !renderer.renderer_type().starts_with('*')
-                            && renderer.renderer_type() != "selection"
+                            && !matches!(renderer.renderer_type(), "selection" | "atomintr")
                     }))
         }) {
+            let mut visible = vec![object.renderers().is_empty(); object.mol().atom_count()];
+            for renderer in object.renderers().iter().filter(|renderer| {
+                renderer.is_visible()
+                    && !renderer.renderer_type().starts_with('*')
+                    && !matches!(renderer.renderer_type(), "selection" | "atomintr")
+            }) {
+                for index in object.mol().select_indices(renderer.selection()) {
+                    visible[index] = true;
+                }
+            }
             let selected = if object.mol().selection_text().is_empty() {
                 selector
                     .as_ref()
@@ -14099,6 +14109,7 @@ impl DesktopAppState {
                     .atoms()
                     .iter()
                     .enumerate()
+                    .filter(|(index, _)| visible[*index])
                     .map(|(index, atom)| {
                         let mut position = atom.position;
                         object.xform_matrix().xform3d(&mut position);

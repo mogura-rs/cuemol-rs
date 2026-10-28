@@ -466,6 +466,9 @@ fn atom_indices(state: &DesktopAppState, id: Uid, args: &Value) -> Result<Vec<us
                             a.ins_code.map(|c| c.to_string()).unwrap_or_default()
                         ) == residue
                         && a.name.trim() == name
+                        && spec.get("altConf").is_none_or(|value| {
+                            a.alt_loc == value.as_str().and_then(|s| s.chars().next())
+                        })
                 })
                 .ok_or_else(|| CueMolError::not_found(format!("atom {chain}.{residue}.{name}")))
         })
@@ -508,7 +511,7 @@ fn molecule_annotations(state: &mut DesktopAppState, name: &str, args: &Value) -
             "exactly one atom is required",
         ));
     }
-    let label = args["rendererName"].as_str().unwrap_or("labels");
+    let label = args["rendererName"].as_str().unwrap_or("");
     let object = state.scene_manager_mut().object_mut(id).unwrap();
     let show = if name == "set_atom_label" {
         args["on"] == true
@@ -534,7 +537,7 @@ fn molecule_annotations(state: &mut DesktopAppState, name: &str, args: &Value) -
                 a.res_id,
                 a.ins_code.map(|c| c.to_string()).unwrap_or_default()
             );
-            let aid = format!("{}.{}.{}", a.chain_id, resid, a.name.trim());
+            let aid = crate::navigation::atom_reference(a);
             let format = args["format"].as_str().unwrap_or("");
             let value = format
                 .replace("{resn}", &a.res_name)
@@ -628,13 +631,7 @@ fn measure(state: &mut DesktopAppState, name: &str, args: &Value) -> Result<Valu
                     .xform_matrix()
                     .transform_point(atom.position),
             );
-            let aid = format!(
-                "{}.{}{}.{}",
-                atom.chain_id,
-                atom.res_id,
-                atom.ins_code.map(|c| c.to_string()).unwrap_or_default(),
-                atom.name.trim()
-            );
+            let aid = crate::navigation::atom_reference(atom);
             references.push(aid.clone());
             all_local &= owner == id;
             labels.push(aid);
@@ -692,7 +689,14 @@ fn measure(state: &mut DesktopAppState, name: &str, args: &Value) -> Result<Valu
             .iter()
             .find(|r| r.renderer_type() == "atomintr" && r.name() == label)
             .map(|r| r.uid())
-            .unwrap_or_else(|| object.add_renderer("atomintr", label));
+            .unwrap_or_else(|| {
+                let id = object.add_renderer("atomintr", label);
+                object
+                    .renderer_mut(id)
+                    .unwrap()
+                    .set_qsc_attr("showlabel", "true");
+                id
+            });
         let line = if name == "measure_selections" {
             AtomIntrLine::from_selections(kind, labels)
         } else if all_local {

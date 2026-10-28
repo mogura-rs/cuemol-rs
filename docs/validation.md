@@ -350,3 +350,33 @@ trajectory seeking, exports, numerical kernels, AI mock-provider interaction,
 input settings, and cancellable rendering. A final macOS GUI build with the same
 browser assets also passed. These remain local checks; release publication and
 GitHub Pages execution are intentionally pending authorization to push.
+
+
+## Viewport navigation and selection audit
+
+The follow-up audit added the reference click-to-label behavior, residue toggles,
+Shift residue ranges, lasso selection, distance/angle/torsion picking, bond edits,
+context selection, hover feedback, tool shortcuts and a persisted tool palette.
+Native and browser interfaces execute the same shared commands. Picking excludes
+atoms outside visible renderer selections. Insertion codes and alternate-location
+identifiers survive label and measurement references. Browser annotations now
+include atom names, measurement values and simple-mode measurement lines.
+
+The shared workspace passed 1,155 tests. Native GUI suites passed 164 tests on
+Linux and Apple Silicon, and all 26 browser tests passed. The added browser tests
+exercise click/drag distinctions, undo, cancellation, every tool shortcut,
+hover state, cursors and palette persistence. A closed lasso path is treated as
+a drag even when its endpoint returns to the starting point. A native layout regression checks
+that new log lines cannot resize the viewport during successive atom clicks.
+Selection undo/redo preserves the current view instead of automatically fitting
+the molecule; camera-changing commands retain their explicit camera history.
+
+The README's previous double-click-to-center mapping disagreed with the reference
+navigation tool and was corrected: double-click toggles a residue, and centering
+is available in the atom context menu. Generated fixtures and screenshots remain
+in the ignored cache. These checks do not execute public release or Pages jobs.
+
+An actual Linux window was exercised with pointer and keyboard events. Atom
+labels, residue double-clicks, Shift range extension, all three measurement
+modes, closed lasso selection, bond creation and undo passed. The camera remained
+unchanged throughout these edits, and the final annotated viewport was inspected.

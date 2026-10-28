@@ -8,6 +8,7 @@ mod electrostatics;
 pub mod external;
 mod file_commands;
 pub use downloads::{load_fetched, prepare_fetch, FetchPlan};
+pub mod navigation;
 mod nodes;
 mod properties;
 pub use animation::advance_animation;

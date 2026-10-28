@@ -6,8 +6,14 @@ impl App {
         &mut self,
         ui: &egui::Ui,
         response: &egui::Response,
-    ) -> Vec<(egui::Pos2, bool)> {
+    ) -> Vec<(egui::Pos2, bool, i32, i32)> {
         let rect = response.rect;
+        let before = (
+            self.camera.center(),
+            self.camera.rotation(),
+            self.camera.zoom(),
+            self.camera.slab_depth(),
+        );
         let size = [rect.width() as f64, rect.height() as f64];
         self.state
             .put_runtime_value("viewport:width", size[0].to_string());
@@ -41,35 +47,84 @@ impl App {
                 (point.y - rect.top()) as f64,
             ];
             let time = number("time") as i64;
-            let modifiers = number("modifiers") as i32;
+            let mut modifiers = number("modifiers") as i32;
+            let emulate = self.state.config_value("cuemol2.ui.mouse-emulate-rbutton") == "true";
+            let mut button = number("button") as i32;
+            if emulate && modifiers & input::CTRL != 0 {
+                if modifiers & input::LEFT != 0 {
+                    modifiers = (modifiers & !(input::CTRL | input::LEFT)) | input::RIGHT;
+                }
+                if button == input::LEFT {
+                    button = input::RIGHT;
+                }
+            }
             let config = self.state.resolved_view_input(self.input_device.trackpad);
             let over_viewport =
                 rect.contains(point) && ui.ctx().layer_id_at(point) == Some(response.layer_id);
             match event["kind"].as_str().unwrap_or("") {
-                "down"
-                    if over_viewport
-                        && (!self.rectangle_select || modifiers & input::LEFT == 0) =>
-                {
-                    self.input.pointer_down(time, local)
+                "down" if over_viewport => {
+                    self.viewport_menu = None;
+                    if self.navigation.tool.is_selection() && button == input::LEFT {
+                        self.rectangle_start = Some(point);
+                        self.lasso_points = vec![point];
+                    }
+                    self.input.pointer_down(time, local);
                 }
                 "move" if self.input.is_pressed() => {
-                    self.input.pointer_move(
-                        &mut self.camera,
-                        &config,
-                        size,
-                        time,
-                        local,
-                        modifiers,
-                    );
+                    if self.rectangle_start.is_some() {
+                        if !over_viewport {
+                            self.rectangle_start = None;
+                            self.lasso_points.clear();
+                            self.input.cancel();
+                        } else if self
+                            .lasso_points
+                            .last()
+                            .is_none_or(|p| p.distance(point) >= 2.)
+                        {
+                            self.lasso_points.push(point);
+                        }
+                    } else {
+                        self.input.pointer_move(
+                            &mut self.camera,
+                            &config,
+                            size,
+                            time,
+                            local,
+                            modifiers,
+                        );
+                    }
                 }
                 "up" => {
+                    if button == input::LEFT {
+                        if let Some(start) = self.rectangle_start.take() {
+                            let dragged = start.distance(point) >= 3.
+                                || (self.navigation.tool == ViewportTool::LassoSelect
+                                    && self.lasso_points.iter().any(|p| start.distance(*p) >= 3.));
+                            if dragged {
+                                if over_viewport {
+                                    self.select_screen_region(
+                                        rect,
+                                        start,
+                                        point,
+                                        modifiers & input::SHIFT != 0,
+                                    );
+                                }
+                                self.lasso_points.clear();
+                                self.input.cancel();
+                                continue;
+                            }
+                            self.lasso_points.clear();
+                        }
+                    }
                     let release = self
                         .input
                         .pointer_up(&self.camera, &config, size, time, local);
-                    if number("button") as i32 == input::LEFT && over_viewport {
+                    if over_viewport {
                         match release {
-                            PointerRelease::Click => clicks.push((point, false)),
-                            PointerRelease::DoubleClick => clicks.push((point, true)),
+                            PointerRelease::Click => clicks.push((point, false, button, modifiers)),
+                            PointerRelease::DoubleClick => {
+                                clicks.push((point, true, button, modifiers))
+                            }
                             _ => {}
                         }
                     }
@@ -96,56 +151,28 @@ impl App {
                     );
                     self.input_device.gesture(time);
                 }
-                "cancel" => self.input.cancel(),
+                "cancel" => {
+                    self.input.cancel();
+                    self.rectangle_start = None;
+                    self.lasso_points.clear();
+                    self.hover_hit = None;
+                }
                 _ => {}
             }
         }
         if self.input.is_animating() {
             ui.ctx().request_repaint();
         }
-        clicks
-    }
-
-    pub(super) fn center_screen_atom(&mut self, rect: egui::Rect, point: egui::Pos2) {
-        let Some(snapshot) = &self.snapshot else {
-            return;
-        };
-        let mvp = glam::Mat4::from_cols_array_2d(&cuemol_desktop_core::offscreen::camera_mvp(
-            &self.camera,
-            rect.aspect_ratio() as f64,
-        ));
-        let hit_precision = self
-            .state
-            .resolved_view_input(self.input_device.trackpad)
-            .hitprec() as f32;
-        let nearest = snapshot
-            .atoms
-            .iter()
-            .filter_map(|atom| {
-                let p = mvp
-                    * glam::Vec4::new(
-                        atom.center.x as f32,
-                        atom.center.y as f32,
-                        atom.center.z as f32,
-                        1.0,
-                    );
-                if p.w <= 0.0 {
-                    return None;
-                }
-                let ndc = p.truncate() / p.w;
-                if !(0.0..=1.0).contains(&ndc.z) {
-                    return None;
-                }
-                let screen = egui::pos2(
-                    rect.left() + (ndc.x + 1.0) * 0.5 * rect.width(),
-                    rect.top() + (1.0 - ndc.y) * 0.5 * rect.height(),
-                );
-                let distance = screen.distance(point);
-                (distance < hit_precision).then_some((distance, atom.center))
-            })
-            .min_by(|a, b| a.0.total_cmp(&b.0));
-        if let Some((_, center)) = nearest {
-            self.camera.set_center(center);
+        if before
+            != (
+                self.camera.center(),
+                self.camera.rotation(),
+                self.camera.zoom(),
+                self.camera.slab_depth(),
+            )
+        {
+            self.hover_sample = None;
         }
+        clicks
     }
 }

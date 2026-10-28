@@ -71,6 +71,10 @@ pub enum Icon {
     Rotate,
     Fit,
     Measure,
+    Lasso,
+    Angle,
+    Torsion,
+    Bond,
 }
 
 pub fn theme(ctx: &Context, light: bool) {
@@ -297,6 +301,34 @@ fn paint_icon(ui: &Ui, icon: Icon, rect: Rect, color: Color32) {
             box_(2., 7., 20., 14.);
             line(&[(6., 7.), (8., 3.), (16., 3.), (18., 7.)]);
             p.circle_stroke(at(12., 14.), rect.width() * 0.19, s);
+        }
+        Icon::Lasso => {
+            line(&[
+                (7., 18.),
+                (3., 12.),
+                (4., 6.),
+                (12., 3.),
+                (20., 6.),
+                (21., 13.),
+                (15., 18.),
+                (7., 18.),
+                (8., 23.),
+            ]);
+        }
+        Icon::Angle => {
+            line(&[(5., 3.), (5., 20.), (22., 20.)]);
+            line(&[(5., 12.), (11., 14.), (13., 20.)]);
+        }
+        Icon::Torsion => {
+            line(&[(3., 17.), (9., 6.), (15., 18.), (21., 7.)]);
+            for (x, y) in [(3., 17.), (9., 6.), (15., 18.), (21., 7.)] {
+                p.circle_filled(at(x, y), 1.8, color);
+            }
+        }
+        Icon::Bond => {
+            line(&[(6., 18.), (18., 6.)]);
+            p.circle_stroke(at(5., 19.), rect.width() * 0.14, s);
+            p.circle_stroke(at(19., 5.), rect.width() * 0.14, s);
         }
         Icon::Selection => {
             for (x, y, sx, sy) in [

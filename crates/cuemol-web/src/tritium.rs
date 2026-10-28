@@ -155,6 +155,15 @@ impl App {
                         }
                     });
                     ui.menu_button("View", |ui| {
+                        if cuemol_ui::navigation::palette_menu(ui, &mut self.state) {
+                            self.settings_text = self.state.config_text();
+                            if let Some(storage) =
+                                web_sys::window().and_then(|w| w.local_storage().ok().flatten())
+                            {
+                                let _ = storage.set_item("cuemol.config", &self.settings_text);
+                            }
+                        }
+                        ui.separator();
                         for activity in Activity::ALL {
                             if ui.button(activity.title()).clicked() {
                                 self.activity = Some(activity);
@@ -835,85 +844,6 @@ impl App {
 }
 
 impl App {
-    pub(super) fn select_screen_rect(&mut self, viewport: egui::Rect, rectangle: egui::Rect) {
-        let atoms = self.state.active_pick_atoms("").unwrap_or_default();
-        let mvp = cuemol_desktop_core::offscreen::camera_mvp(
-            &self.camera,
-            viewport.aspect_ratio() as f64,
-        );
-        let origin = rectangle.min - viewport.min;
-        let end = rectangle.max - viewport.min;
-        let hits = cuemol_desktop_core::atoms_in_screen_rect(
-            &atoms,
-            mvp,
-            (origin.x as f64, origin.y as f64),
-            (end.x as f64, end.y as f64),
-            (viewport.width() as f64, viewport.height() as f64),
-        );
-        self.apply_atom_selection(hits);
-    }
-    pub(super) fn pick_screen_atom(&mut self, viewport: egui::Rect, position: egui::Pos2) {
-        let atoms = self.state.active_pick_atoms("").unwrap_or_default();
-        let mvp = cuemol_desktop_core::offscreen::camera_mvp(
-            &self.camera,
-            viewport.aspect_ratio() as f64,
-        );
-        let point = position - viewport.min;
-        if let Some(hit) = cuemol_desktop_core::pick_atom_screen(
-            &atoms,
-            mvp,
-            (point.x as f64, point.y as f64),
-            (viewport.width() as f64, viewport.height() as f64),
-            self.state
-                .resolved_view_input(self.input_device.trackpad)
-                .hitprec(),
-        ) {
-            self.apply_atom_selection(vec![hit]);
-        }
-    }
-    fn apply_atom_selection(&mut self, hits: Vec<(u64, usize)>) {
-        let mut grouped = std::collections::BTreeMap::<u64, Vec<i32>>::new();
-        for (id, index) in hits {
-            if let Ok(atom) = self.state.atom_summary(Uid::new(id), index) {
-                grouped.entry(id).or_default().push(atom.serial);
-            }
-        }
-        if grouped.is_empty() {
-            self.message = "No atoms in rectangle".into();
-            return;
-        }
-        self.checkpoint();
-        let mut total = 0;
-        for (index, (id, mut serials)) in grouped.into_iter().enumerate() {
-            serials.sort_unstable();
-            serials.dedup();
-            total += serials.len();
-            let selection = format!(
-                "aid {}",
-                serials
-                    .iter()
-                    .map(i32::to_string)
-                    .collect::<Vec<_>>()
-                    .join(",")
-            );
-            if let Err(error) = self
-                .state
-                .set_molecule_selection_text(Uid::new(id), &selection)
-            {
-                if let Some(previous) = self.history.pop() {
-                    self.restore_history(previous);
-                }
-                self.message = error.to_string();
-                return;
-            }
-            if index == 0 {
-                self.selected = Some(Uid::new(id));
-                self.selection = selection;
-            }
-        }
-        self.dirty = true;
-        self.message = format!("Selected {total} atoms");
-    }
     pub(super) fn viewport_palette(&mut self, ctx: &egui::Context) {
         let Some(rect) = self.ui_rects.get("Viewport").copied() else {
             return;
@@ -921,23 +851,32 @@ impl App {
         egui::Area::new(egui::Id::new("viewport-palette"))
             .fixed_pos(egui::pos2(rect[0] + 8., rect[1] + 8.))
             .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).inner_margin(3).show(ui, |ui| {
-                    for (icon, label, selected) in [
-                        (Icon::Rotate,"Navigate",!self.rectangle_select),
-                        (Icon::Selection,"Rect Select",self.rectangle_select),
-                        (Icon::Measure,"Measure selection",false),
-                        (Icon::Fit,"Fit scene",false),
-                    ] {
-                        let response=shell::icon_button(ui,icon,label,selected,egui::vec2(30.,30.));
-                        self.ui_rects.insert(label.into(),[response.rect.min.x,response.rect.min.y,response.rect.width(),response.rect.height()]);
-                        if response.clicked() { match label {
-                            "Navigate"=>self.rectangle_select=false,
-                            "Rect Select"=>self.rectangle_select=true,
-                            "Fit scene"=>self.fit(false),
-                            _=>self.message=self.state.active_measure(&self.selection).unwrap_or_else(||"Select 2, 3 or 4 atoms to measure distance, angle or torsion".into()),
-                        }}
-                    }
-                });
+                egui::Frame::popup(ui.style())
+                    .inner_margin(3)
+                    .show(ui, |ui| {
+                        let (rects, command, changed) = cuemol_ui::navigation::palette(
+                            ui,
+                            &mut self.navigation,
+                            &mut self.state,
+                        );
+                        for (label, rect) in rects {
+                            self.ui_rects.insert(
+                                label.into(),
+                                [rect.min.x, rect.min.y, rect.width(), rect.height()],
+                            );
+                        }
+                        if let Some(command) = command {
+                            self.apply_navigation_commands(vec![command]);
+                        }
+                        if changed {
+                            self.settings_text = self.state.config_text();
+                            if let Some(storage) =
+                                web_sys::window().and_then(|w| w.local_storage().ok().flatten())
+                            {
+                                let _ = storage.set_item("cuemol.config", &self.settings_text);
+                            }
+                        }
+                    });
             });
     }
 }
