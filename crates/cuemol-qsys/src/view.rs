@@ -39,6 +39,7 @@ pub struct View {
     uid: Uid,
     scene_uid: Uid,
     name: String,
+    camera_template: Camera,
     active: bool,
     zoom: f64,
     view_dist: f64,
@@ -77,6 +78,7 @@ impl View {
             uid,
             scene_uid,
             name: String::new(),
+            camera_template: Camera::new(),
             active: true,
             zoom: 50.0,
             view_dist: 200.0,
@@ -420,7 +422,7 @@ impl View {
     }
 
     pub fn camera(&self) -> Camera {
-        let mut camera = Camera::new();
+        let mut camera = self.camera_template.clone();
         camera.set_name(self.name.clone());
         camera.set_zoom(self.zoom);
         camera.set_cam_dist(self.view_dist);
@@ -434,11 +436,28 @@ impl View {
         camera
     }
 
+    pub fn fit_positions(&mut self, positions: impl IntoIterator<Item = Vector4>) -> bool {
+        let mut camera = self.camera();
+        let aspect = if self.width() > 0 && self.height() > 0 {
+            f64::from(self.width()) / f64::from(self.height())
+        } else {
+            1.0
+        };
+        if !camera.fit_positions(positions, aspect) {
+            return false;
+        }
+        self.set_view_center(camera.center());
+        self.set_zoom(camera.zoom());
+        self.set_slab_depth(camera.slab_depth());
+        true
+    }
+
     pub fn get_camera(&self) -> Camera {
         self.camera()
     }
 
     pub fn set_camera(&mut self, camera: &Camera) {
+        self.camera_template = camera.clone();
         self.name = camera.name().to_string();
         self.zoom = camera.zoom();
         self.view_dist = camera.cam_dist();
@@ -1512,6 +1531,9 @@ mod tests {
         camera.set_stereo_mode(StereoMode::Cross);
 
         let mut view = View::new(Uid::new(1), Uid::new(2));
+        camera.set_ui_order(7);
+        camera.set_source("saved.cam");
+        camera.vis_append(42, false, true);
         view.set_camera(&camera);
         assert_eq!(view.name(), "__current");
         assert_eq!(view.zoom(), 75.0);
@@ -1525,6 +1547,13 @@ mod tests {
         assert_eq!(out.name(), "__current");
         assert_eq!(out.zoom(), 75.0);
         assert_eq!(out.cam_dist(), 300.0);
+        let copied = view.camera();
+        assert_eq!(copied.ui_order(), 7);
+        assert_eq!(copied.source(), "saved.cam");
+        assert_eq!(
+            copied.visibility_settings().collect::<Vec<_>>(),
+            camera.visibility_settings().collect::<Vec<_>>()
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use crate::selection::Selector;
 use crate::SolidColoring;
-use cuemol_core::{ByteArray, CueMolError, Matrix4, Result, Vector4};
+use cuemol_core::{ByteArray, CueMolError, Matrix3, Matrix4, Quat, Result, Vector4};
 use cuemol_gfx::SolidColor;
 use cuemol_qsys::View;
 use std::collections::{BTreeMap, BTreeSet};
@@ -943,47 +943,82 @@ impl MolCoord {
     }
 
     pub fn fit_view2(&self, view: &mut View, selector: Option<&Selector>) -> bool {
-        let indices = selected_or_all_indices(self, selector);
-        let Some(first) = indices.first().copied() else {
-            return false;
-        };
-        let rotation = Matrix4::make_rot_mat(view.rot_quat());
-        let inverse = rotation.invert().unwrap_or(Matrix4::IDENTITY);
-        let mut min = rotation.mul_vec(self.atoms[first].position);
-        let mut max = min;
-        for index in indices.into_iter().skip(1) {
-            let position = rotation.mul_vec(self.atoms[index].position);
-            min.x = min.x.min(position.x);
-            min.y = min.y.min(position.y);
-            min.z = min.z.min(position.z);
-            max.x = max.x.max(position.x);
-            max.y = max.y.max(position.y);
-            max.z = max.z.max(position.z);
-        }
-        let margin = (max - min).scale(0.2);
-        min = min - margin;
-        max = max + margin;
+        self.fit_view_with_xform(view, selector, Matrix4::IDENTITY)
+    }
 
-        view.set_view_center(inverse.mul_vec((min + max).scale(0.5)));
-        let frame_aspect = if view.width() > 0 && view.height() > 0 {
-            f64::from(view.width()) / f64::from(view.height())
-        } else {
-            1.0
+    pub fn fit_view_with_xform(
+        &self,
+        view: &mut View,
+        selector: Option<&Selector>,
+        transform: Matrix4,
+    ) -> bool {
+        let indices = selected_or_all_indices(self, selector);
+        view.fit_positions(indices.into_iter().map(|index| {
+            let mut position = self.atoms[index].position;
+            transform.xform3d(&mut position);
+            position
+        }))
+    }
+
+    pub fn orient_view(&self, view: &mut View, selector: Option<&Selector>) -> bool {
+        self.orient_view_with_xform(view, selector, Matrix4::IDENTITY)
+    }
+
+    pub fn orient_view_with_xform(
+        &self,
+        view: &mut View,
+        selector: Option<&Selector>,
+        transform: Matrix4,
+    ) -> bool {
+        let indices = selected_or_all_indices(self, selector);
+        if indices.is_empty() {
+            return false;
+        }
+        let position = |index: usize| {
+            let mut position = self.atoms[index].position;
+            transform.xform3d(&mut position);
+            position
         };
-        let map_width = max.x - min.x;
-        let map_height = max.y - min.y;
-        let map_aspect = if map_height > 0.0 {
-            map_width / map_height
-        } else {
-            f64::INFINITY
-        };
-        view.set_zoom(if map_aspect > frame_aspect {
-            map_width / frame_aspect
-        } else {
-            map_height
-        });
-        view.set_slab_depth(max.z - min.z);
-        true
+        let center = indices
+            .iter()
+            .fold(Vector4::ZERO, |sum, index| sum + position(*index))
+            .scale(1.0 / indices.len() as f64);
+        let mut moment = Matrix3::ZERO;
+        for index in indices {
+            let d = position(index) - center;
+            let d = [d.x, d.y, d.z];
+            for i in 0..3 {
+                for j in 0..3 {
+                    moment.values[i][j] += d[i] * d[j];
+                }
+            }
+        }
+        let mut vectors = Matrix3::IDENTITY;
+        let mut values = Vector4::ZERO;
+        if moment.diag(&mut vectors, &mut values) {
+            let values = [values.x, values.y, values.z];
+            let mut order = [0, 1, 2];
+            order.sort_by(|a, b| values[*b].total_cmp(&values[*a]));
+            let column = |i| {
+                Vector4::new3(
+                    vectors.values[0][i],
+                    vectors.values[1][i],
+                    vectors.values[2][i],
+                )
+            };
+            let first = column(order[0]);
+            let second = column(order[1]);
+            let third = first.cross(second);
+            let rotation = Matrix3::new([
+                [first.x, first.y, first.z],
+                [second.x, second.y, second.z],
+                [third.x, third.y, third.z],
+            ]);
+            if let Ok(quaternion) = Quat::from_rot_matrix(rotation) {
+                view.set_rot_quat(quaternion);
+            }
+        }
+        self.fit_view_with_xform(view, selector, transform)
     }
 
     pub fn fit_view_2(&self, view: &mut View, selector: Option<&Selector>) -> bool {

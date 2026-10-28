@@ -1,5 +1,5 @@
 use cuemol_core::{
-    parse_ldom2_xml, write_ldom2_xml, CueMolError, LDom2Tree, Quat, Result, Vector4,
+    parse_ldom2_xml, write_ldom2_xml, CueMolError, LDom2Tree, Matrix4, Quat, Result, Vector4,
 };
 use std::collections::BTreeMap;
 
@@ -29,6 +29,7 @@ pub enum CenterMark {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Camera {
     name: String,
+    ui_order: i32,
     source: String,
     alt_source: String,
     zoom: f64,
@@ -47,6 +48,7 @@ impl Default for Camera {
     fn default() -> Self {
         Self {
             name: String::new(),
+            ui_order: -1,
             source: String::new(),
             alt_source: String::new(),
             zoom: 50.0,
@@ -78,6 +80,38 @@ impl Camera {
 
     pub fn set_name(&mut self, name: impl Into<String>) {
         self.name = name.into();
+    }
+
+    pub fn ui_order(&self) -> i32 {
+        self.ui_order
+    }
+
+    pub fn set_ui_order(&mut self, order: i32) {
+        self.ui_order = order;
+    }
+
+    pub fn store_in(mut self, cameras: &mut Vec<Self>) {
+        if self.ui_order < 0 {
+            self.ui_order = cameras
+                .iter()
+                .find(|camera| camera.name == self.name)
+                .map(|camera| camera.ui_order)
+                .unwrap_or_else(|| {
+                    cameras
+                        .iter()
+                        .map(|camera| camera.ui_order)
+                        .max()
+                        .unwrap_or(-1)
+                        .saturating_add(1)
+                });
+        }
+        cameras.retain(|camera| camera.name != self.name);
+        cameras.push(self);
+        cameras.sort_by(|a, b| {
+            a.ui_order
+                .cmp(&b.ui_order)
+                .then_with(|| a.name.cmp(&b.name))
+        });
     }
 
     pub fn source(&self) -> &str {
@@ -242,6 +276,40 @@ impl Camera {
 
     pub fn set_rot_quat(&mut self, rotation: Quat) {
         self.set_rotation(rotation);
+    }
+
+    pub fn fit_positions(
+        &mut self,
+        positions: impl IntoIterator<Item = Vector4>,
+        aspect: f64,
+    ) -> bool {
+        let rotation = Matrix4::make_rot_mat(self.rotation);
+        let mut positions = positions
+            .into_iter()
+            .map(|position| rotation.mul_vec(position));
+        let Some(mut min) = positions.next() else {
+            return false;
+        };
+        let mut max = min;
+        for position in positions {
+            min.x = min.x.min(position.x);
+            min.y = min.y.min(position.y);
+            min.z = min.z.min(position.z);
+            max.x = max.x.max(position.x);
+            max.y = max.y.max(position.y);
+            max.z = max.z.max(position.z);
+        }
+        let inverse = rotation.invert().unwrap_or(Matrix4::IDENTITY);
+        self.set_center(inverse.mul_vec((min + max).scale(0.5)));
+        let aspect = if aspect.is_finite() && aspect > 0.0 {
+            aspect
+        } else {
+            1.0
+        };
+        let extent = (max - min).scale(1.4);
+        self.set_zoom((extent.x.max(4.0) / aspect).max(extent.y.max(4.0)));
+        self.set_slab_depth(extent.z.max(4.0));
+        true
     }
 
     pub fn visibility_size(&self) -> usize {

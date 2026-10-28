@@ -442,21 +442,66 @@ impl Matrix3 {
         ])
     }
 
-    /// Diagonalize a symmetric matrix using the same Jacobi basis convention
-    /// used by `Matrix4::diag3`.
     pub fn diagonalize(self) -> (Self, Vector4) {
-        let (vectors, values) = crate::math::jacobi_eigen3(self.values);
-        (
-            Self::new(vectors),
-            Vector4::new3(values[0], values[1], values[2]),
-        )
+        let mut vectors = Self::IDENTITY;
+        let mut values = Vector4::ZERO;
+        self.diag(&mut vectors, &mut values);
+        (vectors, values)
     }
 
     pub fn diag(self, eigenvectors: &mut Self, eigenvalues: &mut Vector4) -> bool {
-        let (vectors, values) = self.diagonalize();
-        *eigenvectors = vectors;
-        *eigenvalues = values;
-        true
+        let mut matrix = self.values;
+        if matrix.iter().flatten().any(|value| !value.is_finite()) {
+            return false;
+        }
+        let mut vectors = Self::IDENTITY;
+        for _ in 0..50 {
+            let off_diagonal = matrix[0][1].abs()
+                + matrix[0][2].abs()
+                + matrix[1][0].abs()
+                + matrix[1][2].abs()
+                + matrix[2][0].abs()
+                + matrix[2][1].abs();
+            if off_diagonal <= 0.0 {
+                *eigenvectors = vectors;
+                *eigenvalues = Vector4::new3(matrix[0][0], matrix[1][1], matrix[2][2]);
+                return true;
+            }
+            // CueMol uses cyclic Jacobi rotations in this fixed order.
+            for (p, q, r) in [(0, 1, 2), (0, 2, 1), (1, 2, 0)] {
+                let pq = matrix[p][q];
+                let t = if pq.abs() < 1.0e-8 {
+                    0.0
+                } else {
+                    let theta = (matrix[q][q] - matrix[p][p]) / (2.0 * pq);
+                    if theta >= 0.0 {
+                        1.0 / (theta + (theta * theta + 1.0).sqrt())
+                    } else {
+                        -1.0 / (-theta + (theta * theta + 1.0).sqrt())
+                    }
+                };
+                let c = 1.0 / (t * t + 1.0).sqrt();
+                let s = c * t;
+                let tau = s / (1.0 + c);
+                let rp = matrix[r][p];
+                let rq = matrix[r][q];
+                matrix[p][p] -= t * pq;
+                matrix[q][q] += t * pq;
+                matrix[p][q] = 0.0;
+                matrix[q][p] = 0.0;
+                matrix[r][p] = rp - s * (rq + tau * rp);
+                matrix[p][r] = matrix[r][p];
+                matrix[r][q] = rq + s * (rp - tau * rq);
+                matrix[q][r] = matrix[r][q];
+                let mut rotation = Self::IDENTITY;
+                rotation.values[p][p] = c;
+                rotation.values[p][q] = s;
+                rotation.values[q][p] = -s;
+                rotation.values[q][q] = c;
+                vectors = vectors * rotation;
+            }
+        }
+        false
     }
 }
 

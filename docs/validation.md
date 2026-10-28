@@ -637,3 +637,36 @@ Nine QSC compatibility tests passed with the C++ reference fixtures present.
 All 33 existing browser tests passed; after the final QSC fix, five save/load
 and label tests passed, including the new unnamed-renderer and measurement API
 regression. The unchanged tests were not repeated after that focused correction.
+
+## Camera ordering, fitting and surface gradients
+
+Cameras retain their UI order when replaced, append after the current maximum
+when no order is supplied, and serialize in display order. Live camera
+references now update subsequent queries within the same script. Replacement and
+deletion detach old references so later edits cannot resurrect a camera.
+Cloned camera values retain their source and visibility settings.
+
+Molecule fitting uses transformed coordinates in the current view, adds 20%
+padding on each side and keeps a minimum extent of four world units. Empty
+selections leave the view unchanged. Principal-axis orientation follows the
+reference Jacobi eigensolver and handedness convention. The C++ oracle compared
+136 cases, including rotated clouds, empty selections and degenerate point sets;
+centers, zoom and slab agree within 1e-7 and rotation dot products within 1e-8.
+CLI centering now uses the selected centroid with the object transform, and
+CLI fitting uses the same view calculation.
+
+MultiGradient supports atomic JSON replacement, duplicate-value handling,
+color-expression preservation and live references. Its default factory now
+returns white, matching the reference implementation. Direct-surface gradients
+sample the named scalar map after the object-to-map transform, and support the
+reference normal offset. Setting a gradient before attaching a renderer, changing
+it through a second reference, undoing a map change and reloading embedded QSC
+all retain the displayed vertex colors. Pending and attached renderers now share
+one property list; the separate lists previously omitted direct-surface gradients
+from existing-renderer proxies.
+
+The shared core passed 200 tests, Qsys passed 130, command integration passed
+14 and the native GUI passed 165. These counts exclude the separate unfinished
+registry audit for map controls, trajectory scripting, hover and exporters.
+All 36 browser tests passed, including camera order and orientation, live
+surface-gradient references, invalid JSON rollback and scene reloads.

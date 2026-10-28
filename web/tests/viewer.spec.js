@@ -617,3 +617,43 @@ test('unnamed renderers and selection measurements persist through browser scene
   expect(JSON.parse(state.message).log).toBe('2.0:142.43\n');
   expect(state.scene.objects[0].renderers.filter(r=>r.type==='cpk')).toHaveLength(2);
 });
+
+test('camera ordering and principal-axis fitting use the shared script API',async({page})=>{
+  await ready(page);await load(page,'camera.pdb',Buffer.from(structure));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  const object=(await page.evaluate(()=>window.cuemol.status())).scene.objects[0].id;
+  const state=await call(page,'execute_script',{source:`
+    var scene=cuemol.getScene(),z=cuemol.Camera(),a=cuemol.Camera();
+    scene.setCamera('z',z);scene.setCamera('a',a);scene.getCameraRef('z').ui_order=10;
+    var mol=cuemol.getObject(${object}),view=cuemol.getView(scene.activeViewID);
+    mol.orientView(view,cuemol.makeSel('*'));var before=view.rotation.toString()+view.center.toString();
+    mol.orientView(view,cuemol.makeSel('none'));print(before===view.rotation.toString()+view.center.toString());
+    mol.fitView2(view,cuemol.makeSel('aid 2'));print(view.slab);
+    print(JSON.parse(scene.getCameraInfoJSON()).filter(c=>c.name==='a'||c.name==='z').map(c=>c.name).join(','));
+  `});
+  expect(JSON.parse(state.message).log).toBe('true\n4\na,z\n');
+});
+
+test('direct-surface gradients keep live references and survive browser scene saves',async({page})=>{
+  await ready(page);await load(page,'gradient.pdb',Buffer.from(structure));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  const object=(await page.evaluate(()=>window.cuemol.status())).scene.objects[0].id;
+  let state=await call(page,'execute_script',{source:`
+    var mol=cuemol.getObject(${object}),r=cuemol.DirectSurfRenderer();r.name='gradient-surface';
+    var g=r.multi_grad;g.setNodesJSON('[{"value":0,"color":"red"},{"value":1,"color":"blue"}]');
+    mol.attachRenderer(r);var other=cuemol.getRenderer(r.uid).multi_grad;
+    other.changeAt(0,0,cuemol.makeColor('#00ff00'));print(g.getColorAt(0).g());
+    var before=g.getNodesJSON();try{g.setNodesJSON('[{"value":0,"color":"#ffffff"},{"value":1}]');}catch(e){}
+    print(before===other.getNodesJSON());
+  `});
+  expect(JSON.parse(state.message).log).toBe('255\ntrue\n');
+  const download=page.waitForEvent('download'),button=state.ui.rects['Save Scene'];
+  await page.mouse.click(button[0]+button[2]/2,button[1]+button[3]/2);
+  const stream=await(await download).createReadStream(),chunks=[];
+  for await(const chunk of stream)chunks.push(chunk);
+  await load(page,'gradient-roundtrip.qsc',Buffer.concat(chunks));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Loaded gradient-roundtrip.qsc');
+  const renderer=(await page.evaluate(()=>window.cuemol.status())).scene.objects[0].renderers.find(r=>r.name==='gradient-surface').id;
+  state=await call(page,'execute_script',{source:`var g=cuemol.getRenderer(${renderer}).multi_grad;print(g.size+':'+g.getColorAt(0).g()+':'+JSON.parse(g.getNodesJSON())[1].color);`});
+  expect(JSON.parse(state.message).log).toBe('2:255:blue\n');
+});

@@ -270,6 +270,7 @@ pub fn renderer_attr_properties(renderer_type: &str) -> Vec<RendererAttrProperty
                 add(name, Real, default);
             }
             add("elepot", Text, "");
+            add("color_mapname", Text, "");
             add("lowpar", Real, "-10");
             add("midpar", Real, "0");
             add("highpar", Real, "10");
@@ -390,6 +391,7 @@ impl crate::DesktopAppState {
                 &styles,
                 sid.get(),
                 self.surface_potential.as_ref(),
+                &self.density_maps,
                 scene,
             );
         } else if let Some(surface) = scene.loaded_surface(object_uid) {

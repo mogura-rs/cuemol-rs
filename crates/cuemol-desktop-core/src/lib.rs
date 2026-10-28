@@ -4400,7 +4400,9 @@ impl DesktopAppState {
                     })
             })
             .transpose()?;
-        Ok(object.mol().fit_view2(view, selection.as_ref()))
+        Ok(object
+            .mol()
+            .fit_view_with_xform(view, selection.as_ref(), object.xform_matrix()))
     }
 
     pub fn set_molecule_selection_text(&mut self, object_uid: Uid, selection: &str) -> Result<()> {
@@ -4490,7 +4492,11 @@ impl DesktopAppState {
             .scene_manager()
             .object(object_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
-        Ok(object.mol().fit_view(view, true))
+        Ok(object.mol().fit_view_with_xform(
+            view,
+            Some(object.mol().selection()),
+            object.xform_matrix(),
+        ))
     }
 
     pub fn fit_density_map_view(&self, map_uid: Uid, view: &mut View) -> Result<()> {
@@ -14428,6 +14434,7 @@ impl DesktopAppState {
                 &styles,
                 scene_uid.get(),
                 self.surface_potential.as_ref(),
+                &self.density_maps,
                 scene,
             );
             append_object_crystal_renderer_snapshot(
@@ -14437,6 +14444,7 @@ impl DesktopAppState {
                 &styles,
                 scene_uid.get(),
                 self.surface_potential.as_ref(),
+                &self.density_maps,
                 scene,
             );
         }
@@ -14481,6 +14489,7 @@ impl DesktopAppState {
                             &styles,
                             source_uid.get(),
                             self.surface_potential.as_ref(),
+                            &self.density_maps,
                             source,
                         );
                         append_molecule_lw_hit_points(
@@ -14511,6 +14520,7 @@ impl DesktopAppState {
                         &styles,
                         source_uid.get(),
                         self.surface_potential.as_ref(),
+                        &self.density_maps,
                         source,
                     );
                     append_molecule_lw_hit_points(
@@ -19518,40 +19528,146 @@ impl DesktopAppState {
         fn multi_gradient_key(kind: &str, index: usize) -> JsString {
             JsString::from(format!("_{kind}_{index}"))
         }
-        fn sync_bound_multi_gradient(this: &JsValue, ctx: &mut Context) -> JsResult<()> {
-            let object = this
-                .as_object()
-                .ok_or_else(|| script_error("MultiGradient receiver is not an object"))?;
-            let renderer_uid = object.get(js_string!("_renderer_uid"), ctx)?;
-            if !renderer_uid.is_number() {
-                return Ok(());
+        fn gradient_color_expression(value: &JsValue, ctx: &mut Context) -> JsResult<String> {
+            let object = iterator_object(value)?;
+            let stored = object.get(js_string!("_gradient_expression"), ctx)?;
+            let original_code = object.get(js_string!("_gradient_code"), ctx)?;
+            let color = solid_color_from_script_value(value, ctx)?;
+            if stored.is_string() && original_code.as_number() == Some(f64::from(color.code())) {
+                return Ok(stored.to_string(ctx)?.to_std_string_escaped());
             }
-            let renderer_uid = renderer_uid.to_number(ctx)? as u64;
+            Ok(value.to_string(ctx)?.to_std_string_escaped())
+        }
+        fn gradient_from_script(this: &JsValue, ctx: &mut Context) -> JsResult<MultiGradient> {
+            let object = iterator_object(this)?;
             let mut gradient = MultiGradient::new();
             for index in 0..multi_gradient_size(this, ctx)? {
                 let value = object
                     .get(multi_gradient_key("value", index), ctx)?
                     .to_number(ctx)?;
                 let color = object.get(multi_gradient_key("color", index), ctx)?;
-                gradient.insert(value, solid_color_from_script_value(&color, ctx)?.rgba8());
+                gradient.insert_with_expression(
+                    value,
+                    solid_color_from_script_value(&color, ctx)?.rgba8(),
+                    Some(gradient_color_expression(&color, ctx)?),
+                );
             }
+            Ok(gradient)
+        }
+        fn fill_multi_gradient(
+            this: &JsValue,
+            gradient: &MultiGradient,
+            ctx: &mut Context,
+        ) -> JsResult<()> {
+            let object = iterator_object(this)?;
+            for index in 0..gradient.size() {
+                let rgba = gradient.color_at(index).unwrap();
+                let color = cuemol_gfx::SolidColor::from_rgba_u8(rgba.r, rgba.g, rgba.b, rgba.a);
+                let code = color.code();
+                let proxy = make_color(color, ctx);
+                iterator_object(&proxy)?.set(
+                    js_string!("_gradient_expression"),
+                    JsString::from(gradient.color_text_at(index).unwrap()),
+                    true,
+                    ctx,
+                )?;
+                iterator_object(&proxy)?.set(
+                    js_string!("_gradient_code"),
+                    f64::from(code),
+                    true,
+                    ctx,
+                )?;
+                object.set(
+                    multi_gradient_key("value", index),
+                    gradient.value_at(index).unwrap(),
+                    true,
+                    ctx,
+                )?;
+                object.set(multi_gradient_key("color", index), proxy, true, ctx)?;
+            }
+            object.set(js_string!("_size"), gradient.size(), true, ctx)?;
+            Ok(())
+        }
+        fn take_pending_multi_gradient(
+            renderer: &JsValue,
+            uid: u64,
+            ctx: &mut Context,
+        ) -> JsResult<Option<MultiGradient>> {
+            let proxy =
+                iterator_object(renderer)?.get(js_string!("_pending_multi_gradient"), ctx)?;
+            if proxy.is_undefined() {
+                return Ok(None);
+            }
+            let gradient = gradient_from_script(&proxy, ctx)?;
+            iterator_object(&proxy)?.set(js_string!("_renderer_uid"), uid as f64, true, ctx)?;
+            Ok(Some(gradient))
+        }
+        fn refresh_bound_multi_gradient(this: &JsValue, ctx: &mut Context) -> JsResult<()> {
+            let id = iterator_object(this)?.get(js_string!("_renderer_uid"), ctx)?;
+            let Some(id) = id.as_number() else {
+                return Ok(());
+            };
+            let gradient = script_renderer(id as u64)?
+                .multi_gradient
+                .unwrap_or_else(MultiGradient::new);
+            fill_multi_gradient(this, &gradient, ctx)
+        }
+        fn sync_bound_multi_gradient(this: &JsValue, ctx: &mut Context) -> JsResult<()> {
+            let object = iterator_object(this)?;
+            let renderer_uid = object.get(js_string!("_renderer_uid"), ctx)?;
+            let Some(renderer_uid) = renderer_uid.as_number() else {
+                return Ok(());
+            };
+            let gradient = gradient_from_script(this, ctx)?;
             script_env::with_mut(|env| {
-                if let Some(renderer) = env.objects.iter_mut().find_map(|object| {
-                    object
+                for object in &mut env.objects {
+                    if let Some(renderer) = object
                         .renderers
                         .iter_mut()
-                        .find(|renderer| renderer.uid == renderer_uid)
-                }) {
-                    renderer.multi_gradient = Some(gradient);
+                        .find(|renderer| renderer.uid == renderer_uid as u64)
+                    {
+                        sync_qsc_multi_gradient(&mut renderer.children, &gradient);
+                        renderer.multi_gradient = Some(gradient);
+                        script_cmds::push(ScriptCmd::SetRendererChildren {
+                            renderer_uid: renderer.uid,
+                            object_uid: object.uid,
+                            object: object.name.clone(),
+                            renderer: renderer.name.clone(),
+                            children: renderer.children.clone(),
+                        });
+                        break;
+                    }
                 }
             });
             Ok(())
+        }
+        fn js_multi_gradient_get_nodes_json(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            refresh_bound_multi_gradient(this, ctx)?;
+            Ok(JsString::from(gradient_from_script(this, ctx)?.get_nodes_json()).into())
+        }
+        fn js_multi_gradient_set_nodes_json(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let mut gradient = MultiGradient::new();
+            gradient
+                .set_nodes_json(&arg0(args, ctx), |text| resolve_script_color(text))
+                .map_err(|error| script_error(error.to_string()))?;
+            fill_multi_gradient(this, &gradient, ctx)?;
+            sync_bound_multi_gradient(this, ctx)?;
+            Ok(JsValue::undefined())
         }
         fn js_multi_gradient_size(
             this: &JsValue,
             _args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            refresh_bound_multi_gradient(this, ctx)?;
             Ok(JsValue::new(multi_gradient_size(this, ctx)?))
         }
         fn js_multi_gradient_clear(
@@ -19615,6 +19731,7 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            refresh_bound_multi_gradient(this, ctx)?;
             let value = color_arg(args, 0, 0.0, ctx)?;
             let color = args.get(1).cloned().unwrap_or(JsValue::undefined());
             if !color.is_object() {
@@ -19637,6 +19754,7 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            refresh_bound_multi_gradient(this, ctx)?;
             let index = multi_gradient_index(args, ctx)?
                 .ok_or_else(|| script_error("MultiGradient index is out of range"))?;
             if index >= multi_gradient_size(this, ctx)? {
@@ -19651,6 +19769,7 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            refresh_bound_multi_gradient(this, ctx)?;
             let index = multi_gradient_index(args, ctx)?
                 .ok_or_else(|| script_error("MultiGradient index is out of range"))?;
             if index >= multi_gradient_size(this, ctx)? {
@@ -19665,6 +19784,7 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            refresh_bound_multi_gradient(this, ctx)?;
             let size = multi_gradient_size(this, ctx)?;
             let Some(index) = multi_gradient_index(args, ctx)?.filter(|index| *index < size) else {
                 return Ok(JsValue::new(false));
@@ -19687,6 +19807,7 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            refresh_bound_multi_gradient(this, ctx)?;
             let size = multi_gradient_size(this, ctx)?;
             let Some(index) = multi_gradient_index(args, ctx)?.filter(|index| *index < size) else {
                 return Ok(JsValue::new(false));
@@ -19719,23 +19840,10 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let source = args.first().cloned().unwrap_or(JsValue::undefined());
-            let source_object = source
-                .as_object()
-                .ok_or_else(|| script_error("MultiGradient source is not an object"))?;
-            let size = multi_gradient_size(&source, ctx)?;
-            let mut entries = Vec::with_capacity(size);
-            for index in 0..size {
-                entries.push((
-                    source_object
-                        .get(multi_gradient_key("value", index), ctx)?
-                        .to_number(ctx)?,
-                    source_object.get(multi_gradient_key("color", index), ctx)?,
-                ));
-            }
-            js_multi_gradient_clear(this, &[], ctx)?;
-            for (value, color) in entries {
-                multi_gradient_insert(this, value, color, ctx)?;
-            }
+            refresh_bound_multi_gradient(&source, ctx)?;
+            let gradient = gradient_from_script(&source, ctx)?;
+            fill_multi_gradient(this, &gradient, ctx)?;
+            sync_bound_multi_gradient(this, ctx)?;
             Ok(JsValue::undefined())
         }
         fn make_multi_gradient(ctx: &mut Context) -> JsValue {
@@ -19793,6 +19901,16 @@ impl DesktopAppState {
                 .function(
                     NativeFunction::from_fn_ptr(js_multi_gradient_copy),
                     js_string!("copyFrom"),
+                    1,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_multi_gradient_get_nodes_json),
+                    js_string!("getNodesJSON"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_multi_gradient_set_nodes_json),
+                    js_string!("setNodesJSON"),
                     1,
                 )
                 .build()
@@ -22539,6 +22657,7 @@ impl DesktopAppState {
                     ("getBoundBoxMax", 1, js_object_bound_max),
                     ("fitView", 2, js_object_fit_view),
                     ("fitView2", 2, js_object_fit_view_selection),
+                    ("orientView", 2, js_object_orient_view),
                     ("getChainNameCandsJSON", 0, js_object_chain_candidates),
                     ("getResidNameCandsJSON", 0, js_object_residue_candidates),
                     ("getAtomNameCandsJSON", 0, js_object_atom_candidates),
@@ -23239,6 +23358,7 @@ impl DesktopAppState {
             let object = iterator_object(this)?;
             let mut camera = cuemol_qsys::Camera::new();
             camera.set_name(this_string_prop(this, "name", ctx));
+            camera.set_ui_order(object.get(js_string!("ui_order"), ctx)?.to_i32(ctx)?);
             camera.set_source(this_string_prop(this, "src", ctx));
             camera.set_zoom(object_number_prop(this, "_zoom", ctx)?);
             camera.set_slab(object_number_prop(this, "_slab", ctx)?);
@@ -23291,6 +23411,13 @@ impl DesktopAppState {
             }
             iterator_object(this)?.set(JsString::from(name), value, true, ctx)?;
             Ok(JsValue::undefined())
+        }
+        fn js_camera_source(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            iterator_object(this)?.get(js_string!("_source"), ctx)
         }
         fn js_camera_zoom(
             this: &JsValue,
@@ -23460,6 +23587,14 @@ impl DesktopAppState {
             Ok(JsValue::undefined())
         }
         fn make_camera(ctx: &mut Context) -> JsValue {
+            let source_getter = FunctionObjectBuilder::new(
+                ctx.realm(),
+                NativeFunction::from_fn_ptr(js_camera_source),
+            )
+            .name(js_string!("get src"))
+            .constructor(false)
+            .build();
+
             let zoom_getter = FunctionObjectBuilder::new(
                 ctx.realm(),
                 NativeFunction::from_fn_ptr(js_camera_zoom),
@@ -23521,7 +23656,14 @@ impl DesktopAppState {
             ObjectInitializer::new(ctx)
                 .property(js_string!("type"), js_string!("Camera"), Attribute::all())
                 .property(js_string!("name"), js_string!(""), Attribute::all())
-                .property(js_string!("src"), js_string!(""), Attribute::ENUMERABLE)
+                .property(js_string!("ui_order"), -1, Attribute::all())
+                .property(js_string!("_source"), js_string!(""), Attribute::all())
+                .accessor(
+                    js_string!("src"),
+                    Some(source_getter),
+                    None,
+                    Attribute::ENUMERABLE,
+                )
                 .property(js_string!("_zoom"), 50.0, Attribute::all())
                 .property(js_string!("_slab"), 50.0, Attribute::all())
                 .property(js_string!("center"), center, Attribute::all())
@@ -24019,6 +24161,7 @@ impl DesktopAppState {
                 .as_object()
                 .ok_or_else(|| script_error("Camera proxy creation failed"))?;
             object.set(js_string!("name"), JsString::from(camera.name()), true, ctx)?;
+            object.set(js_string!("ui_order"), camera.ui_order(), true, ctx)?;
             object.set(js_string!("_zoom"), camera.zoom(), true, ctx)?;
             object.set(js_string!("_slab"), camera.slab(), true, ctx)?;
             object.set(js_string!("_distance"), camera.distance(), true, ctx)?;
@@ -24048,6 +24191,15 @@ impl DesktopAppState {
                 true,
                 ctx,
             )?;
+            object.set(
+                js_string!("_source"),
+                JsString::from(camera.source()),
+                true,
+                ctx,
+            )?;
+            for (uid, visible, is_object) in camera.visibility_settings() {
+                camera_append_entry(&value, uid, visible, is_object, ctx)?;
+            }
             Ok(value)
         }
         fn js_view_get_camera(
@@ -25025,6 +25177,23 @@ impl DesktopAppState {
             }
             Ok(JsValue::undefined())
         }
+        fn sync_camera_references(ctx: &mut Context) -> JsResult<()> {
+            let references = script_env::with(|env| env.camera_refs.clone());
+            for (scene_uid, name, object) in references {
+                let mut camera = camera_from_value(&object.into(), ctx)?;
+                camera.set_name(name);
+                script_env::with_mut(|env| {
+                    if let Some(scene) = env.scenes.iter_mut().find(|scene| scene.uid == scene_uid)
+                    {
+                        camera.clone().store_in(&mut scene.cameras);
+                    }
+                    if env.scene_uid == scene_uid {
+                        camera.store_in(&mut env.cameras);
+                    }
+                });
+            }
+            Ok(())
+        }
         fn scene_camera(scene_uid: u64, name: &str) -> Option<cuemol_qsys::Camera> {
             script_env::with(|env| {
                 env.scenes
@@ -25044,6 +25213,7 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            sync_camera_references(ctx)?;
             let scene_uid = scene_proxy_uid(this, ctx)?;
             let name = arg0(args, ctx);
             match scene_camera(scene_uid, &name) {
@@ -25056,6 +25226,7 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            sync_camera_references(ctx)?;
             let scene_uid = scene_proxy_uid(this, ctx)?;
             let name = arg0(args, ctx);
             if let Some(object) = script_env::with(|env| {
@@ -25082,6 +25253,7 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            sync_camera_references(ctx)?;
             Ok(JsValue::new(
                 scene_camera(scene_proxy_uid(this, ctx)?, &arg0(args, ctx)).is_some(),
             ))
@@ -25091,6 +25263,7 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            sync_camera_references(ctx)?;
             let scene_uid = scene_proxy_uid(this, ctx)?;
             let name = arg0(args, ctx);
             let mut camera =
@@ -25098,13 +25271,14 @@ impl DesktopAppState {
             camera.set_name(name.clone());
             let command_camera = camera.clone();
             script_env::with_mut(|env| {
+                env.camera_refs
+                    .retain(|(uid, camera_name, _)| *uid != scene_uid || camera_name != &name);
+
                 if let Some(scene) = env.scenes.iter_mut().find(|scene| scene.uid == scene_uid) {
-                    scene.cameras.retain(|entry| entry.name() != name);
-                    scene.cameras.push(camera.clone());
+                    camera.clone().store_in(&mut scene.cameras);
                 }
                 if env.scene_uid == scene_uid {
-                    env.cameras.retain(|entry| entry.name() != name);
-                    env.cameras.push(camera);
+                    camera.clone().store_in(&mut env.cameras);
                 }
             });
             script_cmds::push(ScriptCmd::SetSceneCamera {
@@ -25118,9 +25292,13 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            sync_camera_references(ctx)?;
             let scene_uid = scene_proxy_uid(this, ctx)?;
             let name = arg0(args, ctx);
             let removed = script_env::with_mut(|env| {
+                env.camera_refs
+                    .retain(|(uid, camera_name, _)| *uid != scene_uid || camera_name != &name);
+
                 let removed = env
                     .scenes
                     .iter_mut()
@@ -25145,6 +25323,7 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            sync_camera_references(ctx)?;
             let scene_uid = scene_proxy_uid(this, ctx)?;
             let uid = args
                 .first()
@@ -25162,15 +25341,21 @@ impl DesktopAppState {
                 return Ok(JsValue::new(false));
             };
             camera.set_name(name.clone());
+            camera.set_ui_order(-1);
+            if let Some(previous) = scene_camera(scene_uid, &name) {
+                camera.set_source(previous.source());
+            }
+
             let command_camera = camera.clone();
             script_env::with_mut(|env| {
+                env.camera_refs
+                    .retain(|(uid, camera_name, _)| *uid != scene_uid || camera_name != &name);
+
                 if let Some(scene) = env.scenes.iter_mut().find(|scene| scene.uid == scene_uid) {
-                    scene.cameras.retain(|entry| entry.name() != name);
-                    scene.cameras.push(camera.clone());
+                    camera.clone().store_in(&mut scene.cameras);
                 }
                 if env.scene_uid == scene_uid {
-                    env.cameras.retain(|entry| entry.name() != name);
-                    env.cameras.push(camera);
+                    camera.clone().store_in(&mut env.cameras);
                 }
             });
             script_cmds::push(ScriptCmd::SetSceneCamera {
@@ -25184,6 +25369,7 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            sync_camera_references(ctx)?;
             let scene_uid = scene_proxy_uid(this, ctx)?;
             let uid = args
                 .first()
@@ -25210,6 +25396,7 @@ impl DesktopAppState {
             _args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            sync_camera_references(ctx)?;
             let scene_uid = scene_proxy_uid(this, ctx)?;
             let json = script_env::with(|env| {
                 let entries = env
@@ -25220,8 +25407,9 @@ impl DesktopAppState {
                     .flat_map(|scene| &scene.cameras)
                     .map(|camera| {
                         format!(
-                            "{{\"name\":\"{}\",\"vis_size\":{},\"src\":\"{}\"}}",
+                            "{{\"name\":\"{}\",\"ui_order\":{},\"vis_size\":{},\"src\":\"{}\"}}",
                             camera.name().replace('\\', "\\\\").replace('"', "\\\""),
+                            camera.ui_order(),
                             camera.vis_size(),
                             camera.source().replace('\\', "\\\\").replace('"', "\\\"")
                         )
@@ -25237,6 +25425,7 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            sync_camera_references(ctx)?;
             let scene_uid = scene_proxy_uid(this, ctx)?;
             let name = arg0(args, ctx);
             let path = argn(args, 1, ctx);
@@ -29415,6 +29604,11 @@ impl DesktopAppState {
                         )?;
                         children.push(child);
                     }
+                    let multi_gradient =
+                        take_pending_multi_gradient(&renderer_value, renderer_uid, ctx)?;
+                    if let Some(gradient) = multi_gradient.as_ref() {
+                        sync_qsc_multi_gradient(&mut children, gradient);
+                    }
                     let renderer_children = children.clone();
                     let atom_intr_lines = take_pending_atom_intr_lines(&renderer_value, ctx)?;
                     let renderer_atom_intr_lines = atom_intr_lines.clone();
@@ -29428,7 +29622,7 @@ impl DesktopAppState {
                         attributes: attributes.clone(),
                         children,
                         atom_intr_lines,
-                        multi_gradient: None,
+                        multi_gradient,
                     });
                     script_cmds::push(ScriptCmd::CreateRenderer {
                         object_uid: Some(expected_uid),
@@ -30791,6 +30985,10 @@ impl DesktopAppState {
                     )?;
                     children.push(child);
                 }
+                let multi_gradient = take_pending_multi_gradient(&renderer_value, next_uid, ctx)?;
+                if let Some(gradient) = multi_gradient.as_ref() {
+                    sync_qsc_multi_gradient(&mut children, gradient);
+                }
                 let atom_intr_lines = take_pending_atom_intr_lines(&renderer_value, ctx)?;
                 let renderer = ScriptRend {
                     uid: next_uid,
@@ -30802,7 +31000,7 @@ impl DesktopAppState {
                     attributes: attributes.clone(),
                     children,
                     atom_intr_lines,
-                    multi_gradient: None,
+                    multi_gradient,
                 };
                 let renderer_children = renderer.children.clone();
                 let renderer_atom_intr_lines = renderer.atom_intr_lines.clone();
@@ -31187,16 +31385,17 @@ impl DesktopAppState {
             this: &JsValue,
             args: &[JsValue],
             explicit_selection: bool,
+            orient: bool,
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let uid = object_proxy_uid(this, ctx)?;
             let view_value = args.first().cloned().unwrap_or(JsValue::undefined());
             let target_view = view_uid(&view_value, ctx)?;
             let selector = if explicit_selection {
-                Some(selector_from_script_value(
-                    &args.get(1).cloned().unwrap_or(JsValue::undefined()),
-                    ctx,
-                )?)
+                args.get(1)
+                    .filter(|value| !value.is_null_or_undefined())
+                    .map(|value| selector_from_script_value(value, ctx))
+                    .transpose()?
             } else {
                 None
             };
@@ -31208,22 +31407,29 @@ impl DesktopAppState {
                     .map(|molecule| molecule.molecule.clone())
             })
             .ok_or_else(|| script_error(format!("Molecule {uid} is not available")))?;
-            let fitted = script_env::with_mut(|env| {
+            let transform = script_env::with(|env| {
+                env.objects
+                    .iter()
+                    .find(|object| object.uid == uid)
+                    .map(|object| object.xform)
+                    .unwrap_or(Matrix4::IDENTITY)
+            });
+            script_env::with_mut(|env| {
                 env.views
                     .iter_mut()
                     .find(|view| view.uid() == target_view)
                     .map(|view| {
-                        if explicit_selection {
-                            molecule.fit_view2(view, selector.as_ref())
+                        let selection = selector
+                            .as_ref()
+                            .or_else(|| selected.then_some(molecule.selection()));
+                        if orient {
+                            molecule.orient_view_with_xform(view, selection, transform)
                         } else {
-                            molecule.fit_view(view, selected)
+                            molecule.fit_view_with_xform(view, selection, transform)
                         }
                     })
             })
             .ok_or_else(|| script_error(format!("View {} is not available", target_view.get())))?;
-            if !fitted {
-                return Err(script_error("Molecule has no atoms to fit"));
-            }
             Ok(JsValue::undefined())
         }
         fn js_object_fit_view(
@@ -31231,14 +31437,21 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            fit_molecule_view(this, args, false, ctx)
+            fit_molecule_view(this, args, false, false, ctx)
         }
         fn js_object_fit_view_selection(
             this: &JsValue,
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            fit_molecule_view(this, args, true, ctx)
+            fit_molecule_view(this, args, true, false, ctx)
+        }
+        fn js_object_orient_view(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            fit_molecule_view(this, args, true, true, ctx)
         }
         fn js_object_copy_atoms(
             this: &JsValue,
@@ -32863,6 +33076,11 @@ impl DesktopAppState {
                     2,
                 )
                 .function(
+                    NativeFunction::from_fn_ptr(js_object_orient_view),
+                    js_string!("orientView"),
+                    2,
+                )
+                .function(
                     NativeFunction::from_fn_ptr(js_object_chain_candidates),
                     js_string!("getChainNameCandsJSON"),
                     0,
@@ -33521,7 +33739,19 @@ impl DesktopAppState {
                 return map_renderer_property_get(property, this, args, ctx);
             }
             if matches!(property, MapRendererProperty::MultiGradient) {
-                return Ok(JsValue::null());
+                let object = iterator_object(this)?;
+                let existing = object.get(js_string!("_pending_multi_gradient"), ctx)?;
+                if !existing.is_undefined() {
+                    return Ok(existing);
+                }
+                let gradient = make_multi_gradient(ctx);
+                object.set(
+                    js_string!("_pending_multi_gradient"),
+                    gradient.clone(),
+                    true,
+                    ctx,
+                )?;
+                return Ok(gradient);
             }
             pending_renderer_attr_get(fallback, this, args, ctx)
         }
@@ -33846,7 +34076,12 @@ impl DesktopAppState {
             for (name, value) in child_values {
                 object.property(JsString::from(name), value, Attribute::ENUMERABLE);
             }
-            if is_map_renderer_type(renderer_type) || renderer_type == "molsurf" {
+            if is_map_renderer_type(renderer_type)
+                || matches!(
+                    renderer_type,
+                    "molsurf" | "dsurface" | "directsurf" | "dsurf2"
+                )
+            {
                 object.function(
                     NativeFunction::from_fn_ptr(js_map_renderer_get_color_map_object),
                     js_string!("getColorMapObj"),
@@ -35866,7 +36101,10 @@ impl DesktopAppState {
         fn map_renderer_properties(
             renderer_type: &str,
         ) -> Vec<(&'static str, MapRendererProperty, bool)> {
-            if renderer_type == "molsurf" {
+            if matches!(
+                renderer_type,
+                "molsurf" | "dsurface" | "directsurf" | "dsurf2"
+            ) {
                 return vec![("multi_grad", MapRendererProperty::MultiGradient, false)];
             }
             if !is_map_renderer_type(renderer_type) {
@@ -36253,27 +36491,11 @@ impl DesktopAppState {
                 }
                 MapRendererProperty::MultiGradient => {
                     let gradient = make_multi_gradient(ctx);
-                    if let Some(source) = renderer.multi_gradient {
-                        for index in 0..source.size() {
-                            let Some(value) = source.value_at(index) else {
-                                continue;
-                            };
-                            let Some(color) = source.color_at(index) else {
-                                continue;
-                            };
-                            multi_gradient_insert(
-                                &gradient,
-                                value,
-                                make_color(
-                                    cuemol_gfx::SolidColor::from_rgba_u8(
-                                        color.r, color.g, color.b, color.a,
-                                    ),
-                                    ctx,
-                                ),
-                                ctx,
-                            )?;
-                        }
-                    }
+                    fill_multi_gradient(
+                        &gradient,
+                        &renderer.multi_gradient.unwrap_or_else(MultiGradient::new),
+                        ctx,
+                    )?;
                     iterator_object(&gradient)?.set(
                         js_string!("_renderer_uid"),
                         renderer.uid as f64,
@@ -36499,6 +36721,9 @@ impl DesktopAppState {
             _args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            if !pending_renderer_is_attached(this, ctx)? {
+                return Ok(JsValue::null());
+            }
             let renderer = script_renderer(renderer_proxy_uid(this, ctx)?)?;
             let name = renderer_effective_attr(&renderer, "color_mapname", "");
             let object = script_env::with(|env| {
@@ -37360,61 +37585,13 @@ impl DesktopAppState {
                 (getter, setter)
             });
             let is_map_renderer = is_map_renderer_type(&renderer.rtype);
-            let mut map_properties = vec![
-                ("maxLevel", MapRendererProperty::MaxLevel, false),
-                ("minLevel", MapRendererProperty::MinLevel, false),
-                ("colormode", MapRendererProperty::ColorMode, true),
-                ("color", MapRendererProperty::Color, true),
-                ("defaultcolor", MapRendererProperty::Color, true),
-                ("siglevel", MapRendererProperty::SigLevel, true),
-                ("extent", MapRendererProperty::Extent, true),
-                ("center", MapRendererProperty::Center, true),
-                ("level", MapRendererProperty::Level, true),
-                ("use_pbc", MapRendererProperty::UsePbc, true),
-                ("use_abslevel", MapRendererProperty::UseAbsLevel, true),
-                ("bndry_rng", MapRendererProperty::BoundaryRange, true),
-                ("bndry_molname", MapRendererProperty::BoundaryMolecule, true),
-                ("bndry_sel", MapRendererProperty::BoundarySelection, true),
-                ("multi_grad", MapRendererProperty::MultiGradient, false),
-                ("color_mapname", MapRendererProperty::ColorMapName, true),
-                ("maxExtent", MapRendererProperty::MaxExtent, false),
-                ("autoupdate", MapRendererProperty::AutoUpdate, true),
-                ("dragupdate", MapRendererProperty::DragUpdate, true),
-            ];
-            if matches!(renderer.rtype.as_str(), "isosurf" | "MapSurfRenderer") {
-                map_properties.extend([
-                    ("cullface", MapRendererProperty::CullFace, true),
-                    ("drawmode", MapRendererProperty::DrawMode, true),
-                    ("width", MapRendererProperty::Width, true),
-                    ("binning", MapRendererProperty::Binning, true),
-                    ("max_grids", MapRendererProperty::MaxGrids, true),
-                    ("glrender_mode", MapRendererProperty::GlRenderMode, true),
-                    ("omp_thr", MapRendererProperty::OmpThreads, true),
-                ]);
-            } else if matches!(renderer.rtype.as_str(), "gpu_mapvol" | "GLSLMapVolRenderer") {
-                map_properties.push(("xferfn_type", MapRendererProperty::XferFunctionType, true));
-            } else {
-                map_properties.extend([
-                    ("width", MapRendererProperty::Width, true),
-                    ("bufsize", MapRendererProperty::BufferSize, true),
-                ]);
-            }
-            let mut map_accessors = if is_map_renderer {
-                map_properties
-                    .into_iter()
-                    .map(|(name, property, writable)| {
-                        let (getter, setter) = map_accessor(ctx, name, property, writable);
-                        (name, getter, setter)
-                    })
-                    .collect::<Vec<_>>()
-            } else {
-                Vec::new()
-            };
-            if renderer.rtype == "molsurf" {
-                let (getter, setter) =
-                    map_accessor(ctx, "multi_grad", MapRendererProperty::MultiGradient, false);
-                map_accessors.push(("multi_grad", getter, setter));
-            }
+            let map_accessors = map_renderer_properties(&renderer.rtype)
+                .into_iter()
+                .map(|(name, property, writable)| {
+                    let (getter, setter) = map_accessor(ctx, name, property, writable);
+                    (name, getter, setter)
+                })
+                .collect::<Vec<_>>();
             let child_values = renderer_child_properties(&renderer.rtype)
                 .into_iter()
                 .map(|(name, kind)| {
@@ -37490,7 +37667,12 @@ impl DesktopAppState {
             for (name, value) in child_values {
                 proxy.property(JsString::from(name), value, Attribute::ENUMERABLE);
             }
-            if is_map_renderer || renderer.rtype == "molsurf" {
+            if is_map_renderer
+                || matches!(
+                    renderer.rtype.as_str(),
+                    "molsurf" | "dsurface" | "directsurf" | "dsurf2"
+                )
+            {
                 proxy.function(
                     NativeFunction::from_fn_ptr(js_map_renderer_get_color_map_object),
                     js_string!("getColorMapObj"),
@@ -44535,30 +44717,11 @@ impl DesktopAppState {
             })
             .and_then(|_| context.eval(Source::from_bytes(source)));
         if outcome.is_ok() {
-            let camera_refs = script_env::with(|env| env.camera_refs.clone());
-            for (scene_uid, name, object) in camera_refs {
-                let value: JsValue = object.into();
-                let mut camera = match camera_from_value(&value, &mut context) {
-                    Ok(camera) => camera,
-                    Err(error) => {
-                        script_env::clear();
-                        return Err(CueMolError::invalid_argument(format!(
-                            "script camera reference error: {error}"
-                        )));
-                    }
-                };
-                camera.set_name(name.clone());
-                script_env::with_mut(|env| {
-                    if let Some(scene) = env.scenes.iter_mut().find(|scene| scene.uid == scene_uid)
-                    {
-                        scene.cameras.retain(|entry| entry.name() != name);
-                        scene.cameras.push(camera.clone());
-                    }
-                    if env.scene_uid == scene_uid {
-                        env.cameras.retain(|entry| entry.name() != name);
-                        env.cameras.push(camera.clone());
-                    }
-                });
+            if let Err(error) = sync_camera_references(&mut context) {
+                script_env::clear();
+                return Err(CueMolError::invalid_argument(format!(
+                    "script camera reference error: {error}"
+                )));
             }
         }
         let updated_runtime = outcome.as_ref().ok().map(|_| {
@@ -46266,8 +46429,11 @@ impl DesktopAppState {
                         attributes: renderer.qsc_attrs().clone(),
                         children: renderer.qsc_children().to_vec(),
                         atom_intr_lines: renderer.atom_intr_lines().to_vec(),
-                        multi_gradient: (renderer.renderer_type() == "molsurf")
-                            .then(|| renderer_multi_gradient(renderer, &styles)),
+                        multi_gradient: (matches!(
+                            renderer.renderer_type(),
+                            "molsurf" | "dsurface" | "directsurf" | "dsurf2"
+                        ))
+                        .then(|| renderer_multi_gradient(renderer, &styles)),
                     })
                     .collect();
                 objects.push(ScriptObj {
@@ -47390,8 +47556,11 @@ fn script_surface_renderers(
                     .cloned()
                     .collect(),
                 atom_intr_lines: Vec::new(),
-                multi_gradient: (rtype == "molsurf")
-                    .then(|| density_multi_gradient(&style_node, styles)),
+                multi_gradient: (matches!(
+                    rtype.as_str(),
+                    "molsurf" | "dsurface" | "directsurf" | "dsurf2"
+                ))
+                .then(|| density_multi_gradient(&style_node, styles)),
             }
         })
         .collect()
@@ -48003,6 +48172,7 @@ fn append_object_snapshot(
     styles: &StyleManager,
     style_scope_id: u64,
     surface_potential: Option<&DensityMap>,
+    scalar_maps: &BTreeMap<Uid, GuiDensityMapObject>,
     scene: &MolScene,
 ) {
     let selected_indices = if object.mol().selection_text().is_empty() {
@@ -48044,6 +48214,7 @@ fn append_object_snapshot(
             styles,
             style_scope_id,
             surface_potential,
+            scalar_maps,
             scene,
         );
     }
@@ -48056,6 +48227,7 @@ fn append_object_snapshot(
             styles,
             style_scope_id,
             surface_potential,
+            scalar_maps,
             scene,
         );
     }
@@ -48084,6 +48256,7 @@ fn append_object_crystal_renderer_snapshot(
     styles: &StyleManager,
     style_scope_id: u64,
     surface_potential: Option<&DensityMap>,
+    scalar_maps: &BTreeMap<Uid, GuiDensityMapObject>,
     scene: &MolScene,
 ) {
     let Some(cell) = object.mol().cell_params() else {
@@ -48191,6 +48364,7 @@ fn append_object_crystal_renderer_snapshot(
                 styles,
                 style_scope_id,
                 surface_potential,
+                scalar_maps,
                 scene,
             );
             base = Some(rendered);
@@ -48318,6 +48492,7 @@ fn append_object_renderer_snapshot(
     styles: &StyleManager,
     style_scope_id: u64,
     surface_potential: Option<&DensityMap>,
+    scalar_maps: &BTreeMap<Uid, GuiDensityMapObject>,
     scene: &MolScene,
 ) {
     let resolved_renderer = renderer.map(|r| scene.resolve_atom_intr_renderer(object, r));
@@ -48584,9 +48759,14 @@ fn append_object_renderer_snapshot(
             snapshot.meshes.extend(bases.meshes);
             snapshot
         }
-        ("dsurface" | "directsurf" | "dsurf2", Some(renderer)) => {
-            direct_surface_snapshot(object, renderer, styles, style_scope_id, surface_potential)
-        }
+        ("dsurface" | "directsurf" | "dsurf2", Some(renderer)) => direct_surface_snapshot(
+            object,
+            renderer,
+            styles,
+            style_scope_id,
+            surface_potential,
+            scalar_maps,
+        ),
         ("ms2test", _) => {
             let mesh = cuemol_surface::Ms2TestRenderer::new().render_mesh(object.mol());
             let mut snapshot = RenderSceneSnapshot::empty();
@@ -48874,6 +49054,7 @@ fn direct_surface_snapshot(
     styles: &StyleManager,
     style_scope_id: u64,
     surface_potential: Option<&DensityMap>,
+    scalar_maps: &BTreeMap<Uid, GuiDensityMapObject>,
 ) -> RenderSceneSnapshot {
     let resolved = |name: &str| {
         renderer
@@ -48931,43 +49112,83 @@ fn direct_surface_snapshot(
     } else {
         surface_renderer.render_mesh(object.mol())
     };
-    let use_potential =
-        resolved("colormode").is_some_and(|value| matches!(value.as_str(), "potential" | "1"));
-    let mut render_mesh = if use_potential {
-        surface_potential.map(|potential| {
-            let low = resolved("lowpar")
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(-10.0);
-            let mid = resolved("midpar")
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(0.0);
-            let high = resolved("highpar")
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(10.0);
-            let color = |name: &str, default| {
-                resolved(name)
-                    .and_then(|value| resolve_qsc_color(&value, styles))
+    let color_mode = resolved("colormode").unwrap_or_else(|| "molecule".into());
+    let use_gradient = matches!(color_mode.as_str(), "multigrad" | "4");
+    let use_potential = matches!(color_mode.as_str(), "potential" | "1");
+    let map_name = resolved(if use_gradient {
+        "color_mapname"
+    } else {
+        "elepot"
+    })
+    .unwrap_or_default();
+    let scalar = scalar_maps
+        .values()
+        .find(|map| map.scene_uid.get() == style_scope_id && map.name == map_name)
+        .map(|map| (&map.map, map.xform.invert().unwrap_or(Matrix4::IDENTITY)))
+        .or_else(|| {
+            map_name
+                .is_empty()
+                .then_some(surface_potential)
+                .flatten()
+                .map(|map| (map, Matrix4::IDENTITY))
+        });
+    let mut render_mesh = if use_gradient || use_potential {
+        scalar.map(|(map, inverse)| {
+            let number = |key: &str, default| {
+                resolved(key)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(default)
+            };
+            let color = |key: &str, default| {
+                resolved(key)
+                    .and_then(|v| resolve_qsc_color(&v, styles))
                     .map(rgba8_render_color)
                     .unwrap_or(default)
             };
-            let ramp_offset = resolved("ramp_above")
-                .is_some_and(|value| qsc_bool(&value))
-                .then(|| {
-                    resolved("ramp_value")
-                        .and_then(|value| value.parse().ok())
-                        .unwrap_or(1.4)
-                });
-            surface_scalar_mesh_from_mesh_colored(
-                &mesh,
-                potential,
-                low,
-                mid,
-                high,
-                color("lowcol", [1.0, 0.0, 0.0, 1.0]),
-                color("midcol", [1.0, 1.0, 1.0, 1.0]),
-                color("highcol", [0.0, 0.0, 1.0, 1.0]),
-                ramp_offset,
-            )
+            let low = number("lowpar", -10.);
+            let mid = number("midpar", 0.);
+            let high = number("highpar", 10.);
+            let low_color = color("lowcol", [1., 0., 0., 1.]);
+            let mid_color = color("midcol", [1., 1., 1., 1.]);
+            let high_color = color("highcol", [0., 0., 1., 1.]);
+            let ramp = if resolved("ramp_above").is_some_and(|v| qsc_bool(&v)) {
+                number("ramp_value", 1.4)
+            } else {
+                0.
+            };
+            let mut gradient_node = LDom2Node::new();
+            gradient_node.set_str_attr("style", renderer.style().unwrap_or_default());
+            for child in renderer.qsc_children() {
+                gradient_node.append_child_node(child.clone());
+            }
+            let gradient = density_multi_gradient(&gradient_node, styles);
+            let transform = inverse.mul_mat(object.xform_matrix());
+            let vertices = mesh
+                .vertices()
+                .iter()
+                .map(|vertex| {
+                    let mut position = vertex.position + vertex.normal.scale(ramp);
+                    transform.xform3d(&mut position);
+                    let value = map.value_at(position);
+                    cuemol_render::MeshVertex {
+                        position: vertex.position,
+                        normal: vertex.normal,
+                        color: if use_gradient {
+                            rgba8_render_color(gradient.color(value))
+                        } else {
+                            potential_color_with_stops(
+                                value, low, mid, high, low_color, mid_color, high_color,
+                            )
+                        },
+                    }
+                })
+                .collect();
+            let indices = mesh
+                .triangles()
+                .iter()
+                .flat_map(|t| t.iter().copied())
+                .collect();
+            cuemol_render::RenderMesh { vertices, indices }
         })
     } else {
         None
@@ -49519,7 +49740,13 @@ fn density_renderer_qsc_node(renderer: &GuiDensityRenderer) -> LDom2Node {
             };
             let gradnode = gradient.append_child("gradnode");
             gradnode.set_str_attr("par", value.to_string());
-            gradnode.set_str_attr("col", qsc_rgba8_string(color));
+            gradnode.set_str_attr(
+                "col",
+                renderer
+                    .multi_grad
+                    .color_text_at(index)
+                    .unwrap_or_else(|| qsc_rgba8_string(color)),
+            );
         }
         node.append_child_node(gradient);
     }
@@ -49777,9 +50004,6 @@ fn renderer_multi_gradient(renderer: &MolRenderer, styles: &StyleManager) -> Mul
 #[cfg(feature = "scripting")]
 fn sync_qsc_multi_gradient(children: &mut Vec<LDom2Node>, gradient: &MultiGradient) {
     children.retain(|child| child.tag_name() != "multi_grad");
-    if gradient.size() == 0 {
-        return;
-    }
     let mut node = LDom2Node::new();
     node.set_tag_name("multi_grad");
     for index in 0..gradient.size() {
@@ -49789,16 +50013,18 @@ fn sync_qsc_multi_gradient(children: &mut Vec<LDom2Node>, gradient: &MultiGradie
         };
         let gradnode = node.append_child("gradnode");
         gradnode.set_str_attr("par", value.to_string());
-        gradnode.set_str_attr("col", qsc_rgba8_string(color));
+        gradnode.set_str_attr(
+            "col",
+            gradient
+                .color_text_at(index)
+                .unwrap_or_else(|| qsc_rgba8_string(color)),
+        );
     }
     children.push(node);
 }
 
 fn sync_qsc_multi_gradient_node(node: &mut LDom2Node, gradient: &MultiGradient) {
     node.remove_child("multi_grad");
-    if gradient.size() == 0 {
-        return;
-    }
     let mut child = LDom2Node::new();
     child.set_tag_name("multi_grad");
     for index in 0..gradient.size() {
@@ -49808,7 +50034,12 @@ fn sync_qsc_multi_gradient_node(node: &mut LDom2Node, gradient: &MultiGradient) 
         };
         let gradnode = child.append_child("gradnode");
         gradnode.set_str_attr("par", value.to_string());
-        gradnode.set_str_attr("col", qsc_rgba8_string(color));
+        gradnode.set_str_attr(
+            "col",
+            gradient
+                .color_text_at(index)
+                .unwrap_or_else(|| qsc_rgba8_string(color)),
+        );
     }
     node.append_child_node(child);
 }
@@ -49824,10 +50055,11 @@ fn parse_multi_gradient_entries(
                 "multi-gradient values must be finite",
             ));
         }
+        let expression = color.clone();
         let color = resolve_qsc_color(color, styles).ok_or_else(|| {
             CueMolError::invalid_argument(format!("invalid multi-gradient color: {color}"))
         })?;
-        if gradient.insert(*value, color) < 0 {
+        if gradient.insert_with_expression(*value, color, Some(expression)) < 0 {
             return Err(CueMolError::invalid_argument(format!(
                 "duplicate multi-gradient value: {value}"
             )));
@@ -51383,12 +51615,7 @@ fn surface_renderer_summary(
 
 fn multi_gradient_entries(gradient: &MultiGradient) -> Vec<(f64, String)> {
     (0..gradient.size())
-        .filter_map(|index| {
-            Some((
-                gradient.value_at(index)?,
-                qsc_rgba8_string(gradient.color_at(index)?),
-            ))
-        })
+        .filter_map(|index| Some((gradient.value_at(index)?, gradient.color_text_at(index)?)))
         .collect()
 }
 
@@ -54804,6 +55031,162 @@ end_header
         reloaded.open_bytes("measure.qsc", &bytes).unwrap();
         let (log,_)=reloaded.run_script_js("var r=cuemol.getRenderer('mol','measure'); print(r.getValue(0)+':'+r.getValue(2));").unwrap();
         assert_eq!(log, "4:1\n");
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_gradient_json_is_live_atomic_and_persistent_for_direct_surfaces() {
+        let mut app = DesktopAppState::new();
+        let scene = app.ensure_active_scene();
+        let molecule = read_pdb_str(
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n",
+        )
+        .unwrap();
+        app.scene_manager_mut()
+            .scene_mut(scene)
+            .unwrap()
+            .add_molecule("mol", molecule);
+        for (name, value) in [("low-field", -2.), ("high-field", 2.)] {
+            let map = DensityMap::from_grid_map(GridMap {
+                counts: [8, 8, 8],
+                origin: Vector4::new3(-4., -4., -4.),
+                delta: [
+                    Vector4::new3(1., 0., 0.),
+                    Vector4::new3(0., 1., 0.),
+                    Vector4::new3(0., 0., 1.),
+                ],
+                values: vec![value; 512],
+            });
+            let uid = app.add_density_map(scene, name, map);
+            app.set_density_map_visible(uid, false).unwrap();
+        }
+        let (log, _) = app.run_script_js(r##"
+            var mol=cuemol.getObject('mol'), r=cuemol.DirectSurfRenderer(); r.name='field-surface';
+            var g=r.multi_grad; print(g.size+':'+(r.getColorMapObj()===null));
+            g.setNodesJSON('[{"value":-1,"color":"red"},{"value":1,"color":"blue"},{"value":1,"color":"green"}]');
+            var before=g.getNodesJSON(); try { g.setNodesJSON('[{"value":0,"color":"#ffffff"},{"value":1}]'); } catch(e) {}
+            print(before===g.getNodesJSON());
+            mol.attachRenderer(r); r.surftype='vdw'; r.detail=1; r.colormode='multigrad'; r.color_mapname='low-field';
+            var other=r.multi_grad; other.changeAt(0,-1,cuemol.makeColor('#00ff00'));
+            print(g.getColorAt(0).g()+':'+JSON.parse(g.getNodesJSON())[1].color+':'+r.getColorMapObj().name);
+        "##).unwrap();
+        assert_eq!(log, "0:true\ntrue\n255:blue:low-field\n");
+        let colors = |app: &DesktopAppState| {
+            app.active_render_snapshot("")
+                .unwrap()
+                .meshes
+                .iter()
+                .flat_map(|mesh| &mesh.vertices)
+                .map(|vertex| vertex.color)
+                .collect::<Vec<_>>()
+        };
+        let low_colors = colors(&app);
+        assert!(!low_colors.is_empty());
+        assert!(low_colors.iter().all(|color| *color == [0., 1., 0., 1.]));
+        app.run_script_js("var scene=cuemol.getScene(); scene.startUndoTxn('Change scalar field'); cuemol.getRenderer('mol','field-surface').color_mapname='high-field'; scene.commitUndoTxn();")
+            .unwrap();
+        assert!(colors(&app).iter().all(|color| *color == [0., 0., 1., 1.]));
+        app.run_script_js("cuemol.getScene().undo(0);").unwrap();
+        assert!(colors(&app).iter().all(|color| *color == [0., 1., 0., 1.]));
+        let bytes = app.active_scene_bytes().unwrap();
+        let mut restored = DesktopAppState::new();
+        restored.open_bytes("gradient.qsc", &bytes).unwrap();
+        let (log, _) = restored.run_script_js("var r=cuemol.getRenderer('mol','field-surface'); print(JSON.parse(r.multi_grad.getNodesJSON())[1].color+':'+r.getColorMapObj().name);").unwrap();
+        assert_eq!(log, "blue:low-field\n");
+        assert!(colors(&restored)
+            .iter()
+            .all(|color| *color == [0., 1., 0., 1.]));
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_orient_and_fit_use_world_positions_and_keep_empty_views() {
+        let mut app = DesktopAppState::new();
+        app.open_bytes("fit.pdb", b"ATOM      1  CA  ALA A   1      -5.000  -5.000   0.000  1.00 10.00           C\nATOM      2  CA  ALA A   2       5.000   5.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let object_uid = app.object_summaries(app.active_scene().unwrap())[0]
+            .uid
+            .get();
+        let (log, _) = app.run_script_js(&r#"
+            var m=cuemol.getObject(OBJECT_ID), v=cuemol.getScene().createView(); v.sizeChanged(200,100);
+            var t=cuemol.Matrix(); t.setTranslate(cuemol.createObj('Vector','(10,20,30)')); m.xformMat=t;
+            m.orientView(v,cuemol.makeSel('*'));
+            print(v.center.x.toFixed(6)+':'+v.center.y.toFixed(6)+':'+v.center.z.toFixed(6));
+            print(v.zoom.toFixed(6)+':'+v.slab.toFixed(6));
+            var before=v.rotation.toString()+':'+v.center.toString()+':'+v.zoom;
+            m.orientView(v,cuemol.makeSel('none')); m.fitView2(v,cuemol.makeSel('none'));
+            print(before === v.rotation.toString()+':'+v.center.toString()+':'+v.zoom);
+            m.fitView2(v,cuemol.makeSel('aid 1')); print(v.zoom.toFixed(6)+':'+v.slab.toFixed(6));
+        "#.replace("OBJECT_ID", &object_uid.to_string())).unwrap();
+        assert_eq!(
+            log,
+            "10.000000:20.000000:30.000000\n9.899495:4.000000\ntrue\n4.000000:4.000000\n"
+        );
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_camera_references_are_live_and_replacements_detach_old_references() {
+        let mut app = DesktopAppState::new();
+        let scene = app.ensure_active_scene();
+        let mut camera = Camera::new();
+        camera.set_name("source");
+        camera.set_source("linked.cam");
+        camera.vis_append(123, false, true);
+        app.scene_manager_mut()
+            .scene_mut(scene)
+            .unwrap()
+            .set_camera(camera);
+        let (log, _) = app.run_script_js(r#"
+            var s=cuemol.getScene(), a=s.getCameraRef('source'), b=cuemol.Camera();
+            print(a.src+':'+a.vis_size+':'+s.getCamera('source').vis_size);
+            s.setCamera('other',b); a.ui_order=20; a.zoom=70;
+            print(JSON.parse(s.getCameraInfoJSON()).map(c=>c.name).join(',')+':'+s.getCamera('source').zoom);
+            s.setCamera('source',cuemol.Camera()); a.zoom=80;
+            print(s.getCameraRef('source').zoom);
+            var stale=s.getCameraRef('other'); s.destroyCamera('other'); stale.zoom=90;
+            print(s.hasCamera('other'));
+        "#).unwrap();
+        assert_eq!(log, "linked.cam:1:1\nother,source:70\n50\nfalse\n");
+        let scene = app.scene_manager().scene(scene).unwrap();
+        assert_eq!(scene.cameras().len(), 1);
+        assert_eq!(scene.camera_by_name("source").unwrap().zoom(), 50.);
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_camera_order_survives_replacement_reference_edits_and_qsc() {
+        let mut app = DesktopAppState::new();
+        let scene = app.ensure_active_scene();
+        let (log, _) = app
+            .run_script_js(
+                r#"
+            var s=cuemol.getScene(), z=cuemol.Camera(), a=cuemol.Camera(), b=cuemol.Camera();
+            print(z.ui_order); s.setCamera('z',z); s.setCamera('a',a);
+            b.ui_order=100; s.setCamera('b',b);
+            var replacement=cuemol.Camera(); replacement.zoom=70; s.setCamera('z',replacement);
+            print(JSON.parse(s.getCameraInfoJSON()).map(c=>c.name+':'+c.ui_order).join(','));
+            s.getCameraRef('z').ui_order=200;
+        "#,
+            )
+            .unwrap();
+        assert_eq!(log, "-1\nz:0,a:1,b:100\n");
+        let names = |app: &DesktopAppState| {
+            app.camera_summaries(app.active_scene().unwrap())
+                .into_iter()
+                .map(|c| c.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&app), ["a", "b", "z"]);
+        let scene = app.scene_manager().scene(scene).unwrap();
+        assert_eq!(scene.camera_by_name("z").unwrap().zoom(), 70.);
+        assert_eq!(scene.camera_by_name("z").unwrap().ui_order(), 200);
+        let bytes = app.active_scene_bytes().unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("ui_order="));
+        let mut loaded = DesktopAppState::new();
+        loaded.open_bytes("camera-order.qsc", &bytes).unwrap();
+        assert_eq!(names(&loaded), ["a", "b", "z"]);
+        let (log,_)=loaded.run_script_js("print(JSON.parse(cuemol.getScene().getCameraInfoJSON()).map(c=>c.ui_order).join(','));").unwrap();
+        assert_eq!(log, "0,1,2\n");
     }
 
     #[cfg(feature = "scripting")]
@@ -58891,7 +59274,7 @@ end_header
                 )
                 && log.contains("molState=mol-renamed:false:chain A:255:1:2:")
                 && log.contains(":true:true:17:true:true::pdb:")
-                && log.contains("molEdit=true:1:true:1:1:Z:NEW:(8,2,0)")
+                && log.contains("molEdit=true:1:true:1:1:Z:NEW:(8,4,0)")
                 && log.contains(
                     "objectOps=*group:preset:mol-renamed:5:0:true:datachunk:::RendGroup:true:true"
                 ),

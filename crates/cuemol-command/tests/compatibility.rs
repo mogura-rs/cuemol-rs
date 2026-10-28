@@ -675,3 +675,36 @@ fn camera_commands_use_screen_axes_and_current_viewport_height() {
     assert!((camera.center() + delta).length() < 1.0e-12);
     assert_eq!(camera.cam_dist(), 200.0);
 }
+
+#[test]
+fn centering_uses_selection_centroids_and_fitting_uses_transformed_view_bounds() {
+    use cuemol_core::{Matrix4, Vector4};
+    let mut state = DesktopAppState::new();
+    let mut camera = Camera::new();
+    let id = molecule(&mut state, &mut camera, "center", 0.0);
+    let object = state.scene_manager_mut().object_mut(Uid::new(id)).unwrap();
+    object
+        .mol_mut()
+        .set_selection(cuemol_molstr::parse_selector("aid 1:3").unwrap());
+    object.set_xform_matrix(Matrix4::make_trans_mat(Vector4::new3(10., 20., 30.)));
+    let expected = object.mol().get_center_pos(true).unwrap() + Vector4::new3(10., 20., 30.);
+    call(
+        &mut state,
+        &mut camera,
+        "center_view",
+        json!({"objId":id,"zoom":false}),
+    );
+    assert!((camera.center() - expected).length() < 1e-10);
+    camera.set_cam_dist(111.);
+    call(
+        &mut state,
+        &mut camera,
+        "center_view",
+        json!({"objId":id,"selection":"aid 1","zoom":true}),
+    );
+    assert_eq!(camera.center(), Vector4::new3(10., 20., 32.));
+    assert_eq!(
+        (camera.zoom(), camera.slab_depth(), camera.cam_dist()),
+        (4., 4., 111.)
+    );
+}

@@ -1978,7 +1978,10 @@ impl MolScene {
     }
 
     pub fn replace_cameras(&mut self, cameras: Vec<Camera>) {
-        self.cameras = cameras;
+        self.cameras.clear();
+        for camera in cameras {
+            self.set_camera(camera);
+        }
     }
 
     pub fn camera_by_name(&self, name: &str) -> Option<&Camera> {
@@ -1986,15 +1989,7 @@ impl MolScene {
     }
 
     pub fn set_camera(&mut self, camera: Camera) {
-        if let Some(existing) = self
-            .cameras
-            .iter_mut()
-            .find(|existing| existing.name() == camera.name())
-        {
-            *existing = camera;
-        } else {
-            self.cameras.push(camera);
-        }
+        camera.store_in(&mut self.cameras);
     }
 
     pub fn destroy_camera(&mut self, name: &str) -> bool {

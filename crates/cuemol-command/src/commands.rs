@@ -82,55 +82,60 @@ pub(crate) fn fit(
     selection: Option<&str>,
     zoom: bool,
 ) -> Result<()> {
+    let scene_uid = scene(state)?;
     let ids = object.map(|id| vec![id]).unwrap_or_else(|| {
         state
-            .object_summaries(state.active_scene().unwrap())
+            .object_summaries(scene_uid)
             .iter()
             .map(|o| o.uid)
             .collect()
     });
     let selector = selection
-        .map(|s| state.parse_scene_selector(scene(state)?, s))
+        .map(|s| state.parse_scene_selector(scene_uid, s))
         .transpose()?;
-    let mut min = [f64::INFINITY; 3];
-    let mut max = [f64::NEG_INFINITY; 3];
-    let mut found = false;
-    for id in ids {
-        let object = state
-            .scene_manager()
-            .object(id)
-            .ok_or_else(|| CueMolError::not_found("molecule"))?;
-        for atom in object.mol().atoms() {
-            if selector
-                .as_ref()
-                .is_some_and(|sel| !sel.matches_in_molecule(atom, object.mol()))
-            {
-                continue;
-            }
-            let position = object.xform_matrix().transform_point(atom.position);
-            for (i, v) in [position.x, position.y, position.z].into_iter().enumerate() {
-                min[i] = min[i].min(v);
-                max[i] = max[i].max(v);
-            }
-            found = true;
+    let objects = ids
+        .into_iter()
+        .map(|id| {
+            state
+                .scene_manager()
+                .object(id)
+                .ok_or_else(|| CueMolError::not_found("molecule"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let positions = objects.into_iter().flat_map(|object| {
+        let selection = selector
+            .as_ref()
+            .unwrap_or_else(|| object.mol().selection());
+        object
+            .mol()
+            .select_indices(selection)
+            .into_iter()
+            .map(move |index| {
+                let mut position = object.mol().atoms()[index].position;
+                object.xform_matrix().xform3d(&mut position);
+                position
+            })
+    });
+    let found = if zoom {
+        let aspect = state
+            .active_view_summary()
+            .and_then(|view| state.command_manager().view(view.uid))
+            .filter(|view| view.width() > 0 && view.height() > 0)
+            .map_or(1.0, |view| {
+                f64::from(view.width()) / f64::from(view.height())
+            });
+        camera.fit_positions(positions, aspect)
+    } else {
+        let (total, count) = positions.fold((Vector4::ZERO, 0usize), |(total, count), point| {
+            (total + point, count + 1)
+        });
+        if count > 0 {
+            camera.set_center(total.scale(1.0 / count as f64));
         }
-    }
+        count > 0
+    };
     if !found {
         return Err(CueMolError::not_found("atoms matching selection"));
-    }
-    camera.set_center(Vector4::new3(
-        (min[0] + max[0]) * 0.5,
-        (min[1] + max[1]) * 0.5,
-        (min[2] + max[2]) * 0.5,
-    ));
-    if zoom {
-        let size =
-            ((max[0] - min[0]).powi(2) + (max[1] - min[1]).powi(2) + (max[2] - min[2]).powi(2))
-                .sqrt()
-                .max(2.0);
-        camera.set_zoom(size * 1.2);
-        camera.set_cam_dist(size * 2.5);
-        camera.set_slab_depth(size * 2.0);
     }
     Ok(())
 }

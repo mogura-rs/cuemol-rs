@@ -1661,6 +1661,7 @@ dependencies = [
  "cuemol-gfx",
  "flate2",
  "lzma-rs",
+ "serde_json",
 ]
 
 [[package]]

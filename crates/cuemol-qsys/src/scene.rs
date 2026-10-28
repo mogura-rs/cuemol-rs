@@ -792,6 +792,21 @@ impl<T> Scene<T> {
     pub fn set_camera(&mut self, name: impl Into<String>, mut camera: Camera) {
         let name = name.into();
         camera.set_name(name.clone());
+        if camera.ui_order() < 0 {
+            camera.set_ui_order(
+                self.cameras
+                    .get(&name)
+                    .map(Camera::ui_order)
+                    .unwrap_or_else(|| {
+                        self.cameras
+                            .values()
+                            .map(Camera::ui_order)
+                            .max()
+                            .unwrap_or(-1)
+                            .saturating_add(1)
+                    }),
+            );
+        }
         self.cameras.insert(name, camera);
     }
 
@@ -836,7 +851,8 @@ impl<T> Scene<T> {
         let mut camera = view.camera();
         camera.set_name(name.clone());
         camera.set_source(source);
-        self.cameras.insert(name, camera);
+        camera.set_ui_order(-1);
+        self.set_camera(name, camera);
         true
     }
 
@@ -1093,13 +1109,19 @@ impl<T> Scene<T> {
     }
 
     pub fn get_camera_info_json(&self) -> String {
-        let entries = self
-            .cameras
-            .iter()
-            .map(|(name, camera)| {
+        let mut cameras = self.cameras.values().collect::<Vec<_>>();
+        cameras.sort_by(|a, b| {
+            a.ui_order()
+                .cmp(&b.ui_order())
+                .then_with(|| a.name().cmp(b.name()))
+        });
+        let entries = cameras
+            .into_iter()
+            .map(|camera| {
                 format!(
-                    "{{\"name\":\"{}\",\"vis_size\":{},\"src\":\"{}\"}}",
-                    escape_json(name),
+                    "{{\"name\":\"{}\",\"ui_order\":{},\"vis_size\":{},\"src\":\"{}\"}}",
+                    escape_json(camera.name()),
+                    camera.ui_order(),
                     camera.vis_size(),
                     escape_json(camera.source())
                 )
@@ -1542,7 +1564,7 @@ mod tests {
         assert_eq!(scene.camera_count(), 2);
         assert_eq!(
             scene.get_camera_info_json(),
-            "[{\"name\":\"cam1\",\"vis_size\":0,\"src\":\"linked.cam\"},{\"name\":\"cam2\",\"vis_size\":0,\"src\":\"\"}]"
+            "[{\"name\":\"cam1\",\"ui_order\":0,\"vis_size\":0,\"src\":\"linked.cam\"},{\"name\":\"cam2\",\"ui_order\":1,\"vis_size\":0,\"src\":\"\"}]"
         );
         assert!(scene.destroy_camera("cam1"));
         assert_eq!(scene.camera_count(), 1);

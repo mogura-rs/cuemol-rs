@@ -13,8 +13,15 @@ use std::sync::Arc;
 pub const INVALID_UID: u64 = 0;
 
 #[derive(Debug, Clone, PartialEq)]
+struct GradientNode {
+    value: f64,
+    color: Rgba8,
+    expression: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct MultiGradient {
-    nodes: Vec<(f64, Rgba8)>,
+    nodes: Vec<GradientNode>,
 }
 
 impl Default for MultiGradient {
@@ -33,9 +40,9 @@ impl MultiGradient {
         gradient.insert(
             0.0,
             Rgba8 {
-                r: 0,
-                g: 0,
-                b: 0,
+                r: 255,
+                g: 255,
+                b: 255,
                 a: 255,
             },
         );
@@ -45,42 +52,62 @@ impl MultiGradient {
     pub fn size(&self) -> usize {
         self.nodes.len()
     }
-
     pub fn get_size(&self) -> usize {
         self.size()
     }
 
     pub fn insert(&mut self, value: f64, color: Rgba8) -> isize {
-        if self.nodes.iter().any(|(existing, _)| *existing == value) {
+        self.insert_with_expression(value, color, None)
+    }
+
+    pub fn insert_with_expression(
+        &mut self,
+        value: f64,
+        color: Rgba8,
+        expression: Option<String>,
+    ) -> isize {
+        if !value.is_finite() || self.nodes.iter().any(|node| node.value == value) {
             return -1;
         }
         let index = self
             .nodes
             .iter()
-            .position(|(existing, _)| value < *existing)
+            .position(|node| value < node.value)
             .unwrap_or(self.nodes.len());
-        self.nodes.insert(index, (value, color));
+        self.nodes.insert(
+            index,
+            GradientNode {
+                value,
+                color,
+                expression,
+            },
+        );
         index as isize
     }
 
     pub fn value_at(&self, index: usize) -> Option<f64> {
-        self.nodes.get(index).map(|(value, _)| *value)
+        self.nodes.get(index).map(|node| node.value)
     }
-
     pub fn get_value_at(&self, index: usize) -> Option<f64> {
         self.value_at(index)
     }
-
     pub fn color_at(&self, index: usize) -> Option<Rgba8> {
-        self.nodes.get(index).map(|(_, color)| *color)
+        self.nodes.get(index).map(|node| node.color)
     }
-
     pub fn get_color_at(&self, index: usize) -> Option<Rgba8> {
         self.color_at(index)
     }
-
     pub fn get_color_2(&self, index: usize) -> Option<Rgba8> {
         self.color_at(index)
+    }
+
+    pub fn color_text_at(&self, index: usize) -> Option<String> {
+        self.nodes.get(index).map(|node| {
+            node.expression.clone().unwrap_or_else(|| {
+                let color = node.color;
+                SolidColor::from_rgba_u8(color.r, color.g, color.b, color.a).script_string()
+            })
+        })
     }
 
     pub fn remove_at(&mut self, index: usize) -> bool {
@@ -92,26 +119,75 @@ impl MultiGradient {
     }
 
     pub fn change_at(&mut self, index: usize, value: f64, color: Rgba8) -> bool {
-        if index >= self.nodes.len()
+        if !value.is_finite()
+            || index >= self.nodes.len()
             || self
                 .nodes
                 .iter()
                 .enumerate()
-                .any(|(i, (existing, _))| i != index && *existing == value)
+                .any(|(i, node)| i != index && node.value == value)
         {
             return false;
         }
-        self.nodes[index] = (value, color);
-        self.nodes.sort_by(|lhs, rhs| lhs.0.total_cmp(&rhs.0));
+        self.nodes[index] = GradientNode {
+            value,
+            color,
+            expression: None,
+        };
+        self.nodes
+            .sort_by(|lhs, rhs| lhs.value.total_cmp(&rhs.value));
         true
     }
 
     pub fn copy_from(&mut self, source: &MultiGradient) {
         self.nodes.clone_from(&source.nodes);
     }
-
     pub fn clear(&mut self) {
         self.nodes.clear();
+    }
+
+    pub fn get_nodes_json(&self) -> String {
+        serde_json::Value::Array(self.nodes.iter().enumerate().map(|(index, node)| {
+            serde_json::json!({"value": node.value, "color": self.color_text_at(index).unwrap(),
+                "r": node.color.r, "g": node.color.g, "b": node.color.b})
+        }).collect()).to_string()
+    }
+
+    pub fn set_nodes_json(
+        &mut self,
+        json: &str,
+        mut resolve_color: impl FnMut(&str) -> Option<Rgba8>,
+    ) -> cuemol_core::Result<()> {
+        let data: serde_json::Value = serde_json::from_str(json).map_err(|error| {
+            cuemol_core::CueMolError::parse(format!("invalid gradient JSON: {error}"))
+        })?;
+        let nodes = data.as_array().ok_or_else(|| {
+            cuemol_core::CueMolError::invalid_argument("gradient nodes must be an array")
+        })?;
+        let mut scratch = Self::new();
+        for node in nodes {
+            let value = node["value"]
+                .as_f64()
+                .or_else(|| node["value"].as_str()?.parse().ok())
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| {
+                    cuemol_core::CueMolError::invalid_argument(
+                        "gradient node requires a finite value",
+                    )
+                })?;
+            let text = node["color"].as_str().ok_or_else(|| {
+                cuemol_core::CueMolError::invalid_argument("gradient node requires a color")
+            })?;
+            cuemol_gfx::parse_color(text)?;
+            let color = resolve_color(text).ok_or_else(|| {
+                cuemol_core::CueMolError::invalid_argument(format!(
+                    "invalid gradient color: {text}"
+                ))
+            })?;
+            scratch.insert_with_expression(value, color, Some(text.to_string()));
+        }
+        self.copy_from(&scratch);
+        Ok(())
     }
 
     pub fn read_from_ldom2_node(
@@ -120,26 +196,26 @@ impl MultiGradient {
         mut resolve_color: impl FnMut(&str) -> Option<Rgba8>,
     ) -> usize {
         self.clear();
-        for gradient_node in node
+        for node in node
             .children()
             .iter()
             .filter(|child| !child.is_attr() && child.tag_name() == "gradnode")
         {
-            let Some(value) = gradient_node.str_attr("par").as_str().parse::<f64>().ok() else {
+            let Some(value) = node.str_attr("par").as_str().parse::<f64>().ok() else {
                 continue;
             };
-            let Some(color_node) = gradient_node.find_child("col") else {
+            let Some(color_node) = node.find_child("col") else {
                 continue;
             };
-            let color_text = if color_node.value().trim().is_empty() {
+            let text = if color_node.value().trim().is_empty() {
                 color_node.contents().trim()
             } else {
                 color_node.value().trim()
             };
-            let Some(color) = resolve_color(color_text) else {
+            let Some(color) = resolve_color(text) else {
                 continue;
             };
-            self.insert(value, color);
+            self.insert_with_expression(value, color, Some(text.to_string()));
         }
         self.size()
     }
@@ -152,23 +228,22 @@ impl MultiGradient {
                 b: 0,
                 a: 255,
             },
-            [(_, color)] => *color,
+            [node] => node.color,
             nodes => {
-                if value <= nodes[0].0 {
-                    return nodes[0].1;
+                if value <= nodes[0].value {
+                    return nodes[0].color;
                 }
-                if value >= nodes[nodes.len() - 1].0 {
-                    return nodes[nodes.len() - 1].1;
+                if value >= nodes[nodes.len() - 1].value {
+                    return nodes[nodes.len() - 1].color;
                 }
-                for window in nodes.windows(2) {
-                    let (lhs_value, lhs_color) = window[0];
-                    let (rhs_value, rhs_color) = window[1];
-                    if lhs_value <= value && value <= rhs_value {
-                        let t = ((value - lhs_value) / (rhs_value - lhs_value)) as f32;
-                        return lerp_color(lhs_color, rhs_color, t);
+                for pair in nodes.windows(2) {
+                    let (left, right) = (&pair[0], &pair[1]);
+                    if left.value <= value && value <= right.value {
+                        let t = ((value - left.value) / (right.value - left.value)) as f32;
+                        return lerp_color(left.color, right.color, t);
                     }
                 }
-                nodes[nodes.len() - 1].1
+                nodes[nodes.len() - 1].color
             }
         }
     }
@@ -1410,6 +1485,38 @@ mod tests {
         gradient.clear();
         assert_eq!(gradient.color(0.5), color(0, 0, 0));
         assert_eq!(MultiGradient::create_default().size(), 1);
+        assert_eq!(
+            MultiGradient::create_default().color(0.),
+            color(255, 255, 255)
+        );
+    }
+
+    #[test]
+    fn gradient_json_is_atomic_and_preserves_expressions_and_first_duplicate() {
+        let resolve = |text: &str| cuemol_gfx::parse_color(text).ok()?.rgba8();
+        let mut gradient = MultiGradient::new();
+        gradient.set_nodes_json(r##"[{"value":2,"color":"#ff0000"},{"value":-1,"color":"#0000ff{alpha:0.5}"},{"value":2,"color":"#00ff00"}]"##, resolve).unwrap();
+        assert_eq!(gradient.size(), 2);
+        assert_eq!(gradient.color_at(1), Some(color(255, 0, 0)));
+        assert_eq!(gradient.color_at(0).unwrap().a, 128);
+        let before = gradient.clone();
+        for invalid in [
+            "{",
+            "{}",
+            r##"[{"value":0,"color":"#ffffff"},{"value":1}]"##,
+            r##"[{"value":0,"color":"#oops"}]"##,
+        ] {
+            assert!(gradient.set_nodes_json(invalid, resolve).is_err());
+            assert_eq!(gradient, before);
+        }
+        let json: serde_json::Value = serde_json::from_str(&gradient.get_nodes_json()).unwrap();
+        assert_eq!(json[0]["color"], "#0000ff{alpha:0.5}");
+        assert_eq!(json[0]["b"], 255);
+        let mut restored = MultiGradient::new();
+        restored
+            .set_nodes_json(&gradient.get_nodes_json(), resolve)
+            .unwrap();
+        assert_eq!(gradient, restored);
     }
 
     #[test]
