@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn trajectory_reader_qif_properties_round_trip() {
         let mut dcd = DcdTrajReader::new();
-        assert!(!dcd.is_lazy_load());
+        assert!(dcd.is_lazy_load());
         assert_eq!(dcd.nevery(), 1);
         assert_eq!(dcd.get_targ_traj_uid(), 0);
         dcd.set_lazy_load(true);

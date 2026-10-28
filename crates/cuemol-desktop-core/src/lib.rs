@@ -68,6 +68,7 @@ pub mod labels;
 mod memory_io;
 #[cfg(feature = "offscreen")]
 pub mod offscreen;
+mod trajectory_io;
 #[cfg(feature = "offscreen")]
 pub mod viewport;
 #[cfg(feature = "offscreen")]
@@ -399,6 +400,7 @@ const SCRIPT_RUNTIME_CLASS_PARENTS: &[(&str, &str)] = &[
 
 #[derive(Debug, Clone)]
 struct GuiTrajectoryBlockData {
+    stride: usize,
     uid: u64,
     source: String,
     format: String,
@@ -409,12 +411,22 @@ struct GuiTrajectoryBlockData {
 struct GuiTrajectoryData {
     blocks: Vec<GuiTrajectoryBlockData>,
     current_frame: usize,
+    frame_average_size: usize,
+    initialized: bool,
+    load_selection: Option<String>,
+    source_atom_count: Option<usize>,
+    atom_indices: Option<std::sync::Arc<Vec<usize>>>,
 }
 
 #[derive(Debug, Clone)]
 enum GuiTrajectoryFrames {
     Memory(std::sync::Arc<Vec<Vec<Vector4>>>),
     File(std::sync::Arc<cuemol_mdtools::IndexedTrajectory>),
+    Owned(std::sync::Arc<cuemol_mdtools::TrajBlock>),
+    Selected {
+        source: std::sync::Arc<GuiTrajectoryFrames>,
+        indices: std::sync::Arc<Vec<usize>>,
+    },
 }
 
 impl GuiTrajectoryFrames {
@@ -422,6 +434,8 @@ impl GuiTrajectoryFrames {
         match self {
             Self::Memory(frames) => frames.len(),
             Self::File(file) => file.frame_count(),
+            Self::Owned(block) => block.frame_count(),
+            Self::Selected { source, .. } => source.len(),
         }
     }
 
@@ -432,6 +446,32 @@ impl GuiTrajectoryFrames {
                 .cloned()
                 .map(|frame| (frame, None))
                 .ok_or_else(|| CueMolError::not_found("trajectory frame")),
+            Self::Owned(block) => block
+                .frame(index)
+                .map(|frame| {
+                    (
+                        frame
+                            .chunks_exact(3)
+                            .map(|p| Vector4::new3(p[0] as f64, p[1] as f64, p[2] as f64))
+                            .collect(),
+                        block.cell(index),
+                    )
+                })
+                .ok_or_else(|| CueMolError::not_found("trajectory frame")),
+            Self::Selected { source, indices } => {
+                let (positions, cell) = source.frame_with_cell(index)?;
+                let selected = indices
+                    .iter()
+                    .map(|index| {
+                        positions.get(*index).copied().ok_or_else(|| {
+                            CueMolError::invalid_argument(
+                                "trajectory selection index is out of range",
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok((selected, cell))
+            }
             Self::File(file) => {
                 let frame = file.read_frame(index)?;
                 let positions = frame
@@ -446,11 +486,115 @@ impl GuiTrajectoryFrames {
 }
 
 impl GuiTrajectoryData {
+    fn apply_load_selection(
+        &mut self,
+        molecule: &mut MolCoord,
+        selection: Option<&Selector>,
+    ) -> Result<()> {
+        if self.initialized || !self.blocks.is_empty() {
+            return Err(CueMolError::invalid_argument(
+                "a load selection must be applied before any block is added",
+            ));
+        }
+        self.load_selection = selection.map(ToString::to_string);
+        self.atom_indices = None;
+        self.source_atom_count = None;
+        if molecule.atom_count() == 0 {
+            return Ok(());
+        }
+        self.source_atom_count = Some(molecule.atom_count());
+        if let Some(selection) = selection {
+            let indices = molecule.select_indices(selection);
+            let removed =
+                molecule.delete_selected_atoms(&Selector::Not(Box::new(selection.clone())));
+            if removed > 0 {
+                molecule.remove_nonpersistent_bonds();
+            }
+            self.atom_indices = Some(std::sync::Arc::new(indices));
+        }
+        Ok(())
+    }
+
+    fn prepare_block(
+        &self,
+        mut block: GuiTrajectoryBlockData,
+        atoms: usize,
+    ) -> Result<GuiTrajectoryBlockData> {
+        if block.frames.len() == 0 {
+            return Ok(block);
+        }
+        let count = block.frames.frame_with_cell(0)?.0.len();
+        if let Some(indices) = &self.atom_indices {
+            if self.source_atom_count == Some(count) {
+                block.frames = GuiTrajectoryFrames::Selected {
+                    source: std::sync::Arc::new(block.frames),
+                    indices: indices.clone(),
+                };
+            } else if count != indices.len() {
+                return Err(CueMolError::invalid_argument(
+                    "trajectory atom count does not match the load selection",
+                ));
+            }
+        }
+        if block.frames.frame_with_cell(0)?.0.len() != atoms {
+            return Err(CueMolError::invalid_argument(
+                "trajectory atom count does not match topology",
+            ));
+        }
+        Ok(block)
+    }
+
+    fn frame_with_cell(&self, index: usize) -> Result<(Vec<Vector4>, Option<[f64; 6]>)> {
+        let (mut positions, cell) = self.raw_frame_with_cell(index)?;
+        if self.frame_average_size == 0 {
+            return Ok((positions, cell));
+        }
+        positions.fill(Vector4::ZERO);
+        let start = index.saturating_sub(self.frame_average_size);
+        let end = index
+            .saturating_add(self.frame_average_size)
+            .min(self.frame_count() - 1);
+        for frame in start..=end {
+            let (source, _) = self.raw_frame_with_cell(frame)?;
+            if source.len() != positions.len() {
+                return Err(CueMolError::invalid_argument(
+                    "trajectory atom counts differ",
+                ));
+            }
+            for (sum, value) in positions.iter_mut().zip(source) {
+                *sum = *sum + value;
+            }
+        }
+        let scale = 1. / (end - start + 1) as f64;
+        for position in &mut positions {
+            *position = position.scale(scale);
+        }
+        Ok((positions, cell))
+    }
+
+    fn apply_frame(&mut self, molecule: &mut MolCoord, index: usize) -> Result<()> {
+        let (positions, cell) = self.frame_with_cell(index)?;
+        if positions.len() != molecule.atom_count() {
+            return Err(CueMolError::invalid_argument(
+                "trajectory atom count does not match topology",
+            ));
+        }
+        for (atom, position) in molecule.atoms_mut().iter_mut().zip(positions) {
+            atom.position = position;
+        }
+        if let Some([a, b, c, alpha, beta, gamma]) = cell {
+            molecule.set_cell_params(cuemol_core::CellParams::new(a, b, c, alpha, beta, gamma));
+        }
+        molecule.fire_atoms_moved();
+        self.current_frame = index;
+        Ok(())
+    }
+
     fn frame_count(&self) -> usize {
         self.blocks.iter().map(|block| block.frames.len()).sum()
     }
 
-    fn frame_with_cell(&self, index: usize) -> Result<(Vec<Vector4>, Option<[f64; 6]>)> {
+    fn raw_frame_with_cell(&self, index: usize) -> Result<(Vec<Vector4>, Option<[f64; 6]>)> {
         let mut remaining = index;
         for block in &self.blocks {
             if remaining < block.frames.len() {
@@ -3233,15 +3377,13 @@ impl DesktopAppState {
         Ok(())
     }
 
-    fn scene_qsc_with_named_camera_visibility(&self, scene_uid: Uid) -> Result<String> {
+    fn scene_qsc_with_named_camera_visibility(&self, scene_uid: Uid) -> Result<Vec<u8>> {
         let scene = self
             .scene_manager()
             .scene(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
-        let qsc = scene.write_qsc_string();
-        let (xml, suffix) = qsc
-            .split_once(QSC_XML_END_MARKER)
-            .ok_or_else(|| CueMolError::parse("QSC XML terminator was not written"))?;
+        let qsc = scene.write_qsc_bytes();
+        let (xml, suffix) = split_qsc_document(&qsc)?;
         let mut tree = parse_ldom2_xml(xml)?;
         clear_xml_formatting_whitespace(tree.top_mut());
         let entries = self
@@ -3263,12 +3405,10 @@ impl DesktopAppState {
                 set_named_camera_visibility_nodes(camera_node, entries);
             }
         }
-        Ok(format!(
-            "{}\n\n{}{}",
-            write_ldom2_xml(&tree),
-            QSC_XML_END_MARKER,
-            suffix
-        ))
+        let mut output =
+            format!("{}\n\n{}", write_ldom2_xml(&tree), QSC_XML_END_MARKER).into_bytes();
+        output.extend_from_slice(suffix);
+        Ok(output)
     }
 
     fn scene_qsc_with_save_options(
@@ -3277,9 +3417,7 @@ impl DesktopAppState {
         options: GuiSceneSaveOptions,
     ) -> Result<(Vec<u8>, Vec<Uid>)> {
         let qsc = self.scene_qsc_with_named_camera_visibility(scene_uid)?;
-        let (xml, suffix) = qsc
-            .split_once(QSC_XML_END_MARKER)
-            .ok_or_else(|| CueMolError::parse("QSC XML terminator was not written"))?;
+        let (xml, suffix) = split_qsc_document(&qsc)?;
         let mut tree = parse_ldom2_xml(xml)?;
         clear_xml_formatting_whitespace(tree.top_mut());
         let options_node = qsc_save_options_node(options);
@@ -3334,6 +3472,7 @@ impl DesktopAppState {
                 omitted_chunks.insert(chunk_id.to_string());
             }
             node.set_str_attr("src", object.source());
+            node.set_str_attr("srctype", object.source_type());
         }
 
         let mut document =
@@ -7090,6 +7229,7 @@ impl DesktopAppState {
         frames: Vec<Vec<cuemol_core::Vector4>>,
     ) {
         let block = (!frames.is_empty()).then(|| GuiTrajectoryBlockData {
+            stride: 1,
             uid: self.allocate_trajectory_block_uid(),
             source: String::new(),
             format: "SYNTHETIC".to_string(),
@@ -7100,6 +7240,8 @@ impl DesktopAppState {
             GuiTrajectoryData {
                 blocks: block.into_iter().collect(),
                 current_frame: 0,
+                initialized: true,
+                ..GuiTrajectoryData::default()
             },
         );
     }
@@ -7241,6 +7383,8 @@ impl DesktopAppState {
         let trajectory = GuiTrajectoryData {
             blocks,
             current_frame: 0,
+            initialized: true,
+            ..GuiTrajectoryData::default()
         };
         let frame_count = trajectory.frame_count();
         let summary = self.make_trajectory_summary(object_uid, object_name, &trajectory);
@@ -7265,13 +7409,24 @@ impl DesktopAppState {
             .object(object_uid)
             .map(|object| (object.mol().atom_count(), object.name().to_string()))
             .ok_or_else(|| CueMolError::not_found("trajectory object"))?;
-        let block = self.read_trajectory_block(path.as_ref(), nevery, atom_count)?;
+        let expected = self
+            .trajectories
+            .get(&object_uid)
+            .and_then(|data| data.source_atom_count)
+            .unwrap_or(atom_count);
+        let block = self.read_trajectory_block(path.as_ref(), nevery, expected)?;
+        let block = self
+            .trajectories
+            .entry(object_uid)
+            .or_default()
+            .prepare_block(block, atom_count)?;
         let was_empty = self.trajectory_len(object_uid) == 0;
         self.trajectories
             .entry(object_uid)
             .or_default()
             .blocks
             .push(block);
+        self.trajectories.get_mut(&object_uid).unwrap().initialized = true;
         if was_empty {
             self.apply_trajectory_frame(object_uid, 0)?;
         }
@@ -7370,6 +7525,8 @@ impl DesktopAppState {
             GuiTrajectoryData {
                 blocks: vec![block],
                 current_frame: 0,
+                initialized: true,
+                ..GuiTrajectoryData::default()
             },
         );
         Ok(count)
@@ -7483,6 +7640,7 @@ impl DesktopAppState {
         let file = cuemol_mdtools::IndexedTrajectory::open(path, nevery, Some(atom_count))?;
         file.read_frame(0)?;
         Ok(GuiTrajectoryBlockData {
+            stride: nevery,
             uid: self.allocate_trajectory_block_uid(),
             source: path.to_string_lossy().into_owned(),
             format: format.to_ascii_uppercase(),
@@ -11822,7 +11980,11 @@ impl DesktopAppState {
         });
         let result = self
             .command_manager
-            .load_scene_command(path, target_scene)?;
+            .load_scene_command_with_molecule_reader(
+                path,
+                target_scene,
+                &trajectory_io::read_extra_qsc_molecule,
+            )?;
         self.last_qsc_status = Some(result.status.clone());
         self.active_scene = result.result_scene;
         if let Some(scene_uid) = result.result_scene {
@@ -11971,6 +12133,7 @@ impl DesktopAppState {
             self.morphs
                 .insert(object.uid(), morph_from_qsc_object(&object)?);
         }
+        self.restore_scene_trajectories(scene_uid)?;
         Ok(())
     }
 
@@ -13217,6 +13380,7 @@ impl DesktopAppState {
             .active_scene
             .ok_or_else(|| CueMolError::invalid_argument("no active scene"))?;
         let options = options.normalized();
+        self.sync_trajectory_qsc_nodes(scene_uid, options.embed_all, source_path.parent())?;
         self.sync_morph_qsc_nodes(scene_uid)?;
         self.sync_density_map_qsc_nodes(scene_uid)?;
         let (document, embedded_objects) = self.scene_qsc_with_save_options(scene_uid, options)?;
@@ -22752,44 +22916,48 @@ impl DesktopAppState {
             install_pending_object_api(&value, class_name, ctx);
             value
         }
-        fn trajectory_blocks_array(this: &JsValue, ctx: &mut Context) -> JsResult<JsArray> {
-            let value = iterator_object(this)?.get(js_string!("_trajectory_blocks"), ctx)?;
-            let object = value
-                .as_object()
-                .cloned()
-                .ok_or_else(|| script_error("Trajectory block storage is not an array"))?;
-            JsArray::from_object(object)
-        }
-        fn trajectory_block_values(this: &JsValue, ctx: &mut Context) -> JsResult<Vec<JsValue>> {
-            let blocks = trajectory_blocks_array(this, ctx)?;
-            (0..blocks.length(ctx)?)
-                .map(|index| blocks.at(index as i64, ctx))
-                .collect()
-        }
-        fn update_trajectory_block_metadata(
-            this: &JsValue,
-            blocks: &[JsValue],
-            ctx: &mut Context,
-        ) -> JsResult<()> {
-            let object = iterator_object(this)?;
-            let mut start_index = 0_i32;
-            for block in blocks {
-                let block_object = iterator_object(block)?;
-                let frame_count = block_object
-                    .get(js_string!("nframe"), ctx)?
-                    .to_i32(ctx)?
-                    .max(0);
-                block_object.set(js_string!("start_index"), start_index, true, ctx)?;
-                start_index = start_index.saturating_add(frame_count);
+        fn script_trajectory_uid(this: &JsValue, ctx: &mut Context) -> JsResult<u64> {
+            let uid = object_number_prop(this, "uid", ctx)? as u64;
+            if script_env::with(|env| env.trajectories.contains_key(&uid)) {
+                Ok(uid)
+            } else {
+                Err(script_error("Trajectory is not available"))
             }
-            object.set(
-                js_string!("_trajectory_blocks"),
-                JsArray::from_iter(blocks.iter().cloned(), ctx),
-                true,
-                ctx,
-            )?;
-            object.set(js_string!("nblock"), blocks.len() as i32, true, ctx)?;
-            object.set(js_string!("nframe"), start_index, true, ctx)?;
+        }
+        fn sync_script_trajectory(uid: u64) {
+            script_env::with(|env| {
+                if env.objects.iter().any(|object| object.uid == uid) {
+                    if let (Some(trajectory), Some(molecule)) = (
+                        env.trajectories.get(&uid),
+                        env.molecules.iter().find(|m| m.uid == uid),
+                    ) {
+                        script_cmds::push(ScriptCmd::SetTrajectory {
+                            object_uid: uid,
+                            trajectory: trajectory.clone(),
+                            molecule: molecule.molecule.clone(),
+                        });
+                    }
+                }
+            });
+        }
+        fn mutate_script_trajectory(
+            uid: u64,
+            change: impl FnOnce(&mut GuiTrajectoryData, &mut MolCoord) -> cuemol_core::Result<()>,
+        ) -> JsResult<()> {
+            script_env::with_mut(|env| {
+                let trajectory = env
+                    .trajectories
+                    .get_mut(&uid)
+                    .ok_or_else(|| script_error("Trajectory is not available"))?;
+                let molecule = env
+                    .molecules
+                    .iter_mut()
+                    .find(|m| m.uid == uid)
+                    .ok_or_else(|| script_error("Trajectory topology is not available"))?;
+                change(trajectory, &mut molecule.molecule)
+                    .map_err(|error| script_error(error.to_string()))
+            })?;
+            sync_script_trajectory(uid);
             Ok(())
         }
         fn js_trajectory_append(
@@ -22797,32 +22965,58 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            let block = args.first().cloned().unwrap_or(JsValue::undefined());
-            let class_name = object_optional_string_prop(&block, "_class", ctx).unwrap_or_default();
-            if !runtime_implements(&class_name, "TrajBlock") {
-                return Err(script_error("Trajectory.append requires a TrajBlock"));
-            }
-            let mut blocks = trajectory_block_values(this, ctx)?;
-            blocks.push(block);
-            update_trajectory_block_metadata(this, &blocks, ctx)?;
+            let uid = script_trajectory_uid(this, ctx)?;
+            let value = args.first().cloned().unwrap_or(JsValue::undefined());
+            let block_uid = object_number_prop(&value, "uid", ctx)? as u64;
+            let block = script_env::with(|env| env.trajectory_blocks.get(&block_uid).cloned())
+                .ok_or_else(|| script_error("Trajectory.append requires a TrajBlock"))?;
+            mutate_script_trajectory(uid, |trajectory, molecule| {
+                let block = trajectory.prepare_block(block, molecule.atom_count())?;
+                let first = trajectory.blocks.is_empty();
+                trajectory.blocks.push(block);
+                trajectory.initialized = true;
+                if first && trajectory.frame_count() > 0 {
+                    trajectory.apply_frame(molecule, 0)?;
+                    molecule.apply_topology();
+                    molecule.calc_prot_2ndry(-500., false);
+                }
+                Ok(())
+            })?;
             Ok(JsValue::undefined())
+        }
+        fn make_traj_block_proxy(uid: u64, ctx: &mut Context) -> JsValue {
+            let value = ObjectInitializer::new(ctx)
+                .property(js_string!("uid"), uid as f64, Attribute::all())
+                .property(
+                    js_string!("type"),
+                    js_string!("TrajBlock"),
+                    Attribute::all(),
+                )
+                .property(
+                    js_string!("_class"),
+                    js_string!("TrajBlock"),
+                    Attribute::all(),
+                )
+                .build()
+                .into();
+            install_traj_block_api(&value, ctx);
+            value
         }
         fn js_trajectory_get_block(
             this: &JsValue,
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let uid = script_trajectory_uid(this, ctx)?;
             let index = args
                 .first()
                 .cloned()
                 .unwrap_or(JsValue::undefined())
                 .to_i32(ctx)?;
-            if index < 0 {
-                return Ok(JsValue::null());
-            }
-            Ok(trajectory_block_values(this, ctx)?
-                .get(index as usize)
-                .cloned()
+            let block =
+                script_env::with(|env| env.trajectories[&uid].blocks.get(index as usize).cloned());
+            Ok(block
+                .map(|block| make_traj_block_proxy(block.uid, ctx))
                 .unwrap_or_else(JsValue::null))
         }
         fn js_trajectory_remove_block(
@@ -22830,17 +23024,27 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let uid = script_trajectory_uid(this, ctx)?;
             let index = args
                 .first()
                 .cloned()
                 .unwrap_or(JsValue::undefined())
                 .to_i32(ctx)?;
-            let mut blocks = trajectory_block_values(this, ctx)?;
-            if index < 0 || index as usize >= blocks.len() {
-                return Err(script_error("Trajectory block index is out of range"));
-            }
-            blocks.remove(index as usize);
-            update_trajectory_block_metadata(this, &blocks, ctx)?;
+            mutate_script_trajectory(uid, |trajectory, molecule| {
+                if index < 0 || index as usize >= trajectory.blocks.len() {
+                    return Err(CueMolError::invalid_argument(
+                        "trajectory block index is out of range",
+                    ));
+                }
+                trajectory.blocks.remove(index as usize);
+                let count = trajectory.frame_count();
+                if count > 0 {
+                    trajectory.apply_frame(molecule, trajectory.current_frame.min(count - 1))?;
+                } else {
+                    trajectory.current_frame = 0;
+                }
+                Ok(())
+            })?;
             Ok(JsValue::undefined())
         }
         fn js_trajectory_move_block(
@@ -22848,6 +23052,7 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let uid = script_trajectory_uid(this, ctx)?;
             let from = args
                 .first()
                 .cloned()
@@ -22858,37 +23063,208 @@ impl DesktopAppState {
                 .cloned()
                 .unwrap_or(JsValue::undefined())
                 .to_i32(ctx)?;
-            let mut blocks = trajectory_block_values(this, ctx)?;
-            if from < 0 || to < 0 || from as usize >= blocks.len() || to as usize >= blocks.len() {
-                return Err(script_error("Trajectory block index is out of range"));
-            }
-            let block = blocks.remove(from as usize);
-            blocks.insert(to as usize, block);
-            update_trajectory_block_metadata(this, &blocks, ctx)?;
+            mutate_script_trajectory(uid, |trajectory, molecule| {
+                if from < 0
+                    || to < 0
+                    || from as usize >= trajectory.blocks.len()
+                    || to as usize >= trajectory.blocks.len()
+                {
+                    return Err(CueMolError::invalid_argument(
+                        "trajectory block index is out of range",
+                    ));
+                }
+                let block = trajectory.blocks.remove(from as usize);
+                trajectory.blocks.insert(to as usize, block);
+                if trajectory.frame_count() > 0 {
+                    trajectory.apply_frame(molecule, trajectory.current_frame)?;
+                }
+                Ok(())
+            })?;
             Ok(JsValue::undefined())
         }
-        fn make_traj_block(ctx: &mut Context) -> JsValue {
-            let value = make_molcoord("TrajBlock", ctx);
-            install_script_property(&value, "nframe", JsValue::new(0), ctx);
-            install_script_property(&value, "start_index", JsValue::new(0), ctx);
-            value
+        fn js_trajectory_apply_load_sel(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let uid = script_trajectory_uid(this, ctx)?;
+            let value = args.first().cloned().unwrap_or(JsValue::null());
+            let selection = if value.is_null_or_undefined() {
+                None
+            } else {
+                Some(selector_from_script_value(&value, ctx)?)
+            };
+            mutate_script_trajectory(uid, |trajectory, molecule| {
+                trajectory.apply_load_selection(molecule, selection.as_ref())
+            })?;
+            Ok(JsValue::undefined())
         }
-        fn make_trajectory(ctx: &mut Context) -> JsValue {
-            let value = make_molcoord("Trajectory", ctx);
-            install_script_property(&value, "frame", JsValue::new(0), ctx);
-            install_script_property(&value, "dynframe", JsValue::new(0), ctx);
-            install_script_property(&value, "nframe", JsValue::new(0), ctx);
-            install_script_property(&value, "frame_aver_size", JsValue::new(0), ctx);
-            install_script_property(&value, "nblock", JsValue::new(0), ctx);
-            install_script_property(&value, "_trajectory_blocks", JsArray::new(ctx).into(), ctx);
+        #[derive(Clone, Copy)]
+        enum TrajectoryProperty {
+            Frame,
+            Average,
+            Frames,
+            Blocks,
+        }
+        fn trajectory_property_get(
+            property: TrajectoryProperty,
+            this: &JsValue,
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let uid = script_trajectory_uid(this, ctx)?;
+            Ok(JsValue::new(script_env::with(|env| {
+                let data = &env.trajectories[&uid];
+                match property {
+                    TrajectoryProperty::Frame => data.current_frame,
+                    TrajectoryProperty::Average => data.frame_average_size,
+                    TrajectoryProperty::Frames => data.frame_count(),
+                    TrajectoryProperty::Blocks => data.blocks.len(),
+                }
+            }) as f64))
+        }
+        fn trajectory_property_set(
+            property: TrajectoryProperty,
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let uid = script_trajectory_uid(this, ctx)?;
+            let value = args
+                .first()
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_i32(ctx)?;
+            if value < 0 {
+                return Err(script_error(
+                    "trajectory frame and averaging window must be nonnegative",
+                ));
+            }
+            mutate_script_trajectory(uid, |data, molecule| {
+                match property {
+                    TrajectoryProperty::Frame => data.apply_frame(molecule, value as usize)?,
+                    TrajectoryProperty::Average => {
+                        data.frame_average_size = value as usize;
+                        if data.frame_count() > 0 {
+                            data.apply_frame(molecule, data.current_frame)?;
+                        }
+                    }
+                    _ => {}
+                }
+                Ok(())
+            })?;
+            Ok(JsValue::undefined())
+        }
+        fn install_trajectory_api(value: &JsValue, ctx: &mut Context) {
+            for (name, property, writable) in [
+                ("frame", TrajectoryProperty::Frame, true),
+                ("dynframe", TrajectoryProperty::Frame, true),
+                ("frame_aver_size", TrajectoryProperty::Average, true),
+                ("nframe", TrajectoryProperty::Frames, false),
+                ("nblock", TrajectoryProperty::Blocks, false),
+            ] {
+                let getter = FunctionObjectBuilder::new(
+                    ctx.realm(),
+                    NativeFunction::from_copy_closure(move |this, _args, ctx| {
+                        trajectory_property_get(property, this, ctx)
+                    }),
+                )
+                .constructor(false)
+                .build();
+                let setter = writable.then(|| {
+                    FunctionObjectBuilder::new(
+                        ctx.realm(),
+                        NativeFunction::from_copy_closure(move |this, args, ctx| {
+                            trajectory_property_set(property, this, args, ctx)
+                        }),
+                    )
+                    .constructor(false)
+                    .build()
+                });
+                let descriptor = PropertyDescriptor::builder()
+                    .get(getter)
+                    .maybe_set(setter)
+                    .enumerable(true)
+                    .configurable(true);
+                let _ = value.as_object().unwrap().define_property_or_throw(
+                    JsString::from(name),
+                    descriptor,
+                    ctx,
+                );
+            }
             for (name, length, callback) in [
                 ("append", 1, js_trajectory_append as ScriptNativeCallback),
                 ("getBlock", 1, js_trajectory_get_block),
                 ("removeBlock", 1, js_trajectory_remove_block),
                 ("moveBlock", 2, js_trajectory_move_block),
+                ("applyLoadSel", 1, js_trajectory_apply_load_sel),
             ] {
-                install_script_function(&value, name, length, callback, ctx);
+                install_script_function(value, name, length, callback, ctx);
             }
+        }
+        fn install_traj_block_api(value: &JsValue, ctx: &mut Context) {
+            for (name, start) in [("nframe", false), ("start_index", true)] {
+                let getter = FunctionObjectBuilder::new(
+                    ctx.realm(),
+                    NativeFunction::from_copy_closure(move |this, _args, ctx| {
+                        let uid = object_number_prop(this, "uid", ctx)? as u64;
+                        let value = script_env::with(|env| {
+                            if !start {
+                                return env
+                                    .trajectory_blocks
+                                    .get(&uid)
+                                    .map_or(0, |b| b.frames.len());
+                            }
+                            for data in env.trajectories.values() {
+                                let mut start = 0;
+                                for block in &data.blocks {
+                                    if block.uid == uid {
+                                        return start;
+                                    }
+                                    start += block.frames.len();
+                                }
+                            }
+                            0
+                        });
+                        Ok(JsValue::new(value as f64))
+                    }),
+                )
+                .constructor(false)
+                .build();
+                let _ = value.as_object().unwrap().define_property_or_throw(
+                    JsString::from(name),
+                    PropertyDescriptor::builder()
+                        .get(getter)
+                        .enumerable(true)
+                        .configurable(true),
+                    ctx,
+                );
+            }
+        }
+        fn make_traj_block(ctx: &mut Context) -> JsValue {
+            let value = make_molcoord("TrajBlock", ctx);
+            let uid = object_number_prop(&value, "uid", ctx).unwrap() as u64;
+            script_env::with_mut(|env| {
+                env.trajectory_blocks.insert(
+                    uid,
+                    GuiTrajectoryBlockData {
+                        stride: 1,
+                        uid,
+                        source: String::new(),
+                        format: String::new(),
+                        frames: GuiTrajectoryFrames::Memory(std::sync::Arc::new(Vec::new())),
+                    },
+                );
+            });
+            install_traj_block_api(&value, ctx);
+            value
+        }
+        fn make_trajectory(ctx: &mut Context) -> JsValue {
+            let value = make_molcoord("Trajectory", ctx);
+            let uid = object_number_prop(&value, "uid", ctx).unwrap() as u64;
+            script_env::with_mut(|env| {
+                env.trajectories.insert(uid, GuiTrajectoryData::default());
+            });
+            install_trajectory_api(&value, ctx);
             value
         }
         fn js_pending_molecule_atom_count(
@@ -29437,7 +29813,10 @@ impl DesktopAppState {
                     name: name.clone(),
                     data,
                 });
-            } else if matches!(class_name.as_str(), "MolCoord" | "MorphMol") {
+            } else if matches!(
+                class_name.as_str(),
+                "MolCoord" | "AnimMol" | "MorphMol" | "Trajectory"
+            ) {
                 let pending = script_env::with(|env| {
                     env.molecules
                         .iter()
@@ -29791,6 +30170,9 @@ impl DesktopAppState {
                     env.morphs.entry(expected_uid).or_insert_with(MorphMol::new);
                 }
             });
+            if class_name == "Trajectory" {
+                sync_script_trajectory(expected_uid);
+            }
             if let Some(object) = value.as_object() {
                 object.set(js_string!("uid"), expected_uid as f64, true, ctx)?;
                 object.set(js_string!("scene_uid"), target_scene as f64, true, ctx)?;
@@ -33151,7 +33533,11 @@ impl DesktopAppState {
                     1,
                 )
                 .build();
-            obj.into()
+            let value: JsValue = obj.into();
+            if object.class == "Trajectory" {
+                install_trajectory_api(&value, ctx);
+            }
+            value
         }
         fn js_get_object(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
             if args.first().is_some_and(JsValue::is_number) {
@@ -40857,12 +41243,101 @@ impl DesktopAppState {
                 .set(js_string!("_draw_count"), draw_count as f64, true, ctx)?;
             Ok(JsValue::undefined())
         }
+        fn js_handler_read_trajectory(
+            this: &JsValue,
+            class: &str,
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let target = script_handler_target(this, ctx)?;
+            let uid = object_number_prop(&target, "uid", ctx)? as u64;
+            if !script_env::with(|env| env.trajectory_blocks.contains_key(&uid)) {
+                return Err(script_error("trajectory reader target must be a TrajBlock"));
+            }
+            let stride = handler_i32_prop(this, "nevery", 1, ctx)?;
+            if stride <= 0 {
+                return Err(script_error("trajectory stride must be positive"));
+            }
+            let trajectory_uid = object_number_prop(this, "targTrajUID", ctx)? as u64;
+            let expected = if trajectory_uid == 0 {
+                None
+            } else {
+                Some(
+                    script_env::with(|env| {
+                        let data = env.trajectories.get(&trajectory_uid)?;
+                        data.source_atom_count.or_else(|| {
+                            env.molecules
+                                .iter()
+                                .find(|m| m.uid == trajectory_uid)
+                                .map(|m| m.molecule.atom_count())
+                        })
+                    })
+                    .ok_or_else(|| script_error("target trajectory is not available"))?,
+                )
+            };
+            let path = this_string_prop(this, "path", ctx);
+            let indexed = cuemol_mdtools::IndexedTrajectory::open(
+                &path,
+                stride as usize,
+                expected.filter(|n| *n > 0),
+            )
+            .map_err(|error| script_error(error.to_string()))?;
+            let format = indexed.format_name();
+            let correct = matches!(
+                (class, format),
+                ("DCDTrajReader", "DCD")
+                    | ("XtcTrajReader", "XTC")
+                    | ("TrrTrajReader", "TRR")
+                    | ("AmberNetCDFReader", "NETCDF")
+            );
+            if !correct {
+                return Err(script_error(
+                    "trajectory reader does not match the source format",
+                ));
+            }
+            let frames = if handler_bool_prop(this, "lazy_load", class != "AmberNetCDFReader", ctx)
+            {
+                GuiTrajectoryFrames::File(std::sync::Arc::new(indexed))
+            } else {
+                let mut block = cuemol_mdtools::TrajBlock::new(indexed.atom_count());
+                for index in 0..indexed.frame_count() {
+                    let frame = indexed
+                        .read_frame(index)
+                        .map_err(|error| script_error(error.to_string()))?;
+                    block
+                        .append_frame(frame.coordinates, frame.cell)
+                        .map_err(|error| script_error(error.to_string()))?;
+                }
+                GuiTrajectoryFrames::Owned(std::sync::Arc::new(block))
+            };
+            script_env::with_mut(|env| {
+                env.trajectory_blocks.insert(
+                    uid,
+                    GuiTrajectoryBlockData {
+                        stride: stride as usize,
+                        uid,
+                        source: path.clone(),
+                        format: format.to_string(),
+                        frames,
+                    },
+                );
+            });
+            iterator_object(&target)?.set(
+                JsString::from(pending_object_property_key(MoleculeProperty::Source)),
+                JsString::from(path),
+                true,
+                ctx,
+            )?;
+            Ok(JsValue::undefined())
+        }
         fn js_handler_read(
             this: &JsValue,
             _args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let class_name = this_string_prop(this, "_class", ctx);
+            if handler_is_trajectory_reader(&class_name) {
+                return js_handler_read_trajectory(this, &class_name, ctx);
+            }
             if handler_is_density_map_reader(&class_name) {
                 return js_handler_read_density_map(this, &class_name, ctx);
             }
@@ -40951,6 +41426,18 @@ impl DesktopAppState {
             };
             let target = script_handler_target(this, ctx)?;
             set_script_molecule_value(&target, molecule, ctx)?;
+            let uid = object_number_prop(&target, "uid", ctx)? as u64;
+            if script_env::with(|env| env.trajectories.contains_key(&uid)) {
+                mutate_script_trajectory(uid, |data, molecule| {
+                    let selection = data
+                        .load_selection
+                        .as_ref()
+                        .map(|s| parse_selector(s))
+                        .transpose()?;
+                    data.apply_load_selection(molecule, selection.as_ref())
+                })?;
+            }
+
             Ok(JsValue::undefined())
         }
         fn js_handler_get_column_info(
@@ -41338,11 +41825,17 @@ impl DesktopAppState {
             match class_name {
                 "DCDTrajReader" => {
                     object
-                        .property(js_string!("lazy_load"), false, Attribute::all())
+                        .property(js_string!("lazy_load"), true, Attribute::all())
                         .property(js_string!("nevery"), 1, Attribute::all())
                         .property(js_string!("targTrajUID"), 0, Attribute::all());
                 }
-                "TrrTrajReader" | "XtcTrajReader" | "AmberNetCDFReader" => {
+                "TrrTrajReader" | "XtcTrajReader" => {
+                    object
+                        .property(js_string!("lazy_load"), true, Attribute::all())
+                        .property(js_string!("nevery"), 1, Attribute::all())
+                        .property(js_string!("targTrajUID"), 0, Attribute::all());
+                }
+                "AmberNetCDFReader" => {
                     object
                         .property(js_string!("nevery"), 1, Attribute::all())
                         .property(js_string!("targTrajUID"), 0, Attribute::all());
@@ -45545,6 +46038,18 @@ impl DesktopAppState {
                         });
                     }
                 }
+                ScriptCmd::SetTrajectory {
+                    object_uid,
+                    trajectory,
+                    molecule,
+                } => {
+                    let uid = Uid::new(object_uid);
+                    if let Some(object) = self.scene_manager_mut().object_mut(uid) {
+                        object.set_object_type("Trajectory");
+                        object.replace_mol(molecule);
+                        self.trajectories.insert(uid, trajectory);
+                    }
+                }
                 ScriptCmd::CreateMolecule {
                     target_scene,
                     expected_uid,
@@ -46443,7 +46948,11 @@ impl DesktopAppState {
                     class: if self.morphs.contains_key(&object.uid()) {
                         "MorphMol".to_string()
                     } else {
-                        object.object_type().to_string()
+                        if self.trajectories.contains_key(&object.uid()) {
+                            "Trajectory".to_string()
+                        } else {
+                            object.object_type().to_string()
+                        }
                     },
                     visible: object.is_visible(),
                     locked: object.is_ui_locked(),
@@ -46709,6 +47218,17 @@ impl DesktopAppState {
                 .iter()
                 .map(|(uid, morph)| (uid.get(), morph.clone()))
                 .collect(),
+            trajectories: self
+                .trajectories
+                .iter()
+                .map(|(uid, data)| (uid.get(), data.clone()))
+                .collect(),
+            trajectory_blocks: self
+                .trajectories
+                .values()
+                .flat_map(|data| &data.blocks)
+                .map(|block| (block.uid, block.clone()))
+                .collect(),
             lw_objects: self
                 .scene_manager()
                 .scenes()
@@ -46865,6 +47385,12 @@ fn coloring_for_scheme(
 /// (single-threaded GUI, so a thread-local is the simplest safe channel).
 #[cfg(feature = "scripting")]
 enum ScriptCmd {
+    SetTrajectory {
+        object_uid: u64,
+        trajectory: GuiTrajectoryData,
+        molecule: MolCoord,
+    },
+
     Print(String),
     LogWrite {
         message: String,
@@ -47242,6 +47768,8 @@ struct ScriptEnv {
     molecules: Vec<ScriptMol>,
     modified_molecule_uids: BTreeSet<u64>,
     morphs: BTreeMap<u64, MorphMol>,
+    trajectories: BTreeMap<u64, GuiTrajectoryData>,
+    trajectory_blocks: BTreeMap<u64, GuiTrajectoryBlockData>,
     lw_objects: BTreeMap<u64, cuemol_lwview::LWObject>,
     views: Vec<cuemol_qsys::View>,
     camera_refs: Vec<(u64, String, boa_engine::JsObject)>,
@@ -50120,43 +50648,56 @@ fn qsc_save_options_node(options: GuiSceneSaveOptions) -> LDom2Node {
     node
 }
 
+fn byte_index(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn split_qsc_document(bytes: &[u8]) -> Result<(&str, &[u8])> {
+    let marker = QSC_XML_END_MARKER.as_bytes();
+    let index = byte_index(bytes, marker)
+        .ok_or_else(|| CueMolError::parse("QSC XML terminator was not written"))?;
+    let xml = std::str::from_utf8(&bytes[..index])
+        .map_err(|error| CueMolError::parse(format!("invalid QSC XML: {error}")))?;
+    Ok((xml, &bytes[index + marker.len()..]))
+}
+
 fn rewrite_qsc_data_chunks(
-    suffix: &str,
+    suffix: impl AsRef<[u8]>,
     omitted_chunks: &BTreeSet<String>,
     options: GuiSceneSaveOptions,
 ) -> Result<Vec<u8>> {
     let options = options.normalized();
     let mut output = Vec::new();
-    let mut rest = suffix;
+    let mut rest = suffix.as_ref();
     loop {
-        let Some(start) = rest.find(QSC_DATA_CHUNK_START) else {
-            output.extend_from_slice(rest.as_bytes());
+        let Some(start) = byte_index(rest, QSC_DATA_CHUNK_START.as_bytes()) else {
+            output.extend_from_slice(rest);
             break;
         };
-        output.extend_from_slice(&rest.as_bytes()[..start]);
+        output.extend_from_slice(&rest[..start]);
         let chunk = &rest[start..];
         let marker_end = chunk
-            .find('\n')
+            .iter()
+            .position(|byte| *byte == b'\n')
             .map(|index| index + 1)
             .ok_or_else(|| CueMolError::parse("unterminated QSC data chunk marker"))?;
-        let marker = &chunk[..marker_end];
+        let marker = std::str::from_utf8(&chunk[..marker_end])
+            .map_err(|_| CueMolError::parse("invalid QSC data chunk marker"))?;
         let chunk_id = marker
             .strip_prefix(QSC_DATA_CHUNK_START)
             .and_then(|value| value.strip_suffix("==========\n"))
             .ok_or_else(|| CueMolError::parse("invalid QSC data chunk marker"))?;
-        let end_marker = format!("==========END datachunk:{chunk_id}==========");
+        let end_marker = format!("\n==========END datachunk:{chunk_id}==========");
         let payload_and_tail = &chunk[marker_end..];
-        let end = payload_and_tail
-            .find(&end_marker)
+        let end = byte_index(payload_and_tail, end_marker.as_bytes())
             .ok_or_else(|| CueMolError::parse("QSC data chunk end marker is missing"))?;
         let payload = &payload_and_tail[..end];
-        let after_end = &payload_and_tail[end + end_marker.len()..];
-
         if !omitted_chunks.contains(chunk_id) {
             output.extend_from_slice(marker.as_bytes());
-            if payload.starts_with("QDF") {
-                let encoded_payload = payload.strip_suffix('\n').unwrap_or(payload);
-                let qdf0 = cuemol_qsys::decode_qdf_to_qdf0_bytes(encoded_payload.as_bytes())?;
+            if payload.starts_with(b"QDF") {
+                let qdf0 = cuemol_qsys::decode_qdf_to_qdf0_bytes(payload)?;
                 let encoded = match options.version {
                     GuiQscVersion::Qdf0 => qdf0,
                     GuiQscVersion::Qdf1 => {
@@ -50164,15 +50705,12 @@ fn rewrite_qsc_data_chunks(
                     }
                 };
                 output.extend_from_slice(&encoded);
-                if !encoded.ends_with(b"\n") {
-                    output.push(b'\n');
-                }
             } else {
-                output.extend_from_slice(payload.as_bytes());
+                output.extend_from_slice(payload);
             }
             output.extend_from_slice(end_marker.as_bytes());
         }
-        rest = after_end;
+        rest = &payload_and_tail[end + end_marker.len()..];
     }
     Ok(output)
 }
@@ -52866,6 +53404,193 @@ mod tests {
 
     #[cfg(feature = "scripting")]
     #[test]
+    fn script_trajectory_reads_selected_frames_and_shares_native_playback() {
+        fn xtc(start: usize, count: usize) -> Vec<u8> {
+            let mut data = Vec::new();
+            for frame in start..start + count {
+                for value in [1995_i32, 3, frame as i32] {
+                    data.extend(value.to_be_bytes());
+                }
+                data.extend((frame as f32).to_be_bytes());
+                for value in [3_f32, 0., 0., 0., 4., 0., 0., 0., 5.] {
+                    data.extend(value.to_be_bytes());
+                }
+                data.extend(3_i32.to_be_bytes());
+                for atom in 0..3 {
+                    for value in [frame as f32 + atom as f32 * 0.1, 0., 0.] {
+                        data.extend(value.to_be_bytes());
+                    }
+                }
+            }
+            data
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let topology = dir.path().join("topology.pdb");
+        let first = dir.path().join("first.xtc");
+        let second = dir.path().join("second.xtc");
+        std::fs::write(&topology,"ATOM      1  N   GLY A   1       0.000   0.000   0.000  1.00 10.00           N\nATOM      9  CA  GLY A   1       1.000   0.000   0.000  1.00 10.00           C\nATOM     17  C   GLY A   1       2.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        std::fs::write(&first, xtc(0, 4)).unwrap();
+        std::fs::write(&second, xtc(4, 2)).unwrap();
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        let source=r#"
+            var t=cuemol.Trajectory();t.name='selected';t.applyLoadSel(cuemol.makeSel('aid 9,17'));
+            var top=cuemol.PDBFileReader();top.path=TOPOLOGY;top.attach(t);top.read();print(t.getAtomCount());
+            var r=cuemol.XtcTrajReader();r.path=FIRST;r.nevery=2;r.targTrajUID=t.uid;
+            var first=r.createDefaultObj();r.attach(first);r.read();t.append(first);
+            print(r.lazy_load+':'+first.nframe+':'+t.nframe+':'+t.getAtomByID(9).pos.x.toFixed(1));
+            t.frame=1;print(t.getAtomByID(9).pos.x.toFixed(1));t.frame_aver_size=1;
+            print(t.getAtomByID(9).pos.x.toFixed(1));
+            r.path=SECOND;r.nevery=1;r.lazy_load=false;var second=r.createDefaultObj();r.attach(second);r.read();t.append(second);
+            print(t.nblock+':'+t.nframe+':'+t.getBlock(1).start_index);
+            t.frame_aver_size=0;t.dynframe=2;print(t.getAtomByID(9).pos.x.toFixed(1));
+            t.moveBlock(1,0);print(t.frame+':'+t.getAtomByID(9).pos.x.toFixed(1));t.removeBlock(0);
+            print(t.frame+':'+t.nframe+':'+t.getAtomByID(9).pos.x.toFixed(1));
+            try{t.applyLoadSel(cuemol.makeSel('*'));}catch(e){print('selection-locked');}
+            cuemol.getScene().addObject(t);var live=cuemol.getObject(t.uid);live.frame=0;
+            print(live.type+':'+live.nblock+':'+live.getAtomByID(9).pos.x.toFixed(1));
+        "#.replace("TOPOLOGY",&serde_json::to_string(&topology.to_string_lossy()).unwrap())
+            .replace("FIRST",&serde_json::to_string(&first.to_string_lossy()).unwrap())
+            .replace("SECOND",&serde_json::to_string(&second.to_string_lossy()).unwrap());
+        let (log, _) = app.run_script_js(&source).unwrap();
+        assert_eq!(log,"2\ntrue:2:2:1.0\n21.0\n11.0\n2:4:2\n41.0\n2:1.0\n1:2:21.0\nselection-locked\nTrajectory:1:1.0\n");
+        let uid = app.active_object_summaries()[0].uid;
+        assert_eq!(app.trajectory_len(uid), 2);
+        assert_eq!(
+            app.scene_manager().object(uid).unwrap().mol().atom_count(),
+            2
+        );
+        app.apply_trajectory_frame(uid, 1).unwrap();
+        assert!(
+            (app.scene_manager()
+                .object(uid)
+                .unwrap()
+                .mol()
+                .get_atom_by_id(9)
+                .unwrap()
+                .position
+                .x
+                - 21.)
+                .abs()
+                < 1e-5
+        );
+        let (log,_)=app.run_script_js("var s=cuemol.getScene(),t=cuemol.getObject('selected');s.startUndoTxn('Frame');t.frame=0;s.commitUndoTxn();print(t.frame);").unwrap();
+        assert_eq!(log, "0\n");
+        app.run_script_js("cuemol.getScene().undo(0)").unwrap();
+        assert_eq!(app.trajectories[&uid].current_frame, 1);
+        std::fs::write(&first, xtc(10, 4)).unwrap();
+        app.run_script_js("cuemol.getObject('selected').frame=1")
+            .unwrap();
+        assert!(
+            (app.scene_manager()
+                .object(uid)
+                .unwrap()
+                .mol()
+                .get_atom_by_id(9)
+                .unwrap()
+                .position
+                .x
+                - 121.)
+                .abs()
+                < 1e-4
+        );
+        let linked = dir.path().join("linked.qsc");
+        app.save_active_scene_qsc(&linked).unwrap();
+        let linked_data = std::fs::read(&linked).unwrap();
+        assert!(String::from_utf8_lossy(&linked_data).contains("src=\"first.xtc\""));
+        assert!(!String::from_utf8_lossy(&linked_data)
+            .contains(&dir.path().to_string_lossy().to_string()));
+        let moved = tempfile::tempdir().unwrap();
+        std::fs::copy(&linked, moved.path().join("linked.qsc")).unwrap();
+        std::fs::copy(&first, moved.path().join("first.xtc")).unwrap();
+        let mut restored = DesktopAppState::new();
+        restored.open_path(moved.path().join("linked.qsc")).unwrap();
+        let restored_uid = restored.active_object_summaries()[0].uid;
+        assert_eq!(restored.trajectory_len(restored_uid), 2);
+        restored.apply_trajectory_frame(restored_uid, 1).unwrap();
+        assert!(
+            (restored
+                .scene_manager()
+                .object(restored_uid)
+                .unwrap()
+                .mol()
+                .atoms()
+                .iter()
+                .find(|atom| atom.name == "CA")
+                .unwrap()
+                .position
+                .x
+                - 121.)
+                .abs()
+                < 1e-4
+        );
+        let portable = app.active_scene_bytes().unwrap();
+        std::fs::remove_file(&first).unwrap();
+        std::fs::remove_file(moved.path().join("first.xtc")).unwrap();
+        let mut embedded = DesktopAppState::new();
+        embedded.open_bytes("embedded.qsc", &portable).unwrap();
+        let embedded_uid = embedded.active_object_summaries()[0].uid;
+        assert_eq!(embedded.trajectory_len(embedded_uid), 2);
+        assert_eq!(
+            embedded
+                .scene_manager()
+                .object(embedded_uid)
+                .unwrap()
+                .mol()
+                .atom_count(),
+            2
+        );
+        embedded.apply_trajectory_frame(embedded_uid, 1).unwrap();
+        let mol = embedded.scene_manager().object(embedded_uid).unwrap().mol();
+        assert!(
+            (mol.atoms()
+                .iter()
+                .find(|atom| atom.name == "CA")
+                .unwrap()
+                .position
+                .x
+                - 121.)
+                .abs()
+                < 1e-4
+        );
+        let cell = mol.cell_params().unwrap();
+        assert!(
+            (cell.a - 30.).abs() < 1e-5
+                && (cell.b - 40.).abs() < 1e-5
+                && (cell.c - 50.).abs() < 1e-5
+        );
+    }
+
+    #[test]
+    fn external_trajectory_scene_parts_restore_indexed_playback() {
+        let mut app = DesktopAppState::new();
+        app.open_bytes("top.pdb",b"ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let uid = app.active_object_summaries()[0].uid;
+        let frames = GuiTrajectoryFrames::Memory(std::sync::Arc::new(vec![
+            vec![Vector4::new3(2., 0., 0.)],
+            vec![Vector4::new3(5., 0., 0.)],
+        ]));
+        let (mut prefix, suffix) = app
+            .active_scene_bytes_with_external_trajectory(uid, "dcdtraj")
+            .unwrap();
+        prefix.extend(frames.dcd_bytes(1).unwrap());
+        prefix.extend(suffix);
+        let mut restored = DesktopAppState::new();
+        restored.open_bytes("scene.qsc", &prefix).unwrap();
+        let uid = restored.active_object_summaries()[0].uid;
+        assert_eq!(restored.trajectory_len(uid), 2);
+        restored.apply_trajectory_frame(uid, 1).unwrap();
+        assert_eq!(
+            restored.scene_manager().object(uid).unwrap().mol().atoms()[0]
+                .position
+                .x,
+            5.
+        );
+        assert!(restored.trajectories[&uid].blocks[0].frames.is_lazy());
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
     fn script_trajectory_blocks_and_readers_match_mdtools_qif() {
         let mut app = DesktopAppState::new();
         app.ensure_active_scene();
@@ -52896,10 +53621,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             log,
-            "blocks=2:5:0:2\n\
-             moved=3:3\n\
-             removed=1:3\n\
-             readers=false:1:1:1:1:TrajBlock\n\
+            "blocks=2:0:0:0\n\
+             moved=0:0\n\
+             removed=1:0\n\
+             readers=true:1:1:1:1:TrajBlock\n\
              split=function:function\n"
         );
     }

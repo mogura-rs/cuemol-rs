@@ -670,3 +670,42 @@ The shared core passed 200 tests, Qsys passed 130, command integration passed
 registry audit for map controls, trajectory scripting, hover and exporters.
 All 36 browser tests passed, including camera order and orientation, live
 surface-gradient references, invalid JSON rollback and scene reloads.
+
+## Trajectory scripting and scene persistence
+
+Trajectory script objects now use the same indexed sources as native playback.
+The DCD, XTC and TRR reader defaults enable lazy loading, and explicit eager
+loading remains available. Load selections retain file-order indices even when
+atom IDs are sparse. Frame averaging, block reorder/removal and transactional
+Undo update the same molecule shown by the viewport.
+
+Linked QSC files retain relative trajectory paths and load successfully after
+moving the scene and its source files together. Embedded QSC files store sampled,
+selected frames as binary DCD and keep cell lengths and angles. The QSC writer
+now preserves arbitrary binary extension chunks; its string method is only a
+text inspection view. Topologies read through GRO, PSF and Amber readers use the
+same scene loader callback as native file loading.
+
+Browser scene downloads join the scene bytes with the original trajectory File
+as Blob parts. Saving therefore does not decode all frames or copy the trajectory
+through a JavaScript coordinate array. Reloaded embedded trajectories index their
+encoded bytes and decode individual requested frames; loading an embedded QSC
+still requires its encoded bytes in memory. Native file-backed sources continue
+to seek the original file, and undo snapshots share their sources.
+
+DCD cells are normalized to `(a,b,c,alpha,beta,gamma)` in angstroms and degrees.
+The earlier reader exposed the raw DCD order while playback expected this
+normalized order. Tests now cover both byte orders, angle cosines and degree
+angles using the conventions in the
+[VMD DCD reader](https://www.ks.uiuc.edu/Research/vmd/plugins/doxygen/dcdplugin_8c-source.html).
+The reference CueMol reader copies raw DCD cell values; this fix makes the Rust
+reader consistent with its XTC, TRR and NetCDF readers instead of copying that
+inconsistency.
+
+The shared application suite passed 202 tests, excluding the seven separate QIF
+audits, and the native GUI suite passed 165 tests. The full molecule and MD reader
+suites also passed with the reference checkout available. The exhaustive API
+audit still requires map controls, alignment methods, hover and exporter work.
+All 36 browser tests passed, including saving a File-backed DCD, reloading its
+QSC after a page reload, seeking the final frame and reading its coordinates
+through the script API. The command compatibility suite passed all 14 tests.

@@ -22,6 +22,13 @@ impl TrajBlockReader {
         Self::default()
     }
 
+    pub fn with_lazy_load(lazy_load: bool) -> Self {
+        Self {
+            lazy_load,
+            ..Self::default()
+        }
+    }
+
     pub fn lazy_load(&self) -> bool {
         self.lazy_load
     }
@@ -149,6 +156,7 @@ impl TrajBlock {
         self.frames.get_mut(index).map(Vec::as_mut_slice)
     }
 
+    /// Cell lengths in angstroms followed by alpha, beta and gamma in degrees.
     pub fn cell(&self, index: usize) -> Option<[f64; 6]> {
         self.cells.get(index).copied().flatten()
     }
@@ -620,7 +628,7 @@ impl DcdTrajReader {
     pub fn new() -> Self {
         Self {
             reader: ObjReader::new("dcdtraj", "DCD binary trajectory (*.dcd)", "*.dcd"),
-            block_reader: TrajBlockReader::new(),
+            block_reader: TrajBlockReader::with_lazy_load(true),
             options: DcdReadOptions::default(),
         }
     }
@@ -859,7 +867,14 @@ fn read_dcd_stream_with_options(input: impl Read, options: &DcdReadOptions) -> R
             for (index, value) in values.iter_mut().enumerate() {
                 *value = decode_f64(&record[index * 8..index * 8 + 8], endian);
             }
-            Some(values)
+            let [a, gamma, b, beta, alpha, c] = values;
+            let angles = [alpha, beta, gamma];
+            let [alpha, beta, gamma] = if angles.iter().all(|v| (-1.0..=1.0).contains(v)) {
+                angles.map(|v| 90.0 - v.asin().to_degrees())
+            } else {
+                angles
+            };
+            Some([a, b, c, alpha, beta, gamma])
         } else {
             None
         };
@@ -1091,8 +1106,36 @@ mod tests {
             block.frame(1).unwrap(),
             &[202.0, 212.0, 222.0, 200.0, 210.0, 220.0]
         );
-        assert_eq!(block.cell(0), Some([10.0, 0.0, 11.0, 0.0, 0.0, 12.0]));
-        assert_eq!(block.cell(1), Some([12.0, 0.0, 11.0, 0.0, 0.0, 12.0]));
+        assert_eq!(block.cell(0), Some([10.0, 11.0, 12.0, 90.0, 90.0, 90.0]));
+        assert_eq!(block.cell(1), Some([12.0, 11.0, 12.0, 90.0, 90.0, 90.0]));
+    }
+
+    #[test]
+    fn dcd_cell_angles_support_degrees_and_cosines_in_both_byte_orders() {
+        for endian in [Endian::Little, Endian::Big] {
+            for cosine in [false, true] {
+                let mut input = dcd_fixture(endian, true);
+                let angle = |v: f64| if cosine { v.to_radians().cos() } else { v };
+                for (index, value) in [30., angle(110.), 40., angle(80.), angle(70.), 50.]
+                    .into_iter()
+                    .enumerate()
+                {
+                    input[200 + index * 8..208 + index * 8]
+                        .copy_from_slice(&encode_f64(value, endian));
+                }
+                let block = read_dcd_bytes(&input).unwrap();
+                let indexed = crate::IndexedTrajectory::from_bytes(&input, 1, None).unwrap();
+                for cell in [
+                    block.cell(0).unwrap(),
+                    indexed.read_frame(0).unwrap().cell.unwrap(),
+                ] {
+                    for (actual, expected) in cell.into_iter().zip([30., 40., 50., 70., 80., 110.])
+                    {
+                        assert!((actual - expected).abs() < 1e-10);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

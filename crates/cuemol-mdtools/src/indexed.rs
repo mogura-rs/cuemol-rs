@@ -2,9 +2,9 @@
 use crate::{read_dcd_bytes, read_trr_bytes, read_xtc_bytes};
 use cuemol_core::{CueMolError, Result};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
 enum Format {
@@ -21,10 +21,32 @@ struct Span {
     len: u64,
 }
 
+#[derive(Debug)]
+enum Source {
+    File(File),
+    Memory(Cursor<Arc<[u8]>>),
+}
+impl Read for Source {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::File(file) => file.read(buffer),
+            Self::Memory(data) => data.read(buffer),
+        }
+    }
+}
+impl Seek for Source {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        match self {
+            Self::File(file) => file.seek(position),
+            Self::Memory(data) => data.seek(position),
+        }
+    }
+}
+
 /// An open file and a sampled frame index, shared by GUI undo snapshots via `Arc`.
 #[derive(Debug)]
 pub struct IndexedTrajectory {
-    file: Mutex<File>,
+    file: Mutex<Source>,
     _temporary: Option<tempfile::TempPath>,
     file_len: u64,
     format: Format,
@@ -57,7 +79,7 @@ impl IndexedTrajectory {
             ));
         }
         let path = path.as_ref();
-        let (mut file, temporary) = if crate::fileio::detect_compression(path)?
+        let (file, temporary) = if crate::fileio::detect_compression(path)?
             == crate::fileio::CompressionEncoding::Raw
         {
             (File::open(path)?, None)
@@ -69,6 +91,32 @@ impl IndexedTrajectory {
             (file, Some(path))
         };
         let file_len = file.metadata()?.len();
+        Self::from_source(
+            Source::File(file),
+            file_len,
+            path,
+            stride,
+            expected,
+            has_box,
+            temporary,
+        )
+    }
+
+    fn from_source(
+        mut file: Source,
+        file_len: u64,
+        path: &Path,
+        stride: usize,
+        expected: Option<usize>,
+        has_box: Option<bool>,
+        temporary: Option<tempfile::TempPath>,
+    ) -> Result<Self> {
+        if stride == 0 {
+            return Err(CueMolError::invalid_argument(
+                "trajectory stride must be positive",
+            ));
+        }
+
         let mut magic = [0; 4];
         file.read_exact(&mut magic)?;
         file.rewind()?;
@@ -152,6 +200,37 @@ impl IndexedTrajectory {
         })
     }
 
+    pub fn from_bytes(bytes: &[u8], stride: usize, expected: Option<usize>) -> Result<Self> {
+        Self::from_bytes_with_name(bytes, "trajectory", stride, expected)
+    }
+
+    pub fn from_bytes_with_name(
+        bytes: &[u8],
+        name: &str,
+        stride: usize,
+        expected: Option<usize>,
+    ) -> Result<Self> {
+        Self::from_source(
+            Source::Memory(Cursor::new(Arc::from(bytes))),
+            bytes.len() as u64,
+            Path::new(name),
+            stride,
+            expected,
+            None,
+            None,
+        )
+    }
+
+    pub fn format_name(&self) -> &'static str {
+        match self.format {
+            Format::Dcd(_) => "DCD",
+            Format::Xtc => "XTC",
+            Format::Trr => "TRR",
+            Format::Netcdf(_) => "NETCDF",
+            Format::Mdcrd { .. } => "MDCRD",
+        }
+    }
+
     pub fn atom_count(&self) -> usize {
         self.atom_count
     }
@@ -172,13 +251,13 @@ impl IndexedTrajectory {
             .file
             .lock()
             .map_err(|_| CueMolError::Io("trajectory file lock poisoned".into()))?;
-        if file.metadata()?.len() != self.file_len {
+        if matches!(&*file, Source::File(source) if source.metadata()?.len() != self.file_len) {
             return Err(CueMolError::Io(
                 "trajectory file size changed; reopen the trajectory".into(),
             ));
         }
         if let Format::Netcdf(layout) = &self.format {
-            return layout.read_frame(&mut file, index * self.stride);
+            return layout.read_frame(&mut *file, index * self.stride);
         }
         let span = self.spans[index];
         let prefix: &[u8] = match &self.format {
@@ -235,7 +314,7 @@ fn u32_at(bytes: &[u8], offset: usize, little: bool) -> u32 {
     }
 }
 
-fn seek_forward(file: &mut File, bytes: u64, file_len: u64) -> Result<()> {
+fn seek_forward(file: &mut Source, bytes: u64, file_len: u64) -> Result<()> {
     let end = file
         .stream_position()?
         .checked_add(bytes)
@@ -245,7 +324,12 @@ fn seek_forward(file: &mut File, bytes: u64, file_len: u64) -> Result<()> {
     Ok(())
 }
 
-fn dcd_record(file: &mut File, file_len: u64, little: bool, expected: Option<u32>) -> Result<u32> {
+fn dcd_record(
+    file: &mut Source,
+    file_len: u64,
+    little: bool,
+    expected: Option<u32>,
+) -> Result<u32> {
     let mut word = [0; 4];
     file.read_exact(&mut word)?;
     let len = u32_at(&word, 0, little);
@@ -260,7 +344,11 @@ fn dcd_record(file: &mut File, file_len: u64, little: bool, expected: Option<u32
     Ok(len)
 }
 
-fn index_dcd(file: &mut File, file_len: u64, stride: usize) -> Result<(Vec<u8>, Vec<Span>, usize)> {
+fn index_dcd(
+    file: &mut Source,
+    file_len: u64,
+    stride: usize,
+) -> Result<(Vec<u8>, Vec<Span>, usize)> {
     let mut header = [0; 92];
     file.read_exact(&mut header)?;
     let little = u32::from_le_bytes(header[..4].try_into().unwrap()) == 84;
@@ -327,14 +415,14 @@ fn index_dcd(file: &mut File, file_len: u64, stride: usize) -> Result<(Vec<u8>, 
     Ok((prefix, spans, atoms as usize))
 }
 
-fn read_be(file: &mut File) -> Result<u32> {
+fn read_be(file: &mut Source) -> Result<u32> {
     let mut word = [0; 4];
     file.read_exact(&mut word)?;
     Ok(u32::from_be_bytes(word))
 }
 
 fn index_xdr(
-    file: &mut File,
+    file: &mut Source,
     file_len: u64,
     stride: usize,
     xtc: bool,

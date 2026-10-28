@@ -38,7 +38,7 @@ impl TrrTrajReader {
     pub fn new() -> Self {
         Self {
             reader: ObjReader::new("trrtraj", "GROMACS TRR trajectory (*.trr)", "*.trr"),
-            block_reader: TrajBlockReader::new(),
+            block_reader: TrajBlockReader::with_lazy_load(true),
             options: TrrReadOptions::default(),
         }
     }

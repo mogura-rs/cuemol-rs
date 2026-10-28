@@ -578,7 +578,8 @@ fn run() -> Result<(), String> {
             let scene = manager
                 .scene(scene_uid)
                 .ok_or_else(|| "loaded scene not found".to_string())?;
-            print!("{}", scene.write_qsc_string());
+            std::io::Write::write_all(&mut std::io::stdout(), &scene.write_qsc_bytes())
+                .map_err(|error| error.to_string())?;
             Ok(())
         }
         "mol-array-info" => {

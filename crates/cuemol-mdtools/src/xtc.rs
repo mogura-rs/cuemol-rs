@@ -40,7 +40,7 @@ impl XtcTrajReader {
     pub fn new() -> Self {
         Self {
             reader: ObjReader::new("xtctraj", "GROMACS XTC trajectory (*.xtc)", "*.xtc"),
-            block_reader: TrajBlockReader::new(),
+            block_reader: TrajBlockReader::with_lazy_load(true),
             options: XtcReadOptions::default(),
         }
     }

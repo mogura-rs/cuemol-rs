@@ -122,6 +122,9 @@ pub async fn start(canvas: web_sys::HtmlCanvasElement, force_webgl: bool) -> Res
 fn download(name: &str, bytes: &[u8], mime: &str) -> Result<(), JsValue> {
     let array = js_sys::Array::new();
     array.push(&js_sys::Uint8Array::from(bytes));
+    download_parts(name, &array, mime)
+}
+fn download_parts(name: &str, array: &js_sys::Array, mime: &str) -> Result<(), JsValue> {
     let options = web_sys::BlobPropertyBag::new();
     options.set_type(mime);
     let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&array, &options)?;
@@ -644,6 +647,9 @@ impl App {
                             self.dirty = true;
                             self.rebuild();
                             if matches!(loaded, GuiLoadedPath::Scene { .. }) {
+                                self.trajectory = None;
+                                self.frame = 0;
+                                self.playing = false;
                                 self.camera = self.state.active_view_camera().unwrap_or_default();
                             } else {
                                 self.fit(false);
@@ -725,14 +731,43 @@ impl App {
             }
         }
     }
+    fn trajectory_info(&self) -> Option<(Uid, usize, usize)> {
+        if let Some((id, trajectory)) = &self.trajectory {
+            if self.state.scene_manager().scene_uid_for_object(*id) == self.state.active_scene() {
+                return Some((*id, trajectory.frames, self.frame));
+            }
+        }
+        let summaries = self.state.active_trajectory_summaries();
+        summaries
+            .iter()
+            .find(|t| Some(t.object_uid) == self.selected)
+            .or_else(|| summaries.first())
+            .filter(|t| t.frame_count > 0)
+            .map(|t| (t.object_uid, t.frame_count, t.current_frame))
+    }
+
     fn request_frame(&mut self, index: usize) {
         if self.busy {
             return;
         }
-        let Some((id, trajectory)) = self.trajectory.as_ref() else {
+        let Some((id, _, _)) = self.trajectory_info() else {
             return;
         };
-        let (id, trajectory) = (*id, trajectory.clone());
+        let Some((_, trajectory)) = self.trajectory.as_ref().filter(|(uid, _)| *uid == id) else {
+            match self.state.apply_trajectory_frame(id, index) {
+                Ok(()) => {
+                    self.frame = index;
+                    self.dirty = true;
+                    self.revision = self.revision.wrapping_add(1);
+                }
+                Err(error) => {
+                    self.message = error.to_string();
+                    self.playing = false;
+                }
+            }
+            return;
+        };
+        let trajectory = trajectory.clone();
         self.busy = true;
         spawn_local(async move {
             match trajectory.frame(index).await {
@@ -1018,8 +1053,8 @@ impl eframe::App for App {
         if self.playing && !self.busy {
             let now = ctx.input(|i| i.time);
             if now >= self.next_frame {
-                if let Some((_, trajectory)) = &self.trajectory {
-                    self.request_frame((self.frame + 1) % trajectory.frames);
+                if let Some((_, frames, frame)) = self.trajectory_info() {
+                    self.request_frame((frame + 1) % frames);
                     self.next_frame = now + 1.0 / self.fps as f64;
                 }
             }
@@ -1061,6 +1096,6 @@ impl eframe::App for App {
                 [rect.min.x, rect.min.y, rect.width(), rect.height()]
             })
             .collect();
-        STATUS.with(|status|*status.borrow_mut()=json!({"scene":state,"selection":self.selection,"view":cuemol_command::view_json(&self.camera),"message":self.message,"frame":self.frame,"busy":self.busy,"lastCommand":self.last_command,"agent":self.agent.status(),"ui":{"overlays":overlays,"rects":self.ui_rects,"activity":self.activity.map(cuemol_ui::shell::Activity::key),"bottom":self.bottom_tab,"inspector":self.inspector.rects,"navigation":{"tool":self.navigation.tool.label(),"picks":self.navigation.picks.len(),"hover":self.hover_hit.map(|hit|json!({"object":hit.object.get(),"index":hit.index})),"measurementLabels":self.state.active_atom_intr_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).into_iter().map(|label|label.text).collect::<Vec<_>>(),"labels":self.state.active_name_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).len()}}}).to_string());
+        STATUS.with(|status|*status.borrow_mut()=json!({"scene":state,"selection":self.selection,"view":cuemol_command::view_json(&self.camera),"message":self.message,"frame":self.trajectory_info().map_or(self.frame,|(_,_,frame)|frame),"busy":self.busy,"lastCommand":self.last_command,"agent":self.agent.status(),"ui":{"overlays":overlays,"rects":self.ui_rects,"activity":self.activity.map(cuemol_ui::shell::Activity::key),"bottom":self.bottom_tab,"inspector":self.inspector.rects,"navigation":{"tool":self.navigation.tool.label(),"picks":self.navigation.picks.len(),"hover":self.hover_hit.map(|hit|json!({"object":hit.object.get(),"index":hit.index})),"measurementLabels":self.state.active_atom_intr_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).into_iter().map(|label|label.text).collect::<Vec<_>>(),"labels":self.state.active_name_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).len()}}}).to_string());
     }
 }

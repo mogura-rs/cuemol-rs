@@ -59,7 +59,11 @@ impl DesktopAppState {
                 self.scene_manager_mut()
                     .scene_mut(scene_uid)
                     .unwrap()
-                    .load_qsc_bytes(bytes)?;
+                    .load_qsc_bytes_with_molecule_reader(
+                        bytes,
+                        None,
+                        &crate::trajectory_io::read_extra_qsc_molecule,
+                    )?;
                 self.restore_loaded_scene_data(scene_uid)?;
                 if let Some(camera) = self.active_scene_saved_camera() {
                     self.set_active_view_camera(&camera)?;
@@ -121,6 +125,7 @@ impl DesktopAppState {
         let scene_uid = self
             .active_scene()
             .ok_or_else(|| CueMolError::not_found("scene"))?;
+        self.sync_trajectory_qsc_nodes(scene_uid, true, None)?;
         self.sync_morph_qsc_nodes(scene_uid)?;
         self.sync_density_map_qsc_nodes(scene_uid)?;
         let (document, _) = self.scene_qsc_with_save_options(
@@ -131,6 +136,66 @@ impl DesktopAppState {
             },
         )?;
         Ok(document)
+    }
+
+    /// Split an embedded scene around an external trajectory payload for Blob-based export.
+    pub fn active_scene_bytes_with_external_trajectory(
+        &mut self,
+        object_uid: Uid,
+        source_type: &str,
+    ) -> Result<(Vec<u8>, Vec<u8>)> {
+        if !matches!(
+            source_type,
+            "dcdtraj" | "xtctraj" | "trrtraj" | "ambnetcdftraj" | "mdcrd"
+        ) {
+            return Err(CueMolError::invalid_argument(
+                "unsupported trajectory source",
+            ));
+        }
+        let index = self
+            .active_scene()
+            .and_then(|sid| self.scene_manager().scene(sid))
+            .and_then(|scene| {
+                scene
+                    .objects()
+                    .iter()
+                    .position(|obj| obj.uid() == object_uid)
+            })
+            .ok_or_else(|| CueMolError::not_found("trajectory topology"))?;
+        let bytes = self.active_scene_bytes()?;
+        let (xml, suffix) = split_qsc_document(&bytes)?;
+        let mut tree = parse_ldom2_xml(xml)?;
+        let node = tree
+            .top_mut()
+            .children_mut()
+            .iter_mut()
+            .filter(|node| !node.is_attr() && node.tag_name() == "object")
+            .nth(index)
+            .ok_or_else(|| CueMolError::not_found("trajectory topology node"))?;
+        node.set_type_name("Trajectory");
+        node.retain_children(|child| child.tag_name() != "trajfiles");
+        let chunk = (0..100_000)
+            .rev()
+            .map(|index| format!("{index:05}"))
+            .find(|id| {
+                byte_index(
+                    suffix,
+                    format!("{QSC_DATA_CHUNK_START}{id}==========").as_bytes(),
+                )
+                .is_none()
+            })
+            .ok_or_else(|| CueMolError::invalid_argument("too many embedded scene data chunks"))?;
+        let file = node.append_child("trajfiles").append_child("trajfile");
+        file.set_type_name("TrajBlock");
+        file.set_str_attr("src", format!("datachunk:{chunk}"));
+        file.set_str_attr("srctype", source_type);
+        let mut prefix =
+            format!("{}\n\n{}", write_ldom2_xml(&tree), QSC_XML_END_MARKER).into_bytes();
+        prefix.extend_from_slice(suffix);
+        prefix
+            .extend_from_slice(format!("==========START datachunk:{chunk}==========\n").as_bytes());
+        let suffix = format!("\n==========END datachunk:{chunk}==========\n").into_bytes();
+        Ok((prefix, suffix))
     }
 
     pub fn apply_coordinate_frame(

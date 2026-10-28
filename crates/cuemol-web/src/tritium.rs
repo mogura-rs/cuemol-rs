@@ -310,17 +310,32 @@ impl App {
             });
     }
     fn save_scene_download(&mut self) {
-        let result = self
-            .state
-            .set_active_view_camera(&self.camera)
-            .and_then(|_| self.state.active_scene_bytes());
-        match result {
-            Ok(bytes) => {
-                if let Err(e) = download("scene.qsc", &bytes, "application/octet-stream") {
-                    self.message = js_error(e);
-                }
-            }
-            Err(e) => self.message = e.to_string(),
+        if let Err(error) = self.state.set_active_view_camera(&self.camera) {
+            self.message = error.to_string();
+            return;
+        }
+        let result = if let Some((id, trajectory)) = &self.trajectory {
+            self.state
+                .active_scene_bytes_with_external_trajectory(*id, trajectory.source_type())
+                .map_err(|e| e.to_string())
+                .and_then(|(prefix, suffix)| {
+                    let parts = js_sys::Array::new();
+                    parts.push(&js_sys::Uint8Array::from(prefix.as_slice()));
+                    parts.push(trajectory.file());
+                    parts.push(&js_sys::Uint8Array::from(suffix.as_slice()));
+                    download_parts("scene.qsc", &parts, "application/octet-stream")
+                        .map_err(js_error)
+                })
+        } else {
+            self.state
+                .active_scene_bytes()
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| {
+                    download("scene.qsc", &bytes, "application/octet-stream").map_err(js_error)
+                })
+        };
+        if let Err(error) = result {
+            self.message = error;
         }
     }
     fn save_object_download(&mut self) {
@@ -809,12 +824,11 @@ impl App {
                         self.timeline_contents(ui);
                     }
                     "MD Trajectory" => {
-                        if let Some((_, trajectory)) = &self.trajectory {
-                            let frames = trajectory.frames;
+                        if let Some((_, frames, current_frame)) = self.trajectory_info() {
                             ui.horizontal(|ui| {
                                 let label = if self.playing { "Pause" } else { "Play" };
                                 ui.toggle_value(&mut self.playing, label);
-                                let mut frame = self.frame;
+                                let mut frame = current_frame;
                                 if ui
                                     .add(
                                         egui::Slider::new(&mut frame, 0..=frames - 1).text("Frame"),

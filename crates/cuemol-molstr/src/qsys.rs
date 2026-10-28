@@ -2202,6 +2202,15 @@ impl MolScene {
         input: &[u8],
         base_path: Option<&Path>,
     ) -> Result<()> {
+        self.load_qsc_bytes_with_molecule_reader(input, base_path, &unsupported_qsc_molecule)
+    }
+
+    pub fn load_qsc_bytes_with_molecule_reader(
+        &mut self,
+        input: &[u8],
+        base_path: Option<&Path>,
+        read_molecule: &dyn Fn(&str, &[u8]) -> Result<MolCoord>,
+    ) -> Result<()> {
         let stream = LDom2InStream::from_bytes(input)?;
         if stream.tree().top().tag_name() != "scene" {
             return Err(CueMolError::parse("QSC root element is not scene"));
@@ -2307,7 +2316,13 @@ impl MolScene {
                 })
                 .collect::<Result<BTreeMap<_, _>>>()?;
             for node in object_nodes {
-                self.load_qsc_object_block(&qsc_node_lines(&node), &node, &chunks, effective_base)?;
+                self.load_qsc_object_block(
+                    &qsc_node_lines(&node),
+                    &node,
+                    &chunks,
+                    effective_base,
+                    read_molecule,
+                )?;
             }
         }
         for node in camera_nodes {
@@ -2338,6 +2353,7 @@ impl MolScene {
         object_node: &LDom2Node,
         chunks: &BTreeMap<String, Vec<u8>>,
         base_path: Option<&Path>,
+        read_molecule: &dyn Fn(&str, &[u8]) -> Result<MolCoord>,
     ) -> Result<()> {
         let object_line = block
             .first()
@@ -2348,9 +2364,12 @@ impl MolScene {
         // A `.qsc` saved by C++ CueMol2 can also hold non-molecule objects such as
         // MolSurf and DensityMap. Capture supported representations and record only
         // unsupported classes or source formats as skipped.
-        // A missing `type` means MolCoord (the Rust writer always emits `type="MolCoord"`).
+        // A missing `type` means MolCoord.
         let object_type = attr_value(object_line, "type").unwrap_or_else(|| "MolCoord".to_string());
-        if !matches!(object_type.as_str(), "MolCoord" | "MorphMol") {
+        if !matches!(
+            object_type.as_str(),
+            "MolCoord" | "AnimMol" | "MorphMol" | "Trajectory"
+        ) {
             // Capture every supported surface representation. QDF1 is an ASCII
             // envelope, so it remains safe in the text datachunk map.
             let srctype = attr_value(object_line, "srctype").unwrap_or_default();
@@ -2475,11 +2494,7 @@ impl MolScene {
             "mol2" => read_mol2_str(std::str::from_utf8(&data).map_err(|error| {
                 CueMolError::parse(format!("QSC MOL2 source is not UTF-8: {error}"))
             })?)?,
-            other => {
-                return Err(CueMolError::invalid_argument(format!(
-                    "unsupported QSC molecule source type {other}"
-                )))
-            }
+            other => read_molecule(other, &data)?,
         };
         let object_uid = self.add_molecule_with_source_type(object_name, molecule, srctype);
         let qsc_extra_attrs = object_node
@@ -2696,7 +2711,12 @@ impl MolScene {
         Ok(())
     }
 
+    /// Text view for XML inspection. Use `write_qsc_bytes` to preserve binary chunks.
     pub fn write_qsc_string(&self) -> String {
+        String::from_utf8_lossy(&self.write_qsc_bytes()).into_owned()
+    }
+
+    pub fn write_qsc_bytes(&self) -> Vec<u8> {
         let mut output = String::new();
         output.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\n");
         output.push_str("<scene");
@@ -2791,7 +2811,9 @@ impl MolScene {
                 escape_xml(&object.object_type),
                 escape_xml(object.name()),
                 chunk_id,
-                escape_xml(object.source_type()),
+                if object.source_type() == "qdfmol" || object.object_type() == "Trajectory" {
+                    "qdfmol".to_string()
+                } else { "qdfpdb".to_string() },
                 xform_attr,
                 visible_attr,
                 locked_attr,
@@ -3100,18 +3122,23 @@ impl MolScene {
         }
         output.push_str("</scene>\n\n");
         output.push_str("========== End of XML ==========\n\n");
+        let mut output = output.into_bytes();
         for (index, object) in self.objects.iter().enumerate() {
             let chunk_id = format!("{index:05}");
-            if object.source_type() == "qdfmol" {
+            if object.source_type() == "qdfmol" || object.object_type() == "Trajectory" {
                 append_qsc_data_chunk(
                     &mut output,
                     &chunk_id,
                     &crate::write_qdf_mol_bytes(object.mol()),
                 );
             } else {
-                output.push_str(&format!("==========START datachunk:{chunk_id}==========\n"));
-                output.push_str(&write_pdb_string(object.mol()));
-                output.push_str(&format!("\n==========END datachunk:{chunk_id}==========\n"));
+                output.extend_from_slice(
+                    format!("==========START datachunk:{chunk_id}==========\n").as_bytes(),
+                );
+                output.extend_from_slice(write_pdb_string(object.mol()).as_bytes());
+                output.extend_from_slice(
+                    format!("\n==========END datachunk:{chunk_id}==========\n").as_bytes(),
+                );
             }
         }
         for (object, chunk_ids) in self.objects.iter().zip(&object_extra_chunk_ids) {
@@ -3313,7 +3340,7 @@ impl MolSceneManager {
         let scene = self
             .scene(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
-        fs::write(path, scene.write_qsc_string())?;
+        fs::write(path, scene.write_qsc_bytes())?;
         Ok(())
     }
 }
@@ -3489,6 +3516,19 @@ impl MolCommandManager {
         file_path: impl AsRef<Path>,
         target_scene: Option<Uid>,
     ) -> Result<LoadSceneResult> {
+        self.load_scene_command_with_molecule_reader(
+            file_path,
+            target_scene,
+            &unsupported_qsc_molecule,
+        )
+    }
+
+    pub fn load_scene_command_with_molecule_reader(
+        &mut self,
+        file_path: impl AsRef<Path>,
+        target_scene: Option<Uid>,
+        read_molecule: &dyn Fn(&str, &[u8]) -> Result<MolCoord>,
+    ) -> Result<LoadSceneResult> {
         let file_path = absolute_scene_path(file_path.as_ref())?;
         let input = fs::read(&file_path)?;
         if let Ok(text) = std::str::from_utf8(&input) {
@@ -3513,7 +3553,11 @@ impl MolCommandManager {
                     .cloned()
                     .ok_or_else(|| CueMolError::NotFound(format!("scene {}", uid.get())))?;
                 loaded.clear_all_data();
-                loaded.load_qsc_bytes_with_base_path(&input, file_path.parent())?;
+                loaded.load_qsc_bytes_with_molecule_reader(
+                    &input,
+                    file_path.parent(),
+                    read_molecule,
+                )?;
                 loaded.set_name(&scene_name);
                 *self
                     .scene_manager
@@ -3527,7 +3571,7 @@ impl MolCommandManager {
                     .scene_manager
                     .scene_mut(uid)
                     .expect("newly created scene must exist")
-                    .load_qsc_bytes_with_base_path(&input, file_path.parent());
+                    .load_qsc_bytes_with_molecule_reader(&input, file_path.parent(), read_molecule);
                 if let Err(error) = load_result {
                     self.scene_manager.destroy_scene(uid);
                     return Err(error);
@@ -3591,6 +3635,12 @@ fn atom_display_name(atom: &Atom) -> String {
     )
 }
 
+fn unsupported_qsc_molecule(format: &str, _: &[u8]) -> Result<MolCoord> {
+    Err(CueMolError::invalid_argument(format!(
+        "unsupported QSC molecule source type {format}"
+    )))
+}
+
 fn collect_qsc_extension_data(
     node: &LDom2Node,
     chunks: &BTreeMap<String, Vec<u8>>,
@@ -3599,6 +3649,9 @@ fn collect_qsc_extension_data(
 ) -> Result<()> {
     let source = node.str_attr("src").to_string();
     let source_type = node.str_attr("srctype").to_string();
+    if node.tag_name() == "trajfile" && !source.starts_with("datachunk:") {
+        return Ok(());
+    }
     if !source.is_empty() && !source_type.is_empty() && !output.contains_key(&source) {
         let line = qsc_node_lines(node)
             .into_iter()
@@ -4088,24 +4141,52 @@ fn escape_xml(input: &str) -> String {
         .replace('>', "&gt;")
 }
 
-fn append_qsc_data_chunk(output: &mut String, chunk_id: &str, data: &[u8]) {
-    output.push_str(&format!("==========START datachunk:{chunk_id}==========\n"));
+fn append_qsc_data_chunk(output: &mut Vec<u8>, chunk_id: &str, data: &[u8]) {
+    output
+        .extend_from_slice(format!("==========START datachunk:{chunk_id}==========\n").as_bytes());
     let encoded = if data.starts_with(b"QDF0") {
         cuemol_qsys::encode_qdf0_bytes(data, 1, "10").ok()
     } else {
         None
     };
-    let text = encoded.as_deref().unwrap_or(data);
-    output.push_str(&String::from_utf8_lossy(text));
-    if !text.ends_with(b"\n") {
-        output.push('\n');
-    }
-    output.push_str(&format!("==========END datachunk:{chunk_id}==========\n"));
+    output.extend_from_slice(encoded.as_deref().unwrap_or(data));
+    output
+        .extend_from_slice(format!("\n==========END datachunk:{chunk_id}==========\n").as_bytes());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qsc_bytes_preserve_binary_extension_payloads() {
+        let mut manager = MolSceneManager::new();
+        let scene = manager.new_scene("binary");
+        let uid = manager
+            .scene_mut(scene)
+            .unwrap()
+            .add_molecule("molecule", crate::read_pdb_str("ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap());
+        let payload = vec![0, 255, 254, 128, 10];
+        let mut node = LDom2Node::new();
+        node.set_tag_name("blob");
+        node.set_str_attr("src", "datachunk:blob");
+        node.set_str_attr("srctype", "binary");
+        manager.object_mut(uid).unwrap().replace_qsc_extensions(
+            vec![node],
+            BTreeMap::from([("datachunk:blob".to_string(), payload.clone())]),
+        );
+        let bytes = manager.scene(scene).unwrap().write_qsc_bytes();
+        let mut restored = MolSceneManager::new();
+        let scene = restored.new_scene("loaded");
+        restored
+            .scene_mut(scene)
+            .unwrap()
+            .load_qsc_bytes(&bytes)
+            .unwrap();
+        let object = &restored.scene(scene).unwrap().objects()[0];
+        let source = object.qsc_extension_nodes()[0].str_attr("src");
+        assert_eq!(object.qsc_extra_data(source.as_str()).unwrap(), payload);
+    }
 
     #[test]
     fn qsc_camera_display_modes_match_script_enums() {

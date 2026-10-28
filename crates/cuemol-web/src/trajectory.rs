@@ -243,6 +243,19 @@ impl BrowserTrajectory {
             frames,
         })
     }
+    pub fn file(&self) -> &File {
+        &self.file
+    }
+    pub fn source_type(&self) -> &'static str {
+        match self.format {
+            Format::Dcd { .. } => "dcdtraj",
+            Format::Xtc => "xtctraj",
+            Format::Trr => "trrtraj",
+            Format::Netcdf(_) => "ambnetcdftraj",
+            Format::Mdcrd { .. } => "mdcrd",
+        }
+    }
+
     pub async fn frame(&self, index: usize) -> Result<TrajectoryFrame, JsValue> {
         if index >= self.frames {
             return Err(error("Frame out of range"));

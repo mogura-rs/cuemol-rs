@@ -1115,10 +1115,11 @@ pub struct NetcdfFileLayout {
 }
 
 impl NetcdfFileLayout {
-    pub(crate) fn open(file: &mut std::fs::File) -> Result<Self> {
-        use std::io::{Read, Seek};
+    pub(crate) fn open(file: &mut (impl std::io::Read + std::io::Seek)) -> Result<Self> {
+        use std::io::Read;
         file.rewind()?;
-        let len = file.metadata()?.len();
+        let len = file.seek(std::io::SeekFrom::End(0))?;
+        file.rewind()?;
         let mut bytes = Vec::new();
         loop {
             let n = (&mut *file).take(4096).read_to_end(&mut bytes)?;
@@ -1182,10 +1183,10 @@ impl NetcdfFileLayout {
 
     pub(crate) fn read_frame(
         &self,
-        file: &mut std::fs::File,
+        file: &mut (impl std::io::Read + std::io::Seek),
         index: usize,
     ) -> Result<crate::TrajectoryFrame> {
-        use std::io::{Read, Seek, SeekFrom};
+        use std::io::SeekFrom;
         let offset = (index as u64)
             .checked_mul(self.header.record_size as u64)
             .and_then(|n| n.checked_add(self.header.record_data_start as u64))

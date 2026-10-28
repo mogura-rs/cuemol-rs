@@ -94,6 +94,22 @@ test('browser trajectory keeps a File and seeks individual frames',async({page},
   await call(page,'set_frame',{objId:object,frame:1});
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().frame)).toBe(1);
   await page.screenshot({path:testInfo.outputPath('trajectory.png')});
+  const download=page.waitForEvent('download');
+  const button=await page.evaluate(()=>window.cuemol.status().ui.rects['Save Scene']);
+  await page.mouse.click(button[0]+button[2]/2,button[1]+button[3]/2);
+  const saved=await download;const stream=await saved.createReadStream();const chunks=[];for await(const part of stream)chunks.push(part);
+  const scene=Buffer.concat(chunks);
+  expect(scene.includes(Buffer.from('dcdtraj'))).toBe(true);
+  await page.reload();await expect.poll(()=>page.evaluate(()=>!!window.cuemol),{timeout:60000}).toBe(true);
+  await load(page,'trajectory.qsc',scene);
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Loaded trajectory.qsc');
+  const restored=(await page.evaluate(()=>window.cuemol.status())).scene.objects[0].id;
+  let state=await call(page,'list_trajectories');
+  expect(JSON.parse(state.message).trajectories[0].frames).toBe(5);
+  await call(page,'set_frame',{objId:restored,frame:4});
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().frame)).toBe(4);
+  state=await call(page,'execute_script',{source:`print(cuemol.getObject(${restored}).getAtomByID(1).pos.x.toFixed(1));`});
+  expect(state.message).toContain('4.0');
   expect(errors).toEqual([]);
 });
 
