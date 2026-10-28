@@ -1,3 +1,6 @@
+#[path = "updates.rs"]
+mod updates;
+
 use crate::{
     collect_pov_labels, collect_scene_pov_labels, create_apbs_work_dir, create_pov_work_dir,
     overlay_pov_labels, run_apbs_process, run_pov_process, run_pov_process_with_poll, AnimKind,
@@ -1451,6 +1454,7 @@ struct GuiApplication {
     surface_regenerate_draft: Option<NativeSurfaceRegenerateDraft>,
     show_bottom_panel: bool,
     show_about: bool,
+    updates: updates::Updates,
     show_options: bool,
     options_pane: OptionsPane,
     options_draft: Option<NativePreferences>,
@@ -5107,6 +5111,7 @@ impl GuiApplication {
             surface_regenerate_draft: None,
             show_bottom_panel,
             show_about: false,
+            updates: Default::default(),
             show_options: false,
             options_pane: OptionsPane::Misc,
             options_draft: None,
@@ -5500,6 +5505,7 @@ impl GuiApplication {
         if self.show_inspector {
             self.properties_window(ctx, camera);
         }
+        self.updates.show(ctx);
         self.dialogs(ctx, camera);
         self.keyboard_shortcuts(ctx, camera);
         if self.pdb_download_receiver.is_some()
@@ -6261,7 +6267,7 @@ impl GuiApplication {
                                     self.show_console = true;
                                 }
                                 "Check for updates" => {
-                                    self.set_status("Update check is not available offline");
+                                    self.updates.check(ctx);
                                 }
                                 _ => {
                                     self.tool_dialog =

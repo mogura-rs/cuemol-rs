@@ -29,7 +29,9 @@ irm https://raw.githubusercontent.com/mogura-rs/cuemol2-rs/main/install.ps1 | ie
 ```
 
 The Windows destination is `%LOCALAPPDATA%/CueMol/bin`. The same
-`cuemol self-upgrade` command updates an installed binary. A published release
+`cuemol self-upgrade` command updates an installed binary. Use `--check` to
+check the latest version without installing it, or open **Help > Check for updates**
+in the native application. A published release
 is required for network installation; a source checkout alone is insufficient.
 
 ## Molecular viewing

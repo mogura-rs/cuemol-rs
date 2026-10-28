@@ -16,6 +16,8 @@ pub mod config;
 mod protocol;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod transport;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod update;
 pub use commands::{
     call_tool, hatch_params, hatch_settings, prepare_render, rendering_params, rendering_settings,
     view_json, PreparedRender,

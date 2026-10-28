@@ -63,10 +63,32 @@ fn run() -> Result<(), String> {
         }
         "gui" => launch_gui(args.map(std::path::PathBuf::from).collect()),
         "--version" | "-V" => {
-            println!("cuemol {}", env!("CARGO_PKG_VERSION"));
+            println!("cuemol {}", cuemol_command::update::current_version());
             Ok(())
         }
-        "self-upgrade" => self_upgrade(),
+        "self-upgrade" => {
+            let options: Vec<_> = args.collect();
+            if options == ["--check"] {
+                match cuemol_command::update::check()? {
+                    Some(release) => println!(
+                        "{}: {} ({})",
+                        if release.newer {
+                            "Update available"
+                        } else {
+                            "Up to date"
+                        },
+                        release.version,
+                        release.url
+                    ),
+                    None => println!("No published release is available yet."),
+                }
+                Ok(())
+            } else if options.is_empty() {
+                self_upgrade()
+            } else {
+                Err("Usage: cuemol self-upgrade [--check]".into())
+            }
+        }
         "mcp" => runtime::mcp(args.collect()),
         "agent" => agent::run(args.collect()),
         "web" => web::run(args.collect()),
@@ -819,7 +841,7 @@ fn print_usage() {
     println!("  cuemol web build | serve [--port PORT] [--dir DIR]");
     println!("CueMol3: cuemol [FILE ...] | mcp | config | run SCRIPT.js | -c JAVASCRIPT | exec TOOL JSON | render INPUT OUTPUT | trajectory-info FILE [STRIDE]");
     eprintln!("Usage:");
-    eprintln!("  cuemol self-upgrade");
+    eprintln!("  cuemol self-upgrade [--check]");
     eprintln!("  cuemol tools list | path NAME | run NAME [ARG ...] | bundle [--out DIR]");
     eprintln!("  cuemol [file ...]");
     eprintln!("  cuemol gui [file ...]");

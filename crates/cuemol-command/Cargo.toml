@@ -25,6 +25,7 @@ png = "0.17"
 shlex.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+semver = "1"
 tiny_http = "0.12"
 ureq = { version = "3.2", default-features = false, features = ["rustls", "json"] }
 getrandom = "0.3"
