@@ -1649,6 +1649,7 @@ pub struct MolScene {
     loaded_qsc_objects: Vec<LoadedQscObject>,
     loaded_styles: Vec<LoadedStyle>,
     scene_attributes: BTreeMap<String, String>,
+    app_data: cuemol_qsys::SceneAppData,
     active_object_uid: Option<Uid>,
     active_renderer_uid: Option<Uid>,
     active_view_uid: Option<Uid>,
@@ -1809,6 +1810,14 @@ impl MolScene {
 
     pub fn scene_attributes(&self) -> &BTreeMap<String, String> {
         &self.scene_attributes
+    }
+
+    pub fn app_data(&self) -> &cuemol_qsys::SceneAppData {
+        &self.app_data
+    }
+
+    pub fn app_data_mut(&mut self) -> &mut cuemol_qsys::SceneAppData {
+        &mut self.app_data
     }
 
     pub fn replace_scene_attributes(&mut self, attributes: BTreeMap<String, String>) {
@@ -1999,6 +2008,7 @@ impl MolScene {
         self.cameras.clear();
         self.skipped_qsc_objects.clear();
         self.scene_attributes.clear();
+        self.app_data.clear();
         self.active_object_uid = None;
         self.active_renderer_uid = None;
         self.scene_extension_nodes.clear();
@@ -2256,7 +2266,7 @@ impl MolScene {
                 !node.is_attr()
                     && !matches!(
                         node.tag_name(),
-                        "qsc_opts" | "styles" | "object" | "camera" | "animation"
+                        "qsc_opts" | "styles" | "object" | "camera" | "animation" | "appdata"
                     )
             })
             .cloned()
@@ -2284,6 +2294,16 @@ impl MolScene {
         self.loaded_styles = loaded_styles;
         self.scene_attributes = scene_attributes;
         self.scene_extension_nodes = scene_extension_nodes;
+        self.app_data.clear();
+        for node in stream
+            .tree()
+            .top()
+            .children()
+            .iter()
+            .filter(|node| node.tag_name() == "appdata")
+        {
+            self.app_data.read_node(node);
+        }
         self.bind_atom_intr_objects();
         Ok(())
     }
@@ -2657,7 +2677,11 @@ impl MolScene {
             output.push_str(&format!(" {name}=\"{}\"", escape_xml(value)));
         }
         output.push_str(">\n");
-        for node in &self.scene_extension_nodes {
+        for node in self
+            .scene_extension_nodes
+            .iter()
+            .chain(self.app_data.nodes().iter())
+        {
             for line in qsc_node_lines(node) {
                 output.push('\t');
                 output.push_str(&line);
@@ -3158,6 +3182,7 @@ impl MolSceneManager {
             loaded_qsc_objects: Vec::new(),
             loaded_styles: Vec::new(),
             scene_attributes: BTreeMap::new(),
+            app_data: cuemol_qsys::SceneAppData::default(),
             active_object_uid: None,
             active_renderer_uid: None,
             active_view_uid: None,
@@ -4879,6 +4904,37 @@ mod tests {
             reloaded.scene(reloaded_uid).unwrap().loaded_styles().len(),
             2
         );
+    }
+
+    #[test]
+    fn qsc_render_app_data_round_trip_keeps_nested_settings_and_unknown_classes() {
+        let xml = r##"<scene><appdata id="render" type="RenderSettings" width="640" dpi="600">
+          <povray shadow="true"/>
+          <umbreon useGI="false" giSamples="64"/>
+          <umbreon_npr hatchInkColor="#123456"/>
+        </appdata><appdata id="future" type="FutureSettings"><x v="keep"/></appdata></scene>"##;
+        let mut manager = MolSceneManager::new();
+        let sid = manager.new_scene("settings");
+        let scene = manager.scene_mut(sid).unwrap();
+        scene.load_qsc_str(xml).unwrap();
+        let settings = scene.app_data().get("render").unwrap();
+        assert_eq!(settings.get("width"), Some("640"));
+        assert_eq!(settings.get("povray.shadow"), Some("true"));
+        assert_eq!(settings.get("umbreon.useGI"), Some("false"));
+        let expected = settings.overrides().clone();
+        let saved = scene.write_qsc_string();
+        assert!(!saved.contains("dpi="));
+        assert!(saved.contains("FutureSettings"));
+        assert!(saved.contains("#123456"));
+        scene.load_qsc_str(&saved).unwrap();
+        assert_eq!(
+            scene.app_data().get("render").unwrap().overrides(),
+            &expected
+        );
+        assert_eq!(scene.app_data().nodes().len(), 2);
+        assert_eq!(scene.app_data().warnings().len(), 1);
+        scene.clear_all_data();
+        assert!(scene.app_data().is_empty());
     }
 
     #[test]

@@ -894,6 +894,7 @@ impl AnimObjEvent {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SceneEvent {
     inner: QsysEvent,
+    prop_name: Option<String>,
 }
 
 impl SceneEvent {
@@ -902,6 +903,7 @@ impl SceneEvent {
     pub const SCE_SCENE_UNDOINFO: i32 = 3;
     pub const SCE_SCENE_ONLOADED: i32 = 4;
     pub const SCE_SCENE_CLEARALL: i32 = 5;
+    pub const SCE_SCENE_APPDATA_CHG: i32 = 6;
     pub const SCE_OBJ_ADDED: i32 = 11;
     pub const SCE_OBJ_REMOVING: i32 = 12;
     pub const SCE_REND_ADDED: i32 = 21;
@@ -917,7 +919,24 @@ impl SceneEvent {
 
     delegate_event_accessors!();
 
+    pub fn set_prop_name(&mut self, name: impl Into<String>) {
+        self.prop_name = Some(name.into());
+    }
+
     pub fn json(&self) -> LString {
+        if matches!(
+            self.event_type(),
+            Self::SCE_SCENE_PROPCHG | Self::SCE_SCENE_APPDATA_CHG
+        ) {
+            if let Some(name) = &self.prop_name {
+                let json = self.inner.json();
+                return LString::from(format!(
+                    "{},\"propname\":\"{}\"}}",
+                    json.as_str().trim_end_matches('}'),
+                    escape_json(name)
+                ));
+            }
+        }
         self.inner.json()
     }
 
@@ -940,6 +959,11 @@ impl SceneEvent {
             ),
             Self::SCE_SCENE_ONLOADED => (
                 "sceneLoaded",
+                ScrEventManager::SEM_SCENE,
+                ScrEventManager::SEM_CHANGED,
+            ),
+            Self::SCE_SCENE_APPDATA_CHG => (
+                "sceneAppDataChanged",
                 ScrEventManager::SEM_SCENE,
                 ScrEventManager::SEM_CHANGED,
             ),

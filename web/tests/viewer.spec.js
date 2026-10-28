@@ -17,9 +17,10 @@ async function load(page,name,buffer){
   await page.locator('#files').setInputFiles({name,mimeType:'application/octet-stream',buffer});
 }
 async function call(page,name,args={}){
-  await page.evaluate(([name,args])=>window.cuemol.command(name,args),[name,args]);
-  await page.waitForTimeout(100);
-  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().busy),{timeout:60000}).toBe(false);
+  const id=await page.evaluate(([name,args])=>window.cuemol.command(name,args),[name,args]);
+  await expect.poll(()=>page.evaluate(id=>{
+    const state=window.cuemol.status();return state.lastCommand===id&&!state.busy;
+  },id),{timeout:60000}).toBe(true);
   return page.evaluate(()=>window.cuemol.status());
 }
 test('default WebGPU viewport presents colored geometry',async({page},testInfo)=>{
@@ -222,6 +223,57 @@ test('browser analytic surfaces support both backends and density regeneration',
     result=JSON.parse(state.message);
     expect(result.backend).toBe(backend);expect(result.triangles).toBeGreaterThan(0);
   }
+});
+
+test('browser direct surfaces use EDTSurf and MeshMS with stable atom ownership',async({page},testInfo)=>{
+  const errors=[];page.on('pageerror',error=>errors.push(error.message));
+  await ready(page);await load(page,'direct-surface.pdb',Buffer.from(structure));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  let state=await page.evaluate(()=>window.cuemol.status());
+  const object=state.scene.objects[0].id;
+  await call(page,'delete_node',{nodeType:'renderer',nodeId:state.scene.objects[0].renderers[0].id});
+  state=await call(page,'create_renderer',{objId:object,rendererType:'dsurface'});
+  const renderer=state.scene.objects[0].renderers[0].id;
+  const images=[];
+  for(const algorithm of ['distfield','edtsurf','meshms']) {
+    state=await call(page,'set_node_prop',{nodeType:'renderer',nodeId:renderer,prop:'surfalgor',value:algorithm});
+    expect(state.message).not.toMatch(/error|failed/i);
+    await page.waitForTimeout(300);
+    const rect=state.ui.rects.Viewport;
+    const png=PNG.sync.read(await page.screenshot({clip:{x:rect[0],y:rect[1],width:rect[2],height:rect[3]}}));
+    let colored=0;
+    for(let i=0;i<png.data.length;i+=4)if(Math.max(...png.data.subarray(i,i+3))-Math.min(...png.data.subarray(i,i+3))>40)colored++;
+    expect(colored).toBeGreaterThan(100);
+    images.push(png.data);
+  }
+  expect(images[0].equals(images[1])).toBe(false);
+  expect(images[0].equals(images[2])).toBe(false);
+  const kernels=await page.evaluate(()=>[3,4,5,6].map(backend=>{
+    const result=window.cuemolKernels.surface(new Float64Array([0,0,0,1.7,2,0,0,1.52]),2,1.4,backend);
+    return {vertices:result[0].length/6,owners:Array.from(new Set(result[3]))};
+  }));
+  for(const result of kernels){expect(result.vertices).toBeGreaterThan(0);expect(result.owners.sort()).toEqual([0,1]);}
+  await page.screenshot({path:testInfo.outputPath('direct-surface.png')});
+  expect(errors).toEqual([]);
+});
+
+test('browser render app data stays live across scripts, commands, and scene reloads',async({page})=>{
+  await ready(page);await load(page,'render-settings.pdb',Buffer.from(structure));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  await call(page,'set_render_settings',{settings:'width=640; povray.shadow=true; umbreon_npr.hatchDensity=2.5'});
+  let state=await call(page,'execute_script',{source:"var s=scene.getAppData('render'); s.umbreon.giSamples=16; print(s.width+':'+s.povray.shadow+':'+s.umbreon_npr.hatchDensity);"});
+  expect(JSON.parse(state.message).log).toBe('640:true:2.5\n');
+  const download=page.waitForEvent('download');
+  const button=state.ui.rects['Save Scene'];
+  await page.mouse.click(button[0]+button[2]/2,button[1]+button[3]/2);
+  const saved=await download;const stream=await saved.createReadStream();const chunks=[];
+  for await(const chunk of stream)chunks.push(chunk);
+  const bytes=Buffer.concat(chunks);
+  expect(bytes.toString()).toContain('type="RenderSettings"');
+  await load(page,'render-roundtrip.qsc',bytes);
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Loaded render-roundtrip.qsc');
+  state=await call(page,'execute_script',{source:"var s=scene.getAppData('render'); print(s.width+':'+s.umbreon.giSamples+':'+s.umbreon_npr.hatchDensity);"});
+  expect(JSON.parse(state.message).log).toBe('640:16:2.5\n');
 });
 
 test('browser NPR styles and edited hatch layers produce distinct transparent images',async({page},testInfo)=>{

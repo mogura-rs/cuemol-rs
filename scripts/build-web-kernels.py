@@ -75,16 +75,16 @@ def main():
     inputs = sorted((sources / "meshms/src").glob("*.cpp"))
     for directory in ("COMMON", "DATATYPE", "STRUCTURE"):
         inputs.extend(sorted((sources / "BALL" / directory).glob("*.cpp")))
-    inputs.append(sources / "surface_bridge.cpp")
+    inputs.extend([sources / "edtsurf/ProteinSurface.cpp", sources / "surface_bridge.cpp"])
     build_kernel("surface", sources, inputs,
                  ["-std=c++20", "-fexceptions", "-ffp-contract=off", "-sDISABLE_EXCEPTION_CATCHING=0",
                   "-I" + str(sources), "-I" + str(sources / "meshms/include")],
                  ["_cuemol_surface_build", "_cuemol_surface_destroy", "_cuemol_surface_backend",
                   "_cuemol_surface_vertex_count", "_cuemol_surface_triangle_count",
-                  "_cuemol_surface_vertices", "_cuemol_surface_triangles"],
+                  "_cuemol_surface_vertices", "_cuemol_surface_triangles", "_cuemol_surface_owners"],
                  ["HEAPU8", "HEAPU32", "HEAPF64", "UTF8ToString"], args.out_dir, emxx)
     for source, name in [("CueMol-LICENSE", "BALL-LICENSE"), ("Boost-LICENSE", "Boost-LICENSE"),
-                         ("meshms/SOURCE.json", "MeshMS-SOURCE.json"), ("BALL-SOURCE.json", "BALL-SOURCE.json")]:
+                         ("meshms/SOURCE.json", "MeshMS-SOURCE.json"), ("edtsurf/SOURCE.json", "EDTSurf-SOURCE.json"), ("edtsurf/LICENSE", "EDTSurf-LICENSE"), ("BALL-SOURCE.json", "BALL-SOURCE.json")]:
         shutil.copyfile(sources / source, args.out_dir / name)
 
 

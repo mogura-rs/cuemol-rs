@@ -13,6 +13,14 @@ use std::sync::OnceLock;
 
 const FAR_OUTSIDE: f32 = 1.0e6;
 
+fn mesh_float_vector(value: Vector4) -> Vector4 {
+    Vector4::new3(
+        value.x as f32 as f64,
+        value.y as f32 as f64,
+        value.z as f32 as f64,
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct GridEdgeKey {
     lower: [usize; 3],
@@ -192,9 +200,13 @@ impl DistMapMarchingCubes {
         let p1 = Vector4::new3(g1[0] as f64, g1[1] as f64, g1[2] as f64);
         let n0 = self.gradient_at(g0[0], g0[1], g0[2]);
         let n1 = self.gradient_at(g1[0], g1[1], g1[2]);
-        let normal = (n0 + (n1 - n0) * t)
-            .normalize3d()
-            .unwrap_or(Vector4::new3(0.0, 0.0, 1.0));
+        let normal = n0 + (n1 - n0) * t;
+        let length = normal.length3d();
+        let normal = if length > 1.0e-10 {
+            normal / length
+        } else {
+            Vector4::new3(0.0, 0.0, 1.0)
+        };
         let info = self
             .id_field
             .as_ref()
@@ -204,8 +216,8 @@ impl DistMapMarchingCubes {
             })
             .unwrap_or(0);
         SurfaceVertex {
-            position: p0 + (p1 - p0) * t,
-            normal,
+            position: mesh_float_vector(p0 + (p1 - p0) * t),
+            normal: mesh_float_vector(normal),
             info,
         }
     }
@@ -580,12 +592,14 @@ impl DistFieldSurfBuilder {
         let mut mesh = SurfaceMesh::new();
         for vertex in marching.vertices() {
             mesh.push_vertex(SurfaceVertex {
-                position: self.origin
-                    + Vector4::new3(
-                        vertex.position.x * self.grid_spacing,
-                        vertex.position.y * self.grid_spacing,
-                        vertex.position.z * self.grid_spacing,
-                    ),
+                position: mesh_float_vector(
+                    self.origin
+                        + Vector4::new3(
+                            vertex.position.x * self.grid_spacing,
+                            vertex.position.y * self.grid_spacing,
+                            vertex.position.z * self.grid_spacing,
+                        ),
+                ),
                 normal: vertex.normal * normal_sign,
                 info: vertex.info,
             });

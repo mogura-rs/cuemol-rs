@@ -100,7 +100,7 @@ pub fn build_surface(
         );
         return Ok((mesh, SesBackend::Rust));
     }
-    let (coordinates, triangles, used) = kernel(
+    let (coordinates, triangles, used, _) = kernel(
         &xyzr,
         density,
         probe,
@@ -143,13 +143,51 @@ pub fn build_surface(
     ))
 }
 
+pub(crate) fn direct_surface_kernel(
+    spheres: &[(SurfSphere, i32)],
+    density: f64,
+    probe: f64,
+    backend: u32,
+) -> Result<SurfaceMesh> {
+    let xyzr = spheres
+        .iter()
+        .flat_map(|(s, _)| [s.center.x, s.center.y, s.center.z, s.radius])
+        .collect::<Vec<_>>();
+    let (coords, faces, _, owners) = kernel(&xyzr, density, probe, backend)?;
+    if coords.len() % 6 != 0
+        || faces.len() % 3 != 0
+        || coords.iter().any(|v| !v.is_finite())
+        || faces.iter().any(|&i| i as usize >= coords.len() / 6)
+    {
+        return Err(CueMolError::invalid_argument("invalid direct surface mesh"));
+    }
+    let vertices = coords
+        .chunks_exact(6)
+        .enumerate()
+        .map(|(i, v)| {
+            SurfaceVertex::with_info(
+                Vector4::new3(v[0] as f32 as f64, v[1] as f32 as f64, v[2] as f32 as f64),
+                Vector4::new3(v[3] as f32 as f64, v[4] as f32 as f64, v[5] as f32 as f64),
+                owners
+                    .get(i)
+                    .and_then(|&index| spheres.get(index as usize))
+                    .map_or(u32::MAX, |(_, id)| *id as u32),
+            )
+        })
+        .collect();
+    Ok(SurfaceMesh {
+        vertices,
+        triangles: faces.chunks_exact(3).map(|f| [f[0], f[1], f[2]]).collect(),
+    })
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn kernel(
     xyzr: &[f64],
     density: f64,
     probe: f64,
     backend: u32,
-) -> Result<(Vec<f64>, Vec<u32>, u32)> {
+) -> Result<(Vec<f64>, Vec<u32>, u32, Vec<u32>)> {
     use std::ffi::{c_char, c_void, CStr};
     unsafe extern "C" {
         fn cuemol_surface_build(
@@ -162,6 +200,7 @@ fn kernel(
             error_length: u32,
         ) -> *mut c_void;
         fn cuemol_surface_destroy(surface: *mut c_void);
+        fn cuemol_surface_owners(surface: *const c_void) -> *const u32;
         fn cuemol_surface_vertex_count(surface: *const c_void) -> u32;
         fn cuemol_surface_triangle_count(surface: *const c_void) -> u32;
         fn cuemol_surface_backend(surface: *const c_void) -> u32;
@@ -203,6 +242,7 @@ fn kernel(
             std::slice::from_raw_parts(cuemol_surface_vertices(handle.0), vertices * 6).to_vec(),
             std::slice::from_raw_parts(cuemol_surface_triangles(handle.0), triangles * 3).to_vec(),
             cuemol_surface_backend(handle.0),
+            std::slice::from_raw_parts(cuemol_surface_owners(handle.0), vertices).to_vec(),
         ))
     }
 }
@@ -213,7 +253,7 @@ fn kernel(
     density: f64,
     probe: f64,
     backend: u32,
-) -> Result<(Vec<f64>, Vec<u32>, u32)> {
+) -> Result<(Vec<f64>, Vec<u32>, u32, Vec<u32>)> {
     use wasm_bindgen::prelude::*;
     #[wasm_bindgen]
     extern "C" {
@@ -241,6 +281,11 @@ fn kernel(
         vertices,
         triangles,
         result.get(2).as_f64().unwrap_or(0.) as u32,
+        result
+            .get(3)
+            .dyn_into::<js_sys::Uint32Array>()
+            .map_err(|_| CueMolError::invalid_argument("invalid surface atom ids"))?
+            .to_vec(),
     ))
 }
 

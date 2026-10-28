@@ -5602,6 +5602,81 @@ pub fn mainchain_line_snapshot(
     }
 }
 
+/// Ball-and-stick backbone with midpoint color boundaries and atom picking.
+pub fn tracestick_snapshot(
+    molecule: &MolCoord,
+    options: &MoleculeRenderOptions,
+    sphere_radius: f32,
+    bond_radius: f32,
+    detail: u32,
+) -> RenderSceneSnapshot {
+    let draw = options
+        .draw_indices
+        .as_ref()
+        .map(|indices| indices.iter().copied().collect());
+    let selected = options
+        .selected_indices
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let colors = resolve_atom_colors(molecule, options);
+    let mut snapshot = RenderSceneSnapshot::empty();
+    for pivots in collect_mainchain_pivots(molecule, draw.as_ref(), options.pivot_atom.as_deref()) {
+        if sphere_radius > 0.0 {
+            for point in &pivots {
+                snapshot.atoms.push(
+                    RenderAtom::new(
+                        point.pos,
+                        sphere_radius,
+                        Some(colors[point.atom_index].clone()),
+                    )
+                    .with_picking(
+                        options.object_uid,
+                        Some(point.atom_index),
+                        selected.contains(&point.atom_index),
+                    )
+                    .with_detail(Some(detail)),
+                );
+            }
+        }
+        if bond_radius <= 0.0 {
+            continue;
+        }
+        for pair in pivots.windows(2) {
+            let a = &pair[0];
+            let b = &pair[1];
+            let selected = selected.contains(&a.atom_index) || selected.contains(&b.atom_index);
+            let color_a = &colors[a.atom_index];
+            let color_b = &colors[b.atom_index];
+            if color_a == color_b {
+                snapshot.bonds.push(
+                    RenderBond::new(a.pos, b.pos, bond_radius, Some(color_b.clone())).with_picking(
+                        options.object_uid,
+                        Some((a.atom_index, b.atom_index)),
+                        selected,
+                    ),
+                );
+            } else {
+                let middle = (a.pos + b.pos).scale(0.5);
+                for (from, to, color, atom) in [
+                    (a.pos, middle, color_a, a.atom_index),
+                    (middle, b.pos, color_b, b.atom_index),
+                ] {
+                    snapshot.bonds.push(
+                        RenderBond::new(from, to, bond_radius, Some(color.clone())).with_picking(
+                            options.object_uid,
+                            Some((atom, atom)),
+                            selected,
+                        ),
+                    );
+                }
+            }
+        }
+    }
+    snapshot.recompute_bounds();
+    snapshot
+}
+
 fn append_valence_bond_geometry(
     molecule: &MolCoord,
     bond: &Bond,
@@ -12240,5 +12315,45 @@ return cuemol.makeColor("#0000ff");
         assert!(!paint.remove_at(10));
         paint.clear();
         assert!(paint.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod tracestick_tests {
+    use super::*;
+
+    #[test]
+    fn trace_sticks_split_colors_at_midpoints_and_follow_selected_pivots() {
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00           C\nATOM      2  CA  GLY A   2       3.800   0.000   0.000  1.00 10.00           O\nATOM      3  CA  GLY A   3      14.000   0.000   0.000  1.00 10.00           C\n",
+        ).unwrap();
+        let mut options = MoleculeRenderOptions {
+            object_uid: Some(7),
+            ..Default::default()
+        };
+        let snapshot = tracestick_snapshot(&molecule, &options, 0.25, 0.3, 5);
+        assert_eq!(snapshot.atoms.len(), 3);
+        assert!(snapshot
+            .atoms
+            .iter()
+            .all(|atom| atom.radius == 0.25 && atom.detail == Some(5)));
+        assert_eq!(snapshot.bonds.len(), 2);
+        assert_eq!(snapshot.bonds[0].to, Vector4::new3(1.9, 0.0, 0.0));
+        assert_eq!(snapshot.bonds[1].from, snapshot.bonds[0].to);
+        assert_eq!(snapshot.bonds[0].atom_indices, Some((0, 0)));
+        assert_eq!(snapshot.bonds[1].atom_indices, Some((1, 1)));
+        assert_ne!(snapshot.bonds[0].color, snapshot.bonds[1].color);
+        assert!(snapshot
+            .bonds
+            .iter()
+            .all(|bond| bond.screen_width.is_none() && bond.radius == 0.3));
+        options.draw_indices = Some(vec![1]);
+        let selected = tracestick_snapshot(&molecule, &options, 0.5, 0.3, 3);
+        assert_eq!(selected.atoms.len(), 1);
+        assert_eq!(selected.atoms[0].atom_index, Some(1));
+        assert!(selected.bonds.is_empty());
+        assert!(tracestick_snapshot(&molecule, &options, 0.0, 0.0, 3)
+            .atoms
+            .is_empty());
     }
 }

@@ -11,6 +11,7 @@ use std::rc::{Rc, Weak};
 pub mod analytic_ses;
 pub mod backends;
 pub mod boundary;
+mod direct_surface;
 pub mod dist_field;
 pub mod grid_surface;
 pub mod hole_surface;
@@ -2378,7 +2379,7 @@ impl Default for DirectSurfRenderer {
             detail: 6,
             probe_radius: 1.4,
             surface_type: Self::DS_SES,
-            surface_algorithm: Self::DS_EDTSURF,
+            surface_algorithm: Self::DS_DISTFIELD,
             cull_face: false,
             draw_mode: Self::SFDRAW_FILL,
             width: 1.2,
@@ -2404,7 +2405,9 @@ impl DirectSurfRenderer {
     pub const DS_SAS: i32 = 1;
     pub const DS_SES: i32 = 2;
     pub const DS_EDTSURF: i32 = 0;
-    pub const DS_MSMS: i32 = 1;
+    pub const DS_DISTFIELD: i32 = 1;
+    pub const DS_MESHMS: i32 = 2;
+    pub const DS_MSMS: i32 = Self::DS_MESHMS;
     pub const SFDRAW_FILL: i32 = 0;
     pub const SFDRAW_LINE: i32 = 1;
     pub const SFDRAW_POINT: i32 = 2;
@@ -2890,46 +2893,11 @@ impl DirectSurfRenderer {
     }
 
     pub fn grid_spacing(&self) -> f64 {
-        let detail = self.detail.clamp(0, 20) as f64;
-        (1.0 / (1.0 + detail * 0.3)).clamp(0.15, 1.0)
+        (direct_surface::voxel_size(self.detail) * 1.43).max(0.15)
     }
 
     pub fn render_mesh(&self, molecule: &MolCoord) -> SurfaceMesh {
-        let spheres: Vec<_> = molecule
-            .atoms()
-            .iter()
-            .filter(|atom| self.selection.matches_in_molecule(atom, molecule))
-            .map(|atom| SurfSphere {
-                center: atom.position,
-                radius: self.vdw_radii.radius_for_element(&atom.element),
-            })
-            .collect();
-        let mut mesh = SurfaceMesh::new();
-        let spacing = self.grid_spacing();
-        match self.surface_type {
-            Self::DS_VDW => {
-                grid_surface::build_sphere_union_surface(&mut mesh, &spheres, spacing);
-            }
-            Self::DS_SAS => {
-                let accessible: Vec<_> = spheres
-                    .iter()
-                    .map(|sphere| SurfSphere {
-                        center: sphere.center,
-                        radius: sphere.radius + self.probe_radius.max(0.0),
-                    })
-                    .collect();
-                grid_surface::build_sphere_union_surface(&mut mesh, &accessible, spacing);
-            }
-            _ => {
-                grid_surface::build_ses_surface(
-                    &mut mesh,
-                    &spheres,
-                    self.probe_radius.max(0.0),
-                    spacing,
-                );
-            }
-        }
-        mesh
+        direct_surface::render(self, molecule)
     }
 }
 
@@ -2968,25 +2936,11 @@ impl DirectSurfRenderer2 {
         self.inner
     }
 
-    /// Build the dedicated `dsurf2` distance-field mesh.
+    /// Compatibility alias for the distance-field algorithm.
     pub fn render_mesh(&self, molecule: &MolCoord) -> SurfaceMesh {
-        let mut builder = DistFieldSurfBuilder::new();
-        builder.set_probe_radius(self.inner.probe_radius.max(0.0));
-        builder.set_grid_spacing(self.inner.grid_spacing());
-        builder.set_surface_type(self.inner.surface_type);
-        for atom in molecule
-            .atoms()
-            .iter()
-            .filter(|atom| self.inner.selection.matches_in_molecule(atom, molecule))
-        {
-            builder.add_atom(
-                atom.position,
-                self.inner.vdw_radii.radius_for_element(&atom.element),
-                atom.serial,
-            );
-        }
-        builder.build();
-        builder.into_mesh()
+        let mut renderer = self.inner.clone();
+        renderer.set_surface_algorithm(DirectSurfRenderer::DS_DISTFIELD);
+        renderer.render_mesh(molecule)
     }
 }
 
@@ -4175,7 +4129,10 @@ attribute \"dep\" string \"positions\"
         assert_eq!(renderer.get_probe_radius(), 1.4);
         assert_eq!(renderer.surface_type(), DirectSurfRenderer::DS_SES);
         assert_eq!(renderer.get_surf_type(), DirectSurfRenderer::DS_SES);
-        assert_eq!(renderer.surface_algorithm(), DirectSurfRenderer::DS_EDTSURF);
+        assert_eq!(
+            renderer.surface_algorithm(),
+            DirectSurfRenderer::DS_DISTFIELD
+        );
         assert_eq!(renderer.draw_mode(), DirectSurfRenderer::SFDRAW_FILL);
         assert_eq!(renderer.get_draw_mode(), DirectSurfRenderer::SFDRAW_FILL);
         assert_eq!(renderer.width(), 1.2);

@@ -62,6 +62,7 @@ pub fn call_tool(
         "set_render_settings" => {
             let sid = scene(state)?;
             let mut settings = render_settings(state)?;
+            let mut updates = Vec::new();
             for part in split_settings(text(args, "settings")?)?
                 .into_iter()
                 .map(str::trim)
@@ -75,8 +76,10 @@ pub fn call_tool(
                 let local_key = key
                     .strip_prefix("umbreon.")
                     .or_else(|| key.strip_prefix("umbreon_npr."))
+                    .or_else(|| key.strip_prefix("povray."))
                     .unwrap_or(key);
-                if !RENDER_KEYS.contains(&local_key)
+                let schema = cuemol_qsys::SettingsClass::Render.property(key);
+                if schema.is_none() && !RENDER_KEYS.contains(&local_key)
                     || (key != local_key
                         && matches!(
                             local_key,
@@ -88,53 +91,91 @@ pub fn call_tool(
                     )));
                 }
                 let parsed = serde_json::from_str::<Value>(value).unwrap_or_else(|_| json!(value));
-                let valid = match local_key {
-                    "backend" => parsed
+                let valid = if let Some(property) = schema {
+                    let text = parsed
                         .as_str()
-                        .is_some_and(|v| matches!(v, "" | "umbreon" | "umbreon_npr")),
-                    "projection" => parsed
-                        .as_str()
-                        .is_some_and(|v| matches!(v, "perspective" | "orthographic")),
-                    "unit" => parsed
-                        .as_str()
-                        .is_some_and(|v| matches!(v, "px" | "in" | "cm" | "mm")),
-                    "aoGather" => parsed
-                        .as_str()
-                        .is_some_and(|v| matches!(v, "Per output pixel" | "Per shading hit")),
-                    "denoiser" => parsed.as_i64().is_some_and(|v| (0..=2).contains(&v)),
-                    "denoise" => parsed
-                        .as_str()
-                        .is_some_and(|v| matches!(v, "OIDN" | "Bilateral" | "A-trous" | "None")),
-                    "giGroundColor" | "hatchInkColor" | "hatchPaperColor" | "hatchColoring"
-                    | "hatchStyle" | "hatchLayersSpec" | "hatchToneSpec" => parsed.is_string(),
-                    "transparent" | "transparentBg" | "perspective" | "useClipZ" | "clipPlane"
-                    | "shadows" | "showEdgeLines" | "edgeLines" | "useGi" | "useGI"
-                    | "giDenoise" | "aoEnabled" | "hatchCustomInk" | "hatchCustomPaper"
-                    | "hatchDefaultEdges" | "aoMultiScale" | "aoBentNormal"
-                    | "aoLowDiscrepancy" | "giSkyGradient" | "perPixelBlend" | "contactEdges" => {
-                        parsed.is_boolean()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| parsed.to_string());
+                    property.parse(&text).is_ok()
+                        && match local_key {
+                            "backend" => parsed
+                                .as_str()
+                                .is_some_and(|v| matches!(v, "" | "umbreon" | "umbreon_npr")),
+                            "projection" => parsed
+                                .as_str()
+                                .is_some_and(|v| matches!(v, "perspective" | "orthographic")),
+                            "unit" => parsed
+                                .as_str()
+                                .is_some_and(|v| matches!(v, "px" | "in" | "mm" | "cm")),
+                            "width" | "height" | "dpi" => parsed.as_f64().is_some_and(|v| v > 0.0),
+                            _ => true,
+                        }
+                } else {
+                    match local_key {
+                        "backend" => parsed
+                            .as_str()
+                            .is_some_and(|v| matches!(v, "" | "umbreon" | "umbreon_npr")),
+                        "projection" => parsed
+                            .as_str()
+                            .is_some_and(|v| matches!(v, "perspective" | "orthographic")),
+                        "unit" => parsed
+                            .as_str()
+                            .is_some_and(|v| matches!(v, "px" | "in" | "cm" | "mm")),
+                        "aoGather" => parsed
+                            .as_str()
+                            .is_some_and(|v| matches!(v, "Per output pixel" | "Per shading hit")),
+                        "denoiser" => parsed.as_i64().is_some_and(|v| (0..=2).contains(&v)),
+                        "denoise" => parsed.as_str().is_some_and(|v| {
+                            matches!(v, "OIDN" | "Bilateral" | "A-trous" | "None")
+                        }),
+                        "giGroundColor" | "hatchInkColor" | "hatchPaperColor" | "hatchColoring"
+                        | "hatchStyle" | "hatchLayersSpec" | "hatchToneSpec" => parsed.is_string(),
+                        "transparent" | "transparentBg" | "perspective" | "useClipZ"
+                        | "clipPlane" | "shadows" | "showEdgeLines" | "edgeLines" | "useGi"
+                        | "useGI" | "giDenoise" | "aoEnabled" | "hatchCustomInk"
+                        | "hatchCustomPaper" | "hatchDefaultEdges" | "aoMultiScale"
+                        | "aoBentNormal" | "aoLowDiscrepancy" | "giSkyGradient"
+                        | "perPixelBlend" | "contactEdges" => parsed.is_boolean(),
+                        "width" | "height" | "dpi" | "hatchDensity" | "hatchWidthScale" => {
+                            parsed.as_f64().is_some_and(|n| n.is_finite() && n > 0.)
+                        }
+                        _ => parsed.as_f64().is_some_and(f64::is_finite),
                     }
-                    "width" | "height" | "dpi" | "hatchDensity" | "hatchWidthScale" => {
-                        parsed.as_f64().is_some_and(|n| n.is_finite() && n > 0.)
-                    }
-                    _ => parsed.as_f64().is_some_and(f64::is_finite),
                 };
                 if !valid {
                     return Err(CueMolError::invalid_argument(format!(
                         "invalid value for render setting {key}"
                     )));
                 }
+                updates.push((key.to_string(), parsed.clone()));
                 settings.insert(key.into(), parsed);
             }
             crate::commands::hatch_params(&settings, "umbreon_npr")?;
             crate::commands::rendering_params(&settings, "umbreon")?;
             crate::commands::rendering_params(&settings, "umbreon_npr")?;
-            state
-                .scene_manager_mut()
-                .scene_mut(sid)
-                .unwrap()
-                .set_scene_attribute("render_settings", json!(settings).to_string());
-            Ok(json!({"settings":settings}))
+            let mut typed = state
+                .scene_manager()
+                .scene(sid)
+                .and_then(|scene| scene.app_data().get("render"))
+                .cloned()
+                .unwrap_or_default();
+            let mut extensions = serde_json::Map::new();
+            for (key, value) in &settings {
+                if !store_render_setting(&mut typed, key, value)? {
+                    extensions.insert(key.clone(), value.clone());
+                }
+            }
+            for (key, value) in &updates {
+                store_render_setting(&mut typed, key, value)?;
+            }
+            let target = state.scene_manager_mut().scene_mut(sid).unwrap();
+            target.app_data_mut().insert("render", typed)?;
+            if extensions.is_empty() {
+                target.remove_scene_attribute("render_settings");
+            } else {
+                target.set_scene_attribute("render_settings", json!(extensions).to_string());
+            }
+            Ok(json!({"settings":render_settings(state)?}))
         }
         "export_image" | "export_scene" => export(state, camera, name, args),
         "superpose" => {
@@ -250,12 +291,109 @@ const RENDER_KEYS: &[&str] = &[
     "giDenoise",
     "denoiser",
 ];
+fn canonical_render_setting(key: &str, value: &Value) -> (String, Value) {
+    let (prefix, key) = key
+        .rsplit_once('.')
+        .map_or(("", key), |(prefix, key)| (prefix, key));
+    let (key, value) = match key {
+        "transparent" => ("transparentBg", value.clone()),
+        "useClipZ" => ("clipPlane", value.clone()),
+        "showEdgeLines" => ("edgeLines", value.clone()),
+        "useGi" => ("useGI", value.clone()),
+        "perspective" => (
+            "projection",
+            json!(if value == true {
+                "perspective"
+            } else {
+                "orthographic"
+            }),
+        ),
+        "giDenoise" => (
+            "denoise",
+            json!(if value == true { "OIDN" } else { "None" }),
+        ),
+        "denoiser" => (
+            "denoise",
+            json!(match value.as_i64() {
+                Some(1) => "A-trous",
+                Some(2) => "None",
+                _ => "OIDN",
+            }),
+        ),
+        _ => (key, value.clone()),
+    };
+    (
+        if prefix.is_empty() {
+            key.to_string()
+        } else {
+            format!("{prefix}.{key}")
+        },
+        value,
+    )
+}
+
+fn store_render_setting(
+    settings: &mut cuemol_qsys::RenderSettings,
+    key: &str,
+    value: &Value,
+) -> Result<bool> {
+    let (key, value) = canonical_render_setting(key, value);
+    let text = value
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| value.to_string());
+    if settings.class().property(&key).is_some() {
+        settings.set(&key, &text)?;
+        return Ok(true);
+    }
+    if !key.contains('.') {
+        let mut found = false;
+        for prefix in ["umbreon", "umbreon_npr"] {
+            let path = format!("{prefix}.{key}");
+            if settings.class().property(&path).is_some() {
+                settings.set(&path, &text)?;
+                found = true;
+            }
+        }
+        return Ok(found);
+    }
+    Ok(false)
+}
+
 pub fn render_settings(state: &DesktopAppState) -> Result<serde_json::Map<String, Value>> {
-    let s = state.scene_manager().scene(scene(state)?).unwrap();
-    Ok(s.scene_attribute("render_settings")
+    let scene = state.scene_manager().scene(scene(state)?).unwrap();
+    let legacy = scene
+        .scene_attribute("render_settings")
         .and_then(|v| serde_json::from_str::<Value>(v).ok())
         .and_then(|v| v.as_object().cloned())
-        .unwrap_or_default())
+        .unwrap_or_default();
+    if scene.app_data().get("render").is_none() && legacy.is_empty() {
+        return Ok(legacy);
+    }
+    let mut migrated = cuemol_qsys::RenderSettings::default();
+    let mut result = serde_json::Map::new();
+    for (key, value) in legacy {
+        if !store_render_setting(&mut migrated, &key, &value)? {
+            result.insert(key, value);
+        }
+    }
+    let settings = scene.app_data().get("render").unwrap_or(&migrated);
+    let mut add = |class: cuemol_qsys::SettingsClass, prefix: &str| {
+        for property in class.properties() {
+            let path = format!("{prefix}{}", property.name);
+            let text = settings.get(&path).unwrap();
+            let value = match property.kind {
+                cuemol_qsys::SettingsKind::String => json!(text),
+                _ => serde_json::from_str(text).unwrap(),
+            };
+            result.insert(path, value);
+        }
+    };
+    add(cuemol_qsys::SettingsClass::Render, "");
+    for (name, class) in cuemol_qsys::SettingsClass::Render.children() {
+        add(*class, &format!("{name}."));
+    }
+    Ok(result)
 }
 
 const VIEW_EFFECT_DEFAULTS: &[(&str, &str)] = &[

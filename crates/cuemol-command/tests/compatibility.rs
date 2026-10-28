@@ -515,6 +515,76 @@ fn edited_hatch_specs_and_labels_roundtrip_and_invalid_edits_are_atomic() {
 }
 
 #[test]
+fn render_commands_share_typed_scene_data_and_migrate_legacy_aliases() {
+    let mut state = DesktopAppState::new();
+    let mut camera = Camera::new();
+    let sid = state.new_scene("settings", true).result_scene;
+    state
+        .scene_manager_mut()
+        .scene_mut(sid)
+        .unwrap()
+        .set_scene_attribute(
+            "render_settings",
+            r##"{"width":320,"transparent":true,"useGi":false,"umbreon.giBounces":3}"##,
+        );
+    let migrated = cuemol_command::render_settings(&state).unwrap();
+    assert_eq!(migrated["width"], 320);
+    assert_eq!(migrated["transparentBg"], true);
+    assert_eq!(migrated["umbreon.useGI"], false);
+    call(
+        &mut state,
+        &mut camera,
+        "set_render_settings",
+        json!({"settings":"width=640; povray.shadow=true"}),
+    );
+    let scene = state.scene_manager().scene(sid).unwrap();
+    let data = scene.app_data().get("render").unwrap();
+    let uid = data.uid();
+    assert_eq!(data.get("width"), Some("640"));
+    assert_eq!(data.get("povray.shadow"), Some("true"));
+    let extensions: Value =
+        serde_json::from_str(scene.scene_attribute("render_settings").unwrap()).unwrap();
+    assert_eq!(extensions, json!({"umbreon.giBounces":3}));
+    assert!(call_tool(
+        &mut state,
+        &mut camera,
+        "set_render_settings",
+        &json!({"settings":"width=1200; umbrella=1"})
+    )
+    .is_err());
+    assert_eq!(
+        cuemol_command::render_settings(&state).unwrap()["width"],
+        640
+    );
+    call(
+        &mut state,
+        &mut camera,
+        "set_render_settings",
+        json!({"settings":"width=1200"}),
+    );
+    let scene = state.scene_manager_mut().scene_mut(sid).unwrap();
+    assert_eq!(scene.app_data().get("render").unwrap().uid(), uid);
+    scene.set_scene_attribute("render_settings", r#"{"width":320,"umbreon.giBounces":3}"#);
+    assert_eq!(
+        cuemol_command::render_settings(&state).unwrap()["width"],
+        1200
+    );
+    let bytes = state.active_scene_bytes().unwrap();
+    let mut restored = DesktopAppState::new();
+    restored.open_bytes("settings.qsc", &bytes).unwrap();
+    assert_eq!(
+        cuemol_command::render_settings(&state).unwrap(),
+        cuemol_command::render_settings(&restored).unwrap()
+    );
+    assert!(restored
+        .scene_manager()
+        .scene(restored.active_scene().unwrap())
+        .unwrap()
+        .write_qsc_string()
+        .contains("appdata"));
+}
+
+#[test]
 fn lighting_settings_roundtrip_and_ground_color_validation_are_atomic() {
     let mut state = DesktopAppState::new();
     let mut camera = Camera::new();

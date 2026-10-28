@@ -23,6 +23,7 @@ pub struct Scene<T> {
     source_type: String,
     base_path: String,
     qsc_options: Option<LDom2Node>,
+    app_data: crate::SceneAppData,
     bg_color: SolidColor,
     ao_enabled: bool,
     ao_radius: f64,
@@ -79,6 +80,7 @@ impl<T> Scene<T> {
             source_type: String::new(),
             base_path: String::new(),
             qsc_options: None,
+            app_data: crate::SceneAppData::default(),
             bg_color: SolidColor::from_rgb(0.0, 0.0, 0.0),
             ao_enabled: false,
             ao_radius: 4.0,
@@ -110,6 +112,51 @@ impl<T> Scene<T> {
 
     pub fn uid(&self) -> Uid {
         self.uid
+    }
+
+    pub fn app_data(&self) -> &crate::SceneAppData {
+        &self.app_data
+    }
+
+    pub fn get_app_data(&self, id: &str) -> Option<&crate::RenderSettings> {
+        self.app_data.get(id)
+    }
+
+    pub fn has_app_data(&self, id: &str) -> bool {
+        self.get_app_data(id).is_some()
+    }
+
+    pub fn get_create_app_data(
+        &mut self,
+        id: &str,
+        class: &str,
+    ) -> cuemol_core::Result<Option<&mut crate::RenderSettings>> {
+        self.app_data.get_or_create(id, class)
+    }
+
+    pub fn remove_app_data(&mut self, id: &str) -> bool {
+        self.app_data.remove(id)
+    }
+
+    pub fn set_app_data_property(
+        &mut self,
+        id: &str,
+        path: &str,
+        value: &str,
+    ) -> cuemol_core::Result<()> {
+        self.app_data
+            .get_mut(id)
+            .ok_or_else(|| cuemol_core::CueMolError::not_found(id))?
+            .set(path, value)?;
+        self.modified = true;
+        let mut event = SceneEvent::new();
+        event.set_event_type(SceneEvent::SCE_SCENE_APPDATA_CHG);
+        event.set_source(self.uid.get());
+        event.set_target(self.uid.get());
+        event.set_descr(id);
+        event.set_prop_name(path);
+        self.fire_scene_event(&mut event);
+        Ok(())
     }
 
     pub fn attach_event_manager(&mut self, manager: ScrEventManagerHandle) {
@@ -542,6 +589,7 @@ impl<T> Scene<T> {
             .with_mut(|manager| manager.clear_all_info());
         self.objects.clear();
         self.cameras.clear();
+        self.app_data.clear();
     }
 
     pub fn clear_all_data_script(&mut self) {

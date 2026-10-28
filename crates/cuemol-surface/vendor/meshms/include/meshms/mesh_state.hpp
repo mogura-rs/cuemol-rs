@@ -8,8 +8,11 @@
 // aligned per-face normal list. add_patch rebases the triangles onto the growing
 // global vertex list (0-based output, like MeshState.to_arrays()).
 #include <array>
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <iterator>
+#include <limits>
 #include <vector>
 
 #include "meshms/mesh.hpp"
@@ -27,7 +30,9 @@ inline int32_t nearest_atom(const Vec3& p, const int32_t* a, const Vec3* c, int 
   double best_d = dot(p - c[0], p - c[0]);
   for (int k = 1; k < n; ++k) {
     double dk = dot(p - c[static_cast<std::size_t>(k)], p - c[static_cast<std::size_t>(k)]);
-    if (dk < best_d || (dk == best_d && a[k] < a[best])) {
+    const double tolerance = 16.0 * std::numeric_limits<double>::epsilon()
+        * std::max({1.0, std::abs(dk), std::abs(best_d)});
+    if (dk < best_d - tolerance || (std::abs(dk - best_d) <= tolerance && a[k] < a[best])) {
       best = k;
       best_d = dk;
     }

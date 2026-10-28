@@ -17,7 +17,11 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::VecDeque,
+    rc::Rc,
+};
 use trajectory::BrowserTrajectory;
 #[wasm_bindgen]
 extern "C" {
@@ -30,6 +34,7 @@ use wasm_bindgen_futures::{spawn_local, JsFuture};
 thread_local! {
     static EVENTS: RefCell<VecDeque<Event>> = RefCell::new(VecDeque::new());
     static CONTEXT: RefCell<Option<egui::Context>> = const { RefCell::new(None) };
+    static COMMAND_ID: Cell<u32> = const { Cell::new(0) };
     static STATUS: RefCell<String> = RefCell::new(r#"{"busy":true,"scene":{"sceneId":0,"objects":[]}}"#.to_string());
 }
 enum Event {
@@ -48,7 +53,7 @@ enum Event {
     Error(String),
     Trajectory(Uid, BrowserTrajectory),
     Frame(Uid, usize, cuemol_mdtools::TrajectoryFrame),
-    Command(String, Value),
+    Command(u32, String, Value),
     Rendered(cuemol_core::Result<Value>, Option<String>),
 }
 fn enqueue(event: Event) {
@@ -67,10 +72,15 @@ pub fn open_file(file: web_sys::File) {
     enqueue(Event::Source(file));
 }
 #[wasm_bindgen]
-pub fn command(name: String, arguments: String) -> Result<(), JsValue> {
+pub fn command(name: String, arguments: String) -> Result<u32, JsValue> {
     let args = serde_json::from_str(&arguments).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    enqueue(Event::Command(name, args));
-    Ok(())
+    let id = COMMAND_ID.with(|counter| {
+        let next = counter.get().wrapping_add(1).max(1);
+        counter.set(next);
+        next
+    });
+    enqueue(Event::Command(id, name, args));
+    Ok(id)
 }
 #[wasm_bindgen]
 pub fn agent_turn(prompt: String, settings: String, api_key: String) -> Result<(), JsValue> {
@@ -193,6 +203,7 @@ struct App {
     trajectory: Option<(Uid, Rc<BrowserTrajectory>)>,
     frame: usize,
     busy: bool,
+    last_command: u32,
     render_cancel: Option<Arc<AtomicBool>>,
     playing: bool,
     fps: f32,
@@ -326,6 +337,7 @@ impl App {
             trajectory: None,
             frame: 0,
             busy: false,
+            last_command: 0,
             render_cancel: None,
             playing: false,
             fps: 24.0,
@@ -678,7 +690,10 @@ impl App {
                         }
                     }
                 }
-                Event::Command(name, args) => self.call(&name, args),
+                Event::Command(id, name, args) => {
+                    self.call(&name, args);
+                    self.last_command = id;
+                }
                 Event::Rendered(result, name) => {
                     self.busy = false;
                     self.render_cancel = None;
@@ -1011,6 +1026,6 @@ impl eframe::App for App {
                 [rect.min.x, rect.min.y, rect.width(), rect.height()]
             })
             .collect();
-        STATUS.with(|status|*status.borrow_mut()=json!({"scene":state,"selection":self.selection,"view":cuemol_command::view_json(&self.camera),"message":self.message,"frame":self.frame,"busy":self.busy,"agent":self.agent.status(),"ui":{"overlays":overlays,"rects":self.ui_rects,"activity":self.activity.map(cuemol_ui::shell::Activity::key),"bottom":self.bottom_tab,"inspector":self.inspector.rects,"navigation":{"tool":self.navigation.tool.label(),"picks":self.navigation.picks.len(),"hover":self.hover_hit.map(|hit|json!({"object":hit.object.get(),"index":hit.index})),"measurementLabels":self.state.active_atom_intr_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).into_iter().map(|label|label.text).collect::<Vec<_>>(),"labels":self.state.active_name_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).len()}}}).to_string());
+        STATUS.with(|status|*status.borrow_mut()=json!({"scene":state,"selection":self.selection,"view":cuemol_command::view_json(&self.camera),"message":self.message,"frame":self.frame,"busy":self.busy,"lastCommand":self.last_command,"agent":self.agent.status(),"ui":{"overlays":overlays,"rects":self.ui_rects,"activity":self.activity.map(cuemol_ui::shell::Activity::key),"bottom":self.bottom_tab,"inspector":self.inspector.rects,"navigation":{"tool":self.navigation.tool.label(),"picks":self.navigation.picks.len(),"hover":self.hover_hit.map(|hit|json!({"object":hit.object.get(),"index":hit.index})),"measurementLabels":self.state.active_atom_intr_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).into_iter().map(|label|label.text).collect::<Vec<_>>(),"labels":self.state.active_name_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).len()}}}).to_string());
     }
 }

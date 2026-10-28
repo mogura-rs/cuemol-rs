@@ -15,7 +15,9 @@ export async function initKernels() {
         if (!handle) throw new Error(ses.UTF8ToString(error) || 'Surface generation failed');
         const vertices = ses._cuemol_surface_vertex_count(handle), triangles = ses._cuemol_surface_triangle_count(handle);
         const v = ses._cuemol_surface_vertices(handle) / 8, t = ses._cuemol_surface_triangles(handle) / 4;
-        return [ses.HEAPF64.slice(v,v+vertices*6), ses.HEAPU32.slice(t,t+triangles*3), ses._cuemol_surface_backend(handle)];
+        const owners = ses._cuemol_surface_owners(handle) / 4;
+        return [ses.HEAPF64.slice(v,v+vertices*6), ses.HEAPU32.slice(t,t+triangles*3),
+                ses._cuemol_surface_backend(handle), ses.HEAPU32.slice(owners,owners+vertices)];
       } finally {
         if (handle) ses._cuemol_surface_destroy(handle);
         ses._free(data);ses._free(error);

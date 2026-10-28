@@ -457,13 +457,111 @@ cascade. The lightweight-scene fixture now uses the actual `simple` renderer
 name instead of the unregistered `line` name.
 
 The full scripting audit also exposed differences in the reference class registry
-that are outside these appearance changes. AO and spatial AA still require their
-post-processing passes to be connected to the shared viewport. Those follow-up
-items remain open; the appearance comparison is not a full-feature completion
-claim.
+that are outside these appearance changes. The appearance comparison is not a
+full-feature completion claim; subsequent post-processing work is described below.
 
 All 28 browser cases passed after the shared pipeline change. A real Linux window
 also passed pointer/keyboard checks for labels, residue ranges, measurements,
 closed lasso selection, bond editing and undo. The inspected viewport showed all
 three measurement values. The 138 core unit tests and both pixel tests also ran
 successfully on Metal after installing the required reference fixtures.
+
+## Shared viewport post-processing
+
+The native and browser viewports execute the reference GTAO, edge-aware denoise,
+fog-aware AO composition, FXAA and three SMAA passes on the GPU. SMAA uses the
+original area/search tables; the corresponding MIT notices accompany native and
+web distributions. Temporal samples accumulate in a floating-point target and
+reset on camera, geometry, size, background or setting changes. Cached frames
+can be presented without restarting accumulation. Half-resolution AO is used
+for a changed frame and replaced at full resolution on the next stationary frame.
+PNG exporters use full-resolution AO without spatial post-AA, retaining alpha.
+
+`scripts/check-effects.py` compiles the original read-only GLSL passes and
+compares 13 contact-scene fixtures: orthographic/perspective AO, fog, half/full
+resolution, FXAA, SMAA, its threshold, and temporal accumulation. Linux Vulkan
+and Apple Silicon Metal outputs passed a mean channel error of at most 0.25
+on the 0–255 scale and at most 16 pixels differing by more than two channel
+levels. These bounds include rasterization and floating-point differences;
+they do not claim that every pixel matches on every adapter. Test scenes avoid
+an exact sphere-silhouette/pixel-center coincidence, whose single raw coverage
+difference otherwise propagates through neighboring AO samples.
+
+GPU regressions also verify visible contact darkening, distinct AA outputs,
+half-resolution refinement, cached accumulation, camera-change resets, and
+unchanged transparent-export alpha. The shared core passed 140 unit tests on
+Linux and Metal, and both native unit suites passed 165 tests. Command and
+scripting tests cover property discovery, invalid-value rejection, defaults,
+reset, and QSC persistence, including `aaSmaaThreshold`.
+
+All 30 browser tests passed, including separate WebGPU and WebGL2 checks for
+AO darkening, both spatial AA methods, full-resolution refinement and temporal
+history reset. A real Linux window passed the same setting changes through MCP;
+6,796 foreground pixels darkened in the AO contact fixture. The native smoke
+waits for the displayed GPU result after asynchronous commands. Both final
+screenshots were inspected. WebGL2 uses packed 24-bit color depth for post-process
+reads, avoiding unsupported depth-texture loads and shadow-sampler compilation.
+The 18 raw appearance fixtures still matched every Linux RGBA byte.
+
+## Tauri viewport integration
+
+The optional Tauri shell now reads back the same molecular GPU pipeline, including
+AO, spatial AA and a converged temporal average. The worker reads pixels only
+once after convergence. It retains the scene primitives instead of tessellating
+all atoms and cylinders into an extra CPU mesh. Screen lines stay in the scene
+snapshot and depth-test with the molecule; the HTML overlay carries labels.
+Scene editing includes the SMAA threshold. Point and rectangle picking use the
+reference picking slab rather than the farther display plane.
+
+With reference fixtures present, all 143 Tauri tests passed on Apple Silicon,
+including actual GPU AO/AA and the previously ignored animation image exporter.
+The Linux shared pixel test confirms that live-view readback exactly matches
+AO, SMAA and temporal-accumulation output; the same regression passed on Metal.
+The native egui suite passed 165 tests and the shell contract suite passed 69.
+The Linux Tauri build could not run because the host lacks Pango/GTK development
+metadata; this is not evidence of a Linux Tauri runtime test.
+
+Three old Tauri expectations were corrected after checking current behavior:
+Tritium's DefaultNucl section width is 0.4 (the old XUL style says 0.5), the
+default ribbon exposes its C-alpha pivots for picking, and contact annotations
+retain live atom references instead of fixed positions. The class-registry audit
+remains separate follow-up work.
+
+
+## Scene application data and direct molecular surfaces
+
+Scene application data now stores the reference RenderSettings classes with
+live scripting properties, typed values, nested defaults, reset, undo and QSC
+serialization. Existing command settings migrate into the same data. Unknown
+application-data classes survive a read/write cycle. Focused shared tests cover
+invalid input, default resets, legacy-setting precedence, removal and undo.
+
+The tracestick representation follows the reference main-chain pivots and
+visibility rules. Direct molecular surfaces now select distance fields,
+EDTSurf or MeshMS, using reference detail-to-density conversion and atom ownership.
+The EDTSurf sources and license are included in native and browser kernel builds.
+Saved molecular surfaces retain the separate MeshMS/BALL/Rust backend interface.
+
+The C++ surface oracle compares 27 combinations of engine, surface type and
+detail on selected 1CRN residues. Vertex coordinates, normals and triangle
+indices matched on Linux and Apple Silicon. The comparison initializes an
+otherwise uninitialized EDTSurf smoothing flag; it does not reproduce allocator-
+dependent behavior. Equidistant MeshMS ownership uses the smallest atom ID within
+16 double-precision machine epsilons. Differences from the reference are accepted
+only where float-coordinate quantization cannot distinguish the distances, while
+Linux and Apple Silicon ownership arrays must match exactly.
+
+Browser command calls return an ID, and status exposes lastCommand after that
+command is dispatched. Callers can wait for that ID and busy=false before reading
+results; a fixed delay did not reliably distinguish queued from completed work.
+
+The registry now covers all 166 reference classes. The wider QIF audit still
+reports missing members/defaults in maps, labels, trajectory loading, edge groups
+and exporters. Registry coverage alone does not establish their behavior.
+
+All 32 browser tests passed after adding command acknowledgments, including
+all three direct-surface engines and application-data persistence through script
+edits and QSC reloads. The class-set test passed with the reference present;
+13 command integration tests, 117 shared core unit tests and 165 native GUI unit
+tests also passed. The latter two counts describe the selected feature sets,
+not the separate unfinished QIF member/default audit.

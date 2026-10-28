@@ -36,6 +36,8 @@ for name in ('winit.txt', 'smaa.txt', 'molstar.txt', 'xegtao.txt'):
     shutil.copy2(root / 'licenses' / name, licenses / name)
 for name in ('CueMol-LICENSE', 'Boost-LICENSE', 'BALL-SOURCE.json', 'meshms/SOURCE.json'):
     shutil.copy2(root / 'crates/cuemol-surface/vendor' / name, licenses / ('MeshMS-SOURCE.json' if name.startswith('meshms/') else name))
+shutil.copy2(root / 'crates/cuemol-surface/vendor/edtsurf/LICENSE', licenses / 'EDTSurf.txt')
+shutil.copy2(root / 'crates/cuemol-surface/vendor/edtsurf/SOURCE.json', licenses / 'EDTSurf-SOURCE.json')
 if windows:
     output = dist / f'cuemol-{args.target}.zip'
     temporary = output.with_suffix('.tmp')

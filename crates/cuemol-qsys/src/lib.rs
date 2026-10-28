@@ -25,6 +25,7 @@ pub mod view;
 pub mod view_cap;
 pub mod view_input;
 
+pub use app_data::{RenderSettings, SceneAppData, SettingsClass, SettingsKind, SettingsProperty};
 pub use camera::{Camera, CenterMark, StereoMode};
 pub use command::{
     CmdMgr, CommandContext, CommandInstance, CommandValue, CreatedRenderer, HandlerContentSniffer,
@@ -78,3 +79,4 @@ pub use view_cap::ViewCap;
 pub type Command = CommandInstance;
 pub type GUIView = View;
 pub type Object<T = ()> = SceneObject<T>;
+pub mod app_data;

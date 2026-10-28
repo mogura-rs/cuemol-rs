@@ -1,5 +1,6 @@
 {
   "repository": "https://github.com/CueMol/MeshMS",
   "revision": "5aa0b2b94fe5959df9dfc23394c70768d11ef95d",
-  "files": "Unmodified library sources and headers; serial strict floating point build."
+  "files": "Library sources and headers; serial strict floating point build.",
+  "modifications": "Nearest-atom ownership resolves distances within 16 machine epsilons by the smallest atom ID, preventing platform-dependent ownership at equidistant patch vertices."
 }

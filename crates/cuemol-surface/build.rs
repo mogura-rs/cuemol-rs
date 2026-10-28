@@ -28,6 +28,7 @@ fn main() {
         .include("vendor")
         .include("vendor/meshms/include")
         .files(sources)
+        .file("vendor/edtsurf/ProteinSurface.cpp")
         .file("vendor/surface_bridge.cpp")
         .compile("cuemol_surfaces");
 }

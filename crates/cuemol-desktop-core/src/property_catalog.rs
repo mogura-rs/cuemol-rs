@@ -35,6 +35,7 @@ pub fn renderer_attr_properties(renderer_type: &str) -> Vec<RendererAttrProperty
             | "ballstick"
             | "cpk"
             | "trace"
+            | "tracestick"
             | "spline"
             | "tube"
             | "ribbon"
@@ -63,6 +64,12 @@ pub fn renderer_attr_properties(renderer_type: &str) -> Vec<RendererAttrProperty
         "trace" => {
             add("pivotatom", Text, "");
             add("width", Real, "1.2");
+        }
+        "tracestick" => {
+            add("pivotatom", Text, "");
+            add("bondw", Real, "0.25");
+            add("sphr", Real, "0.25");
+            add("detail", Integer, "3");
         }
         "*namelabel" | "name_label" => {
             add("maxlabel", Integer, "50");
@@ -213,7 +220,7 @@ pub fn renderer_attr_properties(renderer_type: &str) -> Vec<RendererAttrProperty
             add("proberad", Real, "1.4");
             add("surftype", Text, "ses");
             if renderer_type != "dsurf2" {
-                add("surfalgor", Text, "edtsurf");
+                add("surfalgor", Text, "distfield");
             }
             add("cullface", Boolean, "false");
             add("drawmode", Text, "fill");

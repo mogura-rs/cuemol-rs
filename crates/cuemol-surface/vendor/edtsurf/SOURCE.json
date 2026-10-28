@@ -1,0 +1,6 @@
+{
+  "repository": "https://github.com/CueMol/cuemol2",
+  "revision": "242600329b0ed85f166fd3b951b998f01beb37c4",
+  "directory": "src/modules/surface/edtsurf",
+  "modifications": "Removed the unused CueMol common.h include; algorithms and lookup tables are unchanged."
+}

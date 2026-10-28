@@ -87,6 +87,7 @@ pub const MOLECULE_RENDERER_TYPES: &[&str] = &[
     "simple",
     "spline",
     "trace",
+    "tracestick",
     "tube",
 ];
 
@@ -101,7 +102,9 @@ pub fn default_molecule_renderer_style(renderer_type: &str) -> Option<&'static s
         "anisou" => Some("DefaultAnIsoU,DefaultCPKColoring"),
         "ballstick" => Some("DefaultBallStick,DefaultCPKColoring"),
         "cpk" => Some("DefaultCPK,DefaultCPKColoring"),
-        "simple" | "trace" | "disorder" | "dsurf2" | "dsurface" => Some("DefaultCPKColoring"),
+        "simple" | "trace" | "tracestick" | "disorder" | "dsurf2" | "dsurface" => {
+            Some("DefaultCPKColoring")
+        }
         _ => None,
     }
 }
@@ -141,7 +144,7 @@ const SCRIPT_RUNTIME_CLASS_NAMES: &[&str] = &[
     "DCDTrajReader",
     "DensityMap",
     "DirectSurfRenderer",
-    "DirectSurfRenderer2",
+    "DirectSurfRendererBase",
     "DisoRenderer",
     "DistPickDrawObj",
     "DrawObj",
@@ -210,6 +213,7 @@ const SCRIPT_RUNTIME_CLASS_NAMES: &[&str] = &[
     "PSEFileReader",
     "PaintColoring",
     "PngSceneExporter",
+    "PovRenderSettings",
     "PovSceneExporter",
     "ProcessManager",
     "PythonBridge",
@@ -223,6 +227,7 @@ const SCRIPT_RUNTIME_CLASS_NAMES: &[&str] = &[
     "RegExpr",
     "RendGroup",
     "RendXformAnim",
+    "RenderSettings",
     "Renderer",
     "ResidIterator",
     "ResidRangeSet",
@@ -256,11 +261,14 @@ const SCRIPT_RUNTIME_CLASS_NAMES: &[&str] = &[
     "TextImgBuf",
     "TimeValue",
     "TraceRenderer",
+    "TraceStickRenderer",
     "TrajBlock",
     "Trajectory",
     "TrrTrajReader",
     "TubeRenderer",
     "TubeSection",
+    "UmbreonNprRenderSettings",
+    "UmbreonRenderSettings",
     "UmbreonSceneExporter",
     "UnitCellRenderer",
     "Vector",
@@ -293,8 +301,9 @@ const SCRIPT_RUNTIME_CLASS_PARENTS: &[(&str, &str)] = &[
     ("Color", "AbstractColor"),
     ("DCDTrajReader", "ObjReader"),
     ("DensityMap", "ScalarObject"),
-    ("DirectSurfRenderer", "MolRenderer"),
+    ("DirectSurfRenderer", "DirectSurfRendererBase"),
     ("DirectSurfRenderer2", "MolRenderer"),
+    ("DirectSurfRendererBase", "MolRenderer"),
     ("DisoRenderer", "MolRenderer"),
     ("DistPickDrawObj", "DrawObj"),
     ("ElePotMap", "ScalarObject"),
@@ -373,10 +382,12 @@ const SCRIPT_RUNTIME_CLASS_PARENTS: &[(&str, &str)] = &[
     ("SymmRenderer", "Renderer"),
     ("TestRenderer", "Renderer"),
     ("TraceRenderer", "MainChainRenderer"),
+    ("TraceStickRenderer", "MainChainRenderer"),
     ("TrajBlock", "Object"),
     ("Trajectory", "AnimMol"),
     ("TrrTrajReader", "ObjReader"),
     ("TubeRenderer", "SplineRenderer"),
+    ("UmbreonNprRenderSettings", "UmbreonRenderSettings"),
     ("UmbreonSceneExporter", "SceneExporter"),
     ("UnitCellRenderer", "Renderer"),
     ("WbpSceneExporter", "SceneExporter"),
@@ -11735,6 +11746,7 @@ impl DesktopAppState {
             && scene.loaded_styles().is_empty()
             && scene.scene_attributes().is_empty()
             && scene.scene_extension_nodes().is_empty()
+            && scene.app_data().is_empty()
             && scene.animation_node().is_none()
     }
 
@@ -14127,7 +14139,7 @@ impl DesktopAppState {
             }) {
                 let indices = if matches!(
                     renderer.renderer_type(),
-                    "trace" | "ribbon" | "cartoon" | "tube" | "spline" | "nucl"
+                    "trace" | "tracestick" | "ribbon" | "cartoon" | "tube" | "spline" | "nucl"
                 ) {
                     let pivot = renderer.resolved_attr("pivotatom", &styles, scene_uid.get());
                     cuemol_molvis::mainchain_pick_indices(
@@ -28243,6 +28255,7 @@ impl DesktopAppState {
                     uid: scene_uid,
                     name: name.clone(),
                     attributes: BTreeMap::new(),
+                    app_data: cuemol_qsys::SceneAppData::default(),
                     active_object_uid: None,
                     active_renderer_uid: None,
                     active_view_uid: None,
@@ -28848,6 +28861,18 @@ impl DesktopAppState {
                 _ => None,
             };
             match class_name.as_str() {
+                _ if initial.is_none()
+                    && cuemol_qsys::SettingsClass::from_name(&class_name).is_some() =>
+                {
+                    Ok(make_settings_proxy(
+                        cuemol_qsys::SettingsClass::from_name(&class_name).unwrap(),
+                        0,
+                        "",
+                        None,
+                        "",
+                        ctx,
+                    ))
+                }
                 "ClassA" | "ClassB" if initial.is_none() => Ok(make_test_class(&class_name, ctx)),
                 "NewSceneCommand" | "NewRendererCommand" | "LoadSceneCommand"
                 | "LoadObjectCommand"
@@ -29694,7 +29719,7 @@ impl DesktopAppState {
                 || (interface_name == "Renderer" && class_name.ends_with("Renderer"))
         }
         fn runtime_has_class(class_name: &str) -> bool {
-            SCRIPT_RUNTIME_CLASS_NAMES.contains(&class_name)
+            SCRIPT_RUNTIME_CLASS_NAMES.contains(&class_name) || class_name == "DirectSurfRenderer2"
         }
         fn js_has_class(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
             Ok(JsValue::new(runtime_has_class(&arg0(args, ctx))))
@@ -35828,6 +35853,7 @@ impl DesktopAppState {
                 "BallStickRenderer" => Some("ballstick"),
                 "CPKRenderer" | "CPK2Renderer" => Some("cpk"),
                 "TraceRenderer" => Some("trace"),
+                "TraceStickRenderer" => Some("tracestick"),
                 "SplineRenderer" => Some("spline"),
                 "TubeRenderer" => Some("tube"),
                 "RibbonRenderer" => Some("ribbon"),
@@ -35861,6 +35887,7 @@ impl DesktopAppState {
                 "ballstick" => "BallStickRenderer",
                 "cpk" => "CPK2Renderer",
                 "trace" => "TraceRenderer",
+                "tracestick" => "TraceStickRenderer",
                 "spline" => "SplineRenderer",
                 "tube" => "TubeRenderer",
                 "ribbon" => "RibbonRenderer",
@@ -35910,6 +35937,7 @@ impl DesktopAppState {
                 | "CPKRenderer"
                 | "CPK2Renderer"
                 | "TraceRenderer"
+                | "TraceStickRenderer"
                 | "SplineRenderer"
                 | "TubeRenderer"
                 | "RibbonRenderer"
@@ -37459,6 +37487,23 @@ impl DesktopAppState {
             description: &str,
             ctx: &mut Context,
         ) -> JsResult<()> {
+            fire_scene_script_property_event_for(
+                scene_uid,
+                event_type,
+                target_uid,
+                description,
+                None,
+                ctx,
+            )
+        }
+        fn fire_scene_script_property_event_for(
+            scene_uid: u64,
+            event_type: i32,
+            target_uid: u64,
+            description: &str,
+            property: Option<&str>,
+            ctx: &mut Context,
+        ) -> JsResult<()> {
             let listeners = script_env::with(|env| {
                 env.scene_listeners
                     .values()
@@ -37482,6 +37527,9 @@ impl DesktopAppState {
             event.set_source(scene_uid);
             event.set_target(target_uid);
             event.set_descr(description);
+            if let Some(property) = property {
+                event.set_prop_name(property);
+            }
             if let Some((category, target_type, normalized_type)) = event.category() {
                 let json = event.json();
                 let manager_delivery = script_env::with(|env| {
@@ -37529,9 +37577,16 @@ impl DesktopAppState {
                     }
                 }
             });
+            let app_data = script_env::with(|env| {
+                env.scenes
+                    .iter()
+                    .map(|scene| (scene.uid, scene.app_data.clone()))
+                    .collect()
+            });
             script_cmds::push(ScriptCmd::StartUndoTxn {
                 scene_uid,
                 description,
+                app_data,
             });
             Ok(JsValue::undefined())
         }
@@ -38388,6 +38443,335 @@ impl DesktopAppState {
                     .count()
             })))
         }
+        fn settings_value(property: cuemol_qsys::SettingsProperty, value: &str) -> JsValue {
+            match property.kind {
+                cuemol_qsys::SettingsKind::Boolean => JsValue::new(value == "true"),
+                cuemol_qsys::SettingsKind::Integer | cuemol_qsys::SettingsKind::Real => {
+                    JsValue::new(value.parse::<f64>().unwrap_or(0.0))
+                }
+                cuemol_qsys::SettingsKind::String => JsString::from(value).into(),
+            }
+        }
+
+        fn settings_root(this: &JsValue, ctx: &mut Context) -> JsResult<JsValue> {
+            iterator_object(this)?.get(js_string!("_settings_root"), ctx)
+        }
+
+        fn settings_property_get(
+            property: cuemol_qsys::SettingsProperty,
+            this: &JsValue,
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let root = settings_root(this, ctx)?;
+            let sid = object_number_prop(&root, "_scene_uid", ctx)? as u64;
+            let id = object_string_prop(&root, "_appdata_id", ctx);
+            let prefix = object_string_prop(this, "_settings_prefix", ctx);
+            let path = format!("{prefix}{}", property.name);
+            if sid != 0 {
+                let value = script_env::with(|env| {
+                    env.scenes
+                        .iter()
+                        .find(|scene| scene.uid == sid)
+                        .and_then(|scene| scene.app_data.get(&id))
+                        .and_then(|settings| settings.get(&path))
+                        .map(str::to_string)
+                });
+                return value
+                    .map(|value| settings_value(property, &value))
+                    .ok_or_else(|| script_error("scene app data no longer exists"));
+            }
+            let value =
+                iterator_object(&root)?.get(JsString::from(format!("_setting_{path}")), ctx)?;
+            Ok(if value.is_undefined() {
+                settings_value(property, property.default)
+            } else {
+                value
+            })
+        }
+
+        fn settings_property_set(
+            property: cuemol_qsys::SettingsProperty,
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let root = settings_root(this, ctx)?;
+            let sid = object_number_prop(&root, "_scene_uid", ctx)? as u64;
+            let id = object_string_prop(&root, "_appdata_id", ctx);
+            let prefix = object_string_prop(this, "_settings_prefix", ctx);
+            let path = format!("{prefix}{}", property.name);
+            let value = args.first().cloned().unwrap_or(JsValue::undefined());
+            let text = match property.kind {
+                cuemol_qsys::SettingsKind::Boolean => value.to_boolean().to_string(),
+                cuemol_qsys::SettingsKind::Integer => value.to_i32(ctx)?.to_string(),
+                cuemol_qsys::SettingsKind::Real => value.to_number(ctx)?.to_string(),
+                cuemol_qsys::SettingsKind::String => value.to_string(ctx)?.to_std_string_escaped(),
+            };
+            let text = property
+                .parse(&text)
+                .map_err(|error| script_error(error.to_string()))?;
+            if sid == 0 {
+                iterator_object(&root)?.set(
+                    JsString::from(format!("_setting_{path}")),
+                    settings_value(property, &text),
+                    true,
+                    ctx,
+                )?;
+            } else {
+                let settings = script_env::with_mut(|env| {
+                    let scene = env
+                        .scenes
+                        .iter_mut()
+                        .find(|scene| scene.uid == sid)
+                        .ok_or_else(|| script_error("scene not found"))?;
+                    let settings = scene
+                        .app_data
+                        .get_mut(&id)
+                        .ok_or_else(|| script_error("scene app data no longer exists"))?;
+                    settings
+                        .set(&path, &text)
+                        .map_err(|error| script_error(error.to_string()))?;
+                    let settings = settings.clone();
+                    scene
+                        .attributes
+                        .insert("_script_modified".into(), "true".into());
+                    if env.scene_uid == sid {
+                        env.scene_attributes
+                            .insert("_script_modified".into(), "true".into());
+                    }
+                    Ok::<_, boa_engine::JsError>(settings)
+                })?;
+                script_cmds::push(ScriptCmd::SetSceneAppData {
+                    scene_uid: sid,
+                    id: id.clone(),
+                    settings: Some(settings),
+                });
+                fire_scene_script_property_event_for(
+                    sid,
+                    cuemol_qsys::SceneEvent::SCE_SCENE_APPDATA_CHG,
+                    sid,
+                    &id,
+                    Some(&path),
+                    ctx,
+                )?;
+            }
+            Ok(JsValue::undefined())
+        }
+
+        fn settings_get_uid(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            iterator_object(this)?.get(js_string!("_appdata_uid"), ctx)
+        }
+
+        fn make_settings_proxy(
+            class: cuemol_qsys::SettingsClass,
+            sid: u64,
+            id: &str,
+            root: Option<JsValue>,
+            prefix: &str,
+            ctx: &mut Context,
+        ) -> JsValue {
+            let accessors = class
+                .properties()
+                .into_iter()
+                .map(|property| {
+                    let getter = FunctionObjectBuilder::new(
+                        ctx.realm(),
+                        NativeFunction::from_copy_closure(move |this, _args, ctx| {
+                            settings_property_get(property, this, ctx)
+                        }),
+                    )
+                    .name(JsString::from(format!("get {}", property.name)))
+                    .constructor(false)
+                    .build();
+                    let setter = FunctionObjectBuilder::new(
+                        ctx.realm(),
+                        NativeFunction::from_copy_closure(move |this, args, ctx| {
+                            settings_property_set(property, this, args, ctx)
+                        }),
+                    )
+                    .name(JsString::from(format!("set {}", property.name)))
+                    .length(1)
+                    .constructor(false)
+                    .build();
+                    (property.name, getter, setter)
+                })
+                .collect::<Vec<_>>();
+            let uid = if sid == 0 {
+                cuemol_qsys::RenderSettings::new(class).uid().get()
+            } else {
+                script_env::with(|env| {
+                    env.scenes
+                        .iter()
+                        .find(|scene| scene.uid == sid)
+                        .and_then(|scene| scene.app_data.get(id))
+                        .map_or(0, |settings| settings.uid().get())
+                })
+            };
+            let mut object = ObjectInitializer::new(ctx);
+            object
+                .property(
+                    js_string!("_class"),
+                    JsString::from(class.name()),
+                    Attribute::all(),
+                )
+                .property(js_string!("_scene_uid"), sid as f64, Attribute::empty())
+                .property(
+                    js_string!("_appdata_id"),
+                    JsString::from(id),
+                    Attribute::empty(),
+                )
+                .property(js_string!("_appdata_uid"), uid as f64, Attribute::empty())
+                .property(
+                    js_string!("_settings_prefix"),
+                    JsString::from(prefix),
+                    Attribute::empty(),
+                );
+            if class == cuemol_qsys::SettingsClass::Render {
+                object.function(
+                    NativeFunction::from_fn_ptr(settings_get_uid),
+                    js_string!("getUID"),
+                    0,
+                );
+            }
+            for (name, getter, setter) in accessors {
+                object.accessor(
+                    JsString::from(name),
+                    Some(getter),
+                    Some(setter),
+                    Attribute::ENUMERABLE,
+                );
+            }
+            let object = object.build();
+            let value: JsValue = object.clone().into();
+            let root = root.unwrap_or_else(|| value.clone());
+            object
+                .set(js_string!("_settings_root"), root.clone(), true, ctx)
+                .expect("new settings root");
+            for (name, child_class) in class.children() {
+                let child = make_settings_proxy(
+                    *child_class,
+                    sid,
+                    id,
+                    Some(root.clone()),
+                    &format!("{prefix}{name}."),
+                    ctx,
+                );
+                object
+                    .define_property_or_throw(
+                        JsString::from(*name),
+                        boa_engine::property::PropertyDescriptor::builder()
+                            .value(child)
+                            .writable(false)
+                            .enumerable(true)
+                            .configurable(false),
+                        ctx,
+                    )
+                    .expect("new settings child");
+            }
+            value
+        }
+
+        fn js_scene_get_app_data(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let sid = scene_proxy_uid(this, ctx)?;
+            let id = arg0(args, ctx);
+            let exists = script_env::with(|env| {
+                env.scenes
+                    .iter()
+                    .find(|scene| scene.uid == sid)
+                    .is_some_and(|scene| scene.app_data.get(&id).is_some())
+            });
+            Ok(if exists {
+                make_settings_proxy(cuemol_qsys::SettingsClass::Render, sid, &id, None, "", ctx)
+            } else {
+                JsValue::null()
+            })
+        }
+
+        fn js_scene_has_app_data(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            Ok(JsValue::new(
+                !js_scene_get_app_data(this, args, ctx)?.is_null(),
+            ))
+        }
+
+        fn js_scene_create_app_data(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let sid = scene_proxy_uid(this, ctx)?;
+            let id = arg0(args, ctx);
+            let class = argn(args, 1, ctx);
+            let settings = script_env::with_mut(|env| {
+                let scene = env
+                    .scenes
+                    .iter_mut()
+                    .find(|scene| scene.uid == sid)
+                    .ok_or_else(|| script_error("scene not found"))?;
+                if scene.app_data.get(&id).is_none()
+                    && runtime_has_class(&class)
+                    && class != "RenderSettings"
+                {
+                    return Err(script_error(format!("class {class} is not a SceneAppData")));
+                }
+                scene
+                    .app_data
+                    .get_or_create(&id, &class)
+                    .map(|settings| settings.cloned())
+                    .map_err(|error| script_error(error.to_string()))
+            })?;
+            let Some(settings) = settings else {
+                return Ok(JsValue::null());
+            };
+            script_cmds::push(ScriptCmd::SetSceneAppData {
+                scene_uid: sid,
+                id: id.clone(),
+                settings: Some(settings),
+            });
+            Ok(make_settings_proxy(
+                cuemol_qsys::SettingsClass::Render,
+                sid,
+                &id,
+                None,
+                "",
+                ctx,
+            ))
+        }
+
+        fn js_scene_remove_app_data(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let sid = scene_proxy_uid(this, ctx)?;
+            let id = arg0(args, ctx);
+            let removed = script_env::with_mut(|env| {
+                env.scenes
+                    .iter_mut()
+                    .find(|scene| scene.uid == sid)
+                    .is_some_and(|scene| scene.app_data.remove(&id))
+            });
+            if removed {
+                script_cmds::push(ScriptCmd::SetSceneAppData {
+                    scene_uid: sid,
+                    id,
+                    settings: None,
+                });
+            }
+            Ok(JsValue::new(removed))
+        }
+
         fn make_scene_proxy_for(scene_uid: u64, ctx: &mut Context) -> JsValue {
             fn accessor(
                 ctx: &mut Context,
@@ -38464,6 +38848,26 @@ impl DesktopAppState {
                 object.accessor(JsString::from(name), Some(getter), setter, Attribute::all());
             }
             let obj = object
+                .function(
+                    NativeFunction::from_fn_ptr(js_scene_get_app_data),
+                    js_string!("getAppData"),
+                    1,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_scene_has_app_data),
+                    js_string!("hasAppData"),
+                    1,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_scene_create_app_data),
+                    js_string!("getCreateAppData"),
+                    2,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_scene_remove_app_data),
+                    js_string!("removeAppData"),
+                    1,
+                )
                 .function(
                     NativeFunction::from_fn_ptr(js_scene_add_object),
                     js_string!("addObject"),
@@ -38729,6 +39133,25 @@ impl DesktopAppState {
             if script_env::with(|env| env.scenes.iter().any(|scene| scene.uid == uid)) {
                 return Ok(make_scene_proxy_for(uid, ctx));
             }
+            let settings = script_env::with(|env| {
+                env.scenes.iter().find_map(|scene| {
+                    scene
+                        .app_data
+                        .iter()
+                        .find(|(_, data)| data.uid().get() == uid)
+                        .map(|(id, _)| (scene.uid, id.to_string()))
+                })
+            });
+            if let Some((sid, id)) = settings {
+                return Ok(make_settings_proxy(
+                    cuemol_qsys::SettingsClass::Render,
+                    sid,
+                    &id,
+                    None,
+                    "",
+                    ctx,
+                ));
+            }
             let object = script_env::with(|env| {
                 env.objects.iter().find(|object| object.uid == uid).cloned()
             });
@@ -38797,6 +39220,7 @@ impl DesktopAppState {
                     uid,
                     name: String::new(),
                     attributes: BTreeMap::new(),
+                    app_data: cuemol_qsys::SceneAppData::default(),
                     active_object_uid: None,
                     active_renderer_uid: None,
                     active_view_uid: None,
@@ -45223,12 +45647,19 @@ impl DesktopAppState {
                 ScriptCmd::StartUndoTxn {
                     scene_uid,
                     description,
+                    app_data,
                 } => {
-                    self.script_scene_start_undo(
-                        Uid::new(scene_uid),
-                        description,
-                        script_run_start.clone(),
-                    );
+                    let mut before = script_run_start.clone();
+                    for (sid, data) in app_data {
+                        if let Some(scene) = before
+                            .command_manager
+                            .scene_manager_mut()
+                            .scene_mut(Uid::new(sid))
+                        {
+                            *scene.app_data_mut() = data;
+                        }
+                    }
+                    self.script_scene_start_undo(Uid::new(scene_uid), description, before);
                 }
                 ScriptCmd::CommitUndoTxn { scene_uid } => {
                     self.script_scene_commit_undo(Uid::new(scene_uid));
@@ -45267,6 +45698,20 @@ impl DesktopAppState {
                 ScriptCmd::RenameScene { uid, name } => {
                     if let Some(scene) = self.scene_manager_mut().scene_mut(Uid::new(uid)) {
                         scene.set_name(name);
+                    }
+                }
+                ScriptCmd::SetSceneAppData {
+                    scene_uid,
+                    id,
+                    settings,
+                } => {
+                    if let Some(scene) = self.scene_manager_mut().scene_mut(Uid::new(scene_uid)) {
+                        if let Some(settings) = settings {
+                            scene.app_data_mut().insert(id, settings)?;
+                        } else {
+                            scene.app_data_mut().remove(&id);
+                        }
+                        scene.set_scene_attribute("_script_modified", "true");
                     }
                 }
                 ScriptCmd::SetSceneAttribute { uid, name, value } => {
@@ -45693,6 +46138,7 @@ impl DesktopAppState {
                     uid: scene.uid().get(),
                     name: scene.name().to_string(),
                     attributes: scene.scene_attributes().clone(),
+                    app_data: scene.app_data().clone(),
                     active_object_uid: scene.active_object_uid().map(Uid::get),
                     active_renderer_uid: scene.active_renderer_uid().map(Uid::get),
                     active_view_uid: scene.active_view_uid().map(Uid::get),
@@ -46142,6 +46588,7 @@ enum ScriptCmd {
     StartUndoTxn {
         scene_uid: u64,
         description: String,
+        app_data: Vec<(u64, cuemol_qsys::SceneAppData)>,
     },
     CommitUndoTxn {
         scene_uid: u64,
@@ -46176,6 +46623,11 @@ enum ScriptCmd {
     RenameScene {
         uid: u64,
         name: String,
+    },
+    SetSceneAppData {
+        scene_uid: u64,
+        id: String,
+        settings: Option<cuemol_qsys::RenderSettings>,
     },
     SetSceneAttribute {
         uid: u64,
@@ -46436,6 +46888,7 @@ struct ScriptSceneInfo {
     uid: u64,
     name: String,
     attributes: BTreeMap<String, String>,
+    app_data: cuemol_qsys::SceneAppData,
     active_object_uid: Option<u64>,
     active_renderer_uid: Option<u64>,
     active_view_uid: Option<u64>,
@@ -47575,6 +48028,21 @@ fn append_object_renderer_snapshot(
                 .unwrap_or(1.2);
             simple_line_snapshot(object.mol(), &options, width)
         }
+        ("tracestick", renderer) => {
+            let value = |key: &str, default: f32| {
+                renderer
+                    .and_then(|renderer| renderer.resolved_attr(key, styles, style_scope_id))
+                    .and_then(|value| value.parse::<f32>().ok())
+                    .unwrap_or(default)
+            };
+            cuemol_molvis::tracestick_snapshot(
+                object.mol(),
+                &options,
+                value("sphr", 0.25),
+                value("bondw", 0.25),
+                value("detail", 3.0).max(0.0) as u32,
+            )
+        }
         ("trace", renderer) => {
             let width = renderer
                 .and_then(|renderer| renderer.resolved_attr("width", styles, style_scope_id))
@@ -48063,6 +48531,13 @@ fn direct_surface_snapshot(
             surface_renderer.set_surface_type(surface_type);
         }
     }
+    if let Some(algorithm) = resolved("surfalgor") {
+        surface_renderer.set_surface_algorithm(match algorithm.as_str() {
+            "edtsurf" | "0" => cuemol_surface::DirectSurfRenderer::DS_EDTSURF,
+            "meshms" | "2" => cuemol_surface::DirectSurfRenderer::DS_MESHMS,
+            _ => cuemol_surface::DirectSurfRenderer::DS_DISTFIELD,
+        });
+    }
     for (element, attr) in [
         ("H", "vdwr_H"),
         ("C", "vdwr_C"),
@@ -48335,7 +48810,7 @@ fn append_molecule_lw_hit_points(
     let renderer_type = renderer.map(MolRenderer::renderer_type).unwrap_or("simple");
     let mainchain = matches!(
         renderer_type,
-        "trace" | "spline" | "tube" | "ribbon" | "cartoon" | "nucl"
+        "trace" | "tracestick" | "spline" | "tube" | "ribbon" | "cartoon" | "nucl"
     );
     if !mainchain
         && !matches!(
@@ -51667,8 +52142,84 @@ mod tests {
 
     #[cfg(feature = "scripting")]
     #[test]
+    fn script_render_settings_are_live_persistent_and_undoable() {
+        let mut app = DesktopAppState::new();
+        let sid = app.new_scene("settings", true).result_scene;
+        let (log, _) = app.run_script_js(r#"
+            var detached = cuemol.RenderSettings();
+            detached.umbreon.giSamples = 16;
+            print(detached.width + ':' + detached.dpi + ':' + detached.umbreon.giSamples + ':' + detached.umbreon_npr.useGI);
+            print(scene.getAppData('render') === null);
+            var settings = scene.getCreateAppData('render', 'RenderSettings');
+            print(scene.hasAppData('render') + ':' + (settings.getUID() === scene.getCreateAppData('render', 'MissingClass').getUID()));
+            print(scene.getCreateAppData('missing', 'UnknownClass') === null);
+            try { scene.getCreateAppData('wrong', 'Color'); } catch (e) { print('invalid-class'); }
+            scene.startUndoTxn('render settings');
+            settings.width = 640;
+            settings.umbreon.giSamples = 128;
+            settings.umbreon_npr.hatchDensity = 2.5;
+            cuemol.resetProp(settings.umbreon, 'giSamples');
+            settings.povray.shadow = true;
+            scene.commitUndoTxn();
+            print(scene.getAppData('render').width + ':' + settings.umbreon.giSamples + ':' + settings.umbreon_npr.hatchDensity);
+        "#).unwrap();
+        assert_eq!(
+            log,
+            "1200:600:16:false\ntrue\ntrue:true\ntrue\ninvalid-class\n640:32:2.5\n"
+        );
+        let settings = app
+            .scene_manager()
+            .scene(sid)
+            .unwrap()
+            .app_data()
+            .get("render")
+            .unwrap();
+        assert_eq!(settings.get("povray.shadow"), Some("true"));
+        let bytes = app.active_scene_bytes().unwrap();
+        let mut restored = DesktopAppState::new();
+        restored.open_bytes("settings.qsc", &bytes).unwrap();
+        assert_eq!(
+            restored
+                .run_script_js("print(scene.getAppData('render').umbreon_npr.hatchDensity);")
+                .unwrap()
+                .0,
+            "2.5\n"
+        );
+        app.run_script_js("scene.undo(0);").unwrap();
+        assert_eq!(
+            app.scene_manager()
+                .scene(sid)
+                .unwrap()
+                .app_data()
+                .get("render")
+                .unwrap()
+                .get("width"),
+            Some("1200")
+        );
+        app.run_script_js("scene.redo(0);").unwrap();
+        assert_eq!(
+            app.scene_manager()
+                .scene(sid)
+                .unwrap()
+                .app_data()
+                .get("render")
+                .unwrap()
+                .get("width"),
+            Some("640")
+        );
+        assert_eq!(app.run_script_js("print(scene.removeAppData('render') + ':' + scene.removeAppData('render') + ':' + scene.hasAppData('render'));").unwrap().0, "true:false:false\n");
+        assert!(app
+            .scene_manager()
+            .scene(sid)
+            .unwrap()
+            .app_data()
+            .is_empty());
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
     fn script_runtime_registry_matches_the_reference_qif_class_set() {
-        assert_eq!(SCRIPT_RUNTIME_CLASS_NAMES.len(), 161);
+        assert_eq!(SCRIPT_RUNTIME_CLASS_NAMES.len(), 166);
         assert!(SCRIPT_RUNTIME_CLASS_NAMES
             .windows(2)
             .all(|pair| pair[0] < pair[1]));
@@ -51687,7 +52238,7 @@ mod tests {
                        cuemol.hasClass('Unknown'));",
             )
             .unwrap();
-        assert_eq!(log.trim(), "registry=161:true:true:true:false");
+        assert_eq!(log.trim(), "registry=166:true:true:true:false");
     }
 
     #[cfg(feature = "scripting")]
@@ -51902,7 +52453,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(apis.len(), 161);
+        assert_eq!(apis.len(), 166);
 
         let specs = apis
             .keys()
@@ -51938,7 +52489,7 @@ mod tests {
                ColoringScheme:'SolidColoring', \
                Command:'NewSceneCommand', DrawObj:'RectSelDrawObj', \
                ImgSceneExporter:'PngSceneExporter', InOutHandler:'PDBFileReader', \
-               LScrObject:'ClassA', MainChainRenderer:'TraceRenderer', \
+               LScrObject:'ClassA', MainChainRenderer:'TraceRenderer', DirectSurfRendererBase:'DirectSurfRenderer', \
                MapRenderer:'MapSurfRenderer', MolRenderer:'SimpleRenderer', \
                MolSelection:'SelCommand', ObjReader:'PDBFileReader', \
                ObjWriter:'PDBFileWriter', Renderer:'SimpleRenderer', \
@@ -52062,7 +52613,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(apis.len(), 161);
+        assert_eq!(apis.len(), 166);
 
         let specs = SCRIPT_RUNTIME_CLASS_NAMES
             .iter()
@@ -52231,7 +52782,7 @@ mod tests {
                     .insert(property.trim().to_string(), color);
             }
         }
-        assert_eq!(apis.len(), 161);
+        assert_eq!(apis.len(), 166);
 
         let specs = SCRIPT_RUNTIME_CLASS_NAMES
             .iter()
@@ -52405,7 +52956,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(apis.len(), 161);
+        assert_eq!(apis.len(), 166);
 
         let specs = SCRIPT_RUNTIME_CLASS_NAMES
             .iter()
@@ -52641,7 +53192,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(apis.len(), 161);
+        assert_eq!(apis.len(), 166);
 
         let specs = SCRIPT_RUNTIME_CLASS_NAMES
             .iter()
@@ -52705,6 +53256,7 @@ mod tests {
             "ClassS",
             "CmdMgr",
             "ColoringScheme",
+            "DirectSurfRendererBase",
             "Command",
             "DrawObj",
             "GUIView",
@@ -61725,7 +62277,7 @@ end_header
             .unwrap();
         renderer.set_qsc_attr("sel", "resid 1 and name CA");
         renderer.set_qsc_attr("surftype", "vdw");
-        renderer.set_qsc_attr("detail", "2");
+        renderer.set_qsc_attr("detail", "6");
 
         let snapshot = app.active_render_snapshot("").unwrap();
         assert_eq!(snapshot.atom_count(), 0);
@@ -61750,7 +62302,7 @@ end_header
         let points = app.active_render_snapshot("").unwrap();
         assert_eq!(points.atom_count(), 0);
         assert_eq!(points.mesh_count(), 0);
-        assert!(points.bond_count() > 100);
+        assert_eq!(points.bond_count(), snapshot.meshes[0].vertices.len());
         assert!(points
             .bonds
             .iter()
@@ -61902,6 +62454,7 @@ end_header
                 "simple",
                 "spline",
                 "trace",
+                "tracestick",
                 "tube",
             ]
         );

@@ -330,10 +330,13 @@ Secondary-structure assignment excludes proline donors and uses sparse
 hydrogen-bond/bridge searches with bounded per-residue bond storage.
 
 The wgpu frontends implement Tritium's layout with Rust egui controls.
-The optional Tauri shell retains the older CueMol2 layout. Molecular surfaces support
-the MeshMS and BALL engines on native and browser targets, with `auto` selecting
-MeshMS and BALL as its fallback. The `rust` backend retains grid-based SES.
-The generation backend, density, and probe radius survive embedded scene saves. NPR rendering includes the nine reference styles and editable line, dot, and
+The optional Tauri shell retains the older CueMol2 layout. Direct molecular
+surfaces support distance fields, EDTSurf and MeshMS on native and browser
+targets, with reference detail and surface-type controls. Saved molecular
+surfaces support MeshMS and BALL, with `auto` selecting MeshMS and BALL as its
+fallback; the `rust` backend retains grid-based SES. The generation backend,
+density and probe radius survive embedded scene saves. Render settings use typed
+scene application data, including nested backend settings, script access and undo. NPR rendering includes the nine reference styles and editable line, dot, and
 stipple layers, with shared native/browser controls for ink, paper, and tone.
 Hatch and tone specifications use the reference syntax. The Rust ray tracer
 uses bounded diffuse path tracing, metallic reflection, camera-relative lights,
