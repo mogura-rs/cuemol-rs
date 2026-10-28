@@ -264,7 +264,7 @@ impl View {
         let qx = axis_angle(Vector4::new3(1.0, 0.0, 0.0), x_deg);
         let qy = axis_angle(Vector4::new3(0.0, 1.0, 0.0), y_deg);
         let qz = axis_angle(Vector4::new3(0.0, 0.0, 1.0), z_deg);
-        self.set_rot_quat(mul_quat(mul_quat(mul_quat(qz, qy), qx), self.rot_quat));
+        self.set_rot_quat(mul_quat(mul_quat(mul_quat(self.rot_quat, qx), qy), qz));
     }
 
     pub fn center(&self) -> Vector4 {
@@ -953,7 +953,7 @@ impl View {
         modifier: i32,
     ) {
         self.mouse_handler
-            .button_down(current_time_millis(), client_x, client_y);
+            .button_down(current_time_millis(), client_x.trunc(), client_y.trunc());
         let mut event = Self::input_event(client_x, client_y, screen_x, screen_y, modifier);
         event.set_event_type(InDevEvent::INDEV_MOUSE_DOWN);
         self.fire_input_event(&mut event);
@@ -968,9 +968,9 @@ impl View {
         screen_y: f64,
         modifier: i32,
     ) {
-        let release_state = self.mouse_handler.state();
-        let velocity = self.mouse_handler.velocity(current_time_millis());
-        self.mouse_handler.button_up();
+        let (release_state, velocity) =
+            self.mouse_handler
+                .release(current_time_millis(), client_x.trunc(), client_y.trunc());
         let mut event = Self::input_event(client_x, client_y, screen_x, screen_y, modifier);
         match release_state {
             DragState::None => return,
@@ -1001,9 +1001,9 @@ impl View {
         if previous_state == DragState::None {
             return;
         }
-        let delta = self
-            .mouse_handler
-            .move_to(current_time_millis(), client_x, client_y);
+        let delta =
+            self.mouse_handler
+                .move_to(current_time_millis(), client_x.trunc(), client_y.trunc());
         let state = self.mouse_handler.state();
         if state == DragState::Down {
             return;
@@ -1014,8 +1014,15 @@ impl View {
         } else {
             InDevEvent::INDEV_DRAG_MOVE
         });
-        event.set_move_x(delta.0.round() as i32);
-        event.set_move_y(delta.1.round() as i32);
+        if previous_state == DragState::Drag {
+            let total = self
+                .mouse_handler
+                .displacement(client_x.trunc(), client_y.trunc());
+            event.set_delta_x(delta.0 as i32);
+            event.set_delta_y(delta.1 as i32);
+            event.set_move_x(total.0 as i32);
+            event.set_move_y(total.1 as i32);
+        }
         self.fire_input_event(&mut event);
     }
 
@@ -1598,8 +1605,12 @@ mod tests {
         assert!(events[0].is_lbutton_on());
         assert!(events[0].is_ctrl_on());
         assert!(events[0].is_shift_on());
-        assert_eq!(events[1].move_x(), 10);
-        assert_eq!(events[1].move_y(), 5);
+        assert_eq!(events[1].move_x(), 0);
+        assert_eq!(events[1].move_y(), 0);
+        assert_eq!(events[2].delta_x(), 4);
+        assert_eq!(events[2].delta_y(), 5);
+        assert_eq!(events[2].move_x(), 14);
+        assert_eq!(events[2].move_y(), 10);
         assert_eq!(events[4].delta_x(), 1);
         assert_eq!(events[4].delta_y(), -3);
         assert_eq!(events[5].gesture_axis(), 2);

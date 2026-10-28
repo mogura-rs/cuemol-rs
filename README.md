@@ -56,15 +56,25 @@ share the same application state and command API.
 
 | Input | Action |
 | --- | --- |
-| Left drag | Rotate |
-| Middle drag | Pan |
-| Wheel or right drag | Zoom |
-| Shift + wheel/right drag | Adjust slab thickness |
-| Ctrl + wheel/right drag | Move the view depth |
+| Left drag | Rotate with the reference virtual trackball |
+| Right drag | Pan |
+| Wheel | Zoom without changing camera distance |
+| Shift + left drag, horizontal | Adjust slab thickness |
+| Shift + left drag, vertical | Zoom |
+| Left + right drag, horizontal | Move the view depth |
+| Left + right drag, vertical | Roll the view |
 | Double-click an atom | Center on the atom |
 | `C` | Center the selection |
 | `F` | Fit the selection |
 | `Home` | Fit the scene |
+
+The table describes the Default mouse preset. Settings also provide Coot, PyMOL,
+iPhone and Trackpad presets, automatic device detection, trackball sensitivity
+and optional momentum. Trackpad mode uses two-finger scrolling to pan and pinching
+to zoom. Preset bindings and custom `UserViewConf` styles use the same resolver as
+scripted `ViewInputConfig` changes. Dragging starts at two logical pixels; mixed
+operations lock to the dominant axis until release. The native and browser
+viewports share this input calculation.
 
 Load an MD topology and trajectory through the MD dialog or `load_trajectory`.
 GRO, PDB, mmCIF, PSF, AMBER topology, SDF, and MOL2 topologies are accepted.
@@ -216,6 +226,8 @@ file references must be saved with embedded data before transfer to the browser.
 
 Rust, a C++20 compiler for the vendored numerical kernels, and the native platform's wgpu/winit
 system dependencies are required. The default workspace build is headless.
+A pinned winit source patch prevents duplicate X11 wheel-release events;
+its provenance and license are retained under `third_party/winit`.
 Tauri is an optional alternate frontend and requires its platform SDKs.
 
 ```sh

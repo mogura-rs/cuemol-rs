@@ -57,6 +57,10 @@ impl MouseEventHandler {
         }
     }
 
+    pub fn displacement(&self, x: f64, y: f64) -> (f64, f64) {
+        (x - self.start.0, y - self.start.1)
+    }
+
     pub fn state(&self) -> DragState {
         self.state
     }
@@ -68,33 +72,44 @@ impl MouseEventHandler {
         self.buf.push_back(s);
     }
 
-    /// Button pressed: reset the buffer and enter the `Down` state.
-    pub fn button_down(&mut self, t_ms: i64, x: f64, y: f64) {
+    pub fn button_down(&mut self, _t_ms: i64, x: f64, y: f64) {
+        if self.state != DragState::None {
+            return;
+        }
         self.buf.clear();
-        self.push(DragSample { t_ms, x, y });
         self.state = DragState::Down;
         self.start = (x, y);
         self.prev = (x, y);
     }
 
-    /// Pointer moved: record the sample and return the `(dx, dy)` delta from the
-    /// previous position. Transitions `Down -> Drag` once the pointer leaves the
-    /// 2-pixel start range (C++ "Drag Start Range").
     pub fn move_to(&mut self, t_ms: i64, x: f64, y: f64) -> (f64, f64) {
-        if self.state == DragState::Down
-            && (x - self.start.0).abs() < 2.0
-            && (y - self.start.1).abs() < 2.0
-        {
-            // Still within the start range: not yet a drag.
+        if self.state == DragState::None {
             return (0.0, 0.0);
         }
         if self.state == DragState::Down {
+            if (x - self.start.0).abs() < 2.0 && (y - self.start.1).abs() < 2.0 {
+                return (0.0, 0.0);
+            }
             self.state = DragState::Drag;
+            self.prev = (x, y);
+            self.buf.clear();
+            self.push(DragSample { t_ms, x, y });
+            return (0.0, 0.0);
         }
         let delta = (x - self.prev.0, y - self.prev.1);
         self.prev = (x, y);
         self.push(DragSample { t_ms, x, y });
         delta
+    }
+
+    pub fn release(&mut self, t_ms: i64, x: f64, y: f64) -> (DragState, Option<(f64, f64)>) {
+        if self.state == DragState::Drag {
+            self.push(DragSample { t_ms, x, y });
+        }
+        let velocity = self.velocity(t_ms);
+        let state = self.button_up();
+        self.buf.clear();
+        (state, velocity)
     }
 
     /// Button released: returns the state at release and resets to `None`.
@@ -213,9 +228,9 @@ mod tests {
         // A sub-2px move stays in Down (start range).
         assert_eq!(h.move_to(10, 101.0, 101.0), (0.0, 0.0));
         assert_eq!(h.state(), DragState::Down);
-        // A larger move enters Drag and reports the delta from the start.
+        // The first move starts dragging without changing the camera.
         let d = h.move_to(20, 110.0, 105.0);
-        assert_eq!(d, (10.0, 5.0));
+        assert_eq!(d, (0.0, 0.0));
         assert_eq!(h.state(), DragState::Drag);
         // The ring buffer never exceeds its capacity.
         for k in 0..40 {

@@ -23,6 +23,7 @@ pub mod tty_view;
 pub mod undo;
 pub mod view;
 pub mod view_cap;
+pub mod view_input;
 
 pub use camera::{Camera, CenterMark, StereoMode};
 pub use command::{

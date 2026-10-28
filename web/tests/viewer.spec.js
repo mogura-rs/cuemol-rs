@@ -63,7 +63,7 @@ test('wgpu structure display, mouse controls, commands, undo, and embedded scene
   await page.mouse.move(480,400);await page.mouse.wheel(0,-120);
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().view.zoom)).not.toBe(initial);
   const slab=(await page.evaluate(()=>window.cuemol.status())).view.slab;
-  await page.keyboard.down('Shift');await page.mouse.wheel(0,120);await page.keyboard.up('Shift');
+  await page.keyboard.down('Shift');await page.mouse.down();await page.mouse.move(540,400,{steps:6});await page.mouse.up();await page.keyboard.up('Shift');
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().view.slab)).not.toBe(slab);
   state=await call(page,'create_renderer',{objId:object,rendererType:'cpk'});
   expect(state.scene.objects[0].renderers).toHaveLength(2);
@@ -409,7 +409,7 @@ test('Tritium Inspector edits the selected object and toolbar undo restores it',
   await page.screenshot({path:testInfo.outputPath('tritium-inspector.png')});
 });
 
-test('Tritium viewport selection and right-drag zoom match the native controls',async({page})=>{
+test('Tritium viewport selection and right-drag pan match the native controls',async({page})=>{
   await ready(page);await load(page,'selection.pdb',Buffer.from(structure));
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
   const rect=await page.evaluate(()=>window.cuemol.status().ui.rects.Viewport);
@@ -420,8 +420,85 @@ test('Tritium viewport selection and right-drag zoom match the native controls',
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().selection)).toMatch(/^aid /);
   await call(page,'undo');
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().selection)).toBe('');
-  const before=await page.evaluate(()=>window.cuemol.status().view.zoom);
+  const before=await page.evaluate(()=>window.cuemol.status().view);
   await page.mouse.move(rect[0]+rect[2]/2,rect[1]+rect[3]/2);await page.mouse.down({button:'right'});
   await page.mouse.move(rect[0]+rect[2]/2,rect[1]+rect[3]/2+80,{steps:8});await page.mouse.up({button:'right'});
-  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().view.zoom)).not.toBe(before);
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().view.center)).not.toEqual(before.center);
+  expect((await page.evaluate(()=>window.cuemol.status())).view.zoom).toBe(before.zoom);
+});
+
+test('pointer threshold, axis locking and wheel scaling match C++ camera input',async({page})=>{
+  await page.addInitScript(()=>localStorage.setItem('cuemol.config','view_input:device\tmouse'));
+  await ready(page);await load(page,'input.pdb',Buffer.from(structure));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  await call(page,'set_view',{zoom:50,slab:50,distance:200,center:[0,0,0]});
+  const rect=await page.evaluate(()=>window.cuemol.status().ui.rects.Viewport);
+  const x=Math.ceil(rect[0]+rect[2]/2),y=Math.ceil(rect[1]+rect[3]/2);
+  const initial=(await page.evaluate(()=>window.cuemol.status())).view;
+  await page.mouse.move(x,y);await page.mouse.down();await page.mouse.move(x+1,y+1);
+  await page.waitForTimeout(40);
+  expect((await page.evaluate(()=>window.cuemol.status())).view.rotation).toEqual(initial.rotation);
+  await page.mouse.move(x+2,y+1);await page.waitForTimeout(40);
+  expect((await page.evaluate(()=>window.cuemol.status())).view.rotation).toEqual(initial.rotation);
+  await page.mouse.move(x+12,y+5);await page.mouse.up();
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().view.rotation)).not.toEqual(initial.rotation);
+  await page.keyboard.down('Shift');await page.mouse.move(x,y);await page.mouse.down();
+  await page.mouse.move(x+3,y);await page.mouse.move(x+23,y+1);await page.mouse.move(x+24,y+31);await page.mouse.up();await page.keyboard.up('Shift');
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().view.slab)).toBeCloseTo(50*1.1*1.005,9);
+  expect((await page.evaluate(()=>window.cuemol.status())).view.zoom).toBe(50);
+  await page.mouse.wheel(0,-120);
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().view.zoom)).toBe(38);
+  expect((await page.evaluate(()=>window.cuemol.status())).view.distance).toBe(200);
+  const before=(await page.evaluate(()=>window.cuemol.status())).view;
+  await page.keyboard.down('Shift');await page.mouse.wheel(0,120);await page.keyboard.up('Shift');await page.waitForTimeout(60);
+  expect((await page.evaluate(()=>window.cuemol.status())).view).toEqual(before);
+  await call(page,'execute_script',{source:"getService('ViewInputConfig').conf_zoom='SHIFT|WHEEL2';"});
+  await page.keyboard.down('Shift');await page.mouse.wheel(0,100);await page.keyboard.up('Shift');
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().view.zoom)).toBeCloseTo(45.6,9);
+});
+
+test('saved trackpad input pans, pinches and survives a reload',async({page})=>{
+  await page.addInitScript(()=>localStorage.setItem('cuemol.config','view_input:device\ttrackpad\ncuemol2.ui.viewinconf\tDefaultViewInConf'));
+  await ready(page);await load(page,'trackpad.pdb',Buffer.from(structure));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  await call(page,'set_view',{zoom:50,slab:50,distance:200,center:[0,0,0]});
+  let rect=await page.evaluate(()=>window.cuemol.status().ui.rects.Viewport);
+  await page.mouse.move(rect[0]+rect[2]/2,rect[1]+rect[3]/2);await page.mouse.wheel(20,40);
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().view.center[0])).toBeCloseTo(-8*50/rect[3],9);
+  let view=(await page.evaluate(()=>window.cuemol.status())).view;
+  expect(view.center[1]).toBeCloseTo(16*50/rect[3],9);expect(view.zoom).toBe(50);
+  await page.keyboard.down('Control');await page.mouse.wheel(0,-10);await page.keyboard.up('Control');
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().view.zoom)).toBe(42);
+  await page.reload();await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId)).toBeGreaterThan(0);
+  rect=await page.evaluate(()=>window.cuemol.status().ui.rects.Viewport);
+  const initial=(await page.evaluate(()=>window.cuemol.status())).view;
+  await page.mouse.move(rect[0]+rect[2]/2,rect[1]+rect[3]/2);await page.mouse.wheel(0,40);
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().view.center)).not.toEqual(initial.center);
+  expect((await page.evaluate(()=>window.cuemol.status())).view.zoom).toBe(initial.zoom);
+});
+
+test('input settings capture their own events and persist across reloads',async({page})=>{
+  await ready(page);await load(page,'settings.pdb',Buffer.from(structure));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  await call(page,'set_view',{zoom:50,slab:50,distance:200,center:[0,0,0]});
+  const clickRect=async key=>{
+    await expect.poll(()=>page.evaluate(key=>window.cuemol.status().ui.rects[key]?.length,key)).toBe(4);
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    const r=await page.evaluate(key=>window.cuemol.status().ui.rects[key],key);
+    await page.mouse.click(r[0]+r[2]/2,r[1]+r[3]/2);
+  };
+  await clickRect('Tools menu');await clickRect('Settings');
+  await clickRect('Input device');await clickRect('input:view_input:device:trackpad');
+  await expect.poll(()=>page.evaluate(()=>localStorage.getItem('cuemol.config'))).toContain('view_input:device\ttrackpad');
+  const before=(await page.evaluate(()=>window.cuemol.status())).view;
+  const field=await page.evaluate(()=>window.cuemol.status().ui.rects['Input device']);
+  await page.mouse.move(field[0]+field[2]/2,field[1]+field[3]/2);await page.mouse.wheel(0,120);
+  await page.waitForTimeout(80);
+  expect((await page.evaluate(()=>window.cuemol.status())).view).toEqual(before);
+  await page.reload();await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId)).toBeGreaterThan(0);
+  const rect=await page.evaluate(()=>window.cuemol.status().ui.rects.Viewport);
+  const initial=(await page.evaluate(()=>window.cuemol.status())).view;
+  await page.mouse.move(rect[0]+rect[2]/2,rect[1]+rect[3]/2);await page.mouse.wheel(0,40);
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().view.center)).not.toEqual(initial.center);
+  expect((await page.evaluate(()=>window.cuemol.status())).view.zoom).toBe(initial.zoom);
 });

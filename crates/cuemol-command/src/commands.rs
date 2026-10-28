@@ -261,15 +261,15 @@ pub fn call_tool(
         }
         "rotate_view" => {
             let axis=match text(args,"axis")? {"x"=>Vector4::new3(1.,0.,0.),"y"=>Vector4::new3(0.,1.,0.),_=>Vector4::new3(0.,0.,1.)};
-            camera.set_rotation(Quat::from_axis_angle(axis,args["angle"].as_f64().unwrap().to_radians())?.mul_quat(camera.rotation()));
+            camera.set_rotation(camera.rotation().mul_quat(Quat::from_axis_angle(axis,args["angle"].as_f64().unwrap().to_radians())?).normalize()?);
             Ok(view_json(camera))
         }
         "pan_view" => {
-            let mut view=View::new(Uid::new(1),scene(state)?);view.set_camera(camera);view.set_view_size(800,600);
-            let delta=Vector4::new3(args["dx"].as_f64().unwrap(),args["dy"].as_f64().unwrap(),args["dz"].as_f64().unwrap_or(0.));
-            let scale=camera.zoom()/600.;
-            let mut world=delta.scale(scale);camera.rotation().to_matrix().xform3d(&mut world);
-            camera.set_center(camera.center()-world);Ok(view_json(camera))
+            let mut view=View::new(Uid::new(1),scene(state)?);view.set_camera(camera);
+            view.set_view_size(state.runtime_value("viewport:width").parse::<f64>().unwrap_or(800.0) as u32,
+                state.runtime_value("viewport:height").parse::<f64>().unwrap_or(600.0) as u32);
+            view.translate_view(args["dx"].as_f64().unwrap(),args["dy"].as_f64().unwrap(),args["dz"].as_f64().unwrap_or(0.0));
+            *camera=view.camera();Ok(view_json(camera))
         }
         "set_projection" => {if let Some(value)=args["perspective"].as_bool(){camera.set_perspective(value);}Ok(json!({"perspective":camera.is_perspective()}))}
         "list_cameras" => Ok(json!({"cameras":state.active_camera_summaries().iter().map(|c|json!({"name":c.name})).collect::<Vec<_>>()})),

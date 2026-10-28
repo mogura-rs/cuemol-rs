@@ -11,7 +11,7 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parent.parent
 REQUIRED = (
-    'index.html', 'kernels.js', 'oidn.js', 'pkg/cuemol_web.js',
+    'index.html', 'kernels.js', 'oidn.js', 'input.js', 'pkg/cuemol_web.js',
     'pkg/cuemol_web_bg.wasm', 'pkg/kernels/usalign.js', 'pkg/kernels/usalign.wasm',
     'pkg/kernels/lcms.js', 'pkg/kernels/lcms.wasm',
     'pkg/kernels/surface.js', 'pkg/kernels/surface.wasm',
@@ -78,7 +78,7 @@ def main():
     if output.exists():
         shutil.rmtree(output)
     output.mkdir(parents=True)
-    for name in ('index.html', 'kernels.js', 'oidn.js'):
+    for name in ('index.html', 'kernels.js', 'oidn.js', 'input.js'):
         shutil.copy2(source / name, output / name)
     shutil.copytree(source / 'pkg', output / 'pkg')
     manifest = {

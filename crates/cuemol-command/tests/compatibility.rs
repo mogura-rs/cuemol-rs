@@ -482,3 +482,45 @@ fn lighting_settings_roundtrip_and_ground_color_validation_are_atomic() {
     .is_err());
     assert_eq!(before, cuemol_command::render_settings(&state).unwrap());
 }
+
+#[test]
+fn camera_commands_use_screen_axes_and_current_viewport_height() {
+    use cuemol_core::{Quat, Vector4};
+    let mut state = DesktopAppState::new();
+    state.new_scene("camera", true);
+    state.put_runtime_value("viewport:width", "900");
+    state.put_runtime_value("viewport:height", "450");
+    let mut camera = Camera::new();
+    let initial = Quat::IDENTITY
+        .rotate_y(65.0)
+        .unwrap()
+        .rotate_z(-27.0)
+        .unwrap();
+    camera.set_rotation(initial);
+    call(
+        &mut state,
+        &mut camera,
+        "rotate_view",
+        json!({"axis":"x","angle":30.0}),
+    );
+    let expected = initial.rotate_x(30.0).unwrap();
+    let actual = camera.rotation();
+    for (a, b) in [
+        (actual.x, expected.x),
+        (actual.y, expected.y),
+        (actual.z, expected.z),
+        (actual.w, expected.w),
+    ] {
+        assert!((a - b).abs() < 1.0e-12);
+    }
+    call(
+        &mut state,
+        &mut camera,
+        "pan_view",
+        json!({"dx":12.0,"dy":-7.0,"dz":4.0}),
+    );
+    let mut delta = Vector4::new3(12.0 * 50.0 / 450.0, 7.0 * 50.0 / 450.0, -1.0);
+    expected.conj().to_matrix().xform3d(&mut delta);
+    assert!((camera.center() + delta).length() < 1.0e-12);
+    assert_eq!(camera.cam_dist(), 200.0);
+}

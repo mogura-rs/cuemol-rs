@@ -59,7 +59,7 @@ The single-scene timings should not be treated as a general speedup guarantee.
 
 ## Packaging
 
-The final Linux x86_64 archive was approximately 123 MiB and included the native
+At the earlier packaging checkpoint, the Linux x86_64 archive was approximately 123 MiB and included the native
 binary, embedded browser assets, and scientific tool bundle. Archive creation
 with gzip level three took 10.74 seconds in one local run. This excludes the
 native build and first-time tool downloads/builds.
@@ -275,3 +275,59 @@ Object-color documentation now states the solid default used for `$molcol`.
 Synthetic tests that expected molecular inheritance without `$molcol`, or a
 spline mesh for a physical chain with fewer than three residues, now express the
 reference's actual prerequisites.
+
+## Reference input comparison
+
+The native and browser viewports now use the shared `ViewInputController`.
+The read-only C++ oracle checks 3,862 camera states across Default, Coot, PyMOL,
+iPhone and Trackpad presets, modifier combinations, rotated cameras, different
+viewport sizes, custom and swapped bindings, axis locking and momentum. All
+states match within the numeric tolerance in `view_input_compat.rs`.
+The browser retains individual DOM events rather than summing them once per frame.
+The native adapter converts physical positions to logical viewport coordinates.
+
+The input implementation corrects the previous half-angle trackball error,
+independent Euler browser rotation, distance-changing zoom, fixed pan scale,
+ignored preset bindings, drag threshold, click timing and unconnected momentum.
+Command-based rotation and translation now use the same reference conventions.
+A real X11 wheel step produced a DOM delta of 120 in Chromium. The native
+adapter now uses that same conversion. Cocoa wheel ticks use 40 pixels, while
+Windows uses the configured system line/character counts and Chromium's
+100/3 pixels-per-line conversion. Sources:
+[Chromium Cocoa input](https://github.com/chromium/chromium/blob/main/components/input/web_input_event_builders_mac.mm),
+[Cocoa tick scale](https://github.com/chromium/chromium/blob/main/ui/events/cocoa/cocoa_event_utils.h),
+and [Windows input](https://github.com/chromium/chromium/blob/main/ui/events/blink/web_input_event_builders_win.cc).
+
+The README and browser help previously documented the earlier custom mappings
+(middle-drag pan, right-drag zoom, Shift-wheel slab and Ctrl-wheel depth). They
+now describe the reference Default preset and explain how to select another
+preset. Earlier mouse smoke checks in this report describe that previous mapping.
+The optional snapshot-test comment also now identifies the Tritium layout rather
+than the older XUL inventory.
+
+The native event checks also found that replacing a camera discarded the last
+pointer position. That position now belongs to the GUI, so an MCP camera update
+no longer prevents the next drag from starting. Both frontends exclude floating
+windows and menus from viewport input. A browser interaction test changes the
+input device through Settings, confirms that the dialog captures wheel events,
+and reloads the viewer to verify the saved trackpad behavior.
+
+The pinned winit XInput2 path emitted a wheel event on both button press and
+release. A source patch drops only releases of wheel buttons 4 through 7;
+valuator scrolling is unchanged. The upstream archive checksum, commit and
+license are retained with the patch, and release packages include its notices.
+
+The final native X11 interaction check matched one wheel step from zoom 50 to
+38, retained the camera distance, and checked the drag threshold, pan transform
+and both Shift-drag axis locks. A floating Options window captured the wheel;
+selecting Trackpad changed scrolling to translation and survived a full process
+restart. The old multi-touch checkbox is represented by the input-device selector;
+legacy enabled values migrate to Trackpad until an explicit device is selected.
+
+At the input checkpoint, the shared workspace passed 1,149 tests and the alternate
+shell passed 69 tests. Native GUI suites passed 162 tests each on Linux and macOS.
+The browser suite's 20 existing cases passed, and its additional Settings case
+passed after correcting the test's menu-transition wait. After the final device
+migration change, all four input/render-cancellation browser cases passed again.
+Distribution-helper tests passed six cases. The native and browser adapters were
+also checked against the C++ input oracle and actual window events described above.

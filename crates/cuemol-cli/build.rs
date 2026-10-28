@@ -18,6 +18,7 @@ fn main() {
         ("pkg/cuemol_web_bg.wasm", "application/wasm"),
         ("kernels.js", "text/javascript; charset=utf-8"),
         ("oidn.js", "text/javascript; charset=utf-8"),
+        ("input.js", "text/javascript; charset=utf-8"),
         ("pkg/oidn/oidn.js", "text/javascript; charset=utf-8"),
         ("pkg/oidn/rt_hdr_calb_cnrm.tza", "application/octet-stream"),
         ("pkg/oidn/OIDN-WebGPU-LICENSE", "text/plain; charset=utf-8"),

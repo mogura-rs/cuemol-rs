@@ -164,7 +164,7 @@ fn build(args: &[String]) -> Result<()> {
             .arg(out.join("pkg/oidn")),
     )?;
     if out != root.join("web") {
-        for name in ["index.html", "kernels.js", "oidn.js"] {
+        for name in ["index.html", "kernels.js", "oidn.js", "input.js"] {
             std::fs::copy(root.join("web").join(name), out.join(name))
                 .map_err(|e| e.to_string())?;
         }

@@ -2121,6 +2121,46 @@ impl DesktopAppState {
     }
 
     #[cfg(feature = "scripting")]
+    pub fn resolved_view_input(&self, trackpad: bool) -> cuemol_qsys::ViewInputConfig {
+        let mut config = self.script_view_input_config.clone();
+        if config.style().is_empty() {
+            config.set_style(self.config_value("cuemol2.ui.viewinconf"));
+            if let Ok(value) = self.config_value("view_input:tbrad").parse() {
+                config.set_tbrad(value);
+            }
+            if let Ok(value) = self.config_value("view_input:hitprec").parse() {
+                config.set_hitprec(value);
+            }
+        }
+        let style = config.style().to_string();
+        let preference = self.config_value("view_input:device");
+        if style.is_empty()
+            || matches!(
+                style.split(',').next(),
+                Some("DefaultViewInConf" | "TrackpadViewInConf")
+            )
+        {
+            let use_trackpad = match preference.as_str() {
+                "mouse" => false,
+                "trackpad" => true,
+                _ if style.starts_with("TrackpadViewInConf") => true,
+                _ if preference.is_empty()
+                    && self.config_value("cuemol2.ui.mouse-multitouch-pad") == "true" =>
+                {
+                    true
+                }
+                _ => trackpad,
+            };
+            config.set_style(if use_trackpad {
+                "TrackpadViewInConf,UserViewConf"
+            } else {
+                "DefaultViewInConf,UserViewConf"
+            });
+        }
+        config.resolved(&self.script_styles)
+    }
+
+    #[cfg(feature = "scripting")]
     pub fn view_input_config_mut(&mut self) -> &mut cuemol_qsys::ViewInputConfig {
         &mut self.script_view_input_config
     }
@@ -42612,7 +42652,7 @@ impl DesktopAppState {
             _ctx: &mut Context,
         ) -> JsResult<JsValue> {
             Ok(script_env::with(|env| {
-                let config = &env.view_input_config;
+                let config = env.view_input_config.resolved(&env.styles);
                 match property {
                     InputConfigProperty::RotX => JsString::from(config.conf_rotx().as_str()).into(),
                     InputConfigProperty::RotY => JsString::from(config.conf_roty().as_str()).into(),

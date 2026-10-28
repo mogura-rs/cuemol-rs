@@ -1491,10 +1491,16 @@ struct GuiApplication {
     show_get_pdb: bool,
     show_console: bool,
     viewport_rect: Option<egui::Rect>,
+    viewport_overlays: Vec<egui::Rect>,
+    last_cursor: Option<egui::Pos2>,
     pixels_per_point: f32,
     shift_down: bool,
     ctrl_down: bool,
-    last_atom_click: Option<(Instant, egui::Pos2)>,
+    input: cuemol_qsys::view_input::ViewInputController,
+    input_device: cuemol_qsys::view_input::InputDeviceDetector,
+    input_origin: Instant,
+    input_buttons: i32,
+    alt_down: bool,
     rect_select_start: Option<egui::Pos2>,
     rect_select_current: Option<egui::Pos2>,
     viewport_menu: Option<ViewportMenu>,
@@ -2804,10 +2810,10 @@ struct NativePreferences {
     ui_language: String,
     use_hidpi: bool,
     mouse_preset: String,
+    input_device: String,
     trackball_radius: f64,
     hit_precision: f64,
     momentum_scroll: bool,
-    multitouch_pad: bool,
     emulate_right_button: bool,
     shortcuts: Vec<NativeShortcut>,
 }
@@ -4709,6 +4715,14 @@ impl NativePreferences {
             atom_label_bold: state.style_value(0, "", "DefaultLabel.font_weight") == "bold",
             ui_language: nonempty_or(state.config_value("general.useragent.locale"), "en-US"),
             use_hidpi: config_bool(state, "cuemol2.ui.view.use_hidpi", false),
+            input_device: nonempty_or(
+                state.config_value("view_input:device"),
+                if config_bool(state, "cuemol2.ui.mouse-multitouch-pad", false) {
+                    "trackpad"
+                } else {
+                    "auto"
+                },
+            ),
             mouse_preset: nonempty_or(
                 state.config_value("cuemol2.ui.viewinconf"),
                 "DefaultViewInConf",
@@ -4716,7 +4730,6 @@ impl NativePreferences {
             trackball_radius: input.tbrad(),
             hit_precision: input.hitprec(),
             momentum_scroll: config_bool(state, "cuemol2.ui.mouse-momentum-scroll", false),
-            multitouch_pad: config_bool(state, "cuemol2.ui.mouse-multitouch-pad", false),
             emulate_right_button: config_bool(state, "cuemol2.ui.mouse-emulate-rbutton", false),
             shortcuts: ["view-trans-plusx", "view-trans-minusx"]
                 .into_iter()
@@ -5140,10 +5153,16 @@ impl GuiApplication {
             show_get_pdb: false,
             show_console: false,
             viewport_rect: None,
+            viewport_overlays: Vec::new(),
+            last_cursor: None,
             pixels_per_point: 1.0,
             shift_down: false,
             ctrl_down: false,
-            last_atom_click: None,
+            input: Default::default(),
+            input_device: Default::default(),
+            input_origin: Instant::now(),
+            input_buttons: 0,
+            alt_down: false,
             rect_select_start: None,
             rect_select_current: None,
             viewport_menu: None,
@@ -5404,8 +5423,27 @@ impl GuiApplication {
     }
 
     fn ui(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
+        let mut input_camera = camera.to_qsys_camera("__current");
+        let height = self.viewport_rect.map_or(600.0, |r| r.height()) as f64;
+        if self.input.tick(
+            &mut input_camera,
+            height,
+            self.input_origin.elapsed().as_millis() as i64,
+        ) {
+            camera.apply_input_camera(&input_camera);
+        }
+        if self.input.is_animating() {
+            ctx.request_repaint();
+        }
+
+        if let Some(rect) = self.viewport_rect {
+            self.state
+                .put_runtime_value("viewport:width", rect.width().to_string());
+            self.state
+                .put_runtime_value("viewport:height", rect.height().to_string());
+        }
         self.agent_ui(ctx, camera);
-        if !ctx.wants_keyboard_input() && self.pointer_in_viewport(camera.last_cursor) {
+        if !ctx.wants_keyboard_input() && self.pointer_in_viewport(self.last_cursor) {
             if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Home)) {
                 camera.fit_snapshot(&self.snapshot);
             }
@@ -5475,6 +5513,14 @@ impl GuiApplication {
         self.updates.show(ctx);
         self.dialogs(ctx, camera);
         self.keyboard_shortcuts(ctx, camera);
+        let layers = ctx.memory(|memory| memory.areas().visible_layer_ids());
+        self.viewport_overlays = layers
+            .into_iter()
+            .filter(|layer| layer.order != egui::Order::Background)
+            .filter_map(|layer| egui::AreaState::load(ctx, layer.id))
+            .filter(|area| area.interactable)
+            .map(|area| area.rect())
+            .collect();
         if self.pdb_download_receiver.is_some()
             || self.url_download_receiver.is_some()
             || self.animation_render_job.is_some()
@@ -17878,7 +17924,11 @@ impl GuiApplication {
                 continue;
             };
             if ctx.input_mut(|input| input.consume_shortcut(&shortcut)) {
-                camera.pan_by(direction * 24.0, 0.0);
+                camera.translate_view(
+                    0,
+                    direction * 24.0,
+                    self.viewport_rect.map_or(600.0, |r| r.height()),
+                );
                 self.set_status(if direction > 0.0 {
                     "Translated view +X"
                 } else {
@@ -21074,6 +21124,13 @@ impl GuiApplication {
     }
 
     fn options_mouse_ui(ui: &mut egui::Ui, draft: &mut NativePreferences) {
+        egui::ComboBox::from_label("Input device")
+            .selected_text(&draft.input_device)
+            .show_ui(ui, |ui| {
+                for value in ["auto", "mouse", "trackpad"] {
+                    ui.selectable_value(&mut draft.input_device, value.into(), value);
+                }
+            });
         egui::ComboBox::from_label("View operation preset")
             .selected_text(mouse_preset_label(&draft.mouse_preset))
             .show_ui(ui, |ui| {
@@ -21101,7 +21158,6 @@ impl GuiApplication {
                 ui.end_row();
             });
         ui.checkbox(&mut draft.momentum_scroll, "Momentum scroll");
-        ui.checkbox(&mut draft.multitouch_pad, "Enable multi-touch trackpad");
         ui.checkbox(&mut draft.emulate_right_button, "Emulate mouse R button");
     }
 
@@ -21189,15 +21245,12 @@ impl GuiApplication {
                 preferences.use_hidpi.to_string(),
             ),
             ("cuemol2.ui.viewinconf", preferences.mouse_preset.clone()),
+            ("view_input:device", preferences.input_device.clone()),
             ("view_input:tbrad", preferences.trackball_radius.to_string()),
             ("view_input:hitprec", preferences.hit_precision.to_string()),
             (
                 "cuemol2.ui.mouse-momentum-scroll",
                 preferences.momentum_scroll.to_string(),
-            ),
-            (
-                "cuemol2.ui.mouse-multitouch-pad",
-                preferences.multitouch_pad.to_string(),
             ),
             (
                 "cuemol2.ui.mouse-emulate-rbutton",
@@ -31059,210 +31112,192 @@ impl GuiApplication {
     }
 
     fn handle_window_event(&mut self, event: &WindowEvent, camera: &mut CameraController) -> bool {
-        match event {
+        use cuemol_qsys::view_input::{self as input, PointerRelease};
+        let time = self.input_origin.elapsed().as_millis() as i64;
+        let rect = self.viewport_rect.unwrap_or(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(800.0, 600.0),
+        ));
+        let size = [rect.width() as f64, rect.height() as f64];
+        let local = |point: egui::Pos2| {
+            [
+                (point.x - rect.left()) as f64,
+                (point.y - rect.top()) as f64,
+            ]
+        };
+        let config = self.state.resolved_view_input(self.input_device.trackpad);
+        let keys = if self.shift_down { input::SHIFT } else { 0 }
+            | if self.ctrl_down { input::CTRL } else { 0 };
+        let wheel_keys = keys | if self.alt_down { input::ALT } else { 0 };
+        self.input.translate_momentum =
+            camera.trans_mms || config_bool(&self.state, "cuemol2.ui.mouse-momentum-scroll", false);
+        self.input.rotate_momentum =
+            camera.rot_mms || config_bool(&self.state, "cuemol2.ui.mouse-momentum-scroll", false);
+        let mut value = camera.to_qsys_camera("__current");
+        let changed = match event {
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.shift_down = modifiers.state().shift_key();
                 self.ctrl_down = modifiers.state().control_key();
+                self.alt_down = modifiers.state().alt_key();
                 false
             }
-            WindowEvent::MouseInput { state, button, .. } => match state {
-                ElementState::Pressed if self.pointer_in_viewport(camera.last_cursor) => {
-                    if *button == MouseButton::Left
-                        && self.interaction_mode == InteractionMode::RectSelect
+            WindowEvent::MouseInput { state, button, .. } => {
+                let bit = match button {
+                    MouseButton::Left => input::LEFT,
+                    MouseButton::Middle => input::MIDDLE,
+                    MouseButton::Right => input::RIGHT,
+                    _ => 0,
+                };
+                if *state == ElementState::Pressed {
+                    self.input_buttons |= bit;
+                    if let Some(position) = self
+                        .last_cursor
+                        .filter(|p| self.pointer_in_viewport(Some(*p)))
                     {
-                        self.rect_select_start = camera.last_cursor;
-                        self.rect_select_current = camera.last_cursor;
-                        camera.drag_mode = None;
-                        camera.last_drag_cursor = None;
-                        camera.drag_total = 0.0;
                         self.viewport_menu = None;
-                        return self.rect_select_start.is_some();
-                    }
-                    camera.drag_mode = self.camera_drag_mode(*button);
-                    camera.last_drag_cursor = camera.last_cursor;
-                    camera.drag_total = 0.0;
-                    self.viewport_menu = None;
-                    camera.drag_mode.is_some()
-                }
-                ElementState::Released => {
-                    if *button == MouseButton::Left {
-                        if let Some(start) = self.rect_select_start.take() {
-                            let current = self
-                                .rect_select_current
-                                .take()
-                                .or(camera.last_cursor)
-                                .unwrap_or(start);
-                            camera.drag_mode = None;
-                            camera.last_drag_cursor = None;
-                            camera.drag_total = 0.0;
-                            self.select_atoms_in_screen_rect(
-                                camera,
-                                egui::Rect::from_two_pos(start, current),
-                            );
-                            return true;
+                        if *button == MouseButton::Left
+                            && self.interaction_mode == InteractionMode::RectSelect
+                        {
+                            self.input.cancel();
+                            self.rect_select_start = Some(position);
+                            self.rect_select_current = Some(position);
+                        } else {
+                            self.input.pointer_down(time, local(position));
                         }
+                        true
+                    } else {
+                        false
                     }
-                    let was_dragging = camera.drag_mode.is_some();
-                    let in_viewport = self.pointer_in_viewport(camera.last_cursor);
-                    let is_click = camera.drag_total < 4.0 && in_viewport;
-                    let should_pick = *button == MouseButton::Left
-                        && camera.drag_mode == Some(CameraDragMode::Rotate)
-                        && is_click;
-                    if should_pick {
-                        if let Some(position) = camera.last_cursor {
-                            let double_click = self.last_atom_click.is_some_and(|(time, last)| {
-                                time.elapsed() < Duration::from_millis(400)
-                                    && last.distance(position) < 5.0
-                            });
-                            if double_click {
-                                self.center_at_pointer(camera, position);
-                                self.last_atom_click = None;
-                            } else {
-                                self.pick_atom_at(camera, position);
-                                self.last_atom_click = Some((Instant::now(), position));
+                } else {
+                    self.input_buttons &= !bit;
+                    if let Some(start) = self
+                        .rect_select_start
+                        .take()
+                        .filter(|_| *button == MouseButton::Left)
+                    {
+                        let current = self
+                            .rect_select_current
+                            .take()
+                            .or(self.last_cursor)
+                            .unwrap_or(start);
+                        self.select_atoms_in_screen_rect(
+                            camera,
+                            egui::Rect::from_two_pos(start, current),
+                        );
+                        true
+                    } else if let Some(position) = self.last_cursor {
+                        let release =
+                            self.input
+                                .pointer_up(&value, &config, size, time, local(position));
+                        if self.pointer_in_viewport(Some(position)) {
+                            match (button, release) {
+                                (MouseButton::Left, PointerRelease::Click) => {
+                                    self.pick_atom_at(camera, position);
+                                }
+                                (MouseButton::Left, PointerRelease::DoubleClick) => {
+                                    self.center_at_pointer(camera, position);
+                                }
+                                (
+                                    MouseButton::Right,
+                                    PointerRelease::Click | PointerRelease::DoubleClick,
+                                ) => {
+                                    self.viewport_menu = Some(ViewportMenu {
+                                        pos: position,
+                                        hit: self.pick_hit(camera, position),
+                                    });
+                                }
+                                _ => {}
                             }
                         }
+                        return release != PointerRelease::None;
+                    } else {
+                        false
                     }
-                    // Right-click (no drag) opens the atom context menu
-                    // (CueMol2 `navi-ctxtmenu-atom`).
-                    let should_menu = *button == MouseButton::Right && is_click;
-                    if should_menu {
-                        if let Some(position) = camera.last_cursor {
-                            let hit = self.pick_hit(camera, position);
-                            self.viewport_menu = Some(ViewportMenu { pos: position, hit });
-                        }
-                    }
-                    camera.drag_mode = None;
-                    camera.last_drag_cursor = None;
-                    camera.drag_total = 0.0;
-                    was_dragging
                 }
-                _ => false,
-            },
-            WindowEvent::CursorLeft { .. } => {
-                camera.last_cursor = None;
-                camera.last_drag_cursor = None;
-                camera.drag_mode = None;
-                camera.drag_total = 0.0;
+            }
+            WindowEvent::Focused(false) => {
+                self.input.cancel();
+                self.input_buttons = 0;
                 self.rect_select_start = None;
                 self.rect_select_current = None;
                 true
             }
-            WindowEvent::CursorMoved { position, .. } => {
-                let pos = self.cursor_position_points(position.x, position.y);
-                if self.rect_select_start.is_some() {
-                    self.rect_select_current = Some(pos);
-                    camera.last_cursor = Some(pos);
-                    return true;
+            WindowEvent::CursorLeft { .. } => {
+                if !self.input.is_pressed() && self.rect_select_start.is_none() {
+                    self.last_cursor = None;
                 }
-                let mut changed = false;
-                if let Some(mode) = camera.drag_mode {
-                    if let Some(last) = camera.last_drag_cursor {
-                        let dx = pos.x - last.x;
-                        let dy = pos.y - last.y;
-                        match mode {
-                            CameraDragMode::Rotate => match self.viewport_rect {
-                                Some(rect) => {
-                                    let width = rect.width().max(1.0);
-                                    let height = rect.height().max(1.0);
-                                    camera.trackball_move(
-                                        ((pos.x - rect.left()) / width) as f64,
-                                        ((pos.y - rect.top()) / height) as f64,
-                                        ((last.x - rect.left()) / width) as f64,
-                                        ((last.y - rect.top()) / height) as f64,
-                                        self.state.view_input_config().tbrad(),
-                                    );
-                                }
-                                None => camera.rotate_by(dx, dy),
-                            },
-                            CameraDragMode::Pan => camera.pan_by(dx, dy),
-                            // Drag up to zoom in, down to zoom out.
-                            CameraDragMode::Zoom => camera.zoom_by(-dy * 0.1),
-                            CameraDragMode::Slab => camera.adjust_slab(dy * 0.1),
-                            CameraDragMode::Depth => camera.translate_depth(dy * 0.05),
-                        }
-                        camera.drag_total += dx.abs() + dy.abs();
-                        changed = dx != 0.0 || dy != 0.0;
-                    }
-                    camera.last_drag_cursor = Some(pos);
-                }
-                camera.last_cursor = Some(pos);
-                changed
+                false
             }
-            WindowEvent::MouseWheel { delta, .. } => {
-                if !self.pointer_in_viewport(camera.last_cursor) {
-                    return false;
-                }
-                let (x, y, step) = match delta {
-                    MouseScrollDelta::LineDelta(x, y) => (*x * 24.0, *y * 24.0, *y),
-                    MouseScrollDelta::PixelDelta(pos) => {
-                        (pos.x as f32, pos.y as f32, pos.y as f32 / 48.0)
+            WindowEvent::CursorMoved { position, .. } => {
+                let point = self.cursor_position_points(position.x, position.y);
+                self.last_cursor = Some(point);
+                if self.rect_select_start.is_some() {
+                    self.rect_select_current = Some(point);
+                    true
+                } else {
+                    let mut modifiers = self.input_buttons | keys;
+                    if modifiers == input::LEFT | input::CTRL
+                        && config_bool(&self.state, "cuemol2.ui.mouse-emulate-rbutton", false)
+                    {
+                        modifiers = input::RIGHT;
                     }
+                    self.input.pointer_move(
+                        &mut value,
+                        &config,
+                        size,
+                        time,
+                        local(point),
+                        modifiers,
+                    )
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } if self.pointer_in_viewport(self.last_cursor) => {
+                let (delta, mode) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => native_wheel_lines(*x as f64, *y as f64),
+                    MouseScrollDelta::PixelDelta(point) => (
+                        [
+                            -point.x / self.pixels_per_point as f64,
+                            -point.y / self.pixels_per_point as f64,
+                        ],
+                        0,
+                    ),
                 };
-                if self.shift_down {
-                    camera.adjust_slab(step);
-                    return step != 0.0;
-                }
-                if self.ctrl_down {
-                    camera.translate_depth(step);
-                    return step != 0.0;
-                }
-                if self.state.view_input_config().style() == "TrackpadViewInConf"
-                    && config_bool(&self.state, "cuemol2.ui.mouse-multitouch-pad", false)
-                    && !self.ctrl_down
-                {
-                    camera.pan_by(x, y);
-                    return x != 0.0 || y != 0.0;
-                }
-                camera.zoom_by(step);
-                step != 0.0
+                let result = self
+                    .input
+                    .wheel(&mut value, &config, size[1], delta, wheel_keys);
+                self.input_device
+                    .wheel(time, delta, mode, cfg!(target_os = "macos"));
+                result
+            }
+            WindowEvent::PinchGesture { delta, .. }
+                if self.pointer_in_viewport(self.last_cursor) =>
+            {
+                let result = self.input.gesture(
+                    &mut value,
+                    &config,
+                    size[1],
+                    6,
+                    -delta.ln_1p() * 100.0,
+                    wheel_keys,
+                );
+                self.input_device.gesture(time);
+                result
+            }
+            WindowEvent::RotationGesture { delta, .. }
+                if self.pointer_in_viewport(self.last_cursor) =>
+            {
+                let result =
+                    self.input
+                        .gesture(&mut value, &config, size[1], 7, *delta as f64, wheel_keys);
+                self.input_device.gesture(time);
+                result
             }
             _ => false,
+        };
+        if changed {
+            camera.apply_input_camera(&value);
         }
-    }
-
-    fn camera_drag_mode(&self, button: MouseButton) -> Option<CameraDragMode> {
-        if button == MouseButton::Right && self.shift_down {
-            return Some(CameraDragMode::Slab);
-        }
-        if button == MouseButton::Right && self.ctrl_down {
-            return Some(CameraDragMode::Depth);
-        }
-        if button == MouseButton::Left
-            && self.ctrl_down
-            && config_bool(&self.state, "cuemol2.ui.mouse-emulate-rbutton", false)
-        {
-            return Some(CameraDragMode::Pan);
-        }
-        match self.state.view_input_config().style() {
-            "CootViewInConf" => match (button, self.ctrl_down, self.shift_down) {
-                (MouseButton::Left, true, _) => Some(CameraDragMode::Pan),
-                (MouseButton::Left, false, true) | (MouseButton::Right, _, _) => {
-                    Some(CameraDragMode::Zoom)
-                }
-                (MouseButton::Left, false, false) => Some(CameraDragMode::Rotate),
-                _ => None,
-            },
-            "PymolViewInConf" => match button {
-                MouseButton::Left => Some(CameraDragMode::Rotate),
-                MouseButton::Middle => Some(CameraDragMode::Pan),
-                MouseButton::Right => Some(CameraDragMode::Zoom),
-                _ => None,
-            },
-            "IphoneViewInConf" => match (button, self.shift_down) {
-                (MouseButton::Left, true) => Some(CameraDragMode::Zoom),
-                (MouseButton::Left, false) => Some(CameraDragMode::Rotate),
-                (MouseButton::Right, _) => Some(CameraDragMode::Pan),
-                _ => None,
-            },
-            _ => {
-                if button == MouseButton::Left && self.shift_down {
-                    Some(CameraDragMode::Zoom)
-                } else {
-                    CameraDragMode::from_button(button)
-                }
-            }
-        }
+        changed
     }
 
     fn cursor_position_points(&self, x: f64, y: f64) -> egui::Pos2 {
@@ -31272,7 +31307,13 @@ impl GuiApplication {
 
     fn pointer_in_viewport(&self, position: Option<egui::Pos2>) -> bool {
         match (self.viewport_rect, position) {
-            (Some(rect), Some(position)) => rect.contains(position),
+            (Some(rect), Some(position)) => {
+                rect.contains(position)
+                    && !self
+                        .viewport_overlays
+                        .iter()
+                        .any(|overlay| overlay.contains(position))
+            }
             (None, _) => true,
             _ => false,
         }
@@ -31459,6 +31500,10 @@ impl GuiApplication {
         object_filter: Option<cuemol_core::Uid>,
     ) -> Option<PickHit> {
         let viewport = self.viewport_rect?;
+        let hit_precision = self
+            .state
+            .resolved_view_input(self.input_device.trackpad)
+            .hitprec() as f32;
         let mut best: Option<(f32, PickHit)> = None;
         let selection = if object_filter.is_some() {
             ""
@@ -31484,7 +31529,7 @@ impl GuiApplication {
             };
             let radius = camera
                 .projected_radius(atom.radius, depth, viewport)
-                .max(self.state.view_input_config().hitprec() as f32);
+                .max(hit_precision);
             let distance = screen.distance(position);
             if distance > radius {
                 continue;
@@ -31513,7 +31558,7 @@ impl GuiApplication {
                     continue;
                 };
                 let distance = screen.distance(position);
-                if distance > self.state.view_input_config().hitprec() as f32 {
+                if distance > hit_precision {
                     continue;
                 }
                 let score = distance + depth * 0.001;
@@ -31563,36 +31608,12 @@ struct CameraController {
     stereo_distance: f32,
     swap_stereo_eyes: bool,
     center_mark: CenterMark,
-    drag_mode: Option<CameraDragMode>,
-    last_cursor: Option<egui::Pos2>,
-    last_drag_cursor: Option<egui::Pos2>,
-    drag_total: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PickHit {
     Atom { object_uid: u64, atom_index: usize },
     Lightweight { snapshot_index: usize },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CameraDragMode {
-    Rotate,
-    Pan,
-    /// Shift+left drag = zoom (CueMol2 default view-input preset).
-    Zoom,
-    Slab,
-    Depth,
-}
-
-impl CameraDragMode {
-    fn from_button(button: MouseButton) -> Option<Self> {
-        match button {
-            MouseButton::Left => Some(Self::Rotate),
-            MouseButton::Right | MouseButton::Middle => Some(Self::Pan),
-            _ => None,
-        }
-    }
 }
 
 impl Default for CameraController {
@@ -31611,15 +31632,25 @@ impl Default for CameraController {
             stereo_distance: 1.0,
             swap_stereo_eyes: false,
             center_mark: CenterMark::Cross,
-            drag_mode: None,
-            last_cursor: None,
-            last_drag_cursor: None,
-            drag_total: 0.0,
         }
     }
 }
 
 impl CameraController {
+    fn apply_input_camera(&mut self, camera: &cuemol_qsys::Camera) {
+        let center = camera.center();
+        let rotation = camera.rotation();
+        self.target = Vec3::new(center.x as f32, center.y as f32, center.z as f32);
+        self.orientation = Quat::from_xyzw(
+            rotation.x as f32,
+            rotation.y as f32,
+            rotation.z as f32,
+            rotation.w as f32,
+        );
+        self.ortho_scale = camera.zoom() as f32 * 0.5;
+        self.slab_depth = camera.slab_depth() as f32;
+    }
+
     fn fit_snapshot(&mut self, snapshot: &RenderSceneSnapshot) {
         let Some((min, max)) = snapshot.bounds else {
             return;
@@ -31634,6 +31665,7 @@ impl CameraController {
         self.slab_depth = (radius * 4.0).max(50.0);
     }
 
+    #[cfg(test)]
     fn rotate_by(&mut self, dx: f32, dy: f32) {
         // Virtual trackball: build an incremental rotation about the camera-local
         // axes (horizontal drag -> up axis, vertical drag -> right axis) and
@@ -31660,6 +31692,7 @@ impl CameraController {
     /// `m_curcam.m_rotQuat.mulSelf(dqrot)`. Unlike a pure incremental rotation,
     /// gestures near the viewport edge naturally introduce roll about the view
     /// axis, reproducing the original "grab and twist" feel.
+    #[cfg(test)]
     fn trackball_move(
         &mut self,
         cur_x: f64,
@@ -31668,29 +31701,23 @@ impl CameraController {
         prev_y: f64,
         trackball_radius: f64,
     ) {
-        let trackball_radius = trackball_radius.clamp(0.1, 10.0);
-        let x1 = 2.0 * prev_x - 1.0;
-        let y1 = 1.0 - 2.0 * prev_y;
-        let x2 = 2.0 * cur_x - 1.0;
-        let y2 = 1.0 - 2.0 * cur_y;
-        let p1 = project_trackball(x1, y1, trackball_radius);
-        let p2 = project_trackball(x2, y2, trackball_radius);
-        let axis = p2.cross(p1);
-        let axis_len = axis.length();
-        if !axis_len.is_finite() || axis_len < 1.0e-7 {
-            return;
+        let (axis, half_angle) = cuemol_qsys::view_input::trackball_rotation(
+            [cur_x, cur_y],
+            [prev_x, prev_y],
+            trackball_radius,
+        );
+        if let Ok(delta) = cuemol_core::Quat::from_axis_half_angle(axis, half_angle) {
+            let delta = Quat::from_xyzw(
+                delta.x as f32,
+                delta.y as f32,
+                delta.z as f32,
+                delta.w as f32,
+            );
+            self.orientation = (self.orientation * delta).normalize();
         }
-        let axis = axis / axis_len;
-        let chord = (p1 - p2).length() as f64;
-        let t = (chord / (2.0 * trackball_radius)).clamp(-1.0, 1.0);
-        let phi = 2.0 * t.asin();
-        if !phi.is_finite() || phi.abs() < 1.0e-5 {
-            return;
-        }
-        let dqrot = Quat::from_axis_angle(axis, phi as f32);
-        self.orientation = (self.orientation * dqrot).normalize();
     }
 
+    #[cfg(test)]
     fn pan_by(&mut self, dx: f32, dy: f32) {
         let rotation = self.rotation();
         let right = rotation * Vec3::X;
@@ -31704,26 +31731,17 @@ impl CameraController {
         self.target += up * dy * scale;
     }
 
+    #[cfg(test)]
     fn zoom_by(&mut self, step: f32) {
-        let factor = (1.0 - step * 0.08).clamp(0.05, 20.0);
-        self.distance = (self.distance * factor).clamp(1.0, 10000.0);
-        self.ortho_scale = (self.ortho_scale * factor).clamp(0.2, 10000.0);
+        self.set_zoom(self.zoom() * (1.0 - step * 0.08));
     }
 
     fn zoom(&self) -> f32 {
-        2.0 * self.ortho_scale.max(0.1)
+        2.0 * self.ortho_scale.max(0.00005)
     }
 
     fn set_zoom(&mut self, zoom: f32) {
-        self.ortho_scale = zoom.max(0.01) * 0.5;
-    }
-
-    fn adjust_slab(&mut self, step: f32) {
-        self.set_slab(self.slab_depth * (step * 0.08).clamp(-4.0, 4.0).exp());
-    }
-
-    fn translate_depth(&mut self, step: f32) {
-        self.target += self.rotation() * Vec3::Z * step * self.slab_depth.max(1.0) * 0.05;
+        self.ortho_scale = zoom.max(0.0001) * 0.5;
     }
 
     fn set_slab(&mut self, slab: f32) {
@@ -31740,7 +31758,7 @@ impl CameraController {
             return;
         }
         let delta = Quat::from_axis_angle(axis, delta_degrees.to_radians());
-        self.orientation = (delta * self.orientation).normalize();
+        self.orientation = (self.orientation * delta).normalize();
     }
 
     fn translate_view(&mut self, axis: usize, delta: f32, viewport_height: f32) {
@@ -31871,7 +31889,7 @@ center_mark\t{}\n",
         ));
         camera.set_cam_dist(self.distance as f64);
         camera.set_slab_depth(self.slab_depth as f64);
-        camera.set_zoom((2.0 * self.ortho_scale.max(0.1)) as f64);
+        camera.set_zoom((2.0 * self.ortho_scale.max(0.00005)) as f64);
         camera.set_perspective(self.perspective);
         camera.set_stereo_mode(self.stereo_mode);
         camera.set_stereo_distance(self.stereo_distance as f64);
@@ -34461,9 +34479,44 @@ fn normalized_or_identity(quat: Quat) -> Quat {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn native_wheel_lines(x: f64, y: f64) -> ([f64; 2], u32) {
+    ([-x * 40.0, -y * 40.0], 1)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn native_wheel_lines(x: f64, y: f64) -> ([f64; 2], u32) {
+    ([-x * 120.0, -y * 120.0], 1)
+}
+
+#[cfg(target_os = "windows")]
+fn native_wheel_lines(x: f64, y: f64) -> ([f64; 2], u32) {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn SystemParametersInfoW(action: u32, parameter: u32, value: *mut u32, flags: u32) -> i32;
+    }
+    let (mut lines, mut chars) = (3_u32, 1_u32);
+    // These queries write one UINT and do not change system preferences.
+    unsafe {
+        SystemParametersInfoW(0x0068, 0, &mut lines, 0);
+        SystemParametersInfoW(0x006c, 0, &mut chars, 0);
+    }
+    let page = lines == u32::MAX;
+    let vertical = if page {
+        1.0
+    } else {
+        lines as f64 * 100.0 / 3.0
+    };
+    (
+        [-x * chars as f64 * 100.0 / 3.0, -y * vertical],
+        if page { 2 } else { 1 },
+    )
+}
+
 /// Bell virtual-trackball projection: map a 2D point onto a sphere of radius
 /// `tkrad` near the center, or onto a hyperbolic sheet farther out. Mirrors
 /// `View::projSphere` in the original qsys/View.cpp.
+#[cfg(test)]
 fn project_trackball(x: f64, y: f64, tkrad: f64) -> Vec3 {
     let d = (x * x + y * y).sqrt();
     let z = if d < tkrad * std::f64::consts::FRAC_1_SQRT_2 {
@@ -36012,7 +36065,25 @@ mod tests {
         ));
         let mut app = GuiApplication::new();
         app.config_path = path.to_string_lossy().into_owned();
+        app.state
+            .put_config_value("cuemol2.ui.mouse-multitouch-pad", "true");
         let mut preferences = NativePreferences::from_state(&app.state);
+        assert_eq!(preferences.input_device, "trackpad");
+        assert!(app
+            .state
+            .resolved_view_input(false)
+            .style()
+            .starts_with("TrackpadViewInConf"));
+        app.state.put_config_value("view_input:device", "mouse");
+        assert_eq!(
+            NativePreferences::from_state(&app.state).input_device,
+            "mouse"
+        );
+        assert!(app
+            .state
+            .resolved_view_input(false)
+            .style()
+            .starts_with("DefaultViewInConf"));
         preferences.atom_label_font = "monospace".to_string();
         preferences.atom_label_size = 18.0;
         preferences.atom_label_color = "#123456".to_string();
@@ -36024,7 +36095,7 @@ mod tests {
         preferences.trackball_radius = 1.4;
         preferences.hit_precision = 16.0;
         preferences.momentum_scroll = true;
-        preferences.multitouch_pad = true;
+        preferences.input_device = "trackpad".to_string();
         preferences.emulate_right_button = true;
         preferences.shortcuts[0].key = "ArrowUp".to_string();
         preferences.shortcuts[1].key = "ArrowDown".to_string();
@@ -36044,21 +36115,17 @@ mod tests {
             app.state.config_value("shortcut:view-trans-plusx:key"),
             "ArrowUp"
         );
-        assert_eq!(
-            app.camera_drag_mode(MouseButton::Middle),
-            Some(CameraDragMode::Pan)
-        );
-        assert_eq!(
-            app.camera_drag_mode(MouseButton::Right),
-            Some(CameraDragMode::Pan)
-        );
-
+        let input = app.state.resolved_view_input(false);
+        assert_eq!(input.find_event(0, cuemol_qsys::view_input::MIDDLE), -1);
+        assert_eq!(input.find_event(0, cuemol_qsys::view_input::RIGHT), 5);
         app.state
             .view_input_config_mut()
             .set_style("PymolViewInConf");
         assert_eq!(
-            app.camera_drag_mode(MouseButton::Right),
-            Some(CameraDragMode::Zoom)
+            app.state
+                .resolved_view_input(false)
+                .find_event(0, cuemol_qsys::view_input::RIGHT),
+            4
         );
 
         let mut restored = GuiApplication::new();
@@ -36156,7 +36223,8 @@ mod tests {
         assert!((parsed.target.y - camera.target.y).abs() < 1.0e-5);
         assert!((parsed.target.z - camera.target.z).abs() < 1.0e-5);
         assert!(parsed.orientation.abs_diff_eq(camera.orientation, 1.0e-5));
-        assert!(parsed.distance < 120.0);
+        assert_eq!(parsed.distance, 120.0);
+        assert!(parsed.zoom() < 80.0);
         assert_eq!(parsed.name, camera.name);
         assert_eq!(parsed.slab_depth, camera.slab_depth);
         assert!(parsed.trans_mms);
@@ -36173,14 +36241,6 @@ mod tests {
         assert_eq!(qsys_camera.stereo_mode(), StereoMode::Cross);
         assert_eq!(qsys_camera.stereo_distance(), 2.25);
         assert_eq!(qsys_camera.center_mark(), cuemol_qsys::CenterMark::Axis);
-        assert_eq!(
-            CameraDragMode::from_button(MouseButton::Left),
-            Some(CameraDragMode::Rotate)
-        );
-        assert_eq!(
-            CameraDragMode::from_button(MouseButton::Right),
-            Some(CameraDragMode::Pan)
-        );
     }
 
     #[test]
@@ -41608,20 +41668,75 @@ mod tests {
     }
 
     #[test]
-    fn shift_left_drag_zooms_the_camera() {
+    fn native_pointer_events_use_logical_pixels_and_reference_drag_threshold() {
+        use winit::{
+            dpi::PhysicalPosition,
+            event::{DeviceId, TouchPhase},
+            keyboard::ModifiersState,
+        };
+        let mut app = GuiApplication::new();
+        app.pixels_per_point = 2.0;
+        app.viewport_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(100.0, 50.0),
+            egui::vec2(800.0, 600.0),
+        ));
         let mut camera = CameraController::default();
-        let start = camera.ortho_scale;
-        // Dragging up in zoom mode reduces ortho_scale (zoom in).
-        camera.zoom_by(-(-20.0) * 0.1);
-        assert!(
-            camera.ortho_scale < start,
-            "shift+left drag-up should zoom in"
+        let initial = camera.to_qsys_camera("__current");
+        let device_id = DeviceId::dummy();
+        let moved = |x, y| WindowEvent::CursorMoved {
+            device_id,
+            position: PhysicalPosition::new(x * 2.0, y * 2.0),
+        };
+        app.handle_window_event(&moved(500.0, 350.0), &mut camera);
+        camera = CameraController::from_qsys_camera(&initial);
+        app.handle_window_event(
+            &WindowEvent::ModifiersChanged(ModifiersState::SHIFT.into()),
+            &mut camera,
         );
+        app.handle_window_event(
+            &WindowEvent::MouseInput {
+                device_id,
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+            },
+            &mut camera,
+        );
+        app.handle_window_event(&moved(501.0, 351.0), &mut camera);
+        assert!(!app.input.is_dragging());
+        app.handle_window_event(&moved(502.0, 351.0), &mut camera);
+        assert!(app.input.is_dragging());
+        assert_eq!(camera.zoom(), initial.zoom() as f32);
+        app.handle_window_event(&moved(502.0, 371.0), &mut camera);
+        assert!((camera.zoom() - initial.zoom() as f32 * 1.1).abs() < 1.0e-5);
+        assert_eq!(camera.distance, initial.cam_dist() as f32);
+        app.handle_window_event(
+            &WindowEvent::MouseInput {
+                device_id,
+                state: ElementState::Released,
+                button: MouseButton::Left,
+            },
+            &mut camera,
+        );
+        app.handle_window_event(
+            &WindowEvent::ModifiersChanged(ModifiersState::empty().into()),
+            &mut camera,
+        );
+        let zoom = camera.zoom();
+        app.handle_window_event(
+            &WindowEvent::MouseWheel {
+                device_id,
+                delta: MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 240.0)),
+                phase: TouchPhase::Moved,
+            },
+            &mut camera,
+        );
+        assert!((camera.zoom() - zoom * 0.76).abs() < 1.0e-5);
+        assert_eq!(camera.distance, initial.cam_dist() as f32);
     }
 
-    /// Opt-in visual self-verification: render the whole CueMol2 shell to a PNG via
+    /// Opt-in visual self-verification: render the Tritium shell to a PNG via
     /// egui_kittest's offscreen wgpu (Metal) renderer, so the layout can be compared
-    /// against the authoritative XUL inventory (`docs/migration/uxp-inventory/`)
+    /// against the reference Tritium layout
     /// without an on-screen window. No-op unless `CUEMOL_SNAPSHOT_OUT` names an output
     /// path; self-skips (does not fail) when no GPU adapter is available — the same
     /// graceful-degradation contract as `offscreen.rs`. The 3D viewport renders blank

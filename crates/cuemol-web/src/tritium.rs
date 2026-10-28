@@ -2,6 +2,14 @@ use super::*;
 use cuemol_ui::shell::{self, Activity, Icon};
 
 impl App {
+    pub(super) fn record_ui_rect(&mut self, name: &str, response: &egui::Response) {
+        let rect = response.rect;
+        self.ui_rects.insert(
+            name.into(),
+            [rect.min.x, rect.min.y, rect.width(), rect.height()],
+        );
+    }
+
     pub(super) fn shell(&mut self, ctx: &egui::Context) {
         shell::theme(ctx, !self.dark);
         self.agent.docked = true;
@@ -179,7 +187,7 @@ impl App {
                             ui.close();
                         }
                     });
-                    ui.menu_button("Tools", |ui| {
+                    let tools_menu = ui.menu_button("Tools", |ui| {
                         if ui.button("Commands…").clicked() {
                             self.show_console = true;
                             ui.close();
@@ -188,12 +196,15 @@ impl App {
                             self.activity = Some(Activity::Agent);
                             ui.close();
                         }
-                        if ui.button("Settings").clicked() {
+                        let settings = ui.button("Settings");
+                        self.record_ui_rect("Settings", &settings);
+                        if settings.clicked() {
                             self.settings_text = self.state.config_text();
                             self.show_settings = true;
                             ui.close();
                         }
                     });
+                    self.record_ui_rect("Tools menu", &tools_menu.response);
                     ui.menu_button("Window", |ui| {
                         for tab in [
                             "Console",
@@ -853,7 +864,9 @@ impl App {
             mvp,
             (point.x as f64, point.y as f64),
             (viewport.width() as f64, viewport.height() as f64),
-            12.,
+            self.state
+                .resolved_view_input(self.input_device.trackpad)
+                .hitprec(),
         ) {
             self.apply_atom_selection(vec![hit]);
         }

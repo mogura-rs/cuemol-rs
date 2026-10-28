@@ -1024,6 +1024,9 @@ pub struct ViewInputConfig {
     hit_prec: f64,
     style_name: String,
     bindings: BTreeMap<i32, String>,
+    explicit_bindings: Vec<(i32, String)>,
+    explicit_tb_rad: bool,
+    explicit_hit_prec: bool,
 }
 
 impl Default for ViewInputConfig {
@@ -1046,6 +1049,9 @@ impl Default for ViewInputConfig {
             hit_prec: 10.0,
             style_name: String::new(),
             bindings,
+            explicit_bindings: Vec::new(),
+            explicit_tb_rad: false,
+            explicit_hit_prec: false,
         }
     }
 }
@@ -1079,6 +1085,7 @@ impl ViewInputConfig {
 
     pub fn set_tb_rad(&mut self, value: f64) {
         self.tb_rad = value;
+        self.explicit_tb_rad = true;
     }
 
     pub fn set_tbrad(&mut self, value: f64) {
@@ -1119,6 +1126,7 @@ impl ViewInputConfig {
 
     pub fn set_hit_prec(&mut self, value: f64) {
         self.hit_prec = value;
+        self.explicit_hit_prec = true;
     }
 
     pub fn set_hitprec(&mut self, value: f64) {
@@ -1127,11 +1135,80 @@ impl ViewInputConfig {
 
     pub fn set_binding(&mut self, id: i32, value: impl Into<String>) {
         let value = value.into();
-        if value.is_empty() {
-            self.bindings.remove(&id);
-        } else {
-            self.bindings.insert(id, value);
+        self.explicit_bindings
+            .retain(|(previous, _)| *previous != id);
+        self.explicit_bindings.push((id, value.clone()));
+        self.assign_binding(id, value);
+    }
+
+    fn assign_binding(&mut self, id: i32, value: String) {
+        let codes: Vec<_> = value
+            .split(',')
+            .map(crate::view_input::parse_binding)
+            .filter(|&v| v != 0)
+            .collect();
+        for previous in self.bindings.values_mut() {
+            *previous = previous
+                .split(',')
+                .filter(|v| !codes.contains(&crate::view_input::parse_binding(v)))
+                .collect::<Vec<_>>()
+                .join(",");
         }
+        self.bindings.insert(id, value);
+    }
+
+    pub fn find_event(&self, axis: i32, modifiers: i32) -> i32 {
+        let code = modifiers | (axis << 6);
+        self.bindings
+            .iter()
+            .find_map(|(&id, value)| {
+                value
+                    .split(',')
+                    .any(|v| !v.is_empty() && crate::view_input::parse_binding(v) == code)
+                    .then_some(id)
+            })
+            .unwrap_or(-1)
+    }
+
+    pub fn resolved(&self, styles: &crate::StyleManager) -> Self {
+        let mut resolved = Self::default();
+        resolved.tb_rad = self.tb_rad;
+        resolved.hit_prec = self.hit_prec;
+        resolved.style_name = self.style_name.clone();
+        for name in self.style_name.split(',').map(str::trim) {
+            let Some(node) = styles.style_node(0, name) else {
+                continue;
+            };
+            if !self.explicit_tb_rad {
+                if let Ok(value) = node.str_attr("tbrad").as_str().parse() {
+                    resolved.tb_rad = value;
+                }
+            }
+            if !self.explicit_hit_prec {
+                if let Ok(value) = node.str_attr("hitprec").as_str().parse() {
+                    resolved.hit_prec = value;
+                }
+            }
+            for (id, key) in [
+                (1, "conf_rotx"),
+                (2, "conf_roty"),
+                (3, "conf_rotz"),
+                (4, "conf_zoom"),
+                (5, "conf_trax"),
+                (6, "conf_tray"),
+                (7, "conf_traz"),
+                (8, "conf_slab"),
+                (9, "conf_dist"),
+            ] {
+                if let Some(value) = node.find_child(key).map(|n| n.value()) {
+                    resolved.assign_binding(id, value.to_string());
+                }
+            }
+        }
+        for (id, value) in &self.explicit_bindings {
+            resolved.assign_binding(*id, value.clone());
+        }
+        resolved
     }
 
     pub fn binding(&self, id: i32) -> LString {
@@ -1143,7 +1220,7 @@ impl ViewInputConfig {
     }
 
     pub fn remove_bindings(&mut self, id: i32) {
-        self.bindings.remove(&id);
+        self.set_binding(id, "");
     }
 
     pub fn set_conf_rot_x(&mut self, value: impl Into<String>) {

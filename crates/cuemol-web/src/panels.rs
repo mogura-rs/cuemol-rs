@@ -215,6 +215,29 @@ impl App {
                 ui.label(format!("ICC profile: {}", self.state.config_value("color:icc_profile")));
                 if ui.button("Import ICC profile…").clicked() { choose_file(); }
             }
+            let mut input_changed = false;
+            for (key, label, options) in [
+                ("view_input:device", "Input device", &["auto", "mouse", "trackpad"][..]),
+                ("cuemol2.ui.viewinconf", "View operation preset", &["DefaultViewInConf", "CootViewInConf", "PymolViewInConf", "IphoneViewInConf", "TrackpadViewInConf"][..]),
+            ] {
+                let old = self.state.config_value(key);
+                let mut value = if old.is_empty() { options[0].to_string() } else { old.clone() };
+                let combo = egui::ComboBox::from_label(label).selected_text(&value).show_ui(ui, |ui| {
+                    for option in options {
+                        let response = ui.selectable_value(&mut value, option.to_string(), *option);
+                        self.record_ui_rect(&format!("input:{key}:{option}"), &response);
+                    }
+                });
+                self.record_ui_rect(label, &combo.response);
+                if value != old { self.state.put_config_value(key, value); input_changed = true; }
+            }
+            let mut momentum = self.state.config_value("cuemol2.ui.mouse-momentum-scroll") == "true";
+            if ui.checkbox(&mut momentum, "Momentum scroll").changed() { self.state.put_config_value("cuemol2.ui.mouse-momentum-scroll", momentum.to_string()); input_changed = true; }
+            if input_changed {
+                self.state.view_input_config_mut().set_style("");
+                self.settings_text = self.state.config_text();
+                if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) { let _ = storage.set_item("cuemol.config", &self.settings_text); }
+            }
             ui.label("Settings are saved in this browser. Use the same tab-separated configuration format as the native application.");
             ui.add(egui::TextEdit::multiline(&mut self.settings_text).code_editor().desired_rows(8).desired_width(f32::INFINITY));
             ui.separator();ui.label("Startup JavaScript");
@@ -224,7 +247,7 @@ impl App {
                 if ui.button("Save").clicked(){
                     let previous=self.state.clone();
                     match self.state.load_config_text(&self.settings_text){
-                        Ok(_)=>{if let Some(storage)=web_sys::window().and_then(|w|w.local_storage().ok().flatten()){
+                        Ok(_)=>{self.state.view_input_config_mut().set_style("");if let Some(storage)=web_sys::window().and_then(|w|w.local_storage().ok().flatten()){
                             let result=storage.set_item("cuemol.config",&self.settings_text).and_then(|_|storage.set_item("cuemol.startup",&self.startup_text));
                             self.message=result.map(|_|"Settings saved.".to_string()).unwrap_or_else(js_error);
                         }else{self.message="Browser storage is unavailable.".into();}}

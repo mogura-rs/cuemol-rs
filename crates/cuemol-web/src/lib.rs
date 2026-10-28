@@ -1,9 +1,10 @@
 #![cfg(target_arch = "wasm32")]
+mod input;
 mod panels;
 mod trajectory;
 mod tritium;
 use base64::Engine;
-use cuemol_core::{Uid, Vector4};
+use cuemol_core::Uid;
 use cuemol_desktop_core::{viewport::ViewportRenderer, DesktopAppState, GuiLoadedPath};
 use cuemol_qsys::Camera;
 use cuemol_render::RenderSceneSnapshot;
@@ -29,6 +30,7 @@ thread_local! {
     static STATUS: RefCell<String> = RefCell::new(r#"{"busy":true,"scene":{"sceneId":0,"objects":[]}}"#.to_string());
 }
 enum Event {
+    Input(Value),
     AgentStart(String, cuemol_agent::Settings, String),
     AgentCancel,
     AgentFrame(
@@ -77,6 +79,12 @@ pub fn agent_turn(prompt: String, settings: String, api_key: String) -> Result<(
 #[wasm_bindgen]
 pub fn agent_cancel() {
     enqueue(Event::AgentCancel);
+}
+#[wasm_bindgen]
+pub fn view_input(event: String) -> Result<(), JsValue> {
+    let event = serde_json::from_str(&event).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    enqueue(Event::Input(event));
+    Ok(())
 }
 #[wasm_bindgen]
 pub fn status() -> String {
@@ -139,6 +147,9 @@ struct HistoryEntry {
     selected: Option<Uid>,
 }
 struct App {
+    input: cuemol_qsys::view_input::ViewInputController,
+    input_device: cuemol_qsys::view_input::InputDeviceDetector,
+    input_events: VecDeque<Value>,
     agent: cuemol_ui::AgentPanel,
     activity: Option<cuemol_ui::shell::Activity>,
     inspector: cuemol_ui::Inspector,
@@ -316,6 +327,9 @@ impl App {
             render_transparent: false,
             show_timeline: false,
             settings_text: String::new(),
+            input: Default::default(),
+            input_device: Default::default(),
+            input_events: Default::default(),
             startup_text,
             tool_filter: String::new(),
             form_tool: String::new(),
@@ -434,6 +448,7 @@ impl App {
         }
     }
     fn fit(&mut self, selected: bool) {
+        self.input.cancel();
         if let Some(id) = self.selected.filter(|_| selected) {
             self.call("center_view",json!({"objId":id.get(),"selection":if self.selection.is_empty(){"*"}else{&self.selection},"zoom":true}));
         } else if let Some((min, max)) = self.snapshot.as_ref().and_then(|s| s.bounds) {
@@ -448,6 +463,7 @@ impl App {
         let events = EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()));
         for event in events {
             match event {
+                Event::Input(event) => self.input_events.push_back(event),
                 Event::AgentCancel => self.agent.cancel("Cancelled; completed edits are kept."),
                 Event::AgentFrame(id, index, result, reply, revision) => {
                     if reply.is_closed() {
@@ -854,7 +870,8 @@ impl App {
         self.gpu.queue.submit([encoder.finish()]);
     }
     fn mouse(&mut self, ui: &egui::Ui, response: &egui::Response) {
-        if !(response.hovered() || response.dragged() || response.drag_stopped()) {
+        let clicks = self.pointer_input(ui, response);
+        if !(response.hovered() || self.input.is_pressed() || !clicks.is_empty()) {
             return;
         }
         if !ui.ctx().wants_keyboard_input() {
@@ -884,115 +901,15 @@ impl App {
             }
             return;
         }
-        let (delta, modifiers, scrolls) = ui.input(|input| {
-            let scrolls = input
-                .events
-                .iter()
-                .filter_map(|event| match event {
-                    egui::Event::MouseWheel {
-                        delta, modifiers, ..
-                    } => Some((if delta.y != 0.0 { delta.y } else { delta.x }, *modifiers)),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            (input.pointer.delta(), input.modifiers, scrolls)
-        });
-        let q = self.camera.rotation();
-        let mut rotation =
-            glam::Quat::from_xyzw(q.x as f32, q.y as f32, q.z as f32, q.w as f32).normalize();
-        let center = self.camera.center();
-        let mut target = glam::Vec3::new(center.x as f32, center.y as f32, center.z as f32);
-        if response.dragged_by(egui::PointerButton::Secondary) && modifiers.shift {
-            self.camera.set_slab_depth(
-                (self.camera.slab_depth() * (delta.y as f64 * 0.01).exp())
-                    .clamp(0.1, self.camera.cam_dist() * 2.0),
-            );
-        } else if response.dragged_by(egui::PointerButton::Secondary) && modifiers.ctrl {
-            target += rotation * glam::Vec3::Z * delta.y * self.camera.zoom() as f32
-                / response.rect.height();
-        } else if response.dragged_by(egui::PointerButton::Secondary) {
-            self.camera.set_zoom(
-                (self.camera.zoom() * (delta.y as f64 * 0.008).exp()).clamp(0.1, 100000.),
-            );
-        } else if response.dragged_by(egui::PointerButton::Middle)
-            || (response.dragged() && modifiers.shift)
-        {
-            target +=
-                rotation * glam::Vec3::new(-delta.x, delta.y, 0.0) * self.camera.zoom() as f32
-                    / response.rect.height();
-        } else if response.dragged_by(egui::PointerButton::Primary) {
-            rotation = (glam::Quat::from_rotation_x(delta.y * 0.008)
-                * glam::Quat::from_rotation_y(delta.x * 0.008)
-                * rotation)
-                .normalize();
-        }
-        for (scroll, modifiers) in scrolls {
-            if modifiers.shift {
-                self.camera.set_slab_depth(
-                    (self.camera.slab_depth() * (scroll as f64 * 0.008).exp())
-                        .clamp(0.1, self.camera.cam_dist() * 2.0),
-                );
-            } else if modifiers.ctrl {
-                target += rotation * glam::Vec3::Z * scroll * self.camera.zoom() as f32 * 0.001;
+        for (position, double) in clicks {
+            if double {
+                self.center_screen_atom(response.rect, position);
             } else {
-                self.camera.set_zoom(
-                    (self.camera.zoom() * (-scroll as f64 * 0.003).exp()).clamp(0.1, 100000.0),
-                );
-            }
-        }
-        self.camera.set_center(Vector4::new3(
-            target.x as f64,
-            target.y as f64,
-            target.z as f64,
-        ));
-        self.camera.set_rotation(cuemol_core::Quat::new(
-            rotation.x as f64,
-            rotation.y as f64,
-            rotation.z as f64,
-            rotation.w as f64,
-        ));
-        if response.clicked() && !response.double_clicked() {
-            if let Some(position) = response.interact_pointer_pos() {
                 self.pick_screen_atom(response.rect, position);
             }
         }
-        if response.double_clicked() {
-            if let (Some(pos), Some(snapshot)) = (response.interact_pointer_pos(), &self.snapshot) {
-                let mvp =
-                    glam::Mat4::from_cols_array_2d(&cuemol_desktop_core::offscreen::camera_mvp(
-                        &self.camera,
-                        response.rect.aspect_ratio() as f64,
-                    ));
-                let nearest = snapshot
-                    .atoms
-                    .iter()
-                    .filter_map(|a| {
-                        let p = mvp
-                            * glam::Vec4::new(
-                                a.center.x as f32,
-                                a.center.y as f32,
-                                a.center.z as f32,
-                                1.0,
-                            );
-                        if p.w <= 0.0 {
-                            return None;
-                        }
-                        let ndc = p.truncate() / p.w;
-                        if !(0.0..=1.0).contains(&ndc.z) {
-                            return None;
-                        }
-                        let screen = egui::pos2(
-                            response.rect.left() + (ndc.x + 1.0) * 0.5 * response.rect.width(),
-                            response.rect.top() + (1.0 - ndc.y) * 0.5 * response.rect.height(),
-                        );
-                        let d = screen.distance(pos);
-                        (d < 18.0).then_some((d, a.center))
-                    })
-                    .min_by(|a, b| a.0.total_cmp(&b.0));
-                if let Some((_, position)) = nearest {
-                    self.camera.set_center(position);
-                }
-            }
+        if ui.ctx().wants_keyboard_input() {
+            return;
         }
         if ui.input(|i| i.key_pressed(egui::Key::Home)) {
             self.fit(false);
@@ -1010,6 +927,7 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.events();
+        self.ui_rects.clear();
         self.agent_ui(ctx);
         if cuemol_command::advance_animation(&mut self.state, &mut self.camera).unwrap_or(false) {
             self.dirty = true;
@@ -1037,7 +955,7 @@ impl eframe::App for App {
             .frame(egui::Frame::NONE)
             .show(ctx, |ui| self.viewport(ui));
         self.viewport_palette(ctx);
-        egui::Window::new("Mouse and keyboard").open(&mut self.show_help).show(ctx,|ui|{ui.label("Drag: rotate\nMiddle drag: pan · Right drag: zoom\nWheel: zoom\nShift + wheel or right drag: slab\nCtrl + wheel or right drag: view depth\nDouble-click atom: center\nHome: fit scene · F: fit selection · C: center selection\nDrop structure files onto the window. Load a topology before a trajectory.\nCommands use the same tool names and JSON arguments as cuemol exec and MCP.");});
+        egui::Window::new("Mouse and keyboard").open(&mut self.show_help).show(ctx,|ui|{ui.label("Default preset: left drag rotates, right drag pans\nWheel: zoom\nShift + left drag: horizontal slab, vertical zoom\nLeft + right drag: horizontal depth, vertical roll\nTrackpad: two-finger pan, pinch zoom\nChoose Default, Coot, PyMOL or Trackpad in Settings\nDouble-click atom: center\nHome: fit scene · F: fit selection · C: center selection\nDrop structure files onto the window. Load a topology before a trajectory.\nCommands use the same tool names and JSON arguments as cuemol exec and MCP.");});
         for file in ctx.input(|i| i.raw.dropped_files.clone()) {
             if let Some(bytes) = file.bytes {
                 enqueue(Event::Data(file.name, bytes.to_vec()));
@@ -1050,6 +968,17 @@ impl eframe::App for App {
             &json!({}),
         )
         .unwrap_or(Value::Null);
-        STATUS.with(|status|*status.borrow_mut()=json!({"scene":state,"selection":self.selection,"view":cuemol_command::view_json(&self.camera),"message":self.message,"frame":self.frame,"busy":self.busy,"agent":self.agent.status(),"ui":{"rects":self.ui_rects,"activity":self.activity.map(cuemol_ui::shell::Activity::key),"bottom":self.bottom_tab,"inspector":self.inspector.rects}}).to_string());
+        let layers = ctx.memory(|memory| memory.areas().visible_layer_ids());
+        let overlays: Vec<[f32; 4]> = layers
+            .into_iter()
+            .filter(|layer| layer.order != egui::Order::Background)
+            .filter_map(|layer| egui::AreaState::load(ctx, layer.id))
+            .filter(|area| area.interactable)
+            .map(|area| {
+                let rect = area.rect();
+                [rect.min.x, rect.min.y, rect.width(), rect.height()]
+            })
+            .collect();
+        STATUS.with(|status|*status.borrow_mut()=json!({"scene":state,"selection":self.selection,"view":cuemol_command::view_json(&self.camera),"message":self.message,"frame":self.frame,"busy":self.busy,"agent":self.agent.status(),"ui":{"overlays":overlays,"rects":self.ui_rects,"activity":self.activity.map(cuemol_ui::shell::Activity::key),"bottom":self.bottom_tab,"inspector":self.inspector.rects}}).to_string());
     }
 }
