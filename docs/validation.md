@@ -1030,3 +1030,33 @@ selection changes and embedded reload, and its resulting image was inspected.
 A further shared regression checks generated surface coordinates, normals and
 winding under reflection, scaling and translation. Hover state, molecular SES
 backend properties and exporter settings remain in the separate QIF audit.
+
+
+### Scripted SES backend selection
+
+`MolSurfObj.sesbackend` now controls the shared MeshMS/BALL generation path for
+molecule inputs, sphere arrays and regeneration. New objects default to `auto`;
+the public script enum accepts `auto`, `meshms` and `ball`. Native command APIs
+retain their additional `rust` option. Changing the requested backend leaves
+existing geometry intact until generation is requested, and failed generation
+preserves the previous mesh and provenance. Scene saves retain both the
+requested backend and the backend that produced the current mesh.
+
+The audit found two execution paths that contradicted the earlier backend
+summary: scripted creation and regeneration still used the Rust grid builder,
+and newly attached scripted surfaces could lose their original generation
+conditions at the end of a script. These now use the common backend and save
+the complete surface state after the object has been created. The old builder
+comment also described a solvent-accessible marching-tetrahedra surface even
+though it generated a solvent-excluded marching-cubes surface; that obsolete
+helper and comment were removed.
+
+Validation passed all surface-domain tests with the reference checkout present,
+217 shared-core tests, 167 native GUI tests and 144 Tauri tests (two explicit GPU
+tests skipped). The new domain regression checks backend changes, sphere-array
+routing and error preservation. The scripting regression compares generated
+meshes before and after changing backend, embedded reload and property reset.
+Three rebuilt-browser tests passed for command-driven surface generation,
+live surface gradients and scripted backend selection followed by reload and
+regeneration. No public workflows or releases were run. Hover state and exporter
+settings remain in the separate QIF audit.

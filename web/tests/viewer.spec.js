@@ -946,3 +946,19 @@ test('browser map caps and molecular colors survive selection edits and embedded
   await expect.poll(async()=>(await colors()).magenta).toBeLessThan(50);
   await page.screenshot({path:testInfo.outputPath('map-caps.png')});
 });
+
+
+test('scripted SES backends regenerate through saved scene objects',async({page})=>{
+  await ready(page);await load(page,'ses.pdb',Buffer.from(structure));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  const id=(await page.evaluate(()=>window.cuemol.status())).scene.objects[0].id;
+  let state=await call(page,'execute_script',{source:`var mol=cuemol.getObject(${id});var surf=cuemol.MolSurfObj();surf.name='scripted-ses';print(surf.sesbackend);surf.sesbackend='meshms';surf.createSESFromMol(mol,cuemol.makeSel('*'),2,1.4);var mesh=surf._mesh_data;surf.sesbackend='ball';surf.regenerateSES1(-1);print(surf.sesbackend+':'+(mesh!==surf._mesh_data));scene.addObject(surf);surf.createRenderer('molsurf','surface');`});
+  expect(JSON.parse(state.message).log).toBe('auto\nball:true\n');
+  const download=page.waitForEvent('download');
+  const button=state.ui.rects['Save Scene'];await page.mouse.click(button[0]+button[2]/2,button[1]+button[3]/2);
+  const saved=await download;const stream=await saved.createReadStream();const chunks=[];for await(const part of stream)chunks.push(part);
+  await load(page,'ses-roundtrip.qsc',Buffer.concat(chunks));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Loaded ses-roundtrip.qsc');
+  state=await call(page,'execute_script',{source:`var surf=cuemol.getObject('scripted-ses');print(surf.sesbackend);surf.regenerateSES1(3);print(surf.orig_den);cuemol.resetProp(surf,'sesbackend');print(surf.sesbackend);`});
+  expect(JSON.parse(state.message).log).toBe('ball\n3\nauto\n');
+});

@@ -372,7 +372,9 @@ surfaces support distance fields, EDTSurf and MeshMS on native and browser
 targets, with reference detail and surface-type controls. Saved molecular
 surfaces support MeshMS and BALL, with `auto` selecting MeshMS and BALL as its
 fallback; the `rust` backend retains grid-based SES. The generation backend,
-density and probe radius survive embedded scene saves. Render settings use typed
+density and probe radius survive embedded scene saves. Scripted
+`MolSurfObj.sesbackend` selects `auto`, `meshms` or `ball` for both creation and
+regeneration, including after scene reload. Render settings use typed
 scene application data, including nested backend settings, script access and undo. NPR rendering includes the nine reference styles and editable line, dot, and
 stipple layers, with shared native/browser controls for ink, paper, and tone.
 Hatch and tone specifications use the reference syntax. The Rust ray tracer

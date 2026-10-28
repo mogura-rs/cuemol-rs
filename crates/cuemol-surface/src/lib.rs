@@ -1187,6 +1187,8 @@ pub struct MolSurfObj {
     orig_selector: Option<Selector>,
     orig_den: f64,
     orig_prad: f64,
+    ses_backend: backends::SesBackend,
+    ses_backend_used: Option<backends::SesBackend>,
     cut_planes: Vec<CutPlane>,
     source_molecule: Option<MolCoord>,
 }
@@ -1288,6 +1290,8 @@ impl Default for MolSurfObj {
             orig_selector: Some(Selector::All),
             orig_den: 0.0,
             orig_prad: 0.0,
+            ses_backend: backends::SesBackend::Auto,
+            ses_backend_used: None,
             cut_planes: Vec::new(),
             source_molecule: None,
         }
@@ -1484,6 +1488,22 @@ impl MolSurfObj {
         self.set_orig_prad(value);
     }
 
+    pub fn ses_backend(&self) -> backends::SesBackend {
+        self.ses_backend
+    }
+
+    pub fn set_ses_backend(&mut self, backend: backends::SesBackend) {
+        self.ses_backend = backend;
+    }
+
+    pub fn ses_backend_used(&self) -> Option<backends::SesBackend> {
+        self.ses_backend_used
+    }
+
+    pub fn set_ses_backend_used(&mut self, backend: Option<backends::SesBackend>) {
+        self.ses_backend_used = backend;
+    }
+
     pub fn cut_planes(&self) -> &[CutPlane] {
         &self.cut_planes
     }
@@ -1528,26 +1548,36 @@ impl MolSurfObj {
         selection: S,
         density: f64,
         probe_radius: f64,
-    ) where
+    ) -> cuemol_core::Result<()>
+    where
         M: IntoSurfaceMoleculeSource<'a>,
         S: IntoSurfaceSelectionSource<'a>,
     {
         let molecule = molecule.into_surface_molecule_source();
         let selection = selection.into_surface_selection_source();
+        let selector = selection.selector().ok_or_else(|| {
+            cuemol_core::CueMolError::invalid_argument("invalid surface atom selection")
+        })?;
+        if let SurfaceMoleculeSource::Molecule(mol) = &molecule {
+            self.create_ses_from_mol_with_backend(
+                mol,
+                &selector,
+                density,
+                probe_radius,
+                self.ses_backend,
+            )?;
+        } else {
+            self.mesh.clear();
+            self.source_molecule = None;
+            self.ses_backend_used = None;
+            self.cut_planes.clear();
+        }
         self.orig_mol = molecule.source_name();
         self.orig_sel = selection.source_text();
-        self.orig_selector = selection.selector();
+        self.orig_selector = Some(selector);
         self.orig_den = density;
         self.orig_prad = probe_radius;
-        self.mesh.clear();
-        if let SurfaceMoleculeSource::Molecule(molecule) = molecule {
-            let selector = self.orig_selector.clone().unwrap_or(Selector::All);
-            build_mol_surface(&mut self.mesh, molecule, &selector, density, probe_radius);
-            self.source_molecule = Some(molecule.clone());
-        } else {
-            self.source_molecule = None;
-        }
-        self.cut_planes.clear();
+        Ok(())
     }
 
     pub fn create_ses_from_mol_with_backend(
@@ -1561,6 +1591,8 @@ impl MolSurfObj {
         let (mesh, used) =
             backends::build_molecular_surface(molecule, selection, density, probe_radius, backend)?;
         self.mesh = mesh;
+        self.ses_backend = backend;
+        self.ses_backend_used = Some(used);
         self.orig_selector = Some(selection.clone());
         self.orig_sel = selection.dump();
         self.orig_den = density;
@@ -1576,23 +1608,10 @@ impl MolSurfObj {
         density: f64,
         probe_radius: f64,
     ) -> cuemol_core::Result<()> {
-        if !density.is_finite() || density <= 0.0 {
-            return Err(cuemol_core::CueMolError::invalid_argument(
-                "surface density must be positive",
-            ));
-        }
-        if !probe_radius.is_finite() || probe_radius < 0.0 {
-            return Err(cuemol_core::CueMolError::invalid_argument(
-                "surface probe radius must be non-negative",
-            ));
-        }
-        self.mesh.clear();
-        grid_surface::build_ses_surface(
-            &mut self.mesh,
-            spheres,
-            probe_radius,
-            (1.0 / density).clamp(0.25, 1.5),
-        );
+        let (mesh, used) =
+            backends::build_surface(spheres, density, probe_radius, self.ses_backend)?;
+        self.mesh = mesh;
+        self.ses_backend_used = Some(used);
         self.cut_planes.clear();
         Ok(())
     }
@@ -1612,11 +1631,12 @@ impl MolSurfObj {
         selection: S,
         density: f64,
         probe_radius: f64,
-    ) where
+    ) -> cuemol_core::Result<()>
+    where
         M: IntoSurfaceMoleculeSource<'a>,
         S: IntoSurfaceSelectionSource<'a>,
     {
-        self.create_ses_from_mol(molecule, selection, density, probe_radius);
+        self.create_ses_from_mol(molecule, selection, density, probe_radius)
     }
 
     pub fn regenerate_ses(&mut self, density: f64) -> cuemol_core::Result<()> {
@@ -1672,14 +1692,13 @@ impl MolSurfObj {
         let selector = selection
             .cloned()
             .unwrap_or_else(|| parse_selector(&self.orig_sel).unwrap_or(Selector::All));
-        let selection_text = selector.dump();
-        self.mesh.clear();
-        build_mol_surface(&mut self.mesh, molecule, &selector, density, probe_radius);
-        self.orig_sel = selection_text;
-        self.orig_den = density;
-        self.orig_prad = probe_radius;
-        self.source_molecule = Some(molecule.clone());
-        self.cut_planes.clear();
+        self.create_ses_from_mol_with_backend(
+            molecule,
+            &selector,
+            density,
+            probe_radius,
+            self.ses_backend,
+        )?;
         Ok(())
     }
 
@@ -1813,49 +1832,8 @@ pub fn regenerate_surface_with_undo(
         .is_some_and(|edit| undo_manager.with_mut(|manager| manager.add_edit_info(Box::new(edit)))))
 }
 
-/// Build the molecular (van-der-Waals / solvent-accessible) surface of the
-/// selected atoms via the union-of-spheres marching-tetrahedra isosurface.
-/// `density` controls the grid fineness (grid points per Angstrom); each atom is
-/// a sphere of `vdw_radius + probe_radius`.
-fn build_mol_surface(
-    mesh: &mut SurfaceMesh,
-    molecule: &MolCoord,
-    selector: &Selector,
-    density: f64,
-    probe_radius: f64,
-) {
-    // Each atom is a bare van-der-Waals sphere; the probe is rolled separately by
-    // the solvent-excluded-surface builder (the reentrant patches it carves are
-    // the whole point of an SES vs. the union-of-spheres accessible surface). The
-    // radius is the C++ production surface's UNITED-ATOM vdW (`getVdwRadius`,
-    // bExplH=false): a backbone CH1 carbon is 1.95, not the bare element 1.70;
-    // atoms with no residue template (ligands/ions/waters) fall back to the
-    // element radius.
-    let spheres: Vec<grid_surface::SurfSphere> = molecule
-        .atoms()
-        .iter()
-        .filter(|atom| selector.matches_in_molecule(atom, molecule))
-        .map(|atom| grid_surface::SurfSphere {
-            center: atom.position,
-            radius: cuemol_molstr::toppar::vdw_radius_for_atom(atom).max(0.1),
-        })
-        .collect();
-
-    // density = grid points per Angstrom; spacing is its reciprocal, clamped to
-    // a sane band (default ~0.6 A when unset).
-    let spacing = if density > 0.0 {
-        (1.0 / density).clamp(0.25, 1.5)
-    } else {
-        0.6
-    };
-    grid_surface::build_ses_surface(mesh, &spheres, probe_radius.max(0.0), spacing);
-}
-
-/// Build the ANALYTIC (Connolly reduced-surface) SES of `molecule` — convex van
-/// der Waals caps + saddle tori + concave reentrant patches — as a [`SurfaceMesh`].
-/// The analytic counterpart of [`build_mol_surface`]'s grid SES (C++ surface/
-/// `RSCompBuilder` + `Tg*`); `detail` is the per-patch tessellation level. The grid
-/// SES remains the production path; this matches C++'s exact analytic patches.
+/// Build an analytic Connolly SES from convex, saddle, and reentrant patches.
+/// `detail` controls tessellation of the Rust analytic implementation.
 pub fn build_analytic_mol_surface(
     molecule: &MolCoord,
     selector: &Selector,
@@ -3636,7 +3614,8 @@ mod tests {
     #[test]
     fn molsurf_obj_records_source_and_cut_planes() {
         let mut obj = MolSurfObj::new();
-        obj.create_ses_from_mol("mol1", "protein", 3.0, 1.4);
+        obj.create_ses_from_mol("mol1", "protein", 3.0, 1.4)
+            .unwrap();
         assert_eq!(obj.orig_mol(), "mol1");
         assert_eq!(obj.orig_sel(), "protein");
         assert!(obj.get_orig_sel().is_some());
@@ -3695,18 +3674,68 @@ mod tests {
         let mut molecule = MolCoord::new();
         molecule.push_atom(surface_atom(1, "CA", "C", 0.0));
         let mut surface = MolSurfObj::new();
-        surface.create_ses_from_mol(&molecule, "name CA", 2.0, 1.4);
+        surface
+            .create_ses_from_mol(&molecule, "name CA", 2.0, 1.4)
+            .unwrap();
         let coarse_triangles = surface.mesh().triangle_count();
 
-        surface.regenerate_ses(5.0).unwrap();
+        surface.regenerate_ses(20.0).unwrap();
 
-        assert_eq!(surface.orig_den(), 5.0);
+        assert_eq!(surface.orig_den(), 20.0);
         assert_eq!(surface.orig_prad(), 1.4);
         assert_eq!(surface.orig_sel(), "name CA");
         assert!(surface.mesh().triangle_count() > coarse_triangles);
 
         let mut detached = MolSurfObj::new();
         assert!(detached.regenerate_ses(2.0).is_err());
+    }
+
+    #[test]
+    fn molsurf_backend_controls_creation_arrays_and_regeneration() {
+        use backends::SesBackend;
+        let mut molecule = MolCoord::new();
+        molecule.push_atom(surface_atom(1, "CA", "C", 0.0));
+        molecule.push_atom(surface_atom(2, "CB", "C", 2.5));
+        let mut surface = MolSurfObj::new();
+        assert_eq!(surface.ses_backend(), SesBackend::Auto);
+        assert_eq!(surface.ses_backend_used(), None);
+        surface.set_ses_backend(SesBackend::MeshMs);
+        surface
+            .create_ses_from_mol(&molecule, "*", 2.0, 1.4)
+            .unwrap();
+        assert_eq!(surface.ses_backend_used(), Some(SesBackend::MeshMs));
+        let meshms = surface.mesh().clone();
+        surface.set_ses_backend(SesBackend::Ball);
+        assert_eq!(surface.mesh(), &meshms);
+        surface.regenerate_ses(-1.0).unwrap();
+        assert_eq!(surface.ses_backend_used(), Some(SesBackend::Ball));
+        assert_ne!(surface.mesh(), &meshms);
+        let (expected, _) = backends::build_molecular_surface(
+            &molecule,
+            &Selector::All,
+            2.0,
+            1.4,
+            SesBackend::Ball,
+        )
+        .unwrap();
+        assert_eq!(surface.mesh(), &expected);
+        let spheres = molecule
+            .atoms()
+            .iter()
+            .map(|atom| SurfSphere {
+                center: atom.position,
+                radius: cuemol_molstr::toppar::vdw_radius_for_atom(atom),
+            })
+            .collect::<Vec<_>>();
+        surface.create_ses_from_array(&spheres, 2.0, 1.4).unwrap();
+        assert_eq!(surface.mesh(), &expected);
+        let saved = surface.clone();
+        assert!(surface
+            .create_ses_from_mol(&molecule, "aid 999", 2.0, 1.4)
+            .is_err());
+        assert_eq!(surface, saved);
+        assert!(surface.create_ses_from_array(&[], 2.0, 1.4).is_err());
+        assert_eq!(surface, saved);
     }
 
     #[test]
@@ -3746,7 +3775,9 @@ mod tests {
         let mut original = MolCoord::new();
         original.push_atom(surface_atom(1, "CA", "C", 0.0));
         let mut surface = MolSurfObj::new();
-        surface.create_ses_from_mol(&original, "*", 2.0, 1.4);
+        surface
+            .create_ses_from_mol(&original, "*", 2.0, 1.4)
+            .unwrap();
         let target = Rc::new(RefCell::new(surface));
         let undo_manager = UndoManagerHandle::new();
         let before = target.borrow().mesh().clone();
@@ -3776,7 +3807,8 @@ mod tests {
         let selector = parse_selector("name CA").unwrap();
 
         let mut obj = MolSurfObj::new();
-        obj.create_ses_from_mol(&molecule, &selector, 2.0, 1.4);
+        obj.create_ses_from_mol(&molecule, &selector, 2.0, 1.4)
+            .unwrap();
 
         assert_eq!(obj.orig_mol(), "MolCoord");
         assert_eq!(obj.orig_sel(), "name CA");
@@ -3810,7 +3842,7 @@ mod tests {
         molecule.push_atom(surface_atom(1, "N", "N", -4.0));
         molecule.push_atom(surface_atom(2, "CA", "C", 4.0));
         let mut obj = MolSurfObj::new();
-        obj.create_ses_from_mol(&molecule, "all", 2.0, 1.4);
+        obj.create_ses_from_mol(&molecule, "all", 2.0, 1.4).unwrap();
         let before = obj.mesh().triangle_count();
         assert!(before > 0);
 

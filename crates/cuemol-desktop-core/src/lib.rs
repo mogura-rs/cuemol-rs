@@ -13407,7 +13407,7 @@ impl DesktopAppState {
                 .scene_mut(scene_uid)
                 .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
             if !surface_indices.is_empty() {
-                scene.add_loaded_surface(pse_surface_object(&name, &molecule, &surface_indices));
+                scene.add_loaded_surface(pse_surface_object(&name, &molecule, &surface_indices)?);
             }
             let object_uid = scene.add_molecule(name, molecule);
             {
@@ -16124,7 +16124,7 @@ impl DesktopAppState {
             .object(object_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
         let mut surface = MolSurfObj::new();
-        surface.create_ses_from_mol(object.mol(), selector, density, probe_radius);
+        surface.create_ses_from_mol(object.mol(), selector, density, probe_radius)?;
         Ok(surface)
     }
 
@@ -16211,7 +16211,7 @@ impl DesktopAppState {
             .object(object_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
         let mut surface = MolSurfObj::new();
-        surface.create_ses_from_mol(object.mol(), selector.clone(), density, probe_radius);
+        surface.create_ses_from_mol(object.mol(), selector.clone(), density, probe_radius)?;
         Ok(surface_render_mesh(object, &selector, &surface))
     }
 
@@ -16235,7 +16235,7 @@ impl DesktopAppState {
             .object(object_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
         let mut surface = MolSurfObj::new();
-        surface.create_ses_from_mol(object.mol(), selector.clone(), density, probe_radius);
+        surface.create_ses_from_mol(object.mol(), selector.clone(), density, probe_radius)?;
         surface.cut_by_plane(1.0, normal, position, false);
         Ok(surface_render_mesh(object, &selector, &surface))
     }
@@ -16334,7 +16334,7 @@ impl DesktopAppState {
             .object(object_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
         let mut surface = MolSurfObj::new();
-        surface.create_ses_from_mol(object.mol(), selector, density, probe_radius);
+        surface.create_ses_from_mol(object.mol(), selector, density, probe_radius)?;
         let (lo, mid, hi) = self.potential_thresholds(potential);
         Ok(surface_scalar_mesh(&surface, potential, lo, mid, hi))
     }
@@ -23458,6 +23458,11 @@ impl DesktopAppState {
             Ok(())
         }
         fn molsurf_from_value(this: &JsValue, ctx: &mut Context) -> JsResult<MolSurfObj> {
+            if pending_object_is_attached(this, ctx)? {
+                if let Some(surface) = script_object(object_proxy_uid(this, ctx)?)?.surface {
+                    return Ok(surface);
+                }
+            }
             let mut surface = MolSurfObj::new();
             let mesh_data = this_string_prop(this, "_mesh_data", ctx);
             if !mesh_data.is_empty() {
@@ -23469,6 +23474,20 @@ impl DesktopAppState {
             surface.set_orig_sel(selector_from_script_value(&selection, ctx)?.to_string());
             surface.set_orig_den(object_number_prop(this, "orig_den", ctx)?);
             surface.set_orig_prad(object_number_prop(this, "orig_prad", ctx)?);
+            surface.set_ses_backend(script_ses_backend(&this_string_prop(
+                this,
+                "sesbackend",
+                ctx,
+            ))?);
+            surface.set_ses_backend_used(
+                cuemol_surface::backends::SesBackend::parse(&this_string_prop(
+                    this,
+                    "_sesbackend_used",
+                    ctx,
+                ))
+                .ok()
+                .filter(|backend| *backend != cuemol_surface::backends::SesBackend::Auto),
+            );
             Ok(surface)
         }
         fn set_molsurf(this: &JsValue, surface: &MolSurfObj, ctx: &mut Context) -> JsResult<()> {
@@ -23487,6 +23506,22 @@ impl DesktopAppState {
             )?;
             object.set(js_string!("orig_den"), surface.orig_den(), true, ctx)?;
             object.set(js_string!("orig_prad"), surface.orig_prad(), true, ctx)?;
+            object.set(
+                js_string!("sesbackend"),
+                JsString::from(surface.ses_backend().name()),
+                true,
+                ctx,
+            )?;
+            object.set(
+                js_string!("_sesbackend_used"),
+                JsString::from(
+                    surface
+                        .ses_backend_used()
+                        .map_or("", |backend| backend.name()),
+                ),
+                true,
+                ctx,
+            )?;
             let selection = make_sel_command(ctx);
             js_sel_compile(
                 &selection,
@@ -23584,7 +23619,14 @@ impl DesktopAppState {
                 return Err(script_error("surface probe radius must be non-negative"));
             }
             let mut surface = MolSurfObj::new();
-            surface.create_ses_from_mol(&molecule.molecule, &selection, density, probe_radius);
+            surface.set_ses_backend(script_ses_backend(&this_string_prop(
+                this,
+                "sesbackend",
+                ctx,
+            ))?);
+            surface
+                .create_ses_from_mol(&molecule.molecule, &selection, density, probe_radius)
+                .map_err(|error| script_error(error.to_string()))?;
             set_molsurf(this, &surface, ctx)?;
             let object = iterator_object(this)?;
             object.set(
@@ -23659,8 +23701,60 @@ impl DesktopAppState {
         ) -> JsResult<JsValue> {
             js_pending_object_force_embed(this, args, ctx)
         }
+        fn script_ses_backend(value: &str) -> JsResult<cuemol_surface::backends::SesBackend> {
+            use cuemol_surface::backends::SesBackend;
+            match value {
+                "auto" => Ok(SesBackend::Auto),
+                "meshms" => Ok(SesBackend::MeshMs),
+                "ball" => Ok(SesBackend::Ball),
+                _ => Err(script_error("sesbackend must be auto, meshms, or ball")),
+            }
+        }
+        fn pending_surface_backend_get(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            if pending_object_is_attached(this, ctx)? {
+                return surface_property_get(SurfaceProperty::Backend, this, args, ctx);
+            }
+            iterator_object(this)?.get(js_string!("_sesbackend"), ctx)
+        }
+        fn pending_surface_backend_set(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            if pending_object_is_attached(this, ctx)? {
+                return surface_property_set(SurfaceProperty::Backend, this, args, ctx);
+            }
+            let backend = script_ses_backend(&argn(args, 0, ctx))?;
+            iterator_object(this)?.set(
+                js_string!("_sesbackend"),
+                JsString::from(backend.name()),
+                true,
+                ctx,
+            )?;
+            Ok(JsValue::undefined())
+        }
         fn make_molsurf(ctx: &mut Context) -> JsValue {
             let selection = make_sel_command(ctx);
+            let backend_getter = FunctionObjectBuilder::new(
+                ctx.realm(),
+                NativeFunction::from_fn_ptr(pending_surface_backend_get),
+            )
+            .name(js_string!("get sesbackend"))
+            .length(0)
+            .constructor(false)
+            .build();
+            let backend_setter = FunctionObjectBuilder::new(
+                ctx.realm(),
+                NativeFunction::from_fn_ptr(pending_surface_backend_set),
+            )
+            .name(js_string!("set sesbackend"))
+            .length(1)
+            .constructor(false)
+            .build();
             let value = ObjectInitializer::new(ctx)
                 .property(
                     js_string!("type"),
@@ -23677,6 +23771,17 @@ impl DesktopAppState {
                 .property(js_string!("orig_sel"), selection, Attribute::all())
                 .property(js_string!("orig_den"), 0.0, Attribute::all())
                 .property(js_string!("orig_prad"), 0.0, Attribute::all())
+                .property(
+                    js_string!("_sesbackend"),
+                    js_string!("auto"),
+                    Attribute::all(),
+                )
+                .accessor(
+                    js_string!("sesbackend"),
+                    Some(backend_getter),
+                    Some(backend_setter),
+                    Attribute::all(),
+                )
                 .property(js_string!("src"), js_string!(""), Attribute::all())
                 .property(js_string!("alt_src"), js_string!(""), Attribute::all())
                 .property(js_string!("modified"), false, Attribute::all())
@@ -30875,6 +30980,7 @@ impl DesktopAppState {
             Selection,
             Density,
             ProbeRadius,
+            Backend,
         }
         fn object_proxy_uid(this: &JsValue, ctx: &mut Context) -> JsResult<u64> {
             Ok(object_number_prop(this, "uid", ctx)? as u64)
@@ -31102,6 +31208,7 @@ impl DesktopAppState {
                 }
                 SurfaceProperty::Density => JsValue::new(surface.orig_den()),
                 SurfaceProperty::ProbeRadius => JsValue::new(surface.orig_prad()),
+                SurfaceProperty::Backend => JsString::from(surface.ses_backend().name()).into(),
             })
         }
         fn surface_property_set(
@@ -31114,7 +31221,7 @@ impl DesktopAppState {
             let value = args.first().cloned().unwrap_or(JsValue::undefined());
             let string_value = matches!(
                 property,
-                SurfaceProperty::Molecule | SurfaceProperty::Selection
+                SurfaceProperty::Molecule | SurfaceProperty::Selection | SurfaceProperty::Backend
             )
             .then(|| {
                 if matches!(property, SurfaceProperty::Selection) {
@@ -31132,6 +31239,13 @@ impl DesktopAppState {
             )
             .then(|| value.to_number(ctx))
             .transpose()?;
+            let backend = if matches!(property, SurfaceProperty::Backend) {
+                Some(script_ses_backend(
+                    string_value.as_deref().unwrap_or_default(),
+                )?)
+            } else {
+                None
+            };
             script_env::with_mut(|env| {
                 let Some(object) = env.objects.iter_mut().find(|object| object.uid == uid) else {
                     return false;
@@ -31152,6 +31266,7 @@ impl DesktopAppState {
                     SurfaceProperty::ProbeRadius => {
                         surface.set_orig_prad(number_value.unwrap_or_default())
                     }
+                    SurfaceProperty::Backend => surface.set_ses_backend(backend.unwrap()),
                 }
                 object.modified = true;
                 true
@@ -32991,6 +33106,7 @@ impl DesktopAppState {
                 ("orig_sel", SurfaceProperty::Selection),
                 ("orig_den", SurfaceProperty::Density),
                 ("orig_prad", SurfaceProperty::ProbeRadius),
+                ("sesbackend", SurfaceProperty::Backend),
             ]
             .into_iter()
             .map(|(name, property)| {
@@ -45682,6 +45798,7 @@ impl DesktopAppState {
             .map(|scene| scene.uid().get())
             .collect::<Vec<_>>();
         let updated_scene_states;
+        let mut pending_surfaces = Vec::new();
         let (
             _runtime_scene_uid,
             next_runtime_uid,
@@ -45788,6 +45905,8 @@ impl DesktopAppState {
                             )
                         })
                         .collect();
+                } else if state.surface.is_some() {
+                    pending_surfaces.push(state);
                 }
             }
             self.next_density_renderer_uid = self
@@ -47124,6 +47243,20 @@ impl DesktopAppState {
                 } => {
                     self.convert_scene_to_lw(Uid::new(source_scene), Uid::new(target_scene))?;
                 }
+            }
+        }
+        for state in pending_surfaces {
+            if let Some(surface) = self
+                .scene_manager_mut()
+                .scene_mut(Uid::new(state.scene_uid))
+                .and_then(|scene| {
+                    scene
+                        .loaded_surfaces_mut()
+                        .iter_mut()
+                        .find(|surface| surface.uid.get() == state.uid)
+                })
+            {
+                sync_script_surface(surface, &state);
             }
         }
         for state in updated_scene_states {
@@ -48498,6 +48631,16 @@ fn loaded_surface_object(surface: &LoadedSurface) -> Option<MolSurfObj> {
         if let Ok(value) = node.str_attr("orig_prad").as_str().parse() {
             object.set_orig_prad(value);
         }
+        if let Ok(backend) =
+            cuemol_surface::backends::SesBackend::parse(node.str_attr("sesbackend").as_str())
+        {
+            object.set_ses_backend(backend);
+        }
+        object.set_ses_backend_used(
+            cuemol_surface::backends::SesBackend::parse(node.str_attr("sesbackend_used").as_str())
+                .ok()
+                .filter(|backend| *backend != cuemol_surface::backends::SesBackend::Auto),
+        );
     }
     Some(object)
 }
@@ -48518,6 +48661,12 @@ fn sync_loaded_surface_geometry(surface: &mut LoadedSurface, object: &MolSurfObj
     node.set_str_attr("orig_sel", object.orig_sel());
     node.set_str_attr("orig_den", object.orig_den().to_string());
     node.set_str_attr("orig_prad", object.orig_prad().to_string());
+    node.set_str_attr("sesbackend", object.ses_backend().name());
+    if let Some(backend) = object.ses_backend_used() {
+        node.set_str_attr("sesbackend_used", backend.name());
+    } else {
+        node.remove_child("sesbackend_used");
+    }
 }
 
 #[cfg(feature = "scripting")]
@@ -48709,6 +48858,12 @@ fn sync_script_surface(surface: &mut LoadedSurface, state: &ScriptObj) {
         node.set_str_attr("orig_sel", object.orig_sel());
         node.set_str_attr("orig_den", object.orig_den().to_string());
         node.set_str_attr("orig_prad", object.orig_prad().to_string());
+        node.set_str_attr("sesbackend", object.ses_backend().name());
+        if let Some(backend) = object.ses_backend_used() {
+            node.set_str_attr("sesbackend_used", backend.name());
+        } else {
+            node.remove_child("sesbackend_used");
+        }
         if state.surface_mesh_modified {
             let data = object.mesh().to_obj_string(&state.name);
             surface.srctype = "obj".to_string();
@@ -51529,9 +51684,9 @@ fn pse_surface_object(
     molecule_name: &str,
     molecule: &MolCoord,
     atom_indices: &[usize],
-) -> LoadedSurface {
+) -> Result<LoadedSurface> {
     let mut surface = MolSurfObj::new();
-    surface.create_ses_from_mol(molecule, Selector::All, 1.0, 1.4);
+    surface.create_ses_from_mol(molecule, Selector::All, 1.0, 1.4)?;
     surface.set_orig_mol(molecule_name);
     let raw_data = cuemol_surface::qdf::write_qdf_surface_bytes(&surface);
 
@@ -51556,7 +51711,7 @@ fn pse_surface_object(
     renderer_node.append_child_node(pse_atom_coloring_node());
     object_node.append_child_node(renderer_node);
 
-    LoadedSurface {
+    Ok(LoadedSurface {
         uid: Uid::new(0),
         name: format!("{molecule_name}_surf"),
         object_type: "MolSurfObj".to_string(),
@@ -51564,7 +51719,7 @@ fn pse_surface_object(
         data: String::from_utf8_lossy(&raw_data).into_owned(),
         raw_data,
         qsc_node: Some(object_node),
-    }
+    })
 }
 
 fn pse_atom_coloring_node() -> LDom2Node {
@@ -61008,6 +61163,84 @@ end_header
 
     #[cfg(feature = "scripting")]
     #[test]
+    fn script_molsurf_backend_drives_generation_and_survives_scene_reload() {
+        use cuemol_surface::backends::SesBackend;
+        let mut app = DesktopAppState::new();
+        let scene = app.ensure_active_scene();
+        let molecule = cuemol_molstr::read_pdb_str(
+            "HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\n\
+             HETATM    2  C2  LIG A   1       2.500   0.000   0.000  1.00 10.00           C\n",
+        )
+        .unwrap();
+        app.scene_manager_mut()
+            .scene_mut(scene)
+            .unwrap()
+            .add_molecule("mol", molecule);
+        let (log, _) = app
+            .run_script_js(
+                r#"
+            var surf = cuemol.MolSurfObj(); print(surf.sesbackend);
+            try { surf.sesbackend = 'rust'; throw new Error('accepted invalid backend'); }
+            catch(e) { if (surf.sesbackend !== 'auto') throw e; }
+            surf.sesbackend = 'meshms';
+            surf.createSESFromMol(cuemol.getObject('mol'), cuemol.makeSel('*'), 2, 1.4);
+            surf.name = 'surface'; scene.addObject(surf);
+            surf.createRenderer('molsurf', 'surface');
+            print(surf.sesbackend);
+        "#,
+            )
+            .unwrap();
+        assert_eq!(log, "auto\nmeshms\n");
+        let meshms =
+            loaded_surface_object(&app.scene_manager().scene(scene).unwrap().loaded_surfaces()[0])
+                .unwrap();
+        assert_eq!(
+            meshms.ses_backend_used(),
+            Some(SesBackend::MeshMs),
+            "{:?}",
+            app.scene_manager().scene(scene).unwrap().loaded_surfaces()[0].qsc_node
+        );
+        app.run_script_js(
+            r#"
+            var surf = cuemol.getObject('surface');
+            surf.sesbackend = 'ball'; surf.regenerateSES1(-1);
+        "#,
+        )
+        .unwrap();
+        let ball =
+            loaded_surface_object(&app.scene_manager().scene(scene).unwrap().loaded_surfaces()[0])
+                .unwrap();
+        assert_eq!(ball.ses_backend(), SesBackend::Ball);
+        assert_eq!(ball.ses_backend_used(), Some(SesBackend::Ball));
+        assert_ne!(ball.mesh(), meshms.mesh());
+        let bytes = app.active_scene_bytes().unwrap();
+        let mut reloaded = DesktopAppState::new();
+        reloaded.open_bytes("surface.qsc", &bytes).unwrap();
+        let (log, _) = reloaded
+            .run_script_js(
+                r#"
+            var surf = cuemol.getObject('surface'); print(surf.sesbackend);
+            surf.regenerateSES1(3); print(surf.orig_den);
+            cuemol.resetProp(surf, 'sesbackend'); print(surf.sesbackend);
+            surf.sesbackend = 'meshms'; surf.regenerateSES1(2);
+        "#,
+            )
+            .unwrap();
+        assert_eq!(log, "ball\n3\nauto\n");
+        let surface = loaded_surface_object(
+            &reloaded
+                .scene_manager()
+                .scene(reloaded.active_scene().unwrap())
+                .unwrap()
+                .loaded_surfaces()[0],
+        )
+        .unwrap();
+        assert_eq!(surface.ses_backend_used(), Some(SesBackend::MeshMs));
+        assert_eq!(surface.mesh(), meshms.mesh());
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
     fn run_script_js_molsurf_creates_scene_surface() {
         let path =
             std::env::temp_dir().join(format!("cuemol-js-molsurf-{}.pdb", std::process::id()));
@@ -68721,7 +68954,9 @@ attribute \"dep\" string \"positions\"
             .mol()
             .clone();
         let mut surface = MolSurfObj::new();
-        surface.create_ses_from_mol(&molecule, Selector::All, 1.0, 1.4);
+        surface
+            .create_ses_from_mol(&molecule, Selector::All, 1.0, 1.4)
+            .unwrap();
         surface.set_orig_mol("source");
         let before_min_x = surface
             .mesh()
@@ -68793,7 +69028,9 @@ attribute \"dep\" string \"positions\"
         )
         .unwrap();
         let mut object = MolSurfObj::new();
-        object.create_ses_from_mol(&molecule, Selector::All, 1.0, 1.4);
+        object
+            .create_ses_from_mol(&molecule, Selector::All, 1.0, 1.4)
+            .unwrap();
         let raw_data = cuemol_surface::qdf::write_qdf_surface_bytes(&object);
         let mut node = LDom2Node::new();
         node.set_tag_name("object");
@@ -69215,7 +69452,7 @@ attribute \"dep\" string \"positions\"
             "ATOM      1  C   GLY A   1       0.000   0.000   0.000  1.00 10.00           C\n",
         )
         .unwrap();
-        let loaded = pse_surface_object("mol", &molecule, &[0]);
+        let loaded = pse_surface_object("mol", &molecule, &[0]).unwrap();
         assert_eq!(loaded.name, "mol_surf");
         assert_eq!(loaded.srctype, "qdfsurf");
         let surface = cuemol_surface::qdf::read_qdf_surface_bytes(&loaded.raw_data).unwrap();

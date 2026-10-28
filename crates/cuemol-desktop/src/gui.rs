@@ -39780,7 +39780,9 @@ mod tests {
         )
         .unwrap();
         let mut object = cuemol_surface::MolSurfObj::new();
-        object.create_ses_from_mol(&molecule, cuemol_molstr::Selector::All, 1.0, 1.4);
+        object
+            .create_ses_from_mol(&molecule, cuemol_molstr::Selector::All, 1.0, 1.4)
+            .unwrap();
         let raw_data = cuemol_surface::qdf::write_qdf_surface_bytes(&object);
         let mut node = cuemol_core::LDom2Node::new();
         node.set_tag_name("object");
