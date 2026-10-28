@@ -123,8 +123,7 @@ fn run_command_cancelable(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     cuemol_command::external::configure_command(&mut command, std::path::Path::new(executable));
-    let mut child = command
-        .spawn()
+    let mut child = cuemol_command::external::spawn_command(&mut command)
         .map_err(|error| format!("failed to start {label} ({executable}): {error}"))?;
     let stdout = child
         .stdout

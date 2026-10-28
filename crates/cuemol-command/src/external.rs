@@ -3,7 +3,7 @@ use cuemol_desktop_core::DesktopAppState;
 use std::{
     io::Read,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
 
@@ -72,8 +72,7 @@ pub fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     configure_command(&mut command, executable);
-    let mut child = command
-        .spawn()
+    let mut child = spawn_command(&mut command)
         .map_err(|e| CueMolError::Io(format!("cannot start {}: {e}", executable.display())))?;
     let read = |stream: Box<dyn Read + Send>| {
         std::thread::spawn(move || {
@@ -135,5 +134,70 @@ pub fn configure_command(command: &mut Command, executable: &Path) {
                 command.env(key, paths);
             }
         }
+    }
+}
+
+/// Retry transient executable-write locks, keeping all other spawn errors unchanged.
+pub fn spawn_command(command: &mut Command) -> std::io::Result<Child> {
+    #[cfg(unix)]
+    for delay in [5, 10, 20, 40, 80] {
+        match command.spawn() {
+            Err(error) if error.raw_os_error() == Some(26) => {
+                std::thread::sleep(Duration::from_millis(delay));
+            }
+            result => return result,
+        }
+    }
+    command.spawn()
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn executable_write_lock_can_clear_before_spawn() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("tool");
+        let mut writer = std::fs::File::create(&executable).unwrap();
+        writer.write_all(b"#!/bin/sh\nexit 0\n").unwrap();
+        writer
+            .set_permissions(std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let mut command = Command::new(&executable);
+        assert_eq!(command.spawn().unwrap_err().raw_os_error(), Some(26));
+        let close = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            drop(writer);
+        });
+        let status = spawn_command(&mut command).unwrap().wait().unwrap();
+        close.join().unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn persistent_write_lock_and_missing_executable_remain_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("tool");
+        let mut writer = std::fs::File::create(&executable).unwrap();
+        writer.write_all(b"#!/bin/sh\nexit 0\n").unwrap();
+        writer
+            .set_permissions(std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        assert_eq!(
+            spawn_command(&mut Command::new(&executable))
+                .unwrap_err()
+                .raw_os_error(),
+            Some(26)
+        );
+        drop(writer);
+        assert_eq!(
+            spawn_command(&mut Command::new(directory.path().join("missing")))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
     }
 }

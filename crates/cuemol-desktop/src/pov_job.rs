@@ -235,12 +235,14 @@ fn run_single_pov_process_with_poll(
         .input_path
         .parent()
         .ok_or_else(|| "POV-Ray input path has no parent directory".to_string())?;
-    let mut child = Command::new(task.executable.trim())
+    let mut command = Command::new(task.executable.trim());
+    command
         .args(povray_args(&task))
         .current_dir(work_dir)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    cuemol_command::external::configure_command(&mut command, Path::new(task.executable.trim()));
+    let mut child = cuemol_command::external::spawn_command(&mut command)
         .map_err(|error| format!("failed to start POV-Ray ({}): {error}", task.executable))?;
     let stdout = child
         .stdout
