@@ -144,7 +144,9 @@ Alternatively, serve the extracted `cuemol-web.zip` from an HTTPS host. WebGPU
 requires a secure context; localhost is supported. `?renderer=webgl` selects the
 WebGL2 fallback. Files stay in the browser. File selection, drag and drop,
 representations, properties, sequence, saved cameras, commands, undo, animation,
-PNG export, and embedded QSC download use the shared Rust core. Browser settings
+PNG export, and embedded QSC download use the shared Rust core. Image rendering
+yields between row batches so the viewport remains interactive, and can be
+cancelled from the status bar. Browser settings
 and startup scripts are stored in localStorage for that origin.
 
 Browser MD playback keeps a `File` handle and reads selected DCD/XTC/TRR/NetCDF/MDCRD

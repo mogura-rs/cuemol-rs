@@ -659,6 +659,28 @@ fn render_float(
     async_state: Option<(&AtomicU32, &AtomicBool)>,
     hatch: Option<&npr::ResolvedHatch>,
 ) -> Result<FloatFrame> {
+    render_float_region(
+        snapshot,
+        camera,
+        background,
+        params,
+        async_state,
+        hatch,
+        0..params.height.max(0) as usize,
+        None,
+    )
+}
+
+fn render_float_region(
+    snapshot: &RenderSceneSnapshot,
+    camera: &Camera,
+    background: [f32; 4],
+    params: &UmbreonRenderParams,
+    async_state: Option<(&AtomicU32, &AtomicBool)>,
+    hatch: Option<&npr::ResolvedHatch>,
+    region: std::ops::Range<usize>,
+    supplied_index: Option<&RayIndex<'_>>,
+) -> Result<FloatFrame> {
     if !(0..=2).contains(&params.denoiser) {
         return Err(CueMolError::invalid_argument("Unknown image denoiser"));
     }
@@ -670,10 +692,14 @@ fn render_float(
         .ok()
         .filter(|value| *value > 0)
         .ok_or_else(|| CueMolError::invalid_argument("umbreon height must be positive"))?;
+    let row_count = region.end.saturating_sub(region.start);
+    if region.end > height || row_count == 0 {
+        return Err(CueMolError::invalid_argument("Invalid render region"));
+    }
     let samples = params.supersample.clamp(1, 8) as usize;
     let components = if params.transparent_background { 4 } else { 3 };
     let length = width
-        .checked_mul(height)
+        .checked_mul(row_count)
         .and_then(|n| n.checked_mul(components))
         .ok_or_else(|| CueMolError::invalid_argument("render dimensions overflow"))?;
     let mut pixels = Vec::new();
@@ -687,7 +713,13 @@ fn render_float(
     let half_w = half_h * aspect;
     let inverse_rotation = camera.rotation().inv()?.to_matrix();
     let camera_center = camera.center();
-    let index = RayIndex::new(snapshot);
+    let owned_index;
+    let index = if let Some(index) = supplied_index {
+        index
+    } else {
+        owned_index = RayIndex::new(snapshot);
+        &owned_index
+    };
 
     let render_row = |y: usize, row: &mut [f32]| {
         for x in 0..width {
@@ -761,7 +793,7 @@ fn render_float(
             if async_state.is_some_and(|(_, cancel)| cancel.load(Ordering::Relaxed)) {
                 break;
             }
-            render_row(start + i, row);
+            render_row(region.start + start + i, row);
             let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
             if let Some((progress, _)) = async_state {
                 progress.fetch_max(
@@ -780,12 +812,12 @@ fn render_float(
                 .map(usize::from)
                 .unwrap_or(1)
                 .min(16)
-                .min(height)
+                .min(row_count)
         };
         if workers == 1 {
             render_rows(0, &mut pixels);
         } else {
-            let rows = height.div_ceil(workers);
+            let rows = row_count.div_ceil(workers);
             std::thread::scope(|scope| {
                 for (i, chunk) in pixels.chunks_mut(rows * row_bytes).enumerate() {
                     let render = &render_rows;
@@ -2105,6 +2137,47 @@ mod tests {
         let mut uniform = vec![123; width * 16 * 3];
         denoise_atrous(&mut uniform, width, 16, 3);
         assert!(uniform.iter().all(|v| *v == 123));
+    }
+
+    #[test]
+    fn partial_rows_preserve_the_full_frame_camera_projection() {
+        let mut snapshot = RenderSceneSnapshot::empty();
+        snapshot.atoms.push(RenderAtom::new(
+            Vector4::new3(0.6, -0.8, 0.),
+            1.,
+            color(220, 40, 10, 210),
+        ));
+        let mut camera = Camera::new();
+        camera.set_zoom(5.);
+        camera.set_cam_dist(10.);
+        camera.set_slab_depth(20.);
+        let params = UmbreonRenderParams {
+            width: 29,
+            height: 31,
+            supersample: 2,
+            transparent_background: true,
+            ..Default::default()
+        };
+        let index = RayIndex::new(&snapshot);
+        let expected = render_float(&snapshot, &camera, [0.; 4], &params, None, None).unwrap();
+        let mut actual = Vec::new();
+        for start in (0..31).step_by(7) {
+            actual.extend(
+                render_float_region(
+                    &snapshot,
+                    &camera,
+                    [0.; 4],
+                    &params,
+                    None,
+                    None,
+                    start..(start + 7).min(31),
+                    Some(&index),
+                )
+                .unwrap()
+                .pixels,
+            );
+        }
+        assert_eq!(actual, expected.pixels);
     }
 
     #[test]

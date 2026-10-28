@@ -261,3 +261,19 @@ test('OIDN uses bundled WebGPU weights and preserves transparent output',async({
   for(let i=3;i<a.data.length;i+=4)expect(b.data[i]).toBe(a.data[i]);
   expect(await page.evaluate(()=>performance.getEntriesByType('resource').some(e=>e.name.includes('rt_hdr_calb_cnrm.tza')))).toBe(true);
 });
+
+test('browser rendering yields to mouse input and can be cancelled',async({page})=>{
+  await ready(page);await load(page,'responsive.pdb',Buffer.from(structure));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  await call(page,'set_render_settings',{settings:'backend=umbreon; supersample=4; useGI=true; giSamples=256; giBounces=4; denoise=None'});
+  const zoom=await page.evaluate(()=>window.cuemol.status().view.zoom);
+  await page.evaluate(()=>window.cuemol.command('get_screenshot',{width:384,height:384}));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().busy)).toBe(true);
+  await page.mouse.move(480,400);await page.mouse.wheel(0,-120);
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().view.zoom)).not.toBe(zoom);
+  expect(await page.evaluate(()=>window.cuemol.status().busy)).toBe(true);
+  const state=await call(page,'cancel_render');expect(state.message).toContain('Render cancelled');
+  await call(page,'set_render_settings',{settings:'useGI=false; supersample=1'});
+  const image=JSON.parse((await call(page,'get_screenshot',{width:32,height:32})).message)._image;
+  expect(PNG.sync.read(Buffer.from(image,'base64')).width).toBe(32);
+});

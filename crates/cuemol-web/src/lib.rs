@@ -8,8 +8,17 @@ use cuemol_qsys::Camera;
 use cuemol_render::RenderSceneSnapshot;
 use eframe::{egui, egui_wgpu};
 use serde_json::{json, Value};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 use trajectory::BrowserTrajectory;
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace=cuemolOidn,js_name=cancel)]
+    fn cancel_oidn();
+}
 use wasm_bindgen::{prelude::*, JsCast};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
 
@@ -121,6 +130,7 @@ struct App {
     trajectory: Option<(Uid, Rc<BrowserTrajectory>)>,
     frame: usize,
     busy: bool,
+    render_cancel: Option<Arc<AtomicBool>>,
     playing: bool,
     fps: f32,
     next_frame: f64,
@@ -220,6 +230,7 @@ impl App {
             trajectory: None,
             frame: 0,
             busy: false,
+            render_cancel: None,
             playing: false,
             fps: 24.0,
             next_frame: 0.0,
@@ -251,6 +262,13 @@ impl App {
         self.future.clear();
     }
     fn call(&mut self, name: &str, args: Value) {
+        if name == "cancel_render" {
+            if let Some(cancel) = &self.render_cancel {
+                cancel.store(true, Ordering::Relaxed);
+                cancel_oidn();
+            }
+            return;
+        }
         if matches!(name, "get_screenshot" | "capture_view" | "render_image") {
             let download = if name == "render_image" {
                 Some(
@@ -482,6 +500,7 @@ impl App {
                 Event::Command(name, args) => self.call(&name, args),
                 Event::Rendered(result, name) => {
                     self.busy = false;
+                    self.render_cancel = None;
                     match result {
                         Ok(value) => {
                             if let Some(name) = name {
@@ -720,8 +739,13 @@ impl App {
             Ok(render) => {
                 self.busy = true;
                 self.message = "Rendering image…".into();
+                let cancel = Arc::new(AtomicBool::new(false));
+                self.render_cancel = Some(cancel.clone());
                 spawn_local(async move {
-                    enqueue(Event::Rendered(render.run_async().await, download));
+                    enqueue(Event::Rendered(
+                        render.run_async_with_cancel(Some(&cancel)).await,
+                        download,
+                    ));
                 });
             }
             Err(e) => self.message = e.to_string(),
@@ -947,6 +971,14 @@ impl eframe::App for App {
         self.toolbar(ctx);
         self.workspace(ctx);
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+            if self.render_cancel.is_some() {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    if ui.button("Cancel render").clicked() {
+                        self.call("cancel_render", json!({}));
+                    }
+                });
+            }
             if let Some((_, trajectory)) = &self.trajectory {
                 let frames = trajectory.frames;
                 ui.horizontal(|ui| {

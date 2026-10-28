@@ -685,12 +685,20 @@ impl PreparedRender {
     }
     #[cfg(target_arch = "wasm32")]
     pub async fn run_async(self) -> Result<Value> {
+        self.run_async_with_cancel(None).await
+    }
+    #[cfg(target_arch = "wasm32")]
+    pub async fn run_async_with_cancel(
+        self,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<Value> {
         let frame = cuemol_render::render_umbreon_snapshot_async(
             &self.snapshot,
             &self.camera,
             self.background,
             &self.params,
             self.hatch.as_ref(),
+            cancel,
         )
         .await?;
         self.encode(frame)

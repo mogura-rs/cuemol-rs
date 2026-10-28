@@ -156,12 +156,94 @@ pub fn prepare_oidn_render(
 }
 
 #[cfg(target_arch = "wasm32")]
+async fn yield_browser() -> Result<()> {
+    use wasm_bindgen::prelude::*;
+    #[wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(js_name=setTimeout)]
+        fn set_timeout(callback: &js_sys::Function, milliseconds: i32);
+    }
+    let promise = js_sys::Promise::new(&mut |resolve, _| set_timeout(&resolve, 0));
+    wasm_bindgen_futures::JsFuture::from(promise)
+        .await
+        .map_err(|_| CueMolError::Io("Browser scheduling failed".into()))?;
+    Ok(())
+}
+#[cfg(target_arch = "wasm32")]
+fn check_cancel(cancel: Option<&AtomicBool>) -> Result<()> {
+    if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+        Err(CueMolError::invalid_argument("Render cancelled"))
+    } else {
+        Ok(())
+    }
+}
+#[cfg(target_arch = "wasm32")]
+async fn render_float_async(
+    snapshot: &RenderSceneSnapshot,
+    camera: &Camera,
+    background: [f32; 4],
+    params: &UmbreonRenderParams,
+    hatch: Option<&npr::ResolvedHatch>,
+    cancel: Option<&AtomicBool>,
+) -> Result<FloatFrame> {
+    let started = Instant::now();
+    let index = RayIndex::new(snapshot);
+    let mut frame = FloatFrame {
+        width: params.width,
+        height: params.height,
+        components: if params.transparent_background { 4 } else { 3 },
+        pixels: Vec::new(),
+        render_seconds: 0.,
+    };
+    let length = usize::try_from(params.width)
+        .ok()
+        .zip(usize::try_from(params.height).ok())
+        .and_then(|(w, h)| w.checked_mul(h))
+        .and_then(|n| n.checked_mul(frame.components as usize))
+        .filter(|n| *n > 0)
+        .ok_or_else(|| CueMolError::invalid_argument("Invalid render dimensions"))?;
+    frame
+        .pixels
+        .try_reserve_exact(length)
+        .map_err(|e| CueMolError::invalid_argument(format!("Cannot allocate render: {e}")))?;
+    let mut row = 0;
+    let mut rows = 4;
+    while row < params.height as usize {
+        yield_browser().await?;
+        check_cancel(cancel)?;
+        let end = (row + rows).min(params.height as usize);
+        let tile = render_float_region(
+            snapshot,
+            camera,
+            background,
+            params,
+            None,
+            hatch,
+            row..end,
+            Some(&index),
+        )?;
+        rows = if tile.render_seconds > 0.02 {
+            (rows / 2).max(1)
+        } else if tile.render_seconds < 0.008 {
+            (rows * 2).min(32)
+        } else {
+            rows
+        };
+        frame.pixels.extend(tile.pixels);
+        row = end;
+    }
+    check_cancel(cancel)?;
+    frame.render_seconds = started.elapsed().as_secs_f64();
+    Ok(frame)
+}
+#[cfg(target_arch = "wasm32")]
 pub async fn render_umbreon_snapshot_async(
     snapshot: &RenderSceneSnapshot,
     camera: &Camera,
     background: [f32; 4],
     params: &UmbreonRenderParams,
     hatch: Option<&HatchRenderParams>,
+    cancel: Option<&AtomicBool>,
 ) -> Result<UmbreonFrame> {
     let resolved = hatch
         .map(|p| npr::ResolvedHatch::new(p, params.supersample))
@@ -170,16 +252,25 @@ pub async fn render_umbreon_snapshot_async(
         .as_ref()
         .map(|r| r.render_settings(params, background))
         .unwrap_or_else(|| (params.clone(), background));
+    let raw = render_float_async(
+        snapshot,
+        camera,
+        background,
+        &settings,
+        resolved.as_ref(),
+        cancel,
+    )
+    .await?;
     if needs_oidn(&settings) {
-        let raw = render_float(
-            snapshot,
-            camera,
-            background,
-            &settings,
-            None,
-            resolved.as_ref(),
-        )?;
-        prepare(
+        let direct = if settings.denoiser != 2 && settings.use_gi && resolved.is_none() {
+            let mut params = settings.clone();
+            params.gi_intensity = 0.;
+            Some(render_float_async(snapshot, camera, background, &params, None, cancel).await?)
+        } else {
+            None
+        };
+        check_cancel(cancel)?;
+        let prepared = prepare_with_direct(
             snapshot,
             camera,
             background,
@@ -187,18 +278,23 @@ pub async fn render_umbreon_snapshot_async(
             raw,
             None,
             resolved.as_ref(),
-        )?
-        .run_async()
-        .await
+            direct,
+        )?;
+        yield_browser().await?;
+        check_cancel(cancel)?;
+        prepared.run_async().await
     } else {
-        render_with_hatch(
-            snapshot,
-            camera,
-            background,
-            &settings,
-            None,
-            resolved.as_ref(),
-        )
+        let mut frame = raw.into_frame();
+        if settings.denoiser == 1 || (settings.use_gi && settings.gi_denoise) {
+            denoise_pixels(
+                &mut frame.pixels,
+                frame.width as usize,
+                frame.height as usize,
+                frame.components as usize,
+                settings.denoiser,
+            );
+        }
+        Ok(frame)
     }
 }
 
@@ -210,6 +306,28 @@ pub(super) fn prepare(
     raw: FloatFrame,
     async_state: Option<(&AtomicU32, &AtomicBool)>,
     hatch: Option<&npr::ResolvedHatch>,
+) -> Result<OidnRender> {
+    prepare_with_direct(
+        snapshot,
+        camera,
+        background,
+        params,
+        raw,
+        async_state,
+        hatch,
+        None,
+    )
+}
+
+fn prepare_with_direct(
+    snapshot: &RenderSceneSnapshot,
+    camera: &Camera,
+    background: [f32; 4],
+    params: &UmbreonRenderParams,
+    raw: FloatFrame,
+    async_state: Option<(&AtomicU32, &AtomicBool)>,
+    hatch: Option<&npr::ResolvedHatch>,
+    direct_override: Option<FloatFrame>,
 ) -> Result<OidnRender> {
     let width = raw.width as usize;
     let height = raw.height as usize;
@@ -276,14 +394,18 @@ pub(super) fn prepare(
     let direct = if params.denoiser != 2 && params.use_gi && hatch.is_none() {
         let mut direct_params = params.clone();
         direct_params.gi_intensity = 0.;
-        let frame = render_float(
-            snapshot,
-            camera,
-            background,
-            &direct_params,
-            async_state,
-            None,
-        )?;
+        let frame = if let Some(frame) = direct_override {
+            frame
+        } else {
+            render_float(
+                snapshot,
+                camera,
+                background,
+                &direct_params,
+                async_state,
+                None,
+            )?
+        };
         if frame.pixels.is_empty() {
             return Err(CueMolError::invalid_argument("Render cancelled"));
         }

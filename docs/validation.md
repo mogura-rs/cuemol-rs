@@ -137,3 +137,13 @@ confirmed changed RGB values and identical alpha, and verified the model request
 The interactive viewport used WebGL2 while OIDN used WebGPU in the same browser.
 The native and WebGPU implementations use different model/runtime versions;
 this check does not assert numerical identity between their filtered pixels.
+
+## Responsive browser rendering
+
+The shared renderer can evaluate bounded row ranges with identical camera
+projection. Native tests compare their concatenated floating-point pixels to a
+whole-frame render. Browser rendering reuses one BVH and adapts its row batches
+to yield between calculations. All 12 browser tests passed, including camera
+zoom during a large GI render, cancellation, and successful rendering afterwards.
+OIDN cancellation also closes the pending browser render operation. The native
+OIDN quality and alpha tests passed on Apple Silicon with its bundled CPU runtime.
