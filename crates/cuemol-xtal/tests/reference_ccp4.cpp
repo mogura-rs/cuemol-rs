@@ -40,6 +40,8 @@ int main(int argc, char **argv) {
             out << map->getDetectedMapType() << ' ' << map->getMinDensity() << ' ' << map->getMaxDensity()
                 << ' ' << map->getMeanDensity() << ' ' << map->getRmsdDensity() << '\n';
             out << map->getLevelBase() << ' ' << map->getLevelStep() << '\n';
+            auto sample = map->convToOrth(qlib::Vector4D(0.4, 0.6, 0.8));
+            out << map->atFloat(0, 0, 0) << ' ' << map->getValueAt(sample) << ' ' << map->getQuantStep() << '\n';
             for (int z = 0; z < map->getSecNo(); ++z)
                 for (int y = 0; y < map->getRowNo(); ++y)
                     for (int x = 0; x < map->getColNo(); ++x)

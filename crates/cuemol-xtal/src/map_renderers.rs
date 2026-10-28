@@ -510,9 +510,6 @@ impl DensityMap {
     }
 
     fn flat_index(&self, col: isize, row: isize, sec: isize) -> Option<usize> {
-        let col = col - self.start[0];
-        let row = row - self.start[1];
-        let sec = sec - self.start[2];
         if col < 0 || row < 0 || sec < 0 {
             return None;
         }
@@ -526,12 +523,13 @@ impl DensityMap {
     }
 
     fn index_from_position(&self, position: Vector4) -> [isize; 3] {
-        let rel = position - self.origin;
-        [
-            project_axis(rel, self.delta[0]).floor() as isize,
-            project_axis(rel, self.delta[1]).floor() as isize,
-            project_axis(rel, self.delta[2]).floor() as isize,
-        ]
+        let Some(inverse) = inverse_grid_basis(self.delta) else {
+            return [isize::MIN; 3];
+        };
+        let index = inverse.mul_vec(position - self.origin);
+        std::array::from_fn(|axis| {
+            ([index.x, index.y, index.z][axis] - self.start[axis] as f64).trunc() as isize
+        })
     }
 }
 
@@ -620,6 +618,23 @@ fn delta_from_cell(
 }
 
 impl ScalarObject for DensityMap {
+    fn quant_step(&self) -> f64 {
+        self.level_step
+    }
+
+    fn base_histogram(&self) -> (f64, f64, f64, Vec<f64>) {
+        (
+            self.level_base,
+            self.level_base + self.level_step * 256.,
+            if self.level_step > 0. {
+                self.level_step
+            } else {
+                1.
+            },
+            self.histogram.iter().map(|count| *count as f64).collect(),
+        )
+    }
+
     fn percent_level_histogram(&self) -> Option<[u64; 256]> {
         self.is_em().then_some(self.histogram)
     }
@@ -1324,7 +1339,6 @@ impl MapMeshRenderer {
         };
         range.limit_node_counts([self.bufsize as usize; 3]);
         let [nc, nr, ns] = range.node_counts();
-        let (sc, sr, ss) = (scalar.start_col(), scalar.start_row(), scalar.start_sec());
         if nc < 2 || nr < 2 || ns < 2 {
             return Vec::new();
         }
@@ -1339,7 +1353,7 @@ impl MapMeshRenderer {
                 k as isize + range.start[2],
             ];
             let [i, j, k] = range.map_indices(scalar, logical);
-            let value = level - scalar.at_float(i + sc, j + sr, k + ss);
+            let value = level - scalar.at_float(i, j, k);
             let [i, j, k] = logical;
             let pos = scalar.conv_to_orth(Vector4::new3(i as f64, j as f64, k as f64));
             (value, pos, boundary.contains(pos))
@@ -1773,14 +1787,11 @@ impl MapSurfRenderer {
 /// taken from grid central differences of the trilinearly interpolated density
 /// so vertex normals stay smooth instead of faceted.
 ///
-/// Index inversion (Cartesian -> continuous grid index) assumes an orthogonal
-/// cell — the same scope as the MTZ/mmCIF density synthesis that feeds it.
+/// Cartesian indices and gradients use the full cell basis, including skew cells.
 struct DensityField<'a, S: ScalarObject> {
     map: &'a S,
     origin: Vector4,
-    axes: [Vector4; 3],
-    inv_len2: [f64; 3],
-    start: [isize; 3],
+    orth_to_grid: Matrix3,
     periodic: bool,
 }
 
@@ -1792,30 +1803,17 @@ impl<'a, S: ScalarObject> DensityField<'a, S> {
             map.conv_to_orth(Vector4::new3(0.0, 1.0, 0.0)) - origin,
             map.conv_to_orth(Vector4::new3(0.0, 0.0, 1.0)) - origin,
         ];
-        let inv_len2 = [
-            inv_sq_len(axes[0]),
-            inv_sq_len(axes[1]),
-            inv_sq_len(axes[2]),
-        ];
         Self {
             map,
             origin,
-            axes,
-            inv_len2,
-            start: [map.start_col(), map.start_row(), map.start_sec()],
+            orth_to_grid: inverse_grid_basis(axes).unwrap_or(Matrix3::IDENTITY),
             periodic,
         }
     }
 
-    /// Cartesian point -> continuous (relative) grid index, via per-axis
-    /// projection (exact for an orthogonal cell).
     fn cont_index(&self, p: Vector4) -> [f64; 3] {
-        let rel = p - self.origin;
-        [
-            rel.dot3d(self.axes[0]) * self.inv_len2[0],
-            rel.dot3d(self.axes[1]) * self.inv_len2[1],
-            rel.dot3d(self.axes[2]) * self.inv_len2[2],
-        ]
+        let index = self.orth_to_grid.mul_vec(p - self.origin);
+        [index.x, index.y, index.z]
     }
 
     fn node_density(&self, i: isize, j: isize, k: isize) -> f64 {
@@ -1826,11 +1824,7 @@ impl<'a, S: ScalarObject> DensityField<'a, S> {
                 index[axis] = index[axis].rem_euclid(counts[axis] as isize);
             }
         }
-        self.map.at_float(
-            index[0] + self.start[0],
-            index[1] + self.start[1],
-            index[2] + self.start[2],
-        )
+        self.map.at_float(index[0], index[1], index[2])
     }
 
     /// Trilinear density at a continuous (relative) grid index.
@@ -1859,26 +1853,30 @@ impl<S: ScalarObject> ScalarField for DensityField<'_, S> {
         // Central difference of the density along each grid axis (one node step
         // either side), mapped to a Cartesian vector by the axis directions.
         // Outward = toward decreasing density = -grad(density).
-        let mut grad = Vector4::ZERO;
+        let mut gradient = [0.; 3];
         for axis in 0..3 {
             let mut lo = idx;
             let mut hi = idx;
             lo[axis] -= 1.0;
             hi[axis] += 1.0;
             let d_dens = self.density_at(hi) - self.density_at(lo);
-            grad = grad + self.axes[axis].scale(-0.5 * d_dens * self.inv_len2[axis]);
+            gradient[axis] = -0.5 * d_dens;
         }
-        grad
+        Matrix3::new(std::array::from_fn(|row| {
+            std::array::from_fn(|col| self.orth_to_grid.values[col][row])
+        }))
+        .mul_vec(Vector4::new3(gradient[0], gradient[1], gradient[2]))
     }
 }
 
-fn inv_sq_len(v: Vector4) -> f64 {
-    let d = v.dot3d(v);
-    if d > 1.0e-20 {
-        1.0 / d
-    } else {
-        0.0
-    }
+fn inverse_grid_basis(axes: [Vector4; 3]) -> Option<Matrix3> {
+    Matrix3::new([
+        [axes[0].x, axes[1].x, axes[2].x],
+        [axes[0].y, axes[1].y, axes[2].y],
+        [axes[0].z, axes[1].z, axes[2].z],
+    ])
+    .invert()
+    .ok()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2059,7 +2057,6 @@ fn build_density_isosurface<S: ScalarObject>(
     if dims[0] < 2 || dims[1] < 2 || dims[2] < 2 {
         return;
     }
-    let start = [map.start_col(), map.start_row(), map.start_sec()];
     let field = DensityField::new(map, range.periodic);
     let spacing = map
         .col_grid_size()
@@ -2075,7 +2072,7 @@ fn build_density_isosurface<S: ScalarObject>(
         |i, j, k| {
             let logical = [indices[0][i], indices[1][j], indices[2][k]];
             let [i, j, k] = range.map_indices(map, logical);
-            level - map.at_float(i + start[0], j + start[1], k + start[2])
+            level - map.at_float(i, j, k)
         },
         // Grid node -> Cartesian (relative index; conv_to_orth adds the start).
         |i, j, k| {
@@ -2378,19 +2375,46 @@ impl_map_renderer_deref!(
     GlslMapVolRenderer,
 );
 
-fn project_axis(value: Vector4, axis: Vector4) -> f64 {
-    let denom = axis.sqlen3d();
-    if denom.abs() < 1.0e-12 {
-        0.0
-    } else {
-        value.dot3d(axis) / denom
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use cuemol_molstr::{parse_selector, read_opendx_str};
+
+    #[test]
+    fn skew_cell_scalar_sampling_and_gradients_use_local_grid_indices() {
+        let mut values = Vec::new();
+        for z in 0..6 {
+            for y in 0..6 {
+                for x in 0..6 {
+                    values.push(x + 2 * y + 4 * z);
+                }
+            }
+        }
+        let mut map = DensityMap::new();
+        map.set_map_byte_array(&values, [6; 3], 0., 256., 17.5, 1.);
+        map.set_map_params([-3, 2, 1], [6; 3]);
+        map.set_xtal_params(10., 12., 14., 83., 77., 120.);
+        map.set_origin(Vector4::new3(20., -6., 3.));
+        assert_eq!(map.at_float(1, 1, 1), 7.);
+        let p = map.conv_to_orth(Vector4::new3(1.2, 1.3, 1.4));
+        assert_eq!(map.value_at(p), 7.);
+        assert!(map.is_in_range(p));
+        let field = DensityField::new(&map, false);
+        let center = map.conv_to_orth(Vector4::new3(2.5, 2.5, 2.5));
+        let gradient = field.gradient(center);
+        let origin = map.conv_to_orth(Vector4::ZERO);
+        for (direction, expected) in [
+            (Vector4::new3(1., 0., 0.), -1.),
+            (Vector4::new3(0., 1., 0.), -2.),
+            (Vector4::new3(0., 0., 1.), -4.),
+        ] {
+            let axis = map.conv_to_orth(direction) - origin;
+            assert!((gradient.dot3d(axis) - expected).abs() < 1e-10);
+        }
+        assert_eq!(map.quant_step(), 1.);
+        let histogram = map.histogram(0., 256., 256);
+        assert_eq!(histogram.values.iter().sum::<f64>(), 216.);
+    }
 
     #[test]
     fn opendx_loads_into_density_map_without_x_z_swap() {
@@ -2506,8 +2530,9 @@ attribute \"dep\" string \"positions\"
         assert!((first_position - Vector4::new3(3.0, -4.0, 15.0)).length3d() < 1.0e-12);
         assert!(map.is_in_range(first_position));
         assert!((map.value_at(first_position) - 1.0).abs() < 0.05);
-        assert!((map.at_float(3, -2, 5) - 1.0).abs() < 0.05);
-        assert!(!map.is_in_boundary(0, 0, 0));
+        assert!((map.at_float(0, 0, 0) - 1.0).abs() < 0.05);
+        assert!(map.is_in_boundary(0, 0, 0));
+        assert!(!map.is_in_boundary(3, -2, 5));
     }
 
     #[test]

@@ -830,3 +830,18 @@ identities across four script transactions, undo, a native state clone and an
 embedded scene reload. The shared core passed 210 tests and native egui passed
 165 tests. Two rebuilt-browser regressions covered transactions and MRC/QSC
 persistence. Other raw surface/lightweight payload types were not changed here.
+
+### Scalar-map indices and skew cells
+
+Scalar access now uses local stored-grid indices, matching the C++ `atFloat`,
+`atByte`, and boundary APIs. File starts are applied only in the coordinate
+transform. Cartesian sampling uses the inverse of the full cell basis, and
+surface gradients use its inverse transpose. This corrects the former
+orthogonal-cell assumption for nonzero starts and skew crystallographic cells.
+Density histograms use their stored byte counts and quantization range while
+reporting the measured minimum and maximum.
+
+The CCP4 oracle passed 80 cases including local sampling and quantization steps.
+Shared-core tests passed 210 cases and native GUI tests passed 165 cases.
+A skew-cell regression checks coordinate sampling, gradient components, and
+histogram counts independently of the reference reader.

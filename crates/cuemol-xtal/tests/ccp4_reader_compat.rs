@@ -108,6 +108,11 @@ fn summary(map: &DensityMap) -> Vec<f64> {
         map.level_base(),
         map.level_step(),
     ];
+    out.extend([
+        map.at_float(0, 0, 0),
+        map.value_at(map.conv_to_orth(Vector4::new3(0.4, 0.6, 0.8))),
+        map.quant_step(),
+    ]);
     out.extend(map.byte_values().iter().map(|v| f64::from(*v)));
     out
 }

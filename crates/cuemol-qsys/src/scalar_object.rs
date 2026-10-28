@@ -50,6 +50,10 @@ pub trait ScalarObject {
     fn level_base(&self) -> f64;
     fn level_step(&self) -> f64;
 
+    fn quant_step(&self) -> f64 {
+        0.0
+    }
+
     fn center(&self) -> Vector4;
     fn origin(&self) -> Vector4;
 
@@ -108,7 +112,7 @@ pub trait ScalarObject {
             };
         }
 
-        let (hist_min, hist_max, base_width, base_histogram) = self.base_histogram();
+        let (hist_min, _hist_max, base_width, base_histogram) = self.base_histogram();
         let target_width = (max - min) / bins as f64;
         let mut histogram = vec![0.0; bins];
         for (index, count) in base_histogram.into_iter().enumerate() {
@@ -142,8 +146,8 @@ pub trait ScalarObject {
         }
 
         ScalarHistogram {
-            min: hist_min,
-            max: hist_max,
+            min: self.min_density(),
+            max: self.max_density(),
             bin_count: bins,
             maximum: histogram.iter().copied().fold(0.0_f64, f64::max),
             sigma: self.rmsd_density(),
@@ -161,7 +165,7 @@ pub trait ScalarObject {
         let range = max - min;
         let requested_width = self.rmsd_density() / 1000.0;
         let count = if range > 0.0 && requested_width > 0.0 {
-            (range / requested_width).floor().max(1.0) as usize
+            (range / requested_width).floor().clamp(1.0, 65536.0) as usize
         } else {
             1
         };
@@ -174,11 +178,7 @@ pub trait ScalarObject {
         for col in 0..self.col_no() {
             for row in 0..self.row_no() {
                 for sec in 0..self.sec_no() {
-                    let value = self.at_float(
-                        self.start_col() + col as isize,
-                        self.start_row() + row as isize,
-                        self.start_sec() + sec as isize,
-                    );
+                    let value = self.at_float(col as isize, row as isize, sec as isize);
                     let index = ((value - min) / width).floor() as isize;
                     if (0..count as isize).contains(&index) {
                         histogram[index as usize] += 1.0;
