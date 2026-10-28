@@ -342,6 +342,29 @@ fn gpu_effects_change_contact_shadows_edges_and_refine_without_stale_history() {
     let exporter = SceneRenderer::new().unwrap();
     camera.set_center(Vector4::ZERO);
     camera.set_cam_dist(40.0);
+    for (name, options) in [
+        ("ao", ao),
+        (
+            "ao-smaa",
+            ViewportOptions {
+                antialiasing: Antialiasing::Smaa,
+                ..ao
+            },
+        ),
+        (
+            "ao-jitter",
+            ViewportOptions {
+                jitter_level: 2,
+                ao_half_res: true,
+                ..ao
+            },
+        ),
+    ] {
+        let image = exporter
+            .render_viewport(&scene, &camera, 129, 127, [0.05, 0.08, 0.12, 1.0], options)
+            .unwrap();
+        assert_eq!(image, images[name], "live readback differs for {name}");
+    }
     let transparent = exporter
         .render_camera_with_effects(&scene, &camera, 129, 127, [0.05, 0.08, 0.12, 0.0], 0, ao)
         .unwrap();

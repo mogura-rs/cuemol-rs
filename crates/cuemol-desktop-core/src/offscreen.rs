@@ -238,7 +238,7 @@ impl SceneRenderer {
             [width, height],
             background,
             level,
-            None,
+            crate::viewport_readback::Effects::None,
         )
     }
 
@@ -263,7 +263,32 @@ impl SceneRenderer {
             [width, height],
             background,
             level,
-            Some((&mut effects, options)),
+            crate::viewport_readback::Effects::Export(&mut effects, options),
+        )
+    }
+
+    /// Render a converged live-view image, including spatial and temporal AA.
+    pub fn render_viewport(
+        &self,
+        snapshot: &RenderSceneSnapshot,
+        camera: &Camera,
+        width: u32,
+        height: u32,
+        background: [f64; 4],
+        options: crate::effects::ViewportOptions,
+    ) -> Option<Vec<u8>> {
+        let mut viewport = self.viewport.lock().ok()?;
+        let mut effects = self.effects.lock().ok()?;
+        crate::viewport_readback::draw(
+            &mut viewport,
+            &self.device,
+            &self.queue,
+            snapshot,
+            camera,
+            [width, height],
+            background,
+            0,
+            crate::viewport_readback::Effects::Live(&mut effects, options),
         )
     }
 

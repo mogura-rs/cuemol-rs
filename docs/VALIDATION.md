@@ -503,5 +503,26 @@ screenshots were inspected. WebGL2 uses packed 24-bit color depth for post-proce
 reads, avoiding unsupported depth-texture loads and shadow-sampler compilation.
 The 18 raw appearance fixtures still matched every Linux RGBA byte.
 
-The optional older Tauri shell still has a separate approximation of screen AO
-and post-AA. Its replacement and the class-registry audit remain follow-up work.
+## Tauri viewport integration
+
+The optional Tauri shell now reads back the same molecular GPU pipeline, including
+AO, spatial AA and a converged temporal average. The worker reads pixels only
+once after convergence. It retains the scene primitives instead of tessellating
+all atoms and cylinders into an extra CPU mesh. Screen lines stay in the scene
+snapshot and depth-test with the molecule; the HTML overlay carries labels.
+Scene editing includes the SMAA threshold. Point and rectangle picking use the
+reference picking slab rather than the farther display plane.
+
+With reference fixtures present, all 143 Tauri tests passed on Apple Silicon,
+including actual GPU AO/AA and the previously ignored animation image exporter.
+The Linux shared pixel test confirms that live-view readback exactly matches
+AO, SMAA and temporal-accumulation output; the same regression passed on Metal.
+The native egui suite passed 165 tests and the shell contract suite passed 69.
+The Linux Tauri build could not run because the host lacks Pango/GTK development
+metadata; this is not evidence of a Linux Tauri runtime test.
+
+Three old Tauri expectations were corrected after checking current behavior:
+Tritium's DefaultNucl section width is 0.4 (the old XUL style says 0.5), the
+default ribbon exposes its C-alpha pivots for picking, and contact annotations
+retain live atom references instead of fixed positions. The class-registry audit
+remains separate follow-up work.

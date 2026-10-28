@@ -15,13 +15,12 @@ use cuemol_anim::{
 use cuemol_core::{LDom2Node, Quat, Uid, Vector4, NANOS_PER_SECOND};
 use cuemol_qsys::{Camera, CenterMark, StereoMode, View};
 use cuemol_render::{
-    tessellate_snapshot, PovSceneExporter, RenderBond, RenderMesh, RenderSceneSnapshot,
-    UmbreonDenoiseMode, UmbreonSceneExporter,
+    PovSceneExporter, RenderSceneSnapshot, UmbreonDenoiseMode, UmbreonSceneExporter,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::offscreen::{camera_depth_range, camera_mvp, encode_rgba_png, SceneRenderer};
+use crate::offscreen::{camera_mvp, camera_pick_mvp, encode_rgba_png, SceneRenderer};
 use crate::{
     atoms_in_screen_rect, collect_scene_pov_labels, create_apbs_work_dir, create_pov_work_dir,
     overlay_pov_labels, pick_atom_screen, run_apbs_process, run_pov_process,
@@ -31,6 +30,7 @@ use crate::{
     WorkspaceObjectClipboard, WorkspaceRendererClipboard, WorkspaceStyleClipboard,
     MOLECULE_RENDERER_TYPES,
 };
+use cuemol_desktop_core::effects::ViewportOptions;
 
 const MAX_VIEW_DIM: u32 = 1_600;
 const MIN_INTERACTIVE_RENDER_SCALE: f64 = 0.5;
@@ -77,6 +77,7 @@ struct SceneDto {
     ao_half_res: bool,
     aa_method: String,
     aa_jitter_level: i32,
+    aa_smaa_threshold: f64,
     onload: String,
     object_uids: String,
     active_object_id: u64,
@@ -951,39 +952,6 @@ struct PickedAtomDto {
     aid: i32,
 }
 
-fn project_viewport_point(
-    mvp: [[f32; 4]; 4],
-    point: Vector4,
-    width: u32,
-    height: u32,
-) -> Option<(f32, f32)> {
-    let value = [point.x as f32, point.y as f32, point.z as f32, 1.0];
-    let mut clip = [0.0_f32; 4];
-    for (row, component) in clip.iter_mut().enumerate() {
-        for (column, value) in value.iter().enumerate() {
-            *component += mvp[column][row] * value;
-        }
-    }
-    if clip[3] <= 0.0 {
-        return None;
-    }
-    Some((
-        (clip[0] / clip[3] + 1.0) * 0.5 * width as f32,
-        (1.0 - clip[1] / clip[3]) * 0.5 * height as f32,
-    ))
-}
-
-fn viewport_css_color(color: cuemol_gfx::Rgba8) -> String {
-    if color.a == u8::MAX {
-        format!("#{:02X}{:02X}{:02X}", color.r, color.g, color.b)
-    } else {
-        format!(
-            "#{:02X}{:02X}{:02X}{:02X}",
-            color.r, color.g, color.b, color.a
-        )
-    }
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct InitialStateDto {
@@ -1104,6 +1072,7 @@ struct ScenePropertiesInput {
     ao_half_res: bool,
     aa_method: String,
     aa_jitter_level: i32,
+    aa_smaa_threshold: f64,
     onload: String,
     use_color_proof: bool,
     icc_filename: String,
@@ -1543,9 +1512,8 @@ struct AppModel {
     renderer: Option<Arc<SceneRenderer>>,
     renderer_warmup: Option<std::thread::JoinHandle<Option<Arc<SceneRenderer>>>>,
     renderer_init_attempted: bool,
-    mesh: Option<RenderMesh>,
-    screen_lines: Vec<RenderBond>,
-    mesh_refit_pending: bool,
+    render_snapshot: Option<RenderSceneSnapshot>,
+    snapshot_refit_pending: bool,
     selection: String,
     background: String,
     show_unit_cell: bool,
@@ -1741,9 +1709,8 @@ impl AppModel {
             renderer: None,
             renderer_warmup: None,
             renderer_init_attempted: false,
-            mesh: None,
-            screen_lines: Vec::new(),
-            mesh_refit_pending: loaded > 0,
+            render_snapshot: None,
+            snapshot_refit_pending: loaded > 0,
             selection: startup_selection.unwrap_or_default(),
             background: "black".to_string(),
             show_unit_cell: false,
@@ -1829,6 +1796,10 @@ impl AppModel {
                         .unwrap_or("fxaa")
                         .to_string(),
                     aa_jitter_level: scene_attr_i32(scene.scene_attribute("aaJitterLevel"), 0),
+                    aa_smaa_threshold: scene_attr_f64(
+                        scene.scene_attribute("aaSmaaThreshold"),
+                        0.05,
+                    ),
                     onload: scene.scene_attribute("onload").unwrap_or("").to_string(),
                     object_uids,
                     active_object_id: scene.active_object_uid().map_or(0, Uid::get),
@@ -2820,7 +2791,7 @@ impl AppModel {
             )
             .map_err(|error| error.to_string())?;
         self.status = "Object properties updated".to_string();
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -2841,7 +2812,7 @@ impl AppModel {
             )
             .map_err(|error| error.to_string())?;
         self.status = "Density map properties updated".to_string();
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -2855,7 +2826,7 @@ impl AppModel {
             .set_density_renderer_visible(Uid::new(map_uid), Uid::new(renderer_uid), visible)
             .map_err(|error| error.to_string())?;
         self.status = "Density renderer visibility updated".to_string();
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -2873,7 +2844,7 @@ impl AppModel {
             .set_workspace_renderer_group_name(Uid::new(map_uid), renderer_uid, group_name)
             .map_err(|error| error.to_string())?;
         self.status = format!("Added {renderer_type} renderer");
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -3007,7 +2978,7 @@ impl AppModel {
                 .map_err(|error| error.to_string())?;
         }
         self.status = "Density renderer properties updated".to_string();
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -3025,7 +2996,7 @@ impl AppModel {
             )
             .map_err(|error| error.to_string())?;
         self.status = "Surface properties updated".to_string();
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -3048,7 +3019,7 @@ impl AppModel {
             )
             .map_err(|error| error.to_string())?;
         self.status = "Lightweight object properties updated".to_string();
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -3099,7 +3070,7 @@ impl AppModel {
             )
             .map_err(|error| error.to_string())?;
         self.status = "Lightweight renderer properties updated".to_string();
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -3113,7 +3084,7 @@ impl AppModel {
             .set_surface_renderer_visible(Uid::new(surface_uid), Uid::new(renderer_uid), visible)
             .map_err(|error| error.to_string())?;
         self.status = "Surface renderer visibility updated".to_string();
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -3130,7 +3101,7 @@ impl AppModel {
             .set_workspace_renderer_group_name(Uid::new(surface_uid), renderer_uid, group_name)
             .map_err(|error| error.to_string())?;
         self.status = "Added molsurf renderer".to_string();
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -3143,7 +3114,7 @@ impl AppModel {
             .set_workspace_renderer_group_name(Uid::new(object_uid), renderer_uid, group_name)
             .map_err(|error| error.to_string())?;
         self.status = "Added lightweight renderer".to_string();
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -3192,7 +3163,7 @@ impl AppModel {
         } else {
             "Workspace item hidden".to_string()
         };
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -3290,7 +3261,7 @@ impl AppModel {
                         ));
                     }
                     self.status = format!("Delete renderer group: {group_name}");
-                    self.invalidate_mesh(false);
+                    self.invalidate_snapshot(false);
                     return Ok(());
                 }
             }
@@ -3523,11 +3494,11 @@ impl AppModel {
                     return Err(format!("style {local_index} not found"));
                 }
                 self.status = "Destroyed style".to_string();
-                self.invalidate_mesh(false);
+                self.invalidate_snapshot(false);
             }
             kind => return Err(format!("unsupported Workspace item type: {kind}")),
         }
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -3714,7 +3685,7 @@ impl AppModel {
             )
             .map_err(|error| error.to_string())?;
         self.status = "Change renderer selection".to_string();
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -3867,7 +3838,7 @@ impl AppModel {
             kind => return Err(format!("unsupported renderer target: {kind}")),
         };
         self.status = format!("Added {renderer_type} renderer: {renderer_name}");
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -3883,7 +3854,7 @@ impl AppModel {
             )
             .map_err(|error| error.to_string())?;
         self.status = format!("Change renderer type to {}", input.renderer_type);
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -3904,7 +3875,7 @@ impl AppModel {
         } else {
             "Change style".to_string()
         };
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -3927,7 +3898,7 @@ impl AppModel {
             )
             .map_err(|error| error.to_string())?;
         self.status = "Change style".to_string();
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -3943,7 +3914,7 @@ impl AppModel {
             )
             .map_err(|error| error.to_string())?;
         self.status = "Change coloring".to_string();
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -3959,7 +3930,7 @@ impl AppModel {
             )
             .map_err(|error| error.to_string())?;
         self.status = "Insert paint entry".to_string();
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -3980,7 +3951,7 @@ impl AppModel {
             .insert_object_paint_entry(object_uid, &input.color)
             .map_err(|error| error.to_string())?;
         self.status = "Insert paint entry".to_string();
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(true)
     }
 
@@ -4039,7 +4010,7 @@ impl AppModel {
         self.modified_scenes.insert(scene_uid);
         self.status = "Paste object".to_string();
         self.touch_structure_details();
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -4091,7 +4062,7 @@ impl AppModel {
             .map_err(|error| error.to_string())?;
         self.modified_scenes.insert(scene_uid);
         self.status = format!("Pasted style {}", clipboard.name());
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -4138,7 +4109,7 @@ impl AppModel {
             }
         }
         self.status = format!("Pasted {} renderer(s)", result.renderer_uids.len());
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(changed)
     }
 
@@ -4191,7 +4162,7 @@ impl AppModel {
             .set_workspace_renderer_styles(object_uid, renderer_uid, style)
             .map_err(|error| error.to_string())?;
         self.status = "Renderer group properties updated".to_string();
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(true)
     }
 
@@ -4462,7 +4433,7 @@ impl AppModel {
         }
 
         self.status = "Change mol selection".to_string();
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -4609,7 +4580,7 @@ impl AppModel {
         };
         if changed {
             self.status = status.to_string();
-            self.invalidate_mesh(false);
+            self.invalidate_snapshot(false);
         }
         Ok(changed)
     }
@@ -4733,7 +4704,7 @@ impl AppModel {
                 .map_err(|error| error.to_string())?;
         }
         self.status = "Surface renderer properties updated".to_string();
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -5767,7 +5738,7 @@ impl AppModel {
                 .map_err(|error| error.to_string())?;
         }
         self.status = "Renderer properties updated".to_string();
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -5864,6 +5835,11 @@ impl AppModel {
         if !(0..=5).contains(&properties.aa_jitter_level) {
             return Err("AA jitter level must be between 0 and 5".to_string());
         }
+        if !properties.aa_smaa_threshold.is_finite()
+            || !(0.0..=1.0).contains(&properties.aa_smaa_threshold)
+        {
+            return Err("SMAA threshold must be between 0 and 1".to_string());
+        }
         if icc_intent_index(&properties.icc_intent).is_none() {
             return Err(format!("unsupported ICC intent: {}", properties.icc_intent));
         }
@@ -5902,6 +5878,12 @@ impl AppModel {
             &properties.aa_jitter_level.to_string(),
             "0",
         );
+        set_scene_attr_default(
+            scene,
+            "aaSmaaThreshold",
+            &properties.aa_smaa_threshold.to_string(),
+            "0.05",
+        );
         set_scene_attr_default(scene, "onload", &properties.onload, "");
         set_scene_attr_default(
             scene,
@@ -5916,7 +5898,7 @@ impl AppModel {
             self.sync_active_scene_properties();
         }
         self.status = "Scene properties updated".to_string();
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -6066,7 +6048,7 @@ impl AppModel {
         Ok(())
     }
 
-    fn rebuild_mesh(&mut self, refit: bool) -> Result<(), String> {
+    fn rebuild_snapshot(&mut self, refit: bool) -> Result<(), String> {
         if self.desktop.sync_auto_symmetry_center(self.camera.center()) {
             if let Some(scene_uid) = self.desktop.active_scene() {
                 self.modified_scenes.insert(scene_uid);
@@ -6112,27 +6094,19 @@ impl AppModel {
                 .active_scene_saved_camera()
                 .unwrap_or_else(|| frame_camera(&snapshot));
         }
-        self.screen_lines = snapshot
-            .bonds
-            .iter()
-            .filter(|bond| bond.screen_width.is_some())
-            .cloned()
-            .collect();
-        snapshot.bonds.retain(|bond| bond.screen_width.is_none());
-        self.mesh = Some(tessellate_snapshot(&snapshot));
-        self.mesh_refit_pending = false;
+        self.render_snapshot = Some(snapshot);
+        self.snapshot_refit_pending = false;
         Ok(())
     }
 
-    fn invalidate_mesh(&mut self, refit: bool) {
-        self.mesh = None;
-        self.screen_lines.clear();
-        self.mesh_refit_pending |= refit;
+    fn invalidate_snapshot(&mut self, refit: bool) {
+        self.render_snapshot = None;
+        self.snapshot_refit_pending |= refit;
     }
 
-    fn prepare_mesh_if_needed(&mut self) -> Result<(), String> {
-        if self.mesh.is_none() {
-            self.rebuild_mesh(self.mesh_refit_pending)?;
+    fn prepare_snapshot_if_needed(&mut self) -> Result<(), String> {
+        if self.render_snapshot.is_none() {
+            self.rebuild_snapshot(self.snapshot_refit_pending)?;
         }
         Ok(())
     }
@@ -6154,7 +6128,7 @@ impl AppModel {
         } else {
             format!("Loaded {loaded}; failed: {}", failures.join("; "))
         };
-        self.invalidate_mesh(true);
+        self.invalidate_snapshot(true);
         if loaded == 0 {
             return Err(self.status.clone());
         }
@@ -6203,7 +6177,7 @@ impl AppModel {
             self.modified_scenes.insert(scene_uid);
         }
         self.touch_structure_details();
-        self.invalidate_mesh(saved_camera.is_none());
+        self.invalidate_snapshot(saved_camera.is_none());
         Ok(())
     }
 
@@ -6212,118 +6186,59 @@ impl AppModel {
             .apply_trajectory_frame(Uid::new(object_uid), frame)
             .map_err(|error| error.to_string())?;
         self.status = format!("Trajectory frame: {frame}");
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
-    fn render_mesh_rgba(
+    fn render_snapshot_rgba(
         &self,
         renderer: &SceneRenderer,
-        mesh: &RenderMesh,
+        snapshot: &RenderSceneSnapshot,
         width: u32,
         height: u32,
     ) -> Option<Vec<u8>> {
-        let scene = self
-            .desktop
-            .active_scene()
-            .and_then(|uid| self.desktop.scene_manager().scene(uid));
-        let jitter_level = scene_attr_i32(
-            scene.and_then(|scene| scene.scene_attribute("aaJitterLevel")),
-            0,
-        )
-        .clamp(0, 5);
-        let aa_method = scene
-            .and_then(|scene| scene.scene_attribute("aa_method"))
-            .unwrap_or("fxaa");
-        let mvp = camera_mvp(&self.camera, f64::from(width) / f64::from(height));
-        let mut clear = background_rgba(&self.background).unwrap_or([0.0, 0.0, 0.0, 1.0]);
-        clear[3] = 1.0;
-        let mut rgba = renderer.render_supersampled(
-            std::slice::from_ref(mesh),
-            mvp,
+        let mut background = background_rgba(&self.background).unwrap_or([0.0, 0.0, 0.0, 1.0]);
+        background[3] = 1.0;
+        renderer.render_viewport(
+            snapshot,
+            &self.camera,
             width,
             height,
-            clear,
-            jitter_level,
-        )?;
-
-        if scene_attr_bool(
-            scene.and_then(|scene| scene.scene_attribute("aoEnabled")),
-            false,
-        ) {
-            let (near, far) = camera_depth_range(&self.camera);
-            if let Some(depth) = renderer.render_depth(
-                std::slice::from_ref(mesh),
-                mvp,
-                width,
-                height,
-                near,
-                far,
-                self.camera.is_perspective(),
-            ) {
-                let radius = scene_attr_f64(
-                    scene.and_then(|scene| scene.scene_attribute("aoRadius")),
-                    4.0,
-                );
-                let intensity = scene_attr_f64(
-                    scene.and_then(|scene| scene.scene_attribute("aoIntensity")),
-                    2.2,
-                );
-                let slices =
-                    scene_attr_i32(scene.and_then(|scene| scene.scene_attribute("aoSlices")), 9);
-                let steps =
-                    scene_attr_i32(scene.and_then(|scene| scene.scene_attribute("aoSteps")), 3);
-                let radius_pixels = ((radius / self.camera.slab_depth())
-                    * f64::from(width.min(height)))
-                .round()
-                .clamp(1.0, 64.0) as usize;
-                apply_screen_space_ao(
-                    &mut rgba,
-                    &depth,
-                    width,
-                    height,
-                    radius_pixels,
-                    intensity,
-                    slices,
-                    steps,
-                );
-            }
-        }
-        if aa_method != "none" {
-            apply_fast_post_aa(&mut rgba, width, height, aa_method == "smaa");
-        }
-        Some(rgba)
+            background,
+            ViewportOptions::from_state(&self.desktop),
+        )
     }
 
     fn render(&mut self, width: u32, height: u32) -> ViewportDto {
-        if let Err(error) = self.prepare_mesh_if_needed() {
+        if let Err(error) = self.prepare_snapshot_if_needed() {
             self.status = format!("Render state failed: {error}");
         }
         let mut viewport = self.viewport_metadata(width, height);
         let width = viewport.width;
         let height = viewport.height;
         if self.renderer.is_none()
-            && self
-                .mesh
-                .as_ref()
-                .is_some_and(|mesh| !mesh.indices.is_empty())
+            && self.render_snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.atom_count() + snapshot.bond_count() + snapshot.mesh_triangle_count() > 0
+            })
         {
             self.finish_renderer_warmup();
         }
-        viewport.image =
-            self.renderer
-                .as_ref()
-                .zip(self.mesh.as_ref())
-                .and_then(|(renderer, mesh)| {
-                    if mesh.indices.is_empty() {
-                        return None;
-                    }
-                    self.render_mesh_rgba(renderer, mesh, width, height)
-                        .map(|rgba| {
-                            let png = encode_rgba_png(&rgba, width, height);
-                            format!("data:image/png;base64,{}", base64_encode(&png))
-                        })
-                });
+        viewport.image = self
+            .renderer
+            .as_ref()
+            .zip(self.render_snapshot.as_ref())
+            .and_then(|(renderer, snapshot)| {
+                if snapshot.atom_count() + snapshot.bond_count() + snapshot.mesh_triangle_count()
+                    == 0
+                {
+                    return None;
+                }
+                self.render_snapshot_rgba(renderer, snapshot, width, height)
+                    .map(|rgba| {
+                        let png = encode_rgba_png(&rgba, width, height);
+                        format!("data:image/png;base64,{}", base64_encode(&png))
+                    })
+            });
         viewport
     }
 
@@ -6333,35 +6248,6 @@ impl AppModel {
         self.view_width = width;
         self.view_height = height;
         let mvp = camera_mvp(&self.camera, f64::from(width) / f64::from(height));
-        let lines = self
-            .screen_lines
-            .iter()
-            .filter_map(|line| {
-                let (x1, y1) = project_viewport_point(mvp, line.from, width, height)?;
-                let (x2, y2) = project_viewport_point(mvp, line.to, width, height)?;
-                Some(ViewportLineDto {
-                    x1: x1 + line.screen_offset[0],
-                    y1: y1 + line.screen_offset[1],
-                    x2: x2 + line.screen_offset[0],
-                    y2: y2 + line.screen_offset[1],
-                    width: line.screen_width.unwrap_or(1.0),
-                    color: line
-                        .color
-                        .as_ref()
-                        .and_then(cuemol_gfx::ColorSpec::rgba8)
-                        .map(viewport_css_color)
-                        .unwrap_or_else(|| "#ffff00".to_string()),
-                    end_color: line
-                        .end_color
-                        .as_ref()
-                        .and_then(cuemol_gfx::ColorSpec::rgba8)
-                        .map(viewport_css_color),
-                    stipple: line.screen_stipple,
-                    point: line.screen_point,
-                })
-            })
-            .take(200_000)
-            .collect();
         let mut labels =
             self.desktop
                 .active_atom_intr_labels(mvp, width as f32, height as f32, 1_000);
@@ -6380,7 +6266,7 @@ impl AppModel {
             slab: self.camera.slab_depth(),
             perspective: self.camera.is_perspective(),
             center_mark: center_mark_name(self.camera.center_mark()).to_string(),
-            lines,
+            lines: Vec::new(),
             labels: labels
                 .into_iter()
                 .map(|label| ViewportLabelDto {
@@ -6517,7 +6403,7 @@ impl AppModel {
         self.animation_elapsed = 0.0;
         self.animation_playing = true;
         self.animation_start_camera = Some(self.camera.clone());
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -6786,7 +6672,7 @@ impl AppModel {
             .desktop
             .load_scene_camera(scene_uid, name, load_visibility)
             .map_err(|error| error.to_string())?;
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         self.status = format!("Loaded camera {name}");
         Ok(())
     }
@@ -6872,7 +6758,7 @@ impl AppModel {
             )
             .map_err(|error| error.to_string())?;
         self.status = format!("Saved style {}", input.name.trim());
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -6885,7 +6771,7 @@ impl AppModel {
             return Err(format!("style {local_index} not found"));
         }
         self.status = "Destroyed style".to_string();
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -6901,7 +6787,7 @@ impl AppModel {
             .desktop
             .active_pick_atoms(selection)
             .map_err(|error| error.to_string())?;
-        let mvp = camera_mvp(
+        let mvp = camera_pick_mvp(
             &self.camera,
             f64::from(width.max(1)) / f64::from(height.max(1)),
         );
@@ -6930,7 +6816,7 @@ impl AppModel {
             "Selected atom {} {}{}:{}",
             atom.serial, atom.residue_name, atom.residue_id, atom.name
         );
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -6962,7 +6848,7 @@ impl AppModel {
             .desktop
             .active_pick_atoms(&self.selection)
             .map_err(|error| error.to_string())?;
-        let mvp = camera_mvp(
+        let mvp = camera_pick_mvp(
             &self.camera,
             f64::from(width.max(1)) / f64::from(height.max(1)),
         );
@@ -6995,7 +6881,7 @@ impl AppModel {
             )
         };
         self.status = format!("Rectangle selected {} atom(s)", serials.len());
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -7466,7 +7352,7 @@ impl AppModel {
             }
         }
         self.animation_playing = false;
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -7492,7 +7378,7 @@ impl AppModel {
             .desktop
             .apply_scene_animation_time(scene_uid, animation_time(elapsed), view_uid)
             .map_err(|error| error.to_string())?;
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -7588,7 +7474,7 @@ impl AppModel {
         self.animation_playing = false;
         self.animation_start_camera = None;
         self.animation_start_desktop = None;
-        self.invalidate_mesh(false);
+        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -8658,124 +8544,6 @@ fn set_scene_attr_default(
         scene.remove_scene_attribute(name);
     } else {
         scene.set_scene_attribute(name, value);
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn apply_screen_space_ao(
-    rgba: &mut [u8],
-    depth: &[u8],
-    width: u32,
-    height: u32,
-    radius_pixels: usize,
-    intensity: f64,
-    slices: i32,
-    steps: i32,
-) {
-    let width = width as usize;
-    let height = height as usize;
-    if width < 3 || height < 3 || rgba.len() != width * height * 4 || depth.len() != rgba.len() {
-        return;
-    }
-    let slices = slices.clamp(1, 64) as usize;
-    let steps = steps.clamp(1, 32) as usize;
-    let radius_pixels = radius_pixels.clamp(1, 64);
-    let mut offsets = BTreeSet::new();
-    for slice in 0..slices {
-        let angle = std::f64::consts::TAU * slice as f64 / slices as f64;
-        for step in 1..=steps {
-            let distance = (radius_pixels * step).div_ceil(steps) as f64;
-            let dx = (angle.cos() * distance).round() as isize;
-            let dy = (angle.sin() * distance).round() as isize;
-            if dx != 0 || dy != 0 {
-                offsets.insert((dx, dy));
-            }
-        }
-    }
-    if offsets.is_empty() {
-        return;
-    }
-    let strength = (intensity / 2.2).clamp(0.1, 3.0);
-    for y in 0..height {
-        for x in 0..width {
-            let index = (y * width + x) * 4;
-            let center = depth[index] as f64;
-            if center <= 1.0 {
-                continue;
-            }
-            let mut occlusion = 0.0;
-            let mut samples = 0usize;
-            for &(dx, dy) in &offsets {
-                let sx = x as isize + dx;
-                let sy = y as isize + dy;
-                if sx < 0 || sy < 0 || sx >= width as isize || sy >= height as isize {
-                    continue;
-                }
-                let sample = depth[(sy as usize * width + sx as usize) * 4] as f64;
-                if sample > center + 2.0 {
-                    occlusion += ((sample - center) / 64.0).min(1.0);
-                }
-                samples += 1;
-            }
-            if samples == 0 {
-                continue;
-            }
-            let shade = (1.0 - 0.65 * strength * occlusion / samples as f64).clamp(0.15, 1.0);
-            for channel in &mut rgba[index..index + 3] {
-                *channel = (f64::from(*channel) * shade).round() as u8;
-            }
-        }
-    }
-}
-
-fn apply_fast_post_aa(rgba: &mut [u8], width: u32, height: u32, high_quality: bool) {
-    let width = width as usize;
-    let height = height as usize;
-    if width < 3 || height < 3 || rgba.len() != width * height * 4 {
-        return;
-    }
-    let row_stride = width * 4;
-    let mut north = rgba[..row_stride].to_vec();
-    let mut current = rgba[row_stride..row_stride * 2].to_vec();
-    let mut south = rgba[row_stride * 2..row_stride * 3].to_vec();
-    let threshold = if high_quality { 10 } else { 18 };
-    let luma = |row: &[u8], index: usize| -> i32 {
-        (i32::from(row[index]) * 54
-            + i32::from(row[index + 1]) * 183
-            + i32::from(row[index + 2]) * 19)
-            / 256
-    };
-    for y in 1..height - 1 {
-        for x in 1..width - 1 {
-            let column = x * 4;
-            let center_luma = luma(&current, column);
-            let neighbor_luma = [
-                luma(&current, column - 4),
-                luma(&current, column + 4),
-                luma(&north, column),
-                luma(&south, column),
-            ];
-            let min_luma = neighbor_luma.into_iter().fold(center_luma, i32::min);
-            let max_luma = neighbor_luma.into_iter().fold(center_luma, i32::max);
-            if max_luma - min_luma < threshold {
-                continue;
-            }
-            let target = (y * width + x) * 4;
-            for channel in 0..3 {
-                let sum = u32::from(current[column - 4 + channel])
-                    + u32::from(current[column + 4 + channel])
-                    + u32::from(north[column + channel])
-                    + u32::from(south[column + channel]);
-                rgba[target + channel] =
-                    ((u32::from(current[column + channel]) * 2 + sum) / 6) as u8;
-            }
-        }
-        std::mem::swap(&mut north, &mut current);
-        std::mem::swap(&mut current, &mut south);
-        if y + 2 < height {
-            let start = (y + 2) * row_stride;
-            south.copy_from_slice(&rgba[start..start + row_stride]);
-        }
     }
 }
 
@@ -9866,7 +9634,7 @@ fn handle_model_request(
                 .map_err(|error| error.to_string())?;
             model.modified_scenes.insert(scene_uid);
             model.status = "Density map redrawn".to_string();
-            model.invalidate_mesh(false);
+            model.invalidate_snapshot(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -9890,7 +9658,7 @@ fn handle_model_request(
                 .generate_density_surface_object(Uid::new(map_uid), Uid::new(renderer_uid))
                 .map_err(|error| error.to_string())?;
             model.status = format!("Generated surface object {}", surface_uid.get());
-            model.invalidate_mesh(false);
+            model.invalidate_snapshot(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -9956,7 +9724,7 @@ fn handle_model_request(
                 .regenerate_surface_object_with_density(Uid::new(surface_uid), density)
                 .map_err(|error| error.to_string())?;
             model.status = format!("Regenerated surface: {triangle_count} triangle(s)");
-            model.invalidate_mesh(false);
+            model.invalidate_snapshot(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -10026,7 +9794,7 @@ fn handle_model_request(
                 .load_scene_camera(scene_uid, &name, true)
                 .map_err(|error| error.to_string())?;
             undo.camera = model.camera.clone();
-            model.invalidate_mesh(false);
+            model.invalidate_snapshot(false);
             model.status = format!("Load camera file {name}");
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
@@ -10125,7 +9893,7 @@ fn handle_model_request(
                 .map_err(|error| error.to_string())?;
             model.status = format!("Loaded style file {path}");
             if model.desktop.active_scene() == Some(scene_uid) {
-                model.invalidate_mesh(false);
+                model.invalidate_snapshot(false);
             }
             model.push_undo(undo);
             debug_assert!(model
@@ -10154,7 +9922,7 @@ fn handle_model_request(
                 .map_err(|error| error.to_string())?;
             model.status = format!("Reloaded style file {source}");
             if model.desktop.active_scene() == Some(scene_uid) {
-                model.invalidate_mesh(false);
+                model.invalidate_snapshot(false);
             }
             model.modified_scenes.insert(scene_uid);
             model.push_undo(undo);
@@ -10260,7 +10028,7 @@ fn handle_model_request(
             if removed > 0 {
                 model.modified_scenes.insert(scene_uid);
                 model.status = format!("Removed {removed} interaction(s)");
-                model.invalidate_mesh(false);
+                model.invalidate_snapshot(false);
                 model.push_undo(undo);
             }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
@@ -10642,7 +10410,7 @@ fn handle_model_request(
             model.selection.clear();
             model.sync_active_scene_properties();
             model.status = format!("File: [{path}] is loaded.");
-            model.invalidate_mesh(recenter);
+            model.invalidate_snapshot(recenter);
             model.push_undo(undo);
             model.touch_structure_details();
             Ok(ModelResponse::MolStructUpdate(Box::new(
@@ -10672,7 +10440,7 @@ fn handle_model_request(
                 model.modified_scenes.remove(&scene_uid);
             }
             model.sync_active_scene_properties();
-            model.invalidate_mesh(true);
+            model.invalidate_snapshot(true);
             model.status = format!("Scene file: [{}] is reloaded.", path.display());
             model.log_lines.push(model.status.clone());
             model.touch_structure_details();
@@ -10703,7 +10471,7 @@ fn handle_model_request(
                 .map_err(|error| error.to_string())?;
             model.modified_scenes.insert(scene_uid);
             model.status = format!("Created molecule {object_name} from SMILES");
-            model.invalidate_mesh(recenter);
+            model.invalidate_snapshot(recenter);
             model.push_undo(undo);
             model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
@@ -10738,7 +10506,7 @@ fn handle_model_request(
                 };
             model.selection.clear();
             model.status = format!("Opened PDB {pdb_id}: {} file(s)", files.len());
-            model.invalidate_mesh(recenter);
+            model.invalidate_snapshot(recenter);
             model.push_undo(undo);
             if summary.object_uid.is_some() {
                 model.touch_structure_details();
@@ -10774,7 +10542,7 @@ fn handle_model_request(
                 "Loaded trajectory {}: {} frame(s)",
                 summary.object_name, summary.frame_count
             );
-            model.invalidate_mesh(renderer_setup.recenter);
+            model.invalidate_snapshot(renderer_setup.recenter);
             model.push_undo(undo);
             model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
@@ -10814,7 +10582,7 @@ fn handle_model_request(
                 summary.frame_count,
                 summary.blocks.len()
             );
-            model.invalidate_mesh(false);
+            model.invalidate_snapshot(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -10828,7 +10596,7 @@ fn handle_model_request(
                 "Removed trajectory block: {} block(s) remaining",
                 summary.blocks.len()
             );
-            model.invalidate_mesh(false);
+            model.invalidate_snapshot(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -10843,7 +10611,7 @@ fn handle_model_request(
                 .move_trajectory_block(Uid::new(object_uid), from, to)
                 .map_err(|error| error.to_string())?;
             model.status = format!("Moved trajectory block: {} → {}", from + 1, to + 1);
-            model.invalidate_mesh(false);
+            model.invalidate_snapshot(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -10859,7 +10627,7 @@ fn handle_model_request(
             model.reset_animation_playback();
             model.sync_active_scene_properties();
             model.status = "New scene".to_string();
-            model.invalidate_mesh(true);
+            model.invalidate_snapshot(true);
             model.push_undo(undo);
             model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
@@ -10906,7 +10674,7 @@ fn handle_model_request(
                 model.reset_animation_playback();
             }
             model.sync_active_scene_properties();
-            model.invalidate_mesh(mode == "new-scene");
+            model.invalidate_snapshot(mode == "new-scene");
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -10929,7 +10697,7 @@ fn handle_model_request(
             model.selection.clear();
             model.sync_active_scene_properties();
             model.status = format!("Activated scene {scene_uid}");
-            model.invalidate_mesh(false);
+            model.invalidate_snapshot(false);
             model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -10948,7 +10716,7 @@ fn handle_model_request(
             model.selection.clear();
             model.sync_active_scene_properties();
             model.status = format!("Activated view {view_uid}");
-            model.invalidate_mesh(false);
+            model.invalidate_snapshot(false);
             model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -10968,7 +10736,7 @@ fn handle_model_request(
             model.selection.clear();
             model.sync_active_scene_properties();
             model.status = "Tab closed".to_string();
-            model.invalidate_mesh(false);
+            model.invalidate_snapshot(false);
             model.push_undo(undo);
             if let Some(scene_uid) = closed_scene
                 .filter(|scene_uid| model.desktop.scene_manager().scene(*scene_uid).is_none())
@@ -10984,7 +10752,7 @@ fn handle_model_request(
                 cuemol_molstr::parse_selector(selection).map_err(|error| error.to_string())?;
             }
             model.selection = selection.to_string();
-            model.invalidate_mesh(false);
+            model.invalidate_snapshot(false);
             model.status = if model.selection.is_empty() {
                 "Selection cleared".to_string()
             } else {
@@ -11056,7 +10824,7 @@ fn handle_model_request(
             } else {
                 "Renderer hidden".to_string()
             };
-            model.invalidate_mesh(false);
+            model.invalidate_snapshot(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -11101,7 +10869,7 @@ fn handle_model_request(
                     .map_err(|error| error.to_string())?;
             }
             model.status = format!("Added {renderer_type} renderer");
-            model.invalidate_mesh(false);
+            model.invalidate_snapshot(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -11132,7 +10900,7 @@ fn handle_model_request(
                 .set_object_coloring(Uid::new(object_uid), coloring_type, attrs)
                 .map_err(|error| error.to_string())?;
             model.status = format!("Applied {coloring} coloring");
-            model.invalidate_mesh(false);
+            model.invalidate_snapshot(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -11241,7 +11009,7 @@ fn handle_model_request(
                 _ => unreachable!("coloring target was validated"),
             }
             model.status = "Changed coloring".to_string();
-            model.rebuild_mesh(false)?;
+            model.rebuild_snapshot(false)?;
             model.push_undo(undo);
             let viewport = model.render(width, height);
             Ok(ModelResponse::MolStructUpdate(Box::new(
@@ -11267,7 +11035,7 @@ fn handle_model_request(
             model.status = format!("Deleted {count} atom(s)");
             if count > 0 {
                 model.selection.clear();
-                model.invalidate_mesh(true);
+                model.invalidate_snapshot(true);
                 model.push_undo(undo);
                 model.touch_structure_details();
             }
@@ -11293,7 +11061,7 @@ fn handle_model_request(
                 .map_err(|error| error.to_string())?;
             model.status = format!("Changed chain ID for {count} atom(s)");
             if count > 0 {
-                model.invalidate_mesh(false);
+                model.invalidate_snapshot(false);
                 model.push_undo(undo);
                 model.touch_structure_details();
             }
@@ -11329,7 +11097,7 @@ fn handle_model_request(
                 if renumber { "Renumbered" } else { "Shifted" }
             );
             if count > 0 {
-                model.invalidate_mesh(false);
+                model.invalidate_snapshot(false);
                 model.push_undo(undo);
                 model.touch_structure_details();
             }
@@ -11355,7 +11123,7 @@ fn handle_model_request(
                 "{} {count} atom(s) into the target molecule",
                 if copy { "Copied" } else { "Moved" }
             );
-            model.invalidate_mesh(true);
+            model.invalidate_snapshot(true);
             model.push_undo(undo);
             model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
@@ -11398,7 +11166,7 @@ fn handle_model_request(
                 }
             }
             model.status = "Molecular superposition applied".to_string();
-            model.invalidate_mesh(auto_recenter);
+            model.invalidate_snapshot(auto_recenter);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -11433,7 +11201,7 @@ fn handle_model_request(
             }
             .to_string();
             if changed {
-                model.invalidate_mesh(false);
+                model.invalidate_snapshot(false);
                 model.push_undo(undo);
             }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
@@ -11467,7 +11235,7 @@ fn handle_model_request(
             }
             model.status = format!("Removed {removed} non-standard bond(s)");
             if removed > 0 {
-                model.invalidate_mesh(false);
+                model.invalidate_snapshot(false);
                 model.push_undo(undo);
             }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
@@ -11510,7 +11278,7 @@ fn handle_model_request(
                     "Defined {} interaction(s) in {}",
                     summary.count, renderer_name
                 );
-                model.invalidate_mesh(false);
+                model.invalidate_snapshot(false);
                 model.push_undo(undo);
             }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
@@ -11549,7 +11317,7 @@ fn handle_model_request(
                 .map_err(|error| error.to_string())?;
             model.modified_scenes.insert(scene_uid);
             model.status = "Changed symmetry information".to_string();
-            model.invalidate_mesh(false);
+            model.invalidate_snapshot(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -11567,7 +11335,7 @@ fn handle_model_request(
                 .map_err(|error| error.to_string())?;
             model.modified_scenes.insert(scene_uid);
             model.status = "Symmetry molecules shown".to_string();
-            model.invalidate_mesh(false);
+            model.invalidate_snapshot(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -11624,7 +11392,7 @@ fn handle_model_request(
             }
             model.modified_scenes.insert(scene_uid);
             model.status = "Unit cell shown".to_string();
-            model.invalidate_mesh(false);
+            model.invalidate_snapshot(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -11668,7 +11436,7 @@ fn handle_model_request(
                 _ => return Err(format!("unsupported secondary structure mode: {mode}")),
             };
             model.status = format!("Secondary structure assigned for {count} {unit}");
-            model.invalidate_mesh(false);
+            model.invalidate_snapshot(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -11691,7 +11459,7 @@ fn handle_model_request(
                 )
                 .map_err(|error| error.to_string())?;
             model.status = format!("Created molecular surface {name}");
-            model.invalidate_mesh(false);
+            model.invalidate_snapshot(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -11798,7 +11566,7 @@ fn handle_model_request(
             } else {
                 format!("Surface cut: {} triangles", summary.target_triangle_count)
             };
-            model.invalidate_mesh(false);
+            model.invalidate_snapshot(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -11937,7 +11705,7 @@ fn handle_model_request(
                             .extend(output.log.lines().map(|line| format!("APBS> {line}")));
                     }
                     model.status = format!("APBS calculation complete: {}", job.potential_name);
-                    model.invalidate_mesh(false);
+                    model.invalidate_snapshot(false);
                     model.push_undo(undo);
                     Ok(ModelResponse::Message(format!(
                         "complete:{}",
@@ -12041,7 +11809,7 @@ fn handle_model_request(
                 "Morph frame {:.2} applied to {} atom(s)",
                 frame, summary.atom_count
             );
-            model.invalidate_mesh(false);
+            model.invalidate_snapshot(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -12064,7 +11832,7 @@ fn handle_model_request(
                 _ => return Err(format!("unsupported display option: {option}")),
             }
             model.status = format!("{option}: {}", if value { "shown" } else { "hidden" });
-            model.invalidate_mesh(false);
+            model.invalidate_snapshot(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -12075,7 +11843,7 @@ fn handle_model_request(
             let undo = model.capture_undo();
             model.density_level = level.clamp(0.1, 10.0);
             model.status = format!("Density level: {:.2} σ", model.density_level);
-            model.invalidate_mesh(false);
+            model.invalidate_snapshot(false);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -12330,7 +12098,7 @@ fn handle_model_request(
             if let Some(scene_uid) = model.desktop.active_scene() {
                 model.modified_scenes.insert(scene_uid);
             }
-            model.invalidate_mesh(false);
+            model.invalidate_snapshot(false);
             model.push_undo(undo);
             model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
@@ -12354,7 +12122,7 @@ fn handle_model_request(
             model
                 .log_lines
                 .push(format!("Exec internal JS: {path} done."));
-            model.invalidate_mesh(false);
+            model.invalidate_snapshot(false);
             model.status = "Script executed".to_string();
             model.push_undo(undo);
             model.touch_structure_details();
@@ -16421,9 +16189,8 @@ mod tests {
             renderer: None,
             renderer_warmup: None,
             renderer_init_attempted: false,
-            mesh: None,
-            screen_lines: Vec::new(),
-            mesh_refit_pending: false,
+            render_snapshot: None,
+            snapshot_refit_pending: false,
             selection: String::new(),
             background: "black".to_string(),
             show_unit_cell: false,
@@ -16623,17 +16390,20 @@ mod tests {
     }
 
     #[test]
-    fn startup_defers_mesh_and_gpu_initialization_until_viewport_render() {
+    fn startup_defers_geometry_and_gpu_initialization_until_viewport_render() {
         let mut model = AppModel::new(Vec::new());
         assert!(model.renderer.is_none());
         assert!(model.renderer_warmup.is_none());
         assert!(!model.renderer_init_attempted);
-        assert!(model.mesh.is_none());
-        model.prepare_mesh_if_needed().unwrap();
+        assert!(model.render_snapshot.is_none());
+        model.prepare_snapshot_if_needed().unwrap();
         assert!(model
-            .mesh
+            .render_snapshot
             .as_ref()
-            .is_some_and(|mesh| mesh.indices.is_empty()));
+            .is_some_and(|snapshot| snapshot.atom_count()
+                + snapshot.bond_count()
+                + snapshot.mesh_triangle_count()
+                == 0));
         assert!(!model.renderer_init_attempted);
     }
 
@@ -16870,8 +16640,8 @@ mod tests {
         };
         assert_eq!(update.snapshot.objects.len(), 1);
         assert!(update.viewport.image.is_none());
-        assert!(model.mesh.is_none());
-        assert!(model.mesh_refit_pending);
+        assert!(model.render_snapshot.is_none());
+        assert!(model.snapshot_refit_pending);
         assert_eq!(update.viewport.width, 800);
         assert_eq!(update.viewport.height, 600);
         fs::remove_file(path).unwrap();
@@ -16921,7 +16691,7 @@ mod tests {
             first_path.to_string_lossy()
         );
         assert_eq!(update.snapshot.scenes[0].source_type, "qsc_xml");
-        assert!(model.mesh_refit_pending);
+        assert!(model.snapshot_refit_pending);
 
         let response = handle_model_request(
             &mut model,
@@ -17041,7 +16811,7 @@ mod tests {
         assert_eq!(model.desktop.active_scene(), Some(empty_scene_uid));
         assert_eq!(model.camera.zoom(), 73.0);
         assert_eq!(model.desktop.active_view_camera().unwrap().zoom(), 73.0);
-        assert!(!model.mesh_refit_pending);
+        assert!(!model.snapshot_refit_pending);
 
         fs::remove_file(path).unwrap();
     }
@@ -17150,7 +16920,7 @@ mod tests {
             .iter()
             .any(|renderer| renderer.name == "atoms" && renderer.renderer_type == "ballstick"));
         assert!(update.snapshot.can_undo);
-        assert!(!model.mesh_refit_pending);
+        assert!(!model.snapshot_refit_pending);
         fs::remove_file(path).unwrap();
     }
 
@@ -17222,7 +16992,7 @@ mod tests {
                 .get("center"),
             Some(&Vector4::new3(4.0, 5.0, 6.0).to_string())
         );
-        assert!(!model.mesh_refit_pending);
+        assert!(!model.snapshot_refit_pending);
         fs::remove_file(path).unwrap();
     }
 
@@ -17288,7 +17058,7 @@ mod tests {
         assert_eq!(update.snapshot.surfaces.len(), 1);
         assert_eq!(update.snapshot.surfaces[0].name, "surface.face");
         assert_eq!(update.snapshot.surfaces[0].renderers[0].name, "surface1");
-        assert!(model.mesh_refit_pending);
+        assert!(model.snapshot_refit_pending);
 
         for path in [face_path, vert_path] {
             fs::remove_file(path).unwrap();
@@ -17464,6 +17234,7 @@ mod tests {
                 ao_half_res: true,
                 aa_method: "smaa".to_string(),
                 aa_jitter_level: 2,
+                aa_smaa_threshold: 0.12,
                 onload: "print('ready');".to_string(),
                 use_color_proof: true,
                 icc_filename: "GenericCMYK.icm".to_string(),
@@ -17480,6 +17251,7 @@ mod tests {
         assert_eq!(scene.ao_radius, 6.5);
         assert_eq!(scene.aa_method, "smaa");
         assert_eq!(scene.aa_jitter_level, 2);
+        assert_eq!(scene.aa_smaa_threshold, 0.12);
         assert!(scene.use_color_proof);
         assert_eq!(model.background, "#123456");
         assert!(model.color_proofing);
@@ -17493,6 +17265,7 @@ mod tests {
             .write_qsc_string();
         assert!(qsc.contains("bgcolor=\"#123456\""));
         assert!(qsc.contains("aoEnabled=\"true\""));
+        assert!(qsc.contains("aaSmaaThreshold=\"0.12\""));
         assert!(qsc.contains("aa_method=\"smaa\""));
         assert!(qsc.contains("icc_intent=\"relative_colorimetric\""));
 
@@ -17504,27 +17277,61 @@ mod tests {
     }
 
     #[test]
-    fn scene_post_processing_applies_ao_and_edge_aa() {
-        let mut rgba = vec![200_u8; 5 * 5 * 4];
-        let mut depth = vec![0_u8; 5 * 5 * 4];
-        for channel in 0..4 {
-            depth[(2 * 5 + 2) * 4 + channel] = 100;
-            depth[(2 * 5 + 3) * 4 + channel] = 220;
+    fn scene_post_processing_uses_the_shared_live_gpu_renderer() {
+        let Some(renderer) = SceneRenderer::new() else {
+            return;
+        };
+        let mut model = model_without_gpu();
+        model.camera.set_zoom(12.0);
+        model.camera.set_cam_dist(40.0);
+        model.camera.set_slab_depth(40.0);
+        let mut snapshot = RenderSceneSnapshot::empty();
+        for (x, y) in [(-1.5, 0.0), (1.3, 0.0), (0.0, 2.0)] {
+            snapshot.atoms.push(cuemol_render::RenderAtom::new(
+                Vector4::new3(x, y, 0.0),
+                1.7,
+                None,
+            ));
         }
-        apply_screen_space_ao(&mut rgba, &depth, 5, 5, 1, 2.2, 4, 1);
-        assert!(rgba[(2 * 5 + 2) * 4] < 200);
-
-        let mut edge = vec![0_u8; 5 * 5 * 4];
-        for y in 0..5 {
-            for x in 2..5 {
-                let index = (y * 5 + x) * 4;
-                edge[index..index + 4].fill(255);
-            }
-        }
-        apply_fast_post_aa(&mut edge, 5, 5, false);
-        assert!(edge[(2 * 5 + 1) * 4] > 0);
-        assert!(edge[(2 * 5 + 2) * 4] < 255);
-        assert_eq!(background_rgba("#123456").unwrap()[0], 18.0 / 255.0);
+        let sid = model.desktop.active_scene().unwrap();
+        model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(sid)
+            .unwrap()
+            .set_scene_attribute("aa_method", "none");
+        let plain = model
+            .render_snapshot_rgba(&renderer, &snapshot, 128, 128)
+            .unwrap();
+        model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(sid)
+            .unwrap()
+            .set_scene_attribute("aoEnabled", "true");
+        let ao = model
+            .render_snapshot_rgba(&renderer, &snapshot, 128, 128)
+            .unwrap();
+        assert!(
+            plain
+                .chunks_exact(4)
+                .zip(ao.chunks_exact(4))
+                .filter(|(a, b)| a[0].saturating_sub(b[0]) > 8)
+                .count()
+                > 20
+        );
+        model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(sid)
+            .unwrap()
+            .set_scene_attribute("aa_method", "smaa");
+        assert_ne!(
+            ao,
+            model
+                .render_snapshot_rgba(&renderer, &snapshot, 128, 128)
+                .unwrap()
+        );
     }
 
     #[test]
@@ -17546,8 +17353,8 @@ mod tests {
             .iter()
             .any(|style| style.name == "DefaultSimple"));
 
-        model.prepare_mesh_if_needed().unwrap();
-        assert!(model.mesh.is_some());
+        model.prepare_snapshot_if_needed().unwrap();
+        assert!(model.render_snapshot.is_some());
         handle_model_request(
             &mut model,
             ModelRequest::SetObjectProperties(ObjectPropertiesInput {
@@ -17562,8 +17369,8 @@ mod tests {
         assert_eq!(object.name(), "renamed molecule");
         assert!(!object.is_visible());
         assert!(object.is_ui_locked());
-        assert!(model.mesh.is_none());
-        model.prepare_mesh_if_needed().unwrap();
+        assert!(model.render_snapshot.is_none());
+        model.prepare_snapshot_if_needed().unwrap();
 
         let response = handle_model_request(
             &mut model,
@@ -17608,7 +17415,7 @@ mod tests {
         assert_eq!(renderer.line_width, 2.4);
         assert_eq!(renderer.style, "ThickSimple,DefaultCPKColoring");
         assert_eq!(snapshot.undo_descriptions.len(), 2);
-        assert!(model.mesh.is_none());
+        assert!(model.render_snapshot.is_none());
 
         model.undo(0).unwrap();
         let renderer = model
@@ -18192,7 +17999,7 @@ mod tests {
     }
 
     #[test]
-    fn simple_atom_intr_lines_are_projected_into_the_viewport() {
+    fn simple_atom_intr_lines_stay_in_the_depth_tested_snapshot() {
         let root = option_env!("CUEMOL2_REF_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../cuemol2"));
@@ -18202,38 +18009,19 @@ mod tests {
         }
         let mut model = model_without_gpu();
         model.desktop.load_qsc_file(&fixture).unwrap();
-        model.rebuild_mesh(true).unwrap();
+        model.rebuild_snapshot(true).unwrap();
 
-        let viewport = model.viewport_metadata(800, 600);
-        let interaction_lines = viewport
-            .lines
+        let snapshot = model.render_snapshot.as_ref().unwrap();
+        let interaction_lines = snapshot
+            .bonds
             .iter()
-            .filter(|line| line.width == 1.0 && line.stipple)
+            .filter(|line| line.screen_width == Some(1.0) && line.screen_stipple)
             .collect::<Vec<_>>();
         assert_eq!(interaction_lines.len(), 2);
-        assert!(interaction_lines.iter().all(|line| {
-            line.x1.is_finite() && line.y1.is_finite() && line.x2.is_finite() && line.y2.is_finite()
-        }));
-    }
-
-    #[test]
-    fn viewport_projects_selection_point_with_pixel_displacement() {
-        let mut model = model_without_gpu();
-        let position = Vector4::new3(0.0, 0.0, 0.0);
-        model.screen_lines = vec![RenderBond::new(position, position, 0.03, None)
-            .with_screen_style(5.0, false)
-            .with_screen_offset(6.0, -4.0)
-            .as_screen_point()];
-        let mvp = camera_mvp(&model.camera, 4.0 / 3.0);
-        let projected = project_viewport_point(mvp, position, 800, 600).unwrap();
-        let viewport = model.viewport_metadata(800, 600);
-        assert_eq!(viewport.lines.len(), 1);
-        let point = &viewport.lines[0];
-        assert!(point.point);
-        assert_eq!(point.width, 5.0);
-        assert!((point.x1 - projected.0 - 6.0).abs() < 1.0e-5);
-        assert!((point.y1 - projected.1 + 4.0).abs() < 1.0e-5);
-        assert_eq!((point.x1, point.y1), (point.x2, point.y2));
+        assert!(interaction_lines
+            .iter()
+            .all(|line| line.from.x.is_finite() && line.to.x.is_finite()));
+        assert!(model.viewport_metadata(800, 600).lines.is_empty());
     }
 
     #[test]
@@ -18351,8 +18139,8 @@ mod tests {
                 .group(),
             Some("main representations")
         );
-        model.prepare_mesh_if_needed().unwrap();
-        assert!(model.mesh.is_some());
+        model.prepare_snapshot_if_needed().unwrap();
+        assert!(model.render_snapshot.is_some());
 
         let response = handle_model_request(
             &mut model,
@@ -18378,7 +18166,7 @@ mod tests {
             Some("main representations")
         );
         assert_eq!(snapshot.undo_descriptions[0], "Move renderer");
-        assert!(model.mesh.is_some());
+        assert!(model.render_snapshot.is_some());
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert_eq!(
             model
@@ -18442,8 +18230,8 @@ mod tests {
             model
                 .desktop
                 .add_density_map(scene_uid, "map", cuemol_xtal::DensityMap::new());
-        model.prepare_mesh_if_needed().unwrap();
-        assert!(model.mesh.is_some());
+        model.prepare_snapshot_if_needed().unwrap();
+        assert!(model.render_snapshot.is_some());
 
         let response = handle_model_request(
             &mut model,
@@ -18463,7 +18251,7 @@ mod tests {
         assert_eq!(snapshot.density_maps[0].ui_order, 1);
         assert_eq!(snapshot.objects[0].ui_order, 2);
         assert_eq!(snapshot.undo_descriptions[0], "Move object");
-        assert!(model.mesh.is_some());
+        assert!(model.render_snapshot.is_some());
 
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         let snapshot = model.snapshot();
@@ -18495,8 +18283,8 @@ mod tests {
     #[test]
     fn workspace_renderer_type_change_is_undoable_and_invalidates_mesh() {
         let (mut model, object_uid, renderer_uid) = model_with_renderer();
-        model.prepare_mesh_if_needed().unwrap();
-        assert!(model.mesh.is_some());
+        model.prepare_snapshot_if_needed().unwrap();
+        assert!(model.render_snapshot.is_some());
         let response = handle_model_request(
             &mut model,
             ModelRequest::ChangeWorkspaceRendererType(WorkspaceRendererTypeInput {
@@ -18520,7 +18308,7 @@ mod tests {
             snapshot.undo_descriptions[0],
             "Change renderer type to cartoon"
         );
-        assert!(model.mesh.is_none());
+        assert!(model.render_snapshot.is_none());
 
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert!(model
@@ -18692,7 +18480,7 @@ mod tests {
     #[test]
     fn workspace_renderer_style_and_coloring_requests_are_undoable() {
         let (mut model, object_uid, renderer_uid) = model_with_renderer();
-        model.prepare_mesh_if_needed().unwrap();
+        model.prepare_snapshot_if_needed().unwrap();
         let response = handle_model_request(
             &mut model,
             ModelRequest::ApplyWorkspaceRendererStyle(WorkspaceRendererStyleInput {
@@ -18708,7 +18496,7 @@ mod tests {
         };
         assert_eq!(snapshot.objects[0].renderers[0].style, "DefaultSimple");
         assert_eq!(snapshot.undo_descriptions[0], "Change style");
-        assert!(model.mesh.is_none());
+        assert!(model.render_snapshot.is_none());
 
         let response = handle_model_request(
             &mut model,
@@ -18887,7 +18675,7 @@ mod tests {
         assert_eq!(snapshot.objects[0].renderers.len(), 1);
         assert_eq!(snapshot.objects[0].renderers[0].renderer_type, "simple");
         assert_eq!(snapshot.undo_descriptions[0], "Pasted 1 renderer(s)");
-        assert!(model.mesh.is_none());
+        assert!(model.render_snapshot.is_none());
 
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert!(model.snapshot().objects[0].renderers.is_empty());
@@ -19510,7 +19298,7 @@ mod tests {
         assert_eq!(pasted.renderers.len(), 1);
         assert_ne!(pasted.renderers[0].uid, renderer_uid.get());
         assert_eq!(snapshot.undo_descriptions[0], "Paste object");
-        assert!(model.mesh.is_none());
+        assert!(model.render_snapshot.is_none());
 
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert_eq!(model.snapshot().objects.len(), 1);
@@ -19839,7 +19627,8 @@ mod tests {
             .iter()
             .find(|renderer| renderer.uid == nucl_uid.get())
             .unwrap();
-        assert_eq!(nucl.specific["section.width"], "0.5");
+        assert_eq!(nucl.specific["section.width"], "0.4");
+        assert_eq!(nucl.specific["section.type"], "roundsquare");
         assert_eq!(nucl.specific["section.tuber"], "2.5");
         assert_eq!(nucl.specific["axialdetail"], "8");
         assert_eq!(nucl.specific["pivotatom"], "P");
@@ -21672,8 +21461,8 @@ mod tests {
             .desktop
             .set_renderer_property(object_uid, renderer_uid, "width", "3.5")
             .unwrap();
-        model.prepare_mesh_if_needed().unwrap();
-        assert!(model.mesh.is_some());
+        model.prepare_snapshot_if_needed().unwrap();
+        assert!(model.render_snapshot.is_some());
 
         let response = handle_model_request(
             &mut model,
@@ -21695,7 +21484,7 @@ mod tests {
             .styles
             .iter()
             .any(|style| style.local_index == Some(local_index) && style.modified));
-        assert!(model.mesh.is_some());
+        assert!(model.render_snapshot.is_some());
         let style = &model
             .desktop
             .scene_manager()
@@ -22102,7 +21891,7 @@ mod tests {
         let mut model = model_without_gpu();
         model.desktop.open_path(&pdb).unwrap();
         model.selection = "chain A and resid 1".to_string();
-        model.rebuild_mesh(true).unwrap();
+        model.rebuild_snapshot(true).unwrap();
         let object_uid = model.desktop.active_object_summaries()[0].uid;
         let response = handle_model_request(
             &mut model,
@@ -22275,7 +22064,7 @@ mod tests {
         }
         let mut model = model_without_gpu();
         model.desktop.open_path(&pdb).unwrap();
-        model.rebuild_mesh(true).unwrap();
+        model.rebuild_snapshot(true).unwrap();
         let object_uid = model.desktop.active_object_summaries()[0].uid;
         handle_model_request(
             &mut model,
@@ -22321,16 +22110,16 @@ mod tests {
         }
         let mut model = model_without_gpu();
         model.desktop.open_path(&pdb).unwrap();
-        model.rebuild_mesh(true).unwrap();
+        model.rebuild_snapshot(true).unwrap();
         let object_uid = model.desktop.active_object_summaries()[0].uid;
-        model.selection = "aid 1".to_string();
+        model.selection = "aid 2".to_string();
         let mvp = camera_mvp(&model.camera, 800.0 / 600.0);
         let labels = model
             .desktop
             .active_atom_labels(&model.selection, mvp, 800.0, 600.0, 1);
         assert_eq!(labels.len(), 1);
         model.selection.clear();
-        model.rebuild_mesh(false).unwrap();
+        model.rebuild_snapshot(false).unwrap();
         let response = handle_model_request(
             &mut model,
             ModelRequest::PickAtomIdentifier {
@@ -22345,7 +22134,7 @@ mod tests {
             panic!("expected a lightweight picked-atom response");
         };
         assert_eq!(atom.object_uid, object_uid.get());
-        assert_eq!(atom.aid, 1);
+        assert_eq!(atom.aid, 2);
         assert!(model.selection.is_empty());
         let response = handle_model_request(
             &mut model,
@@ -22360,10 +22149,29 @@ mod tests {
         let ModelResponse::MolStructUpdate(update) = response else {
             panic!("expected a compact selection and viewport response");
         };
-        assert_eq!(update.snapshot.selection, "aid 1");
+        assert_eq!(update.snapshot.selection, "aid 2");
         assert_eq!(update.viewport.width, 800);
         assert_eq!(update.viewport.height, 600);
-        assert_eq!(model.snapshot().selection, "aid 1");
+        assert_eq!(model.snapshot().selection, "aid 2");
+        let position = model
+            .desktop
+            .scene_manager()
+            .object(object_uid)
+            .unwrap()
+            .mol()
+            .get_atom_by_id(2)
+            .unwrap()
+            .position;
+        model
+            .camera
+            .set_center(position + Vector4::new3(0.0, 0.0, 1.5));
+        model.camera.set_rotation(Quat::new(0.0, 0.0, 0.0, 1.0));
+        model.camera.set_cam_dist(10.0);
+        model.camera.set_slab_depth(2.0);
+        assert!(model
+            .atom_at_screen("aid 2", 400.0, 300.0, 800, 600)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -23049,7 +22857,7 @@ mod tests {
         let mut model = model_without_gpu();
         model.desktop.open_path(&pdb).unwrap();
         model.desktop.open_path(&pdb).unwrap();
-        model.rebuild_mesh(true).unwrap();
+        model.rebuild_snapshot(true).unwrap();
         let objects = model.desktop.active_object_summaries();
         let first = objects[0].uid.get();
         let second = objects[1].uid.get();
@@ -23158,7 +22966,8 @@ mod tests {
             .find(|renderer| renderer.renderer_type() == "atomintr")
             .expect("interaction renderer");
         assert_eq!(renderer.atom_intr_lines().len(), 3);
-        assert_eq!(renderer.atom_intr_lines()[0].positions().len(), 2);
+        assert_eq!(renderer.atom_intr_lines()[0].aids().len(), 2);
+        assert!(renderer.atom_intr_lines()[0].positions().is_empty());
         let response = handle_model_request(
             &mut model,
             ModelRequest::GetSpaceGroups {
@@ -23411,7 +23220,7 @@ mod tests {
         let mut model = model_without_gpu();
         model.desktop.open_path(&pdb).unwrap();
         model.desktop.open_path(&pdb).unwrap();
-        model.rebuild_mesh(true).unwrap();
+        model.rebuild_snapshot(true).unwrap();
         let objects = model.desktop.active_object_summaries();
         let first = objects[0].uid.get();
         let second = objects[1].uid.get();
@@ -23861,7 +23670,7 @@ mod tests {
         std::fs::write(&script_path, "print('tauri-script');").unwrap();
         let mut model = model_without_gpu();
         model.desktop.open_path(&pdb).unwrap();
-        model.rebuild_mesh(true).unwrap();
+        model.rebuild_snapshot(true).unwrap();
 
         let response = handle_model_request(
             &mut model,
@@ -23912,7 +23721,7 @@ mod tests {
         let mut model = model_without_gpu();
         model.desktop.open_path(&pdb).unwrap();
         model.desktop.open_path(&pdb).unwrap();
-        model.rebuild_mesh(true).unwrap();
+        model.rebuild_snapshot(true).unwrap();
         let objects = model.desktop.active_object_summaries();
         let source = objects[0].uid.get();
         let target = objects[1].uid.get();
@@ -24266,7 +24075,7 @@ mod tests {
         let output_dir =
             std::env::temp_dir().join(format!("cuemol-tauri-animation-{}", std::process::id()));
         let mut model = AppModel::new(vec![pdb]);
-        assert!(model.mesh.is_none());
+        assert!(model.render_snapshot.is_none());
         let viewport = model.render(64, 64);
         assert!(model.renderer.is_some());
         assert!(viewport.image.is_some());

@@ -13,10 +13,12 @@ pub use cuemol_desktop_core::*;
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 mod animation_files;
+#[cfg(feature = "egui-gui")]
+pub(crate) use animation_files::animation_ffmpeg_format_options;
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 pub(crate) use animation_files::{
-    animation_ffmpeg_args, animation_ffmpeg_format_options, animation_frame_count,
-    animation_movie_output_path, cleanup_animation_outputs,
+    animation_ffmpeg_args, animation_frame_count, animation_movie_output_path,
+    cleanup_animation_outputs,
 };
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 mod system_path;

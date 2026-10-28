@@ -3018,6 +3018,7 @@ fn tauri_scene_properties_match_the_reference_scene_qif_editor() {
         "aoHalfRes",
         "aa_method",
         "aaJitterLevel",
+        "aaSmaaThreshold",
         "onload",
         "use_colproof",
         "icc_filename",

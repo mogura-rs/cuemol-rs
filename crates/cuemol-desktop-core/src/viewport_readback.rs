@@ -3,6 +3,18 @@ use cuemol_gfx::{jitter_offset, jitter_sample_count};
 use cuemol_qsys::Camera;
 use cuemol_render::RenderSceneSnapshot;
 
+pub(crate) enum Effects<'a> {
+    None,
+    Export(
+        &'a mut crate::effects::ViewportEffects,
+        crate::effects::ViewportOptions,
+    ),
+    Live(
+        &'a mut crate::effects::ViewportEffects,
+        crate::effects::ViewportOptions,
+    ),
+}
+
 pub(crate) fn draw(
     renderer: &mut ViewportRenderer,
     device: &wgpu::Device,
@@ -12,10 +24,7 @@ pub(crate) fn draw(
     size: [u32; 2],
     background: [f64; 4],
     level: i32,
-    mut effects: Option<(
-        &mut crate::effects::ViewportEffects,
-        crate::effects::ViewportOptions,
-    )>,
+    mut effects: Effects<'_>,
 ) -> Option<Vec<u8>> {
     let [width, height] = size.map(|n| n.max(1));
     let extent = wgpu::Extent3d {
@@ -64,42 +73,70 @@ pub(crate) fn draw(
     let camera_uniform = CameraUniform::new(camera, [width, height], background, false);
     renderer.upload(device, queue, snapshot);
     let level = level.clamp(0, 5);
-    let count = jitter_sample_count(level);
-    let mut sum = vec![0_u32; width as usize * height as usize * 4];
+    let live = matches!(effects, Effects::Live(..));
+    let count = if live { 33 } else { jitter_sample_count(level) };
+    let mut sum = if live {
+        Vec::new()
+    } else {
+        vec![0_u32; width as usize * height as usize * 4]
+    };
     for index in 0..count {
         let mut uniform = camera_uniform;
-        uniform.view_proj = crate::offscreen::jittered_mvp(
-            uniform.view_proj,
-            width,
-            height,
-            jitter_offset(level, index as i32),
-        );
+        if !live {
+            uniform.view_proj = crate::offscreen::jittered_mvp(
+                uniform.view_proj,
+                width,
+                height,
+                jitter_offset(level, index as i32),
+            );
+        }
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("viewport-export"),
         });
-        if let Some((effects, options)) = effects.as_mut() {
-            effects.render_export(
+        let pending = match &mut effects {
+            Effects::Live(effects, options) => effects.render(
                 renderer,
                 device,
                 queue,
                 &mut encoder,
                 &color_view,
                 camera,
-                &uniform,
                 [width, height],
                 background,
-                *options,
-            );
-        } else {
-            renderer.render_with_uniform(
-                &mut encoder,
-                queue,
-                &color_view,
-                &depth_view,
-                &uniform,
-                background,
                 None,
-            );
+                *options,
+            ),
+            Effects::Export(effects, options) => {
+                effects.render_export(
+                    renderer,
+                    device,
+                    queue,
+                    &mut encoder,
+                    &color_view,
+                    camera,
+                    &uniform,
+                    [width, height],
+                    background,
+                    *options,
+                );
+                false
+            }
+            Effects::None => {
+                renderer.render_with_uniform(
+                    &mut encoder,
+                    queue,
+                    &color_view,
+                    &depth_view,
+                    &uniform,
+                    background,
+                    None,
+                );
+                false
+            }
+        };
+        if pending {
+            queue.submit([encoder.finish()]);
+            continue;
         }
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
@@ -132,6 +169,15 @@ pub(crate) fn draw(
             .ok()?;
         receiver.recv().ok()?.ok()?;
         let mapped = slice.get_mapped_range();
+        if live {
+            let rgba = mapped
+                .chunks_exact(padded as usize)
+                .flat_map(|row| row[..width as usize * 4].iter().copied())
+                .collect();
+            drop(mapped);
+            readback.unmap();
+            return Some(rgba);
+        }
         for (output, row) in sum
             .chunks_exact_mut(width as usize * 4)
             .zip(mapped.chunks_exact(padded as usize))
@@ -142,6 +188,9 @@ pub(crate) fn draw(
         }
         drop(mapped);
         readback.unmap();
+    }
+    if live {
+        return None;
     }
     Some(
         sum.into_iter()
