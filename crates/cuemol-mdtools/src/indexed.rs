@@ -9,6 +9,7 @@ use std::sync::Mutex;
 #[derive(Debug)]
 enum Format {
     Dcd(Vec<u8>),
+    Mdcrd { has_box: bool },
     Xtc,
     Trr,
     Netcdf(crate::netcdf::NetcdfFileLayout),
@@ -41,6 +42,15 @@ pub struct TrajectoryFrame {
 
 impl IndexedTrajectory {
     pub fn open(path: impl AsRef<Path>, stride: usize, expected: Option<usize>) -> Result<Self> {
+        Self::open_with_amber_box(path, stride, expected, None)
+    }
+
+    pub fn open_with_amber_box(
+        path: impl AsRef<Path>,
+        stride: usize,
+        expected: Option<usize>,
+        has_box: Option<bool>,
+    ) -> Result<Self> {
         if stride == 0 {
             return Err(CueMolError::invalid_argument(
                 "trajectory stride must be positive",
@@ -76,6 +86,34 @@ impl IndexedTrajectory {
             let (prefix, spans, atoms) = index_dcd(&mut file, file_len, stride)?;
             let count = spans.len();
             (Format::Dcd(prefix), spans, atoms, count)
+        } else if is_mdcrd_path(path) {
+            let atoms = expected.ok_or_else(|| {
+                CueMolError::invalid_argument("MDCRD requires a topology atom count")
+            })?;
+            let mut index = crate::mdcrd_index::MdcrdIndexer::new(atoms, stride, has_box)?;
+            let mut buffer = [0; 65536];
+            loop {
+                let count = file.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                index.push(&buffer[..count])?;
+            }
+            let index = index.finish()?;
+            let spans: Vec<_> = index
+                .spans
+                .into_iter()
+                .map(|(offset, len)| Span { offset, len })
+                .collect();
+            let count = spans.len();
+            (
+                Format::Mdcrd {
+                    has_box: index.has_box,
+                },
+                spans,
+                atoms,
+                count,
+            )
         } else {
             let xtc = matches!(i32::from_be_bytes(magic), 1995 | 2023);
             if !xtc && i32::from_be_bytes(magic) != 1993 {
@@ -155,11 +193,14 @@ impl IndexedTrajectory {
         input[..prefix.len()].copy_from_slice(prefix);
         file.seek(SeekFrom::Start(span.offset))?;
         file.read_exact(&mut input[prefix.len()..])?;
+        if let Format::Mdcrd { has_box } = self.format {
+            return crate::mdcrd_index::decode_mdcrd_frame(&input, self.atom_count, has_box);
+        }
         let mut block = match self.format {
             Format::Dcd(_) => read_dcd_bytes(&input)?,
             Format::Xtc => read_xtc_bytes(&input)?,
             Format::Trr => read_trr_bytes(&input)?,
-            Format::Netcdf(_) => unreachable!(),
+            Format::Netcdf(_) | Format::Mdcrd { .. } => unreachable!(),
         };
         let cell = block.cell(0);
         let coordinates = block
@@ -167,6 +208,20 @@ impl IndexedTrajectory {
             .ok_or_else(|| CueMolError::parse("missing trajectory coordinates"))?;
         Ok(TrajectoryFrame { coordinates, cell })
     }
+}
+
+fn is_mdcrd_path(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    let name = name
+        .strip_suffix(".gz")
+        .or_else(|| name.strip_suffix(".bz2"))
+        .or_else(|| name.strip_suffix(".xz"))
+        .unwrap_or(&name);
+    name.ends_with(".mdcrd") || name.ends_with(".crd")
 }
 
 fn u32_at(bytes: &[u8], offset: usize, little: bool) -> u32 {

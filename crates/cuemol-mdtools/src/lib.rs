@@ -2,6 +2,7 @@ pub mod amber;
 mod fileio;
 pub mod gro;
 pub mod indexed;
+pub mod mdcrd_index;
 pub use indexed::{IndexedTrajectory, TrajectoryFrame};
 pub mod namd;
 pub mod netcdf;

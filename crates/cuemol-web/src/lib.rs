@@ -299,15 +299,23 @@ impl App {
                 Event::Source(file) => {
                     let name = file.name();
                     let extension = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-                    if matches!(extension.as_str(), "dcd" | "xtc" | "trr" | "nc" | "netcdf") {
+                    if matches!(
+                        extension.as_str(),
+                        "dcd" | "xtc" | "trr" | "nc" | "netcdf" | "mdcrd" | "crd"
+                    ) {
                         let Some(id) = self.selected else {
                             self.message = "Load and select a topology first.".into();
                             continue;
                         };
+                        let atoms = self
+                            .state
+                            .scene_manager()
+                            .object(id)
+                            .map(|o| o.mol().atom_count());
                         self.busy = true;
                         self.message = "Indexing trajectory…".into();
                         spawn_local(async move {
-                            match BrowserTrajectory::open(file).await {
+                            match BrowserTrajectory::open(file, atoms).await {
                                 Ok(t) => enqueue(Event::Trajectory(id, t)),
                                 Err(e) => enqueue(Event::Error(js_error(e))),
                             }

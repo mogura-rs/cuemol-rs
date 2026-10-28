@@ -57,16 +57,18 @@ share the same application state and command API.
 
 Load an MD topology and trajectory through the MD dialog or `load_trajectory`.
 GRO, PDB, mmCIF, PSF, AMBER topology, SDF, and MOL2 topologies are accepted.
-DCD, XTC, TRR, and AMBER NetCDF trajectories retain a frame index and decode the
+DCD, XTC, TRR, AMBER NetCDF and ASCII MDCRD trajectories retain a frame index and decode the
 requested frame. Coordinates and periodic cells update together. Undo history
 shares trajectory sources and map voxels, and frame playback does not add an
 undo snapshot per frame. Compressed trajectories spool to a temporary seekable
-file; this uses disk space proportional to the decompressed input. AMBER ASCII
-MDCRD retains the eager reader.
+file; this uses disk space proportional to the decompressed input. MDCRD reads
+standard coordinate rows and detects a three-length periodic box row. For
+ambiguous one-atom files, the diagnostic command accepts `--box` or `--no-box`.
 
 ```sh
 cuemol trajectory-info trajectory.xtc
 cuemol trajectory-info trajectory.dcd 10
+cuemol trajectory-info trajectory.mdcrd 10 --atoms 20000 --box
 ```
 
 The optional second argument is the frame stride. Legacy `dcd-info`, `xtc-info`,
@@ -145,7 +147,7 @@ representations, properties, sequence, saved cameras, commands, undo, animation,
 PNG export, and embedded QSC download use the shared Rust core. Browser settings
 and startup scripts are stored in localStorage for that origin.
 
-Browser MD playback keeps a `File` handle and reads selected DCD/XTC/TRR/NetCDF
+Browser MD playback keeps a `File` handle and reads selected DCD/XTC/TRR/NetCDF/MDCRD
 frames with `File.slice`, without first loading the whole trajectory into JS
 memory. The browser cannot access arbitrary native paths or spawn external
 tools. APBS, USalign, and ICC soft proofing run in the native application. The browser

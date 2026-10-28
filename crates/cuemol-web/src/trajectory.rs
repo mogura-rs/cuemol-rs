@@ -32,6 +32,9 @@ enum Format {
         start: u64,
         size: u64,
     },
+    Mdcrd {
+        has_box: bool,
+    },
     Xtc,
     Trr,
     Netcdf(NetcdfFileLayout),
@@ -45,10 +48,33 @@ pub struct BrowserTrajectory {
     pub frames: usize,
 }
 impl BrowserTrajectory {
-    pub async fn open(file: File) -> Result<Self, JsValue> {
+    pub async fn open(file: File, expected: Option<usize>) -> Result<Self, JsValue> {
         let len = file.size() as u64;
         let header = slice(&file, 0, len.min(4096)).await?;
         let magic = word(&header, 0, false)?;
+        let name = file.name().to_ascii_lowercase();
+        if name.ends_with(".mdcrd") || name.ends_with(".crd") {
+            let atoms = expected.ok_or_else(|| error("MDCRD requires a selected topology"))?;
+            let mut index =
+                cuemol_mdtools::mdcrd_index::MdcrdIndexer::new(atoms, 1, None).map_err(error)?;
+            let mut offset = 0;
+            while offset < len {
+                let bytes = slice(&file, offset, (len - offset).min(262144)).await?;
+                index.push(&bytes).map_err(error)?;
+                offset += bytes.len() as u64;
+            }
+            let index = index.finish().map_err(error)?;
+            let frames = index.spans.len();
+            return Ok(Self {
+                file,
+                format: Format::Mdcrd {
+                    has_box: index.has_box,
+                },
+                spans: index.spans,
+                atoms,
+                frames,
+            });
+        }
         if header.starts_with(b"CDF") {
             let mut bytes = header;
             let layout = loop {
@@ -232,6 +258,10 @@ impl BrowserTrajectory {
         let mut bytes = slice(&self.file, offset, len).await?;
         if let Format::Netcdf(layout) = &self.format {
             return layout.decode_frame(&bytes).map_err(error);
+        }
+        if let Format::Mdcrd { has_box } = self.format {
+            return cuemol_mdtools::mdcrd_index::decode_mdcrd_frame(&bytes, self.atoms, has_box)
+                .map_err(error);
         }
         let mut block = match &self.format {
             Format::Dcd { prefix, .. } => {

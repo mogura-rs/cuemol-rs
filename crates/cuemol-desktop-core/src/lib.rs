@@ -7141,23 +7141,12 @@ impl DesktopAppState {
             .object(object_uid)
             .map(|object| object.mol().atoms().len())
             .unwrap_or(0);
-        let trajectory = cuemol_mdtools::read_amber_mdcrd_file(path, natom, false)?;
-        let frames: Vec<Vec<cuemol_core::Vector4>> = trajectory
-            .frames
-            .into_iter()
-            .map(|frame| frame.positions)
-            .collect();
-        let count = frames.len();
-        let block_uid = self.allocate_trajectory_block_uid();
+        let block = self.read_trajectory_block(path, 1, natom)?;
+        let count = block.frames.len();
         self.trajectories.insert(
             object_uid,
             GuiTrajectoryData {
-                blocks: vec![GuiTrajectoryBlockData {
-                    uid: block_uid,
-                    source: path.to_string_lossy().into_owned(),
-                    format: effective_extension(path).to_ascii_uppercase(),
-                    frames: GuiTrajectoryFrames::Memory(std::sync::Arc::new(frames)),
-                }],
+                blocks: vec![block],
                 current_frame: 0,
             },
         );

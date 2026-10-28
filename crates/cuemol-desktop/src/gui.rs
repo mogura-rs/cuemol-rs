@@ -33645,7 +33645,7 @@ const TRAJECTORY_TOPOLOGY_OPEN_FILTERS: &[NativeFileFilter] = &[NativeFileFilter
 }];
 const TRAJECTORY_BLOCK_OPEN_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
     label: "MD trajectory",
-    extensions: &["dcd", "xtc", "trr", "nc"],
+    extensions: &["dcd", "xtc", "trr", "nc", "mdcrd", "crd"],
 }];
 const MSMS_VERTEX_OPEN_FILTERS: &[NativeFileFilter] = &[NativeFileFilter {
     label: "MSMS vertex file",
@@ -35017,7 +35017,7 @@ fn is_trajectory_file(path: &Path) -> bool {
         .is_some_and(|ext| {
             matches!(
                 ext.to_ascii_lowercase().as_str(),
-                "dcd" | "trr" | "xtc" | "nc"
+                "dcd" | "trr" | "xtc" | "nc" | "mdcrd" | "crd"
             )
         })
 }

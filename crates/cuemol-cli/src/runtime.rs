@@ -195,16 +195,28 @@ pub fn render(args: Vec<String>) -> Result<()> {
 }
 
 pub fn trajectory_info(args: Vec<String>) -> Result<()> {
-    if args.is_empty() || args.len() > 2 {
-        return Err("Usage: cuemol trajectory-info FILE [STRIDE]".into());
+    let usage = "Usage: cuemol trajectory-info FILE [STRIDE] [--atoms N] [--box | --no-box]";
+    let path = args.first().ok_or(usage)?;
+    let mut stride = 1;
+    let mut atoms = None;
+    let mut boxed = None;
+    let mut args = args.iter().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--atoms" => {
+                atoms = Some(
+                    args.next()
+                        .ok_or(usage)?
+                        .parse()
+                        .map_err(|_| "invalid atom count")?,
+                )
+            }
+            "--box" => boxed = Some(true),
+            "--no-box" => boxed = Some(false),
+            _ => stride = arg.parse().map_err(|_| usage)?,
+        }
     }
-    let stride = args
-        .get(1)
-        .map(|v| v.parse())
-        .transpose()
-        .map_err(|_| "invalid stride")?
-        .unwrap_or(1);
-    let file = cuemol_mdtools::IndexedTrajectory::open(&args[0], stride, None)
+    let file = cuemol_mdtools::IndexedTrajectory::open_with_amber_box(path, stride, atoms, boxed)
         .map_err(|e| e.to_string())?;
     let first = file.read_frame(0).map_err(|e| e.to_string())?;
     println!(

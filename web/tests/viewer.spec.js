@@ -99,3 +99,20 @@ test('browser startup scripts, shared properties, and animation use the native c
   await call(page,'animate',{action:'stop'});
   expect(errors).toEqual([]);
 });
+
+test('AMBER ASCII frames and periodic cells are read through browser slices',async({page})=>{
+  await ready(page);await load(page,'topology.pdb',Buffer.from(structure));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  let data='AMBER trajectory\n';
+  for(let frame=0;frame<5;frame++){
+    data+=Array.from({length:9},(_,i)=>(frame+i*.25).toFixed(3).padStart(8)).join('')+'\n';
+    data+=[30+frame,40,50].map(x=>x.toFixed(3).padStart(8)).join('')+'\n';
+  }
+  await load(page,'trajectory.mdcrd',Buffer.from(data));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toContain('Indexed 5 frames');
+  const object=(await page.evaluate(()=>window.cuemol.status())).scene.objects[0].id;
+  for(const frame of [4,0,2]){
+    await call(page,'set_frame',{objId:object,frame});
+    await expect.poll(()=>page.evaluate(()=>window.cuemol.status().frame)).toBe(frame);
+  }
+});
