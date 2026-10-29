@@ -21,6 +21,7 @@ fn main() {
     cc::Build::new()
         .cpp(true)
         .std("c++20")
+        .define("_USE_MATH_DEFINES", None)
         .opt_level(2)
         .warnings(false)
         .flag_if_supported("/EHsc")

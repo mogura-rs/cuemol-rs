@@ -332,7 +332,7 @@ test('USalign fits rotated browser molecules with the native calculation kernel'
 test('ICC profiles load, proof colors, and persist in browser storage',async({page})=>{
   await ready(page);
   const profile=await page.evaluate(async()=>{
-    const {default:create}=await import('/pkg/kernels/lcms.js');
+    const {default:create}=await import('./pkg/kernels/lcms.js');
     const cms=await create();
     const handle=cms._cmsCreate_sRGBProfile(), size=cms._malloc(4);
     try {

@@ -10,6 +10,9 @@ $oldDestination = $env:CUEMOL_INSTALL_DIR
 try {
     New-Item -ItemType Directory -Force $release, $inputDir, $installDir, (Join-Path $inputDir 'cuemol-tools') | Out-Null
     Copy-Item $Binary (Join-Path $inputDir 'cuemol.exe')
+    $overlay = [Text.Encoding]::ASCII.GetBytes('cuemol-installer-fixture')
+    $fixture = [IO.File]::Open((Join-Path $inputDir 'cuemol.exe'), [IO.FileMode]::Append)
+    try { $fixture.Write($overlay, 0, $overlay.Length) } finally { $fixture.Dispose() }
     Set-Content (Join-Path $inputDir 'cuemol-tools/marker.txt') 'bundled' -Encoding Ascii
     $asset = 'cuemol-x86_64-pc-windows-msvc.zip'
     Compress-Archive (Join-Path $inputDir '*') (Join-Path $release $asset)
@@ -33,6 +36,16 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Self-upgrade failed' }
     & $installed --version
     if ($LASTEXITCODE -ne 0) { throw 'Upgraded command failed' }
+    $renamedDir = Join-Path $work 'renamed application'
+    New-Item -ItemType Directory $renamedDir | Out-Null
+    $renamed = Join-Path $renamedDir 'cuemol-rs.exe'
+    Copy-Item $Binary $renamed
+    if ((Get-FileHash $renamed -Algorithm SHA256).Hash -eq $before) { throw 'Replacement fixture must differ from the installed command' }
+    & $renamed self-upgrade
+    if ($LASTEXITCODE -ne 0) { throw 'Renamed command self-upgrade failed' }
+    if (Test-Path (Join-Path $renamedDir 'cuemol.exe')) { throw 'Update created a different executable' }
+    if ((Get-FileHash $renamed -Algorithm SHA256).Hash -ne $before) { throw 'Renamed command differs from the release' }
+    if ((Get-Content (Join-Path $renamedDir 'cuemol-tools/marker.txt')) -ne 'bundled') { throw 'Renamed command tools were not updated' }
 }
 finally {
     $env:CUEMOL_RELEASE_URL = $oldUrl

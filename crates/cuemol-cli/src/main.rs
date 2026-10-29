@@ -754,11 +754,12 @@ fn self_upgrade() -> Result<(), String> {
     let mut command = Command::new("sh");
     if directory.file_name().is_some_and(|name| name == "MacOS") {
         if let Some(contents) = directory.parent() {
-            if contents.join("Resources/cuemol-tools").is_dir() {
+            if contents.join("Info.plist").is_file() {
                 command.env(
                     "CUEMOL_TOOLS_INSTALL_DIR",
                     contents.join("Resources/cuemol-tools"),
                 );
+                command.env("CUEMOL_APP_CONTENTS", contents);
             }
         }
     }
@@ -793,32 +794,33 @@ fn self_upgrade() -> Result<(), String> {
 
 #[cfg(windows)]
 fn self_upgrade() -> Result<(), String> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
+    use std::process::Command;
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut command = Command::new("powershell.exe");
     command
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "-"])
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            include_str!("../../../install.ps1"),
+        ])
         .env(
             "CUEMOL_INSTALL_DIR",
             executable
                 .parent()
                 .ok_or("missing installation directory")?,
         )
-        .stdin(Stdio::piped());
+        .env(
+            "CUEMOL_INSTALL_NAME",
+            executable.file_name().ok_or("missing executable name")?,
+        );
     if std::env::var_os("CUEMOL_RELEASE_REPOSITORY").is_none() {
         if let Some(repository) = option_env!("CUEMOL_RELEASE_REPOSITORY") {
             command.env("CUEMOL_RELEASE_REPOSITORY", repository);
         }
     }
-    let mut child = command.spawn().map_err(|e| e.to_string())?;
-    child
-        .stdin
-        .take()
-        .ok_or("installer stdin unavailable")?
-        .write_all(include_bytes!("../../../install.ps1"))
-        .map_err(|e| e.to_string())?;
-    let status = child.wait().map_err(|e| e.to_string())?;
+    let status = command.status().map_err(|e| e.to_string())?;
     if status.success() {
         Ok(())
     } else {

@@ -6,6 +6,8 @@ if ($version -notmatch '^[a-zA-Z0-9._-]+$') { throw 'Invalid release version' }
 $base = if ($version -eq 'latest') { "https://github.com/$repository/releases/latest/download" } else { "https://github.com/$repository/releases/download/$version" }
 if ($env:CUEMOL_RELEASE_URL) { $base = $env:CUEMOL_RELEASE_URL }
 $destination = if ($env:CUEMOL_INSTALL_DIR) { $env:CUEMOL_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'CueMol/bin' }
+$installName = if ($env:CUEMOL_INSTALL_NAME) { $env:CUEMOL_INSTALL_NAME } else { 'cuemol.exe' }
+if ($installName -notmatch '^[a-zA-Z0-9._-]+\.exe$') { throw 'Invalid executable name' }
 $asset = 'cuemol-x86_64-pc-windows-msvc.zip'
 $work = Join-Path ([IO.Path]::GetTempPath()) ([IO.Path]::GetRandomFileName())
 New-Item -ItemType Directory -Force $work, $destination | Out-Null
@@ -24,8 +26,8 @@ try {
     Expand-Archive (Join-Path $work $asset) (Join-Path $work 'unpacked')
     $incoming = Join-Path $work 'unpacked/cuemol.exe'
     if (-not (Test-Path $incoming -PathType Leaf)) { throw 'Release contains no cuemol.exe' }
-    $binary = Join-Path $destination 'cuemol.exe'
-    $previous = Join-Path $destination 'cuemol.previous.exe'
+    $binary = Join-Path $destination $installName
+    $previous = Join-Path $destination ([IO.Path]::GetFileNameWithoutExtension($installName) + '.previous.exe')
     Remove-Item $previous -Force -ErrorAction SilentlyContinue
     if (Test-Path $binary) { Move-Item $binary $previous -Force }
     $tools = Join-Path $work 'unpacked/cuemol-tools'
@@ -48,6 +50,6 @@ try {
         throw
     }
     if (Test-Path $previousTools) { Remove-Item $previousTools -Recurse -Force }
-    Write-Output "Installed cuemol in $destination"
+    Write-Output "Installed $installName in $destination"
 }
 finally { Remove-Item $work -Recurse -Force }

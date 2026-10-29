@@ -11,7 +11,10 @@ case "$(uname -s)-$(uname -m)" in
   Darwin-x86_64) target=x86_64-apple-darwin ;;
   *) exit 1 ;;
 esac
-printf '#!/bin/sh\nprintf "installed\\n"\n' > "$work/input/cuemol"
+cat > "$work/input/cuemol" <<'SH'
+#!/bin/sh
+if [ "${1:-}" = --version ]; then printf 'cuemol v1.2.3\n'; else printf 'installed\n'; fi
+SH
 printf '{"version":"test"}\n' > "$work/input/build-info.json"
 mkdir -p "$work/input/cuemol-tools/apbs/bin"
 printf 'bundled\n' > "$work/input/cuemol-tools/apbs/bin/apbs"
@@ -60,12 +63,43 @@ if [ "$#" -gt 0 ]; then
   test "$(cat "$work/bin/cuemol-tools/apbs/bin/apbs")" = bundled
   app="$work/cu emol-rs.app/Contents"
   mkdir -p "$app/MacOS" "$app/Resources/cuemol-tools"
+  cat > "$app/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>cuemol-rs</string>
+<key>CFBundleShortVersionString</key><string>1.0.0</string>
+<key>CFBundleVersion</key><string>1.0.0</string>
+</dict></plist>
+PLIST
   cp "$1" "$app/MacOS/cuemol-rs"
   printf 'previous\n' > "$app/Resources/cuemol-tools/marker.txt"
+  printf '{"version":"previous"}\n' > "$app/Resources/build-info.json"
+  if PATH="$work/commands:$PATH" CUEMOL_TEST_MV="$real_mv" CUEMOL_TEST_DESTINATION="$app/MacOS/cuemol-rs" \
+    CUEMOL_RELEASE_URL="file://$work/release" "$app/MacOS/cuemol-rs" self-upgrade; then
+    printf 'App update accepted a failed binary replacement\n' >&2
+    exit 1
+  fi
+  cmp "$1" "$app/MacOS/cuemol-rs"
+  test "$(cat "$app/Resources/cuemol-tools/marker.txt")" = previous
+  test "$(cat "$app/Resources/build-info.json")" = '{"version":"previous"}'
+  if [ "$(uname -s)" = Darwin ]; then
+    test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Info.plist")" = 1.0.0
+  fi
   CUEMOL_RELEASE_URL="file://$work/release" "$app/MacOS/cuemol-rs" self-upgrade
   cmp "$work/input/cuemol" "$app/MacOS/cuemol-rs"
   test ! -e "$app/MacOS/cuemol"
   test "$("$app/MacOS/cuemol-rs")" = installed
   test "$(cat "$app/Resources/cuemol-tools/apbs/bin/apbs")" = bundled
   test ! -e "$app/Resources/cuemol-tools/marker.txt"
+  if [ "$(uname -s)" = Darwin ]; then
+    test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Info.plist")" = 1.2.3
+    test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Info.plist")" = 1.2.3
+    cmp "$work/input/build-info.json" "$app/Resources/build-info.json"
+  fi
+  rm -rf "$app/Resources/cuemol-tools"
+  cp "$1" "$app/MacOS/cuemol-rs"
+  CUEMOL_RELEASE_URL="file://$work/release" "$app/MacOS/cuemol-rs" self-upgrade
+  test "$(cat "$app/Resources/cuemol-tools/apbs/bin/apbs")" = bundled
+  test ! -e "$app/MacOS/cuemol-tools"
 fi

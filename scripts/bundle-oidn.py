@@ -61,10 +61,10 @@ def arm_linux(output):
     source = CACHE / 'source'
     unpack(archive, source)
     root = source / f'oidn-{VERSION}'
-    compiler = fetch('https://github.com/ispc/ispc/releases/download/v1.28.2/ispc-v1.28.2-linux.aarch64.tar.gz',
-                     'ispc-1.28.2-arm64.tar.gz', 'c42267566b8c17a2a00668e168f56087b41e55cf1cea047dd0631cf512d011f7')
+    compiler = fetch('https://github.com/ispc/ispc/releases/download/v1.30.0/ispc-v1.30.0-linux.aarch64.tar.gz',
+                     'ispc-1.30.0-arm64.tar.gz', '509399c399ec162d746889458a10cc13797a1aed1c0164b2bd3faddf7d023f13')
     unpack(compiler, CACHE / 'ispc')
-    ispc = next((CACHE / 'ispc').glob('*/bin/ispc'))
+    ispc = CACHE / 'ispc/ispc-v1.30.0-linux.aarch64/bin/ispc'
     tbb = fetch('https://codeload.github.com/uxlfoundation/oneTBB/tar.gz/refs/tags/v2022.3.0',
                 'onetbb-2022.3.0.tar.gz', '01598a46c1162c27253a0de0236f520fd8ee8166e9ebb84a4243574f88e6e50a')
     unpack(tbb, source)

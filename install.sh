@@ -20,7 +20,25 @@ asset="cuemol-$target.tar.gz"
 work=$(mktemp -d "${TMPDIR:-/tmp}/cuemol-install.XXXXXXXX")
 staged=
 tools_replaced=false
+metadata_replaced=false
+manifest_replaced=false
+installation_complete=false
 cleanup() {
+  if [ "$installation_complete" = false ]; then
+    if [ "$metadata_replaced" = true ]; then
+      mv -f "$staged/previous-Info.plist" "$app_contents/Info.plist"
+    fi
+    if [ "$manifest_replaced" = true ]; then
+      rm -f "$app_contents/Resources/build-info.json"
+      if [ -f "$staged/previous-build-info.json" ]; then
+        mv "$staged/previous-build-info.json" "$app_contents/Resources/build-info.json"
+      fi
+    fi
+    if [ "$tools_replaced" = true ]; then
+      rm -rf "$tools_dir"
+      if [ -d "$staged/previous-tools" ]; then mv "$staged/previous-tools" "$tools_dir"; fi
+    fi
+  fi
   if [ -n "$staged" ]; then rm -rf "$staged"; fi
   rm -rf "$work"
 }
@@ -63,20 +81,36 @@ fi
 tar -xzf "$work/$asset" -C "$staged"
 test -f "$staged/cuemol"
 chmod 755 "$staged/cuemol"
+app_contents=${CUEMOL_APP_CONTENTS:-}
+if [ -n "$app_contents" ] && [ "$(uname -s)" = Darwin ]; then
+  app_version=$("$staged/cuemol" --version | sed -E 's/^cuemol v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+  case "$app_version" in
+    ''|*[!0-9.]*) printf 'Invalid application version: %s\n' "$app_version" >&2; exit 1 ;;
+  esac
+  cp "$app_contents/Info.plist" "$staged/previous-Info.plist"
+  cp "$app_contents/Info.plist" "$staged/updated-Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $app_version" "$staged/updated-Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $app_version" "$staged/updated-Info.plist"
+  plutil -lint "$staged/updated-Info.plist" >/dev/null
+fi
 if [ -d "$staged/cuemol-tools" ]; then
   tools_dir=${CUEMOL_TOOLS_INSTALL_DIR:-"$install_dir/cuemol-tools"}
+  mkdir -p "$(dirname "$tools_dir")"
   if [ -e "$tools_dir" ]; then mv "$tools_dir" "$staged/previous-tools"; fi
-  if ! mv "$staged/cuemol-tools" "$tools_dir"; then
-    if [ -d "$staged/previous-tools" ]; then mv "$staged/previous-tools" "$tools_dir"; fi
-    exit 1
-  fi
   tools_replaced=true
+  mv "$staged/cuemol-tools" "$tools_dir"
 fi
-if ! mv -f "$staged/cuemol" "$install_dir/$install_name"; then
-  if [ "$tools_replaced" = true ]; then
-    rm -rf "$tools_dir"
-    if [ -d "$staged/previous-tools" ]; then mv "$staged/previous-tools" "$tools_dir"; fi
+if [ -f "$staged/updated-Info.plist" ]; then
+  metadata_replaced=true
+  mv -f "$staged/updated-Info.plist" "$app_contents/Info.plist"
+  if [ -f "$staged/build-info.json" ]; then
+    if [ -f "$app_contents/Resources/build-info.json" ]; then
+      cp "$app_contents/Resources/build-info.json" "$staged/previous-build-info.json"
+    fi
+    manifest_replaced=true
+    mv -f "$staged/build-info.json" "$app_contents/Resources/build-info.json"
   fi
-  exit 1
 fi
+mv -f "$staged/cuemol" "$install_dir/$install_name"
+installation_complete=true
 printf "Installed %s in %s\n" "$install_name" "$install_dir"
