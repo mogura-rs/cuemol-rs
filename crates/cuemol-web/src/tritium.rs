@@ -107,8 +107,11 @@ impl App {
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.label("PDB identifier");
-                ui.text_edit_singleline(&mut self.pdb_id);
-                if ui.button("Fetch").clicked() {
+                let response = ui.text_edit_singleline(&mut self.pdb_id);
+                self.record_ui_rect("Get PDB identifier", &response);
+                let response = ui.button("Fetch");
+                self.record_ui_rect("Fetch PDB", &response);
+                if response.clicked() {
                     self.fetch();
                 }
             });

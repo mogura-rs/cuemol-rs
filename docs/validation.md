@@ -184,6 +184,15 @@ reproduced a scene change after queueing but before parsing started. The queue
 now retains its destination until it is drained or cancelled. All ten loading
 cases pass, including a queued QSC followed by a molecule in its new scene.
 
+A follow-up review exposed cancellation clearing the busy state of a concurrent
+render. An actual browser regression reproduced this failure. Get PDB had two
+related failures: a response could enter a different scene, and a failed request
+could clear the render's busy state. Both were reproduced through the dialog.
+PDB requests now share the input queue and cancel their fetch with an abort
+signal. Their response is passed as a Blob-backed File to the parser worker.
+All fourteen Chrome loading cases pass, including network cancellation, HTTP
+error recovery, and serialized loading after render cancellation.
+
 Three fresh Chrome contexts per size compared the already optimized public
 revision `4b417fa` with this worker build. For 20,000 atoms, median input time was
 157 ms before and 163 ms after; the maximum timer gap fell from 77 ms to 64 ms.
@@ -233,14 +242,36 @@ The shared-core suite passed 320 tests with the reference QIF files present.
 The Tauri library passed 147 tests; six optional runtime cases were not run by
 that ordinary library invocation. Chrome passed all 76 application cases before
 the two additional queue cases; Firefox and WebKit each passed all eleven loading
-and font checks after those additions. Browser tests compare glyph alpha against the reference OffscreenCanvas
-algorithm and inspect displayed magenta labels on both GPU backends.
+and font checks after those additions. Browser tests compare glyph alpha against
+the reference OffscreenCanvas algorithm and inspect displayed magenta labels on
+both GPU backends.
+
+Public-code review also identified a native crash for CR-only line endings. A
+regression reproduced the out-of-bounds descent lookup. The label bitmap now
+uses the shaper's actual line count; CR, CRLF and LFCR produce the same native
+pixels as LF. All six native font cases pass. An isolated regular-only font
+also passed italic synthesis without a production change.
 
 The Linux native window passed OS drag and wheel input, changes between embedded
 monospaced and proportional fonts, and identical displayed pixels for lowercase
-and uppercase bold/italic settings. The latest Mac Tauri application built, but
+and uppercase bold/italic settings. It also displayed identical multiline labels
+for LF, CR, CRLF and LFCR. The latest Mac Tauri application built, but
 its OS input check still requires an unlocked desktop. Exact glyph pixels remain
 dependent on the installed font and native rasterizer.
+
+## Browser click timing
+
+CI exposed a residue-selection failure when a double-click took 1.7 seconds to
+dispatch under software rendering. A controlled test with a 700 ms input-handler
+stall reproduced the failure: the second release exceeded the shared 500 ms
+timer and was treated as another single click. Browser input now retains the
+native mouse click count as well as the event timestamp. A browser-recognized
+double-click can therefore select a residue after a stall; dragging still uses
+the shared movement classifier. The delayed-input regression passes with this
+repair. The complete Chrome application suite passed all 83 cases after the
+font, loading, network and input repairs.
+Firefox and WebKit each passed all 25 loading, font and navigation cases on the
+same build.
 
 ## Platform failures repaired before publication
 

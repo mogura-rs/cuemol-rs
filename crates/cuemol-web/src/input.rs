@@ -122,7 +122,9 @@ impl App {
                         .pointer_up(&self.camera, &config, size, time, local);
                     if over_viewport {
                         match release {
-                            PointerRelease::Click => clicks.push((point, false, button, modifiers)),
+                            PointerRelease::Click => {
+                                clicks.push((point, number("clicks") >= 2., button, modifiers))
+                            }
                             PointerRelease::DoubleClick => {
                                 clicks.push((point, true, button, modifiers))
                             }

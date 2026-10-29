@@ -1,6 +1,7 @@
 export function installViewInput(canvas, send, status) {
   const isMac = /Mac/.test(navigator.platform);
   let pressed = false;
+  const mouseClicks = new Map();
   const inside = event => {
     const ui = status().ui;
     for (const r of ui?.overlays ?? []) {
@@ -23,15 +24,21 @@ export function installViewInput(canvas, send, status) {
   canvas.addEventListener('pointerdown', event => {
     if (!inside(event)) return;
     pressed = true;
+    mouseClicks.delete(event.button);
     emit(event, 'down');
+  }, true);
+  // PointerEvent.detail is zero; MouseEvent retains the browser's click count.
+  canvas.addEventListener('mousedown', event => {
+    if (pressed) mouseClicks.set(event.button, event.detail);
   }, true);
   document.addEventListener('pointermove', event => { if (pressed) emit(event, 'move'); }, true);
   document.addEventListener('pointerup', event => {
     if (!pressed) return;
-    emit(event, 'up');
+    emit(event, 'up', {clicks: mouseClicks.get(event.button) ?? 0});
+    mouseClicks.delete(event.button);
     pressed = event.buttons !== 0;
   }, true);
-  const cancel = () => { pressed = false; send(JSON.stringify({kind:'cancel'})); };
+  const cancel = () => { pressed = false; mouseClicks.clear(); send(JSON.stringify({kind:'cancel'})); };
   document.addEventListener('pointercancel', cancel, true);
   window.addEventListener('blur', cancel);
   canvas.addEventListener('wheel', event => {

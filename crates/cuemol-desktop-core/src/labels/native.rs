@@ -136,7 +136,7 @@ fn rasterize_with_fonts(
         .map(|run| run.line_w)
         .fold(0., f32::max);
     let logical_width = (logical_width.ceil() / 4.).ceil() * 4.;
-    let line_count = label.text.split('\n').count();
+    let line_count = buffer.lines.len();
     let logical_height = size.ceil() * line_count as f32;
     let width = logical_width.clamp(1., limit as f32) as u32;
     let height = logical_height.clamp(1., limit as f32) as u32;
@@ -213,15 +213,19 @@ fn rasterize_with_fonts(
 mod tests {
     use super::*;
 
-    #[test]
-    fn standalone_regular_face_can_synthesize_requested_bold() {
+    fn regular_fonts() -> NativeFonts {
         let mut db = fontdb::Database::new();
         db.load_font_data(epaint_default_fonts::HACK_REGULAR.to_vec());
         db.set_sans_serif_family("Hack");
-        let mut fonts = NativeFonts {
+        NativeFonts {
             system: FontSystem::new_with_locale_and_db("en-US".into(), db),
             cache: SwashCache::new(),
-        };
+        }
+    }
+
+    #[test]
+    fn standalone_regular_face_can_synthesize_requested_bold() {
+        let mut fonts = regular_fonts();
         let mut label = super::super::tests::label("Glyphs");
         let regular = rasterize_with_fonts(&label, 1., 4096, &mut fonts).unwrap();
         label.font_weight = "bold".into();
@@ -231,5 +235,28 @@ mod tests {
             bold.alpha.iter().map(|&v| u64::from(v)).sum::<u64>()
                 > regular.alpha.iter().map(|&v| u64::from(v)).sum::<u64>()
         );
+    }
+
+    #[test]
+    fn native_line_endings_preserve_multiline_labels() {
+        let mut fonts = regular_fonts();
+        let mut label = super::super::tests::label("A\nB");
+        let expected = rasterize_with_fonts(&label, 1., 4096, &mut fonts).unwrap();
+        for text in ["A\rB", "A\r\nB", "A\n\rB"] {
+            label.text = text.into();
+            let actual = rasterize_with_fonts(&label, 1., 4096, &mut fonts).unwrap();
+            assert_eq!(actual.logical_size, expected.logical_size, "{text:?}");
+            assert_eq!(actual.alpha, expected.alpha, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn standalone_regular_face_can_synthesize_requested_italic() {
+        let mut fonts = regular_fonts();
+        let mut label = super::super::tests::label("Glyphs");
+        let regular = rasterize_with_fonts(&label, 1., 4096, &mut fonts).unwrap();
+        label.font_style = "italic".into();
+        let italic = rasterize_with_fonts(&label, 1., 4096, &mut fonts).unwrap();
+        assert_ne!(italic.alpha, regular.alpha);
     }
 }

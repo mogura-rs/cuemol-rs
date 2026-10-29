@@ -211,10 +211,11 @@ struct App {
     history: Vec<HistoryEntry>,
     future: Vec<HistoryEntry>,
     trajectories: BTreeMap<Uid, BrowserTrajectoryGroup>,
-    source_queue: VecDeque<web_sys::File>,
+    source_queue: VecDeque<loading::Source>,
     source_active: bool,
     source_generation: u64,
     source_scene: Option<Uid>,
+    source_abort: Option<web_sys::AbortController>,
     frame: usize,
     busy: bool,
     last_command: u32,
@@ -363,6 +364,7 @@ impl App {
             source_active: false,
             source_generation: 0,
             source_scene: None,
+            source_abort: None,
             frame: 0,
             busy: false,
             last_command: 0,
@@ -593,6 +595,7 @@ impl App {
                 Event::SourceFinished(generation) => {
                     if self.current_source(generation) {
                         self.source_active = false;
+                        self.source_abort = None;
                         self.busy = false;
                         if self.source_queue.is_empty() {
                             self.source_scene = None;
@@ -826,35 +829,6 @@ impl App {
             Err(e) => self.message = e.to_string(),
         }
         self.dirty = false;
-    }
-    fn fetch(&mut self) {
-        let id = self.pdb_id.trim().to_uppercase();
-        if id.len() != 4 || !id.bytes().all(|b| b.is_ascii_alphanumeric()) {
-            self.message = "Enter a four-character PDB ID.".into();
-            return;
-        }
-        self.message = format!("Downloading {id}…");
-        spawn_local(async move {
-            let result = async {
-                let response = JsFuture::from(
-                    web_sys::window()
-                        .unwrap()
-                        .fetch_with_str(&format!("https://files.rcsb.org/download/{id}.cif")),
-                )
-                .await?
-                .dyn_into::<web_sys::Response>()?;
-                if !response.ok() {
-                    return Err(JsValue::from_str(&format!("HTTP {}", response.status())));
-                }
-                let bytes = JsFuture::from(response.array_buffer()?).await?;
-                Ok(js_sys::Uint8Array::new(&bytes).to_vec())
-            }
-            .await;
-            match result {
-                Ok(bytes) => enqueue(Event::Data(format!("{id}.cif"), bytes)),
-                Err(e) => enqueue(Event::Error(js_error(e))),
-            }
-        });
     }
     fn render_async(&mut self, name: &str, args: &Value, download: Option<String>) {
         if self.busy {

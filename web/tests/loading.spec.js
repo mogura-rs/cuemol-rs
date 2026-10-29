@@ -3,6 +3,7 @@ import {load, call} from './support.js';
 import {gzipSync} from 'node:zlib';
 
 const pdb = 'HETATM    1  C1  LIG A   1      -2.000   0.000   0.000  1.00 10.00           C  \nHETATM    2  O1  LIG A   1       0.000   0.000   0.000  1.00 10.00           O  \nEND\n';
+const downloadedCif = 'data_download\nloop_\n_atom_site.group_PDB\n_atom_site.id\n_atom_site.type_symbol\n_atom_site.label_atom_id\n_atom_site.label_comp_id\n_atom_site.label_asym_id\n_atom_site.label_seq_id\n_atom_site.Cartn_x\n_atom_site.Cartn_y\n_atom_site.Cartn_z\nHETATM 1 C C1 LIG A 1 0 0 0\n#\n';
 async function ready(page) {
   await page.goto('./?renderer=webgl');
   await expect.poll(() => page.evaluate(() => window.cuemol?.status()?.scene?.sceneId), {timeout: 60000}).toBeGreaterThan(0);
@@ -18,6 +19,20 @@ async function holdWorker(page) {
   const handler = async route => { await gate; await route.continue().catch(() => {}); };
   await page.route('**/loader-worker.js', handler);
   return async () => { release(); await page.unroute('**/loader-worker.js', handler); };
+}
+
+async function fetchPdb(page) {
+  const button = await page.evaluate(() => window.cuemol.status().ui.rects['Get PDB']);
+  await page.mouse.click(button[0] + button[2] / 2, button[1] + button[3] / 2);
+  await expect.poll(() => page.evaluate(() => window.cuemol.status().ui.rects['Get PDB identifier'])).toBeTruthy();
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const field = await page.evaluate(() => window.cuemol.status().ui.rects['Get PDB identifier']);
+  await page.mouse.click(field[0] + field[2] / 2, field[1] + field[3] / 2);
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await page.keyboard.press('ControlOrMeta+A');
+  await page.keyboard.type('1CRN');
+  const fetch = await page.evaluate(() => window.cuemol.status().ui.rects['Fetch PDB']);
+  await page.mouse.click(fetch[0] + fetch[2] / 2, fetch[1] + fetch[3] / 2);
 }
 
 test('worker input preserves precise mmCIF coordinates and atom IDs', async ({page}) => {
@@ -224,4 +239,96 @@ test('scene changes cancel files queued before their parser starts', async ({pag
   const state = await page.evaluate(() => window.cuemol.status());
   expect(state.message).toBe('File loading cancelled because the active scene changed.');
   expect(state.scene.objects).toHaveLength(0);
+});
+
+test('cancelling queued input keeps an active render busy and cancellable', async ({page}) => {
+  await ready(page);
+  await load(page, 'render.pdb', Buffer.from(pdb));
+  await loaded(page, 'render.pdb');
+  await call(page, 'set_render_settings', {settings: 'backend=umbreon; supersample=4; useGI=true; giSamples=256; giBounces=4; denoise=None'});
+  await page.evaluate(() => window.cuemol.command('get_screenshot', {width: 384, height: 384}));
+  await expect.poll(() => page.evaluate(() => window.cuemol.status().busy)).toBe(true);
+  try {
+    const id = await page.evaluate(source => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([source], 'cancelled-during-render.pdb'));
+      const input = document.querySelector('#files');
+      input.files = transfer.files;
+      input.dispatchEvent(new Event('change', {bubbles: true}));
+      return window.cuemol.command('cancel_load');
+    }, pdb);
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().lastCommand)).toBe(id);
+    const state = await page.evaluate(() => window.cuemol.status());
+    expect(state.busy).toBe(true);
+    expect(state.loading).toBe(false);
+    expect(state.scene.objects).toHaveLength(1);
+    const next = await page.evaluate(() => window.cuemol.command('get_screenshot', {width: 32, height: 32}));
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().lastCommand)).toBe(next);
+    expect(await page.evaluate(() => window.cuemol.status().message)).toBe('Wait for the current operation to finish.');
+  } finally {
+    await page.evaluate(() => window.cuemol.command('cancel_render'));
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().message)).toContain('Render cancelled');
+  }
+});
+
+for (const action of ['scene change', 'Escape']) {
+test(`PDB downloads cancel their pending request on ${action}`, async ({page}) => {
+  await ready(page);
+  let release, requested;
+  let aborted = false;
+  page.on('requestfailed', request => {
+    if (request.url() === 'https://files.rcsb.org/download/1CRN.cif') aborted = true;
+  });
+  const gate = new Promise(resolve => { release = resolve; });
+  const request = new Promise(resolve => { requested = resolve; });
+  await page.route('https://files.rcsb.org/download/1CRN.cif', async route => {
+    requested();
+    await gate;
+    await route.fulfill({contentType: 'text/plain', body: downloadedCif}).catch(() => {});
+  });
+  try {
+    await fetchPdb(page);
+    await request;
+    const before = await page.evaluate(() => window.cuemol.status().scene.sceneId);
+    if (action === 'scene change') {
+      await call(page, 'create_scene', {name: 'New destination'});
+      expect(await page.evaluate(() => window.cuemol.status().scene.sceneId)).not.toBe(before);
+    } else {
+      const viewport = await page.evaluate(() => window.cuemol.status().ui.rects.Viewport);
+      await page.mouse.click(viewport[0] + viewport[2] / 2, viewport[1] + viewport[3] / 2);
+      await page.keyboard.press('Escape');
+    }
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().loading)).toBe(false);
+  } finally { release(); }
+  await expect.poll(() => page.evaluate(() => window.cuemol.status().message)).toMatch(/Loaded|cancelled/);
+  const state = await page.evaluate(() => window.cuemol.status());
+  expect(state.scene.objects).toHaveLength(0);
+  expect(state.message).toBe(action === 'scene change'
+    ? 'File loading cancelled because the active scene changed.' : 'File loading cancelled.');
+  await expect.poll(() => aborted).toBe(true);
+});
+}
+
+test('PDB download failures do not unlock a concurrent render', async ({page}) => {
+  await ready(page);
+  await load(page, 'render.pdb', Buffer.from(pdb));
+  await loaded(page, 'render.pdb');
+  await page.route('https://files.rcsb.org/download/1CRN.cif', route => route.fulfill({status: 503, body: 'Unavailable'}));
+  await call(page, 'set_render_settings', {settings: 'backend=umbreon; supersample=4; useGI=true; giSamples=256; giBounces=4; denoise=None'});
+  await page.evaluate(() => window.cuemol.command('get_screenshot', {width: 384, height: 384}));
+  await expect.poll(() => page.evaluate(() => window.cuemol.status().busy)).toBe(true);
+  try {
+    await fetchPdb(page);
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().message)).toMatch(/Queued|HTTP 503/);
+    expect(await page.evaluate(() => window.cuemol.status().busy)).toBe(true);
+  } finally {
+    await page.evaluate(() => window.cuemol.command('cancel_render'));
+  }
+  await expect.poll(() => page.evaluate(() => window.cuemol.status().message)).toContain('HTTP 503');
+  await expect.poll(() => page.evaluate(() => window.cuemol.status().busy)).toBe(false);
+  await page.unroute('https://files.rcsb.org/download/1CRN.cif');
+  await page.route('https://files.rcsb.org/download/1CRN.cif', route => route.fulfill({contentType: 'text/plain', body: downloadedCif}));
+  await fetchPdb(page);
+  await loaded(page, '1CRN.cif');
+  expect((await page.evaluate(() => window.cuemol.status())).scene.objects).toHaveLength(2);
 });

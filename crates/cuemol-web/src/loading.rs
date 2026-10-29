@@ -1,6 +1,46 @@
 use super::*;
 use cuemol_desktop_core::PreparedFile;
 
+pub(super) enum Source {
+    File(web_sys::File),
+    Pdb(String),
+}
+
+impl Source {
+    fn name(&self) -> String {
+        match self {
+            Self::File(file) => file.name(),
+            Self::Pdb(id) => format!("{id}.cif"),
+        }
+    }
+
+    async fn open(self, signal: Option<web_sys::AbortSignal>) -> Result<web_sys::File, JsValue> {
+        let id = match self {
+            Self::File(file) => return Ok(file),
+            Self::Pdb(id) => id,
+        };
+        let options = web_sys::RequestInit::new();
+        options.set_signal(signal.as_ref());
+        let response = JsFuture::from(
+            web_sys::window()
+                .ok_or_else(|| JsValue::from_str("Browser window is unavailable"))?
+                .fetch_with_str_and_init(
+                    &format!("https://files.rcsb.org/download/{id}.cif"),
+                    &options,
+                ),
+        )
+        .await?
+        .dyn_into::<web_sys::Response>()?;
+        if !response.ok() {
+            return Err(JsValue::from_str(&format!("HTTP {}", response.status())));
+        }
+        let blob = JsFuture::from(response.blob()?).await?;
+        let parts = js_sys::Array::new();
+        parts.push(&blob);
+        web_sys::File::new_with_blob_sequence(&parts, &format!("{id}.cif"))
+    }
+}
+
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(catch, js_namespace=cuemolLoader, js_name=parseFile)]
@@ -30,19 +70,38 @@ impl App {
             return;
         }
         cancel_worker();
+        if let Some(abort) = self.source_abort.take() {
+            abort.abort();
+        }
         self.source_generation = self.source_generation.wrapping_add(1);
         self.source_queue.clear();
+        if self.source_active {
+            self.busy = false;
+        }
         self.source_active = false;
         self.source_scene = None;
-        self.busy = false;
         self.message = "File loading cancelled.".into();
     }
 
     pub(super) fn queue_source(&mut self, file: web_sys::File) {
+        self.queue_request(Source::File(file));
+    }
+
+    fn queue_request(&mut self, source: Source) {
         if !self.source_active && self.source_queue.is_empty() {
             self.source_scene = self.state.active_scene();
         }
-        self.source_queue.push_back(file);
+        self.source_queue.push_back(source);
+    }
+
+    pub(super) fn fetch(&mut self) {
+        let id = self.pdb_id.trim().to_uppercase();
+        if id.len() != 4 || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+            self.message = "Enter a four-character PDB ID.".into();
+            return;
+        }
+        self.message = format!("Queued download {id}.");
+        self.queue_request(Source::Pdb(id));
     }
 
     pub(super) fn queue_bytes(&mut self, name: &str, bytes: &[u8]) {
@@ -58,7 +117,7 @@ impl App {
         if !self.validate_source_scene() || self.source_active || self.busy {
             return;
         }
-        let Some(file) = self.source_queue.pop_front() else {
+        let Some(source) = self.source_queue.pop_front() else {
             return;
         };
         self.source_active = true;
@@ -66,9 +125,16 @@ impl App {
         self.source_generation = self.source_generation.wrapping_add(1);
         self.source_scene = self.state.active_scene();
         let generation = self.source_generation;
-        let name = file.name();
+        let name = source.name();
         let extension = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
         self.message = format!("Loading {name}…");
+        let file = match source {
+            Source::File(file) => file,
+            remote => {
+                self.start_prepared_source(remote, name, generation);
+                return;
+            }
+        };
         if matches!(
             extension.as_str(),
             "dcd" | "xtc" | "trr" | "nc" | "netcdf" | "mdcrd" | "crd"
@@ -115,18 +181,41 @@ impl App {
                 enqueue(Event::SourceFinished(generation));
             });
         } else {
-            spawn_local(async move {
-                let result = parse_file(file).await.map_err(js_error).and_then(|data| {
-                    PreparedFile::decode(&js_sys::Uint8Array::new(&data).to_vec())
-                        .map_err(|error| error.to_string())
-                });
-                match result {
-                    Ok(file) => enqueue(Event::Prepared(generation, name, file)),
-                    Err(error) => enqueue(Event::SourceError(generation, error)),
-                }
-                enqueue(Event::SourceFinished(generation));
-            });
+            self.start_prepared_source(Source::File(file), name, generation);
         }
+    }
+
+    fn start_prepared_source(&mut self, source: Source, name: String, generation: u64) {
+        self.source_abort = if matches!(&source, Source::Pdb(_)) {
+            match web_sys::AbortController::new() {
+                Ok(abort) => Some(abort),
+                Err(error) => {
+                    enqueue(Event::SourceError(generation, js_error(error)));
+                    enqueue(Event::SourceFinished(generation));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let signal = self
+            .source_abort
+            .as_ref()
+            .map(web_sys::AbortController::signal);
+        spawn_local(async move {
+            let result = async {
+                let file = source.open(signal).await.map_err(js_error)?;
+                let data = parse_file(file).await.map_err(js_error)?;
+                PreparedFile::decode(&js_sys::Uint8Array::new(&data).to_vec())
+                    .map_err(|error| error.to_string())
+            }
+            .await;
+            match result {
+                Ok(file) => enqueue(Event::Prepared(generation, name, file)),
+                Err(error) => enqueue(Event::SourceError(generation, error)),
+            }
+            enqueue(Event::SourceFinished(generation));
+        });
     }
 
     pub(super) fn apply_prepared(&mut self, name: String, file: PreparedFile) {

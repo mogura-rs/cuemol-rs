@@ -184,11 +184,23 @@ def main():
             wait_for(lambda: mask if (mask := label_pixels()) is not None
                      and ImageChops.difference(styled, mask).getbbox() is None else None)
             capture('font-styled.png')
+            script(get_probe + 'fontProbe.setLabel(2,"Top\\nBottom");')
+            multiline = wait_for(lambda: mask if (mask := label_pixels()) is not None
+                                 and ImageChops.difference(styled, mask).getbbox() else None)
+            for text in ['Top\rBottom', 'Top\r\nBottom', 'Top\n\rBottom']:
+                script(get_probe + 'fontProbe.setLabel(2,"Other");')
+                wait_for(lambda: mask if (mask := label_pixels()) is not None
+                         and ImageChops.difference(multiline, mask).getbbox() else None)
+                script(get_probe + f'fontProbe.setLabel(2,{json.dumps(text)});')
+                wait_for(lambda: mask if (mask := label_pixels()) is not None
+                         and ImageChops.difference(multiline, mask).getbbox() is None else None)
+            capture('font-multiline.png')
             report.update(ok=True, window=bounds, atoms=state['objects'][0]['atoms'],
                           rotation_before=before['rotation'], rotation_after=rotated['rotation'],
                           zoom_before=rotated['zoom'], zoom_after=zoomed['zoom'],
                           changed_pixels=changed, colored_pixels=colored,
                           font_family_pixels_changed=True, font_style_case_equal=True,
+                          font_line_endings_equal=True,
                           font_pixels=styled.histogram()[255])
             print(json.dumps(report), flush=True)
         except BaseException as error:

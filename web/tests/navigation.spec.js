@@ -58,6 +58,27 @@ test('atom labels, residue double-click, range extension, hover and undo share t
   await page.screenshot({path:testInfo.outputPath('navigation-labels.png')});
 });
 
+test('browser double-click counts survive a blocked input handler',async({page})=>{
+  const {id,points:p}=await setup(page);
+  await page.evaluate(()=>{
+    window.delayedReleaseTimes=[];
+    document.addEventListener('pointerup',event=>{
+      window.delayedReleaseTimes.push(event.timeStamp);
+      if(window.delayedReleaseTimes.length===1){
+        const deadline=performance.now()+700;
+        while(performance.now()<deadline){}
+      }
+    },true);
+  });
+  await page.mouse.dblclick(...p[0],{delay:70});
+  const times=await page.evaluate(()=>window.delayedReleaseTimes);
+  expect(times).toHaveLength(2);
+  expect(times[1]-times[0]).toBeGreaterThan(500);
+  await expect.poll(async()=>(await status(page)).selection).not.toBe('');
+  const selection=(await status(page)).selection;
+  expect(JSON.parse((await command(page,'count_selection',{objId:id,selection})).message).count).toBe(2);
+});
+
 test('lasso and rectangle selection add with Shift and retain click behavior',async({page})=>{
   const {id,points:p}=await setup(page),before=(await status(page)).view;
   async function box(point,lasso) {
