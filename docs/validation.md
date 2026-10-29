@@ -163,8 +163,17 @@ storage now retains aliases and bounds/type checks without those copies.
 Python transfers byte blocks through one bulk RPC instead of individual calls.
 
 `scripts/benchmark-byte-arrays.py` compared the public v0.1.1 and v0.1.6 binaries
-on the same Linux host. Both executable hashes matched the verified public
-archives. Each sample allocated an array and
+on the same Linux x86_64 host on 2026-10-29 UTC. Both this comparison and the
+molecular-I/O comparison below used these public executables:
+
+| Release | Executable SHA-256 |
+| --- | --- |
+| v0.1.1 | `45d2b45509ed6ea7c84e186637d58a0f40ffb5520168d707a128f38dcd5f6900` |
+| v0.1.6 | `859562a2312ab06d1236ddce0428290ae17ca6d934dbca7de2615dc180266da7` |
+
+Both hashes matched the verified public archives. The retained comparison reports
+include the individual samples, input dimensions, checksums and executable
+provenance. Each byte-array sample allocated an array and
 performed 256 write/read pairs; all checksums were 32,640. Three independent
 processes were measured per size. The byte-array and molecular-I/O measurements
 began after this task's builds and GUI checks finished; other host workloads were
@@ -335,8 +344,9 @@ suite passes 171 tests with the optional POV-Ray process test excluded.
 A real 944 x 588 Linux window also passes OS drag, wheel, font and Python checks.
 Scrolling the tool list preserves the camera, and its captured lower edge no
 longer overlaps an atom-count label.
-The same checks pass with the public v0.1.6 binary. Its five-platform window
-captures also confirm that counts appear only in the bottom status bar.
+Separately from the hosted GUI matrix, the installed public v0.1.6 binary passed
+the same checks in a 944 x 588 Linux window. Its additional capture and the five
+hosted-platform captures confirm that counts appear only in the bottom status bar.
 
 ## Center marks and display scaling
 
