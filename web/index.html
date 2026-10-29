@@ -7,11 +7,13 @@ import init, {start, open_file, command, status, agent_turn, agent_cancel, view_
 import {initKernels} from './kernels.js';
 import './oidn.js';
 import {installViewInput} from './input.js';
+import {initLoader} from './loader.js';
 const loading=document.getElementById('loading');
 performance.mark('cuemol-startup');
 try {
   await Promise.all([
     init().then(()=>performance.mark('cuemol-runtime-ready')),
+    initLoader(),
     initKernels().then(()=>performance.mark('cuemol-kernels-ready')),
   ]);
   loading.querySelector('span').textContent='Starting graphics…';

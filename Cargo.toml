@@ -20,6 +20,7 @@ members = [
   "crates/cuemol-cli",
   "crates/cuemol-command",
   "crates/cuemol-web",
+  "crates/cuemol-web-loader",
   "crates/cuemol-ui",
   "crates/cuemol-agent",
   "crates/cuemol-node",

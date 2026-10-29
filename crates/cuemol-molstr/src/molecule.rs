@@ -6,7 +6,7 @@ use cuemol_qsys::View;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Atom {
     pub serial: i32,
     pub name: String,
@@ -117,7 +117,7 @@ impl Atom {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BondOrder {
     Single,
     Double,
@@ -148,7 +148,7 @@ impl BondOrder {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Bond {
     pub atom1: usize,
     pub atom2: usize,
@@ -163,7 +163,9 @@ pub struct Bond {
     pub persist: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct ResidueKey {
     pub chain_id: String,
     pub res_id: i32,
@@ -210,6 +212,43 @@ pub struct MolCoord {
     cell_params: Option<cuemol_core::CellParams>,
 }
 
+/// Lossless parsed data for transfer between independent runtimes.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct MoleculeData {
+    atoms: Arc<Vec<Atom>>,
+    bonds: Arc<Vec<Bond>>,
+    residue_props: Arc<BTreeMap<ResidueKey, BTreeMap<String, String>>>,
+    selection_text: String,
+    default_color: SolidColor,
+    atoms_moved_generation: usize,
+    cell_params: Option<cuemol_core::CellParams>,
+}
+
+impl MoleculeData {
+    pub fn into_molecule(self) -> Result<MolCoord> {
+        if self
+            .bonds
+            .iter()
+            .any(|bond| bond.atom1 >= self.atoms.len() || bond.atom2 >= self.atoms.len())
+        {
+            return Err(CueMolError::parse(
+                "prepared molecule has an invalid bond index",
+            ));
+        }
+        let mut molecule = MolCoord {
+            atoms: self.atoms,
+            bonds: self.bonds,
+            residue_props: self.residue_props,
+            default_color: self.default_color,
+            atoms_moved_generation: self.atoms_moved_generation,
+            cell_params: self.cell_params,
+            ..MolCoord::new()
+        };
+        molecule.set_selection_text(self.selection_text)?;
+        Ok(molecule)
+    }
+}
+
 impl PartialEq for MolCoord {
     fn eq(&self, other: &Self) -> bool {
         (Arc::ptr_eq(&self.atoms, &other.atoms) || self.atoms == other.atoms)
@@ -232,6 +271,18 @@ impl Default for MolCoord {
 }
 
 impl MolCoord {
+    pub fn transfer_data(&self) -> MoleculeData {
+        MoleculeData {
+            atoms: self.atoms.clone(),
+            bonds: self.bonds.clone(),
+            residue_props: self.residue_props.clone(),
+            selection_text: self.selection_text.clone(),
+            default_color: self.default_color.clone(),
+            atoms_moved_generation: self.atoms_moved_generation,
+            cell_params: self.cell_params.clone(),
+        }
+    }
+
     pub fn apply_undo_changes(&mut self, from: &Self, to: &Self) {
         use cuemol_core::snapshot::apply_value_change;
         apply_value_change(&mut self.bonds, &from.bonds, &to.bonds);

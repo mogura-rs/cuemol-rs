@@ -108,6 +108,8 @@ fn build(args: &[String]) -> Result<()> {
         "--locked",
         "-p",
         "cuemol-web",
+        "-p",
+        "cuemol-web-loader",
         "--target",
         "wasm32-unknown-unknown",
         "--profile",
@@ -129,15 +131,16 @@ fn build(args: &[String]) -> Result<()> {
             .ok_or("missing Cargo target directory")?,
     )
     .join("wasm32-unknown-unknown")
-    .join(if profile == "dev" { "debug" } else { profile })
-    .join("cuemol_web.wasm");
+    .join(if profile == "dev" { "debug" } else { profile });
     std::fs::create_dir_all(out.join("pkg")).map_err(|e| e.to_string())?;
-    run_command(
-        Command::new(bindgen)
-            .arg(&target)
-            .args(["--target", "web", "--no-typescript", "--out-dir"])
-            .arg(out.join("pkg")),
-    )?;
+    for name in ["cuemol_web", "cuemol_web_loader"] {
+        run_command(
+            Command::new(&bindgen)
+                .arg(target.join(format!("{name}.wasm")))
+                .args(["--target", "web", "--no-typescript", "--out-dir"])
+                .arg(out.join("pkg")),
+        )?;
+    }
     run_command(
         Command::new("uv")
             .current_dir(&root)
@@ -164,7 +167,14 @@ fn build(args: &[String]) -> Result<()> {
             .arg(out.join("pkg/oidn")),
     )?;
     if out != root.join("web") {
-        for name in ["index.html", "kernels.js", "oidn.js", "input.js"] {
+        for name in [
+            "index.html",
+            "kernels.js",
+            "oidn.js",
+            "input.js",
+            "loader.js",
+            "loader-worker.js",
+        ] {
             std::fs::copy(root.join("web").join(name), out.join(name))
                 .map_err(|e| e.to_string())?;
         }

@@ -2431,6 +2431,22 @@ impl MolScene {
         base_path: Option<&Path>,
         read_molecule: &QscMoleculeReader<'_>,
     ) -> Result<()> {
+        self.load_qsc_bytes_with_molecule_decoder(
+            input,
+            base_path,
+            &|format, data, options, base| {
+                read_molecule_bytes_with_options(format, data, options, base, read_molecule)
+            },
+        )
+    }
+
+    /// Supply fully decoded molecules while retaining the scene's metadata and reader options.
+    pub fn load_qsc_bytes_with_molecule_decoder(
+        &mut self,
+        input: &[u8],
+        base_path: Option<&Path>,
+        read_molecule: &QscMoleculeReader<'_>,
+    ) -> Result<()> {
         let stream = LDom2InStream::from_bytes(input)?;
         if stream.tree().top().tag_name() != "scene" {
             return Err(CueMolError::parse("QSC root element is not scene"));
@@ -2712,13 +2728,7 @@ impl MolScene {
         let data =
             load_qsc_source_data_with_options(object_line, chunks, base_path, reader_options)?;
         let srctype = attr_value(object_line, "srctype").unwrap_or_else(|| "qdfpdb".to_string());
-        let molecule = read_molecule_bytes_with_options(
-            &srctype,
-            &data,
-            reader_options,
-            base_path,
-            read_molecule,
-        )?;
+        let molecule = read_molecule(&srctype, &data, reader_options, base_path)?;
         let object_uid = self.add_molecule_with_source_type(object_name, molecule, srctype);
         let qsc_extra_attrs = object_node
             .children()

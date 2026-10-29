@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+serde = { version = "1", features = ["derive", "rc"] }
 cuemol-core.workspace = true
 cuemol-gfx.workspace = true
 cuemol-qsys.workspace = true

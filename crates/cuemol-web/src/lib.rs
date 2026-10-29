@@ -1,5 +1,6 @@
 #![cfg(target_arch = "wasm32")]
 mod input;
+mod loading;
 mod navigation;
 use cuemol_command::navigation::{AtomHit, Navigation, Tool as ViewportTool};
 mod panels;
@@ -49,10 +50,13 @@ enum Event {
         u64,
     ),
     Source(web_sys::File),
-    SourceFinished,
+    SourceFinished(u64),
+    SourceError(u64, String),
+    Prepared(u64, String, cuemol_desktop_core::PreparedFile),
+    Profile(u64, String, Vec<u8>),
     Data(String, Vec<u8>),
     Error(String),
-    Trajectory(Uid, BrowserTrajectory, cuemol_mdtools::TrajectoryFrame),
+    Trajectory(u64, Uid, BrowserTrajectory, cuemol_mdtools::TrajectoryFrame),
     Frame(Uid, usize, cuemol_mdtools::TrajectoryFrame, u64),
     Command(u32, String, Value),
     Rendered(cuemol_core::Result<Value>, Option<String>),
@@ -182,7 +186,7 @@ struct App {
     console_source: String,
     logs: Vec<String>,
     last_log: String,
-    last_scene: Option<(String, Vec<u8>)>,
+    last_scene: Option<(String, Arc<Vec<u8>>)>,
     show_get_pdb: bool,
     ui_rects: std::collections::BTreeMap<String, [f32; 4]>,
     revision: u64,
@@ -209,6 +213,8 @@ struct App {
     trajectories: BTreeMap<Uid, BrowserTrajectoryGroup>,
     source_queue: VecDeque<web_sys::File>,
     source_active: bool,
+    source_generation: u64,
+    source_scene: Option<Uid>,
     frame: usize,
     busy: bool,
     last_command: u32,
@@ -355,6 +361,8 @@ impl App {
             trajectories: BTreeMap::new(),
             source_queue: VecDeque::new(),
             source_active: false,
+            source_generation: 0,
+            source_scene: None,
             frame: 0,
             busy: false,
             last_command: 0,
@@ -415,6 +423,10 @@ impl App {
         self.future.clear();
     }
     fn call(&mut self, name: &str, args: Value) {
+        if name == "cancel_load" {
+            self.cancel_load();
+            return;
+        }
         if name == "cancel_render" {
             if let Some(cancel) = &self.render_cancel {
                 cancel.store(true, Ordering::Relaxed);
@@ -577,97 +589,38 @@ impl App {
                     });
                 }
                 Event::Source(file) => self.source_queue.push_back(file),
-                Event::SourceFinished => {
-                    self.source_active = false;
-                    self.busy = false;
-                }
-                Event::Data(name, bytes) => {
-                    if name.to_lowercase().ends_with(".qsc") {
-                        self.last_scene = Some((name.clone(), bytes.clone()));
-                    }
-                    if name.rsplit('.').next().is_some_and(|ext| {
-                        matches!(ext.to_ascii_lowercase().as_str(), "icc" | "icm")
-                    }) {
-                        match cuemol_gfx::cms::register_icc_profile(&name, &bytes) {
-                            Ok(()) => {
-                                self.checkpoint();
-                                self.state.put_config_value("color:icc_profile", &name);
-                                if let Some(scene) = self
-                                    .state
-                                    .active_scene()
-                                    .and_then(|id| self.state.scene_manager_mut().scene_mut(id))
-                                {
-                                    scene.set_scene_attribute("use_colproof", "true");
-                                    scene.set_scene_attribute("icc_filename", &name);
-                                }
-                                self.dirty = true;
-                                self.message = format!("Loaded ICC profile {name}");
-                                if let Some(storage) =
-                                    web_sys::window().and_then(|w| w.local_storage().ok().flatten())
-                                {
-                                    let result = storage
-                                        .set_item(
-                                            &format!("cuemol.icc.{name}"),
-                                            &base64::engine::general_purpose::STANDARD
-                                                .encode(&bytes),
-                                        )
-                                        .and_then(|_| {
-                                            storage.set_item(
-                                                "cuemol.config",
-                                                &self.state.config_text(),
-                                            )
-                                        });
-                                    if result.is_err() {
-                                        self.message.push_str(" (browser storage is full)");
-                                    }
-                                }
-                            }
-                            Err(error) => self.message = error.to_string(),
-                        }
-                        continue;
-                    }
-                    self.checkpoint();
-                    match self.state.open_bytes(&name, &bytes) {
-                        Ok(loaded) => {
-                            self.selected = match loaded {
-                                GuiLoadedPath::Object { object_uid, .. } => Some(object_uid),
-                                _ => None,
-                            };
-                            self.dirty = true;
-                            self.rebuild();
-                            let mut filename = name.to_ascii_lowercase();
-                            for suffix in [".gz", ".bz2", ".xz"] {
-                                if let Some(base) = filename.strip_suffix(suffix) {
-                                    filename = base.to_string();
-                                    break;
-                                }
-                            }
-                            if matches!(loaded, GuiLoadedPath::Scene { .. })
-                                && [".qsc", ".qsl", ".pse"]
-                                    .iter()
-                                    .any(|suffix| filename.ends_with(suffix))
-                            {
-                                self.frame = 0;
-                                self.playing = false;
-                                self.camera = self.state.active_view_camera().unwrap_or_default();
-                            } else {
-                                self.fit(false);
-                            }
-                            self.message = format!("Loaded {name}");
-                        }
-                        Err(e) => {
-                            let snapshot = self.history.pop().unwrap();
-                            self.restore_history(snapshot);
-                            self.message = e.to_string();
-                        }
+                Event::SourceFinished(generation) => {
+                    if self.current_source(generation) {
+                        self.source_active = false;
+                        self.busy = false;
+                        self.source_scene = None;
                     }
                 }
+                Event::SourceError(generation, error) => {
+                    if self.current_source(generation) {
+                        self.message = error;
+                    }
+                }
+                Event::Prepared(generation, name, file) => {
+                    if self.current_source(generation) {
+                        self.apply_prepared(name, file);
+                    }
+                }
+                Event::Profile(generation, name, bytes) => {
+                    if self.current_source(generation) {
+                        self.apply_profile(&name, &bytes);
+                    }
+                }
+                Event::Data(name, bytes) => self.queue_bytes(&name, &bytes),
                 Event::Error(error) => {
                     self.message = error;
                     self.busy = false;
                     self.playing = false;
                 }
-                Event::Trajectory(id, trajectory, first_frame) => {
+                Event::Trajectory(generation, id, trajectory, first_frame) => {
+                    if !self.current_source(generation) {
+                        continue;
+                    }
                     let atoms = self
                         .state
                         .scene_manager()
@@ -751,58 +704,6 @@ impl App {
         }
         self.start_next_source();
     }
-    fn start_next_source(&mut self) {
-        if self.source_active || self.busy {
-            return;
-        }
-        let Some(file) = self.source_queue.pop_front() else {
-            return;
-        };
-        self.source_active = true;
-        self.busy = true;
-        let name = file.name();
-        let extension = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-        if matches!(
-            extension.as_str(),
-            "dcd" | "xtc" | "trr" | "nc" | "netcdf" | "mdcrd" | "crd"
-        ) {
-            let Some(id) = self.selected else {
-                enqueue(Event::Error("Load and select a topology first.".into()));
-                enqueue(Event::SourceFinished);
-                return;
-            };
-            let atoms = self
-                .state
-                .scene_manager()
-                .object(id)
-                .map(|o| o.mol().atom_count());
-            self.message = "Indexing trajectory…".into();
-            spawn_local(async move {
-                let result = async {
-                    let trajectory = BrowserTrajectory::open(file, atoms).await?;
-                    let first = trajectory.frame(0).await?;
-                    Ok::<_, JsValue>((trajectory, first))
-                }
-                .await;
-                match result {
-                    Ok((trajectory, first)) => enqueue(Event::Trajectory(id, trajectory, first)),
-                    Err(error) => enqueue(Event::Error(js_error(error))),
-                }
-                enqueue(Event::SourceFinished);
-            });
-        } else {
-            spawn_local(async move {
-                match JsFuture::from(file.array_buffer()).await {
-                    Ok(bytes) => {
-                        enqueue(Event::Data(name, js_sys::Uint8Array::new(&bytes).to_vec()))
-                    }
-                    Err(error) => enqueue(Event::Error(js_error(error))),
-                }
-                enqueue(Event::SourceFinished);
-            });
-        }
-    }
-
     fn trajectory_state(&self, id: Uid) -> Option<(usize, usize)> {
         let native = self.state.trajectory_frame_state(id);
         if let Some(group) = self.trajectories.get(&id) {
@@ -1221,6 +1122,7 @@ impl eframe::App for App {
             self.navigation.set_tool(tool);
         }
         if !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.cancel_load();
             self.navigation.cancel();
             self.input.cancel();
             self.rectangle_start = None;
@@ -1283,6 +1185,6 @@ impl eframe::App for App {
                 [rect.min.x, rect.min.y, rect.width(), rect.height()]
             })
             .collect();
-        STATUS.with(|status|*status.borrow_mut()=json!({"scene":state,"geometryRevision":self.renderer.revision(),"selection":self.selection,"view":cuemol_command::view_json(&self.camera),"message":self.message,"frame":self.trajectory_info().map_or(self.frame,|(_,_,frame)|frame),"busy":self.busy,"lastCommand":self.last_command,"agent":self.agent.status(),"ui":{"overlays":overlays,"rects":self.ui_rects,"activity":self.activity.map(cuemol_ui::shell::Activity::key),"bottom":self.bottom_tab,"inspector":self.inspector.rects,"navigation":{"tool":self.navigation.tool.label(),"picks":self.navigation.picks.len(),"hover":self.hover_hit.map(|hit|json!({"object":hit.object.get(),"index":hit.index})),"measurementLabels":self.state.active_atom_intr_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).into_iter().map(|label|label.text).collect::<Vec<_>>(),"labels":self.state.active_name_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).len()}}}).to_string());
+        STATUS.with(|status|*status.borrow_mut()=json!({"scene":state,"geometryRevision":self.renderer.revision(),"selection":self.selection,"view":cuemol_command::view_json(&self.camera),"message":self.message,"frame":self.trajectory_info().map_or(self.frame,|(_,_,frame)|frame),"busy":self.busy,"loading":self.source_active,"lastCommand":self.last_command,"agent":self.agent.status(),"ui":{"overlays":overlays,"rects":self.ui_rects,"activity":self.activity.map(cuemol_ui::shell::Activity::key),"bottom":self.bottom_tab,"inspector":self.inspector.rects,"navigation":{"tool":self.navigation.tool.label(),"picks":self.navigation.picks.len(),"hover":self.hover_hit.map(|hit|json!({"object":hit.object.get(),"index":hit.index})),"measurementLabels":self.state.active_atom_intr_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).into_iter().map(|label|label.text).collect::<Vec<_>>(),"labels":self.state.active_name_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).len()}}}).to_string());
     }
 }

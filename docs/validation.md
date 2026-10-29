@@ -146,6 +146,45 @@ main-thread timer delays in a fresh browser context per sample. In Chrome, the
 unchanged at approximately 53 ms. Parsing still occurs on the main thread in
 these measurements, so they do not establish nonblocking parsing.
 
+## Browser parsing workers
+
+Browser file input now parses molecules, compressed data, maps and PyMOL pickle
+data outside the UI runtime. A separate parser-only WASM module shares the
+native readers. Binary transfers retain floating-point bits, atom IDs and order,
+bond properties, unit cells, residue properties and map statistics. QSC loading
+transfers parsed molecules and maps while the UI restores scene metadata with
+current application IDs. Scene assembly and geometry construction still use
+the UI runtime; they can produce frame delays for large inputs.
+
+Input files remain ordered. Undo state is captured immediately before applying
+a successful result, so parsing failures preserve intervening edits and redo.
+Escape or the status-bar button terminates the worker and clears queued files.
+Changing scenes rejects late input. Nearby loads reuse a worker, which is
+terminated after two idle seconds to release its linear memory.
+
+The affected shared suites passed 808 tests. Chrome passed the 71 available
+application cases, followed by the previously missing reference ICC case and
+the added compressed-input case. The final parser-only module passed all seven
+loading cases and the ICC comparison; Firefox and WebKit also exercise the
+loading cases. These checks cover precision, compression, concurrent edits and
+rotation, cancellation, queue order, error recovery, scene changes and worker
+release/recreation. The ten Tauri shell tests use a separate mock bridge and are
+not counted as deployed WASM checks.
+
+Three fresh Chrome contexts per size compared the already optimized public
+revision `4b417fa` with this worker build. For 20,000 atoms, median input time was
+157 ms before and 163 ms after; the maximum timer gap fell from 77 ms to 64 ms.
+Embedded scene reload was 134 ms before and 149 ms after. This is a responsiveness
+change, not a uniform reduction in elapsed loading time.
+
+The parser module is approximately 1.8 MiB, compared with the 25 MiB application
+module. Using it instead of a second complete application runtime reduced the
+20,000-atom worker's linear memory from 22.5 to 15.5 MiB. Main-runtime linear
+memory after scene reload was 54.44 MiB before worker loading and 52.50 MiB after.
+The worker adds transient memory, reaching 20.13 MiB during the scene reload,
+and is then released. These values describe WASM linear memory, not browser
+process RSS or a claim of lower peak memory for every load.
+
 ## Center marks and display scaling
 
 Live center marks now invert the displayed RGB channels after molecular geometry
@@ -343,8 +382,10 @@ Its cancellation concern led to the settled-frame regression and fix.
 
 The DCD, BVH, camera-animation and GPU-upload measurements below apply to their
 recorded inputs and stages. They do not establish optimization of every reader,
-renderer, map/surface calculation or complete GUI frame. Script asynchronous
-readers still collect the input before parsing; native execution uses a worker,
+renderer, map/surface calculation or complete GUI frame. Ordinary browser file
+input uses the parser worker described above. Script asynchronous readers keep
+their synchronous `waitLoadAsync` API and collect the input before parsing;
+native execution uses a worker,
 while the browser parses in `waitLoadAsync`. Indexed browser trajectories instead
 read individual frames with `File.slice`.
 
@@ -1884,3 +1925,4 @@ during this work are collected here; the read-only reference itself was not edit
 | The public GUI entry still reported a locked Mac desktop and untested Windows, ARM Linux and Intel Mac interaction. | Later OS input and window-capture checks passed on all five published native targets. |
 | The Python usage entry only described the root binding. | It now lists the embedded helper modules and their live-scene coverage. |
 | Linux startup instructions omitted an X11 runtime needed by the published GUI. | The Debian/Ubuntu dependency list now includes `libxkbcommon-x11-0`; the GUI matrix also provisions graphics drivers. |
+| Browser parsing was described only by the synchronous script-reader boundary. | Ordinary file input now uses a cancellable parser worker; script `waitLoadAsync` retains its synchronous API. |

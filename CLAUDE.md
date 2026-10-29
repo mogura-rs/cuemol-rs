@@ -58,6 +58,7 @@ Dependencies form a strict DAG. New crates must respect this ordering:
   `cuemol-surface`, `cuemol-symm`, `cuemol-xtal`, `cuemol-mdtools`, `cuemol-molanl`,
   `cuemol-anim`, `cuemol-importers`, `cuemol-lwview`, `cuemol-molclient`.
 - **Apps / bindings** (top of the DAG): `cuemol-cli` (unified command), `cuemol-web` (browser),
+  `cuemol-web-loader` (browser parser worker),
   `cuemol-desktop` (GUI; integrates everything), `cuemol-node` / `cuemol-py`
   (binding-facing facades).
 
@@ -128,6 +129,10 @@ this layer for the same edits. `cuemol-web` uses the extracted wgpu viewport
 pipelines directly; do not introduce PNG round trips into interactive rendering.
 Keep filesystem and process operations behind native target gates. Browser file
 loading uses bytes or `File.slice`; embedded QSC is the portable scene format.
+File parsing uses the shared `PreparedFile` boundary in a dedicated worker.
+Preserve floating-point bits, atom order/IDs, reader options and map statistics
+in transfers. Apply scene IDs and undo entries on the UI thread only after
+parsing succeeds, and reject results from cancelled or superseded requests.
 
 Camera zoom is the full world-space view height, not its reciprocal. Preserve
 this convention across saved cameras, CPU rendering, and both GPU frontends.

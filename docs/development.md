@@ -25,7 +25,10 @@ cargo run --locked -p cuemol-cli -- tools bundle
 ```
 
 `web build` installs the matching wasm-bindgen tool into the checkout cache when
-necessary. It also builds the vendored browser kernels with Emscripten, using
+necessary. It builds both the application and a smaller parser-only WASM module;
+the parser worker uses the same readers and lossless transfer types as native
+byte loading. Both modules and the worker scripts belong in browser distributions.
+It also builds the vendored browser kernels with Emscripten, using
 `EMXX`, an installed `em++`, or a pinned SDK installed in the checkout cache.
 The kernel build requires `uv`; compiled kernels and the SDK are cached in CI.
 `tools bundle` uses `uv` with hashed dependency pins; APBS builds on macOS and

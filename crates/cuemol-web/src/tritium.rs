@@ -29,6 +29,14 @@ impl App {
             .show(ctx, |ui| {
                 ui.visuals_mut().override_text_color = Some(egui::Color32::from_gray(230));
                 ui.horizontal(|ui| {
+                    if self.source_active {
+                        ui.spinner();
+                        let response = ui.small_button("Cancel loading");
+                        self.record_ui_rect("Cancel loading", &response);
+                        if response.clicked() {
+                            self.cancel_load();
+                        }
+                    }
                     if self.render_cancel.is_some() {
                         ui.spinner();
                         if ui.small_button("Cancel render").clicked() {
@@ -386,7 +394,7 @@ impl App {
 
     fn reload_scene(&mut self) {
         if let Some((name, bytes)) = &self.last_scene {
-            enqueue(Event::Data(name.clone(), bytes.clone()));
+            enqueue(Event::Data(name.clone(), bytes.as_ref().clone()));
         } else {
             self.message = "Open a scene file before reloading it.".into();
         }

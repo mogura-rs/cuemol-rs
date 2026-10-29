@@ -16,7 +16,7 @@
 use cuemol_core::{CueMolError, Result};
 
 /// A decoded pickle value.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PickleValue {
     None,
     Bool(bool),

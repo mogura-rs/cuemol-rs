@@ -67,10 +67,28 @@ fn main() {
         );
         assets.insert("build-info.json".into());
     } else {
-        assets.extend(["index.html", "kernels.js", "oidn.js", "input.js"].map(str::to_owned));
+        assets.extend(
+            [
+                "index.html",
+                "kernels.js",
+                "oidn.js",
+                "input.js",
+                "loader.js",
+                "loader-worker.js",
+            ]
+            .map(str::to_owned),
+        );
         collect_assets(&root, &root.join("pkg"), &mut assets);
     }
-    for required in ["index.html", "pkg/cuemol_web.js", "pkg/cuemol_web_bg.wasm"] {
+    for required in [
+        "index.html",
+        "loader.js",
+        "loader-worker.js",
+        "pkg/cuemol_web.js",
+        "pkg/cuemol_web_bg.wasm",
+        "pkg/cuemol_web_loader.js",
+        "pkg/cuemol_web_loader_bg.wasm",
+    ] {
         assert!(
             assets.contains(required),
             "Missing browser entry point: {required}"

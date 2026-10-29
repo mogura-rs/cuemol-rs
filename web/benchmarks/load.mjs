@@ -47,6 +47,7 @@ async function measure(page, operation) {
       probe.observer.observe({entryTypes: ['longtask']});
     }
   });
+  const memoryBefore = await runtimeMemory(page);
   const started = performance.now();
   const value = await operation();
   const elapsedMs = performance.now() - started;
@@ -56,7 +57,15 @@ async function measure(page, operation) {
     clearInterval(probe.timer); probe.observer?.disconnect();
     return {maxTimerGapMs: Math.max(0, ...probe.gaps), longtasksMs: probe.longtasks};
   });
-  return {value, timing: {elapsedMs, ...timing}};
+  const memoryAfter = await runtimeMemory(page);
+  return {value, timing: {elapsedMs, ...timing, memoryBefore, memoryAfter}};
+}
+
+async function runtimeMemory(page) {
+  return page.evaluate(async () => {
+    const module = await import(new URL('./pkg/cuemol_web.js', location.href));
+    return (await module.default()).memory.buffer.byteLength;
+  });
 }
 
 async function load(page, name, buffer) {
@@ -82,6 +91,7 @@ try {
           });
         }
         const loaded = await measure(page, () => load(page, 'large.pdb', input));
+        const loadWorker = await page.evaluate(() => window.cuemolLoader?.last);
         let state = await page.evaluate(() => window.cuemol.status());
         if (state.scene.objects[0]?.atoms !== atoms) throw new Error('PDB atom count changed');
         const exported = await measure(page, async () => {
@@ -94,11 +104,13 @@ try {
           return Buffer.concat(chunks);
         });
         const restored = await measure(page, () => load(page, 'restored.qsc', exported.value));
+        const reloadWorker = await page.evaluate(() => window.cuemolLoader?.last);
         state = await page.evaluate(() => window.cuemol.status());
         if (state.scene.objects[0]?.atoms !== atoms) throw new Error('Scene export changed the atom count');
         if (errors.length) throw new Error(errors.join('\n'));
         const result = {atoms, sample, inputBytes: input.length, sceneBytes: exported.value.length,
-          load: loaded.timing, save: exported.timing, reload: restored.timing};
+          load: {...loaded.timing, worker: loadWorker}, save: exported.timing,
+          reload: {...restored.timing, worker: reloadWorker}};
         report.results.push(result);
         console.log(JSON.stringify(result));
       } finally { await context.close(); }

@@ -97,6 +97,8 @@ pub mod effects;
 #[cfg(feature = "offscreen")]
 pub mod labels;
 mod memory_io;
+mod prepared_io;
+pub use prepared_io::PreparedFile;
 #[cfg(feature = "offscreen")]
 pub mod offscreen;
 mod trajectory_io;
@@ -12482,6 +12484,14 @@ impl DesktopAppState {
     }
 
     fn restore_loaded_scene_data(&mut self, scene_uid: Uid) -> Result<()> {
+        self.restore_loaded_scene_data_with_maps(scene_uid, None)
+    }
+
+    fn restore_loaded_scene_data_with_maps(
+        &mut self,
+        scene_uid: Uid,
+        mut prepared_maps: Option<std::collections::VecDeque<DensityMap>>,
+    ) -> Result<()> {
         let styles = self
             .scene_manager()
             .scene(scene_uid)
@@ -12510,11 +12520,16 @@ impl DesktopAppState {
                     .iter()
                     .find(|node| !node.is_attr() && node.tag_name() == "ropts")
             });
-            let mut map = read_density_map_bytes_with_options(
-                &loaded.raw_data,
-                &loaded.srctype,
-                reader_options,
-            )?;
+            let mut map = match prepared_maps.as_mut() {
+                Some(maps) => maps
+                    .pop_front()
+                    .ok_or_else(|| CueMolError::parse("missing prepared scene map"))?,
+                None => read_density_map_bytes_with_options(
+                    &loaded.raw_data,
+                    &loaded.srctype,
+                    reader_options,
+                )?,
+            };
             if let Some(kind) = loaded
                 .qsc_node
                 .as_ref()
@@ -12592,6 +12607,9 @@ impl DesktopAppState {
                     renderer_groups,
                 },
             );
+        }
+        if prepared_maps.is_some_and(|maps| !maps.is_empty()) {
+            return Err(CueMolError::parse("unexpected prepared scene map"));
         }
         for object in morph_objects {
             self.morphs

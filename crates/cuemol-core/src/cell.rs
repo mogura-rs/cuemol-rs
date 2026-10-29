@@ -8,7 +8,7 @@
 /// a coordinate file. The space group may be given by its Int-Tables number, its
 /// Hermann–Mauguin name, or both — name → number resolution is the symm layer's
 /// job (it owns the space-group table).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CellParams {
     pub a: f64,
     pub b: f64,

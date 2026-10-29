@@ -26,6 +26,11 @@ geometry. Crosses, axes and labels retain their logical size on HiDPI displays.
 ### Representations and rendering
 
 Open files on the command line, through the file dialog, or by drag and drop.
+Browser file parsing runs in a worker so navigation and edits remain available.
+Use **Cancel loading** or Escape to stop the current file and discard queued
+files. A failed load keeps existing edits and redo history. Changing the active
+scene while a file is being parsed prevents its late result from entering the
+new scene.
 The initial representation uses a protein ribbon, a nucleic-acid cartoon, and
 ball-and-stick geometry for other atoms. The renderer controls remain available
 for adding or changing representations, selections, coloring, and materials.

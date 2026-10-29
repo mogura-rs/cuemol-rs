@@ -9,6 +9,7 @@ name = "cuemol_core"
 path = "src/lib.rs"
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
 flate2 = "1.1"
 bzip2 = "0.6"
 lzma-rs = "0.3"

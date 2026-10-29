@@ -14,6 +14,8 @@ pub use region::{
 };
 mod volume;
 pub use volume::MapVolumeData;
+mod transfer;
+pub use transfer::DensityMapData;
 
 fn fraction_level(
     hist: &[u64; 256],

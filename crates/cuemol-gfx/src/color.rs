@@ -52,13 +52,13 @@ pub struct Rgba8 {
     pub a: u8,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum SolidColorMode {
     Rgb,
     Hsb,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SolidColor {
     code: u32,
     mode: SolidColorMode,
