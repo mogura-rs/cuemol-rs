@@ -20878,7 +20878,10 @@ impl GuiApplication {
                 cuemol_ui::shell::logo(ui, 96.);
                 ui.heading("cuemol-rs");
                 ui.label("Molecular visualization system — Rust desktop implementation.");
-                ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+                ui.label(format!(
+                    "Version {}",
+                    cuemol_command::update::current_version()
+                ));
                 if ui.button("Close").clicked() {
                     close = true;
                 }

@@ -104,11 +104,14 @@ jobs:
           CUEMOL_CONFIG_DIR: ${{ runner.temp }}/cuemol-config
           CUEMOL_TOOLS_DIR: ${{ github.workspace }}/.cache/bundled-tools
           TARGET: ${{ matrix.target }}
+          EXPECTED_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
         run: |
           extension=""
           if [ "$RUNNER_OS" = Windows ]; then extension=.exe; fi
           binary="target/$TARGET/release/cuemol$extension"
-          "$binary" --version
+          version=$("$binary" --version)
+          printf '%s\n' "$version"
+          if [ -n "$EXPECTED_VERSION" ]; then test "$version" = "cuemol $EXPECTED_VERSION"; fi
           "$binary" mcp tools > .cache/native-tools.json
           uv run --no-project python scripts/check-apbs.py --binary "$binary"
           "$binary" tools run pdb2pqr --version

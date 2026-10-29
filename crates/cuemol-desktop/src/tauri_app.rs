@@ -2612,7 +2612,7 @@ impl AppModel {
             .collect();
         ApplicationInfoDto {
             product_name: "cuemol-rs",
-            version: env!("CARGO_PKG_VERSION"),
+            version: cuemol_command::update::current_version(),
             target: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
             features,
             plugins,
