@@ -5672,26 +5672,6 @@ impl GuiApplication {
                 let rect = ui.max_rect();
                 self.viewport_rect = Some(rect);
                 self.draw_atom_labels(ui, camera, rect);
-                ui.allocate_ui(rect.size(), |ui| {
-                    ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "{} atoms / {} bonds",
-                                self.state
-                                    .active_object_summaries()
-                                    .iter()
-                                    .map(|o| o.atom_count)
-                                    .sum::<usize>(),
-                                self.state
-                                    .active_object_summaries()
-                                    .iter()
-                                    .map(|o| o.bond_count)
-                                    .sum::<usize>()
-                            ))
-                            .color(egui::Color32::from_rgba_unmultiplied(220, 226, 235, 180)),
-                        );
-                    });
-                });
                 self.draw_rect_selection(ui);
                 self.navigation_feedback(ui, camera, rect);
             });
