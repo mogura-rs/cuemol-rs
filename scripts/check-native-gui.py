@@ -21,6 +21,28 @@ class ApplicationExited(Exception):
     pass
 
 
+def desktop_work_area():
+    if sys.platform == 'darwin':
+        import AppKit
+        screen = AppKit.NSScreen.screens()[0]
+        frame, visible = screen.frame(), screen.visibleFrame()
+        return [round(visible.origin.x),
+                round(frame.origin.y + frame.size.height - visible.origin.y - visible.size.height),
+                round(visible.size.width), round(visible.size.height)]
+    if sys.platform == 'win32':
+        from ctypes import wintypes
+        user = ctypes.WinDLL('user32', use_last_error=True)
+        user.SystemParametersInfoW.argtypes = [wintypes.UINT, wintypes.UINT,
+                                              ctypes.POINTER(wintypes.RECT), wintypes.UINT]
+        user.SystemParametersInfoW.restype = wintypes.BOOL
+        area = wintypes.RECT()
+        if not user.SystemParametersInfoW(0x0030, 0, ctypes.byref(area), 0):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return [area.left, area.top, area.right - area.left, area.bottom - area.top]
+    screen = pyautogui.size()
+    return [0, 0, screen.width, screen.height]
+
+
 def window_bounds(pid):
     if sys.platform == 'darwin':
         import AppKit
@@ -98,10 +120,13 @@ def main():
         'CONECT    1    2\nCONECT    2    3\nEND\n')
     config = work / 'config'
     config.mkdir(exist_ok=True)
-    screen = pyautogui.size()
-    window_width, window_height = min(1024, screen.width - 80), min(768, screen.height - 80)
+    available_x, available_y, available_width, available_height = desktop_work_area()
+    window_width = min(1024, available_width - 80)
+    window_height = min(768, available_height - 120)
+    window_x, window_y = available_x + 40, available_y + 40
     (config / 'config.tsv').write_text(
-        f'window:width\t{window_width}\nwindow:height\t{window_height}\nwindow:x\t40\nwindow:y\t40\n')
+        f'window:width\t{window_width}\nwindow:height\t{window_height}\n'
+        f'window:x\t{window_x}\nwindow:y\t{window_y}\n')
     env = {key: value for key, value in os.environ.items() if not key.startswith('CUEMOL_')}
     env.update(CUEMOL_CONFIG_DIR=str(config), CUEMOL_CACHE_DIR=str(work / 'cache'))
 
@@ -130,6 +155,10 @@ def main():
             state = wait_for(loaded, timeout=90)
             bounds = wait_for(lambda: window_bounds(process.pid))
             x, y, width, height = bounds
+            if (x < available_x or y < available_y
+                    or x + width > available_x + available_width
+                    or y + height > available_y + available_height):
+                raise RuntimeError(f'The application window {bounds} exceeds the desktop work area')
             time.sleep(0.5)
 
             def capture(name=None):
@@ -222,7 +251,9 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             atoms = [line for line in exported if line.startswith(('ATOM  ', 'HETATM'))]
             if len(atoms) != 1 or atoms[0][12:16].strip() != 'O1':
                 raise RuntimeError('Python helper selection did not export exactly the oxygen atom')
-            report.update(ok=True, window=bounds, atoms=state['objects'][0]['atoms'],
+            report.update(ok=True, window=bounds,
+                          work_area=[available_x, available_y, available_width, available_height],
+                          window_contained=True, atoms=state['objects'][0]['atoms'],
                           rotation_before=before['rotation'], rotation_after=rotated['rotation'],
                           zoom_before=rotated['zoom'], zoom_after=zoomed['zoom'],
                           changed_pixels=changed, colored_pixels=colored,
