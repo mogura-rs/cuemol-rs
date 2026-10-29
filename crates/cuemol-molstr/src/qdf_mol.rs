@@ -22,7 +22,7 @@
 //! to an atomic number, so its case is normalised on round-trip (`FE` -> `Fe`);
 //! only the atomic number is preserved, matching C++ `ElemID`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
 use cuemol_core::{CellParams, CueMolError, Result, Vector4};
@@ -32,7 +32,7 @@ use cuemol_qsys::{
     QDF_TYPE_INT8, QDF_TYPE_UID, QDF_TYPE_UINT8,
 };
 
-use crate::molecule::{Atom, BondOrder, MolCoord, ResidueKey};
+use crate::molecule::{Atom, AtomNameSet, BondOrder, MolCoord, ResidueKey};
 
 /// Prefix marking a dynamic (user/computed) property column, e.g. the DSSP
 /// `secondary` residue prop is stored as `$secondary` (C++ `PROP_PFX`).
@@ -101,9 +101,9 @@ fn alt_loc_to_conf(alt_loc: Option<char>) -> i8 {
 }
 
 /// Identifies a residue within the flat atom list.
-#[derive(Clone, PartialEq, Eq)]
-struct ResidKey {
-    chain: String,
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct ResidKey<'a> {
+    chain: &'a str,
     res_id: i32,
     ins_code: Option<char>,
 }
@@ -112,34 +112,30 @@ struct ResidKey {
 pub fn write_qdf_mol_bytes(mol: &MolCoord) -> Vec<u8> {
     // Reconstruct the chain/residue hierarchy from the flat atoms, preserving
     // first-seen order and assigning sequential UIDs.
-    let mut chain_uid: Vec<String> = Vec::new();
+    let mut chain_uid: Vec<&str> = Vec::new();
     let mut resid_keys: Vec<ResidKey> = Vec::new();
-    let mut resid_names: Vec<String> = Vec::new();
+    let mut resid_names: Vec<&str> = Vec::new();
     let mut resid_chain: Vec<u32> = Vec::new();
     let mut atom_resid: Vec<u32> = Vec::with_capacity(mol.atom_count());
+    let mut chain_ids = HashMap::new();
+    let mut residue_ids = HashMap::new();
 
     for atom in mol.atoms() {
-        let chain_uid_idx = match chain_uid.iter().position(|c| c == &atom.chain_id) {
-            Some(i) => i as u32,
-            None => {
-                chain_uid.push(atom.chain_id.clone());
-                (chain_uid.len() - 1) as u32
-            }
-        };
+        let chain_uid_idx = *chain_ids.entry(atom.chain_id.as_str()).or_insert_with(|| {
+            chain_uid.push(&atom.chain_id);
+            (chain_uid.len() - 1) as u32
+        });
         let key = ResidKey {
-            chain: atom.chain_id.clone(),
+            chain: &atom.chain_id,
             res_id: atom.res_id,
             ins_code: atom.ins_code,
         };
-        let resid_idx = match resid_keys.iter().position(|k| k == &key) {
-            Some(i) => i as u32,
-            None => {
-                resid_keys.push(key);
-                resid_names.push(atom.res_name.clone());
-                resid_chain.push(chain_uid_idx);
-                (resid_keys.len() - 1) as u32
-            }
-        };
+        let resid_idx = *residue_ids.entry(key).or_insert_with(|| {
+            resid_keys.push(key);
+            resid_names.push(&atom.res_name);
+            resid_chain.push(chain_uid_idx);
+            (resid_keys.len() - 1) as u32
+        });
         atom_resid.push(resid_idx);
     }
 
@@ -182,7 +178,7 @@ pub fn write_qdf_mol_bytes(mol: &MolCoord) -> Vec<u8> {
         .iter()
         .map(|k| {
             mol.residue_props()
-                .get(&ResidueKey::new(&k.chain, k.res_id, k.ins_code))
+                .get(&ResidueKey::new(k.chain, k.res_id, k.ins_code))
         })
         .collect();
     let prop_names: Vec<String> = {
@@ -443,6 +439,7 @@ pub fn read_qdf_mol_bytes(input: &[u8]) -> Result<MolCoord> {
     // Atom UID -> flat index, so bonds stay correct even if ids are not the
     // sequential order this writer emits (cross-compat robustness).
     let mut atom_index: BTreeMap<u32, usize> = BTreeMap::new();
+    let mut atom_names = AtomNameSet::default();
     for _ in 0..natom {
         let id = r.read_u32()?;
         let pid = r.read_u32()?;
@@ -517,9 +514,16 @@ pub fn read_qdf_mol_bytes(input: &[u8]) -> Result<MolCoord> {
                 }
             }
         }
-        mol.append_atom1(atom, chain, res_id, res_name);
-        atom_index.insert(id, mol.atom_count() - 1);
+        if atom.chain_id.is_empty() || atom.name.is_empty() || !atom_names.insert(&atom, &atom.name)
+        {
+            continue;
+        }
+        atom.serial = i32::try_from(mol.atom_count() + 1)
+            .map_err(|_| CueMolError::parse("QDF mol: too many atoms"))?;
+        mol.push_atom(atom);
+        atom_index.entry(id).or_insert(mol.atom_count() - 1);
     }
+    drop(atom_names);
 
     // Re-apply per-residue string props (e.g. DSSP `secondary`) now that the
     // residues have atoms (set_residue_prop_str requires an existing residue).
@@ -832,6 +836,77 @@ mod tests {
             mol.mark_bond_persistent(atom1, atom2);
         }
         mol
+    }
+
+    #[test]
+    fn qdf_writer_keeps_first_seen_chain_and_residue_order_for_interleaved_atoms() {
+        let mut molecule = MolCoord::new();
+        for (index, (chain, residue, insertion)) in [
+            ("Z", 3, None),
+            ("A", 7, None),
+            ("Z", 3, None),
+            ("B", 2, None),
+            ("A", 7, Some('A')),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut value = atom(
+                &format!("C{index}"),
+                chain,
+                residue,
+                "LIG",
+                "C",
+                [index as f64 * 5., 0., 0.],
+            );
+            value.ins_code = insertion;
+            molecule.push_atom(value);
+        }
+        let bytes = write_qdf_mol_bytes(&molecule);
+        let mut reader = QdfReader::from_bytes(&bytes).unwrap();
+        reader.expect_file_type("MOL2").unwrap();
+        let count = reader.read_data_def("mol").unwrap();
+        read_mol_ext_data(&mut reader, count).unwrap();
+        assert_eq!(reader.read_data_def("chai").unwrap(), 3);
+        reader.read_record_def().unwrap();
+        for (id, name) in ["Z", "A", "B"].into_iter().enumerate() {
+            assert_eq!(reader.read_u32().unwrap(), id as u32);
+            assert_eq!(reader.read_fixed_str(1).unwrap(), name);
+        }
+        assert_eq!(reader.read_data_def("resi").unwrap(), 4);
+        reader.read_record_def().unwrap();
+        for (id, (chain, residue, insertion)) in [(0, 3, 0), (1, 7, 0), (2, 2, 0), (1, 7, b'A')]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(reader.read_u32().unwrap(), id as u32);
+            assert_eq!(reader.read_u32().unwrap(), chain);
+            assert_eq!(reader.read_fixed_str(3).unwrap(), "LIG");
+            assert_eq!(reader.read_i32().unwrap(), residue);
+            assert_eq!(reader.read_i8().unwrap(), insertion as i8);
+        }
+        let restored = read_qdf_mol_bytes(&bytes).unwrap();
+        for (original, restored) in molecule.atoms().iter().zip(restored.atoms()) {
+            assert_eq!(original.chain_id, restored.chain_id);
+            assert_eq!(original.res_id, restored.res_id);
+            assert_eq!(original.ins_code, restored.ins_code);
+            assert_eq!(original.position, restored.position);
+        }
+    }
+
+    #[test]
+    fn qdf_reader_does_not_redirect_bonds_from_rejected_duplicate_atoms() {
+        let mut molecule = MolCoord::new();
+        for (name, x) in [("C", 0.), ("C", 10.), ("O", 20.)] {
+            molecule.push_atom(atom(name, "A", 1, "LIG", name, [x, 0., 0.]));
+        }
+        molecule.add_bond(1, 2, BondOrder::Double);
+        molecule.mark_bond_persistent(1, 2);
+        let restored = read_qdf_mol_bytes(&write_qdf_mol_bytes(&molecule)).unwrap();
+        assert_eq!(restored.atom_count(), 2);
+        assert_eq!(restored.atoms()[0].serial, 1);
+        assert_eq!(restored.atoms()[1].serial, 2);
+        assert_eq!(restored.bond_count(), 0);
     }
 
     #[test]

@@ -14,9 +14,10 @@ _next_callback = 0
 
 def _rpc(operation, **arguments):
     request = {"op": operation, **arguments, "release": list(_released)}
-    _released.clear()
-    _protocol_output.write(json.dumps({"rpc": request}) + "\n")
+    message = _serialize({"rpc": request})
+    _protocol_output.write(message + "\n")
     _protocol_output.flush()
+    del _released[:len(request["release"])]
     while True:
         line = _protocol_input.readline()
         if not line:
@@ -29,6 +30,16 @@ def _rpc(operation, **arguments):
     if "error" in result:
         raise RuntimeError(result["error"])
     return _decode(result.get("value"))
+
+
+def _serialize(value):
+    previous_callback = _next_callback
+    try:
+        return json.dumps(_encode(value), allow_nan=False)
+    except BaseException:
+        for callback in range(previous_callback + 1, _next_callback + 1):
+            _callbacks.pop(callback, None)
+        raise
 
 
 def _encode(value):
@@ -71,10 +82,10 @@ class _Proxy:
             raise AttributeError(str(error)) from error
 
     def __setattr__(self, name, value):
-        _rpc("set", target=self._handle, name=name, value=_encode(value))
+        _rpc("set", target=self._handle, name=name, value=value)
 
     def __call__(self, *arguments):
-        return _rpc("call", target=self._handle, arguments=_encode(arguments))
+        return _rpc("call", target=self._handle, arguments=arguments)
 
     def __eq__(self, other):
         return isinstance(other, _Proxy) and _rpc("equal", target=self._handle, other=other._handle)

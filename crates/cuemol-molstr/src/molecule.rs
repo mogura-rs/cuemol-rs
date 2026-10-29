@@ -3,7 +3,7 @@ use crate::SolidColoring;
 use cuemol_core::{ByteArray, CueMolError, Matrix3, Matrix4, Quat, Result, Vector4};
 use cuemol_gfx::SolidColor;
 use cuemol_qsys::View;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -22,6 +22,20 @@ pub struct Atom {
     pub formal_charge: Option<i32>,
     pub int_props: BTreeMap<String, i32>,
     pub real_props: BTreeMap<String, f64>,
+}
+
+#[derive(Default)]
+pub(crate) struct AtomNameSet {
+    chains: HashMap<String, HashSet<(i32, Option<char>, Option<char>, String)>>,
+}
+
+impl AtomNameSet {
+    pub(crate) fn insert(&mut self, atom: &Atom, name: &str) -> bool {
+        self.chains
+            .entry(atom.chain_id.clone())
+            .or_default()
+            .insert((atom.res_id, atom.ins_code, atom.alt_loc, name.to_string()))
+    }
 }
 
 impl Atom {

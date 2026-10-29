@@ -12,7 +12,7 @@ def load_url(aURL):
         if path.endswith(suffix):
             path, compression = path[:-len(suffix)], mode
             break
-    reader = cm.strMgr().createHandler("mmcif" if path.endswith(".cif") else "pdb", 0)
+    reader = cm.strMgr().createHandler("mmcif" if path.endswith((".cif", ".mmcif")) else "pdb", 0)
     if compression:
         reader.compress = compression
     streams = cm.strMgr()

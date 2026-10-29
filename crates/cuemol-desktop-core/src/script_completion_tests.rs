@@ -215,6 +215,21 @@ with UndoTxn('Move atoms', cuemol.scene()):
     mol_util.shift(mol, cuemol.vec(4, 0, 0), 'name CA')
 assert mol.getAtomByID(2).pos.x == 6
 assert mol.getAtomByID(1).pos.x == 1
+cuemol.scene().undo(0)
+assert mol.getAtomByID(2).pos.x == 2
+cuemol.scene().redo(0)
+assert mol.getAtomByID(2).pos.x == 6
+try:
+    with UndoTxn('Rejected edits', cuemol.scene()):
+        mol_util.shift(mol, cuemol.vec(9, 0, 0), 'name CA')
+        mol_util.chg_chain(mol, '*', 'Z')
+        mol_util.del_atoms(mol, 'name N')
+        raise ValueError('rollback probe')
+except ValueError:
+    pass
+assert mol.getAtomSize() == 3
+assert mol.getAtomByID(1).chainName == 'A'
+assert mol.getAtomByID(2).pos.x == 6
 assert cuemol.scene().uid in scene_util.get_scene_ids()
 assert cuemol.scene(aScene=mol.scene_uid).uid == cuemol.scene().uid
 assert cuemol.obj(aName='helpers', aScene=mol.scene_uid).uid == mol.uid
@@ -339,6 +354,69 @@ assert cuemol.obj('downloaded').getAtomSize() == 1
 }
 
 #[test]
+fn python_failed_download_releases_readers_and_recovers_for_mmcif_urls() {
+    let mut app = DesktopAppState::new();
+    app.new_scene("downloads", true);
+    let directory = tempfile::tempdir().unwrap();
+    let source = format!(
+        r#"
+from pathlib import Path
+from unittest.mock import patch
+import cuemol
+from cuemol import net_fetch
+class BrokenResponse:
+    def __enter__(self):
+        self.first = True
+        return self
+    def __exit__(self, *args):
+        return False
+    def read(self, size):
+        if self.first:
+            self.first = False
+            return b'ATOM      1  CA  GLY A   1       1.000   2.000   3.000  1.00 10.00           C  \nEND\n'
+        raise OSError('download interrupted')
+with patch('urllib.request.urlopen', return_value=BrokenResponse()):
+    try:
+        net_fetch.load_url('https://example.invalid/probe.pdb')
+    except OSError as error:
+        assert str(error) == 'download interrupted'
+    else:
+        raise AssertionError('download should fail')
+path = Path({path})
+path.write_text('''data_probe
+loop_
+_atom_site.group_PDB
+_atom_site.id
+_atom_site.type_symbol
+_atom_site.label_atom_id
+_atom_site.label_comp_id
+_atom_site.label_asym_id
+_atom_site.label_seq_id
+_atom_site.Cartn_x
+_atom_site.Cartn_y
+_atom_site.Cartn_z
+ATOM 7 C CA GLY A 1 1.23456789 2 3
+#
+''')
+mol = net_fetch.load_url(path.as_uri())
+assert mol.getAtomSize() == 1
+assert abs(mol.getAtomByID(7).pos.x - 1.23456789) < 1e-12
+del mol
+"#,
+        path = serde_json::to_string(&directory.path().join("with spaces.mmcif")).unwrap()
+    );
+    run_python(&mut app, &source).unwrap();
+    assert_eq!(
+        app.script_services
+            .resolve()
+            .borrow()
+            .python_objects
+            .retained_counts(),
+        (0, 0)
+    );
+}
+
+#[test]
 fn python_bindings_edit_live_objects_and_keep_detached_reader_targets() {
     let mut app = DesktopAppState::new();
     app.new_scene("python", true);
@@ -428,6 +506,83 @@ fn python_binding_releases_unreferenced_detached_payloads() {
             .retained_counts(),
         (0, 0)
     );
+}
+
+#[test]
+fn python_failed_argument_serialization_preserves_pending_releases() {
+    let mut app = DesktopAppState::new();
+    app.new_scene("serialization", true);
+    run_python(
+        &mut app,
+        r#"
+import cuemol
+call = cuemol.scene().addListener
+values = [cuemol.createObj('MolCoord') for _ in range(30)]
+del values
+try:
+    call(b'unsupported')
+except TypeError:
+    pass
+else:
+    raise AssertionError('bytes should be rejected before sending')
+del call
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        app.script_services
+            .resolve()
+            .borrow()
+            .python_objects
+            .retained_counts(),
+        (0, 0)
+    );
+    run_python(&mut app, "assert cuemol.scene().name == 'serialization'").unwrap();
+}
+
+#[test]
+fn python_failed_argument_serialization_releases_unsubmitted_callbacks() {
+    let mut app = DesktopAppState::new();
+    app.new_scene("serialization", true);
+    run_python(
+        &mut app,
+        r#"
+import cuemol
+try:
+    cuemol.scene().addListener(lambda: None, b'unsupported')
+except TypeError:
+    pass
+else:
+    raise AssertionError('bytes should be rejected before sending')
+assert not cuemol._Proxy.__call__.__globals__['_callbacks']
+assert cuemol.scene().name == 'serialization'
+"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn python_nonfinite_arguments_fail_before_sending_and_recover() {
+    let mut app = DesktopAppState::new();
+    app.new_scene("serialization", true);
+    run_python(
+        &mut app,
+        r#"
+import cuemol
+vector = cuemol.vec(1, 2, 3)
+for value in (float('nan'), float('inf'), -float('inf')):
+    try:
+        vector.x = value
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('nonfinite values should be rejected before sending')
+    assert vector.x == 1
+del vector
+"#,
+    )
+    .unwrap();
+    run_python(&mut app, "assert cuemol.scene().name == 'serialization'").unwrap();
 }
 
 #[test]

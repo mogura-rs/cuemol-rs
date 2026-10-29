@@ -105,6 +105,47 @@ precise speedup ratio. At 64 KiB, median process peak RSS fell from 31.76 MiB to
 The affected core, Python and command suites passed 324 tests; the additional
 Python-to-Umbreon output check passed afterward.
 
+Malformed Python RPC arguments now preserve pending object releases and discard
+callbacks that were never submitted. NaN and infinity are rejected before a
+request is written. Callback results use the same validation, and returned
+object proxies stay alive until their reply is sent. Regressions reproduce the
+old detached-object and callback leaks, then verify recovery in the same
+interpreter. The core and Python suites pass with these cases, interrupted URL
+downloads, `.mmcif` URL detection and transaction undo/redo/rollback coverage.
+
+## Molecular input and output costs
+
+PDB duplicate-name checks and QDF chain/residue lookup previously scanned the
+preceding atoms or residues. Temporary indexes now preserve insertion order and
+the reference duplicate-name rules. The indexes are dropped before subsequent
+processing. QDF input also avoids assigning bonds from rejected duplicate atoms
+to an unrelated preceding atom.
+
+`scripts/benchmark-molecular-io.py` compared the public v0.1.1 native binary with
+the updated release build on the same Linux x86_64 host. Each input contained
+separate synthetic ligand residues, and each size used three fresh processes.
+At 20,000 atoms, the median internal times were:
+
+| Operation | v0.1.1 | Updated readers/writer |
+| --- | ---: | ---: |
+| PDB input | 1,568 ms | 152 ms |
+| QDF output | 189 ms | 6 ms |
+| QDF input | 2,066 ms | 140 ms |
+
+All 1,000-, 5,000- and 20,000-atom samples retained the expected atom count,
+coordinates and identical QDF SHA-256 values across the two builds. Median peak
+process RSS at 20,000 atoms was 59.54 MiB before and 58.84 MiB after. This measures
+the CLI reader/writer workload, not rendering or total browser memory. The full
+molecular-reader suite passed with the reference fixtures present.
+
+`web/benchmarks/load.mjs` measures file input, embedded scene save/reload and
+main-thread timer delays in a fresh browser context per sample. In Chrome, the
+20,000-atom median input time fell from 768 ms on the then-public WASM build to
+159 ms on the optimized local build; the maximum timer gap fell from 692 ms to
+77 ms. Embedded scene reload fell from 416 ms to 136 ms. Scene saving was
+unchanged at approximately 53 ms. Parsing still occurs on the main thread in
+these measurements, so they do not establish nonblocking parsing.
+
 ## Center marks and display scaling
 
 Live center marks now invert the displayed RGB channels after molecular geometry

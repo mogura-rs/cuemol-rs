@@ -41,7 +41,7 @@ def _execute_request(request):
                 if "source" in request:
                     exec(compile(request["source"], "<cuemol>", "exec"), _scope, _scope)
                 elif "callback" in request:
-                    value = _encode(_callbacks[request["callback"]](*_decode(request["arguments"])))
+                    value = _callbacks[request["callback"]](*_decode(request["arguments"]))
                 else:
                     for callback in request["release_callbacks"]:
                         _callbacks.pop(callback, None)
@@ -52,7 +52,12 @@ def _execute_request(request):
         output.seek(0)
         errors.seek(0)
         result = {"status": status, "stdout": output.read(), "stderr": errors.read(), "value": value}
-    _protocol_output.write(json.dumps(result) + "\n")
+    try:
+        message = _serialize(result)
+    except BaseException:
+        result.update(status=1, value=None, stderr=result["stderr"] + traceback.format_exc())
+        message = _serialize(result)
+    _protocol_output.write(message + "\n")
     _protocol_output.flush()
 
 

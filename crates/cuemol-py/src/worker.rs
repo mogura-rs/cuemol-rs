@@ -160,3 +160,71 @@ impl Drop for PythonWorker {
         let _ = self.child.wait();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_callback_results_report_errors_without_desynchronizing_the_worker() {
+        let mut worker = PythonWorker::start().unwrap();
+        let mut handler = |_: Value| Ok(Value::Null);
+        let output = worker.execute(
+            "import cuemol\nbinding = cuemol._Proxy.__call__.__globals__\ncallbacks = binding['_callbacks']\nbinding['_next_callback'] = 2\ncallbacks[1] = lambda: float('nan')\ncallbacks[2] = lambda: [lambda: None, b'unsupported']",
+            &mut handler,
+        ).unwrap();
+        assert!(output.success(), "{}", output.stderr());
+        for id in [1, 2] {
+            let (_, output) = worker
+                .connection
+                .invoke_callback(id, json!([]), &mut handler)
+                .unwrap();
+            assert!(!output.success());
+            let output = worker.execute("print('recovered')", &mut handler).unwrap();
+            assert!(output.success(), "{}", output.stderr());
+            assert_eq!(output.stdout(), "recovered\n");
+        }
+    }
+
+    #[test]
+    fn returned_callback_proxies_stay_alive_until_the_reply_is_sent() {
+        let mut worker = PythonWorker::start().unwrap();
+        let mut released = Vec::new();
+        let mut handler = |request: Value| {
+            released.extend(
+                request["release"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(Value::as_u64),
+            );
+            Ok(Value::Null)
+        };
+        let output = worker.execute(
+            "import cuemol\ncuemol._Proxy.__call__.__globals__['_callbacks'][1] = lambda: cuemol._Proxy(42)",
+            &mut handler,
+        ).unwrap();
+        assert!(output.success(), "{}", output.stderr());
+        let (value, output) = worker
+            .connection
+            .invoke_callback(1, json!([]), &mut handler)
+            .unwrap();
+        assert!(output.success(), "{}", output.stderr());
+        assert_eq!(value, json!({"$cuemol_ref": 42}));
+        assert!(!released.contains(&42));
+        let output = worker
+            .execute("pass", &mut |request: Value| {
+                released.extend(
+                    request["release"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter_map(Value::as_u64),
+                );
+                Ok(Value::Null)
+            })
+            .unwrap();
+        assert!(output.success(), "{}", output.stderr());
+        assert_eq!(released, vec![42]);
+    }
+}

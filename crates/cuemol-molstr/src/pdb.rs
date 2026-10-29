@@ -1,4 +1,4 @@
-use crate::molecule::{Atom, MolCoord};
+use crate::molecule::{Atom, AtomNameSet, MolCoord};
 use crate::selection::Selector;
 use cuemol_core::{CueMolError, Result, Vector4};
 use cuemol_qsys::{InOutHandler, ObjReader, ObjWriter};
@@ -403,6 +403,7 @@ pub fn read_qdfpdb_str(input: &str) -> Result<MolCoord> {
 
 pub fn read_pdb_str_with_options(input: &str, options: PdbReadOptions) -> Result<MolCoord> {
     let mut mol = MolCoord::new();
+    let mut atom_names = AtomNameSet::default();
     let mut current_model = None;
     let mut default_model = None;
     let mut ssbonds = Vec::new();
@@ -424,7 +425,7 @@ pub fn read_pdb_str_with_options(input: &str, options: PdbReadOptions) -> Result
                 current_model,
                 default_model,
             )? {
-                if make_pdb_atom_name_unique(&mol, &mut atom) {
+                if make_pdb_atom_name_unique(&mut atom_names, &mut atom) {
                     last_atom_index = Some(mol.atom_count());
                     mol.push_atom(atom);
                 } else {
@@ -459,6 +460,7 @@ pub fn read_pdb_str_with_options(input: &str, options: PdbReadOptions) -> Result
             }
         }
     }
+    drop(atom_names);
     if mol.atom_count() == 0 {
         return Err(CueMolError::parse("PDB contains no ATOM/HETATM records"));
     }
@@ -1232,17 +1234,8 @@ fn normalize_chain_id(value: &str) -> String {
     }
 }
 
-fn make_pdb_atom_name_unique(mol: &MolCoord, atom: &mut Atom) -> bool {
-    let conflicts = |name: &str| {
-        mol.atoms().iter().any(|existing| {
-            existing.chain_id == atom.chain_id
-                && existing.res_id == atom.res_id
-                && existing.ins_code == atom.ins_code
-                && existing.alt_loc == atom.alt_loc
-                && existing.name == name
-        })
-    };
-    if !conflicts(&atom.name) {
+fn make_pdb_atom_name_unique(names: &mut AtomNameSet, atom: &mut Atom) -> bool {
+    if names.insert(atom, &atom.name) {
         return true;
     }
 
@@ -1259,7 +1252,7 @@ fn make_pdb_atom_name_unique(mol: &MolCoord, atom: &mut Atom) -> bool {
             }
             format!("{}{original}{:02}", index / 100, index % 100)
         };
-        if !conflicts(&candidate) {
+        if names.insert(atom, &candidate) {
             atom.name = candidate;
             return true;
         }
@@ -1811,6 +1804,30 @@ HETATM    4  ABC LIG A   2      30.000   0.000   0.000  1.00 10.00           C
                 .collect::<Vec<_>>(),
             vec!["O", "O00", "ABC"]
         );
+    }
+
+    #[test]
+    fn duplicate_pdb_names_keep_residue_chain_insertion_and_altloc_scopes() {
+        let pdb = "\
+HETATM    1  O   HOH A   1       0.000   0.000   0.000  1.00 10.00           O
+HETATM    2  O   HOH B   1      10.000   0.000   0.000  1.00 10.00           O
+HETATM    3  O   HOH A   2      20.000   0.000   0.000  1.00 10.00           O
+HETATM    4  O   HOH A   1A     30.000   0.000   0.000  1.00 10.00           O
+HETATM    5  O  AHOH A   1      40.000   0.000   0.000  1.00 10.00           O
+HETATM    6  O00 HOH A   1      50.000   0.000   0.000  1.00 10.00           O
+HETATM    7  O   HOH A   1      60.000   0.000   0.000  1.00 10.00           O
+HETATM    8  O  AHOH A   1      70.000   0.000   0.000  1.00 10.00           O
+";
+        let mol = read_pdb_str(pdb).unwrap();
+        assert_eq!(
+            mol.atoms()
+                .iter()
+                .map(|atom| atom.name.as_str())
+                .collect::<Vec<_>>(),
+            ["O", "O", "O", "O", "O", "O00", "O01", "O00"]
+        );
+        assert_eq!(mol.atoms()[3].ins_code, Some('A'));
+        assert_eq!(mol.atoms()[4].alt_loc, Some('A'));
     }
 
     #[test]
