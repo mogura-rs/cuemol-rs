@@ -223,8 +223,12 @@ py.runString('print(scene.uid)');
 ```
 
 Python execution requires a native process and is unavailable in the browser.
-The bridge exposes application bindings; it does not bundle every helper module
-from the reference Python package or third-party scientific Python libraries.
+The embedded helpers include `fileio`, `mol_util`, `renderer`, `scene_util`,
+`cmd`, `net_fetch`, `logging`, `UndoTxn` and the wrapper compatibility modules.
+They operate on the live scene, including object copies, selections, transforms,
+compressed input and scene exporters such as Umbreon. Third-party scientific
+Python libraries are not bundled. The reference `povrender` helper is outside
+this compatibility work.
 
 `export-scene` and `render-qsc` use the same readers, default representations and
 scene geometry as the GUI. They support STL, OBJ, POV-Ray, PNG, MQO, LuxRender,

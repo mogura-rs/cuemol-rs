@@ -34,6 +34,37 @@ fn script_command_arguments_preserve_text_and_count_semantics() {
 }
 
 #[test]
+fn stream_manager_creates_functional_scene_exporters() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = directory.path().join("scene.png");
+    let mut app = DesktopAppState::new();
+    app.open_bytes(
+        "sphere.pdb",
+        b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n",
+    )
+    .unwrap();
+    let (log, _) = app
+        .run_script_js(&format!(
+            r#"
+        var streams = cuemol.getService('StreamManager');
+        var exporter = streams.createHandler('umbreon', 2);
+        exporter.useClipZ = true; exporter.useGI = false;
+        exporter.width = 32; exporter.height = 32;
+        exporter.supersample = 1; exporter.aoSamples = 1;
+        scene.saveViewToCam(scene.activeViewID, '__current');
+        exporter.setPath({}); exporter.attach(scene); exporter.write(); exporter.detach();
+        print(exporter.width + ':' + exporter.useClipZ);
+    "#,
+            serde_json::to_string(&output.to_string_lossy()).unwrap()
+        ))
+        .unwrap();
+    assert_eq!(log, "32:true\n");
+    let image = std::fs::read(output).unwrap();
+    assert!(image.len() > 100);
+    assert!(image.starts_with(b"\x89PNG\r\n\x1a\n"));
+}
+
+#[test]
 fn script_style_capture_keeps_live_and_detached_renderer_properties() {
     let mut app = DesktopAppState::new();
     app.new_scene("styles", true);
@@ -133,6 +164,178 @@ fn run_python(app: &mut DesktopAppState, source: &str) -> Result<(String, Option
         "getService('PythonBridge').runString({});",
         serde_json::to_string(source).unwrap()
     ))
+}
+
+#[test]
+fn python_helpers_load_transform_edit_and_save_live_molecules() {
+    let mut app = DesktopAppState::new();
+    app.new_scene("python helpers", true);
+    let work = tempfile::tempdir().unwrap();
+    let input = work.path().join("input with spaces.pdb");
+    let output = work.path().join("selected.pdb");
+    let rendered = work.path().join("python umbreon.png");
+    std::fs::write(
+        &input,
+        concat!(
+        "ATOM      1  N   GLY A   1       1.000   2.000   3.000  1.00 10.00           N  \n",
+        "ATOM      2  CA  GLY A   1       2.000   2.000   3.000  1.00 10.00           C  \n",
+        "ATOM      3  C   GLY A   1       3.000   2.000   3.000  1.00 10.00           C  \nEND\n"
+    ),
+    )
+    .unwrap();
+    let source = format!(
+        r#"
+import cuemol
+from cuemol import cmd, fileio, mol_util, renderer, scene_util
+from cuemol.internal_loader import import_internal
+from cuemol.wrapper_base import WrapperBase
+from cuemol.undo_txn import UndoTxn
+mol = fileio.loadObject({input}, 'helpers', cuemol.scene(), 'pdb')
+assert isinstance(mol, WrapperBase)
+assert isinstance(mol, cuemol.getWrpClass('MolCoord'))
+assert cuemol.iswrapper(aObj=mol)
+assert cuemol.isimpl(aObj=mol, aIfName='MolCoord')
+assert cuemol.getService(name='SceneManager').activeSceneID == cuemol.scene().uid
+assert cuemol.createObj(name='Vector').x == 0
+wrapped = {{'objects': [mol]}}
+assert cuemol.createWrapper(wrapped) is wrapped
+assert wrapped['objects'][0] == mol
+assert cuemol.conv_dict_arg(d={{'object': mol}})['object'] == mol
+assert import_internal().getClassName(mol._wrapped) == 'MolCoord'
+alias = cuemol.convPolymObj(mol)
+assert mol == alias
+assert hash(mol) == hash(alias)
+assert len({{mol, alias}}) == 1
+rend = renderer.create_renderer(mol, 'simple', 'helper renderer')
+cmd.set(rend, 'width', 2.5)
+assert cmd.get(rend, 'width') == 2.5
+assert [atom.name for atom in mol_util.AtomIter(mol)] == ['N', 'CA', 'C']
+assert len(list(mol_util.ResidIter(mol))) == 1
+with UndoTxn('Move atoms', cuemol.scene()):
+    mol_util.shift(mol, cuemol.vec(4, 0, 0), 'name CA')
+assert mol.getAtomByID(2).pos.x == 6
+assert mol.getAtomByID(1).pos.x == 1
+assert cuemol.scene().uid in scene_util.get_scene_ids()
+assert cuemol.scene(aScene=mol.scene_uid).uid == cuemol.scene().uid
+assert cuemol.obj(aName='helpers', aScene=mol.scene_uid).uid == mol.uid
+assert cuemol.rend(aRend='helper renderer', aObj=mol).uid == rend.uid
+copied = cuemol.copy(aObj=mol, aNewObjName='copied')
+assert copied.uid != mol.uid
+assert copied.getAtomSize() == 3
+assert copied.getRendererByName('helper renderer').width == 2.5
+mol_util.shift(copied, cuemol.vec(aX=0, aY=2, aZ=0))
+assert copied.getAtomByID(2).pos.y == 4
+assert mol.getAtomByID(2).pos.y == 2
+assert mol_util.calc_rmsd(mol, '*', copied, '*') == 2
+mol_util.chg_chain(copied, '*', 'B')
+assert copied.getAtomByID(2).chainName == 'B'
+mol_util.del_atoms(copied, 'name N')
+assert copied.getAtomSize() == 2
+mol_util.showArrow(mol, 'arrow', cuemol.vec(0, 0, 0), cuemol.vec(1, 2, 3))
+assert mol.getRendererByName('arrow').type_name == 'atomintr'
+assert cmd.delete(copied)
+assert not cmd.delete('missing object')
+try:
+    cuemol.sel('name (')
+except ValueError:
+    pass
+else:
+    raise AssertionError('invalid selection did not raise ValueError')
+fileio.saveObject(mol, {output}, 'pdb', {{'sel': cuemol.sel('name CA')}})
+cuemol.view().setViewCenter(cuemol.vec(3, 2, 3))
+cuemol.view().zoom = 10
+cuemol.scene().saveViewToCam(cuemol.scene().activeViewID, '__current')
+exporter = cuemol.strMgr().createHandler('umbreon', 2)
+exporter.width = 32
+exporter.height = 32
+exporter.supersample = 1
+exporter.aoSamples = 1
+exporter.useGI = False
+exporter.setPath({rendered})
+exporter.attach(cuemol.scene())
+exporter.write()
+exporter.detach()
+print('helpers completed')
+"#,
+        input = serde_json::to_string(&input.to_string_lossy()).unwrap(),
+        output = serde_json::to_string(&output.to_string_lossy()).unwrap(),
+        rendered = serde_json::to_string(&rendered.to_string_lossy()).unwrap()
+    );
+    let log = run_python(&mut app, &source).unwrap().0;
+    assert!(log.contains("helpers completed"), "{log}");
+    let saved = cuemol_molstr::read_pdb_file(&output).unwrap();
+    assert_eq!(saved.atom_count(), 1);
+    assert_eq!(saved.atoms()[0].position.x, 6.0);
+    let image = std::fs::read(rendered).unwrap();
+    assert!(image.len() > 100);
+    assert!(image.starts_with(b"\x89PNG\r\n\x1a\n"));
+    run_python(
+        &mut app,
+        "assert mol.getAtomByID(2).pos.x == 6\nassert cmd.get(rend, 'width') == 2.5",
+    )
+    .unwrap();
+}
+
+#[test]
+fn byte_arrays_keep_types_aliases_and_bounds_without_per_byte_properties() {
+    let mut app = DesktopAppState::new();
+    app.new_scene("bytes", true);
+    let (log, _) = app
+        .run_script_js(
+            r#"
+        var bytes = cuemol.ByteArray(); bytes.init(bytes.UINT8, 65536);
+        var alias = bytes;
+        for (var i = 0; i < bytes.length; i++) bytes.setValue(i, i % 256);
+        var sum = 0;
+        for (var i = 0; i < bytes.length; i++) sum += alias.getValue(i);
+        print(bytes.length + ':' + sum);
+        print(Object.keys(bytes).filter(key => key.startsWith('_byte_')).length);
+        var errors = 0;
+        for (var index of [-1, bytes.length]) {
+            try { bytes.setValue(index, 5); } catch (e) { errors++; }
+        }
+        try { bytes.init(0, 4); } catch (e) { errors++; }
+        print(errors + ':' + bytes.length + ':' + bytes.getValue(65535));
+        bytes.init(bytes.INT32, 2); alias.setAt(1, -123456);
+        print(bytes.length + ':' + bytes.elemCount + ':' + bytes.getAt(1));
+        bytes.init(bytes.FLOAT64, 1); bytes.setAtF(0, 1.25);
+        callGC(); print(alias.getAtF(0));
+    "#,
+        )
+        .unwrap();
+    assert_eq!(log, "65536:8355840\n0\n3:65536:255\n8:2:-123456\n1.25\n");
+}
+
+#[test]
+fn python_helpers_transfer_bulk_bytes_and_load_compressed_urls() {
+    let mut app = DesktopAppState::new();
+    app.new_scene("bulk input", true);
+    let directory = tempfile::tempdir().unwrap();
+    let source = format!(
+        r#"
+import gzip
+from pathlib import Path
+import cuemol
+from cuemol import net_fetch
+data = cuemol._internal.createBAryFromBytes(bytes(range(256)) * 256)
+assert data.length == 65536
+assert data.elemCount == 65536
+assert [data.getValue(i) for i in (0, 255, 256, 65535)] == [0, 255, 0, 255]
+data.setValue(65535, 7)
+assert data.getValue(65535) == 7
+path = Path({path})
+pdb = b'ATOM      1  CA  GLY A   1       1.000   2.000   3.000  1.00 10.00           C  \nEND\n'
+path.write_bytes(gzip.compress(pdb))
+mol = net_fetch.load_url(path.as_uri())
+assert mol.getAtomSize() == 1
+assert mol.getAtomByID(1).pos.x == 1
+mol.name = 'downloaded'
+cuemol.scene().addObject(mol)
+assert cuemol.obj('downloaded').getAtomSize() == 1
+"#,
+        path = serde_json::to_string(&directory.path().join("with spaces.pdb.gz")).unwrap()
+    );
+    run_python(&mut app, &source).unwrap();
 }
 
 #[test]

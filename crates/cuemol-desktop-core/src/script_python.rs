@@ -159,6 +159,30 @@ fn dispatch(request: Value, context: &mut Context) -> JsResult<Value> {
     if operation == "release" {
         return Ok(Value::Null);
     }
+    if operation == "bytes" {
+        let encoded = request["value"]
+            .as_str()
+            .ok_or_else(|| error("missing byte data"))?;
+        let decoded = cuemol_core::Base64InStream::new(encoded).into_bytes();
+        let root = context
+            .global_object()
+            .get(JsString::from("cuemol"), context)?;
+        let create = root
+            .as_object()
+            .ok_or_else(|| error("missing CueMol binding"))?
+            .get(JsString::from("createObj"), context)?;
+        let value = create
+            .as_callable()
+            .ok_or_else(|| error("missing object factory"))?
+            .call(&root, &[JsString::from("ByteArray").into()], context)?;
+        let mut bytes = ByteArray::new();
+        bytes
+            .init_code(ByteArray::UINT8, decoded.len())
+            .map_err(|value| error(value.to_string()))?;
+        bytes.as_mut_bytes().copy_from_slice(&decoded);
+        script_bytes::replace(&value, bytes)?;
+        return encode(value, JsValue::undefined(), context);
+    }
     let target = if operation == "root" {
         Handle {
             value: context
@@ -210,6 +234,12 @@ fn dispatch(request: Value, context: &mut Context) -> JsResult<Value> {
             &target.value,
             &handle(&request["other"])?.value,
         ))),
+        "hash" => {
+            use std::hash::{Hash, Hasher};
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            object.hash(&mut hash);
+            Ok(Value::from(hash.finish()))
+        }
         "string" => Ok(Value::String(
             target.value.to_string(context)?.to_std_string_escaped(),
         )),

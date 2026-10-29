@@ -1,4 +1,6 @@
 import json
+import importlib.abc
+import importlib.util
 import os
 import sys
 import types
@@ -77,6 +79,12 @@ class _Proxy:
     def __eq__(self, other):
         return isinstance(other, _Proxy) and _rpc("equal", target=self._handle, other=other._handle)
 
+    def __hash__(self):
+        return _rpc("hash", target=self._handle)
+
+    def __contains__(self, name):
+        return sys.modules["cuemol"].hasProp(self, name)
+
     def __str__(self):
         return _rpc("string", target=self._handle)
 
@@ -91,7 +99,44 @@ class _CueMol(types.ModuleType):
     def __getattr__(self, name):
         if name.startswith("__"):
             raise AttributeError(name)
-        return _rpc("root", name=name)
+        if name in ("UndoTxn", "txn"):
+            return getattr(importlib.import_module("cuemol.undo_txn"), name)
+        if "cuemol." + name in _helper_sources:
+            return importlib.import_module("cuemol." + name)
+        try:
+            return _rpc("root", name=name)
+        except RuntimeError as error:
+            raise AttributeError(str(error)) from error
+
+    def getWrpClass(self, clsnm):
+        if not self.hasClass(clsnm):
+            raise ImportError(f"unknown CueMol class: {clsnm}")
+        if clsnm not in _wrapper_classes:
+            _wrapper_classes[clsnm] = _WrapperType(clsnm, (_Proxy,), {"_interface_name": clsnm})
+        return _wrapper_classes[clsnm]
+
+    def createWrapper(self, obj):
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                obj[key] = self.createWrapper(value)
+        elif isinstance(obj, list):
+            for index, value in enumerate(obj):
+                obj[index] = self.createWrapper(value)
+        return obj
+
+    def conv_dict_arg(self, d):
+        if not isinstance(d, dict):
+            raise TypeError("expected a dictionary")
+        return {key: item._wrapped if self.iswrapper(item) else item for key, item in d.items()}
+
+    def createObj(self, name, *arguments):
+        return _rpc("root", name="createObj")(name, *arguments)
+
+    def getService(self, name):
+        return _rpc("root", name="getService")(name)
+
+    def println(self, astr):
+        print(astr)
 
     def svc(self, name):
         return self.getService(name)
@@ -102,29 +147,29 @@ class _CueMol(types.ModuleType):
     def strMgr(self):
         return self.getService("StreamManager")
 
-    def iswrapper(self, value):
-        return isinstance(value, _Proxy)
+    def iswrapper(self, aObj):
+        return isinstance(aObj, _Proxy)
 
-    def isimpl(self, value, interface):
-        return self.iswrapper(value) and self.implIface2(value, interface)
+    def isimpl(self, aObj, aIfName):
+        return self.iswrapper(aObj) and self.implIface2(aObj, aIfName)
 
-    def isscene(self, value):
-        return self.isimpl(value, "Scene")
+    def isscene(self, aObj):
+        return self.isimpl(aObj, "Scene")
 
-    def isview(self, value):
-        return self.isimpl(value, "View")
+    def isview(self, aObj):
+        return self.isimpl(aObj, "View")
 
-    def isobj(self, value):
-        return self.isimpl(value, "Object")
+    def isobj(self, aObj):
+        return self.isimpl(aObj, "Object")
 
-    def isrend(self, value):
-        return self.isimpl(value, "Renderer")
+    def isrend(self, aObj):
+        return self.isimpl(aObj, "Renderer")
 
-    def issel(self, value):
-        return self.isimpl(value, "MolSelection")
+    def issel(self, aObj):
+        return self.isimpl(aObj, "MolSelection")
 
-    def iscol(self, value):
-        return self.isimpl(value, "AbstractColor")
+    def iscol(self, aObj):
+        return self.isimpl(aObj, "AbstractColor")
 
     def createScene(self):
         manager = self.sceMgr()
@@ -132,7 +177,8 @@ class _CueMol(types.ModuleType):
         manager.setActiveSceneID(value.uid)
         return value
 
-    def scene(self, value=None):
+    def scene(self, aScene=None):
+        value = aScene
         if self.isscene(value):
             return value
         manager = self.sceMgr()
@@ -140,9 +186,16 @@ class _CueMol(types.ModuleType):
             if manager.getSceneUIDList() == "":
                 return self.createScene()
             value = manager.activeSceneID
+            if not value:
+                raise RuntimeError("Active scene ID is not defined")
+        if isinstance(value, float) and value.is_integer():
+            value = int(value)
+        if not isinstance(value, int):
+            raise RuntimeError(f"scene {value} not found")
         return manager.getScene(value)
 
-    def view(self, scene=None, value=None):
+    def view(self, aScene=None, aView=None):
+        scene, value = aScene, aView
         if self.isview(value):
             return value
         scene = self.scene(scene)
@@ -152,9 +205,12 @@ class _CueMol(types.ModuleType):
                 scene.setActiveViewID(value.uid)
                 return value
             value = scene.activeViewID
-        return self.sceMgr().getView(value) if value else None
+        if isinstance(value, float) and value.is_integer():
+            value = int(value)
+        return self.sceMgr().getView(value) if isinstance(value, int) and value else None
 
-    def obj(self, value, scene=None):
+    def obj(self, aName, aScene=None):
+        value, scene = aName, aScene
         if self.isobj(value):
             return value
         scene = self.scene(scene)
@@ -163,7 +219,8 @@ class _CueMol(types.ModuleType):
             raise RuntimeError(f"object {value} not found")
         return result
 
-    def rend(self, value, obj=None):
+    def rend(self, aRend, aObj=None):
+        value, obj = aRend, aObj
         if self.isrend(value):
             return value
         owner = self.scene() if obj is None else self.obj(obj)
@@ -175,32 +232,122 @@ class _CueMol(types.ModuleType):
             raise RuntimeError(f"renderer {value} not found")
         return result
 
-    def vec(self, x, y, z, w=None):
+    def vec(self, aX, aY, aZ, *args):
+        if len(args) > 1:
+            raise RuntimeError("too many args for vec()")
+        x, y, z = aX, aY, aZ
+        w = args[0] if args else None
         value = self.createObj("Vector")
         value.x, value.y, value.z = x, y, z
         if w is not None:
             value.w = w
         return value
 
-    def sel(self, expression, scene=None):
-        return expression if self.issel(expression) else self.makeSel(expression, self.scene(scene).uid)
+    def sel(self, aSelStr, aScene=None):
+        if self.issel(aSelStr):
+            return aSelStr
+        selection = self.createObj("SelCommand")
+        if not selection.compile(aSelStr, self.scene(aScene).uid):
+            raise ValueError(selection.error_msg)
+        return selection
 
-    def col(self, expression, scene=None):
+    def col(self, aColStr, aScene=None):
+        expression, scene = aColStr, aScene
         return expression if self.iscol(expression) else self.svc("StyleManager").compileColor(expression, self.scene(scene).uid)
 
-    def timeval(self, milliseconds):
+    def timeval(self, aMilli):
+        milliseconds = aMilli
         value = self.createObj("TimeValue")
         value.millisec = milliseconds
         return value
 
-    def copy(self, value, name):
-        value = self.obj(value)
-        scene = value.getScene()
-        manager = self.strMgr()
-        result = manager.fromXML(manager.toXML(value), scene.uid)
-        result.name = name
-        scene.addObject(result)
+    def copy(self, aObj, aNewObjName):
+        result = self._copyObject(self.obj(aObj).uid)
+        result.name = aNewObjName
         return result
 
 
-sys.modules["cuemol"] = _CueMol("cuemol")
+class _WrapperType(type):
+    def __instancecheck__(self, value):
+        return sys.modules["cuemol"].isimpl(value, self._interface_name)
+
+    def __call__(self, value):
+        if not isinstance(value, self):
+            raise TypeError(f"expected {self._interface_name}")
+        return value
+
+
+_wrapper_classes = {}
+
+
+class _Internal:
+    Wrapper = _Proxy
+
+    def __getattr__(self, name):
+        return getattr(sys.modules["cuemol"], name)
+
+    def getProp(self, obj, name):
+        for component in name.split("."):
+            obj = getattr(obj, component)
+        return obj
+
+    def setProp(self, obj, name, value):
+        components = name.split(".")
+        for component in components[:-1]:
+            obj = getattr(obj, component)
+        setattr(obj, components[-1], value)
+
+    def resetProp(self, obj, name):
+        components = name.split(".")
+        for component in components[:-1]:
+            obj = getattr(obj, component)
+        return sys.modules["cuemol"].resetProp(obj, components[-1])
+
+    def invokeMethod(self, obj, name, *arguments):
+        return getattr(obj, name)(*arguments)
+
+    def createBAryFromBytes(self, value):
+        import base64
+        return _rpc("bytes", value=base64.b64encode(bytes(value)).decode("ascii"))
+
+    def print(self, value):
+        print(value, end="")
+
+
+class _HelperLoader(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in _helper_sources:
+            return importlib.util.spec_from_loader(fullname, self, origin=f"<{fullname}>")
+        if fullname == "cuemol.wrappers":
+            return importlib.util.spec_from_loader(fullname, self, is_package=True)
+        if fullname.startswith("cuemol.wrappers."):
+            name = fullname.rsplit(".", 1)[1]
+            if sys.modules["cuemol"].hasClass(name):
+                return importlib.util.spec_from_loader(fullname, self)
+        return None
+
+    def create_module(self, spec):
+        return None
+
+    def exec_module(self, module):
+        source = _helper_sources.get(module.__name__)
+        if source is not None:
+            module.__file__ = f"<{module.__name__}>"
+            exec(compile(source, module.__file__, "exec"), module.__dict__)
+        elif module.__name__ != "cuemol.wrappers":
+            name = module.__name__.rsplit(".", 1)[1]
+            setattr(module, name, sys.modules["cuemol"].getWrpClass(name))
+
+
+_cuemol = _CueMol("cuemol")
+_cuemol.__path__ = []
+_cuemol.__package__ = "cuemol"
+_cuemol.__spec__ = importlib.util.spec_from_loader("cuemol", loader=None, is_package=True)
+_cuemol.__all__ = ["getWrpClass", "createWrapper", "conv_dict_arg", "createObj", "getService",
+                   "println", "iswrapper", "isimpl", "isscene", "isview", "isobj", "isrend",
+                   "issel", "iscol", "scene", "view", "createScene", "svc", "obj", "rend",
+                   "sceMgr", "strMgr", "vec", "sel", "col", "timeval", "copy", "UndoTxn", "txn"]
+_cuemol._Proxy = _Proxy
+_cuemol._internal = _Internal()
+sys.modules["cuemol"] = _cuemol
+sys.meta_path.insert(0, _HelperLoader())

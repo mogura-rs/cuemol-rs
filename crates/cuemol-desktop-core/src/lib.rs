@@ -2,6 +2,8 @@ mod animation;
 mod command_support;
 mod property_access;
 #[cfg(feature = "scripting")]
+mod script_bytes;
+#[cfg(feature = "scripting")]
 mod script_io;
 #[cfg(feature = "scripting")]
 mod script_python;
@@ -18291,35 +18293,11 @@ impl DesktopAppState {
                 .build()
                 .into()
         }
-        fn byte_array_from_value(value: &JsValue, ctx: &mut Context) -> JsResult<ByteArray> {
-            let object = value
-                .as_object()
-                .ok_or_else(|| script_error("ByteArray receiver is not an object"))?;
-            let elem_type = object.get(js_string!("_elem_type"), ctx)?.to_i32(ctx)?;
-            let elem_count = object.get(js_string!("_elem_count"), ctx)?.to_i32(ctx)?;
-            let elem_count = usize::try_from(elem_count)
-                .map_err(|_| script_error("ByteArray element count is out of range"))?;
-            let mut value = ByteArray::new();
-            value
-                .init_code(elem_type, elem_count)
-                .map_err(|error| script_error(error.to_string()))?;
-            for (index, byte) in value.as_mut_bytes().iter_mut().enumerate() {
-                *byte = object
-                    .get(JsString::from(format!("_byte_{index}")), ctx)?
-                    .to_i32(ctx)? as u8;
-            }
-            Ok(value)
+        fn byte_array_from_value(value: &JsValue, _ctx: &mut Context) -> JsResult<ByteArray> {
+            script_bytes::read(value, |bytes| Ok(bytes.clone()))
         }
-        fn set_byte_array(this: &JsValue, value: &ByteArray, ctx: &mut Context) -> JsResult<()> {
-            let object = this
-                .as_object()
-                .ok_or_else(|| script_error("ByteArray receiver is not an object"))?;
-            object.set(js_string!("_elem_type"), value.elem_type_code(), true, ctx)?;
-            object.set(js_string!("_elem_count"), value.elem_count(), true, ctx)?;
-            for (index, byte) in value.as_bytes().iter().copied().enumerate() {
-                object.set(JsString::from(format!("_byte_{index}")), byte, true, ctx)?;
-            }
-            Ok(())
+        fn set_byte_array(this: &JsValue, value: &ByteArray, _ctx: &mut Context) -> JsResult<()> {
+            script_bytes::replace(this, value.clone())
         }
         fn byte_array_index(args: &[JsValue], ctx: &mut Context) -> JsResult<usize> {
             let index = args
@@ -18332,25 +18310,29 @@ impl DesktopAppState {
         fn js_byte_array_length(
             this: &JsValue,
             _args: &[JsValue],
-            ctx: &mut Context,
+            _ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            Ok(JsValue::new(byte_array_from_value(this, ctx)?.length()))
+            Ok(JsValue::new(script_bytes::read(this, |value| {
+                Ok(value.length())
+            })?))
         }
         fn js_byte_array_elem_type(
             this: &JsValue,
             _args: &[JsValue],
-            ctx: &mut Context,
+            _ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            Ok(JsValue::new(
-                byte_array_from_value(this, ctx)?.elem_type_code(),
-            ))
+            Ok(JsValue::new(script_bytes::read(this, |value| {
+                Ok(value.elem_type_code())
+            })?))
         }
         fn js_byte_array_elem_count(
             this: &JsValue,
             _args: &[JsValue],
-            ctx: &mut Context,
+            _ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            Ok(JsValue::new(byte_array_from_value(this, ctx)?.elem_count()))
+            Ok(JsValue::new(script_bytes::read(this, |value| {
+                Ok(value.elem_count())
+            })?))
         }
         fn js_byte_array_init(
             this: &JsValue,
@@ -18373,7 +18355,7 @@ impl DesktopAppState {
             value
                 .init_code(elem_type, elem_count)
                 .map_err(|error| script_error(error.to_string()))?;
-            set_byte_array(this, &value, ctx)?;
+            script_bytes::replace(this, value)?;
             Ok(JsValue::undefined())
         }
         fn js_byte_array_get_value(
@@ -18381,9 +18363,8 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            let value = byte_array_from_value(this, ctx)?
-                .get_value(byte_array_index(args, ctx)?)
-                .map_err(|error| script_error(error.to_string()))?;
+            let index = byte_array_index(args, ctx)?;
+            let value = script_bytes::read(this, |value| value.get_value(index))?;
             Ok(JsValue::new(value))
         }
         fn js_byte_array_set_value(
@@ -18397,11 +18378,7 @@ impl DesktopAppState {
                 .cloned()
                 .unwrap_or(JsValue::undefined())
                 .to_i32(ctx)? as u8;
-            let mut value = byte_array_from_value(this, ctx)?;
-            value
-                .set_value(index, new_value)
-                .map_err(|error| script_error(error.to_string()))?;
-            set_byte_array(this, &value, ctx)?;
+            script_bytes::write(this, |value| value.set_value(index, new_value))?;
             Ok(JsValue::undefined())
         }
         fn js_byte_array_get_at(
@@ -18409,9 +18386,8 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            let value = byte_array_from_value(this, ctx)?
-                .get_at(byte_array_index(args, ctx)?)
-                .map_err(|error| script_error(error.to_string()))?;
+            let index = byte_array_index(args, ctx)?;
+            let value = script_bytes::read(this, |value| value.get_at(index))?;
             Ok(JsValue::new(value))
         }
         fn js_byte_array_set_at(
@@ -18425,11 +18401,7 @@ impl DesktopAppState {
                 .cloned()
                 .unwrap_or(JsValue::undefined())
                 .to_i32(ctx)?;
-            let mut value = byte_array_from_value(this, ctx)?;
-            value
-                .set_at(index, new_value)
-                .map_err(|error| script_error(error.to_string()))?;
-            set_byte_array(this, &value, ctx)?;
+            script_bytes::write(this, |value| value.set_at(index, new_value))?;
             Ok(JsValue::undefined())
         }
         fn js_byte_array_get_at_f(
@@ -18437,9 +18409,8 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            let value = byte_array_from_value(this, ctx)?
-                .get_at_f(byte_array_index(args, ctx)?)
-                .map_err(|error| script_error(error.to_string()))?;
+            let index = byte_array_index(args, ctx)?;
+            let value = script_bytes::read(this, |value| value.get_at_f(index))?;
             Ok(JsValue::new(value))
         }
         fn js_byte_array_set_at_f(
@@ -18453,19 +18424,15 @@ impl DesktopAppState {
                 .cloned()
                 .unwrap_or(JsValue::undefined())
                 .to_number(ctx)?;
-            let mut value = byte_array_from_value(this, ctx)?;
-            value
-                .set_at_f(index, new_value)
-                .map_err(|error| script_error(error.to_string()))?;
-            set_byte_array(this, &value, ctx)?;
+            script_bytes::write(this, |value| value.set_at_f(index, new_value))?;
             Ok(JsValue::undefined())
         }
         fn js_byte_array_to_string(
             this: &JsValue,
             _args: &[JsValue],
-            ctx: &mut Context,
+            _ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            Ok(JsString::from(byte_array_from_value(this, ctx)?.to_string()).into())
+            Ok(JsString::from(script_bytes::read(this, |value| Ok(value.to_string()))?).into())
         }
         fn make_byte_array(ctx: &mut Context) -> JsValue {
             let length_getter = FunctionObjectBuilder::new(
@@ -18492,14 +18459,12 @@ impl DesktopAppState {
             .length(0)
             .constructor(false)
             .build();
-            ObjectInitializer::new(ctx)
+            ObjectInitializer::with_native_data(script_bytes::Storage::default(), ctx)
                 .property(
                     js_string!("type"),
                     js_string!("ByteArray"),
                     Attribute::all(),
                 )
-                .property(js_string!("_elem_type"), ByteArray::UINT8, Attribute::all())
-                .property(js_string!("_elem_count"), 0, Attribute::all())
                 .property(js_string!("BOOL"), ByteArray::BOOL, Attribute::ENUMERABLE)
                 .property(js_string!("UINT8"), ByteArray::UINT8, Attribute::ENUMERABLE)
                 .property(
@@ -34925,6 +34890,28 @@ impl DesktopAppState {
                 .map(|object| make_object_proxy(object, ctx))
                 .unwrap_or_else(JsValue::null))
         }
+        fn js_copy_object(
+            _this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let uid = args
+                .first()
+                .cloned()
+                .unwrap_or(JsValue::undefined())
+                .to_number(ctx)? as u64;
+            let object = script_object(uid)?;
+            let copied = with_flushed_script_app(ctx, None, |app| {
+                let clipboard = app.copy_workspace_object(Uid::new(uid))?;
+                app.paste_workspace_object(Uid::new(object.scene_uid), &clipboard)
+            })?
+            .map_err(|error| script_error(error.to_string()))?;
+            js_get_object_by_uid(
+                &JsValue::undefined(),
+                &[JsValue::new(copied.get() as f64)],
+                ctx,
+            )
+        }
         fn js_get_renderer_names(
             _t: &JsValue,
             args: &[JsValue],
@@ -43742,6 +43729,13 @@ impl DesktopAppState {
                 .next()
                 .unwrap_or("InOutHandler")
                 .to_string();
+            if category_value == cuemol_molstr::HandlerCategory::RendToFile {
+                return js_create_obj(
+                    &JsValue::undefined(),
+                    &[JsString::from(class_name.as_str()).into()],
+                    ctx,
+                );
+            }
             Ok(make_script_stream_handler(&class_name, &handler, true, ctx))
         }
         fn js_symm_sg_names(
@@ -44097,12 +44091,16 @@ impl DesktopAppState {
                 .cloned()
                 .unwrap_or(JsValue::undefined())
                 .to_i32(ctx)?;
-            script_cmds::push(ScriptCmd::ChangeBond {
-                object_uid: molecule.uid,
-                aid1,
-                aid2,
-                make,
-            });
+            let mut copy = molecule.molecule;
+            let manager = MolAnlManager::new();
+            let changed = if make {
+                manager.make_bond(&mut copy, aid1, aid2)
+            } else {
+                manager.remove_bond(&mut copy, aid1, aid2)
+            };
+            if changed {
+                with_script_molecule_mut(molecule.uid, |value| *value = copy)?;
+            }
             Ok(JsValue::undefined())
         }
         fn js_molanl_make_bond(
@@ -44132,16 +44130,12 @@ impl DesktopAppState {
                 &args.get(2).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
-            let mut target_copy = target.molecule.clone();
+            let mut target_copy = target.molecule;
             let changed = MolAnlManager::new()
                 .copy_atoms(&mut target_copy, &source.molecule, &selector)
                 .map_err(|error| script_error(error.to_string()))?;
             if changed {
-                script_cmds::push(ScriptCmd::CopyAtoms {
-                    target_uid: target.uid,
-                    source_uid: source.uid,
-                    selection: selector.to_string(),
-                });
+                with_script_molecule_mut(target.uid, |value| *value = target_copy)?;
             }
             Ok(JsValue::new(changed))
         }
@@ -44156,13 +44150,10 @@ impl DesktopAppState {
                 &args.get(1).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
-            let mut copy = molecule.molecule.clone();
+            let mut copy = molecule.molecule;
             let changed = MolAnlManager::new().delete_atoms(&mut copy, &selector);
             if changed {
-                script_cmds::push(ScriptCmd::DeleteAtoms {
-                    object_uid: molecule.uid,
-                    selection: selector.to_string(),
-                });
+                with_script_molecule_mut(molecule.uid, |value| *value = copy)?;
             }
             Ok(JsValue::new(changed))
         }
@@ -44178,14 +44169,10 @@ impl DesktopAppState {
                 ctx,
             )?;
             let name = argn(args, 2, ctx);
-            let mut copy = molecule.molecule.clone();
+            let mut copy = molecule.molecule;
             let changed = MolAnlManager::new().change_chain_name(&mut copy, &selector, &name);
             if changed {
-                script_cmds::push(ScriptCmd::ChangeChainName {
-                    object_uid: molecule.uid,
-                    selection: selector.to_string(),
-                    name,
-                });
+                with_script_molecule_mut(molecule.uid, |value| *value = copy)?;
             }
             Ok(JsValue::new(changed))
         }
@@ -44207,7 +44194,7 @@ impl DesktopAppState {
                 .cloned()
                 .unwrap_or(JsValue::undefined())
                 .to_i32(ctx)?;
-            let mut copy = molecule.molecule.clone();
+            let mut copy = molecule.molecule;
             let manager = MolAnlManager::new();
             let changed = if renumber {
                 manager.renum_res_index(&mut copy, &selector, shift_mode, value)
@@ -44215,13 +44202,7 @@ impl DesktopAppState {
                 manager.shift_res_index(&mut copy, &selector, shift_mode, value)
             };
             if changed {
-                script_cmds::push(ScriptCmd::ChangeResidueIndex {
-                    object_uid: molecule.uid,
-                    selection: selector.to_string(),
-                    shift_mode,
-                    value,
-                    renumber,
-                });
+                with_script_molecule_mut(molecule.uid, |value| *value = copy)?;
             }
             Ok(JsValue::new(changed))
         }
@@ -47155,6 +47136,11 @@ impl DesktopAppState {
                 1,
             )
             .function(
+                NativeFunction::from_fn_ptr(js_copy_object),
+                js_string!("_copyObject"),
+                1,
+            )
+            .function(
                 NativeFunction::from_fn_ptr(js_get_view),
                 js_string!("getView"),
                 1,
@@ -48714,82 +48700,6 @@ impl DesktopAppState {
                         object.mol_mut().set_cell_params(cell);
                     }
                 }
-                ScriptCmd::CopyAtoms {
-                    target_uid,
-                    source_uid,
-                    selection,
-                } => {
-                    let source = self
-                        .scene_manager()
-                        .object(Uid::new(source_uid))
-                        .map(|object| object.mol().clone());
-                    if let (Some(source), Ok(selector)) =
-                        (source, cuemol_molstr::parse_selector(&selection))
-                    {
-                        if let Some(target) =
-                            self.scene_manager_mut().object_mut(Uid::new(target_uid))
-                        {
-                            let _ = MolAnlManager::new().copy_atoms(
-                                target.mol_mut(),
-                                &source,
-                                &selector,
-                            );
-                        }
-                    }
-                }
-                ScriptCmd::DeleteAtoms {
-                    object_uid,
-                    selection,
-                } => {
-                    let _ = self.delete_atoms_in_object(Uid::new(object_uid), &selection);
-                }
-                ScriptCmd::ChangeChainName {
-                    object_uid,
-                    selection,
-                    name,
-                } => {
-                    let _ = self.change_chain_in_object(Uid::new(object_uid), &selection, &name);
-                }
-                ScriptCmd::ChangeResidueIndex {
-                    object_uid,
-                    selection,
-                    shift_mode,
-                    value,
-                    renumber,
-                } => {
-                    if let (Some(object), Ok(selector)) = (
-                        self.scene_manager_mut().object_mut(Uid::new(object_uid)),
-                        cuemol_molstr::parse_selector(&selection),
-                    ) {
-                        if renumber {
-                            MolAnlManager::new().renum_res_index(
-                                object.mol_mut(),
-                                &selector,
-                                shift_mode,
-                                value,
-                            );
-                        } else {
-                            MolAnlManager::new().shift_res_index(
-                                object.mol_mut(),
-                                &selector,
-                                shift_mode,
-                                value,
-                            );
-                        }
-                    }
-                }
-                ScriptCmd::ChangeBond {
-                    object_uid,
-                    aid1,
-                    aid2,
-                    make,
-                } => {
-                    if make {
-                        let _ = self.make_bond_in_object(Uid::new(object_uid), aid1, aid2);
-                    } else {
-                        let _ = self.remove_bond_in_object(Uid::new(object_uid), aid1, aid2);
-                    }
-                }
                 ScriptCmd::CalcSecondaryStructure {
                     object_uid,
                     ignore_breaks,
@@ -49779,33 +49689,6 @@ enum ScriptCmd {
         beta: f64,
         gamma: f64,
         nsg: i32,
-    },
-    CopyAtoms {
-        target_uid: u64,
-        source_uid: u64,
-        selection: String,
-    },
-    DeleteAtoms {
-        object_uid: u64,
-        selection: String,
-    },
-    ChangeChainName {
-        object_uid: u64,
-        selection: String,
-        name: String,
-    },
-    ChangeResidueIndex {
-        object_uid: u64,
-        selection: String,
-        shift_mode: bool,
-        value: i32,
-        renumber: bool,
-    },
-    ChangeBond {
-        object_uid: u64,
-        aid1: i32,
-        aid2: i32,
-        make: bool,
     },
     CalcSecondaryStructure {
         object_uid: u64,

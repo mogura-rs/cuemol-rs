@@ -89,8 +89,22 @@ pub(crate) struct PythonWorker {
 
 impl PythonWorker {
     pub(crate) fn start() -> Result<Self, String> {
+        let helpers = json!({
+            "cuemol.cuemol": include_str!("helpers/cuemol.py"),
+            "cuemol.cmd": include_str!("helpers/cmd.py"),
+            "cuemol.fileio": include_str!("helpers/fileio.py"),
+            "cuemol.internal_loader": include_str!("helpers/internal_loader.py"),
+            "cuemol.logging": include_str!("helpers/logging.py"),
+            "cuemol.mol_util": include_str!("helpers/mol_util.py"),
+            "cuemol.net_fetch": include_str!("helpers/net_fetch.py"),
+            "cuemol.renderer": include_str!("helpers/renderer.py"),
+            "cuemol.scene_util": include_str!("helpers/scene_util.py"),
+            "cuemol.undo_txn": include_str!("helpers/undo_txn.py"),
+            "cuemol.wrapper_base": include_str!("helpers/wrapper_base.py"),
+        });
         let source = format!(
-            "{}\n{}",
+            "import json\n_helper_sources = json.loads({})\n{}\n{}",
+            super::python_string_literal(&helpers.to_string()),
             include_str!("binding.py"),
             include_str!("worker.py")
         );

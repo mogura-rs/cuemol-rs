@@ -38,13 +38,14 @@ epaint_default_fonts = { version = "0.33.3", optional = true }
 # Real (pure-Rust) JavaScript engine for Tools → Execute script — optional, behind
 # the `scripting` feature, so the default headless build doesn't pull it.
 boa_engine = { version = "0.20", optional = true }
+boa_gc = { version = "0.20", optional = true }
 serde_json = { version = "1", optional = true }
 
 [features]
 default = []
 # Embed the boa JS engine so Execute-script actually runs JavaScript (with a `cuemol`
 # binding) instead of only previewing the file. Front ends enable this.
-scripting = ["dep:boa_engine", "dep:cuemol-molclient", "dep:cuemol-py", "dep:serde_json"]
+scripting = ["dep:boa_engine", "dep:boa_gc", "dep:cuemol-molclient", "dep:cuemol-py", "dep:serde_json"]
 # Compile the wgpu offscreen mesh renderer (`offscreen` module) and the
 # `DesktopAppState::export_active_scene_png` path. Front ends that show a 3D view
 # enable this; a pure scene-state build does not.

@@ -50,14 +50,60 @@ spaces after its version/provenance metadata was made stale and its bundled
 tools were removed from their expected location. Self-update replaced the
 executable with the published hash, corrected both metadata files and restored
 the tools under `Contents/Resources`. Startup loaded 1CRN through the bundle's
-GUI process. A further direct mouse check was blocked by the locked desktop;
-the earlier actual macOS Tauri interaction checks are recorded below.
+GUI process. After the desktop was unlocked, a further isolated launch passed
+twenty OS mouse-drag steps: the saved rotation changed while zoom and center
+were preserved. The earlier macOS Tauri interaction checks are recorded below.
 
 Generated release evidence is retained in the ignored validation cache,
 including archive/install results, browser and native-window results, macOS
-bundle-update results and tool-calculation logs. The five-platform Actions
-checks do not establish interactive GUI behavior on Windows, Linux ARM64 or
-Intel macOS. The macOS bundles remain unsigned.
+bundle-update results and tool-calculation logs. The macOS bundles remain unsigned.
+
+### Published native GUI matrix
+
+A separate [GUI workflow](https://github.com/mogura-rs/cuemol-rs/actions/runs/40890514343)
+downloaded the published v0.1.1 application on all five native targets. Each
+job verified its archive checksum, opened an isolated three-atom scene, captured
+the OS window, sent drag and wheel input through the OS, and checked both saved
+camera state and visible pixels. All five passed. Changed viewport pixels ranged
+from 3,195 to 5,496, and every target changed rotation and zoom.
+
+Initial Linux runs exposed missing X11 and graphics-driver runtime packages on
+the minimal runners. The workflow now installs those packages before launch;
+the Debian/Ubuntu runtime requirements are also documented in the README. This
+matrix verifies the tested window/input paths, not every dialog or hardware GPU.
+
+## Python helpers and byte-array storage
+
+The native bridge now embeds the reference helper interfaces for file loading,
+renderers, scene lookup, commands, molecular editing, URL input, logging,
+transactions and wrapper conversion. Tests execute live object loading, selected
+PDB output, object copies, atom/residue iteration, chain edits, transforms, RMSD,
+compressed URL input and keyword-compatible calls. Python also writes a PNG
+through the shared Umbreon exporter. `StreamManager.createHandler(..., 2)` now
+constructs the functional scene exporter instead of an incomplete generic proxy.
+The reference `povrender` module is outside this work.
+
+JavaScript byte arrays previously represented every byte as a separate object
+property and copied the complete array for each indexed access. Native typed
+storage now retains aliases and bounds/type checks without those copies.
+Python transfers byte blocks through one bulk RPC instead of individual calls.
+
+`scripts/benchmark-byte-arrays.py` compared the public v0.1.1 binary with the
+optimized build on the same Linux host. Each sample allocated an array and
+performed 256 write/read pairs; all checksums were 32,640. Three independent
+processes were measured per size. The median internal times were:
+
+| Array size | v0.1.1 | Updated storage |
+| --- | ---: | ---: |
+| 1 KiB | 262 ms | 1 ms |
+| 8 KiB | 2,229 ms | 1 ms |
+| 64 KiB | 19,345 ms | 1 ms |
+
+The timer has millisecond resolution, so the updated values do not establish a
+precise speedup ratio. At 64 KiB, median process peak RSS fell from 31.76 MiB to
+21.44 MiB. These measurements cover byte-array access, not complete GUI frames.
+The affected core, Python and command suites passed 324 tests; the additional
+Python-to-Umbreon output check passed afterward.
 
 ### Platform failures repaired before publication
 
@@ -243,8 +289,8 @@ readers still collect the input before parsing; native execution uses a worker,
 while the browser parses in `waitLoadAsync`. Indexed browser trajectories instead
 read individual frames with `File.slice`.
 
-Python execution requires native `uv`; the live binding does not provide every
-reference Python helper module or arbitrary third-party Python packages.
+Python execution requires native `uv`; supported helpers are listed above.
+The reference `povrender` module and third-party Python packages are not bundled.
 Hardware quad-buffer stereo is unavailable. Fonts and center-mark blending can
 differ, and the Rust ray tracer does not promise the reference integrator's
 exact pixels. Real AI providers and every platform credential store remain
@@ -1776,3 +1822,6 @@ during this work are collected here; the read-only reference itself was not edit
 | Historical validation entries said publishing was still waiting for permission. | Those statements now identify their earlier checkpoint; current public validation is recorded separately. |
 | The reference-render test bypassed the documented fixture discovery with a machine-specific path. | It uses `CUEMOL2_REF_DIR` or the sibling reference checkout, writes to a temporary directory and fails export errors other than a missing GPU adapter. |
 | The HTTP pool description did not distinguish an idle worker from one already reserved by queued work. | The worker-allocation check and comment now account for queued connections. |
+| The public GUI entry still reported a locked Mac desktop and untested Windows, ARM Linux and Intel Mac interaction. | Later OS input and window-capture checks passed on all five published native targets. |
+| The Python usage entry only described the root binding. | It now lists the embedded helper modules and their live-scene coverage. |
+| Linux startup instructions omitted an X11 runtime needed by the published GUI. | The Debian/Ubuntu dependency list now includes `libxkbcommon-x11-0`; the GUI matrix also provisions graphics drivers. |
