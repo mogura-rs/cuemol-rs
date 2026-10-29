@@ -61,9 +61,9 @@ class Distributions(unittest.TestCase):
                         member.size = len(value)
                         archive.addfile(member, io.BytesIO(value))
             if 'apple' in target:
-                with zipfile.ZipFile(directory / f'CueMol-{target}.zip', 'w') as archive:
-                    archive.writestr('CueMol.app/Contents/MacOS/cuemol', b'binary')
-                    archive.writestr('CueMol.app/Contents/Resources/build-info.json', entries['build-info.json'])
+                with zipfile.ZipFile(directory / f'cuemol-rs-{target}.zip', 'w') as archive:
+                    archive.writestr('cuemol-rs.app/Contents/MacOS/cuemol-rs', b'binary')
+                    archive.writestr('cuemol-rs.app/Contents/Resources/build-info.json', entries['build-info.json'])
         return directory
 
     def test_artifact_hashes_and_source_are_enforced(self):
@@ -92,10 +92,10 @@ class Distributions(unittest.TestCase):
 
     def test_mismatched_application_blocks_release(self):
         directory = self.matrix()
-        path = directory / 'CueMol-aarch64-apple-darwin.zip'
+        path = directory / 'cuemol-rs-aarch64-apple-darwin.zip'
         with zipfile.ZipFile(path, 'w') as archive:
-            archive.writestr('CueMol.app/Contents/MacOS/cuemol', b'binary')
-            archive.writestr('CueMol.app/Contents/Resources/build-info.json',
+            archive.writestr('cuemol-rs.app/Contents/MacOS/cuemol-rs', b'binary')
+            archive.writestr('cuemol-rs.app/Contents/Resources/build-info.json',
                             json.dumps({'commit': '2' * 40, 'target': 'aarch64-apple-darwin'}))
         with self.assertRaises(ValueError):
             release.prepare(directory, self.web, COMMIT)

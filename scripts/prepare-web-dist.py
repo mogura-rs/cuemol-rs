@@ -11,7 +11,7 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parent.parent
 REQUIRED = (
-    'index.html', 'kernels.js', 'oidn.js', 'input.js', 'pkg/cuemol_web.js',
+    'pkg/logo.png', 'index.html', 'kernels.js', 'oidn.js', 'input.js', 'pkg/cuemol_web.js',
     'pkg/cuemol_web_bg.wasm', 'pkg/kernels/usalign.js', 'pkg/kernels/usalign.wasm',
     'pkg/kernels/lcms.js', 'pkg/kernels/lcms.wasm',
     'pkg/kernels/surface.js', 'pkg/kernels/surface.wasm',

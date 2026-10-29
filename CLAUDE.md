@@ -33,7 +33,7 @@ cargo build -p cuemol-cli --features gui,bundled-web
 
 # Desktop GUI — two feature-selected front ends over the shared core:
 cargo run -p cuemol-desktop --bin cuemol-desktop --features egui-gui
-cargo run -p cuemol-desktop --bin cuemol-desktop-tauri --features tauri-gui
+cargo run -p cuemol-desktop --bin cuemol-rs --features tauri-gui
 ```
 
 To run compat tests against a reference tree in a non-default location, set

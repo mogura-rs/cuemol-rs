@@ -1,11 +1,12 @@
 <p align="center">
-  <img src="cuemol-rs.png" alt="CueMol3 icon" width="128">
+  <img src="cuemol-rs.png" alt="cuemol-rs icon" width="128">
 </p>
 
-# CueMol3
+# cuemol-rs
 
 Molecular graphics for the desktop, browser and command line, built in Rust.
-CueMol3 ports CueMol2's scene and scripting interfaces to a shared wgpu viewport,
+cuemol-rs ports CueMol2's scene and scripting interfaces and CueMol3's Tritium UI
+to a shared wgpu viewport,
 with molecular dynamics playback and image rendering.
 
 [Installation](#installation) · [Quick start](#quick-start) ·
@@ -20,9 +21,9 @@ with molecular dynamics playback and image rendering.
 | Maps and surfaces | Crystallographic and EM density, electrostatic potentials, isosurfaces, volume rendering and molecular surfaces |
 | MD trajectories | Indexed DCD, XTC, TRR, AMBER NetCDF and MDCRD playback with shared trajectory sources |
 | Images and scenes | Built-in GI and NPR rendering, stereo views, animation export, embedded QSC scenes and mesh export |
-| Automation | JavaScript, a shared command API, MCP and an optional AI Agent |
+| Automation | JavaScript, persistent native Python bindings, a shared command API, MCP and an optional AI Agent |
 
-The native and browser interfaces share Tritium's layout, light and dark themes,
+The native, Tauri and browser interfaces share Tritium's layout, light and dark themes,
 and common application and command logic. Release packages bundle APBS,
 PDB2PQR, FFmpeg, POV-Ray and the native OIDN runtime.
 
@@ -145,9 +146,8 @@ tools, tests, release packaging and Pages deployment.
 | [Validation](docs/validation.md) | Executed checks, benchmarks, reference comparisons and known differences |
 | [Architecture](CLAUDE.md) | Crate boundaries and implementation conventions |
 
-Compatibility and optimization work remain incomplete; see the
-[completion audit](docs/validation.md#completion-audit) for reproduced failures
-and measured remaining costs. Command coverage does not imply pixel-identical
+The [completion audit](docs/validation.md#completion-audit) records the functional
+repairs, measured costs and remaining verification boundaries. Command coverage does not imply pixel-identical
 rendering or equivalence for every parameter combination. Browser filesystem
 and process access differ from
 native execution, and hardware quad-buffer stereo is unavailable. Read the

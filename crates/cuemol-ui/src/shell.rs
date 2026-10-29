@@ -172,6 +172,7 @@ pub fn activity_bar(ctx: &Context, active: &mut Option<Activity>) -> bool {
         .frame(egui::Frame::NONE.fill(ctx.style().visuals.extreme_bg_color))
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing.y = 0.;
+            logo(ui, 44.);
             for view in Activity::ALL {
                 if icon_button(
                     ui,
@@ -427,4 +428,28 @@ fn paint_icon(ui: &Ui, icon: Icon, rect: Rect, color: Color32) {
             }
         }
     }
+}
+
+pub fn logo(ui: &mut Ui, size: f32) {
+    let key = egui::Id::new("cuemol-rs-logo");
+    let cached = ui
+        .ctx()
+        .data(|data| data.get_temp::<egui::TextureHandle>(key));
+    let texture = cached.unwrap_or_else(|| {
+        let image = image::load_from_memory(include_bytes!("../../../cuemol-rs.png"))
+            .expect("application logo")
+            .resize(256, 256, image::imageops::FilterType::Lanczos3)
+            .into_rgba8();
+        let color = egui::ColorImage::from_rgba_unmultiplied(
+            [image.width() as usize, image.height() as usize],
+            image.as_raw(),
+        );
+        let texture = ui
+            .ctx()
+            .load_texture("cuemol-rs-logo", color, egui::TextureOptions::LINEAR);
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(key, texture.clone()));
+        texture
+    });
+    ui.image((texture.id(), egui::vec2(size, size)));
 }

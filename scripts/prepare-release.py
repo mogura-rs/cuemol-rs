@@ -37,11 +37,11 @@ def prepare(directory, web, revision):
             raise ValueError(f'{name} was built from another source or target')
         expected.append(name)
         if 'apple' in target:
-            name = f'CueMol-{target}.zip'
+            name = f'cuemol-rs-{target}.zip'
             with zipfile.ZipFile(directory / name) as archive:
-                if 'CueMol.app/Contents/MacOS/cuemol' not in archive.namelist():
+                if 'cuemol-rs.app/Contents/MacOS/cuemol-rs' not in archive.namelist():
                     raise ValueError(f'{name} lacks the application executable')
-                app_info = json.loads(archive.read('CueMol.app/Contents/Resources/build-info.json'))
+                app_info = json.loads(archive.read('cuemol-rs.app/Contents/Resources/build-info.json'))
                 if app_info != info:
                     raise ValueError(f'{name} does not match its command-line archive')
             expected.append(name)

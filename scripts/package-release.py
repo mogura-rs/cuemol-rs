@@ -34,7 +34,7 @@ shutil.copy2(root / 'crates/cuemol-molanl/vendor/usalign/LICENSE', licenses / 'U
 shutil.copy2(root / 'crates/cuemol-gfx/vendor/lcms2/LICENSE', licenses / 'LittleCMS.txt')
 for name in ('winit.txt', 'smaa.txt', 'molstar.txt', 'xegtao.txt'):
     shutil.copy2(root / 'licenses' / name, licenses / name)
-for name in ('CueMol-LICENSE', 'Boost-LICENSE', 'BALL-SOURCE.json', 'meshms/SOURCE.json'):
+for name in ('cuemol-rs-LICENSE', 'Boost-LICENSE', 'BALL-SOURCE.json', 'meshms/SOURCE.json'):
     shutil.copy2(root / 'crates/cuemol-surface/vendor' / name, licenses / ('MeshMS-SOURCE.json' if name.startswith('meshms/') else name))
 shutil.copy2(root / 'crates/cuemol-surface/vendor/edtsurf/LICENSE', licenses / 'EDTSurf.txt')
 shutil.copy2(root / 'crates/cuemol-surface/vendor/edtsurf/SOURCE.json', licenses / 'EDTSurf-SOURCE.json')
@@ -54,8 +54,8 @@ else:
             archive.add(path, path.name)
     temporary.replace(output)
 if platform.system() == 'Darwin':
-    app = package / 'CueMol.app'
+    app = package / 'cuemol-rs.app'
     subprocess.run(['sh', str(root / 'scripts/package-macos-app.sh'), str(binary), str(app), str(package / 'cuemol-tools')], check=True)
     shutil.copy2(package / 'build-info.json', app / 'Contents/Resources/build-info.json')
     subprocess.run(['plutil', '-lint', str(app / 'Contents/Info.plist')], check=True)
-    subprocess.run(['ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', str(app), str(dist / f'CueMol-{args.target}.zip')], check=True)
+    subprocess.run(['ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', str(app), str(dist / f'cuemol-rs-{args.target}.zip')], check=True)

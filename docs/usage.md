@@ -193,7 +193,7 @@ below. `mcp tools` is the authoritative schema for the installed build.
 
 ```sh
 cuemol exec get_scene_state '{}'
-cuemol run commands.js
+cuemol run commands.js first-argument second-argument
 cuemol -c 'print(21 * 2);'
 cuemol render example.pdb image.png --width 1200 --height 900
 cuemol render example.qsc illustration.png --style npr
@@ -207,7 +207,25 @@ cuemol tools run ffmpeg -version
 `exec` starts a new headless scene; use a persistent MCP connection for a series
 of edits. Relative output filenames are resolved from the process's working
 directory. JavaScript runs in the embedded Boa engine and CueMol bindings, with
-no Node.js runtime requirement.
+no Node.js runtime requirement. `getCmdArgs(-1)` returns the number of script
+arguments; `getCmdArgs(0)` returns the first argument. Both `run` and `-c` preserve
+quoted spaces and empty arguments. Read-only scripts leave Undo and Redo intact.
+
+Native `PythonBridge` uses a persistent `uv`-managed interpreter per application.
+Install `uv` to use it. Python variables survive `runString` and `runFile` calls;
+`import cuemol` provides live scene objects, services, properties and callbacks.
+For example, the JavaScript console accepts:
+
+```javascript
+var py = getService('PythonBridge');
+py.runString('import cuemol\nscene = cuemol.scene()\nprint(scene.name)');
+py.runString('print(scene.uid)');
+```
+
+Python execution requires a native process and is unavailable in the browser.
+The bridge exposes application bindings; it does not bundle every helper module
+from the reference Python package or third-party scientific Python libraries.
+
 `export-scene` and `render-qsc` use the same readers, default representations and
 scene geometry as the GUI. They support STL, OBJ, POV-Ray, PNG, MQO, LuxRender,
 LuxCore and Warabi output. PNG output uses the shared render settings, including
@@ -347,8 +365,10 @@ use the inverse transpose, and reflections preserve outward face orientation.
 Secondary-structure assignment excludes proline donors and uses sparse
 hydrogen-bond/bridge searches with bounded per-residue bond storage.
 
-The wgpu frontends implement Tritium's layout with Rust egui controls.
-The optional Tauri shell retains the older CueMol2 layout. Direct molecular
+The native and browser wgpu frontends implement Tritium's layout with Rust egui
+controls. The optional Tauri shell provides the same activity bar, inspector,
+themes and bottom docks through its webview. All show the `cuemol-rs` application
+name and the repository's PNG logo. Direct molecular
 surfaces support distance fields, EDTSurf and MeshMS on native and browser
 targets, with reference detail and surface-type controls. Saved molecular
 surfaces support MeshMS and BALL, with `auto` selecting MeshMS and BALL as its
@@ -380,6 +400,6 @@ These boundaries remain relevant when comparing complex reference scenes.
 
 The workspace consists of foundation crates (`core`, `gfx`, `qsys`), molecular
 and domain crates, shared `desktop-core` and `command` crates, and the `desktop`,
-`web`, and `cli` applications. The Node.js and Python crates provide binding
-facades. See [CLAUDE.md](../CLAUDE.md) for code organization and
+`web`, and `cli` applications. The Node.js crate provides a binding facade; native Python connects to live
+application state through a persistent worker. See [CLAUDE.md](../CLAUDE.md) for code organization and
 [validation.md](validation.md) for measured checks and their scope.

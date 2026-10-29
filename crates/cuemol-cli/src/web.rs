@@ -169,6 +169,8 @@ fn build(args: &[String]) -> Result<()> {
                 .map_err(|e| e.to_string())?;
         }
     }
+    std::fs::copy(root.join("cuemol-rs.png"), out.join("pkg/logo.png"))
+        .map_err(|e| e.to_string())?;
     let licenses = out.join("pkg/licenses");
     std::fs::create_dir_all(&licenses).map_err(|e| e.to_string())?;
     for name in ["smaa.txt", "molstar.txt", "xegtao.txt"] {
@@ -188,6 +190,7 @@ fn mime(name: &str) -> &'static str {
         "js" => "text/javascript; charset=utf-8",
         "wasm" => "application/wasm",
         "css" => "text/css; charset=utf-8",
+        "png" => "image/png",
         _ => "application/octet-stream",
     }
 }
@@ -235,7 +238,7 @@ fn serve(args: &[String]) -> Result<()> {
     }
     let server = tiny_http::Server::http((address, port)).map_err(|e| e.to_string())?;
     let url = format!("http://{}/", server.server_addr());
-    println!("CueMol3: {url}");
+    println!("cuemol-rs: {url}");
     if open {
         let mut command = if cfg!(target_os = "macos") {
             Command::new("open")

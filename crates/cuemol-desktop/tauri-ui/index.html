@@ -3,14 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="light" />
-    <title>CueMol2</title>
+    <meta name="color-scheme" content="dark light" />
+    <title>cuemol-rs</title>
     <link rel="stylesheet" href="./styles.css" />
+    <script src="./shell.js" defer></script>
     <script src="./app.js" defer></script>
   </head>
   <body>
     <div class="app-shell">
       <header class="application-menu">
+        <span class="app-brand"><img src="logo.png" alt="" width="24" height="24">cuemol-rs</span>
         <details class="menu">
           <summary>File</summary>
           <div class="menu-popup file-menu-popup">
@@ -118,7 +120,7 @@
             <button type="button" data-dialog="Execute script">Execute script…</button>
             <button type="button" data-local-action="performance-measure">Performance measure</button>
             <span class="menu-separator"></span>
-            <button type="button" data-dialog="MolClient tools">Mol clinet tools ...</button>
+            <button type="button" data-dialog="MolClient tools">Molecule tools…</button>
           </div>
         </details>
         <details class="menu">
@@ -153,7 +155,7 @@
                 <span>Windows</span><span class="menu-arrow" aria-hidden="true">›</span>
               </button>
               <div class="menu-popup nested-menu" id="windows-menu" role="menu">
-                <button type="button" class="checked">CueMol2</button>
+                <button type="button" class="checked">cuemol-rs</button>
               </div>
             </div>
           </div>
@@ -164,7 +166,7 @@
             <button type="button" data-dialog="About plugins">About plugins…</button>
             <button type="button" data-dialog="About config">About config…</button>
             <button type="button" data-dialog="Addon manager">Addon manager…</button>
-            <button type="button" data-dialog="About CueMol2">About CueMol2</button>
+            <button type="button" data-dialog="About cuemol-rs">About cuemol-rs</button>
             <span class="menu-separator"></span>
             <button type="button" data-local-action="show-console">Console</button>
             <button type="button" data-local-action="check-updates">Check for updates</button>
@@ -173,50 +175,31 @@
       </header>
 
       <section class="ribbon">
-        <div class="ribbon-tabs" role="tablist" aria-label="Tools">
-          <button class="ribbon-tab active" type="button" role="tab" aria-selected="true" data-ribbon-select="home">
-            Home
-          </button>
-          <button class="ribbon-tab" type="button" role="tab" aria-selected="false" data-ribbon-select="measure">
-            Measure
-          </button>
-          <button class="ribbon-tab" type="button" role="tab" aria-selected="false" data-ribbon-select="animation">
-            Animation
-          </button>
-          <button
-            class="ribbon-collapse"
-            type="button"
-            title="Collapse ribbon"
-            aria-expanded="true"
-            data-ribbon-collapse
-          >
-            ⌃
-          </button>
-        </div>
+
 
         <div class="ribbon-panels">
           <div class="ribbon-panel active" role="tabpanel" data-ribbon-panel="home">
             <div class="toolbar-group file-tools">
               <button class="tool-button new-tab-tool" type="button" data-action="new-scene">
-                <span class="tool-icon">＋</span><span>New tab</span>
+                <span class="tool-icon">＋</span><span>New Tab</span>
               </button>
               <button class="tool-button open-tool" type="button" data-action="open">
-                <span class="tool-icon">↗</span><span>Open</span>
+                <span class="tool-icon">↗</span><span>Open File</span>
               </button>
-              <button class="tool-button save-tool" type="button" data-action="save">
-                <span class="tool-icon">▣</span><span>Save as</span>
+              <button class="tool-button save-tool" type="button" data-dialog="Save File As">
+                <span class="tool-icon">▣</span><span>Save As</span>
               </button>
             </div>
             <div class="toolbar-separator"></div>
             <div class="toolbar-group scene-tools">
               <button class="tool-button" type="button" data-action="open-scene">
-                <span class="tool-icon">▱</span><span>Open scene</span>
+                <span class="tool-icon">▱</span><span>Open Scene</span>
               </button>
-              <button class="tool-button" type="button" data-action="fit">
-                <span class="tool-icon">↻</span><span>Reload / fit</span>
+              <button class="tool-button" type="button" data-local-action="reload-scene">
+                <span class="tool-icon">↻</span><span>Reload Scene</span>
               </button>
               <button class="tool-button" type="button" data-action="save">
-                <span class="tool-icon">▣</span><span>Save scene</span>
+                <span class="tool-icon">▣</span><span>Save Scene</span>
               </button>
             </div>
             <div class="toolbar-separator"></div>
@@ -257,53 +240,36 @@
               </div>
             </div>
             <div class="toolbar-separator"></div>
-            <div class="toolbar-group mode-tools" role="radiogroup" aria-label="Navigation mode">
-              <button class="tool-button selected" type="button" data-interaction="rotate">
-                <span class="tool-icon pointer-icon">➤</span><span>Rotate</span>
-              </button>
-              <button class="tool-button" type="button" data-interaction="rect-select">
-                <span class="tool-icon rect-icon">□</span><span>Rect select</span>
-              </button>
+
+
+            <div class="toolbar-group">
+              <button class="tool-button" type="button" data-dialog="Open PDB"><span class="tool-icon" data-icon="download"></span><span>Get PDB</span></button>
+              <button class="tool-button" type="button" data-dialog="POV-Ray rendering"><span class="tool-icon" data-icon="render"></span><span>Render</span></button>
             </div>
+            <span class="toolbar-spacer"></span>
+            <button class="icon-button" type="button" data-shell-action="theme" title="Switch color theme" aria-label="Switch color theme" data-icon="theme"></button>
           </div>
 
-          <div class="ribbon-panel" role="tabpanel" data-ribbon-panel="measure">
-            <div class="toolbar-group mode-tools" role="radiogroup" aria-label="Measurement mode">
-              <button class="tool-button selected" type="button">
-                <span class="tool-icon">↔</span><span>Distance</span>
-              </button>
-              <button class="tool-button" type="button">
-                <span class="tool-icon">∠</span><span>Angle</span>
-              </button>
-              <button class="tool-button" type="button">
-                <span class="tool-icon">⤨</span><span>Torsion</span>
-              </button>
-            </div>
-            <div class="toolbar-separator"></div>
-            <label class="renderer-name">
-              Renderer name:
-              <input type="text" value="measure" />
-            </label>
-            <output id="measure-readout" class="measure-readout">Select 2 / 3 / 4 atoms</output>
-          </div>
 
-          <div class="ribbon-panel animation-ribbon-panel" role="tabpanel" data-ribbon-panel="animation">
-            <button id="animation-play" class="tool-button compact" type="button">
-              <span class="tool-icon">▶</span><span>Play</span>
-            </button>
-            <button id="animation-stop" class="tool-button compact" type="button">
-              <span class="tool-icon">■</span><span>Stop</span>
-            </button>
-            <label class="animation-loop"><input id="animation-loop" type="checkbox" />Loop</label>
-            <input id="animation-slider" class="animation-slider" type="range" min="0" max="0" step="0.05" value="0" />
-            <output id="animation-time" class="animation-time">00:00 / 00:00</output>
-          </div>
+
+
         </div>
       </section>
 
       <main class="content-holder">
-        <aside class="side-panel" aria-label="CueMol panels">
-          <section class="side-card open" data-side-card>
+        <nav class="activity-bar" aria-label="Activities">
+          <div class="activity-bar-top">
+            <button type="button" class="activity-item active" data-activity="explorer" aria-label="Explorer" aria-pressed="true" title="Explorer" data-icon="explorer"></button>
+            <button type="button" class="activity-item" data-activity="view" aria-label="View" aria-pressed="false" title="View" data-icon="view"></button>
+            <button type="button" class="activity-item" data-activity="selection" aria-label="Selection" aria-pressed="false" title="Selection" data-icon="selection"></button>
+            <button type="button" class="activity-item" data-activity="crystal" aria-label="Crystal" aria-pressed="false" title="Crystal" data-icon="crystal"></button>
+            <button type="button" class="activity-item" data-activity="actions" aria-label="Actions" aria-pressed="false" title="Actions" data-icon="actions"></button>
+          </div>
+          <button type="button" class="activity-item" data-dialog="Options" aria-label="Settings" title="Settings" data-icon="settings"></button>
+        </nav>
+        <aside class="side-panel" aria-label="cuemol-rs panels">
+          <header id="activity-title" class="panel-header">Explorer</header>
+          <section class="side-card open" data-side-card data-activity-panel="explorer" data-panel-name="Workspace">
             <button class="side-title" type="button" data-panel-toggle aria-expanded="true">
               <span class="disclosure">▾</span><span>Workspace</span><span class="panel-close">×</span>
             </button>
@@ -320,40 +286,11 @@
                 <button id="workspace-delete" type="button" data-action="delete-workspace-item" title="Delete" disabled>−</button>
                 <button id="workspace-properties" type="button" title="Property" disabled>⚙</button>
               </div>
-              <div class="workspace-properties">
-                <strong id="inspector-title">No object</strong>
-                <dl id="object-stats" class="stats-grid">
-                  <div><dt>Atoms</dt><dd>—</dd></div>
-                  <div><dt>Residues</dt><dd>—</dd></div>
-                  <div><dt>Bonds</dt><dd>—</dd></div>
-                </dl>
-                <label class="field-label" for="renderer-type">New renderer</label>
-                <div class="add-renderer">
-                  <select id="renderer-type" aria-label="Renderer type">
-                    <option value="anisou">anisou</option>
-                    <option value="atomintr">atomintr</option>
-                    <option value="ballstick">ballstick</option>
-                    <option value="cartoon">cartoon</option>
-                    <option value="cpk">cpk</option>
-                    <option value="disorder">disorder</option>
-                    <option value="dsurf2">dsurf2</option>
-                    <option value="dsurface">dsurface</option>
-                    <option value="nucl">nucl</option>
-                    <option value="ribbon">ribbon</option>
-                    <option value="simple">simple</option>
-                    <option value="spline">spline</option>
-                    <option value="trace">trace</option>
-                    <option value="tracestick">tracestick</option>
-                    <option value="tube">tube</option>
-                  </select>
-                  <button id="inspector-add-renderer" type="button" data-action="add-renderer">Add</button>
-                </div>
-                <div id="renderer-list" class="renderer-list"></div>
-              </div>
+
             </div>
           </section>
 
-          <section class="side-card open" data-side-card>
+          <section class="side-card open" data-side-card data-activity-panel="selection" data-panel-name="MolStruct">
             <button class="side-title" type="button" data-panel-toggle aria-expanded="true">
               <span class="disclosure">▾</span><span>MolStruct</span><span class="panel-close">×</span>
             </button>
@@ -369,7 +306,7 @@
             </div>
           </section>
 
-          <section class="side-card open" data-side-card>
+          <section class="side-card open" data-side-card data-activity-panel="selection" data-panel-name="Selection">
             <button class="side-title" type="button" data-panel-toggle aria-expanded="true">
               <span class="disclosure">▾</span><span>Selection</span><span class="panel-close">×</span>
             </button>
@@ -380,7 +317,7 @@
                 <button type="button" role="tab" data-selection-tab="editor" aria-label="Editor" aria-selected="false" title="Editor"><span aria-hidden="true">▤</span></button>
               </div>
               <div id="selection-command-panel" class="selection-tab-panel">
-                <textarea id="selection-input" rows="3" spellcheck="false" placeholder="Input selection command"></textarea>
+                <textarea id="selection-input" rows="3" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="Input selection command"></textarea>
                 <div class="workspace-tools selection-tools">
                   <button id="selection-history" type="button" aria-label="Selection history" aria-haspopup="menu" title="History">↶⌄</button>
                   <button id="selection-command-apply" type="button" data-action="selection-command-apply" title="Select">↖</button>
@@ -403,7 +340,7 @@
             </div>
           </section>
 
-          <section class="side-card open" data-side-card>
+          <section class="side-card open" data-side-card data-activity-panel="explorer" data-panel-name="Coloring">
             <button class="side-title" type="button" data-panel-toggle aria-expanded="true">
               <span class="disclosure">▾</span><span>Coloring</span><span class="panel-close">×</span>
             </button>
@@ -425,7 +362,7 @@
             </div>
           </section>
 
-          <section class="side-card" data-side-card>
+          <section class="side-card open" data-side-card data-activity-panel="crystal" data-panel-name="Symmetry">
             <button class="side-title" type="button" data-panel-toggle aria-expanded="false">
               <span class="disclosure">▸</span><span>Symmetry</span><span class="panel-close">×</span>
             </button>
@@ -434,7 +371,7 @@
             </div>
           </section>
 
-          <section class="side-card open" data-side-card>
+          <section class="side-card open" data-side-card data-activity-panel="crystal" data-panel-name="Density map">
             <button class="side-title" type="button" data-panel-toggle aria-expanded="true">
               <span class="disclosure">▾</span><span>Density map</span><span class="panel-close">×</span>
             </button>
@@ -443,7 +380,7 @@
             </div>
           </section>
 
-          <section class="side-card" data-side-card>
+          <section class="side-card open" data-side-card data-activity-panel="view" data-panel-name="View">
             <button class="side-title" type="button" data-panel-toggle aria-expanded="false">
               <span class="disclosure">▸</span><span>View</span><span class="panel-close">×</span>
             </button>
@@ -452,29 +389,26 @@
             </div>
           </section>
 
-          <section class="side-card" data-side-card>
-            <button class="side-title" type="button" data-panel-toggle aria-expanded="false">
-              <span class="disclosure">▸</span><span>Animation</span><span class="panel-close">×</span>
-            </button>
-            <div class="side-body animation-body">
-              <label class="animation-summary">Duration: <output id="animation-duration"></output></label>
-              <label class="animation-summary">Start cam: <select id="animation-start-camera"><option value="">(none)</option></select></label>
-              <div id="animation-columns" class="animation-columns">
-                <span>Name</span>
-                <div class="animation-column-splitter" data-animation-column-splitter="name" role="separator" aria-orientation="vertical" aria-label="Name column width" tabindex="0"></div>
-                <span>Start</span>
-                <div class="animation-column-splitter" data-animation-column-splitter="start" role="separator" aria-orientation="vertical" aria-label="Start column width" tabindex="0"></div>
-                <span>End</span>
-              </div>
-              <div id="animation-list" class="animation-list"></div>
-              <div class="animation-tools">
-                <button id="animation-add" type="button" title="Add" aria-label="Add" aria-haspopup="menu">＋⌄</button>
-                <button id="animation-delete" type="button" title="Delete" disabled>−</button>
-                <button id="animation-change" type="button" title="Change" disabled>⚙</button>
-                <button id="animation-up" type="button" title="Move up" disabled>↑</button>
-                <button id="animation-down" type="button" title="Move down" disabled>↓</button>
-              </div>
-            </div>
+
+
+          <section class="action-panel" data-activity-panel="actions">
+            <h2>Molecule</h2>
+            <button type="button" data-dialog="Molecular superposition">Superposition</button>
+            <button type="button" data-dialog="Interaction">Interactions</button>
+            <button type="button" data-dialog="Mol bond editor">Bond editor</button>
+            <button type="button" data-dialog="Reassign secondary str">Secondary structure</button>
+            <h2>Surface and potential</h2>
+            <button type="button" data-dialog="Mol surface generation">Generate surface</button>
+            <button type="button" data-dialog="Mol surface cutter">Cut surface</button>
+            <button type="button" data-dialog="APBS elepot calculation">Electrostatic potential</button>
+            <h2>Animation and scripting</h2>
+            <button type="button" data-dialog="Mol morphing animation">Molecular morphing</button>
+            <button type="button" data-dialog="Animation rendering">Render animation</button>
+            <button type="button" data-dialog="Execute script">Execute script</button>
+          </section>
+          <section class="camera-panel" data-activity-panel="view">
+            <h2>Cameras</h2><div id="camera-list"></div>
+            <button type="button" data-dialog="Save Current View">Save current view…</button>
           </section>
         </aside>
 
@@ -497,6 +431,35 @@
           </div>
 
           <div id="viewport" class="viewport" tabindex="0" aria-label="Molecular viewport">
+            <div class="viewport-palette" aria-label="Viewport tools"><div class="toolbar-group mode-tools" role="radiogroup" aria-label="Navigation mode">
+              <button class="tool-button selected" type="button" data-interaction="rotate">
+                <span class="tool-icon pointer-icon">➤</span><span>Rotate</span>
+              </button>
+              <button class="tool-button" type="button" data-interaction="rect-select">
+                <span class="tool-icon rect-icon">□</span><span>Rect select</span>
+              </button>
+            </div>
+<div class="measurement-tools">
+            <div class="toolbar-group mode-tools" role="radiogroup" aria-label="Measurement mode">
+              <button class="tool-button selected" type="button">
+                <span class="tool-icon">↔</span><span>Distance</span>
+              </button>
+              <button class="tool-button" type="button">
+                <span class="tool-icon">∠</span><span>Angle</span>
+              </button>
+              <button class="tool-button" type="button">
+                <span class="tool-icon">⤨</span><span>Torsion</span>
+              </button>
+            </div>
+            <div class="toolbar-separator"></div>
+            <label class="renderer-name">
+              Renderer name:
+              <input type="text" value="measure" />
+            </label>
+            <output id="measure-readout" class="measure-readout">Select 2 / 3 / 4 atoms</output>
+          </div>
+<button type="button" data-action="fit" title="Fit view" aria-label="Fit view" data-icon="fit"></button>
+</div>
             <img id="viewport-image" alt="Rendered molecular structure" draggable="false" />
             <svg id="viewport-lines" class="viewport-lines" aria-hidden="true" preserveAspectRatio="none"></svg>
             <div id="viewport-labels" class="viewport-labels" aria-hidden="true"></div>
@@ -524,9 +487,46 @@
 
           <section class="bottom-panel">
             <div class="bottom-panels">
+              <div class="bottom-content animation-dock" data-bottom-panel="animation">
+<div class="animation-ribbon-panel">
+            <button id="animation-play" class="tool-button compact" type="button">
+              <span class="tool-icon">▶</span><span>Play</span>
+            </button>
+            <button id="animation-stop" class="tool-button compact" type="button">
+              <span class="tool-icon">■</span><span>Stop</span>
+            </button>
+            <label class="animation-loop"><input id="animation-loop" type="checkbox" />Loop</label>
+            <input id="animation-slider" class="animation-slider" type="range" min="0" max="0" step="0.05" value="0" />
+            <output id="animation-time" class="animation-time">00:00 / 00:00</output>
+          </div>
+<section class="side-card open animation-editor" data-animation-card>
+            <button class="side-title" type="button" data-panel-toggle aria-expanded="false">
+              <span class="disclosure">▸</span><span>Animation</span><span class="panel-close">×</span>
+            </button>
+            <div class="side-body animation-body">
+              <label class="animation-summary">Duration: <output id="animation-duration"></output></label>
+              <label class="animation-summary">Start cam: <select id="animation-start-camera"><option value="">(none)</option></select></label>
+              <div id="animation-columns" class="animation-columns">
+                <span>Name</span>
+                <div class="animation-column-splitter" data-animation-column-splitter="name" role="separator" aria-orientation="vertical" aria-label="Name column width" tabindex="0"></div>
+                <span>Start</span>
+                <div class="animation-column-splitter" data-animation-column-splitter="start" role="separator" aria-orientation="vertical" aria-label="Start column width" tabindex="0"></div>
+                <span>End</span>
+              </div>
+              <div id="animation-list" class="animation-list"></div>
+              <div class="animation-tools">
+                <button id="animation-add" type="button" title="Add" aria-label="Add" aria-haspopup="menu">＋⌄</button>
+                <button id="animation-delete" type="button" title="Delete" disabled>−</button>
+                <button id="animation-change" type="button" title="Change" disabled>⚙</button>
+                <button id="animation-up" type="button" title="Move up" disabled>↑</button>
+                <button id="animation-down" type="button" title="Move down" disabled>↓</button>
+              </div>
+            </div>
+          </section>
+              </div>
               <div class="bottom-content active" data-bottom-panel="output">
-                <pre id="status-history" class="output-log">CueMol2 Rust core</pre>
-                <label class="command-line"><span>Js&gt;</span><input id="output-command" type="text" aria-label="JavaScript command" autocomplete="off" /></label>
+                <pre id="status-history" class="output-log">cuemol-rs Rust core</pre>
+                <label class="command-line"><span>Js&gt;</span><input id="output-command" type="text" spellcheck="false" autocorrect="off" autocapitalize="off" aria-label="JavaScript command" autocomplete="off" /></label>
               </div>
               <div class="bottom-content sequence-placeholder" data-bottom-panel="sequence">
                 <div id="sequence-view" class="sequence-view">
@@ -575,16 +575,54 @@
               </div>
             </div>
             <div class="bottom-tabs" role="tablist">
-              <button class="active" type="button" data-bottom-select="output">Output</button>
+              <button class="active" type="button" data-bottom-select="output">Log</button>
               <button type="button" data-bottom-select="sequence">Sequence</button>
+              <button type="button" data-bottom-select="animation">Animation</button>
               <button type="button" data-bottom-select="trajectory">Trajectory</button>
             </div>
           </section>
         </section>
+
+        <div class="inspector-splitter" role="separator" aria-label="Resize inspector" aria-orientation="vertical" tabindex="0"></div>
+        <aside class="inspector-panel" aria-label="Inspector">
+          <header class="panel-header"><span>Inspector</span><button type="button" data-shell-action="close-inspector" aria-label="Close inspector">×</button></header>
+<div class="workspace-properties">
+                <strong id="inspector-title">No object</strong>
+                <div id="inspector-fields" class="inspector-fields"></div>
+                <button id="inspector-properties" type="button">Edit properties…</button>
+                <dl id="object-stats" class="stats-grid">
+                  <div><dt>Atoms</dt><dd>—</dd></div>
+                  <div><dt>Residues</dt><dd>—</dd></div>
+                  <div><dt>Bonds</dt><dd>—</dd></div>
+                </dl>
+                <label class="field-label" for="renderer-type">New renderer</label>
+                <div class="add-renderer">
+                  <select id="renderer-type" aria-label="Renderer type">
+                    <option value="anisou">anisou</option>
+                    <option value="atomintr">atomintr</option>
+                    <option value="ballstick">ballstick</option>
+                    <option value="cartoon">cartoon</option>
+                    <option value="cpk">cpk</option>
+                    <option value="disorder">disorder</option>
+                    <option value="dsurf2">dsurf2</option>
+                    <option value="dsurface">dsurface</option>
+                    <option value="nucl">nucl</option>
+                    <option value="ribbon">ribbon</option>
+                    <option value="simple">simple</option>
+                    <option value="spline">spline</option>
+                    <option value="trace">trace</option>
+                    <option value="tracestick">tracestick</option>
+                    <option value="tube">tube</option>
+                  </select>
+                  <button id="inspector-add-renderer" type="button" data-action="add-renderer">Add</button>
+                </div>
+                <div id="renderer-list" class="renderer-list"></div>
+              </div>
+        </aside>
       </main>
 
       <footer class="statusbar">
-        <span id="status-text">Starting CueMol2…</span>
+        <span id="status-text">Starting cuemol-rs…</span>
         <span class="status-spacer"></span>
         <span id="projection-readout">ORTHO</span>
         <span id="scene-metrics">0 scenes / 0 objects</span>
@@ -628,7 +666,7 @@
     <dialog id="reference-dialog" class="reference-dialog">
       <form method="dialog">
         <header>
-          <strong id="dialog-title">CueMol2</strong>
+          <strong id="dialog-title">cuemol-rs</strong>
           <button type="submit" aria-label="Close">×</button>
         </header>
         <div id="dialog-content" class="dialog-content"></div>

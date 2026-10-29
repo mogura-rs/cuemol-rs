@@ -1,46 +1,33 @@
 # Validation evidence
 
-These measurements describe local validation of the implementation, not a
-published release or a complete CueMol2 equivalence claim. Generated inputs and
-logs are kept in the ignored checkout cache. No remote workflow was triggered.
-Entries record successive checkpoints, so earlier test counts are historical.
-The [completion audit](#completion-audit) records the current open failures and
-performance gaps. Passing earlier checks does not close those gaps.
-The integrated workspace, browser and complete QIF audit results appear under
-[Affine molecular rendering and final integration checks](#affine-molecular-rendering-and-final-integration-checks).
+Entries record successive checkpoints, so earlier test counts and distribution
+results are historical. Generated inputs and logs stay in the ignored checkout
+cache. The current repairs and their limits appear in the completion audit;
+passing tests do not establish equivalence for every parameter combination.
 
 ## Completion audit
 
-**Status: incomplete.** The application sources at the documentation checkpoint
-`8c8df38` match `092272a`. The probes below used the Linux x86-64 release binary
-built from `092272a`. They establish remaining failures, rather than inferring
-completion from a passing test count.
+The audit of application revision `092272a` found reproducible failures in
+style extraction, Python state and command-line script arguments, together with
+unnecessary molecular copies and Undo entries. The repair now covers these
+entry points and related failures found while tracing their callers.
 
-All seven reference-QIF audits were rerun with the reference checkout present
-and passed. They cover declarations, construction, inheritance, defaults and
-enum round trips for 166 classes. The member audit checks whether a method is a
-function; it does not execute every method or every parameter combination.
-The following behavior probes fail despite that complete declaration coverage.
+| Area | Repair and regression coverage |
+| --- | --- |
+| Style extraction | Preserve live and detached renderer properties, nested style values, inherited coloring and explicit overrides. |
+| Python | Keep one interpreter per application, expose live CueMol objects and callbacks, preserve file globals and recover after exceptions. Release worker processes and detached payloads with their owners. |
+| Script services | Keep log, event-listener, process-manager and molecular-client state across script calls. |
+| Script arguments | Pass trailing arguments through `run` and `-c`, including Unicode, spaces and empty values. |
+| Script history | Add Undo only when persistent scene state changes. Queries and failed scripts preserve Redo in native, Tauri, browser and MCP paths. |
+| Molecular storage | Share atoms, bonds and residue properties across snapshots, with copy-on-write edits and selective Undo. Build render snapshots only when scripts need them. |
+| Script edits | Flush queued object insertion before subsequent atom edits; preserve intentionally empty surface-renderer lists. |
+| Tauri interaction | Update camera motion during a drag, coalesce pending requests, avoid applying deltas twice, preserve full resolution, settle rendering after cancellation and map HiDPI input to render pixels. Disable smart quote replacement in code inputs. |
+| Application shell | Use Tritium activities, inspector and docks with persistent themes; recover from missing or damaged layout settings. Use the `cuemol-rs` name and supplied PNG logo. |
 
-| Entry point | Expected behavior | Observed behavior |
-| --- | --- | --- |
-| `StyleManager.createStyleFromObj` | Preserve a renderer's editable style properties. | A renderer with `alpha=0.4` and `linew=3.25` produces a style with `alpha=1` and no `linew`. |
-| `PythonBridge.runString` | Retain the interpreter's variables between calls, as the reference bridge does. | Assigning a variable in one call and reading it in the next raises `NameError`. |
-
-The style adapter constructs a new renderer from only the object's type and
-name before calling the shared style serializer. The shared serializer's own
-tests pass because they supply a renderer with its properties already populated;
-they do not exercise this script adapter. The relevant paths are
-`js_style_create_from_obj` in `crates/cuemol-desktop-core/src/lib.rs` and
-`create_style_from_obj` in `crates/cuemol-qsys/src/style.rs`.
-
-The Python bridge launches a separate `uv run --no-project python -c` process
-for each call. The reference calls `PyRun_SimpleString` in its existing
-interpreter. Process execution alone therefore does not provide reference
-Python runtime semantics. See `PythonBridge::execute_source` in
-`crates/cuemol-py/src/lib.rs` and the reference `src/pybr/PythonBridge.cpp`.
-
-These two failures can be reproduced with the script console or `cuemol run`:
+The original style probe used `linew` on `SimpleRenderer`. That property name was
+incorrect: the simple renderer uses `width`. The `alpha` loss was a valid
+failure. The corrected regression checks both `alpha=0.4` and `width=3.25`, plus
+inherited nested properties and coloring. This corrects the earlier audit text.
 
 ```javascript
 var object = cuemol.MolCoord();
@@ -48,12 +35,12 @@ object.name = 'probe';
 scene.addObject(object);
 var renderer = object.createRenderer('simple', 'probe-renderer');
 renderer.alpha = 0.4;
-renderer.linew = 3.25;
+renderer.width = 3.25;
 var styles = getService('StyleManager');
 var id = styles.createStyleSet('audit', scene.uid);
 styles.createStyleFromObj(scene.uid, id, 'Probe', renderer);
 print(styles.getStyleValue(scene.uid, 'audit', 'Probe.alpha'));
-print(styles.getStyleValue(scene.uid, 'audit', 'Probe.linew'));
+print(styles.getStyleValue(scene.uid, 'audit', 'Probe.width'));
 ```
 
 ```javascript
@@ -62,61 +49,91 @@ bridge.runString('completion_probe = 42');
 bridge.runString('assert completion_probe == 42');
 ```
 
-Command-line script arguments are also unsupported: `cuemol run probe.js alpha
-beta` returns the usage error. `getCmdArgs` returns zero because the script
-environment does not receive command-line arguments. This differs from the
-reference interpreter's argument list API.
+Regression tests cover Python reads and writes against the live scene, changes
+made by a later JavaScript call, nested event callbacks, exception rollback,
+subprocess output and native descriptor writes without corrupting the bridge
+protocol. The core suite passed 264 tests with scripting enabled. The reference
+checkout was present for the shared compatibility tests and seven QIF audits.
+Those audits cover 166 class declarations, construction, inheritance, defaults
+and enum round trips. Checking that every declared method is callable does not
+execute every method or every possible argument combination.
 
-### Remaining script and history cost
+### Script and history measurement
 
-A separate release-mode probe started a fresh headless MCP process, optionally
-loaded 50,000 synthetic atoms, cleared Undo, issued 20 `get_scene_state` calls,
-then issued 20 `execute_script` calls containing only `print(1);`. The scene
-description remained exactly equal before and after the script calls. Loading
-and initialization are excluded from request times. Three processes were run
-per atom count; the table gives medians across runs, with each request time
-being the median of its 20 calls. The final measurement followed the completion
-of this task's compilation jobs. Other workloads on the shared host were not
-controlled.
+The baseline used a fresh Linux x86-64 release MCP process, optionally loaded
+50,000 synthetic atoms, cleared Undo, issued 20 `get_scene_state` calls, then
+issued 20 `execute_script` calls containing only `print(1);`. The scene JSON was
+identical before and after. Loading and initialization were excluded from
+request times. Three processes ran per atom count. Each request time below is
+the median of each run's 20 calls, followed by the median across three runs.
+Compilation from this task had finished; other shared-host workloads were not
+controlled. Memory came from the server process's Linux `VmRSS`.
 
-| Atoms | Scene query | Script call | RSS before calls | RSS after queries | RSS after scripts |
+| Baseline atoms | Scene query | Script call | RSS before calls | RSS after queries | RSS after scripts |
 | ---: | ---: | ---: | ---: | ---: | ---: |
 | 0 | 0.708 ms | 2.647 ms | 13.78 MiB | 13.78 MiB | 28.88 MiB |
 | 50,000 | 3.798 ms | 74.628 ms | 55.70 MiB | 55.70 MiB | 428.32 MiB |
 
-Memory values come from the server process's Linux `VmRSS`; the final
-50,000-atom `VmHWM` median was also 428.32 MiB. These are current costs, not a
-before/after optimization comparison. They include MCP and script execution,
-not GUI rendering. The script adapter clones molecular data and the application
-state before evaluation. MCP also records a complete application snapshot for
-`execute_script`, even when the script makes no scene edit, retaining up to 20
-entries. `MolCoord` still owns `Vec<Atom>` and derives `Clone`. These paths leave
-substantial work for shared immutable data, copy-on-write updates and history
-that records actual changes.
+These baseline values include MCP and script execution, not GUI frame time.
+The earlier implementation cloned molecule arrays and recorded up to 20 complete
+Undo snapshots for unchanged scripts. The new storage and history paths remove
+those copies and entries. Repeating the same protocol with the repaired release
+produced the following results.
 
-Relevant implementation paths are `build_script_env` and `run_script_js` in
-`crates/cuemol-desktop-core/src/lib.rs`, `Protocol::call` in
-`crates/cuemol-command/src/protocol.rs`, and `MolCoord` in
-`crates/cuemol-molstr/src/molecule.rs`.
+| Repaired atoms | Scene query | Script call | RSS before calls | RSS after queries | RSS after scripts |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 0.725 ms | 2.163 ms | 13.56 MiB | 13.56 MiB | 24.72 MiB |
+| 50,000 | 4.283 ms | 2.253 ms | 55.66 MiB | 55.66 MiB | 62.22 MiB |
+
+At 50,000 atoms the script median decreased by about 33 times and the final
+RSS decreased by about 85%. Scene-query latency did not improve in this run.
+All six processes preserved the scene JSON. These are measurements of the
+listed workload on a shared host, not an overall application speedup.
+
+### Desktop interaction checks
+
+The native egui library passed 171 tests, and the Tauri library passed 147 tests
+with five optional GPU/fixture tests excluded. The Tauri shell compatibility
+suite passed 69 tests. Browser execution passed 64 viewer tests across WebGL2
+and WebGPU plus seven shell tests; two later shell regressions brought the
+separate shell run to nine passing tests. The shell tests mock IPC and verify
+DOM behavior; they do not establish GPU correctness.
+
+The optimized macOS `cuemol-rs.app` was also operated directly with 1CRN loaded.
+A held mouse drag changed the actual viewport image 23 times within 617 ms,
+with the first observed change at 19.7 ms. The preceding run observed 27 updates
+within 613 ms and a first update at 48 ms. Observation includes input dispatch
+and accessibility polling, so these are interaction samples rather than a
+steady-state frame-rate benchmark. The viewport retained full resolution.
+Literal double quotes were preserved and the console executed the test script.
+A separate optimized 1280 x 720 offscreen profile measured median rendering
+at 3.978 ms and PNG encoding at 0.426 ms over 15 frames; it excludes WebView
+transport and display latency.
+
+The Linux release window passed visible-pixel checks for labels, residue/range
+selection, Undo, three measurement modes, lasso, bond editing, affine transforms,
+stereo picking in both eyes, and animation pause/stop through both script and
+toolbar controls. Claude Code reviewed the interaction changes. Its script-file
+rollback concern was disproved by a regression that changes the scene and camera
+before throwing; the transaction commits only after successful evaluation.
+Its cancellation concern led to the settled-frame regression and fix.
 
 ### Completion boundaries
 
-The earlier DCD, BVH, camera-animation and GPU-upload measurements remain valid
-for their recorded inputs and stages. They do not establish optimization of
-every reader, renderer, map/surface calculation, script, history operation or
-complete GUI frame. The new MCP measurement directly shows a remaining memory
-and execution-time cost. Script asynchronous readers also collect the full
-input before parsing; native execution uses a worker, while the current browser
-build parses when `waitLoadAsync` is called. This is separate from the indexed
-browser trajectory path that reads individual frames with `File.slice`.
+The DCD, BVH, camera-animation and GPU-upload measurements below apply to their
+recorded inputs and stages. They do not establish optimization of every reader,
+renderer, map/surface calculation or complete GUI frame. Script asynchronous
+readers still collect the input before parsing; native execution uses a worker,
+while the browser parses in `waitLoadAsync`. Indexed browser trajectories instead
+read individual frames with `File.slice`.
 
-Hardware quad-buffer stereo is unavailable. Fonts and center-mark blending
-differ from the reference, and the Rust ray tracer does not promise identical
-pixels to the reference integrator. Cross-platform release execution, public
-installation and Pages delivery remain unverified until pushing and Actions
-execution are authorized. Real AI providers and every platform credential store
-also remain outside the recorded mock-provider checks. These limits, together
-with the reproduced functional failures, prevent a full-completion claim.
+Python execution requires native `uv`; the live binding does not provide every
+reference Python helper module or arbitrary third-party Python packages.
+Hardware quad-buffer stereo is unavailable. Fonts and center-mark blending can
+differ, and the Rust ray tracer does not promise the reference integrator's
+exact pixels. Real AI providers and every platform credential store remain
+outside the mock-provider tests. Release and Pages checks below distinguish
+local execution from actual public deployment.
 
 ## Functional checks
 

@@ -134,7 +134,7 @@ const DENSITY_RENDERER_TYPES: &[&str] = &["contour", "isosurf", "gpu_mapmesh", "
 const SURFACE_RENDERER_TYPES: &[&str] = &["molsurf"];
 const LIGHTWEIGHT_RENDERER_TYPES: &[&str] = &["lwrend"];
 const LEGACY_MENU_SURFACES: &[&str] = &[
-    "About CueMol3",
+    "About cuemol-rs",
     "Preferences...",
     "New Window",
     "New Tab",
@@ -419,7 +419,8 @@ impl NativeRunner {
             return;
         }
         let attributes = Window::default_attributes()
-            .with_title("CueMol3")
+            .with_title("cuemol-rs")
+            .with_window_icon(application_icon())
             .with_inner_size(PhysicalSize::new(1024, 768));
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
@@ -757,6 +758,7 @@ impl NativeRunner {
                 undo
             });
             let mut camera = gpu.camera.to_qsys_camera("__current");
+            let script_call = name == "execute_script";
             let response = self
                 .protocol
                 .handle(request.message, &mut app.state, &mut camera);
@@ -765,7 +767,11 @@ impl NativeRunner {
             });
             if mutating && success {
                 if let Some(undo) = undo {
-                    app.push_undo_snapshot(undo);
+                    if script_call {
+                        app.push_script_undo_snapshot(undo);
+                    } else {
+                        app.push_undo_snapshot(undo);
+                    }
                 }
                 gpu.camera.apply_qsys_camera(&camera);
                 gpu.camera.read_view_options(&app.state);
@@ -5447,6 +5453,8 @@ impl GuiApplication {
                 continue;
             }
             let mutating = cuemol_command::tool_changes_scene(&name);
+            let script_before = (name == "execute_script").then(|| self.state.clone());
+            let camera_before = view.clone();
             let undo = (mutating && !self.agent.changed_scene).then(|| {
                 let mut undo = if name == "execute_script" {
                     self.capture_script_undo()
@@ -5470,7 +5478,10 @@ impl GuiApplication {
                 cuemol_command::call_tool(&mut self.state, &mut view, &name, &arguments)
                     .map_err(|e| e.to_string())
             };
-            if result.is_ok() && mutating {
+            let changed = script_before
+                .as_ref()
+                .is_none_or(|before| !before.same_undo_state(&self.state) || camera_before != view);
+            if result.is_ok() && mutating && changed {
                 if let Some(undo) = undo {
                     self.push_undo_snapshot(undo);
                 }
@@ -6215,11 +6226,11 @@ impl GuiApplication {
                         }
                     });
                     ui.menu_button("Windows", |ui| {
-                        let _ = ui.radio(true, "CueMol3");
+                        let _ = ui.radio(true, "cuemol-rs");
                     });
                 });
                 ui.menu_button("Help", |ui| {
-                    if ui.button("About CueMol3").clicked() {
+                    if ui.button("About cuemol-rs").clicked() {
                         self.show_about = true;
                         ui.close();
                     }
@@ -15339,11 +15350,9 @@ impl GuiApplication {
                 self.set_status("Script error");
             }
         }
-        if let Some(scene_uid) = self.state.active_scene() {
-            self.modified_scenes.insert(scene_uid);
+        if self.push_script_undo_snapshot(undo) {
+            self.rebuild_snapshot();
         }
-        self.push_undo_snapshot(undo);
-        self.rebuild_snapshot();
     }
 
     fn sequence_current_selection(&self, object_uid: cuemol_core::Uid) -> String {
@@ -19141,7 +19150,7 @@ impl GuiApplication {
                 self.log_lines
                     .push(format!("Exec internal JS: {} done.", self.script_path));
                 self.set_status("Script executed");
-                self.push_undo_snapshot(undo);
+                self.push_script_undo_snapshot(undo);
                 true
             }
             Err(error) => {
@@ -20862,13 +20871,14 @@ impl GuiApplication {
         }
         let mut open = self.show_about;
         let mut close = false;
-        egui::Window::new("About CueMol3")
+        egui::Window::new("About cuemol-rs")
             .open(&mut open)
             .collapsible(false)
             .show(ctx, |ui| {
-                ui.heading("CueMol2");
+                cuemol_ui::shell::logo(ui, 96.);
+                ui.heading("cuemol-rs");
                 ui.label("Molecular visualization system — Rust desktop implementation.");
-                ui.label(format!("Menu surfaces: {}", LEGACY_MENU_SURFACES.len()));
+                ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
                 if ui.button("Close").clicked() {
                     close = true;
                 }
@@ -29717,6 +29727,21 @@ impl GuiApplication {
         self.redo_stack.clear();
     }
 
+    fn push_script_undo_snapshot(&mut self, snapshot: GuiUndoSnapshot) -> bool {
+        if snapshot.state.same_undo_state(&self.state)
+            && snapshot.selected_object == self.selected_object
+            && snapshot.selected_renderer == self.selected_renderer
+            && snapshot.workspace_aux_selection == self.workspace_aux_selection
+            && snapshot.workspace_multiple_selection == self.workspace_multiple_selection
+            && snapshot.selection_text == self.selection_text
+            && snapshot.last_loaded_path == self.last_loaded_path
+        {
+            return false;
+        }
+        self.push_undo_snapshot(snapshot);
+        true
+    }
+
     fn restore_gui_undo_state(&mut self, snapshot: GuiUndoSnapshot) {
         self.state = snapshot.state;
         self.animation_playing = false;
@@ -35631,8 +35656,8 @@ mod tests {
         assert!(LEGACY_MENU_SURFACES.contains(&"Mol surface generation..."));
         assert!(LEGACY_MENU_SURFACES.contains(&"Restore default panel location"));
         assert!(LEGACY_MENU_SURFACES.contains(&"Hardware stereo"));
-        assert!(LEGACY_MENU_SURFACES.contains(&"About CueMol3"));
-        assert!(!LEGACY_MENU_SURFACES.contains(&"About CueMol3-tritium"));
+        assert!(LEGACY_MENU_SURFACES.contains(&"About cuemol-rs"));
+        assert!(!LEGACY_MENU_SURFACES.contains(&"About cuemol-rs-tritium"));
         assert!(RENDERER_TYPES.contains(&"ballstick"));
         assert!(RENDERER_TYPES.contains(&"disorder"));
         assert!(!RENDERER_TYPES.contains(&"molsurf"));
@@ -41660,6 +41685,30 @@ mod tests {
     }
 
     #[test]
+    fn read_only_scripts_preserve_native_undo_and_modified_state() {
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        let modified = app.modified_scenes.clone();
+        let revision = app.snapshot_revision;
+        for source in ["print(1);", "throw new Error('probe');"] {
+            app.console_input = source.into();
+            app.execute_console_input();
+        }
+        assert!(app.undo_stack.is_empty());
+        assert_eq!(app.modified_scenes, modified);
+        assert_eq!(app.snapshot_revision, revision);
+        app.console_input = "scene.setName('edited');".into();
+        app.execute_console_input();
+        assert_eq!(app.undo_stack.len(), 1);
+        app.undo(&mut camera);
+        app.console_input = "print(scene.name);".into();
+        app.execute_console_input();
+        assert_eq!(app.redo_stack.len(), 1);
+        app.redo(&mut camera);
+        assert_eq!(app.state.active_scene_summary().unwrap().name, "edited");
+    }
+
+    #[test]
     fn animation_play_spins_the_camera() {
         // Playing the animation continuously spins the camera (CueMol2 SimpleSpin);
         // stopping leaves it still.
@@ -42588,3 +42637,12 @@ mod tests {
 #[cfg(test)]
 #[path = "agent_tests.rs"]
 mod agent_tests;
+
+fn application_icon() -> Option<winit::window::Icon> {
+    let image = image::load_from_memory(include_bytes!("../../../cuemol-rs.png"))
+        .ok()?
+        .resize(256, 256, image::imageops::FilterType::Lanczos3)
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    winit::window::Icon::from_rgba(image.into_raw(), width, height).ok()
+}

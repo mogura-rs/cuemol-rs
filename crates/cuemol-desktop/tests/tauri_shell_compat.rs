@@ -7,7 +7,7 @@ const TAURI_APP_RS: &str = include_str!("../src/tauri_app.rs");
 const DESKTOP_LIB_RS: &str = include_str!("../src/lib.rs");
 
 #[test]
-fn tauri_shell_matches_the_reference_xul_dock_order() {
+fn tauri_shell_keeps_the_shared_panels_in_the_cuemol3_frame() {
     let menu = HTML.find("class=\"application-menu\"").unwrap();
     let ribbon = HTML.find("class=\"ribbon\"").unwrap();
     let content = HTML.find("class=\"content-holder\"").unwrap();
@@ -23,7 +23,7 @@ fn tauri_shell_matches_the_reference_xul_dock_order() {
         "Density map",
         "View",
         "Animation",
-        "Output",
+        "Log",
         "Sequence",
     ] {
         assert!(
@@ -32,7 +32,7 @@ fn tauri_shell_matches_the_reference_xul_dock_order() {
         );
     }
     assert!(HTML.contains("aria-label=\"Resize bottom panel\""));
-    assert!(CSS.contains("var(--bottom-panel-height, 148px)"));
+    assert!(CSS.contains("var(--bottom-panel-height, 180px)"));
     assert!(JS.contains("function setupBottomPanelSplitter()"));
     assert!(JS.contains("BOTTOM_PANEL_HEIGHT_STORAGE_KEY"));
     assert!(NATIVE_GUI_RS.contains("bottom_panel:height"));
@@ -53,15 +53,15 @@ fn tauri_shell_matches_the_reference_xul_dock_order() {
 }
 
 #[test]
-fn tauri_shell_uses_the_native_light_chrome_and_cuemol_viewport() {
-    assert!(HTML.contains("name=\"color-scheme\" content=\"light\""));
-    assert_eq!(HTML.matches("class=\"side-card open\"").count(), 5);
-    assert_eq!(HTML.matches("data-ribbon-panel=").count(), 3);
-    assert!(HTML.contains("data-ribbon-select=\"animation\""));
+fn tauri_shell_uses_the_cuemol3_activity_inspector_and_bottom_docks() {
+    assert!(HTML.contains("name=\"color-scheme\" content=\"dark light\""));
+    assert_eq!(HTML.matches("data-activity=\"").count(), 5);
+    assert!(HTML.contains("aria-label=\"Inspector\""));
+    assert!(HTML.contains("data-bottom-panel=\"animation\""));
+    assert!(!HTML.contains("data-ribbon-select="));
     assert!(CSS.contains("--viewport: #000"));
-    assert!(CSS.contains("grid-template-columns: var(--panel-width) 6px minmax(0, 1fr)"));
-    assert!(!HTML.contains("NAVIGATOR"));
-    assert!(!HTML.contains("INSPECTOR"));
+    assert!(CSS.contains("grid-template-columns: 44px var(--panel-width) 4px minmax(0, 1fr)"));
+    assert!(!HTML.contains("CueMol2"));
 }
 
 #[test]
@@ -321,7 +321,7 @@ fn tauri_main_menu_matches_the_reference_inventory() {
         "Interaction",
         "Mol surface generation",
         "APBS elepot calculation",
-        "Mol clinet tools ...",
+        "Molecule tools…",
         "Restore default panel location",
         "Check for updates",
     ] {
@@ -453,7 +453,7 @@ fn tauri_main_menu_matches_the_reference_inventory() {
             "missing native MolClient {label}"
         );
     }
-    assert!(HTML.contains("Mol clinet tools ..."));
+    assert!(HTML.contains("Molecule tools…"));
     assert!(JS.contains("get_molclient_renderer_setup"));
     assert!(JS.contains("rendererSetup: result.rendererSetup"));
     assert!(TAURI_APP_RS.contains("CreateMoleculeFromSmiles"));
@@ -1130,7 +1130,7 @@ fn tauri_startup_uses_a_compact_critical_ipc_and_lazy_molecule_details() {
         .expect("secondary panel render function");
     assert!(secondary_render.contains("if (sidePanelIsExpanded(\"Symmetry\")) renderSymmetry()"));
     assert!(secondary_render.contains("[data-bottom-panel=\"trajectory\"]"));
-    assert!(secondary_render.contains("[data-ribbon-panel=\"animation\"]"));
+    assert!(secondary_render.contains("[data-bottom-panel=\"animation\"]"));
     assert!(JS.contains("void mutateWithViewport(\"open_initial_paths\")"));
     assert!(JS.contains("mutateWithViewport(\"open_paths\""));
     assert!(JS.contains("mutateWithViewport(\"open_pdb\""));
@@ -1202,8 +1202,8 @@ fn desktop_startup_and_fetch_overlap_independent_initialization() {
 }
 
 #[test]
-fn tauri_camera_interaction_uses_reduced_preview_pixels() {
-    assert!(JS.contains("const CAMERA_PREVIEW_SCALE = 0.625"));
+fn tauri_camera_interaction_preserves_full_resolution() {
+    assert!(JS.contains("const CAMERA_PREVIEW_SCALE = 1"));
     assert!(JS.contains("renderScale: CAMERA_PREVIEW_SCALE"));
     assert!(JS.contains("scheduleRender(CAMERA_SETTLE_RENDER_DELAY)"));
     assert!(TAURI_APP_RS.contains("scaled_viewport_dimensions(width, height, render_scale)"));
@@ -2022,7 +2022,8 @@ fn tauri_playback_reuses_static_animation_and_trajectory_dom() {
         .expect("trajectory block render key");
     assert!(!trajectory_blocks_key.contains("currentFrame"));
     assert!(TAURI_APP_RS.contains(".apply_scene_animation_time("));
-    assert!(TAURI_APP_RS.contains("animation_start_desktop"));
+    assert!(TAURI_APP_RS.contains(".play_scene_animation(scene, view)"));
+    assert!(TAURI_APP_RS.contains(".stop_scene_animation(scene, Uid::new(0))"));
     assert!(!TAURI_APP_RS.contains("anim_step(&objects"));
 }
 

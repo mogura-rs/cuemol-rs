@@ -85,6 +85,7 @@ tempfile = { version = "3", default-features = false }
 egui_kittest = { version = "0.33.3", features = ["wgpu"] }
 
 [build-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 tauri-build = { version = "2.6.3", optional = true }
 
 [lib]
@@ -97,6 +98,6 @@ path = "src/main.rs"
 required-features = ["egui-gui"]
 
 [[bin]]
-name = "cuemol-desktop-tauri"
+name = "cuemol-rs"
 path = "src/tauri_main.rs"
 required-features = ["tauri-gui"]

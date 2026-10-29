@@ -13,8 +13,9 @@ The sibling `../cuemol2` checkout is an optional, read-only reference; set
 ## Build from source
 
 ```sh
-cargo build --locked -p cuemol-cli --features gui
-cargo run --locked -p cuemol-cli --features gui -- example.pdb
+cargo build --locked --release -p cuemol-cli --features gui
+cargo run --locked --release -p cuemol-cli --features gui -- example.pdb
+cargo run --locked --release -p cuemol-desktop --bin cuemol-rs --features tauri-gui -- example.pdb
 cargo run --locked -p cuemol-cli -- web build
 cargo build --locked --release -p cuemol-cli --features gui,bundled-web
 cargo run --locked -p cuemol-cli -- tools bundle
@@ -30,13 +31,18 @@ builds OIDN with pinned ISPC and oneTBB sources; other targets use verified
 prebuilt OIDN libraries. The native tests require the OIDN runtime bundle. See the
 [release workflow](../.github/workflows/release.yml) for platform dependencies.
 Generated builds, downloaded tools, browser packages, and test output are ignored.
+The root `cuemol-rs.png` is the logo source. Tauri builds generate the RGBA icon
+and webview copy; browser builds copy it into `pkg`, and macOS packaging generates
+the ICNS sizes. These derived assets are ignored. Use a release build when
+measuring interactive performance.
 
 ## Run checks
 
 ```sh
 cargo fmt --all -- --check
 cargo run --locked -p cuemol-cli -- tools bundle --oidn-only
-cargo test --locked --workspace --exclude cuemol-desktop --exclude cuemol-web
+cargo test --locked --workspace --exclude cuemol-desktop --exclude cuemol-web \
+  --features cuemol-desktop-core/scripting,cuemol-command/scripting,cuemol-cli/scripting
 cargo test --locked -p cuemol-desktop --features egui-gui --lib
 scripts/test-install.sh target/debug/cuemol
 ```

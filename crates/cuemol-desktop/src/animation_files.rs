@@ -3,6 +3,7 @@ use std::path::Path;
 
 const MOVIE_FILE_EXTENSIONS: [&str; 4] = ["mov", "mp4", "wmv", "gif"];
 
+#[cfg(any(feature = "egui-gui", test))]
 pub(crate) fn animation_ffmpeg_format_options(format: &str) -> Result<&'static str, String> {
     match format {
         "mov_h264" => Ok("-c:v libx264 -f mov"),

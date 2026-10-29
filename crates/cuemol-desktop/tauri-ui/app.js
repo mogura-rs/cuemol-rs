@@ -143,12 +143,11 @@ const SIDE_PANEL_DEFAULT_ORDER = [
   "Symmetry",
   "Density map",
   "View",
-  "Animation",
 ];
 const MAX_RECENT_FILES = 10;
 const MAX_SELECTION_HISTORY = 10;
 const MAX_COMMAND_HISTORY = 100;
-const CAMERA_PREVIEW_SCALE = 0.625;
+const CAMERA_PREVIEW_SCALE = 1;
 const CAMERA_SETTLE_RENDER_DELAY = 72;
 const MOLECULE_RENDERER_TYPES = [
   "anisou",
@@ -596,7 +595,7 @@ function recordStatus(message) {
   if (!message || statusTrail.at(-1) === message) return;
   statusTrail.push(message);
   statusTrail = statusTrail.slice(-80);
-  statusHistory.textContent = statusTrail.join("\n") || "CueMol2 Rust core";
+  statusHistory.textContent = statusTrail.join("\n") || "cuemol-rs Rust core";
   statusHistory.scrollTop = statusHistory.scrollHeight;
 }
 
@@ -607,11 +606,12 @@ function closeMenus(except = null) {
   closeHistoryMenus();
 }
 
-let bottomPanelHeight = 148;
-let expandedBottomPanelHeight = 148;
+let bottomPanelHeight = 180;
+let expandedBottomPanelHeight = 180;
 try {
-  const storedBottomPanelHeight = Number(localStorage.getItem(BOTTOM_PANEL_HEIGHT_STORAGE_KEY));
-  if (Number.isFinite(storedBottomPanelHeight)) {
+  const savedBottomPanelHeight = localStorage.getItem(BOTTOM_PANEL_HEIGHT_STORAGE_KEY);
+  const storedBottomPanelHeight = Number(savedBottomPanelHeight);
+  if (savedBottomPanelHeight !== null && Number.isFinite(storedBottomPanelHeight)) {
     bottomPanelHeight = storedBottomPanelHeight;
     if (storedBottomPanelHeight >= 80) expandedBottomPanelHeight = storedBottomPanelHeight;
   }
@@ -686,11 +686,12 @@ function setupBottomPanelSplitter() {
   window.addEventListener("resize", () => setBottomPanelHeight(bottomPanelHeight));
 }
 
-let sidePanelWidth = 248;
-let expandedSidePanelWidth = 248;
+let sidePanelWidth = 260;
+let expandedSidePanelWidth = 260;
 try {
-  const storedSidePanelWidth = Number(localStorage.getItem(SIDE_PANEL_WIDTH_STORAGE_KEY));
-  if (Number.isFinite(storedSidePanelWidth)) {
+  const savedSidePanelWidth = localStorage.getItem(SIDE_PANEL_WIDTH_STORAGE_KEY);
+  const storedSidePanelWidth = Number(savedSidePanelWidth);
+  if (savedSidePanelWidth !== null && Number.isFinite(storedSidePanelWidth)) {
     sidePanelWidth = storedSidePanelWidth;
     if (storedSidePanelWidth >= 100) expandedSidePanelWidth = storedSidePanelWidth;
   }
@@ -798,6 +799,8 @@ function showBottomPanel(name) {
     scheduleMoleculeDetailsRefresh(0);
   } else if (name === "trajectory") {
     renderTrajectory();
+  } else if (name === "animation") {
+    renderAnimation();
   }
 }
 
@@ -948,6 +951,8 @@ function dialogTextArea(label, value) {
   const input = document.createElement("textarea");
   input.value = value;
   input.spellcheck = false;
+  input.setAttribute("autocorrect", "off");
+  input.setAttribute("autocapitalize", "off");
   wrapper.append(text, input);
   dialogContent.append(wrapper);
   return input;
@@ -5547,7 +5552,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     "About plugins",
     "About config",
     "Addon manager",
-    "About CueMol2",
+    "About cuemol-rs",
   ].includes(title);
   const usesViewProperties = title === "View Property";
   const usesCameraProperties = title === "Camera Properties";
@@ -5570,7 +5575,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       usesPreferences ||
       usesPovRender ||
       usesAnimationRender ||
-      (usesApplicationInfo && title !== "About CueMol2"),
+      (usesApplicationInfo && title !== "About cuemol-rs"),
   );
   let applicationInfo = null;
   let viewProperties = null;
@@ -5657,15 +5662,21 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         const name = document.createElement("strong");
         name.textContent = feature;
         const source = document.createElement("small");
-        source.textContent = "Bundled with CueMol2";
+        source.textContent = "Bundled with cuemol-rs";
         row.append(name, source, state);
         features.append(row);
       }
       dialogContent.append(features);
     }
-  } else if (title === "About CueMol2") {
+  } else if (title === "About cuemol-rs") {
+    const logo = document.createElement("img");
+    logo.src = "logo.png";
+    logo.alt = "cuemol-rs";
+    logo.width = 128;
+    logo.height = 128;
+    dialogContent.append(logo);
     const heading = document.createElement("h2");
-    heading.textContent = "CueMol2";
+    heading.textContent = "cuemol-rs";
     dialogContent.append(
       heading,
       dialogParagraph("Molecular visualization system — Rust desktop implementation."),
@@ -9170,12 +9181,16 @@ function applyCenterMark(value) {
 }
 
 function restoreDefaultPanels() {
+  selectCueMolActivity("explorer", false);
+  setSidePanelWidth(260, true);
+  setBottomPanelHeight(180, true);
+  setRibbonCollapsed(false, true);
   const openPanels = new Set(["Workspace", "MolStruct", "Selection", "Coloring", "Density map"]);
   applySidePanelOrder(SIDE_PANEL_DEFAULT_ORDER);
-  document.querySelectorAll("[data-side-card]").forEach((card) => {
+  sidePanel.querySelectorAll("[data-side-card]").forEach((card) => {
     card.hidden = false;
     setSidePanelCardHeight(card, null);
-    const title = card.querySelector(".side-title span:nth-child(2)")?.textContent;
+    const title = sidePanelCardName(card);
     const open = openPanels.has(title);
     card.classList.toggle("open", open);
     const button = card.querySelector("[data-panel-toggle]");
@@ -9192,18 +9207,18 @@ function restoreDefaultPanels() {
 }
 
 function sidePanelCard(name) {
-  return [...document.querySelectorAll("[data-side-card]")].find(
-    (item) => item.querySelector(".side-title span:nth-child(2)")?.textContent === name,
+  return [...sidePanel.querySelectorAll("[data-side-card]")].find(
+    (item) => sidePanelCardName(item) === name,
   );
 }
 
 function sidePanelCardName(card) {
-  return card?.querySelector(".side-title span:nth-child(2)")?.textContent || "";
+  return card?.dataset.panelName || card?.querySelector(".side-title span:nth-child(2)")?.textContent || "";
 }
 
 function applySidePanelOrder(order) {
   const cards = new Map(
-    [...document.querySelectorAll("[data-side-card]")].map((card) => [
+    [...sidePanel.querySelectorAll("[data-side-card]")].map((card) => [
       sidePanelCardName(card),
       card,
     ]),
@@ -9239,8 +9254,8 @@ function setSidePanelCardHeight(card, height, persist = false) {
 }
 
 function syncSidePanelSplitters() {
-  const cards = [...document.querySelectorAll("[data-side-card]")].filter(
-    (card) => !card.hidden,
+  const cards = [...sidePanel.querySelectorAll("[data-side-card]")].filter(
+    (card) => !card.hidden && !card.classList.contains("activity-inactive"),
   );
   cards.forEach((card, index) => {
     const splitter = card.querySelector(".side-panel-splitter");
@@ -9250,7 +9265,7 @@ function syncSidePanelSplitters() {
 
 function saveSidePanelState() {
   const state = { __order: [] };
-  for (const card of document.querySelectorAll("[data-side-card]")) {
+  for (const card of sidePanel.querySelectorAll("[data-side-card]")) {
     const name = sidePanelCardName(card);
     if (name) {
       state.__order.push(name);
@@ -9279,7 +9294,7 @@ function restoreSidePanelState() {
   if (Array.isArray(state.__order)) {
     applySidePanelOrder(state.__order);
   }
-  for (const card of document.querySelectorAll("[data-side-card]")) {
+  for (const card of sidePanel.querySelectorAll("[data-side-card]")) {
     const saved = state[sidePanelCardName(card)];
     if (!saved || typeof saved !== "object") continue;
     card.hidden = Boolean(saved.hidden);
@@ -9294,7 +9309,7 @@ function restoreSidePanelState() {
 }
 
 function setupSidePanelHeightSplitters() {
-  for (const card of document.querySelectorAll("[data-side-card]")) {
+  for (const card of sidePanel.querySelectorAll("[data-side-card]")) {
     const splitter = document.createElement("div");
     splitter.className = "side-panel-splitter";
     splitter.tabIndex = 0;
@@ -9345,11 +9360,11 @@ function setupSidePanelHeightSplitters() {
 function setupSidePanelReordering() {
   let sourceCard = null;
   const clearDropIndicators = () => {
-    document.querySelectorAll("[data-side-card]").forEach((card) => {
+    sidePanel.querySelectorAll("[data-side-card]").forEach((card) => {
       card.classList.remove("panel-drop-before", "panel-drop-after");
     });
   };
-  for (const card of document.querySelectorAll("[data-side-card]")) {
+  for (const card of sidePanel.querySelectorAll("[data-side-card]")) {
     const title = card.querySelector("[data-panel-toggle]");
     if (!title) continue;
     title.draggable = true;
@@ -9386,7 +9401,7 @@ function setupSidePanelReordering() {
 
 function sidePanelIsExpanded(name) {
   const card = sidePanelCard(name);
-  return Boolean(card && !card.hidden && card.classList.contains("open"));
+  return Boolean(card && !card.hidden && !card.classList.contains("activity-inactive") && card.classList.contains("open"));
 }
 
 function renderSidePanel(name) {
@@ -9418,8 +9433,8 @@ function renderSidePanel(name) {
 }
 
 function syncSidePanelVisibility() {
-  const cards = [...document.querySelectorAll("[data-side-card]")];
-  const anyVisible = cards.some((card) => !card.hidden);
+  const cards = [...sidePanel.querySelectorAll("[data-side-card]")];
+  const anyVisible = cards.some((card) => !card.hidden && !card.classList.contains("activity-inactive")) || ["actions", "view"].includes(cueMolActivity);
   sidePanel.hidden = !anyVisible;
   contentHolder?.classList.toggle("no-visible-side-panels", !anyVisible);
   document.querySelectorAll("[data-panel-menu]").forEach((element) => {
@@ -9445,14 +9460,14 @@ async function renderWindowsMenu() {
     windowsMenu.replaceChildren();
     windows.forEach((appWindow, index) => {
       const suffix = windows.length > 1 ? ` (${index + 1})` : "";
-      const item = button(`CueMol2${suffix}`, appWindow.label === current.label ? "checked" : "", async () => {
+      const item = button(`cuemol-rs${suffix}`, appWindow.label === current.label ? "checked" : "", async () => {
         closeMenus();
         await appWindow.setFocus();
       });
       windowsMenu.append(item);
     });
   } catch (error) {
-    console.warn("Cannot enumerate CueMol2 windows:", error);
+    console.warn("Cannot enumerate cuemol-rs windows:", error);
   }
 }
 
@@ -9466,7 +9481,7 @@ async function handleLocalAction(action) {
       }
       new WebviewWindow(`cuemol-${Date.now()}`, {
         url: "index.html",
-        title: "CueMol2",
+        title: "cuemol-rs",
         width: 1024,
         height: 768,
         minWidth: 760,
@@ -13521,6 +13536,7 @@ function renderInspector(renderKey = workspaceChromeRenderKey()) {
   const style = workspaceSelectionKind === "style" ? selectedStyle() : null;
   inspectorTitle.textContent =
     object?.name || map?.name || surface?.name || lwObject?.name || camera?.name || style?.name || "No object";
+  renderTritiumInspector(object || map || surface || lwObject, camera, style);
   const labels = style
     ? ["Scope", "Read only", "Source"]
     : camera
@@ -15324,6 +15340,9 @@ function renderColoringDeck(target) {
     case "ScriptColoring": {
       const editor = document.createElement("textarea");
       editor.id = "coloring-script-text";
+      editor.spellcheck = false;
+      editor.setAttribute("autocorrect", "off");
+      editor.setAttribute("autocapitalize", "off");
       editor.className = "coloring-script-text";
       editor.rows = 10;
       editor.value = state.attrs.script || "";
@@ -17104,8 +17123,7 @@ function scheduleSecondaryPanelRender() {
       renderTrajectory();
     }
     if (
-      sidePanelIsExpanded("Animation") ||
-      document.querySelector('[data-ribbon-panel="animation"]')?.classList.contains("active")
+      document.querySelector('[data-bottom-panel="animation"]')?.classList.contains("active")
     ) {
       renderAnimation();
     }
@@ -17139,6 +17157,7 @@ function renderShell() {
   renderSceneTree(workspaceRenderKey);
   renderInspector(workspaceRenderKey);
   renderMolStruct();
+  renderTritiumShell();
   scheduleSecondaryPanelRender();
 }
 
@@ -17172,7 +17191,7 @@ function renderUndoAndStatus() {
 }
 
 function viewportDimensions(forceMeasure = false) {
-  const pixelRatio = preferences?.useHidpi ? window.devicePixelRatio || 1 : 1;
+  const pixelRatio = preferences?.useHidpi !== false ? window.devicePixelRatio || 1 : 1;
   if (
     !forceMeasure &&
     cachedViewportDimensions &&
@@ -17182,9 +17201,10 @@ function viewportDimensions(forceMeasure = false) {
   }
   const bounds = viewport.getBoundingClientRect();
   cachedViewportPixelRatio = pixelRatio;
+  const scale = Math.min(pixelRatio, 4096 / Math.max(1, bounds.width, bounds.height));
   cachedViewportDimensions = {
-    width: Math.max(64, Math.round(bounds.width * pixelRatio)),
-    height: Math.max(64, Math.round(bounds.height * pixelRatio)),
+    width: Math.max(64, Math.round(bounds.width * scale)),
+    height: Math.max(64, Math.round(bounds.height * scale)),
   };
   return cachedViewportDimensions;
 }
@@ -17572,12 +17592,13 @@ async function flushCameraCommands() {
     }
   } finally {
     cameraRequest = null;
-    if (snapshotHasRenderableContent()) scheduleRender(CAMERA_SETTLE_RENDER_DELAY);
+    if (!drag && snapshotHasRenderableContent()) scheduleRender(CAMERA_SETTLE_RENDER_DELAY);
   }
 }
 
 function cameraCommand(action, x = 0, y = 0) {
   if (!invoke) return Promise.resolve();
+  clearTimeout(renderTimer);
   enqueueCameraCommand(action, x, y);
   if (!cameraRequest) cameraRequest = flushCameraCommands();
   return cameraRequest;
@@ -17782,7 +17803,7 @@ async function persistWindowGeometry(appWindow) {
       }),
     );
   } catch (error) {
-    console.warn("Cannot save CueMol2 window geometry:", error);
+    console.warn("Cannot save cuemol-rs window geometry:", error);
   }
 }
 
@@ -17827,7 +17848,7 @@ async function setupWindowGeometryPersistence() {
       );
     }
   } catch (error) {
-    console.warn("Cannot restore CueMol2 window geometry:", error);
+    console.warn("Cannot restore cuemol-rs window geometry:", error);
   }
   const scheduleSave = () => {
     clearTimeout(windowGeometrySaveTimer);
@@ -18182,9 +18203,15 @@ document.querySelectorAll("[data-center-mark]").forEach((element) => {
 document.querySelectorAll("[data-panel-menu]").forEach((element) => {
   element.addEventListener("click", () => {
     closeMenus();
+    if (element.dataset.panelMenu === "Animation") { showBottomPanel("animation"); return; }
     const card = sidePanelCard(element.dataset.panelMenu);
     if (!card) return;
-    card.hidden = !card.hidden;
+    if (card.classList.contains("activity-inactive")) {
+      selectCueMolActivity(card.dataset.activityPanel, false);
+      card.hidden = false;
+    } else {
+      card.hidden = !card.hidden;
+    }
     syncSidePanelVisibility();
     if (!card.hidden && sidePanelWidth === 0) {
       setSidePanelWidth(expandedSidePanelWidth, true);
@@ -18228,7 +18255,7 @@ document.querySelectorAll("[data-panel-toggle]").forEach((element) => {
     const open = card.classList.toggle("open");
     element.setAttribute("aria-expanded", String(open));
     element.querySelector(".disclosure").textContent = open ? "▾" : "▸";
-    const name = element.querySelector("span:nth-child(2)")?.textContent;
+    const name = sidePanelCardName(card);
     if (open && name) renderSidePanel(name);
     syncSidePanelSplitters();
     saveSidePanelState();
@@ -18561,6 +18588,7 @@ function configuredPointerAction(event) {
 }
 
 viewport.addEventListener("pointerdown", (event) => {
+  if (event.target.closest(".viewport-palette")) return;
   const action = configuredPointerAction(event);
   if (!action) return;
   viewport.setPointerCapture(event.pointerId);
@@ -18570,8 +18598,13 @@ viewport.addEventListener("pointerdown", (event) => {
     y: event.clientY,
     dx: 0,
     dy: 0,
+    sentDx: 0,
+    sentDy: 0,
+    frame: null,
+    moved: false,
     action,
   };
+  hoverPending = null;
   viewport.classList.add("dragging");
   dragReadout.textContent = drag.action.toUpperCase();
 });
@@ -18580,13 +18613,13 @@ let hoverPending = null;
 let hoverRunning = false;
 async function updateHover(x, y) {
   hoverPending = {x, y};
-  if (hoverRunning || !invoke) return;
+  if (hoverRunning || !invoke || drag || cameraRequest) return;
   hoverRunning = true;
   try {
     while (hoverPending) {
       const point = hoverPending;
       hoverPending = null;
-      const sequence = ++requestSequence;
+      const sequence = requestSequence;
       const result = await invoke("hover_at_screen", {...point, ...viewportDimensions()});
       if (result.image) applyViewport(result, sequence);
     }
@@ -18595,6 +18628,7 @@ async function updateHover(x, y) {
 }
 viewport.addEventListener("pointerleave", () => { if (!drag) void updateHover(-1, -1); });
 viewport.addEventListener("pointermove", (event) => {
+  if (event.target.closest(".viewport-palette")) return;
   if (!drag) {
     const bounds = viewport.getBoundingClientRect();
     const size = viewportDimensions();
@@ -18613,8 +18647,37 @@ viewport.addEventListener("pointermove", (event) => {
     selectionRectangle.style.width = `${Math.abs(drag.dx)}px`;
     selectionRectangle.style.height = `${Math.abs(drag.dy)}px`;
     selectionRectangle.classList.add("visible");
+  } else if (drag.frame === null) {
+    drag.frame = requestAnimationFrame(() => {
+      if (!drag) return;
+      drag.frame = null;
+      updateDragCamera();
+    });
   }
 });
+
+function updateDragCamera() {
+  if (!drag || drag.action === "rect-select") return;
+  if (!drag.moved && Math.abs(drag.dx) + Math.abs(drag.dy) < 2) return;
+  drag.moved = true;
+  const dx = drag.dx - drag.sentDx;
+  const dy = drag.dy - drag.sentDy;
+  if (dx === 0 && dy === 0) return;
+  if (["zoom", "slab", "zoom-slab"].includes(drag.action)) {
+    drag.axis ||= Math.abs(drag.dx) > Math.abs(drag.dy) ? "x" : "y";
+    const delta = drag.axis === "x" ? dx : dy;
+    const action = drag.action === "zoom-slab" ? (drag.axis === "x" ? "slab" : "zoom") : drag.action;
+    cameraCommand(action, Math.exp(delta * 0.01));
+  } else {
+    const bounds = viewport.getBoundingClientRect();
+    const size = viewportDimensions();
+    const radius = Math.max(0.1, preferences?.trackballRadius || 0.8);
+    const scale = drag.action === "rotate" ? 0.35 * (0.8 / radius) : size.height / bounds.height;
+    cameraCommand(drag.action, dx * scale, dy * scale);
+  }
+  drag.sentDx = drag.dx;
+  drag.sentDy = drag.dy;
+}
 
 async function fillAtomPicker(x, y) {
   const target = atomPickerTarget;
@@ -18644,15 +18707,22 @@ async function fillAtomPicker(x, y) {
 
 function finishDrag(event) {
   if (!drag || drag.pointerId !== event.pointerId) return;
+  drag.dx = event.clientX - drag.x;
+  drag.dy = event.clientY - drag.y;
+  if (drag.frame !== null) cancelAnimationFrame(drag.frame);
+  updateDragCamera();
   const completed = drag;
   drag = null;
   viewport.classList.remove("dragging");
   selectionRectangle.classList.remove("visible");
   dragReadout.textContent = "";
   const bounds = viewport.getBoundingClientRect();
-  const startX = completed.x - bounds.left;
-  const startY = completed.y - bounds.top;
-  if (Math.abs(completed.dx) + Math.abs(completed.dy) < 2) {
+  const size = viewportDimensions();
+  const scaleX = size.width / bounds.width;
+  const scaleY = size.height / bounds.height;
+  const startX = (completed.x - bounds.left) * scaleX;
+  const startY = (completed.y - bounds.top) * scaleY;
+  if (!completed.moved && Math.abs(completed.dx) + Math.abs(completed.dy) < 2) {
     if (completed.action === "rotate" || completed.action === "rect-select") {
       if (atomPickerTarget) {
         void fillAtomPicker(startX, startY);
@@ -18670,36 +18740,29 @@ function finishDrag(event) {
     mutateWithViewport("select_screen_rect", {
       x1: startX,
       y1: startY,
-      x2: startX + completed.dx,
-      y2: startY + completed.dy,
+      x2: startX + completed.dx * scaleX,
+      y2: startY + completed.dy * scaleY,
       ...viewportDimensions(),
     });
-  } else if (completed.action === "zoom" || completed.action === "slab") {
-    const delta = Math.abs(completed.dx) > Math.abs(completed.dy) ? completed.dx : completed.dy;
-    cameraCommand(completed.action, Math.exp(delta * 0.01));
-  } else if (completed.action === "zoom-slab") {
-    if (Math.abs(completed.dx) > Math.abs(completed.dy)) {
-      cameraCommand("slab", Math.exp(completed.dx * 0.01));
-    } else {
-      cameraCommand("zoom", Math.exp(completed.dy * 0.01));
-    }
-  } else {
-    const radius = Math.max(0.1, preferences?.trackballRadius || 0.8);
-    const scale = completed.action === "rotate" ? 0.35 * (0.8 / radius) : 1;
-    cameraCommand(completed.action, completed.dx * scale, completed.dy * scale);
+  } else if (!cameraRequest && snapshotHasRenderableContent()) {
+    scheduleRender(0);
   }
 }
 
 viewport.addEventListener("pointerup", finishDrag);
-viewport.addEventListener("pointercancel", () => {
+viewport.addEventListener("pointercancel", (event) => {
+  if (!drag || drag.pointerId !== event.pointerId) return;
+  if (drag?.frame != null) cancelAnimationFrame(drag.frame);
   drag = null;
   viewport.classList.remove("dragging");
   selectionRectangle.classList.remove("visible");
   dragReadout.textContent = "";
+  if (!cameraRequest && snapshotHasRenderableContent()) scheduleRender(0);
 });
 viewport.addEventListener(
   "wheel",
   (event) => {
+    if (event.target.closest(".viewport-palette")) return;
     event.preventDefault();
     const preset = preferences?.mousePreset || "DefaultViewInConf";
     const trackpad = preset === "TrackpadViewInConf" || preferences?.multitouchPad;
@@ -18708,8 +18771,9 @@ viewport.addEventListener(
     let y = 0;
     if (trackpad && !event.ctrlKey) {
       action = "pan";
-      x = event.deltaX;
-      y = event.deltaY;
+      const scale = viewportDimensions().height / viewport.getBoundingClientRect().height;
+      x = event.deltaX * scale;
+      y = event.deltaY * scale;
     } else if (preset === "PymolViewInConf" && !(event.ctrlKey && event.shiftKey)) {
       action = "slab";
     }
@@ -18840,11 +18904,12 @@ setupSidePanelHeightSplitters();
 setupSidePanelSplitter();
 setupBottomPanelSplitter();
 setupRibbonCollapse();
+setupTritiumShell();
 
 async function start() {
   if (!invoke) {
     statusText.textContent = "Tauri IPC unavailable";
-    showError("Run cargo run -p cuemol-desktop --bin cuemol-desktop-tauri --features tauri-gui");
+    showError("Run cargo run -p cuemol-desktop --bin cuemol-rs --features tauri-gui");
     return;
   }
   try {

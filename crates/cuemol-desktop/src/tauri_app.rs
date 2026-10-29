@@ -33,7 +33,7 @@ use crate::{
 };
 use cuemol_desktop_core::effects::ViewportOptions;
 
-const MAX_VIEW_DIM: u32 = 1_600;
+const MAX_VIEW_DIM: u32 = 4_096;
 const MIN_INTERACTIVE_RENDER_SCALE: f64 = 0.5;
 
 static SHARED_SCENE_RENDERER: OnceLock<Option<Arc<SceneRenderer>>> = OnceLock::new();
@@ -50,11 +50,15 @@ fn scaled_viewport_dimensions(width: u32, height: u32, scale: f64) -> (u32, u32)
     } else {
         1.0
     };
-    let scaled = |value: u32| {
-        let value = value.clamp(64, MAX_VIEW_DIM);
-        ((f64::from(value) * scale).round() as u32).clamp(64, MAX_VIEW_DIM)
-    };
-    (scaled(width), scaled(height))
+    let width = f64::from(width.max(1));
+    let height = f64::from(height.max(1));
+    let scale = scale
+        .max(64.0 / width.min(height))
+        .min(f64::from(MAX_VIEW_DIM) / width.max(height));
+    (
+        (width * scale).round().max(1.0) as u32,
+        (height * scale).round().max(1.0) as u32,
+    )
 }
 
 #[derive(Serialize)]
@@ -2607,7 +2611,7 @@ impl AppModel {
             })
             .collect();
         ApplicationInfoDto {
-            product_name: "CueMol2",
+            product_name: "cuemol-rs",
             version: env!("CARGO_PKG_VERSION"),
             target: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
             features,
@@ -2634,7 +2638,7 @@ impl AppModel {
                 self.desktop.config_value("general.useragent.locale"),
                 "en-US",
             ),
-            use_hidpi: config_bool(&self.desktop, "cuemol2.ui.view.use_hidpi", false),
+            use_hidpi: config_bool(&self.desktop, "cuemol2.ui.view.use_hidpi", true),
             mouse_preset: nonempty_or(
                 self.desktop.config_value("cuemol2.ui.viewinconf"),
                 "DefaultViewInConf",
@@ -6370,8 +6374,7 @@ impl AppModel {
     }
 
     fn viewport_metadata(&mut self, width: u32, height: u32) -> ViewportDto {
-        let width = width.clamp(64, MAX_VIEW_DIM);
-        let height = height.clamp(64, MAX_VIEW_DIM);
+        let (width, height) = scaled_viewport_dimensions(width, height, 1.0);
         self.view_width = width;
         self.view_height = height;
         let labels = cuemol_desktop_core::stereo::labels(
@@ -7768,6 +7771,14 @@ impl AppModel {
             self.modified_scenes.insert(scene_uid);
         }
         self.redo_stack.clear();
+    }
+
+    fn push_script_undo(&mut self, snapshot: AppModelUndo) -> bool {
+        if snapshot.desktop.same_undo_state(&self.desktop) && snapshot.selection == self.selection {
+            return false;
+        }
+        self.push_undo(snapshot);
+        true
     }
 
     fn restore_undo(&mut self, snapshot: AppModelUndo) -> Result<(), String> {
@@ -12490,13 +12501,11 @@ fn handle_model_request(
                     model.status = "Script error".to_string();
                 }
             }
-            if let Some(scene_uid) = model.desktop.active_scene() {
-                model.modified_scenes.insert(scene_uid);
-            }
             model.restore_script_view();
-            model.invalidate_snapshot(false);
-            model.push_undo(undo);
-            model.touch_structure_details();
+            if model.push_script_undo(undo) {
+                model.invalidate_snapshot(false);
+                model.touch_structure_details();
+            }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::ExecuteScriptFile(path) => {
@@ -12520,10 +12529,11 @@ fn handle_model_request(
                 .log_lines
                 .push(format!("Exec internal JS: {path} done."));
             model.restore_script_view();
-            model.invalidate_snapshot(false);
             model.status = "Script executed".to_string();
-            model.push_undo(undo);
-            model.touch_structure_details();
+            if model.push_script_undo(undo) {
+                model.invalidate_snapshot(false);
+                model.touch_structure_details();
+            }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::ExportPov { path } => {
@@ -16848,11 +16858,55 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a GPU and CUEMOL_UI_PROFILE_FILE"]
+    fn tauri_interactive_frame_profile() {
+        use std::time::Instant;
+        let path = std::env::var("CUEMOL_UI_PROFILE_FILE").expect("CUEMOL_UI_PROFILE_FILE");
+        let mut model = model_without_gpu();
+        model.open_paths(vec![path]).unwrap();
+        let warmup = model.render(1280, 720);
+        assert!(warmup.image.is_some(), "GPU viewport must render");
+        let mut render_ms = Vec::new();
+        let mut encode_ms = Vec::new();
+        for _ in 0..15 {
+            model.update_camera("rotate", 1.5, 0.75, 720).unwrap();
+            let before = Instant::now();
+            let rgba = model
+                .render_snapshot_rgba(
+                    model.renderer.as_ref().unwrap(),
+                    model.render_snapshot.as_ref().unwrap(),
+                    1280,
+                    720,
+                )
+                .unwrap();
+            render_ms.push(before.elapsed().as_secs_f64() * 1000.0);
+            let before = Instant::now();
+            let png = encode_rgba_png(&rgba, 1280, 720);
+            assert!(!png.is_empty());
+            encode_ms.push(before.elapsed().as_secs_f64() * 1000.0);
+            assert_eq!(
+                image::load_from_memory(&png)
+                    .unwrap()
+                    .into_rgba8()
+                    .into_raw(),
+                rgba
+            );
+        }
+        render_ms.sort_by(f64::total_cmp);
+        encode_ms.sort_by(f64::total_cmp);
+        println!("{{\"width\":1280,\"height\":720,\"frames\":15,\"render_median_ms\":{},\"png_median_ms\":{}}}", render_ms[7], encode_ms[7]);
+    }
+
+    #[test]
     fn interactive_viewport_dimensions_reduce_pixels_and_preserve_full_renders() {
         assert_eq!(scaled_viewport_dimensions(1_000, 800, 0.625), (625, 500));
         assert_eq!(
             scaled_viewport_dimensions(3_200, 2_400, 0.625),
-            (1_000, 1_000)
+            (2_000, 1_500)
+        );
+        assert_eq!(
+            scaled_viewport_dimensions(8_192, 4_096, 1.0),
+            (4_096, 2_048)
         );
         assert_eq!(scaled_viewport_dimensions(80, 80, 0.1), (64, 64));
         assert_eq!(scaled_viewport_dimensions(1_000, 800, 2.0), (1_000, 800));
@@ -17651,7 +17705,7 @@ mod tests {
         let ModelResponse::ApplicationInfo(info) = response else {
             panic!("expected application information");
         };
-        assert_eq!(info.product_name, "CueMol2");
+        assert_eq!(info.product_name, "cuemol-rs");
         assert!(!info.plugins.is_empty());
         assert!(info
             .plugins
@@ -24331,6 +24385,53 @@ mod tests {
         assert_eq!(snapshot.status, "Script error");
         assert_eq!(snapshot.log_lines[2], "> this is not js (((");
         assert!(snapshot.log_lines[3].contains("SyntaxError"));
+    }
+
+    #[test]
+    fn read_only_scripts_preserve_tauri_undo_and_modified_state() {
+        let mut model = model_without_gpu();
+        let modified = model.modified_scenes.clone();
+        for source in ["print(1);", "throw new Error('probe');"] {
+            handle_model_request(&mut model, ModelRequest::ExecuteScript(source.into())).unwrap();
+        }
+        assert!(model.undo_stack.is_empty());
+        assert_eq!(model.modified_scenes, modified);
+        handle_model_request(
+            &mut model,
+            ModelRequest::ExecuteScript("scene.setName('edited');".into()),
+        )
+        .unwrap();
+        assert_eq!(model.undo_stack.len(), 1);
+        model.undo(0).unwrap();
+        handle_model_request(
+            &mut model,
+            ModelRequest::ExecuteScript("print(scene.name);".into()),
+        )
+        .unwrap();
+        assert_eq!(model.redo_stack.len(), 1);
+        model.redo(0).unwrap();
+        assert_eq!(model.desktop.active_scene_summary().unwrap().name, "edited");
+
+        let before = model.capture_script_undo();
+        let script_path = std::env::temp_dir().join(format!(
+            "cuemol-tauri-failed-script-{}.js",
+            std::process::id()
+        ));
+        std::fs::write(
+            &script_path,
+            "scene.setName('discarded'); var v=cuemol.getView(scene.activeViewID); v.zoom=77; throw new Error('rollback probe');",
+        )
+        .unwrap();
+        let error = handle_model_request(
+            &mut model,
+            ModelRequest::ExecuteScriptFile(script_path.to_string_lossy().into_owned()),
+        );
+        std::fs::remove_file(script_path).unwrap();
+        assert!(error.is_err());
+        assert!(before.desktop.same_undo_state(&model.desktop));
+        assert_eq!(before.camera, model.camera);
+        assert_eq!(before.modified_scenes, model.modified_scenes);
+        assert_eq!(model.undo_stack.len(), 1);
     }
 
     #[test]
