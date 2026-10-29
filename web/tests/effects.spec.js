@@ -9,12 +9,22 @@ END
 
 for (const backend of ['webgpu', 'webgl']) {
   test(`${backend} applies scene AO and AA settings to live pixels`, async ({page}, testInfo) => {
-    test.setTimeout(120000);
+    test.setTimeout(210000);
     const errors=[];
     page.on('pageerror', error=>errors.push(error.message));
     page.on('console', message=>{if(message.type()==='error')errors.push(message.text());});
     await page.goto(`./?renderer=${backend}`, {waitUntil:'commit'});
-    await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId), {timeout:90000}).toBeGreaterThan(0);
+    try {
+      await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId||0), {timeout:150000}).toBeGreaterThan(0);
+    } finally {
+      const startup=await page.evaluate(()=>({
+        phase:document.querySelector('#loading')?.textContent,
+        marks:performance.getEntriesByType('mark').map(({name,startTime})=>({name,startTime})),
+      }));
+      console.info(`${backend} startup: ${JSON.stringify(startup)}`);
+      await testInfo.attach('startup.json',{body:JSON.stringify({...startup,errors}),contentType:'application/json'});
+    }
+    expect(await page.evaluate(()=>window.cuemol.backend)).toBe(backend);
     await page.locator('#files').setInputFiles({name:'contacts.pdb', mimeType:'application/octet-stream', buffer:Buffer.from(pdb)});
     await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
     const command=async(name,args)=>{

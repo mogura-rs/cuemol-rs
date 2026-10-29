@@ -8,8 +8,13 @@ import {initKernels} from './kernels.js';
 import './oidn.js';
 import {installViewInput} from './input.js';
 const loading=document.getElementById('loading');
+performance.mark('cuemol-startup');
 try {
-  await Promise.all([init(), initKernels()]);
+  await Promise.all([
+    init().then(()=>performance.mark('cuemol-runtime-ready')),
+    initKernels().then(()=>performance.mark('cuemol-kernels-ready')),
+  ]);
+  loading.querySelector('span').textContent='Starting graphics…';
   document.addEventListener('dragover',e=>{e.preventDefault();e.stopImmediatePropagation();},true);
   document.addEventListener('drop',e=>{e.preventDefault();e.stopImmediatePropagation();for(const file of e.dataTransfer.files)open_file(file);},true);
   let webgpu=false;
@@ -18,7 +23,9 @@ try {
     try { const adapter=await navigator.gpu.requestAdapter(); if(adapter){const device=await adapter.requestDevice();await device.queue.onSubmittedWorkDone();device.destroy();webgpu=true;} }
     catch(error) { console.warn('WebGPU is unavailable; using WebGL2.',error); }
   }
+  performance.mark('cuemol-adapter-ready');
   await start(document.getElementById('viewport'),!webgpu); loading.remove();
+  performance.mark('cuemol-graphics-ready');
   window.cuemol={backend:webgpu?'webgpu':'webgl',command:(name,args={})=>command(name,JSON.stringify(args)),status:()=>JSON.parse(status()),agent:{start:(prompt,settings,apiKey)=>agent_turn(prompt,JSON.stringify(settings),apiKey),cancel:()=>agent_cancel()}};
   installViewInput(document.getElementById('viewport'), view_input, () => window.cuemol.status());
   document.getElementById('files').onchange=e=>{for(const file of e.target.files)open_file(file);e.target.value='';};
