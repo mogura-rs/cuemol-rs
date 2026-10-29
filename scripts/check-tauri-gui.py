@@ -91,8 +91,24 @@ def main():
                               for r, g, b in image.getdata()])
                 return mask
 
-            before = wait_for(lambda: mask if (mask := capture()).histogram()[255] > 100 else None,
-                              timeout=90)
+            def settled():
+                previous, unchanged = None, 0
+
+                def sample():
+                    nonlocal previous, unchanged
+                    current = capture()
+                    if previous is not None and not ImageChops.difference(previous, current).getbbox():
+                        unchanged += 1
+                    else:
+                        unchanged = 0
+                    previous = current
+                    return current if current.getbbox() and unchanged >= 2 else None
+
+                return wait_for(sample)
+
+            wait_for(lambda: mask if (mask := capture()).histogram()[255] > 100 else None,
+                     timeout=90)
+            before = settled()
             capture("before.png")
             left, top, right, bottom = before.getbbox()
             scale_x, scale_y = width / before.width, height / before.height
@@ -116,12 +132,15 @@ def main():
             duration = time.monotonic() - started
             if changes < 3:
                 raise RuntimeError(f"Only {changes} label updates appeared before mouse release")
-            rotated = wait_for(lambda: mask if (mask := capture()).getbbox()
-                              and ImageChops.difference(before, mask).getbbox() else None)
+            rotated = settled()
+            if not ImageChops.difference(before, rotated).getbbox():
+                raise RuntimeError("Rotation did not persist after mouse release")
             capture("rotated.png")
             pyautogui.scroll(3)
             wait_for(lambda: mask if (mask := capture()).getbbox()
                      and ImageChops.difference(rotated, mask).getbbox() else None)
+            if not ImageChops.difference(rotated, settled()).getbbox():
+                raise RuntimeError("Wheel input did not persist after rendering settled")
             capture("zoomed.png")
             report.update(ok=True, window=bounds, label_pixels=before.histogram()[255],
                           updates_before_release=changes, drag_seconds=duration,
