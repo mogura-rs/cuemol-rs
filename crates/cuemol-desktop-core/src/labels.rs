@@ -3,10 +3,16 @@ use ab_glyph::{point, Font, FontRef, ScaleFont};
 use std::collections::{HashMap, HashSet};
 use wgpu::util::DeviceExt;
 
+#[cfg(target_arch = "wasm32")]
+mod browser;
+#[cfg(not(target_arch = "wasm32"))]
+mod native;
+
 pub struct LabelImage {
     pub width: u32,
     pub height: u32,
     pub logical_size: [f32; 2],
+    pub origin: [f32; 2],
     pub alpha: Vec<u8>,
 }
 
@@ -15,18 +21,39 @@ pub fn rasterize_label(label: &GuiAtomLabel, scale: f32) -> LabelImage {
 }
 
 fn rasterize_label_limited(label: &GuiAtomLabel, scale: f32, limit: u32) -> LabelImage {
+    #[cfg(target_arch = "wasm32")]
+    let image = browser::rasterize(label, scale, limit);
+    #[cfg(not(target_arch = "wasm32"))]
+    let image = native::rasterize(label, scale, limit);
+    image.unwrap_or_else(|| rasterize_embedded(label, scale, limit))
+}
+
+fn pixel_size(label: &GuiAtomLabel, scale: f32) -> f32 {
+    let font_size = if label.font_size.is_finite() {
+        label.font_size
+    } else {
+        12.
+    };
+    let scale = if scale.is_finite() { scale } else { 1. };
+    (font_size.clamp(1., 512.) as f32 * scale).clamp(1., 1024.)
+}
+
+fn font_weight(label: &GuiAtomLabel) -> u16 {
+    match label.font_weight.to_ascii_lowercase().as_str() {
+        "bold" | "bolder" => 700,
+        "lighter" => 300,
+        value => value.parse::<u16>().unwrap_or(400).clamp(1, 1000),
+    }
+}
+
+fn rasterize_embedded(label: &GuiAtomLabel, scale: f32, limit: u32) -> LabelImage {
     let font = FontRef::try_from_slice(if label.font_name.to_ascii_lowercase().contains("mono") {
         epaint_default_fonts::HACK_REGULAR
     } else {
         epaint_default_fonts::UBUNTU_LIGHT
     })
     .expect("embedded label font is valid");
-    let font_size = if label.font_size.is_finite() {
-        label.font_size
-    } else {
-        12.
-    };
-    let size = (font_size.clamp(1., 512.) as f32 * scale).clamp(1., 1024.);
+    let size = pixel_size(label, scale);
     let scaled = font.as_scaled(size);
     let line_height = (scaled.height() + scaled.line_gap()).max(1.);
     let line_width = |line: &str| {
@@ -42,12 +69,9 @@ fn rasterize_label_limited(label: &GuiAtomLabel, scale: f32, limit: u32) -> Labe
         }
         width
     };
-    let italic = label.font_style.contains("italic") || label.font_style.contains("oblique");
-    let bold = label.font_weight.contains("bold")
-        || label
-            .font_weight
-            .parse::<u16>()
-            .is_ok_and(|weight| weight >= 600);
+    let style = label.font_style.to_ascii_lowercase();
+    let italic = style == "italic" || style == "oblique";
+    let bold = font_weight(label) >= 600;
     let logical_width = label
         .text
         .split('\n')
@@ -97,6 +121,7 @@ fn rasterize_label_limited(label: &GuiAtomLabel, scale: f32, limit: u32) -> Labe
         width,
         height,
         logical_size: [logical_width, logical_height],
+        origin: [2., 2.],
         alpha,
     }
 }
@@ -128,6 +153,7 @@ struct GlyphTexture {
     view: wgpu::TextureView,
     size: [u32; 2],
     logical: [f32; 2],
+    origin: [f32; 2],
 }
 
 #[repr(C)]
@@ -270,10 +296,11 @@ impl LabelRenderer {
                     view: texture.create_view(&Default::default()),
                     size: [image.width, image.height],
                     logical: image.logical_size,
+                    origin: image.origin,
                 }
             });
-            let left = label.x - (label.anchor[0] * texture.logical[0] + 2.) / scale;
-            let top = label.y - (label.anchor[1] * texture.logical[1] + 2.) / scale;
+            let left = label.x - (label.anchor[0] * texture.logical[0] + texture.origin[0]) / scale;
+            let top = label.y - (label.anchor[1] * texture.logical[1] + texture.origin[1]) / scale;
             let right = left + texture.size[0] as f32 / scale;
             let bottom = top + texture.size[1] as f32 / scale;
             let [cx, cy, cw, ch] = label.clip.unwrap_or([0., 0., size[0], size[1]]);
@@ -395,5 +422,66 @@ impl LabelRenderer {
             pass.set_bind_group(0, group, &[]);
             pass.draw(i as u32 * 6..(i as u32 + 1) * 6, 0..1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    pub(super) fn label(text: &str) -> GuiAtomLabel {
+        GuiAtomLabel {
+            x: 0.,
+            y: 0.,
+            text: text.into(),
+            color: "white".into(),
+            font_size: 32.,
+            font_name: "Hack".into(),
+            font_style: "normal".into(),
+            font_weight: "normal".into(),
+            anchor: [0., 0.],
+            depth: 0.5,
+            clip: None,
+            on_top: true,
+        }
+    }
+
+    #[test]
+    fn named_font_family_controls_glyphs_and_monospaced_advances() {
+        let narrow = rasterize_label(&label("iiii"), 1.);
+        let wide = rasterize_label(&label("WWWW"), 1.);
+        assert!((narrow.logical_size[0] - wide.logical_size[0]).abs() <= 1.);
+        let mut proportional = label("iiii");
+        proportional.font_name = "Ubuntu".into();
+        let proportional = rasterize_label(&proportional, 1.);
+        assert!(narrow.logical_size[0] > proportional.logical_size[0] * 1.5);
+        assert_ne!(narrow.alpha, proportional.alpha);
+    }
+
+    #[test]
+    fn font_style_and_weight_match_without_case_sensitivity() {
+        let mut text = label("Glyphs");
+        text.font_style = "italic".into();
+        text.font_weight = "bold".into();
+        let lower = rasterize_label(&text, 1.);
+        text.font_style = "ITALIC".into();
+        text.font_weight = "BOLD".into();
+        let upper = rasterize_label(&text, 1.);
+        assert_eq!(upper.logical_size, lower.logical_size);
+        assert!(upper.alpha == lower.alpha);
+        let regular = rasterize_label(&label("Glyphs"), 1.);
+        assert!(regular.alpha != lower.alpha);
+    }
+
+    #[test]
+    fn missing_bold_face_still_produces_bold_glyphs() {
+        let mut text = label("Glyphs");
+        let normal = rasterize_label(&text, 1.);
+        text.font_weight = "bold".into();
+        let bold = rasterize_label(&text, 1.);
+        assert!(
+            bold.alpha.iter().map(|&v| u64::from(v)).sum::<u64>()
+                > normal.alpha.iter().map(|&v| u64::from(v)).sum::<u64>()
+        );
     }
 }

@@ -14,7 +14,7 @@ import sys
 import time
 
 import pyautogui
-from PIL import ImageChops, ImageGrab
+from PIL import Image, ImageChops, ImageGrab
 
 
 class ApplicationExited(Exception):
@@ -96,7 +96,10 @@ def main():
         'CONECT    1    2\nCONECT    2    3\nEND\n')
     config = work / 'config'
     config.mkdir(exist_ok=True)
-    (config / 'config.tsv').write_text('window:width\t1024\nwindow:height\t768\nwindow:x\t40\nwindow:y\t40\n')
+    screen = pyautogui.size()
+    window_width, window_height = min(1024, screen.width - 80), min(768, screen.height - 80)
+    (config / 'config.tsv').write_text(
+        f'window:width\t{window_width}\nwindow:height\t{window_height}\nwindow:x\t40\nwindow:y\t40\n')
     env = {key: value for key, value in os.environ.items() if not key.startswith('CUEMOL_')}
     env.update(CUEMOL_CONFIG_DIR=str(config), CUEMOL_CACHE_DIR=str(work / 'cache'))
 
@@ -125,9 +128,10 @@ def main():
             x, y, width, height = bounds
             time.sleep(0.5)
 
-            def capture(name):
+            def capture(name=None):
                 image = ImageGrab.grab(bbox=(x, y, x + width, y + height)).convert('RGB')
-                image.save(work / name)
+                if name:
+                    image.save(work / name)
                 return image
 
             before_image = capture('before.png')
@@ -146,10 +150,46 @@ def main():
             colored = sum(max(pixel) - min(pixel) > 70 and max(pixel) > 100 for pixel in after_image.getdata())
             if colored < 100:
                 raise RuntimeError(f'The window contains too few colored pixels: {colored}')
+
+            def script(source):
+                return call('execute_script', {'source': source})
+
+            def label_pixels():
+                image = capture()
+                mask = Image.new('L', image.size)
+                mask.putdata([255 if r > 180 and g < 60 and b > 180 else 0 for r, g, b in image.getdata()])
+                return mask if mask.histogram()[255] > 100 else None
+
+            call('set_view', {'center': [0, 0, 0], 'zoom': 8})
+            script('var tree=JSON.parse(scene.getObjectTreeJSON());'
+                   'tree[0].renderers.forEach(function(r){cuemol.getRenderer(r.ID).visible=false;});'
+                   'var fontProbe=cuemol.getObject(tree[0].ID).createRenderer("*namelabel");'
+                   'fontProbe.name="Font probe";fontProbe.font_size=32;fontProbe.font_name="Hack";'
+                   'fontProbe.halign="center";fontProbe.valign="middle";'
+                   'fontProbe.color=cuemol.makeColor("#ff00ff");fontProbe.label_on_top=true;'
+                   'fontProbe.setLabel(2,"iiiiWW Ω");')
+            mono = wait_for(label_pixels)
+            capture('font-monospace.png')
+            get_probe = 'var fontProbe=scene.getRendByName("Font probe");'
+            script(get_probe + 'fontProbe.font_name="Ubuntu";')
+            proportional = wait_for(lambda: mask if (mask := label_pixels()) is not None
+                                    and ImageChops.difference(mono, mask).getbbox() else None)
+            capture('font-proportional.png')
+            if mono.getbbox()[2] - mono.getbbox()[0] <= proportional.getbbox()[2] - proportional.getbbox()[0]:
+                raise RuntimeError('The named monospaced and proportional fonts have indistinguishable advances')
+            script(get_probe + 'fontProbe.font_name="serif";fontProbe.font_style="italic";fontProbe.font_weight="bold";')
+            styled = wait_for(lambda: mask if (mask := label_pixels()) is not None
+                             and ImageChops.difference(proportional, mask).getbbox() else None)
+            script(get_probe + 'fontProbe.font_style="ITALIC";fontProbe.font_weight="BOLD";')
+            wait_for(lambda: mask if (mask := label_pixels()) is not None
+                     and ImageChops.difference(styled, mask).getbbox() is None else None)
+            capture('font-styled.png')
             report.update(ok=True, window=bounds, atoms=state['objects'][0]['atoms'],
                           rotation_before=before['rotation'], rotation_after=rotated['rotation'],
                           zoom_before=rotated['zoom'], zoom_after=zoomed['zoom'],
-                          changed_pixels=changed, colored_pixels=colored)
+                          changed_pixels=changed, colored_pixels=colored,
+                          font_family_pixels_changed=True, font_style_case_equal=True,
+                          font_pixels=styled.histogram()[255])
             print(json.dumps(report), flush=True)
         except BaseException as error:
             report.update(ok=False, error=str(error))

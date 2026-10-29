@@ -59,6 +59,10 @@ Atom labels support per-renderer and per-atom formats, horizontal and vertical
 alignment, pixel offsets and optional display above molecular geometry.
 The shared GPU path clips label pixels against scene depth in native, browser
 and Tauri viewports. Label text and settings survive embedded scene saves.
+Native labels use installed font families, with bundled proportional and
+monospaced fallbacks. Browser labels use CSS family lists through OffscreenCanvas.
+Font styles and weights accept either letter case. Glyph shape and hinting can
+vary with the fonts installed on each platform.
 
 ### Mouse and keyboard
 

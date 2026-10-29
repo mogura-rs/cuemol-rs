@@ -159,7 +159,9 @@ the UI runtime; they can produce frame delays for large inputs.
 Input files remain ordered. Undo state is captured immediately before applying
 a successful result, so parsing failures preserve intervening edits and redo.
 Escape or the status-bar button terminates the worker and clears queued files.
-Changing scenes rejects late input. Nearby loads reuse a worker, which is
+Changing scenes cancels the active load and clears queued files, including
+pending ICC input. A scene loaded by the queue becomes the target for its next
+file. Nearby loads reuse a worker, which is
 terminated after two idle seconds to release its linear memory.
 
 The affected shared suites passed 808 tests. Chrome passed the 71 available
@@ -170,6 +172,17 @@ loading cases. These checks cover precision, compression, concurrent edits and
 rotation, cancellation, queue order, error recovery, scene changes and worker
 release/recreation. The ten Tauri shell tests use a separate mock bridge and are
 not counted as deployed WASM checks.
+
+After publication at `0144383`, all 33 public assets matched the source manifest.
+Mac Chrome passed all 73 deployed application cases; Firefox and WebKit passed
+seven loading cases each. A subsequent review prompted two additional cases:
+manual scene changes incorrectly allowed a queued file or pending ICC profile
+to alter the new scene. Both failures were reproduced against that public
+revision. The shared load guard now cancels those operations and preserves the
+new scene; generation checks also discard their late results. Another regression
+reproduced a scene change after queueing but before parsing started. The queue
+now retains its destination until it is drained or cancelled. All ten loading
+cases pass, including a queued QSC followed by a molecule in its new scene.
 
 Three fresh Chrome contexts per size compared the already optimized public
 revision `4b417fa` with this worker build. For 20,000 atoms, median input time was
@@ -202,6 +215,32 @@ navigation frames. GPU tests cover label scale one and two. The affected Tauri
 suite passed 147 tests, its explicit GPU case passed, and all ten shell cases
 passed, including startup and settled camera frames in an empty scene. The
 native Linux window also passed OS drag and wheel input checks.
+
+## Font families and text placement
+
+Label font names now select installed native fonts, with embedded Hack and Ubuntu
+fallbacks. The native path shapes Unicode text and retains glyph bitmaps between
+labels; it clears retained bitmaps after the cache exceeds 8 MiB. A regular-only
+font also supports requested bold through synthesis. Browser labels use the
+reference OffscreenCanvas path. Both paths recognize uppercase style/weight
+names, use integer CSS pixel sizes and round bitmap widths to four pixels.
+
+Regressions first reproduced ignored family names and case-sensitive styles.
+The repaired native tests cover family selection, monospaced advances, styles,
+weight and an isolated regular-only font database. Metal tests use a fixed font
+to check per-pixel occlusion, overlay ordering, alignment and HiDPI dimensions.
+The shared-core suite passed 320 tests with the reference QIF files present.
+The Tauri library passed 147 tests; six optional runtime cases were not run by
+that ordinary library invocation. Chrome passed all 76 application cases before
+the two additional queue cases; Firefox and WebKit each passed all eleven loading
+and font checks after those additions. Browser tests compare glyph alpha against the reference OffscreenCanvas
+algorithm and inspect displayed magenta labels on both GPU backends.
+
+The Linux native window passed OS drag and wheel input, changes between embedded
+monospaced and proportional fonts, and identical displayed pixels for lowercase
+and uppercase bold/italic settings. The latest Mac Tauri application built, but
+its OS input check still requires an unlocked desktop. Exact glyph pixels remain
+dependent on the installed font and native rasterizer.
 
 ## Platform failures repaired before publication
 
@@ -993,10 +1032,10 @@ invalid assignments, per-atom overrides, reset and embedded scene roundtrips.
 The shared GPU label pass uses cached glyph textures and compares each fragment
 with packed scene depth. Native, browser, Tauri and camera image rendering share
 that pass; explicit on-top labels bypass only the depth comparison. Pixel tests
-verify partial occlusion, overlay display and alignment on Metal. The font
-rasterizer uses bundled proportional and monospaced fonts, with synthetic bold
-and italic; arbitrary operating-system fonts and exact reference glyph pixels
-are not reproduced.
+verify partial occlusion, overlay display and alignment on Metal. At this earlier
+checkpoint, the rasterizer used only bundled proportional and monospaced fonts
+with synthetic bold and italic. Installed font selection and browser glyph
+comparisons are recorded in the later font-family section above.
 
 All 33 browser tests passed, including label depth, overlay and displacement.
 The native GUI suite passed 165 tests. The Tauri suite passed 142 tests with one
@@ -1926,3 +1965,4 @@ during this work are collected here; the read-only reference itself was not edit
 | The Python usage entry only described the root binding. | It now lists the embedded helper modules and their live-scene coverage. |
 | Linux startup instructions omitted an X11 runtime needed by the published GUI. | The Debian/Ubuntu dependency list now includes `libxkbcommon-x11-0`; the GUI matrix also provisions graphics drivers. |
 | Browser parsing was described only by the synchronous script-reader boundary. | Ordinary file input now uses a cancellable parser worker; script `waitLoadAsync` retains its synchronous API. |
+| Label documentation described only bundled fonts. | Native labels resolve installed families, and browser labels use the reference OffscreenCanvas path. |
