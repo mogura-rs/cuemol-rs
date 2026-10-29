@@ -7,6 +7,16 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+fn command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cuemol"));
+    let config =
+        std::env::temp_dir().join(format!("cuemol-export-test-config-{}", std::process::id()));
+    command
+        .env("CUEMOL_CONFIG_DIR", &config)
+        .env("CUEMOL_CONFIG_FILE", config.join("config.tsv"));
+    command
+}
+
 fn reference_dir() -> PathBuf {
     option_env!("CUEMOL2_REF_DIR")
         .map(PathBuf::from)
@@ -23,7 +33,7 @@ fn render_qsc_renders_a_styled_scene_to_obj() {
     let out = std::env::temp_dir().join("cuemol_render_qsc_test.obj");
     let _ = std::fs::remove_file(&out);
 
-    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+    let status = command()
         .args([
             "render-qsc",
             fixture.to_str().unwrap(),
@@ -69,13 +79,13 @@ fn render_qsc_renders_saved_density_map_renderers() {
     let qsc = format!(
         "<scene>\n\
          <object type=\"DensityMap\" name=\"map\" src=\"datachunk:00000\" srctype=\"qdfmap\" xformMat=\"(1,0,0,0,0,1,0,0,0,0,1,0,20,0,0,1)\">\n\
-         <renderer type=\"contour\" name=\"wire\" siglevel=\"0\"/>\n\
-         <renderer type=\"isosurf\" name=\"solid\" siglevel=\"0\" color=\"#0000ff\" binning=\"2\" max_grids=\"77\" use_pbc=\"false\" colormode=\"multigrad\" color_mapname=\"map\" egtype=\"edges\" eglinew=\"0.05\" egcolor=\"#040506\" cullface=\"true\">\n\
+         <renderer type=\"contour\" name=\"wire\" siglevel=\"0\" region_mode=\"full\"/>\n\
+         <renderer type=\"isosurf\" region_mode=\"full\" name=\"solid\" siglevel=\"0\" color=\"#0000ff\" binning=\"2\" max_grids=\"77\" use_pbc=\"false\" colormode=\"multigrad\" color_mapname=\"map\" egtype=\"edges\" eglinew=\"0.05\" egcolor=\"#040506\" cullface=\"true\">\n\
          <multi_grad><gradnode par=\"-1\"><col value=\"#ff0000\"/></gradnode><gradnode par=\"1\"><col value=\"#00ff00\"/></gradnode></multi_grad>\n\
          </renderer>\n\
-         <renderer type=\"isosurf\" name=\"lines\" siglevel=\"0\" use_pbc=\"false\" drawmode=\"line\"/>\n\
-         <renderer type=\"isosurf\" name=\"points\" siglevel=\"0\" use_pbc=\"false\" drawmode=\"point\"/>\n\
-         <renderer type=\"gpu_mapvol\" name=\"volume\" siglevel=\"0\" use_pbc=\"false\"/>\n\
+         <renderer type=\"isosurf\" region_mode=\"full\" name=\"lines\" siglevel=\"0\" use_pbc=\"false\" drawmode=\"line\"/>\n\
+         <renderer type=\"isosurf\" region_mode=\"full\" name=\"points\" siglevel=\"0\" use_pbc=\"false\" drawmode=\"point\"/>\n\
+         <renderer type=\"gpu_mapvol\" region_mode=\"full\" name=\"volume\" siglevel=\"0\" use_pbc=\"false\"/>\n\
          <renderer type=\"*unitcell\" name=\"cell\" width=\"1.5\" color=\"#abcdef\"/>\n\
          </object>\n\
          <object type=\"MolCoord\" name=\"direct-mol\" src=\"datachunk:00002\" srctype=\"pdb\" xformMat=\"(1,0,0,0,0,1,0,0,0,0,1,0,40,0,0,1)\">\n\
@@ -106,8 +116,11 @@ END\n\
     let qsc_path = std::env::temp_dir().join("cuemol_render_qsc_map_test.qsc");
     let out = std::env::temp_dir().join("cuemol_render_qsc_map_test.obj");
     let mqo_path = std::env::temp_dir().join("cuemol_render_qsc_map_test.mqo");
-    std::fs::write(&qsc_path, qsc).unwrap();
-    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+    std::fs::write(&qsc_path, &qsc).unwrap();
+    let mut shared = cuemol_desktop_core::DesktopAppState::new();
+    shared.open_bytes("map.qsc", qsc.as_bytes()).unwrap();
+    assert_eq!(shared.active_render_snapshot("").unwrap().volumes.len(), 1);
+    let status = command()
         .args([
             "render-qsc",
             qsc_path.to_str().unwrap(),
@@ -126,7 +139,7 @@ END\n\
         .filter_map(|value| value.parse::<f64>().ok())
         .fold(f64::INFINITY, f64::min);
     assert!(min_x > 4.0, "density transform was not applied: {min_x}");
-    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+    let status = command()
         .args([
             "render-qsc",
             qsc_path.to_str().unwrap(),
@@ -136,7 +149,7 @@ END\n\
         .expect("export QSC density renderers to MQO");
     assert!(status.success());
     let mqo = std::fs::read_to_string(&mqo_path).unwrap();
-    assert!(mqo.contains("Object \"volume\""));
+    assert!(!mqo.contains("Object \"volume\""));
     assert!(mqo.contains("Object \"cell\""));
     assert!(mqo.contains("Object \"surface_potential\""));
     assert!(mqo.contains("Object \"surface_gradient\""));
@@ -178,7 +191,7 @@ fn render_qsc_preserves_exporter_scene_context() {
     let mqo_path = std::env::temp_dir().join(format!("{stem}.mqo"));
     std::fs::write(&qsc_path, source).unwrap();
 
-    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+    let status = command()
         .args([
             "render-qsc",
             qsc_path.to_str().unwrap(),
@@ -195,7 +208,7 @@ fn render_qsc_preserves_exporter_scene_context() {
     assert!(inc.contains("texture{ T_Chrome_4D }"));
     assert!(inc.contains("0.498039"));
 
-    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+    let status = command()
         .args([
             "render-qsc",
             qsc_path.to_str().unwrap(),
@@ -245,8 +258,13 @@ ATOM      1  O1  LIG A   1      10.000   0.000   0.000  1.00 20.00           O\n
 END\n\
                ==========END datachunk:00001==========\n";
     std::fs::write(&qsc_path, qsc).unwrap();
+    let mut shared = cuemol_desktop_core::DesktopAppState::new();
+    shared.open_bytes("visibility.qsc", qsc.as_bytes()).unwrap();
+    let snapshot = shared.active_render_snapshot("").unwrap();
+    assert_eq!(snapshot.atoms.len(), 1);
+    assert_eq!(snapshot.atoms[0].center.x, 10.0);
 
-    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+    let status = command()
         .args([
             "render-qsc",
             qsc_path.to_str().unwrap(),
@@ -284,7 +302,7 @@ fn render_qsc_exports_saved_surface_renderers() {
                ==========END datachunk:00000==========\n";
     std::fs::write(&qsc_path, qsc).unwrap();
 
-    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+    let status = command()
         .args([
             "render-qsc",
             qsc_path.to_str().unwrap(),
@@ -297,7 +315,7 @@ fn render_qsc_exports_saved_surface_renderers() {
     assert!(obj.contains("v 2.000000 3.000000 5.000000"));
     assert_eq!(obj.lines().filter(|line| line.starts_with("f ")).count(), 2);
 
-    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+    let status = command()
         .args([
             "render-qsc",
             qsc_path.to_str().unwrap(),
@@ -348,7 +366,7 @@ f 4 5 6\n\
                ==========END datachunk:00001==========\n";
     std::fs::write(&qsc_path, qsc).unwrap();
 
-    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+    let status = command()
         .args([
             "render-qsc",
             qsc_path.to_str().unwrap(),
@@ -361,7 +379,7 @@ f 4 5 6\n\
     assert_eq!(obj.lines().filter(|line| line.starts_with("f ")).count(), 1);
     assert!(!obj.contains("v 10.000000"));
 
-    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+    let status = command()
         .args([
             "render-qsc",
             qsc_path.to_str().unwrap(),
@@ -400,7 +418,7 @@ END\n\
                ==========END datachunk:00000==========\n";
     std::fs::write(&qsc_path, qsc).unwrap();
 
-    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+    let status = command()
         .args([
             "render-qsc",
             qsc_path.to_str().unwrap(),
@@ -414,7 +432,7 @@ END\n\
     assert!(faces > 100);
     assert!(faces < 300, "named selection must exclude oxygen: {faces}");
 
-    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+    let status = command()
         .args([
             "render-qsc",
             qsc_path.to_str().unwrap(),
@@ -459,7 +477,7 @@ END\n\
                ==========END datachunk:00001==========\n";
     std::fs::write(&qsc_path, qsc).unwrap();
 
-    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+    let status = command()
         .args([
             "render-qsc",
             qsc_path.to_str().unwrap(),
@@ -471,7 +489,7 @@ END\n\
     let obj = std::fs::read_to_string(&obj_path).unwrap();
     assert!(obj.lines().filter(|line| line.starts_with("f ")).count() > 12);
 
-    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+    let status = command()
         .args([
             "render-qsc",
             qsc_path.to_str().unwrap(),
@@ -525,7 +543,7 @@ fn render_qsc_exports_saved_lightweight_renderers() {
     let mqo_path = std::env::temp_dir().join(format!("{stem}.mqo"));
     std::fs::write(&qsc_path, qsc).unwrap();
 
-    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+    let status = command()
         .args([
             "render-qsc",
             qsc_path.to_str().unwrap(),
@@ -538,7 +556,7 @@ fn render_qsc_exports_saved_lightweight_renderers() {
     assert!(obj.contains("v 2.000000 0.000000 1.000000"));
     assert_eq!(obj.lines().filter(|line| line.starts_with("f ")).count(), 2);
 
-    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+    let status = command()
         .args([
             "render-qsc",
             qsc_path.to_str().unwrap(),
@@ -578,7 +596,7 @@ fn render_qsc_exports_molecule_unit_cell_renderer() {
     let mqo_path = std::env::temp_dir().join(format!("{stem}.mqo"));
     std::fs::write(&qsc_path, qsc).unwrap();
 
-    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+    let status = command()
         .args([
             "render-qsc",
             qsc_path.to_str().unwrap(),
@@ -600,7 +618,7 @@ fn render_qsc_exports_molecule_unit_cell_renderer() {
         .fold(f64::NEG_INFINITY, f64::max);
     assert!(max_x > 8.0, "symmetry mate was not exported: {max_x}");
 
-    let status = Command::new(env!("CARGO_BIN_EXE_cuemol"))
+    let status = command()
         .args([
             "render-qsc",
             qsc_path.to_str().unwrap(),
@@ -616,4 +634,85 @@ fn render_qsc_exports_molecule_unit_cell_renderer() {
     std::fs::remove_file(qsc_path).ok();
     std::fs::remove_file(obj_path).ok();
     std::fs::remove_file(mqo_path).ok();
+}
+
+#[test]
+fn scene_exports_share_affine_geometry_and_saved_render_settings() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("affine.qsc");
+    let qsc = r##"<scene name="affine" bgcolor="#123456">
+<appdata id="render" type="RenderSettings" width="64" height="48" unit="px" backend="umbreon">
+<umbreon type="UmbreonSettings" useGI="false" supersample="1"/>
+</appdata>
+<object type="MolCoord" name="molecule" src="datachunk:00000" srctype="pdb" xformMat="(3,0,0,0,0,4,0,0,0,0,5,0,5,6,7,1)">
+<renderer type="cpk" name="ellipsoid" detail="4" xformMat="(-2,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1)"/>
+</object>
+<camera name="__current" center="(-16,6,7)" zoom="12" slab="100" distance="50"/>
+</scene>
+========== End of XML ==========
+==========START datachunk:00000==========
+ATOM      1  C1  LIG A   1       1.000   0.000   0.000  1.00 20.00           C
+END
+==========END datachunk:00000==========
+"##;
+    std::fs::write(&input, qsc).unwrap();
+    for entry in ["render-qsc", "export-scene"] {
+        let output = directory.path().join(format!("{entry}.obj"));
+        assert!(command()
+            .args([entry])
+            .arg(&input)
+            .arg(&output)
+            .status()
+            .unwrap()
+            .success());
+        let obj = std::fs::read_to_string(output).unwrap();
+        let vertices: Vec<[f64; 3]> = obj
+            .lines()
+            .filter_map(|line| line.strip_prefix("v "))
+            .map(|line| {
+                line.split_whitespace()
+                    .map(|v| v.parse().unwrap())
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap()
+            })
+            .collect();
+        assert!(!vertices.is_empty());
+        for [x, y, z] in vertices {
+            let radius = (((x + 16.) / 2.).powi(2) + (y - 6.).powi(2) + (z - 7.).powi(2)).sqrt();
+            assert!(
+                (radius - 1.7).abs() < 1e-5,
+                "molecular scale distorted atom radius: {radius}"
+            );
+        }
+        let normals = obj
+            .lines()
+            .filter_map(|line| line.strip_prefix("vn "))
+            .count();
+        assert!(normals > 0);
+    }
+    for extension in ["stl", "mqo", "lxs", "cfg", "wbp", "pov", "png"] {
+        let output = directory.path().join(format!("output.{extension}"));
+        let result = command()
+            .arg("render-qsc")
+            .arg(&input)
+            .arg(&output)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{extension}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let bytes = std::fs::read(output).unwrap();
+        assert!(!bytes.is_empty(), "{extension}");
+        if extension == "png" {
+            assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+            assert_eq!(u32::from_be_bytes(bytes[16..20].try_into().unwrap()), 64);
+            assert_eq!(u32::from_be_bytes(bytes[20..24].try_into().unwrap()), 48);
+        }
+    }
+    for companion in ["output.inc", "output.scn", "output.mqo"] {
+        assert!(directory.path().join(companion).is_file(), "{companion}");
+    }
 }

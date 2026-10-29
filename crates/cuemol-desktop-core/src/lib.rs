@@ -12216,6 +12216,10 @@ impl DesktopAppState {
             if let Some(tree) = &qsc_xml {
                 self.restore_named_qsc_camera_visibility(scene_uid, tree.top())?;
             }
+            if let Some(camera) = self.active_scene_saved_camera() {
+                self.apply_scene_visibility_settings(scene_uid, camera.visibility_settings())?;
+                self.set_active_view_camera(&camera)?;
+            }
         }
         Ok(result.result_scene)
     }
@@ -50154,6 +50158,22 @@ fn append_object_crystal_renderer_snapshot(
             } else {
                 rendered.recompute_bounds();
             }
+            let alpha = resolved("alpha")
+                .and_then(|value| value.parse::<f64>().ok())
+                .unwrap_or(1.0)
+                .clamp(0.0, 1.0);
+            let material = resolved("material").unwrap_or_else(|| "default".into());
+            apply_renderer_properties(&mut rendered, renderer.name(), alpha, &material);
+            set_renderer_edge_group(
+                &mut rendered,
+                resolved("egroup").as_deref(),
+                renderer_edge_style(
+                    resolved("egtype").as_deref(),
+                    resolved("eglinew").as_deref(),
+                    resolved("egcolor").as_deref(),
+                    styles,
+                ),
+            );
             append_snapshot(target, rendered);
             continue;
         }
@@ -52182,7 +52202,11 @@ fn read_qsc_xml_prefix(path: &Path) -> Result<Option<LDom2Tree>> {
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 {
-            return Ok(None);
+            return if xml.trim_start().starts_with('<') {
+                parse_ldom2_xml(&xml).map(Some)
+            } else {
+                Ok(None)
+            };
         }
         if line.trim() == QSC_XML_END_MARKER {
             return parse_ldom2_xml(&xml).map(Some);

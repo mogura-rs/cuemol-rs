@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 type Result<T> = std::result::Result<T, String>;
 
-fn state() -> Result<(DesktopAppState, Camera)> {
+pub(crate) fn state() -> Result<(DesktopAppState, Camera)> {
     let mut state = DesktopAppState::new();
     state.new_scene("Untitled", true);
     configuration::load(&mut state).map_err(|e| e.to_string())?;

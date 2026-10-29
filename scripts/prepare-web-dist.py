@@ -21,6 +21,8 @@ REQUIRED = (
     'pkg/kernels/Boost-LICENSE', 'pkg/kernels/MeshMS-SOURCE.json',
     'pkg/kernels/BALL-SOURCE.json', 'pkg/kernels/LittleCMS-LICENSE',
     'pkg/kernels/USalign-LICENSE',
+    'pkg/kernels/EDTSurf-LICENSE', 'pkg/kernels/EDTSurf-SOURCE.json',
+    'pkg/licenses/molstar.txt', 'pkg/licenses/smaa.txt', 'pkg/licenses/xegtao.txt',
 )
 
 

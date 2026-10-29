@@ -1132,3 +1132,33 @@ for(const backend of ['webgl','webgpu']) {
     expect(errors).toEqual([]);
   });
 }
+
+test('loaded camera visibility applies to browser objects and renderers',async({page})=>{
+  await ready(page);
+  const qsc=`<scene>
+<object type="MolCoord" name="hidden" src="datachunk:00000" srctype="pdb"><renderer type="cpk" name="hidden-cpk"/></object>
+<object type="MolCoord" name="shown" src="datachunk:00000" srctype="pdb"><renderer type="cpk" name="masked"/><renderer type="cpk" name="visible" defaultcolor="#ff00ff"/></object>
+<camera name="__current" center="(0,0,0)" zoom="10" slab="50" distance="100"><visibilities><object target="hidden" value="false"/><renderer target="masked" type="cpk" client="shown" value="false"/></visibilities></camera>
+</scene>
+========== End of XML ==========
+==========START datachunk:00000==========
+ATOM      1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C
+END
+==========END datachunk:00000==========
+`;
+  await load(page,'visibility.qsc',Buffer.from(qsc));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(2);
+  const objects=await page.evaluate(()=>window.cuemol.status().scene.objects);
+  const hidden=objects.find(object=>object.name==='hidden').id;
+  const renderers=objects.find(object=>object.name==='shown').renderers;
+  const masked=renderers.find(renderer=>renderer.name==='masked').id;
+  const visible=renderers.find(renderer=>renderer.name==='visible').id;
+  const state=await call(page,'execute_script',{source:`print(cuemol.getObject(${hidden}).visible+':'+cuemol.getRenderer(${masked}).visible+':'+cuemol.getRenderer(${visible}).visible);`});
+  expect(JSON.parse(state.message).log).toBe('false:false:true\n');
+  await expect.poll(async()=>{
+    const rect=await page.evaluate(()=>window.cuemol.status().ui.rects.Viewport);
+    const png=PNG.sync.read(await page.screenshot({clip:{x:rect[0],y:rect[1],width:rect[2],height:rect[3]}}));
+    let count=0;for(let i=0;i<png.data.length;i+=4)if(png.data[i]>90&&png.data[i+1]<60&&png.data[i+2]>90)count++;
+    return count;
+  }).toBeGreaterThan(500);
+});

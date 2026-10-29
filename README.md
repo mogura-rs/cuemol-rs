@@ -194,6 +194,8 @@ cuemol run commands.js
 cuemol -c 'print(21 * 2);'
 cuemol render example.pdb image.png --width 1200 --height 900
 cuemol render example.qsc illustration.png --style npr
+cuemol export-scene example.pdb model.obj
+cuemol render-qsc example.qsc scene.pov
 cuemol tools list
 cuemol tools run pdb2pqr --help
 cuemol tools run ffmpeg -version
@@ -203,6 +205,11 @@ cuemol tools run ffmpeg -version
 of edits. Relative output filenames are resolved from the process's working
 directory. JavaScript runs in the embedded Boa engine and CueMol bindings, with
 no Node.js runtime requirement.
+`export-scene` and `render-qsc` use the same readers, default representations and
+scene geometry as the GUI. They support STL, OBJ, POV-Ray, PNG, MQO, LuxRender,
+LuxCore and Warabi output. PNG output uses the shared render settings, including
+saved dimensions. Triangle formats export geometry; volume data remains available
+to image renderers rather than being converted into an unrelated isosurface.
 Scene Undo, Redo and Rollback update script queries immediately. Transactions
 preserve edits made before they start, changes in other scenes and later changes
 to unrelated properties. An uncaught script error discards that evaluation's

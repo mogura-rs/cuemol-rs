@@ -65,7 +65,13 @@ impl DesktopAppState {
                         &crate::trajectory_io::read_extra_qsc_molecule,
                     )?;
                 self.restore_loaded_scene_data(scene_uid)?;
+                let end = byte_index(bytes, QSC_XML_END_MARKER.as_bytes()).unwrap_or(bytes.len());
+                let xml = std::str::from_utf8(&bytes[..end])
+                    .map_err(|error| CueMolError::parse(error.to_string()))?;
+                let tree = parse_ldom2_xml(xml)?;
+                self.restore_named_qsc_camera_visibility(scene_uid, tree.top())?;
                 if let Some(camera) = self.active_scene_saved_camera() {
+                    self.apply_scene_visibility_settings(scene_uid, camera.visibility_settings())?;
                     self.set_active_view_camera(&camera)?;
                 }
                 Ok(GuiLoadedPath::Scene { scene_uid })

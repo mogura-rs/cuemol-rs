@@ -1288,6 +1288,36 @@ ordinary Tauri tests pass; the real renderer test also passes explicitly on Linu
 and macOS. Windows and the other native release targets still require execution
 in the unpublished release matrix.
 
+### Shared command exports and complete browser embedding
+
+The legacy `render-qsc` and `export-scene` commands previously duplicated scene
+geometry construction. They now load through the shared command layer and use
+`DesktopAppState` snapshots. This removes the obsolete combined object/renderer
+transform path and keeps saved surface colors, material definitions, map regions,
+and floating-point volume data consistent with the GUI. PNG output uses the
+shared render settings. Triangle exports no longer substitute an isosurface for
+a volume. Eleven CLI scene tests pass, including all eight output formats,
+reflected nonuniform renderer transforms, invariant molecular radii, saved image
+dimensions, surface coloring, camera visibility, and external-scene companions.
+The other five CLI integration tests also pass with the reference fixtures present.
+The integrated native/shared rerun passes 1,595 tests across 100 test executables;
+the normally ignored real POV-Ray case also passes when invoked explicitly.
+The browser checks cover 53 existing cases plus the new saved-camera visibility
+case. The new case is also run independently against the rebuilt browser assets.
+
+The common QSC loaders now resolve named camera visibility after maps and surfaces
+have their runtime identifiers, and apply the saved camera on file and byte loads.
+Unit-cell geometry retains its renderer name, alpha, material and edge group.
+The map fixture explicitly requests the full region: a world-centered periodic box
+can legitimately extend outside the translated map's original unit cell.
+
+The installed-archive check found five missing embedded license/provenance files
+that were present in the browser distribution manifest. The build now embeds all
+manifest entries, or the generated `pkg` tree when building directly from the
+source browser directory. Staging also requires these five files. The six
+portable-distribution checks pass; the installed artifact check compares every
+served asset's bytes against its manifest hash.
+
 ### Documentation reconciled with implementation
 
 The implementation takes precedence over stale descriptions. Corrections found
@@ -1315,3 +1345,5 @@ during this work are collected here; the read-only reference itself was not edit
 | Sphere/cylinder helper comments said flat shading. | Their radial vertex normals support smooth shading. |
 | README called POV-Ray an optional external installation. | Native distributions now include its console renderer, runtime, standard files and sources. |
 | Earlier validation entries described the registry audit as unfinished. | Checkpoints are marked as historical and linked to the completed integrated audit. |
+| The legacy CLI claimed to honor all saved renderer geometry independently. | Both scene-export commands now use the shared GUI geometry and render settings. |
+| The browser manifest listed assets that the executable's fixed list omitted. | Embedding follows the manifest, including the five missing license/provenance files. |

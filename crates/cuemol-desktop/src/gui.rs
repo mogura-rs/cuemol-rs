@@ -34915,7 +34915,7 @@ mod tests {
         let pov_settings = AnimationRenderSettings {
             width: 800,
             height: 600,
-            povray_include_dir: "/tmp/pov include".to_string(),
+            povray_include_dir: "pov include".to_string(),
             pov_shadow: true,
             pov_radiosity: 7,
             ..Default::default()
@@ -34935,7 +34935,7 @@ mod tests {
             "Quality=11",
             "Antialias_Depth=3",
             "Declare=_shadow=1",
-            "+L/tmp/pov include",
+            "+L\"pov include\"",
             "Declare=_radiosity=7",
         ] {
             assert!(
