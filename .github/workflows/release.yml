@@ -53,7 +53,7 @@ jobs:
           - runner: windows-2022
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 35
+    timeout-minutes: ${{ matrix.runner == 'macos-15-intel' && 45 || 35 }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -64,6 +64,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
+          cache-on-failure: true
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
@@ -72,7 +73,7 @@ jobs:
         with:
           name: web-assets
           path: .cache/web-artifact
-      - uses: actions/cache@v6
+      - uses: actions/cache/restore@v6
         id: tools
         with:
           path: .cache/bundled-tools
@@ -89,6 +90,12 @@ jobs:
       - name: Build native tools
         if: steps.tools.outputs.cache-hit != 'true'
         run: uv run --no-project python scripts/bundle-tools.py
+      - name: Cache completed native tools
+        if: steps.tools.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: .cache/bundled-tools
+          key: ${{ steps.tools.outputs.cache-primary-key }}
       - name: Verify browser artifact
         shell: bash
         run: uv run --no-project python scripts/prepare-web-dist.py --verify .cache/web-artifact --revision "$GITHUB_SHA"

@@ -76,7 +76,10 @@ avoid LTO, while the browser uses a separate size-oriented profile. CI caches
 Cargo, wasm-bindgen, Emscripten, scientific kernels and Chromium. Shared and
 native interface tests run once; browser tests run once against the shared web
 build. Release jobs reuse that browser artifact and cache platform tool bundles
-for five native targets. A version tag publishes eight archives and checksums
+for five native targets. Completed tool bundles are saved before application
+compilation, and Cargo dependencies are retained after failed release jobs.
+Intel macOS has a longer timeout for builds without a populated cache.
+A version tag publishes eight archives and checksums
 only after every target succeeds. Failed uploads leave a draft that can be
 resumed; an already published version is never overwritten. Manual release runs
 build artifacts by default; select a version tag and enable `publish` to publish.
