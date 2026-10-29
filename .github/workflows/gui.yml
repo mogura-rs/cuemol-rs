@@ -46,12 +46,16 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then suffix=zip; fi
           tag_args=()
           if [ -n "$RELEASE_TAG" ]; then tag_args+=("$RELEASE_TAG"); fi
-          gh release download "${tag_args[@]}" --pattern "cuemol-$TARGET.$suffix" --pattern SHA256SUMS --dir .cache/gui-release
+          patterns=(--pattern "cuemol-$TARGET.$suffix" --pattern SHA256SUMS)
+          if [ "$RUNNER_OS" = macOS ]; then patterns+=(--pattern "cuemol-rs-$TARGET.zip"); fi
+          gh release download "${tag_args[@]}" "${patterns[@]}" --dir .cache/gui-release
           uv run --no-project --python 3.13 python - <<'PY'
           import hashlib
           import json
           import os
           from pathlib import Path
+          import plistlib
+          import subprocess
           import tarfile
           import zipfile
           work = Path('.cache/gui-release')
@@ -75,10 +79,33 @@ jobs:
               raise RuntimeError('Published archive target mismatch')
           if os.environ['RELEASE_TAG'] and info['version'] != os.environ['RELEASE_TAG']:
               raise RuntimeError('Published archive version mismatch')
+          info.update(archive=name, archiveSha256=actual)
+          if os.environ['RUNNER_OS'] == 'macOS':
+              app_name = f"cuemol-rs-{os.environ['TARGET']}.zip"
+              app_archive = work / app_name
+              with app_archive.open('rb') as source:
+                  app_hash = hashlib.file_digest(source, 'sha256').hexdigest()
+              if app_hash != checksums[app_name]:
+                  raise RuntimeError('Published application checksum mismatch')
+              subprocess.run(['ditto', '-x', '-k', str(app_archive), str(output)], check=True)
+              contents = output / 'cuemol-rs.app/Contents'
+              app_info = json.loads((contents / 'Resources/build-info.json').read_text())
+              for key in ('commit', 'version', 'target'):
+                  if app_info[key] != info[key]:
+                      raise RuntimeError(f'Application metadata mismatch: {key}')
+              plist = plistlib.loads((contents / 'Info.plist').read_bytes())
+              if plist['CFBundleExecutable'] != 'cuemol-rs' or plist['CFBundleShortVersionString'] != info['version'].removeprefix('v'):
+                  raise RuntimeError('Application bundle metadata mismatch')
+              with (output / 'cuemol').open('rb') as source:
+                  native_hash = hashlib.file_digest(source, 'sha256').hexdigest()
+              with (contents / 'MacOS/cuemol-rs').open('rb') as source:
+                  if hashlib.file_digest(source, 'sha256').hexdigest() != native_hash:
+                      raise RuntimeError('Application and command-line executables differ')
+              info.update(appArchive=app_name, appArchiveSha256=app_hash,
+                          binarySha256=native_hash)
           evidence = Path('.cache/native-gui-check')
           evidence.mkdir(parents=True, exist_ok=True)
-          (evidence / 'distribution.json').write_text(json.dumps(
-              dict(info, archive=name, archiveSha256=actual), indent=2) + '\n')
+          (evidence / 'distribution.json').write_text(json.dumps(info, indent=2) + '\n')
           print(f'Verified {name}: {actual}')
           PY
       - name: Check presented pixels and OS input
@@ -87,6 +114,7 @@ jobs:
           extension=''
           if [ "$RUNNER_OS" = Windows ]; then extension=.exe; fi
           binary=".cache/gui-release/app/cuemol$extension"
+          if [ "$RUNNER_OS" = macOS ]; then binary='.cache/gui-release/app/cuemol-rs.app/Contents/MacOS/cuemol-rs'; fi
           if [ "$RUNNER_OS" = Linux ]; then
             xvfb-run -a -s '-screen 0 1440x1080x24' uv run --python 3.13 scripts/check-native-gui.py --binary "$binary" --out .cache/native-gui-check
           else
@@ -100,6 +128,7 @@ jobs:
           extension=''
           if [ "$RUNNER_OS" = Windows ]; then extension=.exe; fi
           binary=".cache/gui-release/app/cuemol$extension"
+          if [ "$RUNNER_OS" = macOS ]; then binary='.cache/gui-release/app/cuemol-rs.app/Contents/MacOS/cuemol-rs'; fi
           if [ "$RUNNER_OS" = Linux ]; then
             export XDG_DATA_HOME="$RUNNER_TEMP/cuemol-keyring-data"
             export XDG_CONFIG_HOME="$RUNNER_TEMP/cuemol-keyring-config"

@@ -90,6 +90,12 @@ only after every target succeeds. Failed uploads leave a draft that can be
 resumed; an already published version is never overwritten. Manual release runs
 build artifacts by default; select a version tag and enable `publish` to publish.
 
+GitHub cannot restore a cache from a different tag. To prepare caches that later
+tags can reuse, run the Release workflow on the default branch with `publish`
+disabled after native build dependencies change. This also runs the distribution
+checks without publishing. See GitHub's
+[cache access restrictions](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#restrictions-for-accessing-a-cache).
+
 The manual `Published native GUI` workflow downloads a selected public release
 on all five targets and checks captured window pixels, OS mouse input and Python
 helpers. It also checks native credential save/read/update/delete and environment
