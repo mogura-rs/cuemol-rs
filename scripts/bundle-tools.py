@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import importlib.metadata
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -20,7 +21,6 @@ APBS_VERSION = '3.4.1'
 FETK_REV = '57195e55351e04ce6ee0ef56a143c996a9aee7e2'
 APBS_HASHES = {
     'Linux': '750f6a2df7b5a82b69be5c4cb192115c02fa261d0ff52cf1d9632ed1eda8b4f0',
-    'Darwin': '894bd87f3c4494483b9cd18c366f5d055e34c890e25d82d6035e318ffde3a890',
     'Windows': '77dbccc31307b82f2009a179dd1890f7a05061596771df726a4d95d2958887f8',
 }
 SOURCES = []
@@ -66,7 +66,7 @@ def apbs(output, force_source):
                 (output / 'licenses' / f'FETK-{module}-{name}').write_bytes(contents.extractfile(source_name).read())
     destination = output / 'apbs'
     system = platform.system()
-    if not force_source and platform.machine().lower() in ('amd64', 'x86_64'):
+    if not force_source and system != 'Darwin' and platform.machine().lower() in ('amd64', 'x86_64'):
         archive = fetch(f'https://github.com/Electrostatics/apbs/releases/download/v{APBS_VERSION}/APBS-{APBS_VERSION}.{system}.zip',
                         f'apbs-{system.lower()}.zip', APBS_HASHES[system])
         extracted = CACHE / f'apbs-{system.lower()}'
@@ -74,6 +74,14 @@ def apbs(output, force_source):
             contents.extractall(extracted)
         package = extracted / f'APBS-{APBS_VERSION}.{system}'
         shutil.copytree(package, destination, dirs_exist_ok=True)
+        if system == 'Windows':
+            # The upstream executable and its DLLs are 32-bit and link Python 3.9.
+            runtime = fetch('https://www.python.org/ftp/python/3.9.13/python-3.9.13-embed-win32.zip',
+                            'python-3.9.13-embed-win32.zip',
+                            'f8ed5e019d7bc6dba1d7dfa5d59052b5241c37e8eaa5293133c898ac7acedb98')
+            with zipfile.ZipFile(runtime) as contents:
+                contents.extractall(destination / 'bin')
+                (output / 'licenses' / 'APBS-Python.txt').write_bytes(contents.read('LICENSE.txt'))
     else:
         archive = fetk_archive
         fetk = root / f'FETK-{FETK_REV}'
@@ -82,7 +90,8 @@ def apbs(output, force_source):
         build = CACHE / 'apbs-build'
         extra = []
         if system == 'Linux':
-            extra.append('-DCMAKE_C_STANDARD_LIBRARIES=-Wl,-Bstatic -lgomp -Wl,-Bdynamic')
+            extra += ['-DBLA_VENDOR=OpenBLAS',
+                      '-DCMAKE_C_STANDARD_LIBRARIES=-Wl,-Bstatic -lgomp -Wl,-Bdynamic -lm -lpthread']
         elif system == 'Darwin':
             prefixes = [subprocess.check_output(['brew', '--prefix', name], text=True).strip()
                         for name in ('suite-sparse', 'openblas', 'gettext', 'libiconv', 'libomp')]
@@ -98,10 +107,11 @@ def apbs(output, force_source):
         run('cmake', '--build', build, '--parallel', str(min(os.cpu_count() or 2, 8)))
         run('cmake', '--install', build)
         if system == 'Darwin':
-            library = Path(omp) / 'lib/libomp.dylib'
-            (destination / 'lib').mkdir(exist_ok=True)
-            shutil.copy2(library, destination / 'lib/libomp.dylib')
-            run('install_name_tool', '-change', str(library), '@executable_path/../lib/libomp.dylib', destination / 'bin/apbs')
+            spec = importlib.util.spec_from_file_location('bundle_povray', ROOT / 'scripts/bundle-povray.py')
+            runtime = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(runtime)
+            dependencies = runtime.copy_macos_runtime(destination / 'bin/apbs', destination)
+            SOURCES.append({'tool': 'APBS', 'runtime': dependencies})
 
         for module in ('maloc', 'punc', 'gamer', 'mc'):
             for name in ('LGPL.txt', 'license.h'):
@@ -118,7 +128,7 @@ def apbs(output, force_source):
     shutil.copy2(src / 'LICENSE.md', output / 'licenses' / 'APBS.txt')
     result = subprocess.run([str(executable), '--version'], capture_output=True, text=True, cwd=CACHE)
     if APBS_VERSION not in result.stdout + result.stderr:
-        raise RuntimeError(f'APBS version check failed: {result.stdout}\n{result.stderr}')
+        raise RuntimeError(f'APBS version check failed ({result.returncode}): {result.stdout}\n{result.stderr}')
 
 
 def python_tools(output):

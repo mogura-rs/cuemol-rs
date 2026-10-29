@@ -81,7 +81,7 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libsuitesparse-dev libopenblas-dev gfortran autoconf automake libboost-thread-dev libpng-dev libjpeg-dev libtiff-dev patchelf
       - name: Install macOS source-build dependencies
-        if: runner.os == 'macOS' && runner.arch == 'ARM64' && steps.tools.outputs.cache-hit != 'true'
+        if: runner.os == 'macOS' && steps.tools.outputs.cache-hit != 'true'
         run: brew install suite-sparse openblas gettext libiconv libomp
       - name: Install macOS POV-Ray build dependencies
         if: runner.os == 'macOS' && steps.tools.outputs.cache-hit != 'true'
@@ -110,6 +110,7 @@ jobs:
           binary="target/$TARGET/release/cuemol$extension"
           "$binary" --version
           "$binary" mcp tools > .cache/native-tools.json
+          uv run --no-project python scripts/check-apbs.py --binary "$binary"
           "$binary" tools run pdb2pqr --version
           "$binary" tools run ffmpeg -version
           uv run --no-project python scripts/check-povray.py --binary "$binary"
@@ -131,6 +132,16 @@ jobs:
           path: dist/*
           if-no-files-found: error
           compression-level: 0
+          retention-days: 7
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: release-diagnostics-${{ matrix.target }}
+          path: |
+            .cache/tools/apbs-build/CMakeFiles/CMakeConfigureLog.yaml
+            .cache/tools/apbs-build/CMakeFiles/CMakeError.log
+            .cache/tools/apbs-build/CMakeCache.txt
+          if-no-files-found: ignore
           retention-days: 7
   publish:
     if: startsWith(github.ref, 'refs/tags/') && (github.event_name == 'push' || inputs.publish)

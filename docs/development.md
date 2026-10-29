@@ -25,8 +25,11 @@ cargo run --locked -p cuemol-cli -- tools bundle
 necessary. It also builds the vendored browser kernels with Emscripten, using
 `EMXX`, an installed `em++`, or a pinned SDK installed in the checkout cache.
 The kernel build requires `uv`; compiled kernels and the SDK are cached in CI.
-`tools bundle` uses `uv` with hashed dependency pins; ARM APBS builds
-also need CMake, SuiteSparse, BLAS, and platform compiler libraries. Linux ARM64
+`tools bundle` uses `uv` with hashed dependency pins; APBS builds on macOS and
+Linux ARM also need CMake, SuiteSparse, BLAS, and platform compiler libraries.
+The upstream Windows APBS executable is 32-bit and receives its matching
+embedded Python runtime beside the executable. This runtime is separate from
+the application's Python scripting bridge. Linux ARM64
 builds OIDN with pinned ISPC and oneTBB sources; other targets use verified
 prebuilt OIDN libraries. The native tests require the OIDN runtime bundle. See the
 [release workflow](../.github/workflows/release.yml) for platform dependencies.

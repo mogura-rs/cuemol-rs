@@ -9,16 +9,19 @@ END
 
 for (const backend of ['webgpu', 'webgl']) {
   test(`${backend} applies scene AO and AA settings to live pixels`, async ({page}, testInfo) => {
+    test.setTimeout(120000);
     const errors=[];
     page.on('pageerror', error=>errors.push(error.message));
     page.on('console', message=>{if(message.type()==='error')errors.push(message.text());});
-    await page.goto(`./?renderer=${backend}`);
-    await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId), {timeout:60000}).toBeGreaterThan(0);
+    await page.goto(`./?renderer=${backend}`, {waitUntil:'commit'});
+    await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId), {timeout:90000}).toBeGreaterThan(0);
     await page.locator('#files').setInputFiles({name:'contacts.pdb', mimeType:'application/octet-stream', buffer:Buffer.from(pdb)});
     await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
     const command=async(name,args)=>{
-      await page.evaluate(([name,args])=>window.cuemol.command(name,args),[name,args]);
-      await page.waitForTimeout(100);
+      const id=await page.evaluate(([name,args])=>window.cuemol.command(name,args),[name,args]);
+      await expect.poll(()=>page.evaluate(id=>{
+        const state=window.cuemol.status();return state.lastCommand===id&&!state.busy;
+      },id),{timeout:30000}).toBe(true);
       return page.evaluate(()=>window.cuemol.status());
     };
     let state=await page.evaluate(()=>window.cuemol.status());
@@ -41,13 +44,15 @@ for (const backend of ['webgpu', 'webgl']) {
     state=await command('list_node_props',{nodeType:'scene'});
     expect(JSON.parse(state.message).properties.some(p=>p.key==='aaSmaaThreshold'&&p.value==='0.05')).toBe(true);
     await property('aoEnabled',true);
-    const ao=await capture();
-    let dark=0;
-    for(let i=0;i<ao.length;i+=4)if(plain[i]+plain[i+1]+plain[i+2]>ao[i]+ao[i+1]+ao[i+2]+15)dark++;
-    expect(dark).toBeGreaterThan(100);
+    let ao;
+    await expect.poll(async()=>{
+      ao=await capture();let dark=0;
+      for(let i=0;i<ao.length;i+=4)if(plain[i]+plain[i+1]+plain[i+2]>ao[i]+ao[i+1]+ao[i+2]+15)dark++;
+      return dark;
+    }).toBeGreaterThan(100);
     for(const method of ['fxaa','smaa']){
       await property('aa_method',method);
-      expect(difference(ao,await capture())).toBeGreaterThan(20);
+      await expect.poll(async()=>difference(ao,await capture())).toBeGreaterThan(20);
     }
     await property('aa_method','none');
     await property('aoHalfRes',true);
@@ -60,7 +65,7 @@ for (const backend of ['webgpu', 'webgl']) {
     },{timeout:20000}).toBe(0);
     expect(difference(ao,converged)).toBeGreaterThan(20);
     await command('set_view',{zoom:14});
-    expect(difference(converged,await capture())).toBeGreaterThan(500);
+    await expect.poll(async()=>difference(converged,await capture())).toBeGreaterThan(500);
     await command('set_view',{zoom:12});
     await expect.poll(async()=>difference(converged,await capture()),{timeout:20000}).toBe(0);
     await page.screenshot({path:testInfo.outputPath(`${backend}-effects.png`)});

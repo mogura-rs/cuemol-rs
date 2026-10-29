@@ -34,7 +34,7 @@ shutil.copy2(root / 'crates/cuemol-molanl/vendor/usalign/LICENSE', licenses / 'U
 shutil.copy2(root / 'crates/cuemol-gfx/vendor/lcms2/LICENSE', licenses / 'LittleCMS.txt')
 for name in ('winit.txt', 'smaa.txt', 'molstar.txt', 'xegtao.txt'):
     shutil.copy2(root / 'licenses' / name, licenses / name)
-for name in ('cuemol-rs-LICENSE', 'Boost-LICENSE', 'BALL-SOURCE.json', 'meshms/SOURCE.json'):
+for name in ('CueMol-LICENSE', 'Boost-LICENSE', 'BALL-SOURCE.json', 'meshms/SOURCE.json'):
     shutil.copy2(root / 'crates/cuemol-surface/vendor' / name, licenses / ('MeshMS-SOURCE.json' if name.startswith('meshms/') else name))
 shutil.copy2(root / 'crates/cuemol-surface/vendor/edtsurf/LICENSE', licenses / 'EDTSurf.txt')
 shutil.copy2(root / 'crates/cuemol-surface/vendor/edtsurf/SOURCE.json', licenses / 'EDTSurf-SOURCE.json')
