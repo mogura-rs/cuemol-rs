@@ -72,6 +72,10 @@ def unix_build(root):
 
 
 def windows_build(root):
+    attribute = root / 'libraries/openexr/IlmImf/ImfAttribute.cpp'
+    attribute.write_text(attribute.read_text().replace(
+        'struct NameCompare: std::binary_function <const char *, const char *, bool>',
+        'struct NameCompare'))
     config = root / 'windows/povconfig/syspovconfig.h'
     config.write_text(config.read_text().replace('// #define _CONSOLE', '#define _CONSOLE'))
     build = root / 'source/base/build.h'

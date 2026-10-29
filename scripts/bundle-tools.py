@@ -90,8 +90,11 @@ def apbs(output, force_source):
         build = CACHE / 'apbs-build'
         extra = []
         if system == 'Linux':
-            extra += ['-DBLA_VENDOR=OpenBLAS',
-                      '-DCMAKE_C_STANDARD_LIBRARIES=-Wl,-Bstatic -lgomp -Wl,-Bdynamic -lm -lpthread']
+            toolchain = CACHE / 'apbs-toolchain.cmake'
+            toolchain.write_text(
+                'set(CMAKE_C_STANDARD_LIBRARIES "-Wl,-Bstatic -lgomp -Wl,-Bdynamic -lm -lpthread")\n'
+                'set(CMAKE_CXX_STANDARD_LIBRARIES "-Wl,-Bstatic -lgomp -Wl,-Bdynamic -lm -lpthread")\n')
+            extra += ['-DBLA_VENDOR=OpenBLAS', f'-DCMAKE_TOOLCHAIN_FILE={toolchain}']
         elif system == 'Darwin':
             prefixes = [subprocess.check_output(['brew', '--prefix', name], text=True).strip()
                         for name in ('suite-sparse', 'openblas', 'gettext', 'libiconv', 'libomp')]
