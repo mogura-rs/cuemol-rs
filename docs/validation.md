@@ -4,8 +4,119 @@ These measurements describe local validation of the implementation, not a
 published release or a complete CueMol2 equivalence claim. Generated inputs and
 logs are kept in the ignored checkout cache. No remote workflow was triggered.
 Entries record successive checkpoints, so earlier test counts are historical.
+The [completion audit](#completion-audit) records the current open failures and
+performance gaps. Passing earlier checks does not close those gaps.
 The integrated workspace, browser and complete QIF audit results appear under
 [Affine molecular rendering and final integration checks](#affine-molecular-rendering-and-final-integration-checks).
+
+## Completion audit
+
+**Status: incomplete.** The application sources at the documentation checkpoint
+`8c8df38` match `092272a`. The probes below used the Linux x86-64 release binary
+built from `092272a`. They establish remaining failures, rather than inferring
+completion from a passing test count.
+
+All seven reference-QIF audits were rerun with the reference checkout present
+and passed. They cover declarations, construction, inheritance, defaults and
+enum round trips for 166 classes. The member audit checks whether a method is a
+function; it does not execute every method or every parameter combination.
+The following behavior probes fail despite that complete declaration coverage.
+
+| Entry point | Expected behavior | Observed behavior |
+| --- | --- | --- |
+| `StyleManager.createStyleFromObj` | Preserve a renderer's editable style properties. | A renderer with `alpha=0.4` and `linew=3.25` produces a style with `alpha=1` and no `linew`. |
+| `PythonBridge.runString` | Retain the interpreter's variables between calls, as the reference bridge does. | Assigning a variable in one call and reading it in the next raises `NameError`. |
+
+The style adapter constructs a new renderer from only the object's type and
+name before calling the shared style serializer. The shared serializer's own
+tests pass because they supply a renderer with its properties already populated;
+they do not exercise this script adapter. The relevant paths are
+`js_style_create_from_obj` in `crates/cuemol-desktop-core/src/lib.rs` and
+`create_style_from_obj` in `crates/cuemol-qsys/src/style.rs`.
+
+The Python bridge launches a separate `uv run --no-project python -c` process
+for each call. The reference calls `PyRun_SimpleString` in its existing
+interpreter. Process execution alone therefore does not provide reference
+Python runtime semantics. See `PythonBridge::execute_source` in
+`crates/cuemol-py/src/lib.rs` and the reference `src/pybr/PythonBridge.cpp`.
+
+These two failures can be reproduced with the script console or `cuemol run`:
+
+```javascript
+var object = cuemol.MolCoord();
+object.name = 'probe';
+scene.addObject(object);
+var renderer = object.createRenderer('simple', 'probe-renderer');
+renderer.alpha = 0.4;
+renderer.linew = 3.25;
+var styles = getService('StyleManager');
+var id = styles.createStyleSet('audit', scene.uid);
+styles.createStyleFromObj(scene.uid, id, 'Probe', renderer);
+print(styles.getStyleValue(scene.uid, 'audit', 'Probe.alpha'));
+print(styles.getStyleValue(scene.uid, 'audit', 'Probe.linew'));
+```
+
+```javascript
+var bridge = getService('PythonBridge');
+bridge.runString('completion_probe = 42');
+bridge.runString('assert completion_probe == 42');
+```
+
+Command-line script arguments are also unsupported: `cuemol run probe.js alpha
+beta` returns the usage error. `getCmdArgs` returns zero because the script
+environment does not receive command-line arguments. This differs from the
+reference interpreter's argument list API.
+
+### Remaining script and history cost
+
+A separate release-mode probe started a fresh headless MCP process, optionally
+loaded 50,000 synthetic atoms, cleared Undo, issued 20 `get_scene_state` calls,
+then issued 20 `execute_script` calls containing only `print(1);`. The scene
+description remained exactly equal before and after the script calls. Loading
+and initialization are excluded from request times. Three processes were run
+per atom count; the table gives medians across runs, with each request time
+being the median of its 20 calls. The final measurement followed the completion
+of this task's compilation jobs. Other workloads on the shared host were not
+controlled.
+
+| Atoms | Scene query | Script call | RSS before calls | RSS after queries | RSS after scripts |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 0.708 ms | 2.647 ms | 13.78 MiB | 13.78 MiB | 28.88 MiB |
+| 50,000 | 3.798 ms | 74.628 ms | 55.70 MiB | 55.70 MiB | 428.32 MiB |
+
+Memory values come from the server process's Linux `VmRSS`; the final
+50,000-atom `VmHWM` median was also 428.32 MiB. These are current costs, not a
+before/after optimization comparison. They include MCP and script execution,
+not GUI rendering. The script adapter clones molecular data and the application
+state before evaluation. MCP also records a complete application snapshot for
+`execute_script`, even when the script makes no scene edit, retaining up to 20
+entries. `MolCoord` still owns `Vec<Atom>` and derives `Clone`. These paths leave
+substantial work for shared immutable data, copy-on-write updates and history
+that records actual changes.
+
+Relevant implementation paths are `build_script_env` and `run_script_js` in
+`crates/cuemol-desktop-core/src/lib.rs`, `Protocol::call` in
+`crates/cuemol-command/src/protocol.rs`, and `MolCoord` in
+`crates/cuemol-molstr/src/molecule.rs`.
+
+### Completion boundaries
+
+The earlier DCD, BVH, camera-animation and GPU-upload measurements remain valid
+for their recorded inputs and stages. They do not establish optimization of
+every reader, renderer, map/surface calculation, script, history operation or
+complete GUI frame. The new MCP measurement directly shows a remaining memory
+and execution-time cost. Script asynchronous readers also collect the full
+input before parsing; native execution uses a worker, while the current browser
+build parses when `waitLoadAsync` is called. This is separate from the indexed
+browser trajectory path that reads individual frames with `File.slice`.
+
+Hardware quad-buffer stereo is unavailable. Fonts and center-mark blending
+differ from the reference, and the Rust ray tracer does not promise identical
+pixels to the reference integrator. Cross-platform release execution, public
+installation and Pages delivery remain unverified until pushing and Actions
+execution are authorized. Real AI providers and every platform credential store
+also remain outside the recorded mock-provider checks. These limits, together
+with the reproduced functional failures, prevent a full-completion claim.
 
 ## Functional checks
 

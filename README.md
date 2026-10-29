@@ -5,8 +5,8 @@
 # CueMol3
 
 Molecular graphics for the desktop, browser and command line, built in Rust.
-CueMol3 combines CueMol2-compatible scenes and scripting with a shared wgpu
-viewport, molecular dynamics playback and image rendering.
+CueMol3 ports CueMol2's scene and scripting interfaces to a shared wgpu viewport,
+with molecular dynamics playback and image rendering.
 
 [Installation](#installation) · [Quick start](#quick-start) ·
 [User guide](docs/usage.md) · [Development](docs/development.md) ·
@@ -145,8 +145,11 @@ tools, tests, release packaging and Pages deployment.
 | [Validation](docs/validation.md) | Executed checks, benchmarks, reference comparisons and known differences |
 | [Architecture](CLAUDE.md) | Crate boundaries and implementation conventions |
 
-Command coverage does not imply pixel-identical rendering or equivalence for
-every parameter combination. Browser filesystem and process access differ from
+Compatibility and optimization work remain incomplete; see the
+[completion audit](docs/validation.md#completion-audit) for reproduced failures
+and measured remaining costs. Command coverage does not imply pixel-identical
+rendering or equivalence for every parameter combination. Browser filesystem
+and process access differ from
 native execution, and hardware quad-buffer stereo is unavailable. Read the
 [compatibility boundaries](docs/usage.md#compatibility-boundaries) when comparing
 reference scenes. Local validation does not publish a release or a Pages site.
