@@ -4,6 +4,77 @@ use cuemol_qsys::Camera;
 use serde_json::{json, Value};
 
 #[test]
+fn image_output_declares_file_writes_and_preserves_scene_redo() {
+    let mut state = DesktopAppState::new();
+    state.open_bytes("probe.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+    let mut camera = state.active_view_camera().unwrap();
+    let mut protocol = Protocol::new();
+    request(
+        &mut protocol,
+        &mut state,
+        &mut camera,
+        "initialize",
+        json!({}),
+    );
+    assert_eq!(
+        call(
+            &mut protocol,
+            &mut state,
+            &mut camera,
+            "rotate_view",
+            json!({"axis":"y","angle":20})
+        )["isError"],
+        false
+    );
+    let rotated = camera.clone();
+    assert_eq!(
+        call(&mut protocol, &mut state, &mut camera, "undo", json!({}))["isError"],
+        false
+    );
+    let before = state.clone();
+    let before_camera = camera.clone();
+    let directory = tempfile::tempdir().unwrap();
+    let output = directory.path().join("render.png");
+    assert_eq!(
+        call(
+            &mut protocol,
+            &mut state,
+            &mut camera,
+            "render_image",
+            json!({"fileName":output.to_string_lossy(),"width":16,"height":16})
+        )["isError"],
+        false
+    );
+    let bytes = std::fs::read(output).unwrap();
+    assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+    assert_eq!(u32::from_be_bytes(bytes[16..20].try_into().unwrap()), 16);
+    assert!(before.same_undo_state(&state));
+    assert_eq!(camera, before_camera);
+    assert_eq!(
+        call(&mut protocol, &mut state, &mut camera, "redo", json!({}))["isError"],
+        false
+    );
+    assert_eq!(camera, rotated);
+    let listed = request(
+        &mut protocol,
+        &mut state,
+        &mut camera,
+        "tools/list",
+        json!({}),
+    );
+    let tool = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "render_image")
+        .unwrap();
+    assert_eq!(tool["annotations"]["readOnlyHint"], false);
+    assert!(cuemol_command::tool_is_mutating("render_image"));
+    assert!(!cuemol_command::tool_changes_scene("render_image"));
+    assert!(!cuemol_command::tool_records_history("render_image"));
+}
+
+#[test]
 #[cfg(feature = "scripting")]
 fn query_scripts_preserve_redo_and_do_not_consume_undo_entries() {
     let mut state = DesktopAppState::new();

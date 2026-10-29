@@ -30,7 +30,7 @@ pub fn mcp(args: Vec<String>) -> Result<()> {
             Err("Usage: cuemol mcp serve [--http 127.0.0.1:PORT]".into())
         }
         "connect" => {
-            let path = match &args[1..] {
+            let path = match args.get(1..).unwrap_or(&[]) {
                 [] => std::env::var_os("CUEMOL_LOCAL_API_INFO")
                     .map(PathBuf::from)
                     .unwrap_or_else(transport::info_path),

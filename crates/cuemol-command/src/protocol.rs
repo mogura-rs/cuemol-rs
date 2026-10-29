@@ -26,6 +26,7 @@ pub fn tool_changes_scene(name: &str) -> bool {
                 | "save_scene"
                 | "save_object"
                 | "export_image"
+                | "render_image"
                 | "export_scene"
                 | "clear_undo"
         )

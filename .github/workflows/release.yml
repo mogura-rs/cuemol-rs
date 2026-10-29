@@ -117,6 +117,7 @@ jobs:
           "$binary" tools run pdb2pqr --version
           "$binary" tools run ffmpeg -version
           uv run --no-project python scripts/check-povray.py --binary "$binary"
+          uv run --no-project python scripts/check-oidn.py --binary "$binary"
       - name: Test Unix installer and self-upgrade
         if: runner.os != 'Windows'
         shell: bash
