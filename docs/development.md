@@ -90,6 +90,14 @@ only after every target succeeds. Failed uploads leave a draft that can be
 resumed; an already published version is never overwritten. Manual release runs
 build artifacts by default; select a version tag and enable `publish` to publish.
 
+The manual `Published native GUI` workflow downloads a selected public release
+on all five targets and checks captured window pixels, OS mouse input and Python
+helpers. It also checks native credential save/read/update/delete and environment
+fallback against a loopback model catalog. The credential driver requires a
+disposable GitHub-hosted runner and refuses to replace an existing provider key.
+Linux uses an isolated D-Bus session and Secret Service data directory. Dummy
+keys are removed afterward; these checks do not contact a real AI provider.
+
 ## GitHub Pages
 
 The Pages workflow deploys the browser artifact from successful `main` CI runs,

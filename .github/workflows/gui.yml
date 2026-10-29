@@ -3,9 +3,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Published release to validate
-        required: true
-        default: v0.1.1
+        description: Published release to validate (empty selects latest)
+        required: false
+        default: ''
 permissions:
   contents: read
 jobs:
@@ -33,7 +33,7 @@ jobs:
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
       - name: Install Linux window dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 libegl1 libgl1-mesa-dri libvulkan1 mesa-vulkan-drivers xvfb xauth xdotool
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 libegl1 libgl1-mesa-dri libvulkan1 mesa-vulkan-drivers xvfb xauth xdotool gnome-keyring dbus-x11
       - name: Download and verify published application
         shell: bash
         env:
@@ -44,9 +44,12 @@ jobs:
         run: |
           suffix=tar.gz
           if [ "$RUNNER_OS" = Windows ]; then suffix=zip; fi
-          gh release download "$RELEASE_TAG" --pattern "cuemol-$TARGET.$suffix" --pattern SHA256SUMS --dir .cache/gui-release
+          tag_args=()
+          if [ -n "$RELEASE_TAG" ]; then tag_args+=("$RELEASE_TAG"); fi
+          gh release download "${tag_args[@]}" --pattern "cuemol-$TARGET.$suffix" --pattern SHA256SUMS --dir .cache/gui-release
           uv run --no-project --python 3.13 python - <<'PY'
           import hashlib
+          import json
           import os
           from pathlib import Path
           import tarfile
@@ -67,6 +70,15 @@ jobs:
           else:
               with tarfile.open(archive) as package:
                   package.extractall(output, filter='data')
+          info = json.loads((output / 'build-info.json').read_text())
+          if info['target'] != os.environ['TARGET']:
+              raise RuntimeError('Published archive target mismatch')
+          if os.environ['RELEASE_TAG'] and info['version'] != os.environ['RELEASE_TAG']:
+              raise RuntimeError('Published archive version mismatch')
+          evidence = Path('.cache/native-gui-check')
+          evidence.mkdir(parents=True, exist_ok=True)
+          (evidence / 'distribution.json').write_text(json.dumps(
+              dict(info, archive=name, archiveSha256=actual), indent=2) + '\n')
           print(f'Verified {name}: {actual}')
           PY
       - name: Check presented pixels and OS input
@@ -79,6 +91,24 @@ jobs:
             xvfb-run -a -s '-screen 0 1440x1080x24' uv run --python 3.13 scripts/check-native-gui.py --binary "$binary" --out .cache/native-gui-check
           else
             uv run --python 3.13 scripts/check-native-gui.py --binary "$binary" --out .cache/native-gui-check
+          fi
+      - name: Check native credential storage with a loopback provider
+        shell: bash
+        env:
+          CUEMOL_CREDENTIAL_TEST_RUNNER: ${{ runner.environment }}
+        run: |
+          extension=''
+          if [ "$RUNNER_OS" = Windows ]; then extension=.exe; fi
+          binary=".cache/gui-release/app/cuemol$extension"
+          if [ "$RUNNER_OS" = Linux ]; then
+            export XDG_DATA_HOME="$RUNNER_TEMP/cuemol-keyring-data"
+            export XDG_CONFIG_HOME="$RUNNER_TEMP/cuemol-keyring-config"
+            dbus-run-session -- bash -c '
+              printf "validation-store-password" | gnome-keyring-daemon --unlock --components=secrets >/dev/null
+              uv run --no-project python scripts/check-agent-credentials.py --binary "$1" --out .cache/native-gui-check/credentials.json
+            ' _ "$binary"
+          else
+            uv run --no-project python scripts/check-agent-credentials.py --binary "$binary" --out .cache/native-gui-check/credentials.json
           fi
       - uses: actions/upload-artifact@v7
         if: always()
