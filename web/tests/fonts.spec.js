@@ -3,6 +3,49 @@ import {PNG} from 'pngjs';
 import {load, call} from './support.js';
 
 for (const backend of ['webgl', 'webgpu']) {
+  test(`line ending variants preserve label pixels on ${backend}`, async ({page}) => {
+    await page.addInitScript(() => {
+      const contexts = new WeakSet();
+      window.multilineImages = [];
+      const prototype = Object.getPrototypeOf(new OffscreenCanvas(1, 1).getContext('2d'));
+      const fill = prototype.fillText, read = prototype.getImageData;
+      prototype.fillText = function (text, ...args) {
+        if (text.startsWith('Top')) contexts.add(this);
+        return fill.call(this, text, ...args);
+      };
+      prototype.getImageData = function (...args) {
+        const image = read.apply(this, args);
+        if (contexts.has(this)) window.multilineImages.push({width: image.width, height: image.height,
+          alpha: Array.from(image.data.filter((_, i) => i % 4 === 3))});
+        return image;
+      };
+    });
+    await page.goto(`./?renderer=${backend}`);
+    await expect.poll(() => page.evaluate(() => window.cuemol?.status()?.scene?.sceneId), {timeout: 60000}).toBeGreaterThan(0);
+    await load(page, 'lines.pdb', Buffer.from('HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n'));
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().message)).toBe('Loaded lines.pdb');
+    const object = (await page.evaluate(() => window.cuemol.status())).scene.objects[0];
+    const state = await call(page, 'execute_script', {source: `var r=cuemol.getObject(${object.id}).createRenderer('*namelabel');r.name='lines';r.font_size=24;r.font_name='serif';`});
+    const renderer = state.scene.objects[0].renderers.find(r => r.name === 'lines').id;
+    for (const variants of [
+      ['Top\nBottom', 'Top\rBottom', 'Top\r\nBottom', 'Top\n\rBottom'],
+      ['Top\n\nBottom', 'Top\r\n\rBottom', 'Top\n\r\nBottom'],
+    ]) {
+      let expected;
+      for (const text of variants) {
+        await page.evaluate(() => { window.multilineImages = []; });
+        await call(page, 'execute_script', {source: `cuemol.getRenderer(${renderer}).setLabel(1,${JSON.stringify(text)});`});
+        await expect.poll(() => page.evaluate(() => window.multilineImages.length)).toBeGreaterThan(0);
+        const actual = await page.evaluate(() => window.multilineImages.at(-1));
+        expect(actual.alpha.filter(value => value > 0).length).toBeGreaterThan(100);
+        if (expected) {
+          expect([actual.width, actual.height], JSON.stringify(text)).toEqual([expected.width, expected.height]);
+          expect(actual.alpha, JSON.stringify(text)).toEqual(expected.alpha);
+        } else expected = actual;
+      }
+    }
+  });
+
   test(`font families and styles use reference Canvas glyphs on ${backend}`, async ({page}, testInfo) => {
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));

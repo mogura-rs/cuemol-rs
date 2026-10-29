@@ -240,13 +240,18 @@ mod tests {
     #[test]
     fn native_line_endings_preserve_multiline_labels() {
         let mut fonts = regular_fonts();
-        let mut label = super::super::tests::label("A\nB");
-        let expected = rasterize_with_fonts(&label, 1., 4096, &mut fonts).unwrap();
-        for text in ["A\rB", "A\r\nB", "A\n\rB"] {
-            label.text = text.into();
-            let actual = rasterize_with_fonts(&label, 1., 4096, &mut fonts).unwrap();
-            assert_eq!(actual.logical_size, expected.logical_size, "{text:?}");
-            assert_eq!(actual.alpha, expected.alpha, "{text:?}");
+        for variants in [
+            &["A\nB", "A\rB", "A\r\nB", "A\n\rB"][..],
+            &["A\n\nB", "A\r\n\rB", "A\n\r\nB"][..],
+        ] {
+            let mut label = super::super::tests::label(variants[0]);
+            let expected = rasterize_with_fonts(&label, 1., 4096, &mut fonts).unwrap();
+            for &text in &variants[1..] {
+                label.text = text.into();
+                let actual = rasterize_with_fonts(&label, 1., 4096, &mut fonts).unwrap();
+                assert_eq!(actual.logical_size, expected.logical_size, "{text:?}");
+                assert_eq!(actual.alpha, expected.alpha, "{text:?}");
+            }
         }
     }
 

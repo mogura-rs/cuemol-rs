@@ -252,12 +252,25 @@ uses the shaper's actual line count; CR, CRLF and LFCR produce the same native
 pixels as LF. All six native font cases pass. An isolated regular-only font
 also passed italic synthesis without a production change.
 
+A subsequent browser regression reproduced CR-only text being drawn on one
+line. Browser line splitting now recognizes LF, CR, CRLF and LFCR without
+allocating a normalized text copy, including consecutive line endings that
+leave an empty line. The native regression covers those empty-line variants.
+Chrome passed four font cases across WebGL and WebGPU; Firefox and WebKit each
+passed the two WebGL font cases, with exact alpha-mask comparisons between
+equivalent line-ending variants.
+
 The Linux native window passed OS drag and wheel input, changes between embedded
 monospaced and proportional fonts, and identical displayed pixels for lowercase
 and uppercase bold/italic settings. It also displayed identical multiline labels
-for LF, CR, CRLF and LFCR. The latest Mac Tauri application built, but
-its OS input check still requires an unlocked desktop. Exact glyph pixels remain
-dependent on the installed font and native rasterizer.
+for LF, CR, CRLF and LFCR. The
+[hosted Mac Tauri check](https://github.com/mogura-rs/cuemol-rs/actions/runs/40931192947)
+built application revision `89fce01` and passed real OS mouse and wheel input.
+Its CR-separated, bold italic label remained visible, with twenty changed
+captures while the mouse button was held and a further change after scrolling.
+The eight-second drag includes test capture delays and is not a frame-rate
+benchmark. Exact glyph pixels remain dependent on the installed font and native
+rasterizer.
 
 ## Browser click timing
 

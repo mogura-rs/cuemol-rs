@@ -1,6 +1,22 @@
 use super::*;
 use wasm_bindgen::JsCast;
 
+fn text_lines(text: &str) -> impl Iterator<Item = &str> {
+    let mut remaining = Some(text);
+    std::iter::from_fn(move || {
+        let text = remaining.take()?;
+        let Some(end) = text.find(['\r', '\n']) else {
+            return Some(text);
+        };
+        let bytes = text.as_bytes();
+        let paired = bytes
+            .get(end + 1)
+            .is_some_and(|&next| matches!((bytes[end], next), (b'\r', b'\n') | (b'\n', b'\r')));
+        remaining = Some(&text[end + if paired { 2 } else { 1 }..]);
+        Some(&text[..end])
+    })
+}
+
 pub(super) fn rasterize(label: &GuiAtomLabel, scale: f32, limit: u32) -> Option<LabelImage> {
     let canvas = web_sys::OffscreenCanvas::new(1, 1).ok()?;
     let context = canvas
@@ -25,8 +41,8 @@ pub(super) fn rasterize(label: &GuiAtomLabel, scale: f32, limit: u32) -> Option<
     context.set_font(&requested);
     let font = context.font();
     let mut logical_width = 0_f64;
-    let logical_height = size.ceil() * label.text.split('\n').count() as f64;
-    for text in label.text.split('\n') {
+    let logical_height = size.ceil() * text_lines(&label.text).count() as f64;
+    for text in text_lines(&label.text) {
         let metrics = context.measure_text(text).ok()?;
         logical_width = logical_width.max(metrics.width());
     }
@@ -38,7 +54,7 @@ pub(super) fn rasterize(label: &GuiAtomLabel, scale: f32, limit: u32) -> Option<
     context.set_font(&font);
     context.set_text_baseline("bottom");
     context.set_fill_style_str("white");
-    for (line, text) in label.text.split('\n').enumerate() {
+    for (line, text) in text_lines(&label.text).enumerate() {
         context
             .fill_text(text, 0., (line + 1) as f64 * size.ceil())
             .ok()?;
