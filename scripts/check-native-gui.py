@@ -182,7 +182,11 @@ def main():
             script(get_probe + 'fontProbe.font_name="serif";fontProbe.font_style="italic";fontProbe.font_weight="bold";')
             styled = wait_for(lambda: mask if (mask := label_pixels()) is not None
                              and ImageChops.difference(proportional, mask).getbbox() else None)
-            script(get_probe + 'fontProbe.font_style="ITALIC";fontProbe.font_weight="BOLD";')
+            script(get_probe + 'fontProbe.setLabel(2,"Other");')
+            wait_for(lambda: mask if (mask := label_pixels()) is not None
+                     and ImageChops.difference(styled, mask).getbbox() else None)
+            script(get_probe + 'fontProbe.font_style="ITALIC";fontProbe.font_weight="BOLD";'
+                   'fontProbe.setLabel(2,"iiiiWW Ω");')
             wait_for(lambda: mask if (mask := label_pixels()) is not None
                      and ImageChops.difference(styled, mask).getbbox() is None else None)
             capture('font-styled.png')
