@@ -3,6 +3,9 @@
 These measurements describe local validation of the implementation, not a
 published release or a complete CueMol2 equivalence claim. Generated inputs and
 logs are kept in the ignored checkout cache. No remote workflow was triggered.
+Entries record successive checkpoints, so earlier test counts are historical.
+The integrated workspace, browser and complete QIF audit results appear under
+[Affine molecular rendering and final integration checks](#affine-molecular-rendering-and-final-integration-checks).
 
 ## Functional checks
 
@@ -556,16 +559,17 @@ Browser command calls return an ID, and status exposes lastCommand after that
 command is dispatched. Callers can wait for that ID and busy=false before reading
 results; a fixed delay did not reliably distinguish queued from completed work.
 
-The registry now covers all 166 reference classes. The wider QIF audit still
-reports missing members/defaults in maps, labels, trajectory loading
-and exporters. Registry coverage alone does not establish their behavior.
+The registry covered all 166 reference classes at this checkpoint. The wider
+QIF audit then reported missing members/defaults in maps, labels, trajectory
+loading and exporters; later sections record their implementation and validation.
+Registry coverage alone does not establish their behavior.
 
 All 32 browser tests passed after adding command acknowledgments, including
 all three direct-surface engines and application-data persistence through script
 edits and QSC reloads. The class-set test passed with the reference present;
 13 command integration tests, 117 shared core unit tests and 165 native GUI unit
 tests also passed. The latter two counts describe the selected feature sets,
-not the separate unfinished QIF member/default audit.
+not the separate QIF member/default audit completed later.
 
 ## Shared outline groups
 
@@ -631,8 +635,8 @@ contains `sel="aid 1"` while the selection overlay does not.
 
 The shared core passed 196 tests on Linux and Apple Silicon, excluding the seven
 separate registry audit tests. The native GUI passed 165 tests. The registry
-member/default audit remains unfinished for maps, trajectory readers and
-exporters; those gaps are not covered by these passing suites.
+member/default audit was still incomplete for maps, trajectory readers and
+exporters at this checkpoint; later sections cover those gaps.
 Nine QSC compatibility tests passed with the C++ reference fixtures present.
 All 33 existing browser tests passed; after the final QSC fix, five save/load
 and label tests passed, including the new unnamed-renderer and measurement API
@@ -666,8 +670,9 @@ one property list; the separate lists previously omitted direct-surface gradient
 from existing-renderer proxies.
 
 The shared core passed 200 tests, Qsys passed 130, command integration passed
-14 and the native GUI passed 165. These counts exclude the separate unfinished
-registry audit for map controls, trajectory scripting, hover and exporters.
+14 and the native GUI passed 165. These historical counts exclude the separate
+registry audit for map controls, trajectory scripting, hover and exporters,
+which was completed later.
 All 36 browser tests passed, including camera order and orientation, live
 surface-gradient references, invalid JSON rollback and scene reloads.
 
@@ -705,7 +710,8 @@ inconsistency.
 The shared application suite passed 202 tests, excluding the seven separate QIF
 audits, and the native GUI suite passed 165 tests. The full molecule and MD reader
 suites also passed with the reference checkout available. The exhaustive API
-audit still requires map controls, alignment methods, hover and exporter work.
+audit still required map controls, alignment methods, hover and exporter work
+at this checkpoint; the later sections record their completion.
 All 36 browser tests passed, including saving a File-backed DCD, reloading its
 QSC after a page reload, seeking the final frame and reading its coordinates
 through the script API. The command compatibility suite passed all 14 tests.
@@ -810,8 +816,8 @@ input so those ranges can be repaired. Also, the reference QDF map reader derive
 quantization from measured minimum/maximum, which loses a distinct header-derived
 range. Optional `qbase`/`qstep` fields preserve that range in Rust QDF/QSC round
 trips; older reference readers ignore these fields and retain their old behavior.
-Old QDF headers remain readable. Binary map data sharing and the remaining map
-renderer/scalar scripting audit are separate follow-up work.
+Old QDF headers remain readable. Binary map data sharing and the map
+renderer/scalar scripting audit were completed in the following stages.
 
 The shared core passed 209 tests and native egui passed 165 tests after this
 change. The rebuilt browser passed the existing embedded-scene workflow and a
@@ -880,8 +886,8 @@ and CCP4 map-kind/origin/quantization/top-fraction metadata.
 
 Validation passed: five C++ oracle cases, 211 shared-core tests, 165 native
 GUI tests, and three rebuilt-browser tests (structure/scene export, CCP4
-metadata, and potential display/scene export). The remaining QIF audit is tracked
-separately; these checks establish the scalar-data changes only.
+metadata, and potential display/scene export). These checks establish the
+scalar-data changes; the later integrated audit covers the complete QIF surface.
 
 ### Map levels and default-state persistence
 
@@ -1308,3 +1314,4 @@ during this work are collected here; the read-only reference itself was not edit
 | Snapshot transform comments combined object and renderer transforms and described rotation-only normals. | Object coordinates are transformed before glyph construction; renderer geometry uses affine transforms and inverse-transpose normals. |
 | Sphere/cylinder helper comments said flat shading. | Their radial vertex normals support smooth shading. |
 | README called POV-Ray an optional external installation. | Native distributions now include its console renderer, runtime, standard files and sources. |
+| Earlier validation entries described the registry audit as unfinished. | Checkpoints are marked as historical and linked to the completed integrated audit. |
