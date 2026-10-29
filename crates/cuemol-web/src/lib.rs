@@ -480,19 +480,27 @@ impl App {
         }
         let mutating = cuemol_command::tool_changes_scene(name);
         let record_history = cuemol_command::tool_records_history(name);
-        if record_history {
-            self.checkpoint();
-        }
+        let before = record_history.then(|| self.capture_history());
         match cuemol_command::call_tool(&mut self.state, &mut self.camera, name, &args) {
             Ok(value) => {
+                let changed = before.as_ref().is_none_or(|before| {
+                    before.camera != self.camera || !before.state.same_undo_state(&self.state)
+                });
+                if let Some(before) = before.filter(|_| changed) {
+                    self.navigation.cancel();
+                    self.revision = self.revision.wrapping_add(1);
+                    self.history.push(before);
+                    if self.history.len() > 12 {
+                        self.history.remove(0);
+                    }
+                    self.future.clear();
+                }
                 self.message = serde_json::to_string_pretty(&value).unwrap();
-                self.dirty |= mutating;
+                self.dirty |= mutating && changed;
             }
             Err(e) => {
-                if record_history {
-                    if let Some(snapshot) = self.history.pop() {
-                        self.restore_history(snapshot);
-                    }
+                if let Some(before) = before {
+                    self.restore_history(before);
                 }
                 self.message = e.to_string();
             }

@@ -4,6 +4,7 @@ use cuemol_core::{ByteArray, CueMolError, Matrix3, Matrix4, Quat, Result, Vector
 use cuemol_gfx::SolidColor;
 use cuemol_qsys::View;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Atom {
@@ -182,17 +183,32 @@ pub struct ChainSummary {
     pub residue_keys: Vec<ResidueKey>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct MolCoord {
-    atoms: Vec<Atom>,
-    bonds: Vec<Bond>,
-    residue_props: BTreeMap<ResidueKey, BTreeMap<String, String>>,
+    atoms: Arc<Vec<Atom>>,
+    bonds: Arc<Vec<Bond>>,
+    residue_props: Arc<BTreeMap<ResidueKey, BTreeMap<String, String>>>,
     selection: Selector,
     selection_text: String,
     coloring: SolidColoring,
     default_color: SolidColor,
     atoms_moved_generation: usize,
     cell_params: Option<cuemol_core::CellParams>,
+}
+
+impl PartialEq for MolCoord {
+    fn eq(&self, other: &Self) -> bool {
+        (Arc::ptr_eq(&self.atoms, &other.atoms) || self.atoms == other.atoms)
+            && (Arc::ptr_eq(&self.bonds, &other.bonds) || self.bonds == other.bonds)
+            && (Arc::ptr_eq(&self.residue_props, &other.residue_props)
+                || self.residue_props == other.residue_props)
+            && self.selection == other.selection
+            && self.selection_text == other.selection_text
+            && self.coloring == other.coloring
+            && self.default_color == other.default_color
+            && self.atoms_moved_generation == other.atoms_moved_generation
+            && self.cell_params == other.cell_params
+    }
 }
 
 impl Default for MolCoord {
@@ -218,29 +234,35 @@ impl MolCoord {
             &to.default_color,
         );
         apply_value_change(&mut self.cell_params, &from.cell_params, &to.cell_params);
-        cuemol_core::snapshot::apply_sequence_changes(
-            &mut self.atoms,
-            &from.atoms,
-            &to.atoms,
-            |atom| atom.serial,
-            Atom::apply_undo_changes,
-        );
-        cuemol_core::snapshot::apply_map_changes_with(
-            &mut self.residue_props,
-            &from.residue_props,
-            &to.residue_props,
-            cuemol_core::snapshot::apply_map_changes,
-        );
-        if from.atoms != to.atoms {
+        if !Arc::ptr_eq(&from.atoms, &to.atoms) && from.atoms != to.atoms {
+            cuemol_core::snapshot::apply_sequence_changes(
+                Arc::make_mut(&mut self.atoms),
+                &from.atoms,
+                &to.atoms,
+                |atom| atom.serial,
+                Atom::apply_undo_changes,
+            );
+        }
+        if !Arc::ptr_eq(&from.residue_props, &to.residue_props)
+            && from.residue_props != to.residue_props
+        {
+            cuemol_core::snapshot::apply_map_changes_with(
+                Arc::make_mut(&mut self.residue_props),
+                &from.residue_props,
+                &to.residue_props,
+                cuemol_core::snapshot::apply_map_changes,
+            );
+        }
+        if !Arc::ptr_eq(&from.atoms, &to.atoms) && from.atoms != to.atoms {
             self.atoms_moved_generation = self.atoms_moved_generation.wrapping_add(1);
         }
     }
 
     pub fn new() -> Self {
         Self {
-            atoms: Vec::new(),
-            bonds: Vec::new(),
-            residue_props: BTreeMap::new(),
+            atoms: Arc::default(),
+            bonds: Arc::default(),
+            residue_props: Arc::default(),
             selection: Selector::All,
             selection_text: String::new(),
             coloring: SolidColoring::new(),
@@ -252,9 +274,9 @@ impl MolCoord {
 
     pub fn with_atoms(atoms: Vec<Atom>) -> Self {
         Self {
-            atoms,
-            bonds: Vec::new(),
-            residue_props: BTreeMap::new(),
+            atoms: Arc::new(atoms),
+            bonds: Arc::default(),
+            residue_props: Arc::default(),
             selection: Selector::All,
             selection_text: String::new(),
             coloring: SolidColoring::new(),
@@ -356,7 +378,9 @@ impl MolCoord {
     }
 
     pub fn atom_mut_by_serial(&mut self, serial: i32) -> Option<&mut Atom> {
-        self.atoms.iter_mut().find(|atom| atom.serial == serial)
+        Arc::make_mut(&mut self.atoms)
+            .iter_mut()
+            .find(|atom| atom.serial == serial)
     }
 
     pub fn atom_by_spec(
@@ -492,7 +516,7 @@ impl MolCoord {
     }
 
     pub fn push_atom(&mut self, atom: Atom) {
-        self.atoms.push(atom);
+        Arc::make_mut(&mut self.atoms).push(atom);
     }
 
     pub fn append_atom1(
@@ -552,7 +576,7 @@ impl MolCoord {
     }
 
     pub fn atoms_mut(&mut self) -> &mut [Atom] {
-        &mut self.atoms
+        Arc::make_mut(&mut self.atoms).as_mut_slice()
     }
 
     pub fn add_bond(&mut self, atom1: usize, atom2: usize, order: BondOrder) {
@@ -602,7 +626,7 @@ impl MolCoord {
             }) {
                 return;
             }
-            self.bonds.push(Bond {
+            Arc::make_mut(&mut self.bonds).push(Bond {
                 atom1,
                 atom2,
                 order,
@@ -617,7 +641,7 @@ impl MolCoord {
     /// LINK-record reader so the writer can echo those links back. Returns
     /// whether a matching bond was found.
     pub fn mark_bond_persistent(&mut self, atom1: usize, atom2: usize) -> bool {
-        for bond in &mut self.bonds {
+        for bond in Arc::make_mut(&mut self.bonds) {
             if (bond.atom1 == atom1 && bond.atom2 == atom2)
                 || (bond.atom1 == atom2 && bond.atom2 == atom1)
             {
@@ -633,7 +657,7 @@ impl MolCoord {
     /// metadata.
     pub fn remove_bond_between(&mut self, atom1: usize, atom2: usize) -> bool {
         let before = self.bonds.len();
-        self.bonds.retain(|bond| {
+        Arc::make_mut(&mut self.bonds).retain(|bond| {
             !((bond.atom1 == atom1 && bond.atom2 == atom2)
                 || (bond.atom1 == atom2 && bond.atom2 == atom1))
         });
@@ -642,7 +666,7 @@ impl MolCoord {
 
     pub fn remove_nonpersistent_bonds(&mut self) -> usize {
         let before = self.bonds.len();
-        self.bonds.retain(|bond| bond.persist);
+        Arc::make_mut(&mut self.bonds).retain(|bond| bond.persist);
         before - self.bonds.len()
     }
 
@@ -722,7 +746,7 @@ impl MolCoord {
 
     pub fn chain_summaries(&self) -> Vec<ChainSummary> {
         let mut chains = BTreeMap::<String, BTreeSet<ResidueKey>>::new();
-        for atom in &self.atoms {
+        for atom in self.atoms.iter() {
             chains
                 .entry(atom.chain_id.clone())
                 .or_default()
@@ -772,7 +796,7 @@ impl MolCoord {
                 chain, sindex
             )));
         }
-        self.residue_props
+        Arc::make_mut(&mut self.residue_props)
             .entry(key)
             .or_default()
             .insert(name.into(), value.into());
@@ -783,13 +807,15 @@ impl MolCoord {
         &mut self,
         assignments: impl IntoIterator<Item = (ResidueKey, Option<&'static str>, String)>,
     ) {
-        self.residue_props.retain(|_, props| {
+        Arc::make_mut(&mut self.residue_props).retain(|_, props| {
             props.remove("secondary");
             props.remove("secondary2");
             !props.is_empty()
         });
         for (key, secondary, marker) in assignments {
-            let props = self.residue_props.entry(key).or_default();
+            let props = Arc::make_mut(&mut self.residue_props)
+                .entry(key)
+                .or_default();
             if let Some(secondary) = secondary {
                 props.insert("secondary".into(), secondary.into());
             }
@@ -819,12 +845,12 @@ impl MolCoord {
     ) -> Result<bool> {
         let (res_id, ins_code) = parse_residue_index(sindex)?;
         let key = ResidueKey::new(chain, res_id, ins_code);
-        let Some(props) = self.residue_props.get_mut(&key) else {
+        let Some(props) = Arc::make_mut(&mut self.residue_props).get_mut(&key) else {
             return Ok(false);
         };
         let removed = props.remove(name).is_some();
         if props.is_empty() {
-            self.residue_props.remove(&key);
+            Arc::make_mut(&mut self.residue_props).remove(&key);
         }
         Ok(removed)
     }
@@ -884,7 +910,7 @@ impl MolCoord {
             })
             .collect();
         // Apply atom mutations.
-        for (atom, new_key) in self.atoms.iter_mut().zip(&dests) {
+        for (atom, new_key) in Arc::make_mut(&mut self.atoms).iter_mut().zip(&dests) {
             atom.chain_id = new_key.chain_id.clone();
             atom.res_id = new_key.res_id;
             atom.ins_code = new_key.ins_code;
@@ -893,12 +919,12 @@ impl MolCoord {
         // so a lockstep shift (1->2, 2->3) does not clobber a not-yet-moved entry.
         let mut moved = Vec::new();
         for (old, new) in &prop_moves {
-            if let Some(props) = self.residue_props.remove(old) {
+            if let Some(props) = Arc::make_mut(&mut self.residue_props).remove(old) {
                 moved.push((new.clone(), props));
             }
         }
         for (new, props) in moved {
-            self.residue_props.insert(new, props);
+            Arc::make_mut(&mut self.residue_props).insert(new, props);
         }
         true
     }
@@ -913,7 +939,7 @@ impl MolCoord {
     /// Replace the entire residue-property table (used to restore a snapshot, e.g.
     /// for undo of a secondary-structure edit).
     pub fn set_all_residue_props(&mut self, props: BTreeMap<ResidueKey, BTreeMap<String, String>>) {
-        self.residue_props = props;
+        self.residue_props = Arc::new(props);
     }
 
     /// Assign protein secondary structure (Kabsch-Sander DSSP) into the
@@ -972,7 +998,7 @@ impl MolCoord {
     pub fn xform_by_mat(&mut self, matrix: Matrix4, selector: Option<&Selector>) -> usize {
         let indices = selected_or_all_indices(self, selector);
         for index in &indices {
-            matrix.xform3d(&mut self.atoms[*index].position);
+            matrix.xform3d(&mut Arc::make_mut(&mut self.atoms)[*index].position);
         }
         indices.len()
     }
@@ -1180,7 +1206,7 @@ impl MolCoord {
             })
             .collect::<Vec<_>>();
 
-        for atom in &mut self.atoms {
+        for atom in Arc::make_mut(&mut self.atoms) {
             atom.int_props.remove("base_pair");
         }
 
@@ -1249,10 +1275,10 @@ impl MolCoord {
             let lhs_resid = lhs.res_id;
             let rhs_resid = rhs.res_id;
             for index in &residues[*i].1 {
-                self.atoms[*index].set_int_prop("base_pair", rhs_resid);
+                Arc::make_mut(&mut self.atoms)[*index].set_int_prop("base_pair", rhs_resid);
             }
             for index in &residues[*j].1 {
-                self.atoms[*index].set_int_prop("base_pair", lhs_resid);
+                Arc::make_mut(&mut self.atoms)[*index].set_int_prop("base_pair", lhs_resid);
             }
             let _ = self.set_residue_prop_str(
                 &lhs.chain_id,
@@ -1319,11 +1345,10 @@ impl MolCoord {
             })
             .collect();
 
-        self.atoms = atoms;
-        self.bonds = bonds;
+        self.atoms = Arc::new(atoms);
+        self.bonds = Arc::new(bonds);
         let live_residues = self.atoms.iter().map(residue_key).collect::<BTreeSet<_>>();
-        self.residue_props
-            .retain(|key, _| live_residues.contains(key));
+        Arc::make_mut(&mut self.residue_props).retain(|key, _| live_residues.contains(key));
         selected.len()
     }
 
@@ -1363,13 +1388,13 @@ impl MolCoord {
         if old_key != new_key && self.atoms.iter().any(|atom| residue_key(atom) == new_key) {
             return Ok(false);
         }
-        for atom in &mut self.atoms {
+        for atom in Arc::make_mut(&mut self.atoms) {
             if residue_key(atom) == old_key {
                 atom.chain_id = new_chain.to_string();
             }
         }
-        if let Some(props) = self.residue_props.remove(&old_key) {
-            self.residue_props.insert(new_key, props);
+        if let Some(props) = Arc::make_mut(&mut self.residue_props).remove(&old_key) {
+            Arc::make_mut(&mut self.residue_props).insert(new_key, props);
         }
         Ok(true)
     }
@@ -1390,14 +1415,14 @@ impl MolCoord {
         if old_key != new_key && self.atoms.iter().any(|atom| residue_key(atom) == new_key) {
             return Ok(false);
         }
-        for atom in &mut self.atoms {
+        for atom in Arc::make_mut(&mut self.atoms) {
             if residue_key(atom) == old_key {
                 atom.res_id = new_res_id;
                 atom.ins_code = new_ins_code;
             }
         }
-        if let Some(props) = self.residue_props.remove(&old_key) {
-            self.residue_props.insert(new_key, props);
+        if let Some(props) = Arc::make_mut(&mut self.residue_props).remove(&old_key) {
+            Arc::make_mut(&mut self.residue_props).insert(new_key, props);
         }
         Ok(true)
     }
@@ -1441,10 +1466,10 @@ impl MolCoord {
         let mut remap = BTreeMap::new();
         for index in &selected {
             let new_index = self.atoms.len();
-            self.atoms.push(source.atoms[*index].clone());
+            Arc::make_mut(&mut self.atoms).push(source.atoms[*index].clone());
             remap.insert(*index, new_index);
         }
-        for bond in &source.bonds {
+        for bond in source.bonds.iter() {
             if let (Some(atom1), Some(atom2)) = (remap.get(&bond.atom1), remap.get(&bond.atom2)) {
                 self.add_bond_stereo(*atom1, *atom2, bond.order, bond.stereo);
                 if bond.persist {
@@ -1455,7 +1480,7 @@ impl MolCoord {
         for index in &selected {
             let key = residue_key(&source.atoms[*index]);
             if let Some(props) = source.residue_props.get(&key) {
-                self.residue_props
+                Arc::make_mut(&mut self.residue_props)
                     .entry(key)
                     .or_default()
                     .extend(props.clone());
@@ -2128,5 +2153,39 @@ mod tests {
         mol.set_selection_text("").unwrap();
         assert_eq!(mol.selection(), &Selector::All);
         assert_eq!(mol.selection_text(), "");
+    }
+    #[test]
+    fn snapshots_share_storage_and_edits_preserve_undo_sources() {
+        let mut original =
+            MolCoord::with_atoms(vec![atom(1, "A", 1, "CA", 1.0), atom(2, "A", 1, "CB", 2.0)]);
+        original.add_bond(0, 1, BondOrder::Single);
+        original
+            .set_residue_prop_str("A", "1", "tag", "before")
+            .unwrap();
+        let snapshot = original.clone();
+        assert!(Arc::ptr_eq(&original.atoms, &snapshot.atoms));
+        assert!(Arc::ptr_eq(&original.bonds, &snapshot.bonds));
+        assert!(Arc::ptr_eq(
+            &original.residue_props,
+            &snapshot.residue_props
+        ));
+        original.atoms_mut()[0].position.x = 7.0;
+        original.remove_bond(1, 2);
+        original
+            .set_residue_prop_str("A", "1", "tag", "after")
+            .unwrap();
+        assert_eq!(snapshot.atoms()[0].position.x, 1.0);
+        assert_eq!(snapshot.bond_count(), 1);
+        assert_eq!(
+            snapshot.get_residue_prop_str("A", "1", "tag").unwrap(),
+            Some("before")
+        );
+        let modified = original.clone();
+        original.atoms_mut()[1].b_factor = 99.0;
+        original.apply_undo_changes(&modified, &snapshot);
+        assert_eq!(original.atoms()[0].position.x, 1.0);
+        assert_eq!(original.atoms()[1].b_factor, 99.0);
+        assert_eq!(original.bonds(), snapshot.bonds());
+        assert_eq!(original.residue_props(), snapshot.residue_props());
     }
 }

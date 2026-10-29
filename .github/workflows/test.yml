@@ -34,7 +34,7 @@ jobs:
       - name: Install native GUI dependencies
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
       - name: Test shared core and CLI
-        run: cargo test --locked --workspace --exclude cuemol-desktop --exclude cuemol-web
+        run: cargo test --locked --workspace --exclude cuemol-desktop --exclude cuemol-web --features cuemol-desktop-core/scripting,cuemol-command/scripting,cuemol-cli/scripting
       - name: Test native interface
         run: cargo test --locked -p cuemol-desktop --features egui-gui
       - name: Test installer and self-upgrade

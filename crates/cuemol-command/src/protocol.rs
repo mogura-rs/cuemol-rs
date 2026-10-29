@@ -240,7 +240,9 @@ impl Protocol {
         let before = tool_records_history(name).then(|| (state.clone(), camera.clone()));
         match call_tool(state, camera, name, args) {
             Ok(value) => {
-                if let Some(before) = before.filter(|_| self.record_history) {
+                if let Some(before) = before.filter(|(previous, view)| {
+                    self.record_history && (view != camera || !previous.same_undo_state(state))
+                }) {
                     if self.undo.len() == 20 {
                         self.undo.remove(0);
                     }

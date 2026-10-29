@@ -94,7 +94,8 @@ impl App {
                 continue;
             }
             let mutating = cuemol_command::tool_changes_scene(&name);
-            let undo = (mutating && !self.agent.changed_scene).then(|| self.capture_history());
+            let undo = (mutating && (!self.agent.changed_scene || name == "execute_script"))
+                .then(|| self.capture_history());
             let result = if let Some(download) = download {
                 download.and_then(|data| {
                     cuemol_command::load_fetched(
@@ -116,8 +117,12 @@ impl App {
                     self.set_trajectory_frame_index(Uid::new(id), frame as usize);
                 }
             }
-            if result.is_ok() && mutating {
-                if let Some(undo) = undo {
+            let changed = name != "execute_script"
+                || undo.as_ref().is_none_or(|before| {
+                    before.camera != self.camera || !before.state.same_undo_state(&self.state)
+                });
+            if result.is_ok() && mutating && changed {
+                if let Some(undo) = undo.filter(|_| !self.agent.changed_scene) {
                     self.history.push(undo);
                     self.future.clear();
                     if self.history.len() > 12 {

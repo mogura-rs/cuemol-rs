@@ -911,10 +911,20 @@ impl StyleManager {
 
     pub fn create_style_from_obj(
         &mut self,
-        _scope_id: u64,
+        scope_id: u64,
         style_set_id: u64,
         name: impl AsRef<str>,
         object: &Renderer,
+    ) -> bool {
+        self.create_style_from_node(scope_id, style_set_id, name, object.to_style_node())
+    }
+
+    pub fn create_style_from_node(
+        &mut self,
+        _scope_id: u64,
+        style_set_id: u64,
+        name: impl AsRef<str>,
+        mut node: LDom2Node,
     ) -> bool {
         let Some(set) = self.get_style_set_mut(style_set_id) else {
             return false;
@@ -926,7 +936,11 @@ impl StyleManager {
         if set.has_style(name) {
             set.remove_style(name);
         }
-        set.set_style(name, object.to_style_node())
+        node.set_tag_name("style");
+        node.remove_child("name");
+        node.remove_child("type");
+        node.set_type_name("renderer");
+        set.set_style(name, node)
     }
 
     pub fn compile_color(&self, rep: &str, scope_id: u64) -> SolidColor {

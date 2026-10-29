@@ -25,6 +25,26 @@ async function call(page,name,args={}){
   return page.evaluate(()=>window.cuemol.status());
 }
 for (const backend of ['webgl','webgpu']) {
+  test(`read-only scripts ${backend} preserve undo redo and geometry`,async({page})=>{
+    const errors=[];page.on('pageerror',error=>errors.push(error.message));
+    await page.goto(`./?renderer=${backend}`);
+    await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId),{timeout:60000}).toBeGreaterThan(0);
+    await load(page,'history.pdb',Buffer.from(structure));
+    await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+    let state=await call(page,'clear_undo');
+    const object=state.scene.objects[0];
+    state=await call(page,'execute_script',{source:`cuemol.getObject(${object.id}).name='edited';`});
+    expect(state.scene.objects[0].name).toBe('edited');
+    const revision=state.geometryRevision;
+    for(let i=0;i<15;i++)state=await call(page,'execute_script',{source:'print(scene.name);'});
+    expect(state.geometryRevision).toBe(revision);
+    state=await call(page,'undo');expect(state.scene.objects[0].name).toBe(object.name);
+    await call(page,'execute_script',{source:'print(1);'});
+    state=await call(page,'execute_script',{source:`cuemol.getObject(${object.id}).name='failed';throw new Error('probe');`});
+    expect(state.scene.objects[0].name).toBe(object.name);
+    state=await call(page,'redo');expect(state.scene.objects[0].name).toBe('edited');
+    expect(errors).toEqual([]);
+  });
   test(`streamed reader ${backend} retains chunks and options between commands`,async({page})=>{
     const errors=[];page.on('pageerror',error=>errors.push(error.message));
     await page.goto(`./?renderer=${backend}`);

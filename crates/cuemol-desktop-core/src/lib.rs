@@ -4,7 +4,11 @@ mod property_access;
 #[cfg(feature = "scripting")]
 mod script_io;
 #[cfg(feature = "scripting")]
+mod script_python;
+#[cfg(feature = "scripting")]
 mod script_reader;
+#[cfg(feature = "scripting")]
+mod script_services;
 pub use property_access::auxiliary_property_readonly;
 mod density_view;
 mod map_surface;
@@ -13,6 +17,8 @@ pub mod projection;
 pub mod stereo;
 mod view_state;
 pub use view_state::GuiViewOptions;
+#[cfg(all(test, feature = "scripting"))]
+mod script_completion_tests;
 #[cfg(all(test, feature = "scripting"))]
 mod script_export_tests;
 #[cfg(test)]
@@ -690,6 +696,8 @@ pub struct DesktopAppState {
     #[cfg(feature = "scripting")]
     script_styles: StyleManager,
     #[cfg(feature = "scripting")]
+    script_services: script_services::Identity,
+    #[cfg(feature = "scripting")]
     script_view_input_config: cuemol_qsys::ViewInputConfig,
     #[cfg(feature = "scripting")]
     script_scene_undo: BTreeMap<u64, ScriptSceneUndoState>,
@@ -711,7 +719,7 @@ struct DesktopSceneSnapshot {
 }
 
 #[cfg(feature = "scripting")]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct ScriptSceneUndoEntry {
     description: String,
     before: std::sync::Arc<DesktopSceneSnapshot>,
@@ -719,7 +727,7 @@ struct ScriptSceneUndoEntry {
 }
 
 #[cfg(feature = "scripting")]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct ScriptSceneUndoActive {
     description: String,
     before: std::sync::Arc<DesktopSceneSnapshot>,
@@ -727,7 +735,7 @@ struct ScriptSceneUndoActive {
 }
 
 #[cfg(feature = "scripting")]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 struct ScriptSceneUndoState {
     undo: Vec<ScriptSceneUndoEntry>,
     redo: Vec<ScriptSceneUndoEntry>,
@@ -1908,6 +1916,8 @@ impl Default for DesktopAppState {
             #[cfg(feature = "scripting")]
             script_styles: default_desktop_style_manager(),
             #[cfg(feature = "scripting")]
+            script_services: script_services::Identity::default(),
+            #[cfg(feature = "scripting")]
             script_view_input_config: cuemol_qsys::ViewInputConfig::new(),
             #[cfg(feature = "scripting")]
             script_scene_undo: BTreeMap::new(),
@@ -1920,6 +1930,26 @@ impl Default for DesktopAppState {
 }
 
 impl DesktopAppState {
+    /// Compare state restored by application undo, excluding transient caches and services.
+    pub fn same_undo_state(&self, other: &Self) -> bool {
+        let same = self.active_scene == other.active_scene
+            && self.scene_manager().scenes() == other.scene_manager().scenes()
+            && self.command_manager.views() == other.command_manager.views()
+            && self.config == other.config
+            && self.runtime == other.runtime
+            && self.morphs == other.morphs
+            && self.density_maps == other.density_maps
+            && self.trajectories == other.trajectories
+            && self.surface_potential == other.surface_potential
+            && self.potential_scale == other.potential_scale;
+        #[cfg(feature = "scripting")]
+        let same = same
+            && self.script_styles == other.script_styles
+            && self.script_view_input_config == other.script_view_input_config
+            && self.script_scene_undo == other.script_scene_undo;
+        same
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -2786,7 +2816,7 @@ impl DesktopAppState {
                     .filter(|node| node.tag_name() == "renderer" && !node.is_attr())
                     .filter(|node| matches!(node.type_name(), "molsurf" | "MolSurfRenderer"))
                     .collect::<Vec<_>>();
-                let renderer_nodes = if renderer_nodes.is_empty() {
+                let renderer_nodes = if renderer_nodes.is_empty() && object_node.is_none() {
                     vec![None]
                 } else {
                     renderer_nodes
@@ -5344,7 +5374,6 @@ impl DesktopAppState {
             .and_then(|scene| scene.loaded_surface_mut(surface_uid))
             .expect("surface was checked above");
         let object_node = ensure_surface_qsc_node(surface);
-        materialize_implicit_surface_renderer(object_node);
         let renderer_index = surface_renderer_nodes(object_node).count();
         let renderer_uid = surface_renderer_uid(scene_uid, surface_uid, renderer_index);
         let mut renderer = default_surface_renderer_node(renderer_index + 1);
@@ -8158,8 +8187,11 @@ impl DesktopAppState {
             .view_mut(view_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("view {}", view_uid.get())))?;
         let name = view.name().to_string();
-        view.set_camera(camera);
-        view.set_name(name);
+        let mut camera = camera.clone();
+        camera.set_name(name);
+        if view.camera() != camera {
+            view.set_camera(&camera);
+        }
         Ok(())
     }
 
@@ -9738,7 +9770,6 @@ impl DesktopAppState {
                 .and_then(|scene| scene.loaded_surface_mut(object_uid))
                 .expect("surface scene was checked above");
             let node = ensure_surface_qsc_node(surface);
-            materialize_implicit_surface_renderer(node);
             ensure_aux_renderer_group_name_available(
                 &aux_renderer_group_nodes(node).cloned().collect::<Vec<_>>(),
                 None,
@@ -10259,7 +10290,6 @@ impl DesktopAppState {
                     .and_then(|scene| scene.loaded_surface_mut(object_uid))
                     .expect("surface scene was checked above");
                 let object_node = ensure_surface_qsc_node(surface);
-                materialize_implicit_surface_renderer(object_node);
                 let renderer_index = surface_renderer_nodes(object_node).count();
                 let uid = surface_renderer_uid(scene_uid, object_uid, renderer_index);
                 let mut renderer_node = renderer_node.clone();
@@ -10318,7 +10348,6 @@ impl DesktopAppState {
                     .and_then(|scene| scene.loaded_surface_mut(object_uid))
                     .expect("surface scene was checked above");
                 let object_node = ensure_surface_qsc_node(surface);
-                materialize_implicit_surface_renderer(object_node);
                 let (group_uid, group_name) = if let Some(group_uid) = destination_group_uid {
                     (
                         group_uid,
@@ -11851,7 +11880,6 @@ impl DesktopAppState {
                 .and_then(|scene| scene.loaded_surface_mut(object_uid))
                 .expect("surface scene was checked above");
             let node = ensure_surface_qsc_node(surface);
-            materialize_implicit_surface_renderer(node);
             set_qsc_aux_renderer_ui_orders(node, object_uid, scene_uid, &orders, true);
             return Ok(());
         }
@@ -12247,7 +12275,6 @@ impl DesktopAppState {
             .and_then(|scene| scene.loaded_surface_mut(surface_uid))
             .expect("surface was checked above");
         let object_node = ensure_surface_qsc_node(surface);
-        materialize_implicit_surface_renderer(object_node);
         let mut index = 0usize;
         let mut removed = false;
         object_node.retain_children(|child| {
@@ -13515,15 +13542,21 @@ impl DesktopAppState {
                 )))
             }
         };
-        let qsc_node = if format == "msms" {
-            None
-        } else {
+        let qsc_node = {
             let mut node = LDom2Node::new();
             node.set_tag_name("object");
             node.set_type_name("MolSurfObj");
             node.set_str_attr("name", &object_name);
-            node.set_str_attr("src", path.to_string_lossy());
-            node.set_str_attr("srctype", format);
+            node.set_str_attr(
+                "src",
+                if format == "msms" {
+                    "datachunk:".into()
+                } else {
+                    path.to_string_lossy()
+                },
+            );
+            node.set_str_attr("srctype", srctype);
+            node.append_child_node(default_surface_renderer_node(1));
             Some(node)
         };
         let scene = self
@@ -16725,6 +16758,15 @@ impl DesktopAppState {
     /// synchronized at transaction boundaries and committed after successful evaluation.
     #[cfg(feature = "scripting")]
     pub fn run_script_js(&mut self, source: &str) -> Result<(String, Option<String>)> {
+        self.run_script_js_with_args(source, &[])
+    }
+
+    #[cfg(feature = "scripting")]
+    pub fn run_script_js_with_args(
+        &mut self,
+        source: &str,
+        command_args: &[String],
+    ) -> Result<(String, Option<String>)> {
         use boa_engine::object::{builtins::JsArray, FunctionObjectBuilder};
         use boa_engine::{
             js_string,
@@ -28445,7 +28487,7 @@ impl DesktopAppState {
         ) -> JsResult<JsValue> {
             let scene = args.first().cloned().unwrap_or(JsValue::undefined());
             let scene_uid = object_number_prop(&scene, "uid", ctx)? as u64;
-            if !script_env::with(|env| env.render_scenes.contains_key(&scene_uid)) {
+            if !script_env::with(|env| env.scenes.iter().any(|scene| scene.uid == scene_uid)) {
                 return Err(script_error(format!("Scene {scene_uid} is not available")));
             }
             with_script_native_scene_exporter_mut(
@@ -28503,7 +28545,7 @@ impl DesktopAppState {
                 script_env::with(|env| {
                     let exporter = env.native_scene_exporters.get(&id)?;
                     let scene_uid = exporter.base().client_scene()?.get();
-                    let render_scene = env.render_scenes.get(&scene_uid)?.clone();
+                    let render_scene = env.render_scene(scene_uid)?;
                     let scene = env.scenes.iter().find(|scene| scene.uid == scene_uid);
                     let camera_name = exporter.camera_name();
                     let camera = if let Some(camera) = exporter.base().camera_object() {
@@ -29363,7 +29405,7 @@ impl DesktopAppState {
                 let exporter = env.umbreon_exporters.get(&id)?;
                 let scene_uid = exporter.scene().client_scene()?.get();
                 let camera_name = exporter.scene().camera_name().to_string();
-                let render_scene = env.render_scenes.get(&scene_uid)?.clone();
+                let render_scene = env.render_scene(scene_uid)?;
                 let camera = if let Some(camera) = exporter.scene().camera_object() {
                     Some(camera.clone())
                 } else if camera_name.is_empty() {
@@ -29417,7 +29459,7 @@ impl DesktopAppState {
         ) -> JsResult<JsValue> {
             let scene = args.first().cloned().unwrap_or(JsValue::undefined());
             let scene_uid = object_number_prop(&scene, "uid", ctx)? as u64;
-            if !script_env::with(|env| env.render_scenes.contains_key(&scene_uid)) {
+            if !script_env::with(|env| env.scenes.iter().any(|scene| scene.uid == scene_uid)) {
                 return Err(script_error(format!("Scene {scene_uid} is not available")));
             }
             with_script_umbreon_mut(umbreon_proxy_id(this, ctx)?, |exporter| {
@@ -31408,6 +31450,7 @@ impl DesktopAppState {
                     matrix: xform,
                 });
             }
+            with_flushed_script_app(ctx, None, |_| ())?;
             fire_scene_script_event_for(
                 target_scene,
                 cuemol_qsys::SceneEvent::SCE_OBJ_ADDED,
@@ -36106,8 +36149,19 @@ impl DesktopAppState {
                 .children
                 .iter()
                 .find(|child| child.tag_name() == child_tag)
-                .map(|child| child.str_attr(name).to_string())
-                .filter(|value| !value.is_empty())
+                .and_then(|child| child.find_child(name))
+                .map(|value| value.value().to_string())
+                .or_else(|| {
+                    let names = renderer.attributes.get("style")?;
+                    script_env::with(|env| {
+                        env.styles.resolve_style_child_attr(
+                            renderer.scene_uid,
+                            names,
+                            child_tag,
+                            name,
+                        )
+                    })
+                })
                 .unwrap_or_else(|| default.to_string())
         }
         fn renderer_child_proxy_info(this: &JsValue, ctx: &mut Context) -> JsResult<(u64, String)> {
@@ -36435,6 +36489,17 @@ impl DesktopAppState {
             renderer_coloring_node(renderer)
                 .map(|child| child.str_attr(name).to_string())
                 .filter(|value| !value.is_empty())
+                .or_else(|| {
+                    let names = renderer.attributes.get("style")?;
+                    script_env::with(|env| {
+                        env.styles.resolve_style_child_attr(
+                            renderer.scene_uid,
+                            names,
+                            "coloring",
+                            name,
+                        )
+                    })
+                })
                 .unwrap_or_else(|| default.to_string())
         }
         fn mutate_renderer_coloring(
@@ -36778,11 +36843,14 @@ impl DesktopAppState {
                 .and_then(|value| value.as_number())
                 .map(|value| value as u64)
             {
-                if let Some(node) = script_renderer(uid)?
-                    .children
-                    .into_iter()
-                    .find(|child| child.tag_name() == "coloring")
-                {
+                let renderer = script_renderer(uid)?;
+                if let Some(mut node) = renderer_coloring_node(&renderer) {
+                    for property in coloring_property_specs(&class_name) {
+                        node.set_str_attr(
+                            property.key,
+                            coloring_node_attr(&renderer, property.key, property.default),
+                        );
+                    }
                     return Ok(node);
                 }
             }
@@ -39809,7 +39877,9 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<()> {
             let listeners = script_env::with(|env| {
-                env.scene_listeners
+                let services = env.services.borrow();
+                services
+                    .scene_listeners
                     .values()
                     .filter(|(listener_scene_uid, _)| *listener_scene_uid == scene_uid)
                     .map(|(_, callback)| callback.clone())
@@ -39837,10 +39907,11 @@ impl DesktopAppState {
             if let Some((category, target_type, normalized_type)) = event.category() {
                 let json = event.json();
                 let manager_delivery = script_env::with(|env| {
-                    env.event_listener.as_ref().map(|listener| {
+                    let services = env.services.borrow();
+                    services.event_listener.as_ref().map(|listener| {
                         (
                             listener.clone(),
-                            env.event_manager.matching_slot_ids(
+                            services.event_manager.matching_slot_ids(
                                 category.as_str(),
                                 target_type,
                                 normalized_type,
@@ -39873,6 +39944,12 @@ impl DesktopAppState {
             sync_camera_references(ctx)?;
             let mut env = script_env::take();
             let update = env.runtime_update();
+            let pick_snapshot = env
+                .live_app
+                .as_ref()
+                .and_then(|app| app.gpu_pick_image.as_ref())
+                .and_then(|(scene, _, _, _)| env.render_scene(scene.get()))
+                .map(|scene| scene.snapshot);
             let mut app = env.live_app.take().expect("script app is available");
             let result =
                 app.apply_script_batch(update, script_cmds::drain())
@@ -39885,13 +39962,7 @@ impl DesktopAppState {
                     });
             let fresh = app.build_script_env();
             if app.gpu_pick_image.as_ref().is_some_and(|(scene, _, _, _)| {
-                env.render_scenes
-                    .get(&scene.get())
-                    .map(|scene| &scene.snapshot)
-                    != fresh
-                        .render_scenes
-                        .get(&scene.get())
-                        .map(|scene| &scene.snapshot)
+                pick_snapshot.as_ref() != app.render_snapshot(*scene, "").ok().as_ref()
             }) {
                 app.gpu_pick_image = None;
             }
@@ -45107,11 +45178,93 @@ impl DesktopAppState {
             let set_uid = color_arg(args, 1, 0.0, ctx)? as u64;
             let key = argn(args, 2, ctx);
             let value = args.get(3).cloned().unwrap_or(JsValue::undefined());
-            let mut renderer = cuemol_qsys::Renderer::new(object_string_prop(&value, "type", ctx));
-            renderer.set_name(object_string_prop(&value, "name", ctx));
+            let object = iterator_object(&value)?;
+            let renderer_type = object
+                .get(js_string!("type_name"), ctx)?
+                .as_string()
+                .map(|value| value.to_std_string_escaped())
+                .ok_or_else(|| script_error("createStyleFromObj requires a renderer"))?;
+            let mut node = LDom2Node::new();
+            node.set_tag_name("style");
+            for (name, value) in pending_renderer_base_attributes(&value, ctx)? {
+                if !matches!(name.as_str(), "style" | "ui_order" | "group") {
+                    node.set_str_attr(name, value);
+                }
+            }
+            node.set_str_attr(
+                "visible",
+                object
+                    .get(js_string!("visible"), ctx)?
+                    .to_boolean()
+                    .to_string(),
+            );
+            let properties = renderer_attr_properties(&renderer_type)
+                .into_iter()
+                .chain(
+                    map_renderer_properties(&renderer_type)
+                        .into_iter()
+                        .filter(|(_, _, writable)| *writable)
+                        .map(|(name, property, writable)| {
+                            map_renderer_fallback_property(&renderer_type, name, property, writable)
+                        }),
+                )
+                .collect::<Vec<_>>();
+            for property in properties.into_iter().filter(|property| property.writable) {
+                let input = object.get(JsString::from(property.name), ctx)?;
+                let text = match property.kind {
+                    RendererAttrKind::Boolean => input.to_boolean().to_string(),
+                    RendererAttrKind::Integer => input.to_i32(ctx)?.to_string(),
+                    RendererAttrKind::Real => input.to_number(ctx)?.to_string(),
+                    RendererAttrKind::String => input.to_string(ctx)?.to_std_string_escaped(),
+                    RendererAttrKind::Selection => {
+                        selector_from_script_value(&input, ctx)?.to_string()
+                    }
+                    RendererAttrKind::Color => {
+                        solid_color_from_script_value(&input, ctx)?.script_string()
+                    }
+                    RendererAttrKind::Vector => vector_string(vector_from_value(&input, ctx)?),
+                };
+                node.set_str_attr(property.key, text);
+            }
+            let mut children = if pending_renderer_is_attached(&value, ctx)? {
+                script_renderer(renderer_proxy_uid(&value, ctx)?)?.children
+            } else {
+                Vec::new()
+            };
+            if renderer_supports_coloring(&renderer_type) {
+                let coloring = object.get(js_string!("coloring"), ctx)?;
+                children.retain(|child| child.tag_name() != "coloring");
+                children.push(coloring_node_from_script(&coloring, ctx)?);
+            }
+            for (child_name, kind) in renderer_child_properties(&renderer_type) {
+                let child_value = object.get(JsString::from(child_name), ctx)?;
+                let mut child = LDom2Node::new();
+                child.set_tag_name(child_name);
+                let names: &[&str] = match kind {
+                    RendererChildKind::TubeSection => {
+                        &["width", "tuber", "sharp", "type", "detail"]
+                    }
+                    RendererChildKind::Junction => &["type", "gamma", "basw", "arrow"],
+                };
+                for name in names {
+                    let text = iterator_object(&child_value)?
+                        .get(JsString::from(*name), ctx)?
+                        .to_string(ctx)?
+                        .to_std_string_escaped();
+                    child.set_str_attr(*name, text);
+                }
+                children.retain(|child| child.tag_name() != child_name);
+                children.push(child);
+            }
+            let gradient = object.get(js_string!("_pending_multi_gradient"), ctx)?;
+            if !gradient.is_undefined() {
+                sync_qsc_multi_gradient(&mut children, &gradient_from_script(&gradient, ctx)?);
+            }
+            for child in children {
+                node.append_child_node(child);
+            }
             script_env::with_mut(|env| {
-                env.styles
-                    .create_style_from_obj(scope, set_uid, key, &renderer);
+                env.styles.create_style_from_node(scope, set_uid, key, node);
             });
             Ok(JsValue::undefined())
         }
@@ -45127,9 +45280,9 @@ impl DesktopAppState {
             let message = arg0(args, ctx);
             script_env::with_mut(|env| {
                 if newline {
-                    env.msg_log.writeln(&message)
+                    env.services.borrow_mut().msg_log.writeln(&message)
                 } else {
-                    env.msg_log.write(&message)
+                    env.services.borrow_mut().msg_log.write(&message)
                 }
             })
             .map_err(|error| script_error(error.to_string()))?;
@@ -45156,7 +45309,12 @@ impl DesktopAppState {
             _ctx: &mut Context,
         ) -> JsResult<JsValue> {
             Ok(JsString::from(script_env::with(|env| {
-                env.msg_log.get_accum_msg().as_str().to_string()
+                env.services
+                    .borrow_mut()
+                    .msg_log
+                    .get_accum_msg()
+                    .as_str()
+                    .to_string()
             }))
             .into())
         }
@@ -45165,7 +45323,7 @@ impl DesktopAppState {
             _args: &[JsValue],
             _ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            script_env::with_mut(|env| env.msg_log.remove_accum_msg());
+            script_env::with_mut(|env| env.services.borrow_mut().msg_log.remove_accum_msg());
             Ok(JsValue::undefined())
         }
         fn js_msg_log_set_path(
@@ -45174,7 +45332,7 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let path = arg0(args, ctx);
-            script_env::with_mut(|env| env.msg_log.set_file_redir_path(path));
+            script_env::with_mut(|env| env.services.borrow_mut().msg_log.set_file_redir_path(path));
             Ok(JsValue::undefined())
         }
         fn js_msg_log_get_path(
@@ -45183,7 +45341,12 @@ impl DesktopAppState {
             _ctx: &mut Context,
         ) -> JsResult<JsValue> {
             Ok(JsString::from(script_env::with(|env| {
-                env.msg_log.get_file_redir_path().as_str().to_string()
+                env.services
+                    .borrow_mut()
+                    .msg_log
+                    .get_file_redir_path()
+                    .as_str()
+                    .to_string()
             }))
             .into())
         }
@@ -45240,7 +45403,7 @@ impl DesktopAppState {
             _ctx: &mut Context,
         ) -> JsResult<JsValue> {
             Ok(JsValue::new(script_env::with(|env| {
-                env.process_manager.queue_len()
+                env.services.borrow_mut().process_manager.queue_len()
             })))
         }
         fn js_process_error(
@@ -45249,7 +45412,11 @@ impl DesktopAppState {
             _ctx: &mut Context,
         ) -> JsResult<JsValue> {
             Ok(JsString::from(script_env::with(|env| {
-                env.process_manager.error_msg().to_string()
+                env.services
+                    .borrow_mut()
+                    .process_manager
+                    .error_msg()
+                    .to_string()
             }))
             .into())
         }
@@ -45265,7 +45432,12 @@ impl DesktopAppState {
                 .to_i32(ctx)?;
             let value = usize::try_from(value)
                 .map_err(|_| script_error("process slot size is out of range"))?;
-            script_env::with_mut(|env| env.process_manager.set_slot_size(value));
+            script_env::with_mut(|env| {
+                env.services
+                    .borrow_mut()
+                    .process_manager
+                    .set_slot_size(value)
+            });
             Ok(JsValue::undefined())
         }
         fn js_process_get_slots(
@@ -45274,7 +45446,7 @@ impl DesktopAppState {
             _ctx: &mut Context,
         ) -> JsResult<JsValue> {
             Ok(JsValue::new(script_env::with(|env| {
-                env.process_manager.get_slot_size()
+                env.services.borrow_mut().process_manager.get_slot_size()
             })))
         }
         fn process_queue(args: &[JsValue], with_cwd: bool, ctx: &mut Context) -> JsResult<JsValue> {
@@ -45284,12 +45456,20 @@ impl DesktopAppState {
             let result = if with_cwd {
                 let cwd = argn(args, 3, ctx);
                 script_env::with_mut(|env| {
-                    env.process_manager
-                        .queue_task2(path, command_args, wait_for, cwd)
+                    env.services.borrow_mut().process_manager.queue_task2(
+                        path,
+                        command_args,
+                        wait_for,
+                        cwd,
+                    )
                 })
             } else {
                 script_env::with_mut(|env| {
-                    env.process_manager.queue_task(path, command_args, wait_for)
+                    env.services.borrow_mut().process_manager.queue_task(
+                        path,
+                        command_args,
+                        wait_for,
+                    )
                 })
             }
             .map_err(|error| script_error(error.to_string()))?;
@@ -45316,7 +45496,7 @@ impl DesktopAppState {
         ) -> JsResult<JsValue> {
             let id = process_task_id(args, ctx)?;
             Ok(JsValue::new(script_env::with_mut(|env| {
-                env.process_manager.is_alive(id)
+                env.services.borrow_mut().process_manager.is_alive(id)
             })))
         }
         fn js_process_status(
@@ -45326,7 +45506,10 @@ impl DesktopAppState {
         ) -> JsResult<JsValue> {
             let id = process_task_id(args, ctx)?;
             Ok(JsValue::new(script_env::with_mut(|env| {
-                env.process_manager.get_task_status(id)
+                env.services
+                    .borrow_mut()
+                    .process_manager
+                    .get_task_status(id)
             })))
         }
         fn js_process_wait(
@@ -45335,7 +45518,7 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let id = process_task_id(args, ctx)?;
-            script_env::with_mut(|env| env.process_manager.wait_for_exit(id))
+            script_env::with_mut(|env| env.services.borrow_mut().process_manager.wait_for_exit(id))
                 .map_err(|error| script_error(error.to_string()))?;
             Ok(JsValue::undefined())
         }
@@ -45345,7 +45528,7 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let id = process_task_id(args, ctx)?;
-            script_env::with_mut(|env| env.process_manager.kill(id))
+            script_env::with_mut(|env| env.services.borrow_mut().process_manager.kill(id))
                 .map_err(|error| script_error(error.to_string()))?;
             Ok(JsValue::undefined())
         }
@@ -45355,8 +45538,13 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let id = process_task_id(args, ctx)?;
-            let output = script_env::with(|env| env.process_manager.peek_result_output(id))
-                .map_err(|error| script_error(error.to_string()))?;
+            let output = script_env::with(|env| {
+                env.services
+                    .borrow_mut()
+                    .process_manager
+                    .peek_result_output(id)
+            })
+            .map_err(|error| script_error(error.to_string()))?;
             Ok(JsString::from(output).into())
         }
         fn js_process_get_output(
@@ -45365,8 +45553,13 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let id = process_task_id(args, ctx)?;
-            let output = script_env::with_mut(|env| env.process_manager.get_result_output(id))
-                .map_err(|error| script_error(error.to_string()))?;
+            let output = script_env::with_mut(|env| {
+                env.services
+                    .borrow_mut()
+                    .process_manager
+                    .get_result_output(id)
+            })
+            .map_err(|error| script_error(error.to_string()))?;
             Ok(JsString::from(output).into())
         }
         fn js_process_set_log(
@@ -45375,7 +45568,9 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let path = arg0(args, ctx);
-            script_env::with_mut(|env| env.process_manager.set_log_path(path));
+            script_env::with_mut(|env| {
+                env.services.borrow_mut().process_manager.set_log_path(path)
+            });
             Ok(JsValue::undefined())
         }
         fn js_process_empty(
@@ -45384,7 +45579,7 @@ impl DesktopAppState {
             _ctx: &mut Context,
         ) -> JsResult<JsValue> {
             Ok(JsValue::new(script_env::with_mut(|env| {
-                env.process_manager.is_empty()
+                env.services.borrow_mut().process_manager.is_empty()
             })))
         }
         fn js_process_kill_all(
@@ -45392,7 +45587,7 @@ impl DesktopAppState {
             _args: &[JsValue],
             _ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            script_env::with_mut(|env| env.process_manager.kill_all());
+            script_env::with_mut(|env| env.services.borrow_mut().process_manager.kill_all());
             Ok(JsValue::undefined())
         }
         fn js_process_done_json(
@@ -45401,7 +45596,10 @@ impl DesktopAppState {
             _ctx: &mut Context,
         ) -> JsResult<JsValue> {
             Ok(JsString::from(script_env::with_mut(|env| {
-                env.process_manager.done_task_list_json()
+                env.services
+                    .borrow_mut()
+                    .process_manager
+                    .done_task_list_json()
             }))
             .into())
         }
@@ -45515,8 +45713,15 @@ impl DesktopAppState {
         }
         fn python_run_file(args: &[JsValue], arity: usize, ctx: &mut Context) -> JsResult<JsValue> {
             let path = arg0(args, ctx);
+            let bridge = script_env::with(|env| env.services.borrow().python_bridge.clone());
+            let mut bridge = bridge
+                .try_borrow_mut()
+                .map_err(|_| script_error("recursive Python execution is not supported"))?;
+            script_python::prepare(&mut bridge)?;
             let result = match arity {
-                1 => script_env::with_mut(|env| env.python_bridge.run_file(&path)),
+                1 => bridge.run_file_with_handler(&path, &mut |request| {
+                    script_python::request(request, ctx)
+                }),
                 3 => {
                     let arg1 = args
                         .get(1)
@@ -45528,7 +45733,9 @@ impl DesktopAppState {
                         .cloned()
                         .unwrap_or(JsValue::undefined())
                         .to_i32(ctx)?;
-                    script_env::with_mut(|env| env.python_bridge.run_file2(&path, arg1, arg2))
+                    bridge.run_file3_with_handler(&path, arg1, arg2, "None", &mut |request| {
+                        script_python::request(request, ctx)
+                    })
                 }
                 4 => {
                     let arg1 = args
@@ -45542,14 +45749,25 @@ impl DesktopAppState {
                         .unwrap_or(JsValue::undefined())
                         .to_i32(ctx)?;
                     let label = argn(args, 3, ctx);
-                    script_env::with_mut(|env| {
-                        env.python_bridge.run_file3(&path, arg1, arg2, &label)
+                    bridge.run_file3_with_handler(&path, arg1, arg2, &label, &mut |request| {
+                        script_python::request(request, ctx)
                     })
                 }
                 _ => unreachable!(),
             };
+            python_script_output(&bridge);
             result.map_err(script_error)?;
             Ok(JsValue::undefined())
+        }
+        fn python_script_output(bridge: &cuemol_py::PythonBridge) {
+            if let Some(output) = bridge.last_output() {
+                if !output.stdout().is_empty() {
+                    script_cmds::push(ScriptCmd::LogWrite {
+                        message: output.stdout().into(),
+                        newline: false,
+                    });
+                }
+            }
         }
         fn js_python_run_file(
             _this: &JsValue,
@@ -45578,8 +45796,16 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let source = arg0(args, ctx);
-            script_env::with_mut(|env| env.python_bridge.try_run_string(&source))
-                .map_err(script_error)?;
+            let bridge = script_env::with(|env| env.services.borrow().python_bridge.clone());
+            let mut bridge = bridge
+                .try_borrow_mut()
+                .map_err(|_| script_error("recursive Python execution is not supported"))?;
+            script_python::prepare(&mut bridge)?;
+            let result = bridge.try_run_string_with_handler(&source, &mut |request| {
+                script_python::request(request, ctx)
+            });
+            python_script_output(&bridge);
+            result.map_err(script_error)?;
             Ok(JsValue::undefined())
         }
         fn make_python_bridge(ctx: &mut Context) -> JsValue {
@@ -45633,14 +45859,18 @@ impl DesktopAppState {
             if object_string_prop(this, "_class", ctx) == "Scene" {
                 let scene_uid = scene_proxy_uid(this, ctx)?;
                 let id = script_env::with_mut(|env| {
-                    let id = env.next_scene_listener_id;
-                    env.next_scene_listener_id = env.next_scene_listener_id.saturating_add(1);
-                    env.scene_listeners.insert(id, (scene_uid, callback));
+                    let mut services = env.services.borrow_mut();
+                    let id = services.next_scene_listener_id;
+                    services.next_scene_listener_id =
+                        services.next_scene_listener_id.saturating_add(1);
+                    services.scene_listeners.insert(id, (scene_uid, callback));
                     id
                 });
                 Ok(JsValue::new(id))
             } else {
-                script_env::with_mut(|env| env.event_listener = Some(callback));
+                script_env::with_mut(|env| {
+                    env.services.borrow_mut().event_listener = Some(callback)
+                });
                 Ok(JsValue::new(0))
             }
         }
@@ -45657,19 +45887,22 @@ impl DesktopAppState {
             let removed = if object_string_prop(this, "_class", ctx) == "Scene" {
                 let scene_uid = scene_proxy_uid(this, ctx)?;
                 script_env::with_mut(|env| {
-                    if env
+                    let mut services = env.services.borrow_mut();
+                    if services
                         .scene_listeners
                         .get(&id)
                         .is_some_and(|(listener_scene_uid, _)| *listener_scene_uid == scene_uid)
                     {
-                        env.scene_listeners.remove(&id);
+                        services.scene_listeners.remove(&id);
                         true
                     } else {
                         false
                     }
                 })
             } else {
-                script_env::with_mut(|env| env.event_listener.take().is_some())
+                script_env::with_mut(|env| {
+                    env.services.borrow_mut().event_listener.take().is_some()
+                })
             };
             Ok(JsValue::new(removed))
         }
@@ -45695,8 +45928,12 @@ impl DesktopAppState {
                 .unwrap_or(JsValue::undefined())
                 .to_number(ctx)? as i64;
             Ok(JsValue::new(script_env::with_mut(|env| {
-                env.event_manager
-                    .append(category, source_type, event_type, source_uid)
+                env.services.borrow_mut().event_manager.append(
+                    category,
+                    source_type,
+                    event_type,
+                    source_uid,
+                )
             })))
         }
         fn js_event_remove(
@@ -45710,7 +45947,7 @@ impl DesktopAppState {
                 .unwrap_or(JsValue::undefined())
                 .to_i32(ctx)?;
             Ok(JsValue::new(script_env::with_mut(|env| {
-                env.event_manager.remove(id)
+                env.services.borrow_mut().event_manager.remove(id)
             })))
         }
         fn make_event_manager(ctx: &mut Context) -> JsValue {
@@ -46063,7 +46300,10 @@ impl DesktopAppState {
         ) -> JsResult<JsValue> {
             let endpoint = arg0(args, ctx);
             script_env::with_mut(|env| {
-                env.mol_client_manager.connect(endpoint.clone());
+                env.services
+                    .borrow_mut()
+                    .mol_client_manager
+                    .connect(endpoint.clone());
             });
             Ok(make_xmlrpc_connection(&endpoint, ctx))
         }
@@ -46735,13 +46975,31 @@ impl DesktopAppState {
                 .join(",");
             Ok(JsString::from(format!("[{names}]")).into())
         }
-        fn js_get_cmd_args(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+        fn js_get_cmd_args(
+            _t: &JsValue,
+            args: &[JsValue],
+            _ctx: &mut Context,
+        ) -> JsResult<JsValue> {
             if args.len() != 1 {
                 return Err(script_error("getCmdArgs: invalid argument 0"));
             }
-            let _index = args[0].to_i32(ctx)?;
-            // The desktop script action does not inject command-line arguments.
-            Ok(JsValue::new(0))
+            let index = args[0]
+                .as_number()
+                .filter(|value| {
+                    value.is_finite()
+                        && value.fract() == 0.0
+                        && *value >= i32::MIN as f64
+                        && *value <= i32::MAX as f64
+                })
+                .ok_or_else(|| script_error("getCmdArgs: invalid argument 0"))?
+                as i32;
+            Ok(script_env::with(|env| {
+                usize::try_from(index)
+                    .ok()
+                    .and_then(|index| env.command_args.get(index))
+                    .map(|value| JsString::from(value.as_str()).into())
+                    .unwrap_or_else(|| JsValue::new(env.command_args.len() as f64))
+            }))
         }
         // Live computed query: measure a selection (2 atoms→distance, 3→angle,
         // 4→torsion) against the snapshot molecules DURING eval — the same math as the
@@ -46775,6 +47033,8 @@ impl DesktopAppState {
         let _ = script_cmds::drain(); // clear any stale buffer
         script_errors::clear();
         let mut environment = self.build_script_env();
+        script_python::restore(&mut environment);
+        environment.command_args = command_args.to_vec();
         environment.live_app = Some(Box::new(self.clone()));
         script_env::set(environment);
         let mut context = Context::default();
@@ -47054,6 +47314,8 @@ impl DesktopAppState {
                 ))
             })
             .and_then(|_| context.eval(Source::from_bytes(source)));
+        let finish = script_python::finish(&mut context);
+        let outcome = outcome.and(finish.map(|_| JsValue::undefined()));
         if outcome.is_ok() {
             if let Err(error) = sync_camera_references(&mut context) {
                 script_env::clear();
@@ -47064,6 +47326,9 @@ impl DesktopAppState {
         }
         let mut environment = script_env::take();
         let commands = script_cmds::drain();
+        script_python::retain(&mut environment, &mut context).map_err(|error| {
+            CueMolError::invalid_argument(format!("Python object retention failed: {error}"))
+        })?;
         outcome.map_err(|error| CueMolError::invalid_argument(format!("script error: {error}")))?;
         let updated_runtime = environment.runtime_update();
         let mut app = environment
@@ -47206,6 +47471,7 @@ impl DesktopAppState {
             view_input_config,
             scene_states,
         ) = updated_runtime;
+        let styles_changed = styles != self.build_script_styles();
         {
             self.script_next_runtime_uid = self.script_next_runtime_uid.max(next_runtime_uid);
             updated_scene_states = scene_states;
@@ -47242,7 +47508,9 @@ impl DesktopAppState {
                     object.set_alt_source(state.alt_source);
                     object.set_visible(state.visible);
                     object.set_xform_matrix(state.xform);
-                    object.set_qsc_coloring_node(state.coloring);
+                    if mol_object_coloring_node(object) != state.coloring {
+                        object.set_qsc_coloring_node(state.coloring);
+                    }
                     for mut renderer_state in state.renderers {
                         if let Some(renderer) = object.renderer_mut(Uid::new(renderer_state.uid)) {
                             renderer.set_visible(renderer_state.visible);
@@ -47341,7 +47609,9 @@ impl DesktopAppState {
                 .into_iter()
                 .map(|(uid, morph)| (Uid::new(uid), morph))
                 .collect();
-            self.script_styles = styles;
+            if styles_changed {
+                self.script_styles = styles;
+            }
             self.script_view_input_config = view_input_config;
         }
 
@@ -48839,6 +49109,28 @@ impl DesktopAppState {
     }
 
     #[cfg(feature = "scripting")]
+    fn build_script_styles(&self) -> StyleManager {
+        let mut styles = self.script_styles.clone();
+        for scene in self.scene_manager().scenes() {
+            let scope_id = scene.uid().get();
+            for (index, loaded) in scene.loaded_styles().iter().enumerate() {
+                let id = loaded.node.str_attr("id");
+                let name = if id.is_empty() {
+                    format!("scene-style-{index}")
+                } else {
+                    id.to_string()
+                };
+                if styles.has_style_set(&name, scope_id) != 0 {
+                    continue;
+                }
+                let read_only = loaded.node.str_attr("readonly").equals_ignore_case("true");
+                styles.load_style_set_from_xml(scope_id, name, &loaded.data, read_only);
+            }
+        }
+        styles
+    }
+
+    #[cfg(feature = "scripting")]
     fn build_script_env(&self) -> ScriptEnv {
         let mut objects = Vec::new();
         for scene in self.scene_manager().scenes() {
@@ -49035,23 +49327,7 @@ impl DesktopAppState {
                 })
             })
             .collect();
-        let mut styles = self.script_styles.clone();
-        for scene in self.scene_manager().scenes() {
-            let scope_id = scene.uid().get();
-            for (index, loaded) in scene.loaded_styles().iter().enumerate() {
-                let id = loaded.node.str_attr("id");
-                let name = if id.is_empty() {
-                    format!("scene-style-{index}")
-                } else {
-                    id.to_string()
-                };
-                if styles.has_style_set(&name, scope_id) != 0 {
-                    continue;
-                }
-                let read_only = loaded.node.str_attr("readonly").equals_ignore_case("true");
-                styles.load_style_set_from_xml(scope_id, name, &loaded.data, read_only);
-            }
-        }
+        let styles = self.build_script_styles();
         let scenes: Vec<ScriptSceneInfo> = self
             .scene_manager()
             .scenes()
@@ -49101,26 +49377,6 @@ impl DesktopAppState {
             .active_scene()
             .and_then(|uid| self.scene_animation(uid).ok().flatten())
             .unwrap_or_default();
-        let render_scenes = self
-            .scene_manager()
-            .scenes()
-            .iter()
-            .filter_map(|scene| {
-                let snapshot = self.render_snapshot(scene.uid(), "").ok()?;
-                let camera = scene
-                    .camera_by_name("__current")
-                    .or_else(|| scene.cameras().first())
-                    .cloned()
-                    .unwrap_or_else(|| auto_frame_camera(&snapshot));
-                Some((
-                    scene.uid().get(),
-                    ScriptRenderScene {
-                        snapshot,
-                        default_camera: camera,
-                    },
-                ))
-            })
-            .collect();
         let mut allocated_runtime_uids = BTreeSet::new();
         allocated_runtime_uids.extend(scenes.iter().map(|scene| scene.uid));
         allocated_runtime_uids.extend(
@@ -49135,6 +49391,7 @@ impl DesktopAppState {
         }
         ScriptEnv {
             live_app: None,
+            command_args: Vec::new(),
             committed_log: String::new(),
             committed_selection: None,
             scene_uid,
@@ -49193,22 +49450,14 @@ impl DesktopAppState {
             next_pending_atom_intr_id: 1,
             pending_lw_objects: BTreeMap::new(),
             next_pending_lw_object_id: 1,
-            render_scenes,
             native_scene_exporters: BTreeMap::new(),
             next_native_scene_exporter_id: 1,
             umbreon_exporters: BTreeMap::new(),
             next_umbreon_exporter_id: 1,
             styles,
-            msg_log: cuemol_core::LMsgLog::new(),
-            process_manager: cuemol_core::ProcessManager::new(),
-            python_bridge: cuemol_py::PythonBridge::with_uv_execution(),
-            event_manager: cuemol_qsys::ScrEventManager::new(),
+            services: self.script_services.resolve(),
             view_input_config: self.script_view_input_config.clone(),
-            mol_client_manager: cuemol_molclient::MolClientManager::new(),
             async_readers: self.async_readers.clone(),
-            scene_listeners: BTreeMap::new(),
-            next_scene_listener_id: 0,
-            event_listener: None,
         }
     }
 
@@ -49681,6 +49930,7 @@ fn resolve_script_color_in_scope(spec: &str, scope_id: u64) -> Option<cuemol_gfx
 #[derive(Default)]
 struct ScriptEnv {
     live_app: Option<Box<DesktopAppState>>,
+    command_args: Vec<String>,
     committed_log: String,
     committed_selection: Option<String>,
     scene_uid: u64,
@@ -49712,22 +49962,14 @@ struct ScriptEnv {
     next_pending_atom_intr_id: u64,
     pending_lw_objects: BTreeMap<u64, cuemol_lwview::LWObject>,
     next_pending_lw_object_id: u64,
-    render_scenes: BTreeMap<u64, ScriptRenderScene>,
     native_scene_exporters: BTreeMap<u64, ScriptNativeSceneExporter>,
     next_native_scene_exporter_id: u64,
     umbreon_exporters: BTreeMap<u64, UmbreonSceneExporter>,
     next_umbreon_exporter_id: u64,
     styles: StyleManager,
-    msg_log: cuemol_core::LMsgLog,
-    process_manager: cuemol_core::ProcessManager,
-    python_bridge: cuemol_py::PythonBridge,
-    event_manager: cuemol_qsys::ScrEventManager,
+    services: script_services::Shared,
     view_input_config: cuemol_qsys::ViewInputConfig,
-    mol_client_manager: cuemol_molclient::MolClientManager,
     async_readers: script_reader::AsyncReaders,
-    scene_listeners: BTreeMap<i32, (u64, boa_engine::JsObject)>,
-    next_scene_listener_id: i32,
-    event_listener: Option<boa_engine::JsObject>,
 }
 
 #[cfg(feature = "scripting")]
@@ -49748,10 +49990,26 @@ type ScriptRuntimeUpdate = (
 
 #[cfg(feature = "scripting")]
 impl ScriptEnv {
+    fn render_scene(&self, scene_uid: u64) -> Option<ScriptRenderScene> {
+        let app = self.live_app.as_ref()?;
+        let uid = Uid::new(scene_uid);
+        let scene = app.scene_manager().scene(uid)?;
+        let snapshot = app.render_snapshot(uid, "").ok()?;
+        let default_camera = scene
+            .camera_by_name("__current")
+            .or_else(|| scene.cameras().first())
+            .cloned()
+            .unwrap_or_else(|| auto_frame_camera(&snapshot));
+        Some(ScriptRenderScene {
+            snapshot,
+            default_camera,
+        })
+    }
+
     fn hit_view(&self, view: &View, cpu_only: bool, area: bool, gpu_names: bool) -> View {
         let mut view = view.clone();
         view.set_hit_precision(self.view_input_config.resolved(&self.styles).hitprec());
-        let Some(scene) = self.render_scenes.get(&view.scene_uid().get()) else {
+        let Some(scene) = self.render_scene(view.scene_uid().get()) else {
             return view;
         };
         let mut candidates = Vec::new();
@@ -49908,7 +50166,6 @@ impl ScriptEnv {
         self.animation = fresh.animation;
         self.styles = fresh.styles;
         self.view_input_config = fresh.view_input_config;
-        self.render_scenes = fresh.render_scenes;
         self.modified_molecule_uids.clear();
         self.next_scene_uid = self.next_scene_uid.max(fresh.next_scene_uid);
         self.next_runtime_uid = self.next_runtime_uid.max(fresh.next_runtime_uid);
@@ -50208,7 +50465,6 @@ fn script_surface_renderers(
                 .filter(|child| child.tag_name() == "renderer" && !child.is_attr())
                 .collect::<Vec<_>>()
         })
-        .filter(|nodes| !nodes.is_empty())
         .unwrap_or_else(|| vec![&fallback]);
     let (mut renderer_index, mut group_index) = (0, 0);
     nodes
@@ -54115,12 +54371,6 @@ fn ensure_surface_qsc_node(surface: &mut LoadedSurface) -> &mut LDom2Node {
         .expect("surface node was inserted")
 }
 
-fn materialize_implicit_surface_renderer(node: &mut LDom2Node) {
-    if surface_renderer_nodes(node).next().is_none() {
-        node.append_child_node(default_surface_renderer_node(1));
-    }
-}
-
 fn ensure_surface_renderer_node(
     surface: &mut LoadedSurface,
     scene_uid: Uid,
@@ -54128,7 +54378,6 @@ fn ensure_surface_renderer_node(
 ) -> Result<&mut LDom2Node> {
     let surface_uid = surface.uid;
     let object_node = ensure_surface_qsc_node(surface);
-    materialize_implicit_surface_renderer(object_node);
     let child_index = object_node
         .children()
         .iter()
@@ -61399,7 +61648,7 @@ end_header
                     "rendererProps=2.5:false:name CA:128:0.4:false:9:1.25:false:0.75:3:255:1.8:true"
                 )
                 && log.contains(
-                    "rendererChildren=TubeSection:0.9:rectangle:JctTable:arrow:3:arrow:0.6:TubeSection:0.35:JctTable:arrow:1.8"
+                    "rendererChildren=TubeSection:0.9:rectangle:JctTable:arrow:3:smooth:0.6:TubeSection:0.35:JctTable:arrow:1.8"
                 )
                 && log.contains(
                     "rendererColoring=RainbowColoring:true:180:20:PaintColoring:2:name CA:255"
@@ -65575,7 +65824,7 @@ end_header
         .unwrap();
         builder.scene_mut(bscene).unwrap().add_molecule("mol1", mol);
         let mut qsc = builder.scene(bscene).unwrap().write_qsc_string();
-        let surf = "\t<object type=\"MolSurf\" name=\"surf1\" src=\"datachunk:90000\" srctype=\"obj\">\n\t</object>\n</scene>";
+        let surf = "\t<object type=\"MolSurf\" name=\"surf1\" src=\"datachunk:90000\" srctype=\"obj\">\n\t<renderer type=\"molsurf\" name=\"surface\"/>\n\t</object>\n</scene>";
         qsc = qsc.replace("</scene>", surf);
         qsc.push_str(
             "\n==========START datachunk:90000==========\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n==========END datachunk:90000==========\n",
@@ -65593,7 +65842,10 @@ end_header
         );
         assert_eq!(meshes[0].vertices.len(), 3);
         assert_eq!(meshes[0].indices.len(), 3, "one triangle -> three indices");
-        assert_eq!(meshes[0].vertices[0].color, [0.45, 0.65, 0.95, 1.0]);
+        assert_eq!(
+            meshes[0].vertices[0].color,
+            [192.0 / 255.0, 192.0 / 255.0, 1.0, 1.0]
+        );
         let snapshot = app.active_render_snapshot("").unwrap();
         assert_eq!(snapshot.mesh_count(), 1);
         assert_eq!(snapshot.meshes[0], meshes[0]);

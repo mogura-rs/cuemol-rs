@@ -824,7 +824,7 @@ fn self_upgrade() -> Result<(), String> {
 
 fn print_usage() {
     println!("  cuemol web build | serve [--port PORT] [--dir DIR]");
-    println!("CueMol3: cuemol [FILE ...] | mcp | config | run SCRIPT.js | -c JAVASCRIPT | exec TOOL JSON | render INPUT OUTPUT | trajectory-info FILE [STRIDE]");
+    println!("CueMol3: cuemol [FILE ...] | mcp | config | run SCRIPT.js [ARGS...] | -c JAVASCRIPT [ARGS...] | exec TOOL JSON | render INPUT OUTPUT | trajectory-info FILE [STRIDE]");
     eprintln!("Usage:");
     eprintln!("  cuemol self-upgrade [--check]");
     eprintln!("  cuemol tools list | path NAME | run NAME [ARG ...] | bundle [--out DIR]");

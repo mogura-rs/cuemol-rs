@@ -1653,6 +1653,7 @@ dependencies = [
  "cuemol-core",
  "cuemol-gfx",
  "cuemol-molstr",
+ "serde_json",
 ]
 
 [[package]]

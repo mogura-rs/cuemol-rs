@@ -122,27 +122,29 @@ pub fn config(args: Vec<String>) -> Result<()> {
     }
 }
 
+#[cfg(feature = "scripting")]
 pub fn script(command: &str, args: Vec<String>) -> Result<()> {
-    if args.len() != 1 {
-        return Err("Usage: cuemol run SCRIPT.js | cuemol -c JAVASCRIPT".into());
+    if args.is_empty() {
+        return Err(
+            "Usage: cuemol run SCRIPT.js [ARGS...] | cuemol -c JAVASCRIPT [ARGS...]".into(),
+        );
     }
     let source = if command == "run" {
         std::fs::read_to_string(&args[0]).map_err(|e| e.to_string())?
     } else {
         args[0].clone()
     };
-    let (mut state, mut camera) = state()?;
-    let result = call_tool(
-        &mut state,
-        &mut camera,
-        "execute_script",
-        &json!({"source":source}),
-    )
-    .map_err(|e| e.to_string())?;
-    if let Some(log) = result["log"].as_str() {
-        print!("{log}");
-    }
+    let (mut state, _) = state()?;
+    let (log, _) = state
+        .run_script_js_with_args(&source, &args[1..])
+        .map_err(|e| e.to_string())?;
+    print!("{log}");
     Ok(())
+}
+
+#[cfg(not(feature = "scripting"))]
+pub fn script(_command: &str, _args: Vec<String>) -> Result<()> {
+    Err("This build does not include the scripting feature".into())
 }
 
 pub fn execute(args: Vec<String>) -> Result<()> {

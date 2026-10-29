@@ -5,6 +5,88 @@ use serde_json::{json, Value};
 
 #[test]
 #[cfg(feature = "scripting")]
+fn query_scripts_preserve_redo_and_do_not_consume_undo_entries() {
+    let mut state = DesktopAppState::new();
+    state.open_bytes("probe.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+    let mut camera = state.active_view_camera().unwrap();
+    let mut protocol = Protocol::new();
+    request(
+        &mut protocol,
+        &mut state,
+        &mut camera,
+        "initialize",
+        json!({}),
+    );
+    for source in ["print(1)", "print(scene.name)"] {
+        assert_eq!(
+            call(
+                &mut protocol,
+                &mut state,
+                &mut camera,
+                "execute_script",
+                json!({"source":source})
+            )["isError"],
+            false
+        );
+    }
+    assert_eq!(
+        call(&mut protocol, &mut state, &mut camera, "undo", json!({}))["isError"],
+        true
+    );
+    assert_eq!(
+        call(
+            &mut protocol,
+            &mut state,
+            &mut camera,
+            "execute_script",
+            json!({"source":"scene.setName('edited');"})
+        )["isError"],
+        false
+    );
+    for _ in 0..25 {
+        assert_eq!(
+            call(
+                &mut protocol,
+                &mut state,
+                &mut camera,
+                "execute_script",
+                json!({"source":"print(scene.name);"})
+            )["isError"],
+            false
+        );
+    }
+    assert_eq!(
+        call(&mut protocol, &mut state, &mut camera, "undo", json!({}))["isError"],
+        false
+    );
+    assert_ne!(state.active_scene_summary().unwrap().name, "edited");
+    call(
+        &mut protocol,
+        &mut state,
+        &mut camera,
+        "execute_script",
+        json!({"source":"print(scene.name);"}),
+    );
+    assert_eq!(
+        call(&mut protocol, &mut state, &mut camera, "redo", json!({}))["isError"],
+        false
+    );
+    assert_eq!(state.active_scene_summary().unwrap().name, "edited");
+    assert_eq!(
+        call(
+            &mut protocol,
+            &mut state,
+            &mut camera,
+            "execute_script",
+            json!({"source":"scene.setName('failed'); throw new Error('fail');"})
+        )["isError"],
+        true
+    );
+    assert_eq!(state.active_scene_summary().unwrap().name, "edited");
+}
+
+#[test]
+#[cfg(feature = "scripting")]
 fn script_playback_pauses_and_restores_renderer_transform_through_protocol() {
     let mut state = DesktopAppState::new();
     state.open_bytes("animation.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
