@@ -89,27 +89,19 @@ pub(crate) struct PythonWorker {
 
 impl PythonWorker {
     pub(crate) fn start() -> Result<Self, String> {
-        let helpers = json!({
-            "cuemol.cuemol": include_str!("helpers/cuemol.py"),
-            "cuemol.cmd": include_str!("helpers/cmd.py"),
-            "cuemol.fileio": include_str!("helpers/fileio.py"),
-            "cuemol.internal_loader": include_str!("helpers/internal_loader.py"),
-            "cuemol.logging": include_str!("helpers/logging.py"),
-            "cuemol.mol_util": include_str!("helpers/mol_util.py"),
-            "cuemol.net_fetch": include_str!("helpers/net_fetch.py"),
-            "cuemol.renderer": include_str!("helpers/renderer.py"),
-            "cuemol.scene_util": include_str!("helpers/scene_util.py"),
-            "cuemol.undo_txn": include_str!("helpers/undo_txn.py"),
-            "cuemol.wrapper_base": include_str!("helpers/wrapper_base.py"),
-        });
-        let source = format!(
-            "import json\n_helper_sources = json.loads({})\n{}\n{}",
-            super::python_string_literal(&helpers.to_string()),
-            include_str!("binding.py"),
-            include_str!("worker.py")
-        );
+        Self::start_with_source(&worker_source())
+    }
+
+    fn start_with_source(source: &str) -> Result<Self, String> {
         let mut child = Command::new("uv")
-            .args(["run", "--no-project", "python", "-u", "-c", &source])
+            .args([
+                "run",
+                "--no-project",
+                "python",
+                "-u",
+                "-c",
+                include_str!("bootstrap.py"),
+            ])
             .env("UV_CACHE_DIR", super::uv_cache_dir())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -118,10 +110,12 @@ impl PythonWorker {
             .map_err(|error| format!("cannot start Python: {error}"))?;
         let input = child.stdin.take().expect("piped stdin");
         let output = BufReader::new(child.stdout.take().expect("piped stdout"));
-        Ok(Self {
+        let worker = Self {
             child,
             connection: PythonConnection(Arc::new(Mutex::new(Streams { input, output }))),
-        })
+        };
+        worker.connection.send(&json!(source))?;
+        Ok(worker)
     }
 
     pub(crate) fn execute(
@@ -135,6 +129,28 @@ impl PythonWorker {
                 .exchange(json!({"source": source}), handler)?,
         )
     }
+}
+
+fn worker_source() -> String {
+    let helpers = json!({
+        "cuemol.cuemol": include_str!("helpers/cuemol.py"),
+        "cuemol.cmd": include_str!("helpers/cmd.py"),
+        "cuemol.fileio": include_str!("helpers/fileio.py"),
+        "cuemol.internal_loader": include_str!("helpers/internal_loader.py"),
+        "cuemol.logging": include_str!("helpers/logging.py"),
+        "cuemol.mol_util": include_str!("helpers/mol_util.py"),
+        "cuemol.net_fetch": include_str!("helpers/net_fetch.py"),
+        "cuemol.renderer": include_str!("helpers/renderer.py"),
+        "cuemol.scene_util": include_str!("helpers/scene_util.py"),
+        "cuemol.undo_txn": include_str!("helpers/undo_txn.py"),
+        "cuemol.wrapper_base": include_str!("helpers/wrapper_base.py"),
+    });
+    format!(
+        "import json\n_helper_sources = json.loads({})\n{}\n{}",
+        super::python_string_literal(&helpers.to_string()),
+        include_str!("binding.py"),
+        include_str!("worker.py")
+    )
 }
 
 fn run_output(result: &Value) -> Result<PythonRunOutput, String> {
@@ -164,6 +180,26 @@ impl Drop for PythonWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_unicode_bootstrap_keeps_the_protocol_stream_usable() {
+        let source = format!("# {}\n{}", "λ🧬".repeat(65_536), worker_source());
+        let mut worker = PythonWorker::start_with_source(&source).unwrap();
+        let mut handler = |_: Value| Ok(Value::Null);
+        let output = worker
+            .execute(
+                "from cuemol import fileio, mol_util\nprint('ready λ')",
+                &mut handler,
+            )
+            .unwrap();
+        assert!(output.success(), "{}", output.stderr());
+        assert_eq!(output.stdout(), "ready λ\n");
+        let output = worker
+            .execute("print('second request')", &mut handler)
+            .unwrap();
+        assert!(output.success(), "{}", output.stderr());
+        assert_eq!(output.stdout(), "second request\n");
+    }
 
     #[test]
     fn invalid_callback_results_report_errors_without_desynchronizing_the_worker() {

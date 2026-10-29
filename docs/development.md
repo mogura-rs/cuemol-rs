@@ -53,6 +53,8 @@ cargo run --locked -p cuemol-cli -- tools bundle --oidn-only
 cargo test --locked --workspace --exclude cuemol-desktop --exclude cuemol-web \
   --features cuemol-desktop-core/scripting,cuemol-command/scripting,cuemol-cli/scripting
 cargo test --locked -p cuemol-desktop --features egui-gui --lib
+cargo build --locked -p cuemol-cli --features scripting
+uv run --no-project python scripts/check-python.py --binary target/debug/cuemol
 scripts/test-install.sh target/debug/cuemol
 ```
 
@@ -84,6 +86,8 @@ native interface tests run once; browser tests run once against the shared web
 build. Release jobs reuse that browser artifact and cache platform tool bundles
 for five native targets. Completed tool bundles are saved before application
 compilation, and Cargo dependencies are retained after failed release jobs.
+Each native release binary also runs Python helper imports, live-scene queries,
+selected PDB output and persistent interpreter checks before packaging.
 Intel macOS has a longer timeout for builds without a populated cache.
 A version tag publishes eight archives and checksums
 only after every target succeeds. Failed uploads leave a draft that can be

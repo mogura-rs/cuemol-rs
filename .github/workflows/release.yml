@@ -120,6 +120,7 @@ jobs:
           printf '%s\n' "$version"
           if [ -n "$EXPECTED_VERSION" ]; then test "$version" = "cuemol $EXPECTED_VERSION"; fi
           "$binary" mcp tools > .cache/native-tools.json
+          uv run --no-project python scripts/check-python.py --binary "$binary"
           uv run --no-project python scripts/check-apbs.py --binary "$binary"
           "$binary" tools run pdb2pqr --version
           "$binary" tools run ffmpeg -version

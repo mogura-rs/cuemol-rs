@@ -5,7 +5,6 @@ import os
 import sys
 import types
 
-_protocol_input = open(os.dup(0), "r", encoding="utf-8")
 _protocol_output = open(os.dup(1), "w", encoding="utf-8", buffering=1)
 _released = []
 _callbacks = {}

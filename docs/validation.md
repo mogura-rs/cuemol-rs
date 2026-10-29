@@ -72,6 +72,18 @@ the minimal runners. The workflow now installs those packages before launch;
 the Debian/Ubuntu runtime requirements are also documented in the README. This
 matrix verifies the tested window/input paths, not every dialog or hardware GPU.
 
+### Native credential storage
+
+The public v0.1.3 binary passed credential save, load, replacement, deletion and
+environment-variable fallback for OpenAI, Anthropic and Google on all five
+native targets. The [GUI matrix](https://github.com/mogura-rs/cuemol-rs/actions/runs/40942322152)
+passed these checks on both macOS and Linux architectures; the
+[Windows follow-up](https://github.com/mogura-rs/cuemol-rs/actions/runs/40943958893)
+ran them independently of the failing Python GUI check. Each target made nine
+authenticated requests to a loopback mock provider. These exercise the actual
+OS stores, without calling a cloud AI service. Linux used an isolated D-Bus
+session and GNOME Keyring; the macOS jobs used the actual published app bundle.
+
 ## Python helpers and byte-array storage
 
 The native bridge now embeds the reference helper interfaces for file loading,
@@ -112,6 +124,24 @@ object proxies stay alive until their reply is sent. Regressions reproduce the
 old detached-object and callback leaks, then verify recovery in the same
 interpreter. The core and Python suites pass with these cases, interrupted URL
 downloads, `.mmcif` URL detection and transaction undo/redo/rollback coverage.
+
+### Native Python process startup
+
+The published v0.1.3 Windows GUI passed mouse, font-family, style and newline
+checks, but starting Python returned Windows error 206, "The filename or extension
+is too long." Its executable embeds CRLF source files;
+the reconstructed worker command line occupied approximately 34,446 UTF-16 units,
+exceeding the [Windows process limit](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw).
+The worker now receives its embedded modules as one JSON message through standard
+input. A short launcher retains the same buffered protocol stream for subsequent
+requests, including bytes already read ahead during initialization.
+
+A large Unicode bootstrap reproduced an argument-length failure on Linux before
+the repair. Afterward, all eight Python crate tests passed on Linux and macOS,
+and eleven live-scene Python regressions passed on Linux. Those regressions cover
+callbacks, retained variables, selected output, compressed input and recovery
+after exceptions. `scripts/check-python.py` adds a binary-level release gate on
+every native target, including Unicode paths and separate persistent calls.
 
 ## Molecular input and output costs
 
@@ -305,6 +335,17 @@ These operational observations are not a controlled build-speed benchmark.
 
 ## Public Pages checks
 
+At application revision `14c182f`,
+[CI](https://github.com/mogura-rs/cuemol-rs/actions/runs/40934636951)
+passed 1,650 Rust tests with one explicit ignored case, and 94 browser cases
+with one missing-reference-profile skip. The browser total includes ten Tauri
+shell cases that use a mock bridge.
+The [public deployment](https://github.com/mogura-rs/cuemol-rs/actions/runs/40936452224)
+matched all 33 asset hashes in its manifest. Chrome then passed all 85 deployed
+application cases with the reference profile available. Firefox and WebKit
+each passed 26 deployed loading, font and navigation cases. These public counts
+exclude the Tauri mock bridge.
+
 The renamed [public browser application](https://mogura-rs.github.io/cuemol-rs/)
 was checked at application revision `c073b9a`. Its
 [CI run](https://github.com/mogura-rs/cuemol-rs/actions/runs/40867507458)
@@ -476,8 +517,8 @@ Python execution requires native `uv`; supported helpers are listed above.
 The reference `povrender` module and third-party Python packages are not bundled.
 Hardware quad-buffer stereo is unavailable. Font rasterization can differ,
 and the Rust ray tracer does not promise the reference integrator's
-exact pixels. Real AI providers and every platform credential store remain
-outside the mock-provider tests. The public release and Pages checks distinguish
+exact pixels. Actual OS credential-store checks are recorded above, while real
+AI provider turns remain outside the loopback-provider tests. The public release and Pages checks distinguish
 local execution from actual public deployment.
 
 ## Functional checks
@@ -2010,3 +2051,5 @@ during this work are collected here; the read-only reference itself was not edit
 | Linux startup instructions omitted an X11 runtime needed by the published GUI. | The Debian/Ubuntu dependency list now includes `libxkbcommon-x11-0`; the GUI matrix also provisions graphics drivers. |
 | Browser parsing was described only by the synchronous script-reader boundary. | Ordinary file input now uses a cancellable parser worker; script `waitLoadAsync` retains its synchronous API. |
 | Label documentation described only bundled fonts. | Native labels resolve installed families, and browser labels use the reference OffscreenCanvas path. |
+| Native key-storage instructions omitted the Linux session service. | Saved Linux keys require Secret Service; environment and session-only keys work without it. |
+| The release-cache description did not distinguish cache scopes. | Tags can reuse default-branch caches, but cannot read another tag's cache. A manual default-branch build prepares reusable caches. |

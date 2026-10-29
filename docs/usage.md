@@ -297,6 +297,9 @@ and enter that provider's API key. The model field accepts arbitrary model IDs;
 in `agent.json` beside the other configuration files. Native keys can be stored
 in the OS credential store, with `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or
 `GEMINI_API_KEY` as a fallback. Browser keys remain in the current tab's memory.
+On Linux, saved keys require a running Secret Service, such as GNOME Keyring,
+in the desktop session. Environment variables or `--api-key-stdin` remain
+available when that service is absent.
 
 Sending a message shares the prompt, scene description, tool results, and any
 captured images with the selected provider. Replies stream into the panel.
