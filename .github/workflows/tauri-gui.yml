@@ -1,0 +1,45 @@
+name: Tauri macOS GUI
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Source tag to validate
+        required: true
+        default: v0.1.2
+permissions:
+  contents: read
+jobs:
+  gui:
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
+          path: .cache/tauri-source
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: tauri-macos-gui
+          workspaces: .cache/tauri-source -> target
+          cache-on-failure: true
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - name: Build the tagged Tauri source and fixture CLI
+        working-directory: .cache/tauri-source
+        run: cargo build --locked --release -p cuemol-desktop -p cuemol-cli --features cuemol-desktop/tauri-gui
+      - name: Check presented pixels and OS input
+        run: |
+          mkdir -p .cache/tauri-gui-check
+          git -C .cache/tauri-source rev-parse HEAD > .cache/tauri-gui-check/source.txt
+          uv run --python 3.13 scripts/check-tauri-gui.py --binary .cache/tauri-source/target/release/cuemol-rs --cli .cache/tauri-source/target/release/cuemol --out .cache/tauri-gui-check
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: tauri-macos-gui
+          path: .cache/tauri-gui-check
+          if-no-files-found: warn
+          retention-days: 7
