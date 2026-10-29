@@ -17522,7 +17522,8 @@ async function mutateWithViewport(command, args = {}, render = renderShell) {
 function snapshotHasRenderableContent() {
   return Boolean(
     snapshot &&
-      (snapshot.objects.length ||
+      (centerMark !== "none" ||
+        snapshot.objects.length ||
         snapshot.densityMaps.length ||
         snapshot.surfaces.length ||
         (snapshot.lwObjects || []).length),

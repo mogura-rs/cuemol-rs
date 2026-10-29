@@ -119,10 +119,11 @@ inversion, removal and a 20-logical-pixel cross at display scale two. Tauri also
 renders marks in empty scenes. Display scaling now keeps its marks, labels and
 selection outlines at their intended logical size, including reduced-resolution
 navigation frames. GPU tests cover label scale one and two. The affected Tauri
-suite passed 147 tests, its explicit GPU case passed, and all nine shell cases
-passed. The native Linux window also passed OS drag and wheel input checks.
+suite passed 147 tests, its explicit GPU case passed, and all ten shell cases
+passed, including startup and settled camera frames in an empty scene. The
+native Linux window also passed OS drag and wheel input checks.
 
-### Platform failures repaired before publication
+## Platform failures repaired before publication
 
 Actual matrix failures led to these repairs: APBS static BLAS dependencies on
 Linux ARM64, the required ISPC version for ARM64 OIDN, portable macOS APBS

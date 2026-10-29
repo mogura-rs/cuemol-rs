@@ -3,7 +3,7 @@ import {readFile} from 'node:fs/promises';
 
 const shellRoot = new URL('../../crates/cuemol-desktop/tauri-ui/', import.meta.url);
 
-async function openShell(page, storage = {}) {
+async function openShell(page, storage = {}, options = {}) {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.route('http://tauri.test/**', async route => {
@@ -11,12 +11,12 @@ async function openShell(page, storage = {}) {
     const contentType = file.endsWith('.png') ? 'image/png' : file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html';
     await route.fulfill({body: await readFile(file === 'logo.png' ? new URL('../../cuemol-rs.png', import.meta.url) : new URL(file, shellRoot)), contentType});
   });
-  await page.addInitScript(storage => {
+  await page.addInitScript(({storage, options}) => {
     if (!sessionStorage.getItem('seeded')) {
       for (const [key, value] of Object.entries(storage)) localStorage.setItem(key, value);
       sessionStorage.setItem('seeded', '1');
     }
-    const scene = {uid: 1, name: 'Test scene', source: '', modified: false, active: true, objectCount: 1, mapCount: 0};
+    const scene = {uid: 1, name: 'Test scene', source: '', modified: false, active: true, objectCount: options.empty ? 0 : 1, mapCount: 0};
     const renderer = {
       uid: 4, name: 'Atoms', rendererType: 'cpk', group: null, uiCollapsed: false,
       selection: '*', visible: true, locked: false, style: '', material: '', alpha: 1,
@@ -33,7 +33,7 @@ async function openShell(page, storage = {}) {
     };
     const snapshot = {
       scenes: [scene], views: [{uid: 2, sceneUid: 1, name: 'Main', active: true}],
-      cameras: [], styles: [], objects: [molecule], structureKey: 'initial', sequenceKey: 'initial',
+      cameras: [], styles: [], objects: options.empty ? [] : [molecule], structureKey: 'initial', sequenceKey: 'initial',
       crystals: [], densityMaps: [], surfaces: [], lwObjects: [], activeSceneUid: 1,
       selection: '*', measureResult: null, perspective: false, background: 'black',
       showUnitCell: false, showSymmetryMates: false, showDensityContour: false, colorProofing: false,
@@ -44,7 +44,7 @@ async function openShell(page, storage = {}) {
     };
     const viewport = {
       image: null, width: 320, height: 240, center: [0, 0, 0], zoom: 10, distance: 100, slab: 50,
-      perspective: false, centerMark: 'none', lines: [], labels: [], status: 'Ready',
+      perspective: false, centerMark: options.centerMark || 'none', centerMarkEmbedded: true, lines: [], labels: [], status: 'Ready',
     };
     window.__shellCalls = [];
     window.__TAURI__ = {core: {invoke: async (command, args) => {
@@ -72,12 +72,27 @@ async function openShell(page, storage = {}) {
       }
       throw new Error(`Unexpected IPC: ${command}`);
     }}};
-  }, storage);
+  }, {storage, options});
   await page.goto('http://tauri.test/');
   await expect(page.locator('#status-text')).toHaveText('Ready');
   await expect(page.locator('#error-alert-dialog')).not.toBeVisible();
   return errors;
 }
+
+test('Tauri empty scenes render their center axes and settle after camera motion', async ({page}) => {
+  const errors = await openShell(page, {}, {empty: true, centerMark: 'axis'});
+  const rendered = () => page.evaluate(() => window.__shellCalls.filter(call => call.command === 'render_viewport').length);
+  await expect.poll(rendered).toBeGreaterThan(0);
+  const before = await rendered();
+  const rect = await page.locator('#viewport').boundingBox();
+  await page.mouse.move(rect.x + rect.width / 2, rect.y + rect.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(rect.x + rect.width / 2 + 60, rect.y + rect.height / 2 + 30, {steps: 6});
+  await page.mouse.up();
+  await expect.poll(rendered).toBeGreaterThan(before);
+  expect(await page.evaluate(() => window.__shellCalls.some(call => call.command === 'update_camera'))).toBe(true);
+  expect(errors).toEqual([]);
+});
 
 test('Tauri fresh storage opens the CueMol3 panels and theme survives reload', async ({page}) => {
   const errors = await openShell(page);
