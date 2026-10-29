@@ -765,6 +765,10 @@ fn self_upgrade() -> Result<(), String> {
     command
         .arg("-s")
         .env("CUEMOL_INSTALL_DIR", directory)
+        .env(
+            "CUEMOL_INSTALL_NAME",
+            executable.file_name().ok_or("missing executable name")?,
+        )
         .stdin(Stdio::piped());
     if std::env::var_os("CUEMOL_RELEASE_REPOSITORY").is_none() {
         if let Some(repository) = option_env!("CUEMOL_RELEASE_REPOSITORY") {

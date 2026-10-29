@@ -58,4 +58,14 @@ if [ "$#" -gt 0 ]; then
   CUEMOL_RELEASE_URL="file://$work/release" "$work/bin/cuemol" self-upgrade
   test "$("$work/bin/cuemol")" = installed
   test "$(cat "$work/bin/cuemol-tools/apbs/bin/apbs")" = bundled
+  app="$work/cu emol-rs.app/Contents"
+  mkdir -p "$app/MacOS" "$app/Resources/cuemol-tools"
+  cp "$1" "$app/MacOS/cuemol-rs"
+  printf 'previous\n' > "$app/Resources/cuemol-tools/marker.txt"
+  CUEMOL_RELEASE_URL="file://$work/release" "$app/MacOS/cuemol-rs" self-upgrade
+  cmp "$work/input/cuemol" "$app/MacOS/cuemol-rs"
+  test ! -e "$app/MacOS/cuemol"
+  test "$("$app/MacOS/cuemol-rs")" = installed
+  test "$(cat "$app/Resources/cuemol-tools/apbs/bin/apbs")" = bundled
+  test ! -e "$app/Resources/cuemol-tools/marker.txt"
 fi

@@ -42,9 +42,13 @@ else
 fi
 if [ "$actual" != "$expected" ]; then printf "Checksum mismatch for %s\n" "$asset" >&2; exit 1; fi
 install_dir=${CUEMOL_INSTALL_DIR:-"${HOME:?HOME is required}/.local/bin"}
+install_name=${CUEMOL_INSTALL_NAME:-cuemol}
+case "$install_name" in
+  ''|.|..|*[!a-zA-Z0-9._-]*) printf "Invalid executable name\n" >&2; exit 1 ;;
+esac
 mkdir -p "$install_dir"
-if [ -d "$install_dir/cuemol" ]; then
-  printf "Installation target is a directory: %s/cuemol\n" "$install_dir" >&2
+if [ -d "$install_dir/$install_name" ]; then
+  printf "Installation target is a directory: %s/%s\n" "$install_dir" "$install_name" >&2
   exit 1
 fi
 staged=$(mktemp -d "$install_dir/.cuemol.XXXXXXXX")
@@ -68,11 +72,11 @@ if [ -d "$staged/cuemol-tools" ]; then
   fi
   tools_replaced=true
 fi
-if ! mv -f "$staged/cuemol" "$install_dir/cuemol"; then
+if ! mv -f "$staged/cuemol" "$install_dir/$install_name"; then
   if [ "$tools_replaced" = true ]; then
     rm -rf "$tools_dir"
     if [ -d "$staged/previous-tools" ]; then mv "$staged/previous-tools" "$tools_dir"; fi
   fi
   exit 1
 fi
-printf "Installed cuemol in %s\n" "$install_dir"
+printf "Installed %s in %s\n" "$install_name" "$install_dir"
