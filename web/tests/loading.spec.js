@@ -106,6 +106,26 @@ test('queued files load in order and an invalid file does not block the queue', 
   expect((await page.evaluate(() => window.cuemol.status())).scene.objects.map(object => object.name)).toEqual(['first.pdb']);
 });
 
+test('a queued scene becomes the destination for its following molecule', async ({page}) => {
+  await ready(page);
+  await load(page, 'original.pdb', Buffer.from(pdb));
+  await loaded(page, 'original.pdb');
+  const before = await page.evaluate(() => window.cuemol.status().scene.sceneId);
+  const download = page.waitForEvent('download');
+  const button = await page.evaluate(() => window.cuemol.status().ui.rects['Save Scene']);
+  await page.mouse.click(button[0] + button[2] / 2, button[1] + button[3] / 2);
+  const chunks = [];
+  for await (const chunk of await (await download).createReadStream()) chunks.push(chunk);
+  await page.locator('#files').setInputFiles([
+    {name: 'queued.qsc', mimeType: 'application/octet-stream', buffer: Buffer.concat(chunks)},
+    {name: 'following.pdb', mimeType: 'application/octet-stream', buffer: Buffer.from(pdb)},
+  ]);
+  await loaded(page, 'following.pdb');
+  const state = await page.evaluate(() => window.cuemol.status());
+  expect(state.scene.sceneId).not.toBe(before);
+  expect(state.scene.objects.map(object => object.name)).toEqual(['original.pdb', 'following.pdb']);
+});
+
 test('worker is reused for nearby loads and released after idle', async ({page}) => {
   await ready(page);
   const loaders = () => page.workers().filter(worker => worker.url().endsWith('/loader-worker.js'));
@@ -138,7 +158,9 @@ test('cancel button discards queued files and scene changes reject late input', 
   expect((await page.evaluate(() => window.cuemol.status())).scene.objects).toHaveLength(0);
   release = await holdWorker(page);
   try {
-    await load(page, 'late.pdb', Buffer.from(pdb));
+    await page.locator('#files').setInputFiles(['late.pdb', 'late-queued.pdb'].map(name => ({
+      name, mimeType: 'application/octet-stream', buffer: Buffer.from(pdb),
+    })));
     await expect.poll(() => page.evaluate(() => window.cuemol.status().loading)).toBe(true);
     const before = await page.evaluate(() => window.cuemol.status().scene.sceneId);
     const id = await page.evaluate(() => window.cuemol.command('create_scene', {name: 'New scene'}));
@@ -146,6 +168,59 @@ test('cancel button discards queued files and scene changes reject late input', 
     await expect.poll(() => page.evaluate(() => window.cuemol.status().scene.sceneId)).not.toBe(before);
   } finally { await release(); }
   await expect.poll(() => page.evaluate(() => window.cuemol.status().loading), {timeout: 60000}).toBe(false);
+  const state = await page.evaluate(() => window.cuemol.status());
+  expect(state.message).toBe('File loading cancelled because the active scene changed.');
+  expect(state.scene.objects).toHaveLength(0);
+});
+
+test('scene changes cancel pending ICC input before it alters the new scene', async ({page}) => {
+  await ready(page);
+  const profile = await page.evaluate(async () => {
+    const {default: create} = await import('./pkg/kernels/lcms.js');
+    const cms = await create();
+    const handle = cms._cmsCreate_sRGBProfile(), size = cms._malloc(4);
+    try {
+      cms._cmsSaveProfileToMem(handle, 0, size);
+      const length = cms.HEAPU32[size / 4], data = cms._malloc(length);
+      try {
+        cms._cmsSaveProfileToMem(handle, data, size);
+        return Array.from(cms.HEAPU8.subarray(data, data + length));
+      } finally { cms._free(data); }
+    } finally { cms._free(size); cms._cmsCloseProfile(handle); }
+  });
+  await page.evaluate(() => {
+    const read = File.prototype.arrayBuffer;
+    File.prototype.arrayBuffer = async function () {
+      if (this.name === 'late.icc') await new Promise(resolve => { window.releaseProfile = resolve; });
+      return read.call(this);
+    };
+  });
+  await load(page, 'late.icc', Buffer.from(profile));
+  await expect.poll(() => page.evaluate(() => typeof window.releaseProfile)).toBe('function');
+  const before = await page.evaluate(() => window.cuemol.status().scene.sceneId);
+  const id = await page.evaluate(() => window.cuemol.command('create_scene', {name: 'New scene'}));
+  await expect.poll(() => page.evaluate(() => window.cuemol.status().lastCommand)).toBe(id);
+  await expect.poll(() => page.evaluate(() => window.cuemol.status().scene.sceneId)).not.toBe(before);
+  await page.evaluate(() => window.releaseProfile());
+  await expect.poll(() => page.evaluate(() => window.cuemol.status().loading)).toBe(false);
+  expect(await page.evaluate(() => window.cuemol.status().message)).toBe('File loading cancelled because the active scene changed.');
+  expect(await page.evaluate(() => localStorage.getItem('cuemol.icc.late.icc'))).toBeNull();
+});
+
+test('scene changes cancel files queued before their parser starts', async ({page}) => {
+  await ready(page);
+  const before = await page.evaluate(() => window.cuemol.status().scene.sceneId);
+  const id = await page.evaluate(source => {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([source], 'queued-before-start.pdb'));
+    const input = document.querySelector('#files');
+    input.files = transfer.files;
+    input.dispatchEvent(new Event('change', {bubbles: true}));
+    return window.cuemol.command('create_scene', {name: 'New scene'});
+  }, pdb);
+  await expect.poll(() => page.evaluate(() => window.cuemol.status().lastCommand)).toBe(id);
+  await expect.poll(() => page.evaluate(() => window.cuemol.status().scene.sceneId)).not.toBe(before);
+  await expect.poll(() => page.evaluate(() => window.cuemol.status().loading)).toBe(false);
   const state = await page.evaluate(() => window.cuemol.status());
   expect(state.message).toBe('File loading cancelled because the active scene changed.');
   expect(state.scene.objects).toHaveLength(0);

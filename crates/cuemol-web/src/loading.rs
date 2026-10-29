@@ -14,6 +14,17 @@ impl App {
         self.source_active && generation == self.source_generation
     }
 
+    pub(super) fn validate_source_scene(&mut self) -> bool {
+        if (self.source_active || !self.source_queue.is_empty())
+            && self.source_scene != self.state.active_scene()
+        {
+            self.cancel_load();
+            self.message = "File loading cancelled because the active scene changed.".into();
+            return false;
+        }
+        true
+    }
+
     pub(super) fn cancel_load(&mut self) {
         if !self.source_active && self.source_queue.is_empty() {
             return;
@@ -27,17 +38,24 @@ impl App {
         self.message = "File loading cancelled.".into();
     }
 
+    pub(super) fn queue_source(&mut self, file: web_sys::File) {
+        if !self.source_active && self.source_queue.is_empty() {
+            self.source_scene = self.state.active_scene();
+        }
+        self.source_queue.push_back(file);
+    }
+
     pub(super) fn queue_bytes(&mut self, name: &str, bytes: &[u8]) {
         let parts = js_sys::Array::new();
         parts.push(&js_sys::Uint8Array::from(bytes));
         match web_sys::File::new_with_u8_array_sequence(&parts, name) {
-            Ok(file) => self.source_queue.push_back(file),
+            Ok(file) => self.queue_source(file),
             Err(error) => self.message = js_error(error),
         }
     }
 
     pub(super) fn start_next_source(&mut self) {
-        if self.source_active || self.busy {
+        if !self.validate_source_scene() || self.source_active || self.busy {
             return;
         }
         let Some(file) = self.source_queue.pop_front() else {
@@ -112,8 +130,7 @@ impl App {
     }
 
     pub(super) fn apply_prepared(&mut self, name: String, file: PreparedFile) {
-        if self.source_scene != self.state.active_scene() {
-            self.message = "File loading cancelled because the active scene changed.".into();
+        if !self.validate_source_scene() {
             return;
         }
         let source = file
@@ -122,6 +139,7 @@ impl App {
         let before = self.capture_history();
         match self.state.open_prepared(file) {
             Ok(loaded) => {
+                self.source_scene = self.state.active_scene();
                 self.navigation.cancel();
                 self.revision = self.revision.wrapping_add(1);
                 self.history.push(before);

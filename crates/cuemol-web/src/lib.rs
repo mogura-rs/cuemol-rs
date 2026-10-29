@@ -533,6 +533,7 @@ impl App {
     fn events(&mut self) {
         let events = EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()));
         for event in events {
+            self.validate_source_scene();
             match event {
                 Event::Input(event) => self.input_events.push_back(event),
                 Event::AgentCancel => self.agent.cancel("Cancelled; completed edits are kept."),
@@ -588,12 +589,14 @@ impl App {
                         }
                     });
                 }
-                Event::Source(file) => self.source_queue.push_back(file),
+                Event::Source(file) => self.queue_source(file),
                 Event::SourceFinished(generation) => {
                     if self.current_source(generation) {
                         self.source_active = false;
                         self.busy = false;
-                        self.source_scene = None;
+                        if self.source_queue.is_empty() {
+                            self.source_scene = None;
+                        }
                     }
                 }
                 Event::SourceError(generation, error) => {
