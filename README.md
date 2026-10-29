@@ -389,7 +389,12 @@ uv run --no-project --with mdtraj --with netCDF4 \
 The ribbon, cartoon and tube paths use the reference cross-section profiles,
 natural and smoothing splines, junctions, helix-width modes and end caps.
 Their geometry, triangle winding, partial selections and color boundaries are
-checked against an optional C++ oracle.
+checked against an optional C++ oracle. Object transforms apply to molecular
+coordinates before glyph construction, preserving atom radii and thermal tensor
+axes. Renderer transforms apply to the resulting geometry. Uniform scales keep
+sphere/cylinder primitives; nonuniform scales and shear tessellate them while
+retaining picking identities, section materials and transparency. Mesh normals
+use the inverse transpose, and reflections preserve outward face orientation.
 Secondary-structure assignment excludes proline donors and uses sparse
 hydrogen-bond/bridge searches with bounded per-residue bond storage.
 

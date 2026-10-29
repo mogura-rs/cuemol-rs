@@ -2,6 +2,8 @@ mod command_support;
 mod density_view;
 mod map_surface;
 pub mod picking;
+#[cfg(test)]
+mod transform_tests;
 pub use density_view::DensityViewSync;
 use density_view::DensityViewUpdate;
 pub mod property_catalog;
@@ -50381,6 +50383,22 @@ fn append_object_renderer_snapshot(
             object.mol().default_color(),
         );
     }
+    let transformed_object =
+        if renderer_type != "atomintr" && object.xform_matrix() != Matrix4::IDENTITY {
+            options.backbone_links = Some(std::sync::Arc::new(cuemol_molvis::mainchain_links(
+                object.mol(),
+                options.pivot_atom.as_deref(),
+            )));
+            let mut transformed = object.clone();
+            transformed
+                .mol_mut()
+                .xform_by_mat(object.xform_matrix(), None);
+            transformed.set_xform_matrix(Matrix4::IDENTITY);
+            Some(transformed)
+        } else {
+            None
+        };
+    let object = transformed_object.as_ref().unwrap_or(object);
     let mut snapshot = match (renderer_type, renderer) {
         ("simple", renderer) => {
             let width = renderer
@@ -50799,23 +50817,11 @@ fn append_object_renderer_snapshot(
             });
         }
     }
-    // Apply the object + renderer `xformMat` (C++ `Object`/`Renderer` xformMat,
-    // multiplied onto the modelview at display; the object xform is propagated onto
-    // atom positions). The effective transform is `renderer · object`, baked into
-    // this renderer's geometry so a superposed/positioned object renders where the
-    // scene saved it. AtomIntr endpoints already include each source object's
-    // transform. Skipped when both remaining transforms are identity.
-    let object_xform = if renderer_type == "atomintr" {
-        Matrix4::IDENTITY
-    } else {
-        object.xform_matrix()
-    };
     let renderer_xform = renderer
         .map(MolRenderer::xform_matrix)
         .unwrap_or(Matrix4::IDENTITY);
-    let xform = renderer_xform.mul_mat(object_xform);
-    if xform != Matrix4::IDENTITY {
-        snapshot.apply_xform(&xform);
+    if renderer_xform != Matrix4::IDENTITY {
+        snapshot.apply_xform(&renderer_xform);
     }
     append_snapshot(target, snapshot);
 }

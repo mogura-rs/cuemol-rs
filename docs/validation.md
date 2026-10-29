@@ -1201,3 +1201,76 @@ and reloads the scene, then appends to the reloaded trajectory. A truncated inpu
 leaves the existing blocks and coordinates intact, and the next valid file loads
 successfully. Frame reset on QSC reload follows the reference's nonpersistent
 `frame` property. Public release execution remains outside this local checkpoint.
+
+
+### Affine molecular rendering and final integration checks
+
+Object coordinates now receive their transform before molecular geometry is
+constructed. CPK radii, bond thickness, backbone cross sections and anisotropic
+thermal axes therefore retain their reference meanings. Backbone links are
+resolved before coordinate changes, so scaling a molecule cannot split its
+chain. The authoritative molecule is not mutated. Identity object transforms
+avoid the temporary molecule copy; transformed copies are released after each
+renderer is built.
+
+Renderer transforms apply to complete glyphs. Similarity transforms preserve
+sphere/cylinder primitives and scale their radii, while screen-space line widths
+remain in pixels. Nonuniform scales and shear tessellate those primitives and
+retain section materials, alpha, edge data and atom ownership. Normals use the
+inverse transpose, with a cofactor fallback for singular transforms. Reflections
+preserve face orientation. The primitive tessellator also had inward sphere and
+cylinder faces; these now point outward, while outline faces point inward.
+
+The independent C++ backbone oracle passes 60 mesh configurations and 57 spline
+configurations, including nonuniform scaling, shear, reflection and rotation.
+Position, normal, color and picking comparisons retain the previous tolerances.
+Shared regressions verify object-versus-renderer scaling, unchanged thermal axes,
+raw coordinate preservation, transformed picking metadata and material ranges.
+WebGL and WebGPU checks verify circular object-scaled spheres, uniformly scaled
+spheres, reflected ellipsoids, fragment hover, CPU rendering and scene reloads.
+
+The complete workspace run with the native GUI feature passes 1,593 tests,
+including 252 shared-core tests, 167 native GUI tests, 81 renderer tests and
+76 molecular-renderer tests. Reference fixtures were available; optional external
+oracles still require their explicit invocations. All seven QIF audits pass for
+166 classes. The final integration run exposed a missing `tracestick` entry in
+both Tauri renderer lists; both lists now include it, and all 69 shell checks
+pass. Tauri's ordinary suite passes 144 tests. Its three GPU checks were then run
+explicitly on Metal, including real numbered animation PNGs, hover and a volume-only
+scene. Both external MDTraj trajectory checks ran successfully with the generator
+installed. Distribution-helper tests pass six cases and all workflows pass
+actionlint. Public release and Pages execution remain untested under the no-push
+instruction.
+
+The complete browser suite passes all 53 tests after rebuilding the final
+geometry. This run also exposed a bottom-panel layout error: the Console pane
+shrank by the unused input-row margin on successive frames, changing the viewport
+and invalidating click coordinates. The panel now reserves its assigned height,
+and Console/Output scroll areas retain it regardless of log length. Navigation,
+trackpad scaling, log growth and affine glyph checks pass together.
+
+### Documentation reconciled with implementation
+
+The implementation takes precedence over stale descriptions. Corrections found
+during this work are collected here; the read-only reference itself was not edited.
+
+| Previous description | Behavior followed or documented |
+| --- | --- |
+| Proline donor exclusion depended on case. | Proline is excluded regardless of case. |
+| DefaultRibbon section dimensions and all axial detail defaults were shared. | Style-specific dimensions are used; tube/spline default to six subdivisions, while named ribbon styles and cartoon use eight. |
+| The current C++ trajectory reader was eager. | The reference also indexes frames; Rust playback and memory claims now state their measured scope. |
+| Native layout and snapshot comments described XUL. | The default native/browser controls follow Tritium; the optional Tauri shell retains the legacy layout. |
+| Surface previews were uniformly light gray. | Preview geometry uses atom colors. |
+| Object coloring implicitly supplied the historical palette. | `$molcol` follows the object's solid default or explicit coloring scheme. |
+| README/browser help described earlier custom mouse bindings. | They now describe the reference presets and their configurable bindings. |
+| Repository metadata used an old organization URL. | It follows the configured repository used by installation and updates. |
+| Native annotations described only atom labels. | Measurement values and their positions are included. |
+| A missing custom pivot produced no backbone. | The reference falls back to the residue's normal pivot. |
+| Both `VALIDATION.md` and `validation.md` existed with different content. | Evidence is consolidated in `docs/validation.md`. |
+| `Renderer.qif` described unnamed edge groups as object-specific. | The C++ implementation groups them by matching edge style. |
+| The reference cap-table header described generated surfaces only. | The renderer also uses caps for full-region display and explicit `cap_mode=on`. |
+| Map meshing comments still said marching tetrahedra. | The implementation uses marching cubes. |
+| An old surface helper claimed solvent-accessible marching tetrahedra. | Its actual solvent-excluded marching-cubes behavior was superseded by the shared SES backend path. |
+| A spline helper comment said Catmull-Rom. | The implementation uses a natural cubic spline. |
+| Snapshot transform comments combined object and renderer transforms and described rotation-only normals. | Object coordinates are transformed before glyph construction; renderer geometry uses affine transforms and inverse-transpose normals. |
+| Sphere/cylinder helper comments said flat shading. | Their radial vertex normals support smooth shading. |

@@ -161,8 +161,11 @@ int main(int argc, char **argv) {
                 const auto split = setting.find('=');
                 qlib::LVariant value;
                 value.setStringValue(setting.substr(split + 1).c_str());
-                if (!renderer->setNestedProperty(setting.substr(0, split).c_str(), value))
-                    throw std::runtime_error("Unknown property: " + setting);
+                const auto key = setting.substr(0, split);
+                const bool ok = key.rfind("object.", 0) == 0
+                    ? mol->setNestedProperty(key.substr(7).c_str(), value)
+                    : renderer->setNestedProperty(key.c_str(), value);
+                if (!ok) throw std::runtime_error("Unknown property: " + setting);
             }
             renderer->write(out, false, false, false);
         }

@@ -602,6 +602,8 @@ test('saved trackpad input pans, pinches and survives a reload',async({page})=>{
   expect(view.center[1]).toBeCloseTo(16*50/rect[3],9);expect(view.zoom).toBe(50);
   await page.keyboard.down('Control');await page.mouse.wheel(0,-10);await page.keyboard.up('Control');
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().view.zoom)).toBe(42);
+  await call(page,'execute_script',{source:"for(var i=0;i<40;i++) print('Viewport layout '+i);"});
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().ui.rects.Viewport)).toEqual(rect);
   await page.reload();await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId)).toBeGreaterThan(0);
   rect=await page.evaluate(()=>window.cuemol.status().ui.rects.Viewport);
   const initial=(await page.evaluate(()=>window.cuemol.status())).view;
@@ -1075,3 +1077,58 @@ test('browser trajectories append ordered files across molecules and retain bloc
   await call(page,'set_frame',{objId:target,frame:8});expect(await x(target)).toBe(60);
   expect(errors).toEqual([]);
 });
+
+for(const backend of ['webgl','webgpu']) {
+  test(`${backend} affine glyphs preserve object radii, renderer shape, and picking`,async({page},testInfo)=>{
+    const errors=[];page.on('pageerror',error=>errors.push(error.message));
+    await page.goto(`./?renderer=${backend}`);
+    await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId),{timeout:60000}).toBeGreaterThan(0);
+    await load(page,'affine.pdb',Buffer.from('HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C  \nEND\n'));
+    await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+    let state=await page.evaluate(()=>window.cuemol.status());
+    const object=state.scene.objects[0].id;
+    const hide=state.scene.objects[0].renderers.map(r=>`cuemol.getRenderer(${r.id}).visible=false;`).join('');
+    state=await call(page,'execute_script',{source:hide+`var r=cuemol.getObject(${object}).createRenderer('cpk');r.name='shape';r.defaultcolor=cuemol.Color('#ff00ff');`});
+    const renderer=state.scene.objects[0].renderers.find(r=>r.name==='shape').id;
+    await call(page,'set_projection',{perspective:false});
+    await call(page,'set_view',{center:[0,0,0],zoom:12,distance:200,slab:50});
+    const rect=state.ui.rects.Viewport;
+    const capture=async()=>PNG.sync.read(await page.screenshot({clip:{x:rect[0],y:rect[1],width:rect[2],height:rect[3]}}));
+    const extent=png=>{
+      let minX=png.width,maxX=-1,minY=png.height,maxY=-1;
+      for(let y=0;y<png.height;y++)for(let x=0;x<png.width;x++){
+        const i=4*(y*png.width+x);
+        if(png.data[i]>100&&png.data[i+1]<60&&png.data[i+2]>100){minX=Math.min(minX,x);maxX=Math.max(maxX,x);minY=Math.min(minY,y);maxY=Math.max(maxY,y);}
+      }
+      return [maxX-minX+1,maxY-minY+1];
+    };
+    await expect.poll(async()=>extent(await capture())[0]).toBeGreaterThan(30);
+    const original=extent(await capture());
+    expect(original[0]/original[1]).toBeCloseTo(1,1);
+    await call(page,'set_node_prop',{nodeType:'object',nodeId:object,prop:'xformMat',value:'(2,0,0,0,0,0.75,0,0,0,0,1,0,0,0,0,1)'});
+    await expect.poll(async()=>extent(await capture())).toEqual(original);
+    await call(page,'set_node_prop',{nodeType:'renderer',nodeId:renderer,prop:'xformMat',value:'(2,0,0,0,0,2,0,0,0,0,2,0,0,0,0,1)'});
+    await expect.poll(async()=>extent(await capture())[0]).toBeGreaterThan(original[0]*1.9);
+    await call(page,'set_node_prop',{nodeType:'renderer',nodeId:renderer,prop:'xformMat',value:'(-2,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1)'});
+    await expect.poll(async()=>{const [w,h]=extent(await capture());return w/h;}).toBeGreaterThan(1.9);
+    const stretched=extent(await capture());
+    expect(stretched[1]).toBeGreaterThan(original[1]*0.95);
+    expect(stretched[1]).toBeLessThan(original[1]*1.05);
+    await page.mouse.move(rect[0]+rect[2]/2+2.5*rect[3]/12,rect[1]+rect[3]/2);
+    await expect.poll(()=>page.evaluate(()=>window.cuemol.status().ui.navigation.hover?.index)).toBe(0);
+    await page.mouse.move(0,0);
+    await call(page,'set_render_settings',{settings:'umbreon.useGI=false; umbreon.aoSamples=0; umbreon.supersample=1; umbreon.denoise=None'});
+    state=await call(page,'get_screenshot',{width:96,height:96});
+    const cpu=extent(PNG.sync.read(Buffer.from(JSON.parse(state.message)._image,'base64')));
+    expect(cpu[0]/cpu[1]).toBeGreaterThan(1.8);
+    const pending=page.waitForEvent('download'),button=state.ui.rects['Save Scene'];
+    await page.mouse.click(button[0]+button[2]/2,button[1]+button[3]/2);
+    const saved=await pending,stream=await saved.createReadStream(),chunks=[];
+    for await(const chunk of stream)chunks.push(chunk);
+    await load(page,'affine-roundtrip.qsc',Buffer.concat(chunks));
+    await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Loaded affine-roundtrip.qsc');
+    await expect.poll(async()=>{const [w,h]=extent(await capture());return w/h;}).toBeGreaterThan(1.9);
+    await page.screenshot({path:testInfo.outputPath('affine-glyph.png')});
+    expect(errors).toEqual([]);
+  });
+}

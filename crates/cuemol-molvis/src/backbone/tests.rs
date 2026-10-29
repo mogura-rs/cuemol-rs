@@ -224,6 +224,22 @@ fn spline_lines_match_cpp_for_partial_selection_colors_and_picking() {
         &["sel=A.7:8.*", "segend_fade=true"],
         &["sel=A.7:17.N", "segend_fade=true"],
         &["pivotatom=N", "sel=A.7:17.*"],
+        &[
+            "object.xformMat=(2,0,0,0,0,0.75,0,0,0,0,1.25,0,3,-2,1,1)",
+            "sel=A.7:17.*",
+        ],
+        &[
+            "object.xformMat=(1,0,0,0,0.3,1,0,0,0.1,0.2,1,0,0,0,0,1)",
+            "sel=A.7:17.*",
+        ],
+        &[
+            "object.xformMat=(-1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1)",
+            "sel=A.7:17.*",
+        ],
+        &[
+            "object.xformMat=(0,1,0,0,-1,0,0,0,0,0,1,0,3,2,1,1)",
+            "sel=A.7:17.*",
+        ],
     ];
     let styles = default_style_manager();
     for settings in cases {
@@ -246,7 +262,9 @@ fn spline_lines_match_cpp_for_partial_selection_colors_and_picking() {
             renderer.set_qsc_attr("axialdetail", detail.to_string());
             for setting in *settings {
                 let (key, value) = setting.split_once('=').unwrap();
-                renderer.set_qsc_attr(key, value);
+                if !key.starts_with("object.") {
+                    renderer.set_qsc_attr(key, value);
+                }
             }
             let mut options = molecule_render_options_for_renderer("spline");
             apply_renderer_styles(&mut options, renderer, &styles, scene.get());
@@ -268,6 +286,18 @@ fn spline_lines_match_cpp_for_partial_selection_colors_and_picking() {
                         .mol()
                         .select_indices(&cuemol_molstr::parse_selector(&selection).unwrap()),
                 );
+            }
+            for setting in *settings {
+                if let Some(value) = setting.strip_prefix("object.xformMat=") {
+                    options.backbone_links = Some(std::sync::Arc::new(mainchain_links(
+                        object.mol(),
+                        options.pivot_atom.as_deref(),
+                    )));
+                    object.mol_mut().xform_by_mat(
+                        cuemol_core::Matrix4::from_script_string(value).unwrap(),
+                        None,
+                    );
+                }
             }
             let actual = mainchain_line_snapshot(
                 object.mol(),
@@ -405,6 +435,66 @@ fn backbone_geometry_and_triangle_winding_match_cpp() {
         ("ribbon", "DefaultRibbon", &["defaultcolor=#234567"]),
         ("cartoon", "RoundCartoon", &["defaultcolor=#765432"]),
         ("tube", "", &["defaultcolor=#123456"]),
+        (
+            "ribbon",
+            "DefaultRibbon",
+            &["object.xformMat=(2,0,0,0,0,0.75,0,0,0,0,1.25,0,3,-2,1,1)"],
+        ),
+        (
+            "ribbon",
+            "DefaultRibbon",
+            &["object.xformMat=(1,0,0,0,0.3,1,0,0,0.1,0.2,1,0,0,0,0,1)"],
+        ),
+        (
+            "ribbon",
+            "DefaultRibbon",
+            &["object.xformMat=(-1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1)"],
+        ),
+        (
+            "ribbon",
+            "DefaultRibbon",
+            &["object.xformMat=(0,1,0,0,-1,0,0,0,0,0,1,0,3,2,1,1)"],
+        ),
+        (
+            "cartoon",
+            "RoundCartoon",
+            &["object.xformMat=(2,0,0,0,0,0.75,0,0,0,0,1.25,0,3,-2,1,1)"],
+        ),
+        (
+            "cartoon",
+            "RoundCartoon",
+            &["object.xformMat=(1,0,0,0,0.3,1,0,0,0.1,0.2,1,0,0,0,0,1)"],
+        ),
+        (
+            "cartoon",
+            "RoundCartoon",
+            &["object.xformMat=(-1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1)"],
+        ),
+        (
+            "cartoon",
+            "RoundCartoon",
+            &["object.xformMat=(0,1,0,0,-1,0,0,0,0,0,1,0,3,2,1,1)"],
+        ),
+        (
+            "tube",
+            "",
+            &["object.xformMat=(2,0,0,0,0,0.75,0,0,0,0,1.25,0,3,-2,1,1)"],
+        ),
+        (
+            "tube",
+            "",
+            &["object.xformMat=(1,0,0,0,0.3,1,0,0,0.1,0.2,1,0,0,0,0,1)"],
+        ),
+        (
+            "tube",
+            "",
+            &["object.xformMat=(-1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1)"],
+        ),
+        (
+            "tube",
+            "",
+            &["object.xformMat=(0,1,0,0,-1,0,0,0,0,0,1,0,3,2,1,1)"],
+        ),
         (
             "ribbon",
             "DefaultRibbon,DefaultHSCPaint",
@@ -583,6 +673,18 @@ fn backbone_geometry_and_triangle_winding_match_cpp() {
         if let Some(selection) = selection {
             let selector = cuemol_molstr::parse_selector(&selection).unwrap();
             options.draw_indices = Some(object.mol().select_indices(&selector));
+        }
+        for setting in settings {
+            if let Some(value) = setting.strip_prefix("object.xformMat=") {
+                options.backbone_links = Some(std::sync::Arc::new(mainchain_links(
+                    object.mol(),
+                    options.pivot_atom.as_deref(),
+                )));
+                object.mol_mut().xform_by_mat(
+                    cuemol_core::Matrix4::from_script_string(value).unwrap(),
+                    None,
+                );
+            }
         }
         let snapshot = ribbon_mesh_snapshot(object.mol(), &options);
         let actual = snapshot

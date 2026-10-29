@@ -164,6 +164,7 @@ const MOLECULE_RENDERER_TYPES = [
   "simple",
   "spline",
   "trace",
+  "tracestick",
   "tube",
 ];
 const DENSITY_RENDERER_TYPES = ["contour", "isosurf", "gpu_mapvol"];

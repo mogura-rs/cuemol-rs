@@ -1813,11 +1813,6 @@ fn cross(left: Vector4, right: Vector4) -> Vector4 {
     )
 }
 
-#[cfg(test)]
-fn encode_umbreon_png(frame: &UmbreonFrame) -> Result<Vec<u8>> {
-    encode_umbreon_png_with_dpi(frame, 0.)
-}
-
 fn encode_umbreon_png_with_dpi(frame: &UmbreonFrame, dpi: f64) -> Result<Vec<u8>> {
     let width = u32::try_from(frame.width)
         .map_err(|_| CueMolError::invalid_argument("invalid Umbreon frame width"))?;

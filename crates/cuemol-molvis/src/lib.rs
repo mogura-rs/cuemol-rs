@@ -3517,6 +3517,8 @@ pub struct MoleculeRenderOptions {
     pub cartoon_helix_width_plus: f64,
     /// Custom MainChainRenderer pivot atom name. `None` uses the topology pivot.
     pub pivot_atom: Option<String>,
+    /// Backbone links resolved before applying an object coordinate transform.
+    pub backbone_links: Option<std::sync::Arc<std::collections::BTreeSet<(usize, usize)>>>,
     /// Interpolate renderer colors along each spline interval.
     pub smooth_color: bool,
     /// Tube end-cap geometry.
@@ -3877,6 +3879,7 @@ impl Default for MoleculeRenderOptions {
             cartoon_helix_width: 2.3,
             cartoon_helix_width_plus: 0.2,
             pivot_atom: None,
+            backbone_links: None,
             smooth_color: false,
             start_cap_type: TubeCapType::None,
             end_cap_type: TubeCapType::None,
@@ -5505,6 +5508,7 @@ pub fn mainchain_line_snapshot(
         draw.as_ref(),
         options.pivot_atom.as_deref(),
         mode == MainchainLineMode::Spline,
+        options.backbone_links.as_deref(),
     );
     let colors = resolve_atom_colors(molecule, options);
     let mut bonds = Vec::new();
@@ -5671,7 +5675,13 @@ pub fn tracestick_snapshot(
         .collect::<std::collections::BTreeSet<_>>();
     let colors = resolve_atom_colors(molecule, options);
     let mut snapshot = RenderSceneSnapshot::empty();
-    for pivots in collect_mainchain_pivots(molecule, draw.as_ref(), options.pivot_atom.as_deref()) {
+    for pivots in collect_mainchain_pivots_with_context(
+        molecule,
+        draw.as_ref(),
+        options.pivot_atom.as_deref(),
+        false,
+        options.backbone_links.as_deref(),
+    ) {
         if sphere_radius > 0.0 {
             for point in &pivots {
                 snapshot.atoms.push(
@@ -5912,7 +5922,13 @@ pub fn mainchain_trace_snapshot(
             .copied()
             .collect::<std::collections::BTreeSet<_>>()
     });
-    let chains = collect_mainchain_pivots(molecule, draw.as_ref(), options.pivot_atom.as_deref());
+    let chains = collect_mainchain_pivots_with_context(
+        molecule,
+        draw.as_ref(),
+        options.pivot_atom.as_deref(),
+        false,
+        options.backbone_links.as_deref(),
+    );
     let putty = options.putty;
 
     // Putty statistics (min/max/mean of the target value) over every backbone
@@ -6486,6 +6502,22 @@ pub fn mainchain_pick_indices(
         .collect()
 }
 
+/// Keep backbone connectivity stable when rendering transformed atom positions.
+pub fn mainchain_links(
+    molecule: &MolCoord,
+    pivot_atom: Option<&str>,
+) -> std::collections::BTreeSet<(usize, usize)> {
+    collect_mainchain_pivots(molecule, None, pivot_atom)
+        .into_iter()
+        .flat_map(|chain| {
+            chain
+                .windows(2)
+                .map(|pair| (pair[0].atom_index, pair[1].atom_index))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 /// Collect each chain's backbone pivots (position + secondary structure) in
 /// residue order, split into contiguous runs to be splined/traced.
 ///
@@ -6500,7 +6532,7 @@ fn collect_mainchain_pivots(
     draw: Option<&std::collections::BTreeSet<usize>>,
     pivot_atom: Option<&str>,
 ) -> Vec<Vec<MainchainPoint>> {
-    collect_mainchain_pivots_with_context(molecule, draw, pivot_atom, false)
+    collect_mainchain_pivots_with_context(molecule, draw, pivot_atom, false, None)
 }
 
 fn collect_mainchain_pivots_with_context(
@@ -6508,10 +6540,10 @@ fn collect_mainchain_pivots_with_context(
     draw: Option<&std::collections::BTreeSet<usize>>,
     pivot_atom: Option<&str>,
     preserve_chain: bool,
+    links: Option<&std::collections::BTreeSet<(usize, usize)>>,
 ) -> Vec<Vec<MainchainPoint>> {
     let mut runs: Vec<Vec<MainchainPoint>> = Vec::new();
-    // Previous accepted pivot: (chain name, position, link cutoff).
-    let mut prev: Option<(String, Vector4, f64)> = None;
+    let mut prev: Option<(String, Vector4, f64, usize)> = None;
     let mut iter = ResidIterator::all(molecule);
     iter.first();
     while iter.has_more() {
@@ -6534,16 +6566,19 @@ fn collect_mainchain_pivots_with_context(
                     let pos = point.pos;
                     let new_run = match &prev {
                         None => true,
-                        Some((prev_chain, prev_pos, prev_cutoff)) => {
+                        Some((prev_chain, prev_pos, prev_cutoff, prev_index)) => {
                             *prev_chain != chain
-                                || pivot_distance(*prev_pos, pos) > prev_cutoff.max(cutoff)
+                                || links.map_or_else(
+                                    || pivot_distance(*prev_pos, pos) > prev_cutoff.max(cutoff),
+                                    |links| !links.contains(&(*prev_index, point.atom_index)),
+                                )
                         }
                     };
                     if new_run {
                         runs.push(Vec::new());
                     }
                     runs.last_mut().expect("a run was just pushed").push(point);
-                    prev = Some((chain, pos, cutoff));
+                    prev = Some((chain, pos, cutoff, point.atom_index));
                 } else {
                     prev = None;
                 }
@@ -6880,6 +6915,7 @@ pub fn ribbon_mesh_snapshot(
         draw.as_ref(),
         options.pivot_atom.as_deref(),
         !options.cartoon && !options.linear_backbone,
+        options.backbone_links.as_deref(),
     );
     // Putty (TubeRenderer): modulate the ribbon width per residue by the B-factor/
     // occupancy, on top of the section width scales. Stats are over all pivots.

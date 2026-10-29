@@ -745,6 +745,7 @@ impl App {
             })
             .resizable(self.bottom_open)
             .show(ctx, |ui| {
+                ui.set_min_height(ui.available_height());
                 ui.horizontal(|ui| {
                     for tab in [
                         "Console",
@@ -776,6 +777,8 @@ impl App {
                 match self.bottom_tab.as_str() {
                     "Console" => {
                         egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .min_scrolled_height(0.)
                             .max_height((ui.available_height() - 30.).max(20.))
                             .stick_to_bottom(true)
                             .show(ui, |ui| {
@@ -803,6 +806,8 @@ impl App {
                             self.logs.clear();
                         }
                         egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .min_scrolled_height(0.)
                             .stick_to_bottom(true)
                             .show(ui, |ui| {
                                 for line in &self.logs {

@@ -1,3 +1,4 @@
+mod affine;
 pub mod raytrace;
 mod volume;
 pub use volume::{RenderVolume, VolumeSlices};
@@ -578,56 +579,10 @@ impl RenderSceneSnapshot {
         self.meshes.iter().map(RenderMesh::triangle_count).sum()
     }
 
-    /// Apply an affine transform `m` to all geometry in place.
-    ///
-    /// The headless equivalent of C++ `DisplayContext::multMatrix(xform)` applied
-    /// to an object/renderer `xformMat` before `display()` (`Scene::displayRendImpl`,
-    /// and the object xform propagated to atom positions via `MolAtom::getPos`).
-    /// Positions transform as points (w=1); mesh normals transform by the rotation
-    /// part only (w=0) and are renormalized — correct for the rigid superposition
-    /// transforms that set `xformMat`. Bounds are recomputed from the transformed
-    /// geometry so a moved object still auto-frames correctly.
+    /// Apply a renderer transform, including glyph shape and inverse-transpose normals.
+    /// Nonuniform scales and shear tessellate sphere and cylinder primitives.
     pub fn apply_xform(&mut self, m: &Matrix4) {
-        for group in &mut self.transparency_groups {
-            if let Some(picking) = &mut group.picking {
-                for atoms in [&mut picking.atoms, &mut picking.gpu_atoms] {
-                    for atom in std::sync::Arc::make_mut(atoms) {
-                        m.xform3d(&mut atom.position);
-                    }
-                }
-            }
-        }
-        for volume in &mut self.volumes {
-            volume.apply_xform(m);
-        }
-        for atom in &mut self.atoms {
-            m.xform3d(&mut atom.center);
-        }
-        for bond in &mut self.bonds {
-            m.xform3d(&mut bond.from);
-            m.xform3d(&mut bond.to);
-        }
-        for mesh in &mut self.meshes {
-            for vertex in &mut mesh.vertices {
-                m.xform3d(&mut vertex.position);
-                let render_marker = vertex.normal.w;
-                // Rotation-only (w=0 drops the translation column).
-                let rotated = m.transform_point(Vector4::new4(
-                    vertex.normal.x,
-                    vertex.normal.y,
-                    vertex.normal.z,
-                    0.0,
-                ));
-                let len =
-                    (rotated.x * rotated.x + rotated.y * rotated.y + rotated.z * rotated.z).sqrt();
-                if len > 1.0e-12 {
-                    vertex.normal =
-                        Vector4::new3(rotated.x / len, rotated.y / len, rotated.z / len);
-                    vertex.normal.w = render_marker;
-                }
-            }
-        }
-        self.recompute_bounds();
+        affine::apply(self, m);
     }
 
     /// Recompute the axis-aligned bounds from the current geometry (atom spheres,
@@ -4965,7 +4920,7 @@ fn sphere_detail_to_rings_segs(detail: u32) -> (usize, usize) {
     (detail * 2, detail * 3)
 }
 
-/// Tessellate a UV sphere (flat-shaded, radial normals) at the default detail.
+/// Tessellate a UV sphere with radial normals at the default detail.
 fn add_sphere(mesh: &mut RenderMesh, center: Vector4, radius: f64, color: [f32; 4]) {
     add_sphere_detailed(
         mesh,
@@ -5014,13 +4969,13 @@ fn add_sphere_detailed(
             let b = base + (i * stride + j + 1) as u32;
             let c = base + ((i + 1) * stride + j) as u32;
             let d = base + ((i + 1) * stride + j + 1) as u32;
-            mesh.indices.extend_from_slice(&[a, c, b, b, c, d]);
+            mesh.indices.extend_from_slice(&[a, b, c, b, d, c]);
         }
     }
 }
 
-/// Tessellate a cylinder between `from` and `to` (flat-shaded) into `mesh`. A
-/// zero-length cylinder contributes nothing.
+/// Tessellate the curved side of a cylinder with radial normals into `mesh`.
+/// A zero-length cylinder contributes nothing.
 fn add_cylinder(mesh: &mut RenderMesh, from: Vector4, to: Vector4, radius: f64, color: [f32; 4]) {
     add_cylinder_detailed(mesh, from, to, radius, color, 10);
 }
@@ -5067,7 +5022,7 @@ fn add_cylinder_detailed(
         let b = base + j + 1;
         let c = base + stride + j;
         let d = base + stride + j + 1;
-        mesh.indices.extend_from_slice(&[a, c, b, b, c, d]);
+        mesh.indices.extend_from_slice(&[a, b, c, b, d, c]);
     }
 }
 
@@ -6664,6 +6619,41 @@ mod tests {
     }
 
     #[test]
+    fn tessellated_primitives_have_outward_faces_and_inward_outline_faces() {
+        let mut snapshot = RenderSceneSnapshot::empty();
+        let edge = RenderEdgeStyle {
+            mode: RenderEdgeMode::Edges,
+            width: 0.2,
+            color: [0., 0., 0., 1.],
+        };
+        snapshot
+            .atoms
+            .push(RenderAtom::new(Vector4::ZERO, 1., None).with_edge(Some(edge)));
+        snapshot.bonds.push(
+            RenderBond::new(Vector4::ZERO, Vector4::new3(0., 0., 3.), 0.5, None)
+                .with_edge(Some(edge)),
+        );
+        let mesh = tessellate_snapshot(&snapshot);
+        let mut counts = [0; 2];
+        for face in mesh.indices.chunks_exact(3) {
+            let [a, b, c] = std::array::from_fn(|i| mesh.vertices[face[i] as usize]);
+            let cross = (b.position - a.position).cross(c.position - a.position);
+            if cross.length3d() < 1e-10 {
+                continue;
+            }
+            let direction = cross.dot3d(a.normal + b.normal + c.normal);
+            if a.is_edge_outline() {
+                assert!(direction < 0.);
+                counts[0] += 1;
+            } else {
+                assert!(direction > 0.);
+                counts[1] += 1;
+            }
+        }
+        assert!(counts.into_iter().all(|count| count > 100));
+    }
+
+    #[test]
     fn tessellate_snapshot_adds_inverted_primitive_edge_hulls() {
         let edge = RenderEdgeStyle {
             mode: RenderEdgeMode::Silhouette,
@@ -6702,7 +6692,7 @@ mod tests {
         );
         let main_sphere = &mesh.vertices[sphere_vertices..sphere_vertices * 2];
         assert!(main_sphere.iter().all(|vertex| !vertex.is_edge_outline()));
-        assert_eq!(mesh.indices[0..3], [0, 1, (DEFAULT_SPHERE_SEGS + 1) as u32]);
+        assert_eq!(mesh.indices[0..3], [0, (DEFAULT_SPHERE_SEGS + 1) as u32, 1]);
         let (min, max) = snapshot.bounds.unwrap();
         assert!((min.y + 1.2).abs() < 1.0e-6);
         assert!((max.x - 3.45).abs() < 1.0e-6);

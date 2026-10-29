@@ -31726,15 +31726,6 @@ impl CameraController {
         Some((egui::pos2(x, y), (self.eye() - point).length()))
     }
 
-    fn projected_radius(&self, radius: f32, depth: f32, viewport: egui::Rect) -> f32 {
-        if self.perspective {
-            let focal = 0.5 * viewport.height() * self.distance / self.ortho_scale.max(0.01);
-            (radius * focal / depth.max(0.1)).clamp(2.0, 48.0)
-        } else {
-            (radius * viewport.height() / (self.ortho_scale * 2.0).max(0.1)).clamp(2.0, 48.0)
-        }
-    }
-
     fn to_view_data(&self) -> String {
         format!(
             "cuemol2-rs-view\t3\n\
@@ -39617,7 +39608,6 @@ mod tests {
         assert!((screen.x - 400.0).abs() < 1.0);
         assert!((screen.y - 300.0).abs() < 1.0);
         assert!((depth - camera.distance).abs() < 1.0e-5);
-        assert!(camera.projected_radius(0.45, depth, viewport) > 2.0);
 
         let mut app = GuiApplication::new();
         app.viewport_rect = Some(viewport);
