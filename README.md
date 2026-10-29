@@ -44,6 +44,13 @@ in `~/.local/bin`. Add that directory to `PATH` if needed. Set
 `CUEMOL_INSTALL_DIR` to choose another directory or `CUEMOL_VERSION=vX.Y.Z`
 to select a release. macOS releases also provide unsigned application bundles.
 
+On Debian and Ubuntu, the native GUI needs the following system libraries and
+a working Vulkan or OpenGL driver. Install missing libraries with:
+
+```sh
+sudo apt-get install libxkbcommon0 libxkbcommon-x11-0 libwayland-client0
+```
+
 ### Windows
 
 ```powershell

@@ -17,6 +17,10 @@ import pyautogui
 from PIL import ImageChops, ImageGrab
 
 
+class ApplicationExited(Exception):
+    pass
+
+
 def window_bounds(pid):
     if sys.platform == 'darwin':
         import AppKit
@@ -112,7 +116,7 @@ def main():
         try:
             def loaded():
                 if process.poll() is not None:
-                    raise RuntimeError('The application exited before loading the fixture')
+                    raise ApplicationExited(f'The application exited with status {process.returncode} before loading the fixture; see gui.log')
                 state = call('get_scene_state')
                 return state if state.get('objects') else None
 

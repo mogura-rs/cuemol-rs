@@ -6,6 +6,9 @@ Rust, a C++20 compiler for the vendored numerical kernels, and the platform's
 wgpu/winit system dependencies are required. The default workspace build is headless.
 The published winit crate is resolved through Cargo. A small native input filter
 uses raw X11 button states to discard duplicate wheel-release events.
+An X11 session also requires the runtime `libxkbcommon-x11` library, even when
+the application was built successfully. Debian and Ubuntu provide it in
+`libxkbcommon-x11-0`.
 Tauri is an optional alternate frontend and requires its platform SDKs.
 The sibling `../cuemol2` checkout is an optional, read-only reference; set
 `CUEMOL2_REF_DIR` when using a different location.
