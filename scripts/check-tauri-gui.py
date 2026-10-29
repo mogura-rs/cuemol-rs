@@ -77,7 +77,12 @@ def main():
         process = subprocess.Popen([str(executable), str(scene)], cwd=work, env=env,
                                    stdout=log, stderr=subprocess.STDOUT)
         try:
-            bounds = wait_for(lambda: window_bounds(process.pid), timeout=90)
+            def visible_window():
+                if process.poll() is not None:
+                    raise helpers["ApplicationExited"]("The Tauri process exited before opening a window; see gui.log")
+                return window_bounds(process.pid)
+
+            bounds = wait_for(visible_window, timeout=90)
             x, y, width, height = bounds
 
             def capture(name=None):

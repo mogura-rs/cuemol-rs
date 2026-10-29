@@ -26,6 +26,8 @@ def window_bounds(pid):
         import AppKit
         import Quartz
         application = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+        if application is None:
+            raise RuntimeError('The application has not registered with macOS yet')
         application.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
         for window in Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly, 0):
             if window.get('kCGWindowOwnerPID') == pid and window.get('kCGWindowLayer') == 0:
