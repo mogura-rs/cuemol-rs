@@ -30,13 +30,13 @@ PDB2PQR, FFmpeg, POV-Ray and the native OIDN runtime.
 ## Installation
 
 The installers below require a published
-[GitHub release](https://github.com/mogura-rs/cuemol2-rs/releases). To use an
+[GitHub release](https://github.com/mogura-rs/cuemol-rs/releases). To use an
 unreleased revision, [build from source](#build-from-source).
 
 ### Linux and macOS
 
 ```sh
-curl -LsSf https://raw.githubusercontent.com/mogura-rs/cuemol2-rs/main/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/mogura-rs/cuemol-rs/main/install.sh | sh
 ```
 
 The installer verifies `SHA256SUMS` and installs the application and bundled tools
@@ -47,7 +47,7 @@ to select a release. macOS releases also provide unsigned application bundles.
 ### Windows
 
 ```powershell
-irm https://raw.githubusercontent.com/mogura-rs/cuemol2-rs/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/mogura-rs/cuemol-rs/main/install.ps1 | iex
 ```
 
 The default destination is `%LOCALAPPDATA%/CueMol/bin`.

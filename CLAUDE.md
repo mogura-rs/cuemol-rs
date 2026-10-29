@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-`cuemol2-rs` is a Rust reimplementation of CueMol2 (a molecular graphics / structural
+`cuemol-rs` is a Rust reimplementation of CueMol2 (a molecular graphics / structural
 biology viewer). It is a Cargo workspace with shared native, browser, and command application layers.
 
 The sibling C++ checkout `../cuemol2` is used **only** as specification, fixture source,

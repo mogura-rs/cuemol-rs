@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-repository=${CUEMOL_RELEASE_REPOSITORY:-mogura-rs/cuemol2-rs}
+repository=${CUEMOL_RELEASE_REPOSITORY:-mogura-rs/cuemol-rs}
 version=${CUEMOL_VERSION:-latest}
 case "$version" in
   latest) release_url="https://github.com/$repository/releases/latest/download" ;;

@@ -64232,26 +64232,30 @@ end_header
 
     #[cfg(feature = "offscreen")]
     #[test]
-    fn renders_1crn_molecule_to_a_png_for_visual_check() {
-        // Produce the ACTUAL molecular view the GUI viewport renders, as a PNG, so
-        // it can be eyeballed (self-skips without the reference PDB or a GPU).
-        let pdb =
-            std::path::Path::new("/Users/thmini/works/tools/cuemol2/tests/test_data/1CRN.pdb");
+    fn renders_reference_molecule_to_png() {
+        let reference = std::env::var_os("CUEMOL2_REF_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../cuemol2"));
+        let pdb = reference.join("tests/test_data/1CRN.pdb");
         if !pdb.exists() {
+            eprintln!("Skipping reference render: 1CRN.pdb is unavailable");
             return;
         }
         let mut app = DesktopAppState::new();
         app.ensure_active_scene();
-        if app.open_path(pdb).is_err() {
-            return;
-        }
-        let out = std::path::Path::new(concat!(
-            "/private/tmp/claude-501/-Users-thmini-works-tools-cuemol2-rs/",
-            "3e9e9ca1-ce59-4a29-94a8-969339aa0fa7/scratchpad/crn_render.png"
-        ));
-        match app.export_active_scene_png(out, 600, 600, "") {
-            Ok(()) => assert!(out.exists(), "png not written"),
-            Err(_) => { /* no GPU adapter; skip */ }
+        app.open_path(&pdb).unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let out = work.path().join("crn.png");
+        match app.export_active_scene_png(&out, 600, 600, "") {
+            Ok(()) => {
+                let bytes = std::fs::read(out).unwrap();
+                assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+                assert!(bytes.len() > 100);
+            }
+            Err(error) if error.to_string().contains("no GPU adapter") => {
+                eprintln!("Skipping reference render: {error}");
+            }
+            Err(error) => panic!("reference PNG export failed: {error}"),
         }
     }
 

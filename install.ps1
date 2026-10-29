@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 trap { [Console]::Error.WriteLine($_); exit 1 }
-$repository = if ($env:CUEMOL_RELEASE_REPOSITORY) { $env:CUEMOL_RELEASE_REPOSITORY } else { 'mogura-rs/cuemol2-rs' }
+$repository = if ($env:CUEMOL_RELEASE_REPOSITORY) { $env:CUEMOL_RELEASE_REPOSITORY } else { 'mogura-rs/cuemol-rs' }
 $version = if ($env:CUEMOL_VERSION) { $env:CUEMOL_VERSION } else { 'latest' }
 if ($version -notmatch '^[a-zA-Z0-9._-]+$') { throw 'Invalid release version' }
 $base = if ($version -eq 'latest') { "https://github.com/$repository/releases/latest/download" } else { "https://github.com/$repository/releases/download/$version" }

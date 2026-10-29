@@ -255,78 +255,89 @@ fn serve(args: &[String]) -> Result<()> {
             .stderr(Stdio::null())
             .spawn();
     }
-    for request in server.incoming_requests() {
-        if !matches!(
-            request.method(),
-            tiny_http::Method::Get | tiny_http::Method::Head
-        ) {
-            let _ = request.respond(tiny_http::Response::empty(405));
-            continue;
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            let server = &server;
+            let directory = directory.as_deref();
+            scope.spawn(move || {
+                for request in server.incoming_requests() {
+                    serve_request(request, directory);
+                }
+            });
         }
-        let route = request
-            .url()
-            .split('?')
-            .next()
-            .unwrap_or("/")
-            .trim_start_matches('/');
-        let name = if route.is_empty() {
-            "index.html"
-        } else {
-            route
-        };
-        if !Path::new(name)
-            .components()
-            .all(|c| matches!(c, Component::Normal(_)))
-            || name.contains('%')
-            || name.contains('\\')
-        {
-            let _ = request.respond(tiny_http::Response::empty(404));
-            continue;
-        }
-        let wants_gzip = request.headers().iter().any(|h| {
-            h.field.equiv("Accept-Encoding")
-                && h.value.as_str().split(',').any(|v| v.trim() == "gzip")
-        });
-        let asset = if let Some(dir) = &directory {
-            let path = dir.join(name);
-            std::fs::canonicalize(path)
-                .ok()
-                .filter(|p| p.starts_with(dir) && p.is_file())
-                .and_then(|path| std::fs::read(path).ok())
-                .map(|bytes| (mime(name), bytes, false))
-        } else {
-            BUNDLED_WEB
-                .iter()
-                .find(|(path, _, _)| *path == name)
-                .and_then(|(_, mime, compressed)| {
-                    if wants_gzip {
-                        Some((*mime, compressed.to_vec(), true))
-                    } else {
-                        let mut bytes = Vec::new();
-                        flate2::read::GzDecoder::new(*compressed)
-                            .read_to_end(&mut bytes)
-                            .ok()
-                            .map(|_| (*mime, bytes, false))
-                    }
-                })
-        };
-        let Some((mime, bytes, gzip)) = asset else {
-            let _ = request.respond(tiny_http::Response::empty(404));
-            continue;
-        };
-        let mut response = tiny_http::Response::from_data(bytes);
-        for (key, value) in [
-            ("Content-Type", mime),
-            ("Cache-Control", "no-cache"),
-            ("X-Content-Type-Options", "nosniff"),
-            ("Vary", "Accept-Encoding"),
-        ] {
-            response.add_header(tiny_http::Header::from_bytes(key, value).unwrap());
-        }
-        if gzip {
-            response.add_header(tiny_http::Header::from_bytes("Content-Encoding", "gzip").unwrap());
-        }
-        let _ = request.respond(response);
-    }
+    });
     Ok(())
+}
+
+fn serve_request(request: tiny_http::Request, directory: Option<&Path>) {
+    if !matches!(
+        request.method(),
+        tiny_http::Method::Get | tiny_http::Method::Head
+    ) {
+        let _ = request.respond(tiny_http::Response::empty(405));
+        return;
+    }
+    let route = request
+        .url()
+        .split('?')
+        .next()
+        .unwrap_or("/")
+        .trim_start_matches('/');
+    let name = if route.is_empty() {
+        "index.html"
+    } else {
+        route
+    };
+    if !Path::new(name)
+        .components()
+        .all(|c| matches!(c, Component::Normal(_)))
+        || name.contains('%')
+        || name.contains('\\')
+    {
+        let _ = request.respond(tiny_http::Response::empty(404));
+        return;
+    }
+    let wants_gzip = request.headers().iter().any(|h| {
+        h.field.equiv("Accept-Encoding") && h.value.as_str().split(',').any(|v| v.trim() == "gzip")
+    });
+    let asset = if let Some(dir) = directory {
+        let path = dir.join(name);
+        std::fs::canonicalize(path)
+            .ok()
+            .filter(|p| p.starts_with(dir) && p.is_file())
+            .and_then(|path| std::fs::read(path).ok())
+            .map(|bytes| (mime(name), bytes, false))
+    } else {
+        BUNDLED_WEB
+            .iter()
+            .find(|(path, _, _)| *path == name)
+            .and_then(|(_, mime, compressed)| {
+                if wants_gzip {
+                    Some((*mime, compressed.to_vec(), true))
+                } else {
+                    let mut bytes = Vec::new();
+                    flate2::read::GzDecoder::new(*compressed)
+                        .read_to_end(&mut bytes)
+                        .ok()
+                        .map(|_| (*mime, bytes, false))
+                }
+            })
+    };
+    let Some((mime, bytes, gzip)) = asset else {
+        let _ = request.respond(tiny_http::Response::empty(404));
+        return;
+    };
+    let mut response = tiny_http::Response::from_data(bytes);
+    for (key, value) in [
+        ("Content-Type", mime),
+        ("Cache-Control", "no-cache"),
+        ("X-Content-Type-Options", "nosniff"),
+        ("Vary", "Accept-Encoding"),
+    ] {
+        response.add_header(tiny_http::Header::from_bytes(key, value).unwrap());
+    }
+    if gzip {
+        response.add_header(tiny_http::Header::from_bytes("Content-Encoding", "gzip").unwrap());
+    }
+    let _ = request.respond(response);
 }

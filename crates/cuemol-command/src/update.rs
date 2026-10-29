@@ -10,7 +10,7 @@ pub fn current_version() -> &'static str {
 pub fn repository() -> String {
     std::env::var("CUEMOL_RELEASE_REPOSITORY").unwrap_or_else(|_| {
         option_env!("CUEMOL_RELEASE_REPOSITORY")
-            .unwrap_or("mogura-rs/cuemol2-rs")
+            .unwrap_or("mogura-rs/cuemol-rs")
             .into()
     })
 }
