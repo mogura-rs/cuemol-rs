@@ -372,27 +372,16 @@ impl GuiApplication {
         let Some(rect) = self.viewport_rect else {
             return;
         };
-        egui::Area::new(egui::Id::new("viewport-palette"))
-            .fixed_pos(rect.left_top() + egui::vec2(8., 8.))
-            .show(ctx, |ui| {
-                egui::Frame::popup(ui.style())
-                    .inner_margin(3)
-                    .show(ui, |ui| {
-                        let (_, command, changed) = cuemol_ui::navigation::palette(
-                            ui,
-                            &mut self.navigation,
-                            &mut self.state,
-                        );
-                        if let Some(command) = command {
-                            self.apply_navigation_commands(camera, vec![command]);
-                        }
-                        if changed {
-                            if let Err(error) = self.persist_config_state() {
-                                self.set_status(error);
-                            }
-                        }
-                    });
-            });
+        let (_, command, changed) =
+            cuemol_ui::navigation::palette(ctx, rect, &mut self.navigation, &mut self.state);
+        if let Some(command) = command {
+            self.apply_navigation_commands(camera, vec![command]);
+        }
+        if changed {
+            if let Err(error) = self.persist_config_state() {
+                self.set_status(error);
+            }
+        }
     }
 }
 

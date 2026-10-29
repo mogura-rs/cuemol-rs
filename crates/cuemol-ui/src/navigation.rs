@@ -158,6 +158,36 @@ pub fn tool_shortcut(ctx: &egui::Context) -> Option<Tool> {
 }
 
 pub fn palette(
+    ctx: &egui::Context,
+    viewport: Rect,
+    navigation: &mut Navigation,
+    state: &mut DesktopAppState,
+) -> (Vec<(&'static str, Rect)>, Option<Command>, bool) {
+    let bounds = viewport.shrink(8.);
+    if !bounds.is_positive() {
+        return (Vec::new(), None, false);
+    }
+    egui::Area::new(egui::Id::new("viewport-palette"))
+        .fixed_pos(bounds.left_top())
+        .constrain_to(bounds)
+        .show(ctx, |ui| {
+            ui.shrink_clip_rect(viewport);
+            let frame = egui::Frame::popup(ui.style()).inner_margin(3);
+            let height = (bounds.height() - frame.total_margin().sum().y).max(0.);
+            let frame = frame.show(ui, |ui| {
+                ui.set_max_height(height);
+                palette_contents(ui, navigation, state)
+            });
+            let (mut rects, command, changed) = frame.inner;
+            if ui.is_visible() {
+                rects.push(("Tool palette", frame.response.rect));
+            }
+            (rects, command, changed)
+        })
+        .inner
+}
+
+fn palette_contents(
     ui: &mut Ui,
     navigation: &mut Navigation,
     state: &mut DesktopAppState,
@@ -184,7 +214,9 @@ pub fn palette(
         offsets.map(|[x, y]| center + egui::vec2(x, y)).to_vec(),
         Stroke::new(1.3, ui.visuals().text_color()),
     ));
-    rects.push((label, response.rect));
+    if ui.is_rect_visible(response.rect) {
+        rects.push((label, response.rect.intersect(ui.clip_rect())));
+    }
     let changed = response.clicked();
     if changed {
         collapsed = !collapsed;
@@ -194,45 +226,53 @@ pub fn palette(
         return (rects, command, changed);
     }
     ui.separator();
-    for tool in Tool::ALL {
-        if matches!(tool, Tool::RectSelect | Tool::Distance | Tool::Bond) {
-            ui.separator();
-        }
-        if matches!(tool, Tool::Distance | Tool::Bond) {
-            let (selected, rect) = options(ui, navigation, state, tool);
-            command = selected.or(command);
-            if let Some(rect) = rect {
-                rects.push((
-                    if tool == Tool::Bond {
-                        "Bond editor options"
-                    } else {
-                        "Measure options"
-                    },
-                    rect,
-                ));
+    egui::ScrollArea::vertical()
+        .id_salt("viewport-palette-tools")
+        .max_height(ui.available_height().max(0.))
+        .min_scrolled_height(0.)
+        .show(ui, |ui| {
+            for tool in Tool::ALL {
+                if matches!(tool, Tool::RectSelect | Tool::Distance | Tool::Bond) {
+                    ui.separator();
+                }
+                if matches!(tool, Tool::Distance | Tool::Bond) {
+                    let (selected, rect) = options(ui, navigation, state, tool);
+                    command = selected.or(command.take());
+                    if let Some(rect) = rect.filter(|rect| ui.is_rect_visible(*rect)) {
+                        rects.push((
+                            if tool == Tool::Bond {
+                                "Bond editor options"
+                            } else {
+                                "Measure options"
+                            },
+                            rect.intersect(ui.clip_rect()),
+                        ));
+                    }
+                }
+                let icon = match tool {
+                    Tool::Navigate => Icon::Rotate,
+                    Tool::RectSelect => Icon::Selection,
+                    Tool::LassoSelect => Icon::Lasso,
+                    Tool::Distance => Icon::Measure,
+                    Tool::Angle => Icon::Angle,
+                    Tool::Torsion => Icon::Torsion,
+                    Tool::Bond => Icon::Bond,
+                };
+                let response = shell::icon_button(
+                    ui,
+                    icon,
+                    tool.label(),
+                    navigation.tool == tool,
+                    egui::vec2(30., 30.),
+                );
+                if ui.is_rect_visible(response.rect) {
+                    rects.push((tool.label(), response.rect.intersect(ui.clip_rect())));
+                }
+                if response.clicked() {
+                    navigation.set_tool(tool);
+                }
             }
-        }
-        let icon = match tool {
-            Tool::Navigate => Icon::Rotate,
-            Tool::RectSelect => Icon::Selection,
-            Tool::LassoSelect => Icon::Lasso,
-            Tool::Distance => Icon::Measure,
-            Tool::Angle => Icon::Angle,
-            Tool::Torsion => Icon::Torsion,
-            Tool::Bond => Icon::Bond,
-        };
-        let response = shell::icon_button(
-            ui,
-            icon,
-            tool.label(),
-            navigation.tool == tool,
-            egui::vec2(30., 30.),
-        );
-        rects.push((tool.label(), response.rect));
-        if response.clicked() {
-            navigation.set_tool(tool);
-        }
-    }
+        });
     (rects, command, changed)
 }
 

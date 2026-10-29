@@ -910,35 +910,25 @@ impl App {
         let Some(rect) = self.ui_rects.get("Viewport").copied() else {
             return;
         };
-        egui::Area::new(egui::Id::new("viewport-palette"))
-            .fixed_pos(egui::pos2(rect[0] + 8., rect[1] + 8.))
-            .show(ctx, |ui| {
-                egui::Frame::popup(ui.style())
-                    .inner_margin(3)
-                    .show(ui, |ui| {
-                        let (rects, command, changed) = cuemol_ui::navigation::palette(
-                            ui,
-                            &mut self.navigation,
-                            &mut self.state,
-                        );
-                        for (label, rect) in rects {
-                            self.ui_rects.insert(
-                                label.into(),
-                                [rect.min.x, rect.min.y, rect.width(), rect.height()],
-                            );
-                        }
-                        if let Some(command) = command {
-                            self.apply_navigation_commands(vec![command]);
-                        }
-                        if changed {
-                            self.settings_text = self.state.config_text();
-                            if let Some(storage) =
-                                web_sys::window().and_then(|w| w.local_storage().ok().flatten())
-                            {
-                                let _ = storage.set_item("cuemol.config", &self.settings_text);
-                            }
-                        }
-                    });
-            });
+        let viewport =
+            egui::Rect::from_min_size(egui::pos2(rect[0], rect[1]), egui::vec2(rect[2], rect[3]));
+        let (rects, command, changed) =
+            cuemol_ui::navigation::palette(ctx, viewport, &mut self.navigation, &mut self.state);
+        for (label, rect) in rects {
+            self.ui_rects.insert(
+                label.into(),
+                [rect.min.x, rect.min.y, rect.width(), rect.height()],
+            );
+        }
+        if let Some(command) = command {
+            self.apply_navigation_commands(vec![command]);
+        }
+        if changed {
+            self.settings_text = self.state.config_text();
+            if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten())
+            {
+                let _ = storage.set_item("cuemol.config", &self.settings_text);
+            }
+        }
     }
 }

@@ -7,6 +7,67 @@ passing tests do not establish equivalence for every parameter combination.
 
 ## Public release and installation
 
+### Current release: v0.1.4
+
+The [v0.1.4 release](https://github.com/mogura-rs/cuemol-rs/releases/tag/v0.1.4)
+was published on 2026-10-29 UTC from application revision `32169c5`.
+Its [release workflow](https://github.com/mogura-rs/cuemol-rs/actions/runs/40944568464)
+passed shared tests, browser tests and all five native builds. Each native
+build executed Python helper imports, live-scene queries, selected PDB output
+and persistent calls before packaging. The Windows build passed the previously
+failing startup path described below. The default-branch cache preparation also
+completed on all five targets; this release restored each native tool bundle
+without rebuilding it.
+
+The [application CI](https://github.com/mogura-rs/cuemol-rs/actions/runs/40944337425)
+passed 1,651 Rust tests with one explicit exclusion, and 94 browser cases with
+one optional ICC-fixture exclusion. Ten of those browser cases use a mock Tauri
+bridge. Public Pages checks separately passed all 85 application cases in Chrome,
+including the reference ICC case, and 26 loading, font and navigation cases each
+in Firefox and WebKit. All 33 deployed assets at `32169c5` matched their manifest
+and were byte-identical to that fully tested public build at `14c182f`.
+
+All eight public archives were downloaded and verified against `SHA256SUMS`,
+their source/target/version manifests and license/provenance files. Fresh
+isolated installations on Linux x86-64 and macOS Apple Silicon passed public
+release discovery, installation and self-update with the published binary hashes.
+Both installations passed APBS calculations, PDB2PQR conversion of 1CRN to 642
+atoms, FFmpeg encoding/decoding of four distinct frames, native OIDN rendering,
+MCP checks and PNG export. All 33 embedded browser assets matched their manifest,
+and the installed Linux server passed 17 application cases.
+
+The published macOS app bundle also passed self-update from a path with spaces.
+The test deliberately replaced version/provenance metadata and moved the bundled
+tools away; updating restored them and retained the published executable hash.
+The macOS application bundles remain unsigned.
+
+The [published GUI matrix](https://github.com/mogura-rs/cuemol-rs/actions/runs/40949270248)
+passed on Windows x86-64, Linux x86-64/ARM64 and macOS Intel/Apple Silicon.
+The macOS checks launched the executable inside the actual published app bundle.
+Each target passed OS drag and wheel input, camera-state and pixel checks,
+font-family changes, uppercase styles, equivalent line endings and Python-selected
+PDB output. Inspection of earlier captures exposed taskbar/Dock overlap at the
+bottom of some small CI desktops. The driver now reserves their usable work area
+and checks that the entire window fits before capturing it. All five targets
+passed again with this containment check. Reviewing the complete small-window
+captures then exposed the palette overlap addressed below.
+
+The installed Linux window additionally passed residue/range selection, Undo,
+distance/angle/torsion measurements, lasso, bond editing, affine transforms,
+both-eye stereo picking and animation pause/stop through script and toolbar
+controls. A separate
+[hosted Tauri check](https://github.com/mogura-rs/cuemol-rs/actions/runs/40931192947)
+at source revision `89fce01` observed 20 displayed updates while the OS mouse
+button was held, followed by settled drag and wheel frames. This was a source
+Tauri build, separately from the published native application matrix.
+
+The performance tables below now compare the verified public v0.1.1 and v0.1.4
+binaries. Hardware quad-buffer stereo and real cloud-provider turns remain
+unresolved; the completion boundaries distinguish those from passing local and
+loopback checks.
+
+### Initial release: v0.1.1
+
 The [v0.1.1 release](https://github.com/mogura-rs/cuemol-rs/releases/tag/v0.1.1)
 was published on 2026-10-29 from application revision `c073b9a`.
 Its [release workflow](https://github.com/mogura-rs/cuemol-rs/actions/runs/40867588832)
@@ -74,12 +135,11 @@ matrix verifies the tested window/input paths, not every dialog or hardware GPU.
 
 ### Native credential storage
 
-The public v0.1.3 binary passed credential save, load, replacement, deletion and
+The public v0.1.4 binary passed credential save, load, replacement, deletion and
 environment-variable fallback for OpenAI, Anthropic and Google on all five
-native targets. The [GUI matrix](https://github.com/mogura-rs/cuemol-rs/actions/runs/40942322152)
-passed these checks on both macOS and Linux architectures; the
-[Windows follow-up](https://github.com/mogura-rs/cuemol-rs/actions/runs/40943958893)
-ran them independently of the failing Python GUI check. Each target made nine
+native targets in the
+[GUI matrix](https://github.com/mogura-rs/cuemol-rs/actions/runs/40949270248).
+Each target made nine
 authenticated requests to a loopback mock provider. These exercise the actual
 OS stores, without calling a cloud AI service. Linux used an isolated D-Bus
 session and GNOME Keyring; the macOS jobs used the actual published app bundle.
@@ -100,20 +160,21 @@ property and copied the complete array for each indexed access. Native typed
 storage now retains aliases and bounds/type checks without those copies.
 Python transfers byte blocks through one bulk RPC instead of individual calls.
 
-`scripts/benchmark-byte-arrays.py` compared the public v0.1.1 binary with the
-optimized build on the same Linux host. Each sample allocated an array and
+`scripts/benchmark-byte-arrays.py` compared the public v0.1.1 and v0.1.4 binaries
+on the same Linux host. Both executable hashes matched the verified public
+archives. Each sample allocated an array and
 performed 256 write/read pairs; all checksums were 32,640. Three independent
 processes were measured per size. The median internal times were:
 
-| Array size | v0.1.1 | Updated storage |
+| Array size | v0.1.1 | v0.1.4 |
 | --- | ---: | ---: |
-| 1 KiB | 262 ms | 1 ms |
-| 8 KiB | 2,229 ms | 1 ms |
-| 64 KiB | 19,345 ms | 1 ms |
+| 1 KiB | 270 ms | 1 ms |
+| 8 KiB | 2,224 ms | 1 ms |
+| 64 KiB | 19,112 ms | 1 ms |
 
 The timer has millisecond resolution, so the updated values do not establish a
-precise speedup ratio. At 64 KiB, median process peak RSS fell from 31.76 MiB to
-21.44 MiB. These measurements cover byte-array access, not complete GUI frames.
+precise speedup ratio. At 64 KiB, median process peak RSS fell from 31.54 MiB to
+21.88 MiB. These measurements cover byte-array access, not complete GUI frames.
 The affected core, Python and command suites passed 324 tests; the additional
 Python-to-Umbreon output check passed afterward.
 
@@ -142,6 +203,9 @@ and eleven live-scene Python regressions passed on Linux. Those regressions cove
 callbacks, retained variables, selected output, compressed input and recovery
 after exceptions. `scripts/check-python.py` adds a binary-level release gate on
 every native target, including Unicode paths and separate persistent calls.
+The v0.1.4 release gate passed on all five targets. The public Windows GUI also
+passed helper imports, live object queries and selected-atom output, closing the
+failure reproduced against v0.1.3.
 
 ## Molecular input and output costs
 
@@ -151,21 +215,22 @@ the reference duplicate-name rules. The indexes are dropped before subsequent
 processing. QDF input also avoids assigning bonds from rejected duplicate atoms
 to an unrelated preceding atom.
 
-`scripts/benchmark-molecular-io.py` compared the public v0.1.1 native binary with
-the updated release build on the same Linux x86_64 host. Each input contained
+`scripts/benchmark-molecular-io.py` compared the verified public v0.1.1 and
+v0.1.4 native binaries on the same Linux x86_64 host. Each input contained
 separate synthetic ligand residues, and each size used three fresh processes.
 At 20,000 atoms, the median internal times were:
 
-| Operation | v0.1.1 | Updated readers/writer |
+| Operation | v0.1.1 | v0.1.4 |
 | --- | ---: | ---: |
-| PDB input | 1,568 ms | 152 ms |
-| QDF output | 189 ms | 6 ms |
-| QDF input | 2,066 ms | 140 ms |
+| PDB input | 1,521 ms | 153 ms |
+| QDF output | 186 ms | 6 ms |
+| QDF input | 2,005 ms | 140 ms |
 
 All 1,000-, 5,000- and 20,000-atom samples retained the expected atom count,
 coordinates and identical QDF SHA-256 values across the two builds. Median peak
-process RSS at 20,000 atoms was 59.54 MiB before and 58.84 MiB after. This measures
-the CLI reader/writer workload, not rendering or total browser memory. The full
+process RSS at 20,000 atoms was 59.54 MiB before and 60.43 MiB after, so this
+workload did not show a memory reduction. This measures the CLI reader/writer
+workload, not rendering or total browser memory. The full
 molecular-reader suite passed with the reference fixtures present.
 
 `web/benchmarks/load.mjs` measures file input, embedded scene save/reload and
@@ -236,6 +301,27 @@ memory after scene reload was 54.44 MiB before worker loading and 52.50 MiB afte
 The worker adds transient memory, reaching 20.13 MiB during the scene reload,
 and is then released. These values describe WASM linear memory, not browser
 process RSS or a claim of lower peak memory for every load.
+
+## Compact viewport controls
+
+The native/browser tool palette previously grew beyond a short viewport and
+covered the console. A 960 x 600 browser regression reproduced this against the
+public v0.1.4 runtime: the torsion button extended ten pixels below the viewport.
+The complete Windows and macOS captures also showed the overlap.
+
+The shared UI now bounds the palette to its viewport, keeps the collapse button
+fixed and scrolls the tool list. The browser case verifies that the final tool
+can be reached and selected without changing camera zoom, then opens its options
+and collapses the palette. Captured option-menu contents remain visible. All 86
+Chrome application cases pass, and the macOS native UI library passes 171 tests
+with one explicit exclusion. Firefox and WebKit each pass 27 loading, font and
+navigation cases, including the compact-palette regression.
+
+A real Linux window at 944 x 648 passes drag, wheel, font and Python checks. An
+additional OS wheel-input check scrolls the palette's visible tools while keeping
+the camera center, rotation and zoom unchanged. The captured console is uncovered.
+These checks exercise the vertical native/browser palette; Tauri uses its own
+horizontal toolbar.
 
 ## Center marks and display scaling
 

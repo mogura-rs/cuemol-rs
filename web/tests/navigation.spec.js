@@ -146,6 +146,42 @@ test('tool shortcuts, cursors and the collapsed palette persist the expected int
   await page.screenshot({path:testInfo.outputPath('palette.png')});
 });
 
+test('short viewports keep the tool palette above the console and allow scrolling to the last tool',async({page},testInfo)=>{
+  await page.setViewportSize({width:960,height:600});
+  await setup(page);
+  const labels=['Hide tool palette','Navigate','Rect Select','Lasso','Measure options','Distance','Angle','Torsion','Bond editor options','Add Bond'];
+  function checkBounds(state) {
+    const viewport=state.ui.rects.Viewport,bottom=viewport[1]+viewport[3];
+    for(const label of labels) {
+      const rect=state.ui.rects[label];
+      if(rect)expect(rect[1]+rect[3],`${label} overlaps the console`).toBeLessThanOrEqual(bottom);
+    }
+  }
+  const before=await status(page);
+  checkBounds(before);
+  expect(before.ui.rects['Add Bond']).toBeUndefined();
+  const palette=before.ui.rects['Tool palette'];
+  expect(palette).toHaveLength(4);
+  const viewport=before.ui.rects.Viewport;
+  expect(palette[1]+palette[3]).toBeLessThanOrEqual(viewport[1]+viewport[3]);
+  await page.mouse.move(palette[0]+palette[2]/2,palette[1]+palette[3]-20);
+  await page.mouse.wheel(0,800);
+  await expect.poll(async()=>(await status(page)).ui.rects['Add Bond']?.length).toBe(4);
+  const scrolled=await status(page);
+  checkBounds(scrolled);
+  expect(scrolled.view.zoom).toBe(before.view.zoom);
+  await choose(page,'Add Bond');
+  await expect.poll(async()=>(await status(page)).ui.navigation.tool).toBe('Add Bond');
+  await page.screenshot({path:testInfo.outputPath('short-palette-scrolled.png')});
+  await choose(page,'Bond editor options');
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  await page.screenshot({path:testInfo.outputPath('short-palette-options.png')});
+  await page.keyboard.press('Escape');
+  await choose(page,'Hide tool palette');
+  await expect.poll(async()=>(await status(page)).ui.rects['Show tool palette']?.length).toBe(4);
+  await page.screenshot({path:testInfo.outputPath('short-palette.png')});
+});
+
 test('cross-molecule measurement values follow transforms and survive scene reloads',async({page},testInfo)=>{
   const {id}=await setup(page);
   await page.locator('#files').setInputFiles({name:'other.pdb',mimeType:'application/octet-stream',buffer:Buffer.from(pdb)});
