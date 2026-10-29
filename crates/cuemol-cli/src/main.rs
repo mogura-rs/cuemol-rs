@@ -797,6 +797,8 @@ fn self_upgrade() -> Result<(), String> {
     use std::process::Command;
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut command = Command::new("powershell.exe");
+    // Windows PowerShell cannot load the module paths inherited from PowerShell 7.
+    command.env_remove("PSModulePath");
     command
         .args([
             "-NoProfile",
