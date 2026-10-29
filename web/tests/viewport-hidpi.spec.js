@@ -19,7 +19,8 @@ for (const backend of ['webgl','webgpu']) {
         baseline=await capture();
         const offset=4*(Math.floor(baseline.height/2)*baseline.width+Math.floor(baseline.width/2));
         return Array.from(baseline.data.subarray(offset,offset+3)).every(value=>value>10&&value<240);
-      }).toBe(true);
+      },{timeout:30000,message:'the HiDPI viewport must present the scene background'}).toBe(true);
+      await testInfo.attach('viewport-baseline',{body:PNG.sync.write(baseline),contentType:'image/png'});
       for(const stereo of ['none','para']) {
         await call(page,'set_node_prop',{nodeType:'view',prop:'stereoMode',value:stereo});
         await call(page,'set_node_prop',{nodeType:'view',prop:'centerMark',value:'crosshair'});
@@ -39,7 +40,7 @@ for (const backend of ['webgl','webgpu']) {
             }
             return count>=80&&maxX-minX>=36&&maxX-minX<=42;
           }).every(Boolean);
-        }).toBe(true);
+        },{timeout:30000,message:'both eyes must present the inverted center mark'}).toBe(true);
         await page.screenshot({path:testInfo.outputPath(`center-${stereo}.png`)});
         await call(page,'set_node_prop',{nodeType:'view',prop:'centerMark',value:'none'});
         await expect.poll(async()=>{
@@ -53,7 +54,7 @@ for (const backend of ['webgl','webgpu']) {
             }
             return true;
           });
-        }).toBe(true);
+        },{timeout:30000,message:'disabling the center mark must restore the background'}).toBe(true);
       }
       expect(errors).toEqual([]);
     });
