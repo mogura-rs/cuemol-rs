@@ -100,7 +100,6 @@ def main():
                         check_models(provider)
                 finally:
                     if saved:
-                        check_models(provider)
                         result = command(['key', 'delete', provider])
                         if result.returncode:
                             raise RuntimeError(f'{provider}: credential cleanup failed')
