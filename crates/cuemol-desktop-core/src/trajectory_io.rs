@@ -341,15 +341,57 @@ impl DesktopAppState {
     }
 }
 
-pub(super) fn read_extra_qsc_molecule(format: &str, bytes: &[u8]) -> Result<MolCoord> {
+pub(super) fn read_extra_qsc_molecule_with_options(
+    format: &str,
+    bytes: &[u8],
+    options: Option<&LDom2Node>,
+    base_path: Option<&Path>,
+) -> Result<MolCoord> {
+    if format == "namdcoor" {
+        let topology = options
+            .map(|node| node.str_attr("subPath_topo").to_string())
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| {
+                CueMolError::invalid_argument("NAMD coordinate source requires a topology path")
+            })?;
+        let path = Path::new(&topology);
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            base_path.unwrap_or_else(|| Path::new(".")).join(path)
+        };
+        let psf = cuemol_molstr::read_text_maybe_compressed(&path)?;
+        return cuemol_mdtools::read_namd_coor_with_psf_bytes(bytes, &psf)
+            .map(|load| load.molecule);
+    }
     let text = std::str::from_utf8(bytes)
         .map_err(|error| CueMolError::parse(format!("invalid trajectory topology: {error}")))?;
     match format {
         "gro" => cuemol_mdtools::read_gro_str(text),
         "psf" => cuemol_mdtools::read_psf_str(text),
-        "amberprm" | "amberprmtop" => cuemol_mdtools::read_amber_prmtop_str(text),
+        "amberprm" | "amberprmtop" => {
+            let mode = amber_bond_mode(
+                options
+                    .map(|node| node.str_attr("bondmode").to_string())
+                    .as_deref()
+                    .unwrap_or("file"),
+            )?;
+            cuemol_mdtools::read_amber_prmtop_str_with_bond_mode(text, mode)
+        }
         _ => Err(CueMolError::invalid_argument(format!(
             "unsupported QSC molecule source type {format}"
+        ))),
+    }
+}
+
+pub(super) fn amber_bond_mode(value: &str) -> Result<i32> {
+    use cuemol_mdtools::AmberPrmtopReader;
+    match value {
+        "" | "file" | "0" => Ok(AmberPrmtopReader::BONDMODE_FILE),
+        "hybrid" | "1" => Ok(AmberPrmtopReader::BONDMODE_HYBRID),
+        "autogen" | "2" => Ok(AmberPrmtopReader::BONDMODE_AUTOGEN),
+        _ => Err(CueMolError::invalid_argument(format!(
+            "invalid AMBER bond mode: {value}"
         ))),
     }
 }

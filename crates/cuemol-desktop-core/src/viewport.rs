@@ -39,6 +39,35 @@ impl ReusableGpuBuffer {
         queue.write_buffer(&self.buffer, 0, bytes);
     }
 
+    pub fn upload_iter<T: bytemuck::Pod>(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        count: usize,
+        values: impl IntoIterator<Item = T>,
+    ) {
+        if count == 0 {
+            return;
+        }
+        let required = count
+            .checked_mul(std::mem::size_of::<T>())
+            .and_then(|bytes| wgpu::BufferSize::new(bytes as u64))
+            .expect("invalid GPU upload size");
+        if required.get() > self.capacity {
+            self.capacity = scene_buffer_capacity(required.get());
+            self.buffer = create_scene_buffer(device, self.label, self.usage, self.capacity);
+        }
+        let mut staging = queue
+            .write_buffer_with(&self.buffer, 0, required)
+            .expect("GPU staging allocation failed");
+        let mut values = values.into_iter();
+        for destination in staging.chunks_exact_mut(std::mem::size_of::<T>()) {
+            let value = values.next().expect("GPU upload has too few values");
+            destination.copy_from_slice(bytemuck::bytes_of(&value));
+        }
+        assert!(values.next().is_none(), "GPU upload has too many values");
+    }
+
     pub fn slice(&self) -> wgpu::BufferSlice<'_> {
         self.buffer.slice(..)
     }
@@ -851,26 +880,44 @@ impl ViewportRenderer {
         queue: &wgpu::Queue,
         scene: &RenderSceneSnapshot,
     ) {
-        let atoms: Vec<_> = scene
-            .atoms
-            .iter()
-            .filter(|a| a.hit.is_none())
-            .map(atom_instance)
-            .collect();
-        let bonds: Vec<_> = scene.bonds.iter().map(bond_instance).collect();
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
-        for mesh in &scene.meshes {
-            let base = vertices.len() as u32;
-            vertices.extend(mesh.vertices.iter().map(mesh_gpu_vertex));
-            indices.extend(mesh.indices.iter().map(|i| base + i));
-        }
         self.draws = primitive_draws(scene);
         self.revision = self.revision.wrapping_add(1);
-        self.atoms.upload(device, queue, &atoms);
-        self.bonds.upload(device, queue, &bonds);
-        self.vertices.upload(device, queue, &vertices);
-        self.indices.upload(device, queue, &indices);
+        self.atoms.upload_iter(
+            device,
+            queue,
+            scene.atoms.iter().filter(|atom| atom.hit.is_none()).count(),
+            scene
+                .atoms
+                .iter()
+                .filter(|atom| atom.hit.is_none())
+                .map(atom_instance),
+        );
+        self.bonds.upload_iter(
+            device,
+            queue,
+            scene.bonds.len(),
+            scene.bonds.iter().map(bond_instance),
+        );
+        self.vertices.upload_iter(
+            device,
+            queue,
+            scene.meshes.iter().map(|mesh| mesh.vertices.len()).sum(),
+            scene
+                .meshes
+                .iter()
+                .flat_map(|mesh| mesh.vertices.iter().map(mesh_gpu_vertex)),
+        );
+        let mut base = 0_u32;
+        self.indices.upload_iter(
+            device,
+            queue,
+            scene.meshes.iter().map(|mesh| mesh.indices.len()).sum(),
+            scene.meshes.iter().flat_map(|mesh| {
+                let offset = base;
+                base += mesh.vertices.len() as u32;
+                mesh.indices.iter().map(move |index| offset + index)
+            }),
+        );
         self.volumes.upload(device, queue, &scene.volumes);
     }
 

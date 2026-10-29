@@ -1,9 +1,10 @@
 mod atom_intr;
 
+#[cfg(test)]
+use crate::read_pdb_str;
 use crate::{
-    read_mmcif_file, read_mmcif_str, read_mol2_file, read_mol2_str, read_pdb_file, read_pdb_str,
-    read_qdf_mol_bytes, read_qdfpdb_file, read_sdf_file, read_sdf_str, write_pdb_string, Atom,
-    MolCoord, Selector, SolidColoring,
+    read_mmcif_file, read_mol2_file, read_pdb_file, read_qdf_mol_bytes, read_qdfpdb_file,
+    read_sdf_file, write_pdb_string, Atom, MolCoord, Selector, SolidColoring,
 };
 use cuemol_core::{
     parse_ldom2_xml, write_ldom2_xml, CueMolError, LDom2InStream, LDom2Node, LDom2Tree, Matrix4,
@@ -20,6 +21,9 @@ const RENDERER_UID_BASE: u64 = 2_000_000_000;
 const VIEW_UID_BASE: u64 = 3_000_000_000;
 const UID_SCENE_STRIDE: u64 = 1_000_000;
 const UID_OBJECT_STRIDE: u64 = 1_000;
+
+pub type QscMoleculeReader<'a> =
+    dyn Fn(&str, &[u8], Option<&LDom2Node>, Option<&Path>) -> Result<MolCoord> + 'a;
 
 type PendingAtomIntrRenderer = (String, Vec<PendingAtomIntrDef>);
 
@@ -2416,6 +2420,17 @@ impl MolScene {
         base_path: Option<&Path>,
         read_molecule: &dyn Fn(&str, &[u8]) -> Result<MolCoord>,
     ) -> Result<()> {
+        self.load_qsc_bytes_with_reader_options(input, base_path, &|format, bytes, _, _| {
+            read_molecule(format, bytes)
+        })
+    }
+
+    pub fn load_qsc_bytes_with_reader_options(
+        &mut self,
+        input: &[u8],
+        base_path: Option<&Path>,
+        read_molecule: &QscMoleculeReader<'_>,
+    ) -> Result<()> {
         let stream = LDom2InStream::from_bytes(input)?;
         if stream.tree().top().tag_name() != "scene" {
             return Err(CueMolError::parse("QSC root element is not scene"));
@@ -2558,13 +2573,17 @@ impl MolScene {
         object_node: &LDom2Node,
         chunks: &BTreeMap<String, Vec<u8>>,
         base_path: Option<&Path>,
-        read_molecule: &dyn Fn(&str, &[u8]) -> Result<MolCoord>,
+        read_molecule: &QscMoleculeReader<'_>,
     ) -> Result<()> {
         let object_line = block
             .first()
             .ok_or_else(|| CueMolError::parse("QSC object element not found"))?;
         let object_name = attr_value(object_line, "name")
             .ok_or_else(|| CueMolError::parse("QSC object name not found"))?;
+        let reader_options = object_node
+            .children()
+            .iter()
+            .find(|node| !node.is_attr() && node.tag_name() == "ropts");
         // Object class dispatch: MolCoord chunks can be PDB text or native QDF.
         // A `.qsc` saved by C++ CueMol2 can also hold non-molecule objects such as
         // MolSurf and DensityMap. Capture supported representations and record only
@@ -2581,7 +2600,12 @@ impl MolScene {
             if matches!(object_type.as_str(), "MolSurf" | "MolSurfObj")
                 && matches!(srctype.as_str(), "obj" | "ply" | "qdfsurf")
             {
-                if let Ok(data) = load_qsc_source_data(object_line, chunks, base_path) {
+                if let Ok(data) = load_qsc_source_data_with_options(
+                    object_line,
+                    chunks,
+                    base_path,
+                    reader_options,
+                ) {
                     self.add_loaded_surface(LoadedSurface {
                         uid: Uid::new(0),
                         name: object_name.clone(),
@@ -2607,7 +2631,12 @@ impl MolScene {
                         | "qdfpot"
                 )
             {
-                if let Ok(data) = load_qsc_source_data(object_line, chunks, base_path) {
+                if let Ok(data) = load_qsc_source_data_with_options(
+                    object_line,
+                    chunks,
+                    base_path,
+                    reader_options,
+                ) {
                     self.loaded_density_maps.push(LoadedDensityMap {
                         name: object_name.clone(),
                         object_type: object_type.clone(),
@@ -2620,7 +2649,12 @@ impl MolScene {
                 }
             }
             if object_type == "LWObject" && matches!(srctype.as_str(), "qdflwobj" | "qdf_lwobj") {
-                if let Ok(data) = load_qsc_source_data(object_line, chunks, base_path) {
+                if let Ok(data) = load_qsc_source_data_with_options(
+                    object_line,
+                    chunks,
+                    base_path,
+                    reader_options,
+                ) {
                     let visible = attr_value(object_line, "visible").is_none_or(|value| {
                         !matches!(value.as_str(), "false" | "0" | "no" | "off")
                     });
@@ -2663,7 +2697,8 @@ impl MolScene {
             let raw_data = if source.is_empty() {
                 None
             } else {
-                load_qsc_source_data(object_line, chunks, base_path).ok()
+                load_qsc_source_data_with_options(object_line, chunks, base_path, reader_options)
+                    .ok()
             };
             self.loaded_qsc_objects.push(LoadedQscObject {
                 name: object_name.clone(),
@@ -2674,33 +2709,16 @@ impl MolScene {
             self.skipped_qsc_objects.push((object_name, object_type));
             return Ok(());
         }
-        let data = load_qsc_source_data(object_line, chunks, base_path)?;
+        let data =
+            load_qsc_source_data_with_options(object_line, chunks, base_path, reader_options)?;
         let srctype = attr_value(object_line, "srctype").unwrap_or_else(|| "qdfpdb".to_string());
-        let molecule = match srctype.as_str() {
-            "qdfmol" => {
-                let qdf_data = if data.starts_with(b"QDF0") {
-                    data.as_slice()
-                } else {
-                    trim_ascii_bytes(&data)
-                };
-                read_qdf_mol_bytes(qdf_data)?
-            }
-            "qdfpdb" | "pdb" | "" => {
-                read_pdb_str(std::str::from_utf8(&data).map_err(|error| {
-                    CueMolError::parse(format!("QSC PDB chunk is not UTF-8: {error}"))
-                })?)?
-            }
-            "mmcif" | "cif" => read_mmcif_str(std::str::from_utf8(&data).map_err(|error| {
-                CueMolError::parse(format!("QSC mmCIF source is not UTF-8: {error}"))
-            })?)?,
-            "sdf" | "mol" => read_sdf_str(std::str::from_utf8(&data).map_err(|error| {
-                CueMolError::parse(format!("QSC SDF source is not UTF-8: {error}"))
-            })?)?,
-            "mol2" => read_mol2_str(std::str::from_utf8(&data).map_err(|error| {
-                CueMolError::parse(format!("QSC MOL2 source is not UTF-8: {error}"))
-            })?)?,
-            other => read_molecule(other, &data)?,
-        };
+        let molecule = read_molecule_bytes_with_options(
+            &srctype,
+            &data,
+            reader_options,
+            base_path,
+            read_molecule,
+        )?;
         let object_uid = self.add_molecule_with_source_type(object_name, molecule, srctype);
         let qsc_extra_attrs = object_node
             .children()
@@ -3739,6 +3757,19 @@ impl MolCommandManager {
         target_scene: Option<Uid>,
         read_molecule: &dyn Fn(&str, &[u8]) -> Result<MolCoord>,
     ) -> Result<LoadSceneResult> {
+        self.load_scene_command_with_reader_options(
+            file_path,
+            target_scene,
+            &|format, bytes, _, _| read_molecule(format, bytes),
+        )
+    }
+
+    pub fn load_scene_command_with_reader_options(
+        &mut self,
+        file_path: impl AsRef<Path>,
+        target_scene: Option<Uid>,
+        read_molecule: &QscMoleculeReader<'_>,
+    ) -> Result<LoadSceneResult> {
         let file_path = absolute_scene_path(file_path.as_ref())?;
         let input = fs::read(&file_path)?;
         if let Ok(text) = std::str::from_utf8(&input) {
@@ -3763,7 +3794,7 @@ impl MolCommandManager {
                     .cloned()
                     .ok_or_else(|| CueMolError::NotFound(format!("scene {}", uid.get())))?;
                 loaded.clear_all_data();
-                loaded.load_qsc_bytes_with_molecule_reader(
+                loaded.load_qsc_bytes_with_reader_options(
                     &input,
                     file_path.parent(),
                     read_molecule,
@@ -3781,7 +3812,7 @@ impl MolCommandManager {
                     .scene_manager
                     .scene_mut(uid)
                     .expect("newly created scene must exist")
-                    .load_qsc_bytes_with_molecule_reader(&input, file_path.parent(), read_molecule);
+                    .load_qsc_bytes_with_reader_options(&input, file_path.parent(), read_molecule);
                 if let Err(error) = load_result {
                     self.scene_manager.destroy_scene(uid);
                     return Err(error);
@@ -3851,6 +3882,14 @@ fn unsupported_qsc_molecule(format: &str, _: &[u8]) -> Result<MolCoord> {
     )))
 }
 
+fn qsc_reader_bool(node: &LDom2Node, key: &str, default: bool) -> bool {
+    if node.str_attr(key).is_empty() {
+        default
+    } else {
+        node.bool_attr(key)
+    }
+}
+
 fn collect_qsc_extension_data(
     node: &LDom2Node,
     chunks: &BTreeMap<String, Vec<u8>>,
@@ -3880,6 +3919,15 @@ fn load_qsc_source_data(
     chunks: &BTreeMap<String, Vec<u8>>,
     base_path: Option<&Path>,
 ) -> Result<Vec<u8>> {
+    load_qsc_source_data_with_options(object_line, chunks, base_path, None)
+}
+
+fn load_qsc_source_data_with_options(
+    object_line: &str,
+    chunks: &BTreeMap<String, Vec<u8>>,
+    base_path: Option<&Path>,
+    options: Option<&LDom2Node>,
+) -> Result<Vec<u8>> {
     let src = attr_value(object_line, "src").unwrap_or_default();
     if src.starts_with("datachunk:") {
         return chunks
@@ -3907,7 +3955,22 @@ fn load_qsc_source_data(
         } else {
             base_path.unwrap_or_else(|| Path::new(".")).join(path)
         };
-        match crate::read_bytes_maybe_compressed(&path) {
+        let input = if let Some(options) = options {
+            let mut handler = cuemol_qsys::InOutHandler::default();
+            handler.set_path(path.to_string_lossy());
+            handler.set_compress(match options.str_attr("compress").as_str() {
+                "" | "none" | "0" => 0,
+                "gzip" | "1" => 1,
+                "bzip2" | "2" => 2,
+                "xzip" | "xz" | "3" => 3,
+                _ => return Err(CueMolError::parse("invalid object compression option")),
+            });
+            handler.set_base64(options.bool_attr("base64"));
+            handler.read_bytes()
+        } else {
+            crate::read_bytes_maybe_compressed(&path)
+        };
+        match input {
             Ok(data) => return Ok(data),
             Err(error) => errors.push(format!("{}: {error}", path.display())),
         }
@@ -5599,4 +5662,120 @@ opaque payload
 
         fs::remove_dir_all(relative_dir).unwrap();
     }
+}
+
+/// Decode a molecular source using the options applied by the scene reader factory.
+pub fn read_molecule_bytes_with_options(
+    srctype: &str,
+    data: &[u8],
+    reader_options: Option<&LDom2Node>,
+    base_path: Option<&Path>,
+    read_molecule: &dyn Fn(&str, &[u8], Option<&LDom2Node>, Option<&Path>) -> Result<MolCoord>,
+) -> Result<MolCoord> {
+    Ok(match srctype {
+        "qdfmol" => {
+            let qdf_data = if data.starts_with(b"QDF0") {
+                data
+            } else {
+                trim_ascii_bytes(data)
+            };
+            read_qdf_mol_bytes(qdf_data)?
+        }
+        "qdfpdb" | "pdb" | "" => {
+            let mut options = crate::PdbReadOptions::default();
+            if let Some(node) = reader_options {
+                options.load_model = qsc_reader_bool(node, "loadmodel", options.load_model);
+                options.load_anisou = qsc_reader_bool(node, "loadanisou", options.load_anisou);
+                options.load_alt_conf = qsc_reader_bool(node, "loadaltconf", options.load_alt_conf);
+                options.build_secondary =
+                    qsc_reader_bool(node, "build2ndry", options.build_secondary);
+                options.load_seg_id = qsc_reader_bool(node, "loadsegid", options.load_seg_id);
+                options.auto_topo_gen = qsc_reader_bool(node, "autoTopoGen", options.auto_topo_gen);
+            }
+            crate::read_pdb_str_with_options(
+                std::str::from_utf8(&data).map_err(|error| {
+                    CueMolError::parse(format!("QSC PDB chunk is not UTF-8: {error}"))
+                })?,
+                options,
+            )?
+        }
+        "mmcif" | "cif" => {
+            let mut options = crate::MmcifReadOptions {
+                load_secstr: false,
+                ..Default::default()
+            };
+            if let Some(node) = reader_options {
+                options.load_model = qsc_reader_bool(node, "loadmodel", options.load_model);
+                options.load_anisou = qsc_reader_bool(node, "loadanisou", options.load_anisou);
+                options.load_alt_conf = qsc_reader_bool(node, "loadaltconf", options.load_alt_conf);
+                options.load_secstr = qsc_reader_bool(node, "loadsecstr", options.load_secstr);
+                options.auto_topo_gen = qsc_reader_bool(node, "autoTopoGen", options.auto_topo_gen);
+            }
+            crate::read_mmcif_str_with_options(
+                std::str::from_utf8(&data).map_err(|error| {
+                    CueMolError::parse(format!("QSC mmCIF source is not UTF-8: {error}"))
+                })?,
+                options,
+            )?
+        }
+        "sdf" | "mol" => {
+            let mut options = crate::SdfReadOptions {
+                chain_name: "_".into(),
+                ..Default::default()
+            };
+            if let Some(node) = reader_options {
+                options.load_compound_id = node
+                    .str_attr("load_cmpd_id")
+                    .as_str()
+                    .parse()
+                    .unwrap_or(options.load_compound_id);
+                options.load_as_chain =
+                    qsc_reader_bool(node, "load_as_chain", options.load_as_chain);
+                options.residue_index = node
+                    .str_attr("resid_index")
+                    .as_str()
+                    .parse()
+                    .unwrap_or(options.residue_index);
+                if let Some(value) = node.find_child("chain_name") {
+                    options.chain_name = value.value().to_string();
+                }
+            }
+            crate::read_sdf_str_with_options(
+                std::str::from_utf8(&data).map_err(|error| {
+                    CueMolError::parse(format!("QSC SDF source is not UTF-8: {error}"))
+                })?,
+                &options,
+            )?
+        }
+        "mol2" => {
+            let mut options = crate::Mol2ReadOptions {
+                chain_name: "_".into(),
+                ..Default::default()
+            };
+            if let Some(node) = reader_options {
+                options.load_compound_id = node
+                    .str_attr("load_cmpd_id")
+                    .as_str()
+                    .parse()
+                    .unwrap_or(options.load_compound_id);
+                options.load_as_chain =
+                    qsc_reader_bool(node, "load_as_chain", options.load_as_chain);
+                options.residue_index = node
+                    .str_attr("resid_index")
+                    .as_str()
+                    .parse()
+                    .unwrap_or(options.residue_index);
+                if let Some(value) = node.find_child("chain_name") {
+                    options.chain_name = value.value().to_string();
+                }
+            }
+            crate::read_mol2_str_with_options(
+                std::str::from_utf8(&data).map_err(|error| {
+                    CueMolError::parse(format!("QSC MOL2 source is not UTF-8: {error}"))
+                })?,
+                &options,
+            )?
+        }
+        other => read_molecule(other, data, reader_options, base_path)?,
+    })
 }

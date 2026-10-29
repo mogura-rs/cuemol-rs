@@ -1,6 +1,7 @@
-use cuemol_core::{ByteArray, CueMolError, Result};
+use cuemol_core::{Base64InStream, Base64OutStream, ByteArray, CueMolError, Result};
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{Cursor, Write};
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,7 +120,24 @@ impl InOutHandler {
 
     pub fn read_bytes_for(&self, key: &str) -> Result<Vec<u8>> {
         let path = self.required_path(key)?;
-        Ok(fs::read(path)?)
+        let bytes = fs::read(path)?;
+        if self.filters_apply(key) {
+            self.decode_bytes(bytes)
+        } else {
+            Ok(bytes)
+        }
+    }
+
+    pub fn decode_bytes(&self, mut bytes: Vec<u8>) -> Result<Vec<u8>> {
+        self.validate_compression()?;
+        if self.base64 {
+            bytes = Base64InStream::new(bytes).into_bytes();
+        }
+        match self.compress_mode {
+            Self::COMP_GZIP => cuemol_core::decode_gzip_bytes(&bytes),
+            Self::COMP_XZIP => cuemol_core::decode_xz_bytes(&bytes),
+            _ => Ok(bytes),
+        }
     }
 
     pub fn read_byte_array(&self) -> Result<ByteArray> {
@@ -135,8 +153,8 @@ impl InOutHandler {
     }
 
     pub fn read_string_for(&self, key: &str) -> Result<String> {
-        let path = self.required_path(key)?;
-        Ok(fs::read_to_string(path)?)
+        String::from_utf8(self.read_bytes_for(key)?)
+            .map_err(|error| CueMolError::parse(error.to_string()))
     }
 
     pub fn write_bytes(&self, bytes: &[u8]) -> Result<()> {
@@ -145,8 +163,55 @@ impl InOutHandler {
 
     pub fn write_bytes_for(&self, key: &str, bytes: &[u8]) -> Result<()> {
         let path = self.required_path(key)?;
-        fs::write(path, bytes)?;
+        if !self.filters_apply(key) || (self.compress_mode == Self::COMP_NONE && !self.base64) {
+            fs::write(path, bytes)?;
+            return Ok(());
+        }
+        self.validate_compression()?;
+        let mut output = match self.compress_mode {
+            Self::COMP_GZIP => {
+                let mut encoder =
+                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+                encoder.write_all(bytes)?;
+                encoder.finish()?
+            }
+            Self::COMP_XZIP => {
+                let mut output = Vec::new();
+                lzma_rs::xz_compress(&mut Cursor::new(bytes), &mut output)
+                    .map_err(|error| CueMolError::Io(error.to_string()))?;
+                output
+            }
+            _ => bytes.to_vec(),
+        };
+        if self.base64 {
+            let mut encoder = Base64OutStream::new();
+            encoder.write(&output, 0, output.len());
+            output = encoder.finish();
+        }
+        fs::write(path, output)?;
         Ok(())
+    }
+
+    fn filters_apply(&self, key: &str) -> bool {
+        key.is_empty()
+            && matches!(
+                self.category,
+                Self::IOH_CAT_OBJREADER | Self::IOH_CAT_OBJWRITER
+            )
+    }
+
+    fn validate_compression(&self) -> Result<()> {
+        if matches!(
+            self.compress_mode,
+            Self::COMP_NONE | Self::COMP_GZIP | Self::COMP_XZIP
+        ) {
+            Ok(())
+        } else {
+            Err(CueMolError::invalid_argument(format!(
+                "unsupported object stream compression method: {}",
+                self.compress_mode
+            )))
+        }
     }
 
     pub fn write_string(&self, text: &str) -> Result<()> {
@@ -220,6 +285,83 @@ impl InOutHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
+
+    #[test]
+    fn object_stream_filters_compress_before_base64_and_leave_auxiliary_streams_raw() {
+        let path =
+            std::env::temp_dir().join(format!("cuemol-stream-filters-{}", std::process::id()));
+        let aux = path.with_extension("aux");
+        let payload = b"molecular coordinates\n\x00\xff";
+        let mut handler = InOutHandler::new("test", "Test", "*", InOutHandler::IOH_CAT_OBJWRITER);
+        handler.set_path(path.to_string_lossy());
+        handler.set_sub_path("aux", aux.to_string_lossy());
+        for compression in [
+            InOutHandler::COMP_NONE,
+            InOutHandler::COMP_GZIP,
+            InOutHandler::COMP_XZIP,
+        ] {
+            for base64 in [false, true] {
+                handler.set_compress(compression);
+                handler.set_base64(base64);
+                handler.write_bytes(payload).unwrap();
+                let encoded = fs::read(&path).unwrap();
+                let compressed = if base64 {
+                    assert!(encoded.is_ascii());
+                    Base64InStream::new(encoded).into_bytes()
+                } else {
+                    encoded
+                };
+                let mut decoded = Vec::new();
+                match compression {
+                    InOutHandler::COMP_GZIP => {
+                        assert!(compressed.starts_with(&[0x1f, 0x8b]));
+                        flate2::read::GzDecoder::new(compressed.as_slice())
+                            .read_to_end(&mut decoded)
+                            .unwrap();
+                    }
+                    InOutHandler::COMP_XZIP => {
+                        assert!(compressed.starts_with(b"\xfd7zXZ\0"));
+                        lzma_rs::xz_decompress(&mut Cursor::new(compressed), &mut decoded).unwrap();
+                    }
+                    _ => decoded = compressed,
+                }
+                assert_eq!(decoded, payload);
+                assert_eq!(handler.read_bytes().unwrap(), payload);
+                handler.write_bytes_for("aux", payload).unwrap();
+                assert_eq!(fs::read(&aux).unwrap(), payload);
+                assert_eq!(handler.read_bytes_for("aux").unwrap(), payload);
+            }
+        }
+        fs::remove_file(path).unwrap();
+        fs::remove_file(aux).unwrap();
+    }
+
+    #[test]
+    fn invalid_object_filters_fail_without_replacing_files_and_scene_streams_stay_raw() {
+        let path =
+            std::env::temp_dir().join(format!("cuemol-stream-invalid-{}", std::process::id()));
+        fs::write(&path, b"unchanged").unwrap();
+        let mut handler = InOutHandler::default();
+        handler.set_path(path.to_string_lossy());
+        for compression in [InOutHandler::COMP_BZIP2, 99] {
+            handler.set_compress(compression);
+            assert!(handler.write_string("replacement").is_err());
+            assert!(handler.read_bytes().is_err());
+            assert_eq!(fs::read(&path).unwrap(), b"unchanged");
+        }
+        for compression in [InOutHandler::COMP_GZIP, InOutHandler::COMP_XZIP] {
+            handler.set_compress(compression);
+            assert!(handler.read_bytes().is_err());
+        }
+        let mut scene = InOutHandler::new("qsc", "Scene", "*.qsc", InOutHandler::IOH_CAT_SCEWRITER);
+        scene.set_path(path.to_string_lossy());
+        scene.set_compress(InOutHandler::COMP_GZIP);
+        scene.set_base64(true);
+        scene.write_string("<scene/>").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "<scene/>");
+        fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn inout_handler_paths_and_constants_match_reference() {

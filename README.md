@@ -445,7 +445,9 @@ library location. Missing runtimes or unsupported browser devices report errors.
 The A-trous implementation uses increasing B3-spline sample spacing, following
 the [wavelet filtering approach](https://doi.org/10.2312/EGGH/HPG10/067-075),
 with color and alpha guidance rather than the paper's additional geometry data.
-Unsupported settings return errors. Native MCP ray tracing and APBS run in
+Unsupported render settings return errors. The legacy PNG exporter's `interlace`
+and `compresslev` properties retain the C++ behavior: they are accepted but do
+not change PNG encoding. Native MCP ray tracing and APBS run in
 background workers; the MCP call returns when its result is available.
 These boundaries remain relevant when comparing complex reference scenes.
 

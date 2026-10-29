@@ -180,6 +180,10 @@ impl<T> SceneObject<T> {
         &self.properties
     }
 
+    pub fn remove_property_str(&mut self, name: &str) -> bool {
+        self.properties.remove(name).is_some()
+    }
+
     pub fn is_visible(&self) -> bool {
         self.visible
     }

@@ -1,24 +1,12 @@
 use crate::commands::{scene, text};
 use cuemol_anim::{AnimMgr, AnimMotion};
-use cuemol_core::clock::Instant;
 use cuemol_core::{
     time_from_milliseconds, time_to_milliseconds, CueMolError, LDom2Node, Result, Uid,
 };
 use cuemol_desktop_core::DesktopAppState;
 use cuemol_qsys::Camera;
 use serde_json::{json, Value};
-use std::sync::OnceLock;
 
-fn clock_ms() -> f64 {
-    static START: OnceLock<Instant> = OnceLock::new();
-    START.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.
-}
-fn key(scene: Uid, part: &str) -> String {
-    format!("animation:{}:{part}", scene.get())
-}
-fn runtime_number(state: &DesktopAppState, scene: Uid, part: &str) -> f64 {
-    state.runtime_value(&key(scene, part)).parse().unwrap_or(0.)
-}
 fn element(mgr: &AnimMgr, spec: &str) -> Result<usize> {
     let index = if let Some(uid) = spec.strip_prefix('#').and_then(|s| s.parse::<u64>().ok()) {
         mgr.motions()
@@ -32,7 +20,26 @@ fn element(mgr: &AnimMgr, spec: &str) -> Result<usize> {
     index.ok_or_else(|| CueMolError::not_found(format!("animation element {spec}")))
 }
 fn timeline(state: &DesktopAppState, mgr: &AnimMgr, sid: Uid) -> Value {
-    json!({"mgr":{"lengthMs":time_to_milliseconds(mgr.length()),"loop":mgr.loop_enabled(),"startcam":mgr.startcam(),"playState":if state.runtime_value(&key(sid,"playing"))=="true"{"playing"}else{"paused"},"elapsedMs":runtime_number(state,sid,"time")},"elements":mgr.motions().iter().enumerate().map(|(i,m)|{let b=m.base();json!({"number":i+1,"uid":b.uid().get(),"name":b.name(),"type":m.type_name(),"startMs":time_to_milliseconds(b.rel_start()),"endMs":time_to_milliseconds(b.rel_end()),"absStartMs":time_to_milliseconds(b.abs_start()),"absEndMs":time_to_milliseconds(b.abs_end()),"timeRefName":b.time_ref_name(),"disabled":b.disabled()})}).collect::<Vec<_>>()})
+    let play_state = if state.is_scene_animation_playing(sid) {
+        "playing"
+    } else if mgr.play_state() == cuemol_anim::AnimPlayState::Pause {
+        "paused"
+    } else {
+        "stopped"
+    };
+    let elements = mgr.motions().iter().enumerate().map(|(index, motion)| {
+        let base = motion.base();
+        json!({
+            "number": index + 1, "uid": base.uid().get(), "name": base.name(),
+            "type": motion.type_name(), "startMs": time_to_milliseconds(base.rel_start()),
+            "endMs": time_to_milliseconds(base.rel_end()), "absStartMs": time_to_milliseconds(base.abs_start()),
+            "absEndMs": time_to_milliseconds(base.abs_end()), "timeRefName": base.time_ref_name(),
+            "disabled": base.disabled()
+        })
+    }).collect::<Vec<_>>();
+    json!({"mgr": {"lengthMs": time_to_milliseconds(mgr.length()), "loop": mgr.loop_enabled(),
+        "startcam": mgr.startcam(), "playState": play_state,
+        "elapsedMs": state.scene_animation_elapsed_ms(sid)}, "elements": elements})
 }
 
 pub fn call_tool(
@@ -63,6 +70,7 @@ pub fn call_tool(
     }
     if name == "animate" {
         advance_animation(state, camera)?;
+        mgr = state.scene_animation(sid)?.unwrap_or_default();
         let action = text(args, "action")?;
         if !matches!(action, "play" | "pause" | "stop" | "seek") {
             return Err(CueMolError::invalid_argument("unknown animation action"));
@@ -79,8 +87,11 @@ pub fn call_tool(
                 "seek requires a nonnegative timeMs",
             ));
         }
-        if mgr.startcam().is_empty() {
-            let mut start = camera.clone();
+        if mgr.startcam().is_empty() && matches!(action, "play" | "seek") {
+            let mut start = mgr
+                .initial_camera()
+                .cloned()
+                .unwrap_or_else(|| camera.clone());
             start.set_name("__animation_start");
             state.save_scene_camera(sid, start, true)?;
             mgr.set_startcam("__animation_start");
@@ -88,32 +99,30 @@ pub fn call_tool(
         }
         match action {
             "play" => {
-                let duration = time_to_milliseconds(mgr.length());
-                if duration <= 0. {
-                    return Err(CueMolError::invalid_argument("animation has no duration"));
-                }
-                let mut time = runtime_number(state, sid, "time");
-                if time >= duration {
-                    time = 0.;
-                }
-                state.put_runtime_value(key(sid, "time"), time.to_string());
-                state.put_runtime_value(key(sid, "offset"), time.to_string());
-                state.put_runtime_value(key(sid, "epoch"), clock_ms().to_string());
-                state.put_runtime_value(key(sid, "playing"), "true");
+                state.set_active_view_camera(camera)?;
+                let view = state
+                    .active_view_summary()
+                    .ok_or_else(|| CueMolError::not_found("view"))?;
+                state.play_scene_animation(sid, view.uid)?;
             }
-            "pause" => state.put_runtime_value(key(sid, "playing"), "false"),
-            "stop" | "seek" => {
-                let time = if action == "stop" {
-                    0.
-                } else {
-                    args["timeMs"]
-                        .as_f64()
-                        .ok_or_else(|| CueMolError::invalid_argument("seek requires timeMs"))?
-                };
+            "pause" => {
+                if let Some(updated) = state.pause_scene_animation(sid)? {
+                    *camera = updated;
+                }
+            }
+            "stop" => {
+                let view = state
+                    .active_view_summary()
+                    .ok_or_else(|| CueMolError::not_found("view"))?;
+                *camera = state.stop_scene_animation(sid, view.uid)?;
+            }
+            "seek" => {
+                let time = args["timeMs"]
+                    .as_f64()
+                    .ok_or_else(|| CueMolError::invalid_argument("seek requires timeMs"))?;
                 if !time.is_finite() || time < 0. {
                     return Err(CueMolError::invalid_argument("invalid animation time"));
                 }
-                state.put_runtime_value(key(sid, "playing"), "false");
                 apply_time(
                     state,
                     camera,
@@ -123,6 +132,7 @@ pub fn call_tool(
             }
             _ => return Err(CueMolError::invalid_argument("unknown animation action")),
         }
+        mgr = state.scene_animation(sid)?.unwrap_or_default();
         return Ok(timeline(state, &mgr, sid));
     }
     if name == "set_anim_options" {
@@ -272,36 +282,17 @@ fn apply_time(state: &mut DesktopAppState, camera: &mut Camera, sid: Uid, time: 
         .active_view_summary()
         .ok_or_else(|| CueMolError::not_found("view"))?;
     *camera = state.apply_scene_animation_time(sid, time_from_milliseconds(time), view.uid)?;
-    state.put_runtime_value(key(sid, "time"), time.to_string());
     Ok(())
 }
 
 pub fn advance_animation(state: &mut DesktopAppState, camera: &mut Camera) -> Result<bool> {
-    let Some(sid) = state.active_scene() else {
+    let Some(scene) = state.active_scene() else {
         return Ok(false);
     };
-    if state.runtime_value(&key(sid, "playing")) != "true" {
-        return Ok(false);
-    }
-    let Some(mgr) = state.scene_animation(sid)? else {
-        return Ok(false);
-    };
-    let duration = time_to_milliseconds(mgr.length());
-    if duration <= 0. {
-        state.put_runtime_value(key(sid, "playing"), "false");
-        return Ok(false);
-    }
-    let elapsed = (clock_ms() - runtime_number(state, sid, "epoch")
-        + runtime_number(state, sid, "offset"))
-    .max(0.);
-    let time = if mgr.loop_enabled() {
-        elapsed % duration
+    if let Some(updated) = state.advance_scene_animation(scene)? {
+        *camera = updated;
+        Ok(true)
     } else {
-        elapsed.min(duration)
-    };
-    if elapsed >= duration && !mgr.loop_enabled() {
-        state.put_runtime_value(key(sid, "playing"), "false");
+        Ok(false)
     }
-    apply_time(state, camera, sid, time)?;
-    Ok(true)
 }

@@ -6,6 +6,7 @@ use cuemol_qsys::{
 };
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+mod runtime;
 
 pub type TimeValue = i64;
 
@@ -1624,6 +1625,8 @@ pub struct AnimMgr {
     frame_no: i32,
     render_end_frame: i32,
     render_delta: f64,
+    render_start_camera: Option<Camera>,
+    saved_properties: runtime::SavedProperties,
     target_scene_uid: Option<Uid>,
     event_manager: Option<ScrEventManagerHandle>,
     motions: Vec<AnimMotion>,
@@ -1641,6 +1644,8 @@ impl Default for AnimMgr {
             frame_no: 0,
             render_end_frame: -1,
             render_delta: 0.0,
+            render_start_camera: None,
+            saved_properties: runtime::SavedProperties::default(),
             target_scene_uid: None,
             event_manager: None,
             motions: Vec::new(),
@@ -1695,6 +1700,7 @@ impl AnimMgr {
 
     pub fn set_startcam(&mut self, value: impl Into<String>) {
         self.startcam = value.into();
+        self.render_start_camera = None;
     }
 
     pub fn loop_enabled(&self) -> bool {
@@ -1800,6 +1806,16 @@ impl AnimMgr {
         self.play_state = AnimPlayState::Stop;
     }
 
+    pub fn stop_in_scene<T>(&mut self, scene: &mut Scene<T>) {
+        self.saved_properties.restore(scene);
+        self.render_start_camera = None;
+        self.stop();
+    }
+
+    pub fn initial_camera(&self) -> Option<&Camera> {
+        self.render_start_camera.as_ref()
+    }
+
     pub fn pause(&mut self) {
         if self.play_state != AnimPlayState::Play {
             return;
@@ -1833,7 +1849,12 @@ impl AnimMgr {
         scene: &mut Scene<T>,
         view_uid: Uid,
     ) -> Result<()> {
-        let mut work_camera = if self.startcam.is_empty() {
+        if scene.view(view_uid).is_none() {
+            return Err(CueMolError::NotFound(format!("view {}", view_uid.get())));
+        }
+        self.saved_properties.restore(scene);
+        self.saved_properties.capture(scene, &self.motions);
+        let start_camera = if self.startcam.is_empty() {
             scene.view(view_uid).map(View::camera).unwrap_or_default()
         } else {
             scene
@@ -1842,30 +1863,40 @@ impl AnimMgr {
         };
         self.target_scene_uid = Some(scene.uid());
         self.go_time_detached(value);
+        self.render_start_camera = Some(start_camera.clone());
+        self.apply_time_in_scene(value, scene, view_uid, &start_camera)
+    }
+
+    fn apply_time_in_scene<T>(
+        &self,
+        elapsed: TimeValue,
+        scene: &mut Scene<T>,
+        view_uid: Uid,
+        start_camera: &Camera,
+    ) -> Result<()> {
+        if scene.view(view_uid).is_none() {
+            return Err(CueMolError::NotFound(format!("view {}", view_uid.get())));
+        }
+        let (work_camera, motion_starts) =
+            motion_cameras(scene, &self.motions, start_camera, elapsed)?;
         let primary_property_motions = primary_property_motions(scene, &self.motions);
         initialize_primary_property_motions(
             scene,
             &self.motions,
             &primary_property_motions,
-            work_camera.zoom(),
+            start_camera.zoom(),
         );
 
-        for motion in &self.motions {
+        for (index, motion) in self.motions.iter().enumerate() {
             let base = motion.base();
             if base.disabled() {
                 continue;
             }
-            let phase = MotionPhase::at(base, self.elapsed);
-            let rho = phase.rho(base, self.elapsed);
+            let phase = MotionPhase::at(base, elapsed);
+            let rho = phase.rho(base, elapsed);
+            let motion_camera = motion_starts[index].as_ref().unwrap_or(start_camera);
             match motion {
-                AnimMotion::Camera(value) => {
-                    if phase == MotionPhase::Before {
-                        continue;
-                    }
-                    if let Some(end_camera) = scene.get_camera(value.endcam()) {
-                        apply_camera_motion(&mut work_camera, &end_camera, value, rho);
-                    }
-                }
+                AnimMotion::Camera(_) | AnimMotion::Spin(_) => {}
                 AnimMotion::RealProperty(value) => {
                     if phase == MotionPhase::Before {
                         continue;
@@ -1894,7 +1925,7 @@ impl AnimMgr {
                     if phase == MotionPhase::Before {
                         continue;
                     }
-                    let rotation = Matrix4::make_rot_mat(work_camera.rotation().conj());
+                    let rotation = Matrix4::make_rot_mat(motion_camera.rotation().conj());
                     let translation = rotation.transform_point(Vector4::new4(
                         value.translation_at_rho(rho).x,
                         value.translation_at_rho(rho).y,
@@ -1902,7 +1933,7 @@ impl AnimMgr {
                         0.0,
                     ));
                     apply_to_renderer_targets(scene, value.rend(), |renderer| {
-                        renderer.set_xform_matrix(Matrix4::make_trans_mat(translation));
+                        set_renderer_transform(renderer, Matrix4::make_trans_mat(translation));
                     });
                 }
                 AnimMotion::ShowHide(value) => {
@@ -1912,34 +1943,25 @@ impl AnimMgr {
                     apply_to_renderer_targets(scene, value.rend(), |renderer| match phase {
                         MotionPhase::Before => unreachable!(),
                         MotionPhase::Active => {
-                            renderer.set_visible(true);
+                            set_renderer_visible(renderer, true);
                             if value.fade() {
-                                renderer.set_alpha(value.alpha_at_rho(rho));
+                                set_renderer_alpha(renderer, value.alpha_at_rho(rho));
                             }
                         }
                         MotionPhase::After => {
-                            renderer.set_visible(!value.hide());
+                            set_renderer_visible(renderer, !value.hide());
                             if value.fade() {
-                                renderer.set_alpha(value.tgt_alpha());
+                                set_renderer_alpha(renderer, value.tgt_alpha());
                             }
                         }
                     });
-                }
-                AnimMotion::Spin(value) => {
-                    if phase != MotionPhase::Before {
-                        let rotation = Quat::from_axis_angle(
-                            value.axis(),
-                            value.angle_at_rho(rho).to_radians(),
-                        )?;
-                        work_camera.set_rotation(work_camera.rotation().mul_quat(rotation));
-                    }
                 }
                 AnimMotion::Slide(value) => {
                     if phase == MotionPhase::Before {
                         continue;
                     }
-                    let translation = value.translation_at_rho(work_camera.zoom(), rho);
-                    let rotation = Matrix4::make_rot_mat(work_camera.rotation().conj());
+                    let translation = value.translation_at_rho(motion_camera.zoom(), rho);
+                    let rotation = Matrix4::make_rot_mat(motion_camera.rotation().conj());
                     let translation = rotation.transform_point(Vector4::new4(
                         translation.x,
                         translation.y,
@@ -1949,16 +1971,19 @@ impl AnimMgr {
                     apply_to_renderer_targets(scene, value.rend(), |renderer| match phase {
                         MotionPhase::Before => unreachable!(),
                         MotionPhase::Active => {
-                            renderer.set_visible(true);
-                            renderer.set_xform_matrix(Matrix4::make_trans_mat(translation));
+                            set_renderer_visible(renderer, true);
+                            set_renderer_transform(renderer, Matrix4::make_trans_mat(translation));
                         }
                         MotionPhase::After => {
-                            renderer.set_visible(!value.hide());
-                            renderer.set_xform_matrix(if value.hide() {
-                                Matrix4::IDENTITY
-                            } else {
-                                Matrix4::make_trans_mat(translation)
-                            });
+                            set_renderer_visible(renderer, !value.hide());
+                            set_renderer_transform(
+                                renderer,
+                                if value.hide() {
+                                    Matrix4::IDENTITY
+                                } else {
+                                    Matrix4::make_trans_mat(translation)
+                                },
+                            );
                         }
                     });
                 }
@@ -1982,15 +2007,25 @@ impl AnimMgr {
     }
 
     pub fn setup_render(&mut self, start: TimeValue, end: TimeValue, frame_rate: f64) -> i32 {
-        if frame_rate <= 0.0 || end < start {
+        let first = (start as f64 * frame_rate / NANOS_PER_SECOND as f64).ceil();
+        let last = (end as f64 * frame_rate / NANOS_PER_SECOND as f64).floor();
+        self.render_start_camera = None;
+        if !frame_rate.is_finite()
+            || frame_rate <= 0.0
+            || end < start
+            || first < i32::MIN as f64
+            || last >= i32::MAX as f64
+            || last - first + 1.0 > i32::MAX as f64
+        {
             self.frame_no = 0;
             self.render_end_frame = -1;
             self.render_delta = 0.0;
             return 0;
         }
-        self.frame_no = (start as f64 * frame_rate / NANOS_PER_SECOND as f64).ceil() as i32;
-        self.render_end_frame = (end as f64 * frame_rate / NANOS_PER_SECOND as f64).floor() as i32;
+        self.frame_no = first as i32;
+        self.render_end_frame = last as i32;
         self.render_delta = NANOS_PER_SECOND as f64 / frame_rate;
+        self.play_state = AnimPlayState::Play;
         (self.render_end_frame - self.frame_no + 1).max(0)
     }
 
@@ -2016,11 +2051,41 @@ impl AnimMgr {
         true
     }
 
+    pub fn begin_frame_in_scene<T>(
+        &mut self,
+        writer: &mut SceneExporter,
+        scene: &mut Scene<T>,
+        view_uid: Uid,
+    ) -> Result<bool> {
+        if self.frame_no > self.render_end_frame {
+            return Ok(false);
+        }
+        let current_camera = scene
+            .view(view_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("view {}", view_uid.get())))?
+            .camera();
+        if self.render_start_camera.is_none() {
+            self.saved_properties.restore(scene);
+            self.saved_properties.capture(scene, &self.motions);
+        }
+        let start_camera = self
+            .render_start_camera
+            .get_or_insert_with(|| scene.get_camera(&self.startcam).unwrap_or(current_camera))
+            .clone();
+        let elapsed = (self.frame_no as f64 * self.render_delta).floor() as TimeValue;
+        self.apply_time_in_scene(elapsed, scene, view_uid, &start_camera)?;
+        self.target_scene_uid = Some(scene.uid());
+        self.elapsed = elapsed;
+        writer.attach(scene.uid());
+        writer.set_camera_object(scene.view(view_uid).map(View::camera));
+        Ok(true)
+    }
+
     pub fn end_frame(&mut self, writer: &mut SceneExporter) {
         if self.target_scene_uid.is_some() {
             writer.detach();
         }
-        self.frame_no += 1;
+        self.frame_no = self.frame_no.saturating_add(1);
     }
 
     pub fn clear(&mut self) {
@@ -2460,7 +2525,7 @@ fn initialize_primary_property_motions<T>(
                         .object_mut(object_uid)
                         .and_then(|object| object.renderer_mut(*target_uid))
                 }) {
-                    renderer.set_xform_matrix(Matrix4::make_trans_mat(value.start_tran()));
+                    set_renderer_transform(renderer, Matrix4::make_trans_mat(value.start_tran()));
                 }
             }
             AnimMotion::ShowHide(value) => {
@@ -2469,9 +2534,12 @@ fn initialize_primary_property_motions<T>(
                         .object_mut(object_uid)
                         .and_then(|object| object.renderer_mut(*target_uid))
                 }) {
-                    renderer.set_visible(value.hide());
+                    set_renderer_visible(renderer, value.hide());
                     if value.fade() {
-                        renderer.set_alpha(if value.hide() { value.tgt_alpha() } else { 0.0 });
+                        set_renderer_alpha(
+                            renderer,
+                            if value.hide() { value.tgt_alpha() } else { 0.0 },
+                        );
                     }
                 }
             }
@@ -2482,8 +2550,8 @@ fn initialize_primary_property_motions<T>(
                         .and_then(|object| object.renderer_mut(*target_uid))
                 }) {
                     let (start, _) = value.calc_slide_positions(zoom);
-                    renderer.set_xform_matrix(Matrix4::make_trans_mat(start));
-                    renderer.set_visible(value.hide());
+                    set_renderer_transform(renderer, Matrix4::make_trans_mat(start));
+                    set_renderer_visible(renderer, value.hide());
                 }
             }
             AnimMotion::Noop(_)
@@ -2494,10 +2562,60 @@ fn initialize_primary_property_motions<T>(
     }
 }
 
-fn apply_camera_motion(camera: &mut Camera, destination: &Camera, motion: &CamMotion, rho: f64) {
+fn motion_cameras<T>(
+    scene: &Scene<T>,
+    motions: &[AnimMotion],
+    initial: &Camera,
+    elapsed: TimeValue,
+) -> Result<(Camera, Vec<Option<Camera>>)> {
+    let mut starts = vec![None; motions.len()];
+    let times = motions
+        .iter()
+        .filter(|motion| !motion.base().disabled() && motion.base().abs_start() <= elapsed)
+        .map(|motion| motion.base().abs_start())
+        .chain(std::iter::once(elapsed))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut camera = initial.clone();
+    for time in times {
+        camera = initial.clone();
+        for (index, motion) in motions.iter().enumerate() {
+            let base = motion.base();
+            let phase = MotionPhase::at(base, time);
+            if base.disabled() || phase == MotionPhase::Before {
+                continue;
+            }
+            let start = starts[index].get_or_insert_with(|| camera.clone());
+            let rho = phase.rho(base, time);
+            match motion {
+                AnimMotion::Camera(motion) => {
+                    if let Some(destination) = scene.get_camera(motion.endcam()) {
+                        apply_camera_motion(&mut camera, start, &destination, motion, rho);
+                    }
+                }
+                AnimMotion::Spin(motion) => {
+                    let rotation = Quat::from_axis_angle(
+                        motion.axis(),
+                        motion.angle_at_rho(rho).to_radians(),
+                    )?;
+                    camera.set_rotation(camera.rotation().mul_quat(rotation));
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok((camera, starts))
+}
+
+fn apply_camera_motion(
+    camera: &mut Camera,
+    start: &Camera,
+    destination: &Camera,
+    motion: &CamMotion,
+    rho: f64,
+) {
     if !motion.ignorerotate() {
         if let Ok(rotation) = slerp_quat(
-            camera.rotation(),
+            start.rotation(),
             destination.rotation(),
             rho,
             motion.keepquatpositive(),
@@ -2506,13 +2624,13 @@ fn apply_camera_motion(camera: &mut Camera, destination: &Camera, motion: &CamMo
         }
     }
     if !motion.ignorecenter() {
-        camera.set_center(camera.center() * (1.0 - rho) + destination.center() * rho);
+        camera.set_center(start.center() * (1.0 - rho) + destination.center() * rho);
     }
     if !motion.ignorezoom() {
-        camera.set_zoom(camera.zoom() * (1.0 - rho) + destination.zoom() * rho);
+        camera.set_zoom(start.zoom() * (1.0 - rho) + destination.zoom() * rho);
     }
     if !motion.ignoreslab() {
-        camera.set_slab_depth(camera.slab_depth() * (1.0 - rho) + destination.slab_depth() * rho);
+        camera.set_slab_depth(start.slab_depth() * (1.0 - rho) + destination.slab_depth() * rho);
     }
 }
 
@@ -2577,10 +2695,25 @@ fn apply_to_renderer_targets<T>(
     }
 }
 
+fn set_renderer_visible(renderer: &mut Renderer, value: bool) {
+    renderer.set_visible(value);
+    renderer.set_property_str("visible", value.to_string());
+}
+
+fn set_renderer_alpha(renderer: &mut Renderer, value: f64) {
+    renderer.set_alpha(value);
+    renderer.set_property_str("alpha", value.to_string());
+}
+
+fn set_renderer_transform(renderer: &mut Renderer, value: Matrix4) {
+    renderer.set_xform_matrix(value);
+    renderer.set_property_str("xformMat", value.to_script_string());
+}
+
 fn set_renderer_real(renderer: &mut Renderer, property: &str, value: f64) {
     match property {
-        "alpha" | "default_alpha" => renderer.set_alpha(value),
-        "visible" => renderer.set_visible(value >= 0.5),
+        "alpha" | "default_alpha" => set_renderer_alpha(renderer, value),
+        "visible" => set_renderer_visible(renderer, value >= 0.5),
         _ => renderer.set_property_str(property, value.to_string()),
     }
 }

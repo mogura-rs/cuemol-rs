@@ -653,6 +653,10 @@ impl Renderer {
         &self.properties
     }
 
+    pub fn remove_property_str(&mut self, name: &str) -> bool {
+        self.properties.remove(name).is_some()
+    }
+
     pub fn to_style_node(&self) -> LDom2Node {
         let mut node = LDom2Node::new();
         node.set_tag_name("style");

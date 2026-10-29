@@ -93,7 +93,7 @@ impl App {
                 }
                 continue;
             }
-            let mutating = cuemol_command::tool_is_mutating(&name);
+            let mutating = cuemol_command::tool_changes_scene(&name);
             let undo = (mutating && !self.agent.changed_scene).then(|| self.capture_history());
             let result = if let Some(download) = download {
                 download.and_then(|data| {

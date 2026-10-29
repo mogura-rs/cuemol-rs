@@ -4904,6 +4904,8 @@ function showSceneSaveOptions() {
     [
       ["QDF0", "Ver 2.2 or later"],
       ["QDF1", "Ver 2.3 or later"],
+      ["QDF2", "QDF2"],
+      ["QDF3", "QDF3"],
     ],
     "QDF0",
     format,
@@ -4920,7 +4922,7 @@ function showSceneSaveOptions() {
   );
   const base64 = dialogCheckbox("Enable text encoding", false, format);
   const updateState = () => {
-    const advanced = version.value === "QDF1";
+    const advanced = version.value !== "QDF0";
     compress.disabled = !advanced;
     base64.disabled = !advanced;
   };
@@ -4944,7 +4946,7 @@ function showSceneSaveOptions() {
       referenceDialog.close();
     });
     const ok = button("OK", "dialog-primary", () => {
-      const advanced = version.value === "QDF1";
+      const advanced = version.value !== "QDF0";
       finish({
         embedAll: embedAll.checked,
         version: version.value,

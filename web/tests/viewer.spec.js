@@ -1,5 +1,6 @@
 import {test,expect} from '@playwright/test';
 import {PNG} from 'pngjs';
+import {gzipSync} from 'node:zlib';
 import {existsSync, readFileSync} from 'node:fs';
 const structure=`HETATM    1  C1  LIG A   1      -2.000   0.000   0.000  1.00 10.00           C  
 HETATM    2  O1  LIG A   1       0.000   0.000   0.000  1.00 10.00           O  
@@ -23,6 +24,97 @@ async function call(page,name,args={}){
   },id),{timeout:60000}).toBe(true);
   return page.evaluate(()=>window.cuemol.status());
 }
+for (const backend of ['webgl','webgpu']) {
+  test(`streamed reader ${backend} retains chunks and options between commands`,async({page})=>{
+    const errors=[];page.on('pageerror',error=>errors.push(error.message));
+    await page.goto(`./?renderer=${backend}`);
+    await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId),{timeout:60000}).toBeGreaterThan(0);
+    let state=await call(page,'execute_script',{source:`
+      var reader=cuemol.PDBFileReader();reader.loadmodel=true;reader.compress='gzip';reader.base64=true;
+      reader.path='stream.pdb.gz.b64';print(cuemol.getService('StreamManager').loadObjectAsync(reader));
+    `});
+    const id=Number(JSON.parse(state.message).log.trim());expect(id).toBeGreaterThan(0);
+    const pdb='MODEL        1\n'+structure+'ENDMDL\nMODEL        2\n'+structure+'ENDMDL\n';
+    const bytes=Buffer.from(gzipSync(Buffer.from(pdb)).toString('base64'));
+    for(let offset=0;offset<bytes.length;offset+=64){
+      const chunk=Array.from(bytes.subarray(offset,offset+64));
+      await call(page,'execute_script',{source:`
+        var data=${JSON.stringify(chunk)};var bytes=cuemol.ByteArray();bytes.init(bytes.UINT8,data.length);
+        for(var i=0;i<data.length;i++)bytes.setAt(i,data[i]);
+        cuemol.getService('StreamManager').supplyDataAsync(${id},bytes,bytes.length);
+      `});
+    }
+    state=await call(page,'execute_script',{source:`
+      var streams=cuemol.getService('StreamManager');var object=streams.waitLoadAsync(${id});
+      object.name='streamed';scene.addObject(object);
+      print(object.getAtomCount()+':'+object.src+':'+(streams.waitLoadAsync(${id})===null));
+    `});
+    expect(JSON.parse(state.message).log).toBe('6:stream.pdb.gz.b64:true\n');
+    expect(state.scene.objects.some(object=>object.name==='streamed')).toBe(true);
+    expect(errors).toEqual([]);
+  });
+  test(`script animation ${backend} moves pixels and shares pause and stop controls`,async({page},testInfo)=>{
+    const errors=[];page.on('pageerror',error=>errors.push(error.message));
+    await page.goto(`./?renderer=${backend}`);
+    await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId),{timeout:60000}).toBeGreaterThan(0);
+    const qsc=`<scene bgcolor="black"><object type="MolCoord" name="motion" src="datachunk:00000" srctype="pdb"><renderer type="cpk" name="sphere" defaultcolor="#ff00ff"/></object><camera name="__current" center="(0,0,0)" zoom="12" slab="50" distance="100" centerMark="none"/></scene>
+========== End of XML ==========
+==========START datachunk:00000==========
+HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C
+END
+==========END datachunk:00000==========
+`;
+    await load(page,'motion.qsc',Buffer.from(qsc));
+    await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Loaded motion.qsc');
+    const rect=await page.evaluate(()=>window.cuemol.status().ui.rects.Viewport);
+    const centroid=async()=>{
+      const png=PNG.sync.read(await page.screenshot({clip:{x:rect[0],y:rect[1],width:rect[2],height:rect[3]}}));
+      let sum=0,count=0;
+      for(let y=0;y<png.height;y++)for(let x=0;x<png.width;x++){
+        const i=4*(y*png.width+x),[r,g,b]=png.data.subarray(i,i+3);
+        if(r>100&&b>100&&g<70){sum+=x;count++;}
+      }
+      return {x:sum/count,count};
+    };
+    await expect.poll(async()=>(await centroid()).count).toBeGreaterThan(300);
+    const original=(await centroid()).x;
+    let state=await call(page,'execute_script',{source:`
+      function time(ms){var t=cuemol.TimeValue();t.millisec=ms;return t;}
+      var manager=scene.getAnimMgr();manager.length=time(10000);manager.loop=true;
+      var motion=cuemol.RendXformAnim();motion.rend='motion/sphere';
+      motion.end_tran=cuemol.Vector('(6,0,0,0)');motion.end=time(10000);manager.append(motion);
+      manager.start(cuemol.getView(scene.activeViewID));
+      print(manager.playState);
+    `});
+    expect(JSON.parse(state.message).log).toContain('play');
+    await expect.poll(async()=>Math.abs((await centroid()).x-original),{timeout:10000}).toBeGreaterThan(20);
+    await call(page,'execute_script',{source:'scene.getAnimMgr().pause();'});
+    state=await call(page,'list_anims');expect(JSON.parse(state.message).mgr.playState).toBe('paused');
+    const paused=(await centroid()).x;
+    await page.waitForTimeout(250);expect((await centroid()).x).toBeCloseTo(paused,1);
+    await call(page,'animate',{action:'play'});
+    await expect.poll(async()=>Math.abs((await centroid()).x-paused),{timeout:10000}).toBeGreaterThan(15);
+    await call(page,'animate',{action:'stop'});
+    await expect.poll(async()=>(await centroid()).x).toBeCloseTo(original,1);
+    state=await call(page,'list_anims');expect(JSON.parse(state.message).mgr.playState).toBe('stopped');
+    expect(JSON.parse(state.message).mgr.elapsedMs).toBe(0);
+    await page.screenshot({path:testInfo.outputPath('animation-restored.png')});
+    state=await call(page,'execute_script',{source:`
+      function time(ms){var t=cuemol.TimeValue();t.millisec=ms;return t;}
+      var manager=scene.getAnimMgr();manager.clear();manager.length=time(10000);manager.loop=true;
+      scene.getObjectByName('motion').getAtomByID(1).pos=cuemol.Vector('(0,0,3,0)');
+      var spin=cuemol.SimpleSpin();spin.angle=180;spin.end=time(10000);manager.append(spin);
+      manager.start(cuemol.getView(scene.activeViewID));
+    `});
+    const geometryRevision=state.geometryRevision;
+    const spinStart=(await centroid()).x;
+    await expect.poll(async()=>Math.abs((await centroid()).x-spinStart),{timeout:10000}).toBeGreaterThan(15);
+    expect(await page.evaluate(()=>window.cuemol.status().geometryRevision)).toBe(geometryRevision);
+    await call(page,'animate',{action:'stop'});
+    expect(errors).toEqual([]);
+  });
+}
+
 test('default WebGPU viewport presents colored geometry',async({page},testInfo)=>{
   const errors=[];page.on('pageerror',error=>errors.push(error.message));
   await page.goto('./');

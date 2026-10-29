@@ -23,4 +23,6 @@ pub use commands::{
     call_tool, hatch_params, hatch_settings, prepare_render, rendering_params, rendering_settings,
     view_json, PreparedRender,
 };
-pub use protocol::{tool_is_mutating, tool_records_history, tools_list, validate_args, Protocol};
+pub use protocol::{
+    tool_changes_scene, tool_is_mutating, tool_records_history, tools_list, validate_args, Protocol,
+};

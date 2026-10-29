@@ -1401,6 +1401,95 @@ that mode produces mono. The single-point `View.projToScreen` API retains the
 reference's central, full-width projection; interactive stereo picking does not
 use that ambiguous projection.
 
+### Script animation, stream I/O and memory audit
+
+Animation frame export now evaluates the current scene and invokes the supplied
+exporter. Previously, the script entry points advanced a placeholder exporter
+without producing files. Frame setup retains the initial camera, overlapping
+camera motions start from their own start-time camera, and renderer translations
+retain their initial camera axes. Failed writes detach the exporter without
+advancing the frame number. Script exports flush preceding edits before writing.
+
+Script playback shares the application timer with command, native and browser
+controls; Tauri ticks use the same state. Pause, resume, loop, seek and natural
+completion retain the reference behavior. Stop restores only animated properties,
+including absent attributes and the secondary alpha/transform changes from
+show/hide and slide motions. Tests include molecular, map, surface and lightweight
+objects, and morph frames across separate script calls.
+Animation and focus commands now advertise their scene changes, so native and
+browser callers refresh the displayed result after pause, stop and focus.
+File-writing tools advertise their side effects separately from scene edits;
+writing a file does not create a scene undo snapshot.
+Native and Tauri toolbar playback also use the shared player. A GUI-started
+animation can therefore be paused or stopped from a script without continuing
+on a second timer or resetting before the script runs. Interactive playback no
+longer clones the whole scene for restoration; it saves the initial camera and
+only the properties that animation changes. Normal edits stop the animation
+before recording undo, while script controls retain their current playback time.
+
+Scene readers and writers complete synchronously and propagate errors to the
+calling script. Object-load commands return the attached object's actual identity.
+SDF selections filter atoms and remap bonds. Object streams apply gzip or XZ
+before outer Base64 on write and reverse that order on read; auxiliary streams
+remain raw. Unsupported compression fails before truncating the destination.
+Source metadata and reader options survive linked-scene reloads, including
+multiple models, density options, trajectory filters and NAMD topology paths.
+Scene writing honors embedded auxiliary data, QDF versions and chunk encoding.
+Scene readers preserve existing view cameras, while `LoadSceneCommand.set_camera`
+controls whether the saved camera is applied to all existing views. Replacing a
+scene also removes its old animation player and saved runtime properties.
+Reader construction preserves the reference distinction between direct
+constructors and factories: the latter reset declared defaults before applying
+explicit options. QSC source readers use those factory defaults.
+
+Script stream jobs now retain the chosen reader, its filters and options across
+separate command calls. Previously, the asynchronous adapter guessed the format
+and discarded jobs when the script context ended. Native loads parse on an I/O
+worker; the browser collects chunks and parses them when `waitLoadAsync` is
+called because its current WASM build has no worker threads. Both paths return
+the requested object type and preserve source metadata. Completed or failed
+jobs are removed, and invalid supply lengths return errors.
+
+Per-frame animation evaluation now borrows molecular, map and surface data while
+copying only the metadata required by the animation runtime. Camera-only playback
+also retains the native/browser GPU geometry and Tauri geometry snapshot. GPU
+uploads write converted instances and mesh vertices directly into staging memory,
+removing the complete intermediate arrays and their extra copies.
+
+Release-mode measurements use three runs per variant. A 100,000-atom, 60-frame
+shared-core rotation benchmark decreases from a median 18.918 ms to 0.149 ms per
+update, with an identical final camera quaternion. Median process peak RSS falls
+from 70.34 MiB to 38.28 MiB on x86-64 Linux. These times measure animation state
+updates, not full GUI frame time. Run it with:
+
+```sh
+cargo run --locked --release -p cuemol-desktop-core --example animation_bench -- 100000 60
+```
+
+A separate Metal transfer benchmark sends one million 80-byte records ten times,
+including queue completion. Direct staging takes a median 12.512 ms per upload
+versus 15.397 ms with an intermediate vector; median process peak RSS falls from
+245.33 MiB to 169.00 MiB. GPU readback exactly matches the first, middle and last
+records. This isolates upload conversion and transfer, not scene construction or
+rendering. Both variants remain runnable on a supported native GPU:
+
+```sh
+cargo run --locked --release -p cuemol-desktop-core --features offscreen --example upload_bench -- collected 1000000 10
+cargo run --locked --release -p cuemol-desktop-core --features offscreen --example upload_bench -- direct 1000000 10
+```
+
+Current source checks pass 1,241 headless workspace cases, 250 scripting-enabled
+shared-core cases, 48 command cases, 170 native GUI cases and 146 Tauri cases.
+The native and Tauri suites skip one and four optional external-runtime tests,
+respectively. Clippy completes with style warnings. All 62 browser cases pass,
+including chunked compressed input across commands, animation pixel motion,
+pause/resume/stop, and geometry reuse during camera-only playback on WebGL and
+WebGPU. Actual Linux GUI checks also exercise selection, measurements, undo,
+affine transforms, stereo eye picking and restoration after animation stops.
+Both script-started and toolbar-started animation move the displayed molecule,
+pause stably through script controls, and restore its original pixel position
+through the shared stop command.
+
 ### Documentation reconciled with implementation
 
 The implementation takes precedence over stale descriptions. Corrections found
@@ -1431,3 +1520,9 @@ during this work are collected here; the read-only reference itself was not edit
 | The legacy CLI claimed to honor all saved renderer geometry independently. | Both scene-export commands now use the shared GUI geometry and render settings. |
 | The browser manifest listed assets that the executable's fixed list omitted. | Embedding follows the manifest, including the five missing license/provenance files. |
 | The byte-loader comment described native-reader behavior without stating its molecule-only QDF dispatch and missing surface/session paths. | Byte loads now use the matching domain readers and shared PyMOL import logic. |
+| The native playback comment claimed an empty timeline automatically spins. | Playback requires an animation with a positive duration. |
+| `LoadSceneCommand.qif` offered `scene_name` as the new scene name. | Its C++ implementation does not use the property; loading uses the file-derived scene name. |
+| `MmcifMolReader.qif` declared `loadsecstr=false`. | Direct C++ construction sets true; `StreamManager` resets it to false. Both entry points preserve their actual behavior. |
+| README said every unsupported setting returned an error. | Legacy PNG `interlace` and `compresslev` remain accepted but ineffective, as in the C++ exporter. |
+| SDF/MOL2 declarations set `chain_name="_"`, while their constructors set `"A"`. | Direct construction uses `"A"`; factories and QSC source readers reset to `"_"` before explicit options. |
+| MCP annotations labeled animation, focus, history clearing and file writes as read-only. | Their side effects are declared; scene changes trigger viewport refresh separately from file writes and undo recording. |

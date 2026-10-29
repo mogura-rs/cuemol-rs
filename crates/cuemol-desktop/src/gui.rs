@@ -745,10 +745,14 @@ impl NativeRunner {
                 app.redo_stack.clear();
             }
             let mutating =
-                is_call && name != "clear_undo" && cuemol_command::tool_is_mutating(name);
+                is_call && name != "clear_undo" && cuemol_command::tool_changes_scene(name);
             gpu.camera.store_view_options(&mut app.state);
             let undo = (is_call && cuemol_command::tool_records_history(name)).then(|| {
-                let mut undo = app.capture_undo();
+                let mut undo = if name == "execute_script" {
+                    app.capture_script_undo()
+                } else {
+                    app.capture_undo()
+                };
                 undo.camera = Some(gpu.camera.to_qsys_camera("__current"));
                 undo
             });
@@ -1577,7 +1581,7 @@ struct GuiApplication {
     animation_pending_add: Option<(AnimKind, usize)>,
     animation_reset_confirmation: bool,
     animation_start_camera: Option<CameraController>,
-    animation_start_state: Option<DesktopAppState>,
+    animation_started_from_ui: bool,
     animation_render_settings: AnimationRenderSettings,
     animation_render_job: Option<AnimationRenderJob>,
     animation_render_log: Vec<String>,
@@ -5254,7 +5258,7 @@ impl GuiApplication {
             animation_pending_add: None,
             animation_reset_confirmation: false,
             animation_start_camera: None,
-            animation_start_state: None,
+            animation_started_from_ui: false,
             animation_render_settings,
             animation_render_job: None,
             animation_render_log: Vec::new(),
@@ -5442,9 +5446,13 @@ impl GuiApplication {
                 }
                 continue;
             }
-            let mutating = cuemol_command::tool_is_mutating(&name);
+            let mutating = cuemol_command::tool_changes_scene(&name);
             let undo = (mutating && !self.agent.changed_scene).then(|| {
-                let mut undo = self.capture_undo();
+                let mut undo = if name == "execute_script" {
+                    self.capture_script_undo()
+                } else {
+                    self.capture_undo()
+                };
                 undo.camera = Some(view.clone());
                 undo
             });
@@ -5499,6 +5507,16 @@ impl GuiApplication {
 
     fn ui(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         self.apply_script_view(camera);
+        if self.animation_render_job.is_none() {
+            if let Some(scene) = self.state.active_scene() {
+                self.animation_elapsed =
+                    (self.state.scene_animation_elapsed_ms(scene) / 1000.0) as f32;
+                if !self.state.has_scene_animation_player(scene) {
+                    self.animation_started_from_ui = false;
+                    self.animation_start_camera = None;
+                }
+            }
+        }
         camera.store_view_options(&mut self.state);
         let _ = self
             .state
@@ -5554,7 +5572,17 @@ impl GuiApplication {
         if cuemol_command::advance_animation(&mut self.state, &mut command_camera).unwrap_or(false)
         {
             camera.apply_qsys_camera(&command_camera);
-            self.rebuild_snapshot();
+            if let Some(scene) = self.shared_animation_scene() {
+                self.animation_elapsed =
+                    (self.state.scene_animation_elapsed_ms(scene) / 1000.0) as f32;
+                if self
+                    .state
+                    .scene_animation_changes_geometry(scene)
+                    .unwrap_or(true)
+                {
+                    self.rebuild_snapshot();
+                }
+            }
             ctx.request_repaint();
         }
         self.poll_pdb_download(camera);
@@ -5566,8 +5594,6 @@ impl GuiApplication {
         self.pixels_per_point = ctx.pixels_per_point();
         cuemol_ui::shell::theme(ctx, self.light_theme);
         self.agent.docked = true;
-        // Animation playback: drive the camera from the timeline objects (or a simple
-        // spin when the list is empty). Keep requesting repaints so it animates.
         if self.animation_playing {
             let dt = ctx.input(|input| input.stable_dt).clamp(0.0, 0.1);
             self.advance_animation(dt, camera);
@@ -6230,24 +6256,33 @@ impl GuiApplication {
     fn animation_playback_controls(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
         let total = self.animation_duration() as f32;
         ui.horizontal(|ui| {
-            let play_label = if self.animation_playing {
-                "⏸ Pause"
-            } else {
-                "▶ Play"
-            };
+            let playing = self.animation_playing
+                || self
+                    .shared_animation_scene()
+                    .is_some_and(|scene| self.state.is_scene_animation_playing(scene));
+            let play_label = if playing { "⏸ Pause" } else { "▶ Play" };
             if ui
                 .add_enabled(total > 0.0, egui::Button::new(play_label))
                 .clicked()
             {
-                if self.animation_playing {
+                if playing {
                     self.animation_playing = false;
+                    if let Some(scene) = self.shared_animation_scene() {
+                        match self.state.pause_scene_animation(scene) {
+                            Ok(Some(updated)) => camera.apply_qsys_camera(&updated),
+                            Ok(None) => {}
+                            Err(error) => self.set_status(format!("Error: {error}")),
+                        }
+                    }
                 } else if let Err(error) = self.begin_animation_playback(camera) {
                     self.set_status(format!("Error: {error}"));
                 }
             }
             if ui
                 .add_enabled(
-                    self.animation_playing || self.animation_elapsed > 0.0,
+                    playing
+                        || self.animation_elapsed > 0.0
+                        || self.shared_animation_scene().is_some(),
                     egui::Button::new("⏹ Stop"),
                 )
                 .clicked()
@@ -13532,6 +13567,12 @@ impl GuiApplication {
             .unwrap_or(0.0)
     }
 
+    fn shared_animation_scene(&self) -> Option<cuemol_core::Uid> {
+        self.state
+            .active_scene()
+            .filter(|scene| self.state.has_scene_animation_player(*scene))
+    }
+
     fn animation_loop_enabled(&self) -> bool {
         self.active_animation_manager()
             .map(|animation| animation.loop_enabled())
@@ -13558,6 +13599,17 @@ impl GuiApplication {
         &mut self,
         camera: &CameraController,
     ) -> std::result::Result<(), String> {
+        if self.shared_animation_scene().is_some() {
+            let mut current = camera.to_qsys_camera("__current");
+            cuemol_command::call_tool(
+                &mut self.state,
+                &mut current,
+                "animate",
+                &serde_json::json!({"action": "play"}),
+            )
+            .map_err(|error| error.to_string())?;
+            return Ok(());
+        }
         let duration = self.animation_duration();
         if duration <= 0.0 {
             return Err("no animation objects".to_string());
@@ -13565,14 +13617,23 @@ impl GuiApplication {
         if f64::from(self.animation_elapsed) >= duration {
             self.animation_elapsed = 0.0;
         }
-        if self.animation_start_state.is_none() {
+        if !self.animation_started_from_ui {
             self.state
                 .set_active_view_camera(&camera.to_qsys_camera("__current"))
                 .map_err(|error| error.to_string())?;
             self.animation_start_camera = Some(camera.clone());
-            self.animation_start_state = Some(self.state.clone());
+            self.animation_started_from_ui = true;
         }
-        self.animation_playing = true;
+        let scene = self.state.active_scene().ok_or("no active scene")?;
+        let view = self
+            .state
+            .active_view_summary()
+            .ok_or("no active view")?
+            .uid;
+        self.state
+            .play_scene_animation(scene, view)
+            .map_err(|error| error.to_string())?;
+        self.animation_playing = false;
         Ok(())
     }
 
@@ -13581,11 +13642,14 @@ impl GuiApplication {
         camera: &mut CameraController,
         preserve_camera: bool,
     ) -> std::result::Result<(), String> {
+        if let Some(scene) = self.shared_animation_scene() {
+            self.state
+                .stop_scene_animation(scene, cuemol_core::Uid::new(0))
+                .map_err(|error| error.to_string())?;
+        }
         let final_camera = camera.clone();
         let start_camera = self.animation_start_camera.take();
-        if let Some(state) = self.animation_start_state.take() {
-            self.state = state;
-        }
+        self.animation_started_from_ui = false;
         if preserve_camera {
             *camera = final_camera;
         } else if let Some(start_camera) = start_camera {
@@ -13628,7 +13692,13 @@ impl GuiApplication {
             .apply_scene_animation_time(scene_uid, time_from_seconds(elapsed), view_uid)
             .map_err(|error| error.to_string())?;
         camera.apply_qsys_camera(&animated_camera);
-        self.rebuild_snapshot();
+        if self
+            .state
+            .scene_animation_changes_geometry(scene_uid)
+            .unwrap_or(true)
+        {
+            self.rebuild_snapshot();
+        }
         Ok(())
     }
 
@@ -13647,38 +13717,28 @@ impl GuiApplication {
 
     /// Advance the scene-backed animation timeline by `dt` seconds.
     fn advance_animation(&mut self, dt: f32, camera: &mut CameraController) {
-        let Ok(animation) = self.active_animation_manager() else {
+        let Some(scene) = self.shared_animation_scene() else {
             self.animation_playing = false;
             return;
         };
-        let total = time_to_seconds(animation.length()) as f32;
-        if total <= 0.0 {
-            self.animation_playing = false;
-            self.set_status("No animation objects");
-            return;
-        }
-        let step = dt.clamp(0.0, 0.25);
-        let reaches_end = !animation.loop_enabled() && self.animation_elapsed + step >= total;
-        let elapsed = if reaches_end {
-            total
-        } else if animation.loop_enabled() {
-            (self.animation_elapsed + step) % total
-        } else {
-            self.animation_elapsed + step
-        };
-        if let Err(error) = self.apply_active_animation_time(f64::from(elapsed), camera) {
-            self.animation_playing = false;
-            self.set_status(format!("Error: {error}"));
-            return;
-        }
-        self.animation_elapsed = elapsed;
-        if reaches_end {
-            if let Err(error) = self.restore_animation_playback(camera, true) {
-                self.set_status(format!("Error: {error}"));
-            } else {
-                self.animation_elapsed = total;
-                self.set_status("Animation finished");
+        match self
+            .state
+            .advance_scene_animation_by(scene, Duration::from_secs_f32(dt.clamp(0.0, 0.25)))
+        {
+            Ok(Some(updated)) => {
+                camera.apply_qsys_camera(&updated);
+                self.animation_elapsed =
+                    (self.state.scene_animation_elapsed_ms(scene) / 1000.0) as f32;
+                if self
+                    .state
+                    .scene_animation_changes_geometry(scene)
+                    .unwrap_or(true)
+                {
+                    self.rebuild_snapshot();
+                }
             }
+            Ok(None) => {}
+            Err(error) => self.set_status(format!("Error: {error}")),
         }
     }
 
@@ -14045,7 +14105,7 @@ impl GuiApplication {
             self.animation_elapsed = restore.elapsed;
             self.animation_playing = false;
             self.animation_start_camera = None;
-            self.animation_start_state = None;
+            self.animation_started_from_ui = false;
             self.rebuild_snapshot();
         }
         self.refresh_animation_render_outputs();
@@ -15249,7 +15309,7 @@ impl GuiApplication {
         self.log_lines.push(format!("> {command}"));
         self.remember_command(&command);
         self.console_input.clear();
-        let mut undo = self.capture_undo();
+        let mut undo = self.capture_script_undo();
         undo.camera = self.state.active_view_camera();
         match self.state.run_script_js(&command) {
             Ok((log, selection)) => {
@@ -19064,7 +19124,7 @@ impl GuiApplication {
                 return false;
             }
         };
-        let mut undo = self.capture_undo();
+        let mut undo = self.capture_script_undo();
         undo.camera = self.state.active_view_camera();
         // Run the JS with the embedded boa engine (cuemol.print/select/color).
         match self.state.run_script_js(&script) {
@@ -28947,6 +29007,8 @@ impl GuiApplication {
                                 .selected_text(match draft.version {
                                     crate::GuiQscVersion::Qdf0 => "Ver 2.2 or later",
                                     crate::GuiQscVersion::Qdf1 => "Ver 2.3 or later",
+                                    crate::GuiQscVersion::Qdf2 => "QDF2",
+                                    crate::GuiQscVersion::Qdf3 => "QDF3",
                                 })
                                 .show_ui(ui, |ui| {
                                     ui.selectable_value(
@@ -28959,11 +29021,21 @@ impl GuiApplication {
                                         crate::GuiQscVersion::Qdf1,
                                         "Ver 2.3 or later",
                                     );
+                                    ui.selectable_value(
+                                        &mut draft.version,
+                                        crate::GuiQscVersion::Qdf2,
+                                        "QDF2",
+                                    );
+                                    ui.selectable_value(
+                                        &mut draft.version,
+                                        crate::GuiQscVersion::Qdf3,
+                                        "QDF3",
+                                    );
                                 });
                             ui.end_row();
 
                             ui.label("Compression:");
-                            ui.add_enabled_ui(draft.version == crate::GuiQscVersion::Qdf1, |ui| {
+                            ui.add_enabled_ui(draft.version != crate::GuiQscVersion::Qdf0, |ui| {
                                 egui::ComboBox::from_id_salt("scene_save_compression")
                                     .selected_text(match draft.compression {
                                         crate::GuiQscCompression::Xz => "xz",
@@ -28990,7 +29062,7 @@ impl GuiApplication {
                             });
                             ui.end_row();
                         });
-                    ui.add_enabled_ui(draft.version == crate::GuiQscVersion::Qdf1, |ui| {
+                    ui.add_enabled_ui(draft.version != crate::GuiQscVersion::Qdf0, |ui| {
                         ui.checkbox(&mut draft.base64, "Enable text encoding");
                     });
                 });
@@ -29007,7 +29079,7 @@ impl GuiApplication {
             });
 
         if accept {
-            let advanced = draft.version == crate::GuiQscVersion::Qdf1;
+            let advanced = draft.version != crate::GuiQscVersion::Qdf0;
             self.save_current_scene_to_path_with_options(
                 camera,
                 &draft.path,
@@ -29598,12 +29670,25 @@ impl GuiApplication {
     }
 
     fn capture_undo(&mut self) -> GuiUndoSnapshot {
-        if let Some(state) = self.animation_start_state.take() {
-            self.state = state;
+        if self.animation_started_from_ui {
+            if let Some(scene) = self.shared_animation_scene() {
+                if let Err(error) = self
+                    .state
+                    .stop_scene_animation(scene, cuemol_core::Uid::new(0))
+                {
+                    self.set_error(error);
+                }
+            }
+            self.animation_started_from_ui = false;
+            self.animation_start_camera = None;
             self.animation_playing = false;
             self.animation_elapsed = 0.0;
             self.rebuild_snapshot();
         }
+        self.capture_script_undo()
+    }
+
+    fn capture_script_undo(&self) -> GuiUndoSnapshot {
         GuiUndoSnapshot {
             camera: None,
             state: self.state.clone(),
@@ -29637,7 +29722,7 @@ impl GuiApplication {
         self.animation_playing = false;
         self.animation_elapsed = 0.0;
         self.animation_start_camera = None;
-        self.animation_start_state = None;
+        self.animation_started_from_ui = false;
         self.selected_object = snapshot.selected_object;
         self.selected_renderer = snapshot.selected_renderer;
         self.workspace_aux_selection = snapshot.workspace_aux_selection;
@@ -41349,7 +41434,7 @@ mod tests {
 
         app.seek_animation(0.5, &mut camera).unwrap();
         app.set_renderer_visibility(object.uid, renderer.uid, false);
-        assert!(app.animation_start_state.is_none());
+        assert!(!app.animation_started_from_ui);
         app.restore_animation_playback(&mut camera, false).unwrap();
         assert!(!app
             .state
@@ -41508,6 +41593,73 @@ mod tests {
     }
 
     #[test]
+    fn script_started_animation_drives_native_frames_and_stops_from_toolbar() {
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        let view = app.state.active_view_summary().unwrap().uid;
+        let scene = app.state.active_scene().unwrap();
+        app.state.run_script_js(&format!(
+            "var end = cuemol.TimeValue(); end.millisec = 1000; \
+             var manager = scene.getAnimMgr(); manager.length = end; \
+             var spin = cuemol.SimpleSpin(); spin.angle = 180; spin.end = end; manager.append(spin); \
+             manager.start(cuemol.getView({}));", view.get(),
+        )).unwrap();
+        app.state
+            .advance_scene_animation_by(scene, std::time::Duration::from_millis(100))
+            .unwrap();
+        let initial = camera.orientation;
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| app.ui(ctx, &mut camera));
+        assert!(!camera.orientation.abs_diff_eq(initial, 1e-4));
+        assert!(!app.animation_playing);
+        let revision = app.snapshot_revision;
+        app.state
+            .advance_scene_animation_by(scene, std::time::Duration::from_millis(100))
+            .unwrap();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| app.ui(ctx, &mut camera));
+        assert_eq!(app.snapshot_revision, revision);
+        app.state.pause_scene_animation(scene).unwrap();
+        app.begin_animation_playback(&camera).unwrap();
+        assert!(app.state.is_scene_animation_playing(scene));
+        app.restore_animation_playback(&mut camera, false).unwrap();
+        assert!(!app.state.is_scene_animation_playing(scene));
+        let stopped = camera.orientation;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| app.ui(ctx, &mut camera));
+        assert!(camera.orientation.abs_diff_eq(stopped, 1e-6));
+    }
+
+    #[test]
+    fn native_started_animation_obeys_script_pause_and_command_stop() {
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.add_animation_motion(AnimKind::Spin, &mut camera)
+            .unwrap();
+        app.begin_animation_playback(&camera).unwrap();
+        app.advance_animation(0.1, &mut camera);
+        app.console_input = "scene.getAnimMgr().pause();".into();
+        app.execute_console_input();
+        app.apply_script_view(&mut camera);
+        let scene = app.state.active_scene().unwrap();
+        assert!(app.state.scene_animation_elapsed_ms(scene) >= 100.0);
+        let paused = camera.orientation;
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| app.ui(ctx, &mut camera));
+        assert!(camera.orientation.abs_diff_eq(paused, 1e-6));
+        let mut current = camera.to_qsys_camera("__current");
+        cuemol_command::call_tool(
+            &mut app.state,
+            &mut current,
+            "animate",
+            &serde_json::json!({"action":"stop"}),
+        )
+        .unwrap();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| app.ui(ctx, &mut camera));
+        assert_eq!(app.animation_elapsed, 0.0);
+        assert!(!app.animation_started_from_ui);
+        assert!(app.animation_start_camera.is_none());
+    }
+
+    #[test]
     fn animation_play_spins_the_camera() {
         // Playing the animation continuously spins the camera (CueMol2 SimpleSpin);
         // stopping leaves it still.
@@ -41519,7 +41671,9 @@ mod tests {
             .unwrap();
         app.begin_animation_playback(&camera).unwrap();
         let before = camera.orientation;
+        let revision = app.snapshot_revision;
         let _ = ctx.run(egui::RawInput::default(), |ctx| app.ui(ctx, &mut camera));
+        assert_eq!(app.snapshot_revision, revision);
         assert!(
             !camera.orientation.abs_diff_eq(before, 1.0e-4),
             "playing must spin the camera"

@@ -18,8 +18,21 @@ pub fn tool_is_mutating(name: &str) -> bool {
         .is_some_and(|tool| tool["annotations"]["readOnlyHint"] == false)
 }
 
+pub fn tool_changes_scene(name: &str) -> bool {
+    tool_is_mutating(name)
+        && !matches!(
+            name,
+            "save_camera_file"
+                | "save_scene"
+                | "save_object"
+                | "export_image"
+                | "export_scene"
+                | "clear_undo"
+        )
+}
+
 pub fn tool_records_history(name: &str) -> bool {
-    tool_is_mutating(name) && !matches!(name, "set_frame" | "animate" | "clear_undo")
+    tool_changes_scene(name) && !matches!(name, "set_frame" | "animate")
 }
 
 pub fn validate_args(name: &str, args: &Value) -> Result<(), String> {

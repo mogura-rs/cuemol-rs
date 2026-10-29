@@ -641,7 +641,7 @@ impl RenderSceneSnapshot {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExportState {
     base: QsysSceneExporter,
     write_count: usize,
@@ -2006,7 +2006,7 @@ fn append_pov_pixel_mesh(output: &mut String, image: &PovPixelImage, path: &str)
     output.push_str("  no_shadow\n}\n");
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MqoSceneExporter {
     state: ExportState,
     perspective: bool,
@@ -2378,7 +2378,7 @@ const WBP_DIRECTIONAL_LIGHT: &str = concat!(
     "    }\n",
 );
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WbpSceneExporter {
     state: ExportState,
     camera_name: String,
@@ -3060,7 +3060,7 @@ impl LuxBackgroundMode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LuxRendSceneExporter {
     state: ExportState,
     halt_spp: i32,
@@ -3939,7 +3939,7 @@ impl Default for LuxRendSceneExporter {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LuxCoreSceneExporter {
     state: ExportState,
     halt_spp: i32,

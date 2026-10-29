@@ -59,10 +59,10 @@ impl DesktopAppState {
                 self.scene_manager_mut()
                     .scene_mut(scene_uid)
                     .unwrap()
-                    .load_qsc_bytes_with_molecule_reader(
+                    .load_qsc_bytes_with_reader_options(
                         bytes,
                         None,
-                        &crate::trajectory_io::read_extra_qsc_molecule,
+                        &crate::trajectory_io::read_extra_qsc_molecule_with_options,
                     )?;
                 self.restore_loaded_scene_data(scene_uid)?;
                 let end = byte_index(bytes, QSC_XML_END_MARKER.as_bytes()).unwrap_or(bytes.len());

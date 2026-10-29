@@ -1,5 +1,10 @@
+mod animation;
 mod command_support;
 mod property_access;
+#[cfg(feature = "scripting")]
+mod script_io;
+#[cfg(feature = "scripting")]
+mod script_reader;
 pub use property_access::auxiliary_property_readonly;
 mod density_view;
 mod map_surface;
@@ -8,6 +13,8 @@ pub mod projection;
 pub mod stereo;
 mod view_state;
 pub use view_state::GuiViewOptions;
+#[cfg(all(test, feature = "scripting"))]
+mod script_export_tests;
 #[cfg(test)]
 mod transform_tests;
 pub use density_view::DensityViewSync;
@@ -59,9 +66,9 @@ use cuemol_render::{
 use cuemol_surface::{MolSurfObj, PqrFileWriter, XyzrFileWriter};
 use cuemol_xtal::{
     density_map_from_cif, read_mmcif_map_file, read_mtz_metadata_file, read_opendx_file,
-    read_opendx_str, BrixMapReader, Ccp4MapReader, GlslMapVolRenderer, MapColorMode,
-    MapMeshRenderer, MapRegionMode, MapRenderer, MapSurfRenderer, MapSurfaceDrawMode,
-    Mtz2MapReader, MtzFile, QdfDenMapReader, XplorMapReader,
+    BrixMapReader, Ccp4MapReader, GlslMapVolRenderer, MapColorMode, MapMeshRenderer, MapRegionMode,
+    MapRenderer, MapSurfRenderer, MapSurfaceDrawMode, Mtz2MapReader, MtzFile, QdfDenMapReader,
+    XplorMapReader,
 };
 // Re-exported so consumers (and tests) can name the scalar-field types the surface
 // potential API takes — e.g. `set_surface_potential_map(DensityMap)`.
@@ -658,6 +665,8 @@ pub struct DesktopAppState {
         std::sync::Arc<picking::PickImage>,
     )>,
     last_qsc_status: Option<QscLoadStatus>,
+    animation_runtimes: BTreeMap<Uid, AnimMgr>,
+    animation_players: BTreeMap<Uid, animation::Playback>,
     morphs: BTreeMap<Uid, MorphMol>,
     density_maps: BTreeMap<Uid, GuiDensityMapObject>,
     density_view_updates: BTreeMap<Uid, DensityViewUpdate>,
@@ -686,6 +695,8 @@ pub struct DesktopAppState {
     script_scene_undo: BTreeMap<u64, ScriptSceneUndoState>,
     #[cfg(feature = "scripting")]
     script_next_runtime_uid: u64,
+    #[cfg(feature = "scripting")]
+    async_readers: script_reader::AsyncReaders,
 }
 
 #[cfg(feature = "scripting")]
@@ -1511,6 +1522,8 @@ pub struct GuiPngExportOptions {
 pub enum GuiQscVersion {
     Qdf0,
     Qdf1,
+    Qdf2,
+    Qdf3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1556,6 +1569,8 @@ impl GuiSceneSaveOptions {
         match self.version {
             GuiQscVersion::Qdf0 => "QDF0",
             GuiQscVersion::Qdf1 => "QDF1",
+            GuiQscVersion::Qdf2 => "QDF2",
+            GuiQscVersion::Qdf3 => "QDF3",
         }
     }
 
@@ -1878,6 +1893,8 @@ impl Default for DesktopAppState {
             active_scene: None,
             gpu_pick_image: None,
             last_qsc_status: None,
+            animation_runtimes: BTreeMap::new(),
+            animation_players: BTreeMap::new(),
             morphs: BTreeMap::new(),
             density_maps: BTreeMap::new(),
             density_view_updates: BTreeMap::new(),
@@ -1896,6 +1913,8 @@ impl Default for DesktopAppState {
             script_scene_undo: BTreeMap::new(),
             #[cfg(feature = "scripting")]
             script_next_runtime_uid: 1_900_000_000,
+            #[cfg(feature = "scripting")]
+            async_readers: script_reader::AsyncReaders::default(),
         }
     }
 }
@@ -1918,6 +1937,17 @@ impl DesktopAppState {
             .scene_manager()
             .scene(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        if let Some(animation) = self.animation_runtimes.get(&scene_uid) {
+            let unchanged = scene.animation_node().map_or(
+                animation.size() == 0
+                    && animation.length() == 0
+                    && animation.play_state() != cuemol_anim::AnimPlayState::Stop,
+                |node| *node == animation.to_ldom2_node(),
+            );
+            if unchanged {
+                return Ok(Some(animation.clone()));
+            }
+        }
         scene
             .animation_node()
             .map(AnimMgr::from_ldom2_node)
@@ -1933,7 +1963,13 @@ impl DesktopAppState {
             .scene_manager_mut()
             .scene_mut(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
-        scene.set_animation_node(animation.map(AnimMgr::to_ldom2_node))
+        scene.set_animation_node(animation.map(AnimMgr::to_ldom2_node))?;
+        if let Some(animation) = animation {
+            self.animation_runtimes.insert(scene_uid, animation.clone());
+        } else {
+            self.animation_runtimes.remove(&scene_uid);
+        }
+        Ok(())
     }
 
     pub fn apply_scene_animation_time(
@@ -1942,23 +1978,41 @@ impl DesktopAppState {
         elapsed: i64,
         view_uid: Uid,
     ) -> Result<Camera> {
+        self.pause_animation_for_seek(scene_uid, elapsed);
+        self.update_scene_animation(scene_uid, view_uid, Some(elapsed))
+    }
+
+    pub fn stop_scene_animation(&mut self, scene_uid: Uid, view_uid: Uid) -> Result<Camera> {
+        self.animation_players.remove(&scene_uid);
+        self.update_scene_animation(scene_uid, view_uid, None)
+    }
+
+    fn update_scene_animation(
+        &mut self,
+        scene_uid: Uid,
+        view_uid: Uid,
+        elapsed: Option<i64>,
+    ) -> Result<Camera> {
         let mut animation = self.scene_animation(scene_uid)?.unwrap_or_default();
         let source_scene = self
             .scene_manager()
             .scene(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
         let scene_name = source_scene.name().to_string();
-        let cameras = source_scene.cameras().to_vec();
-        let objects = source_scene.objects().to_vec();
-        let surfaces = source_scene.loaded_surfaces().to_vec();
-        let lw_objects = source_scene.loaded_lw_objects().to_vec();
+        let cameras = source_scene.cameras();
+        let objects = source_scene.objects();
+        let surfaces = source_scene.loaded_surfaces();
+        let lw_objects = source_scene.loaded_lw_objects();
+        let object_uids: Vec<_> = objects.iter().map(MolObject::uid).collect();
+        let surface_uids: Vec<_> = surfaces.iter().map(|object| object.uid).collect();
+        let lw_object_uids: Vec<_> = lw_objects.iter().map(|object| object.uid).collect();
         let styles = scene_style_manager(source_scene);
         let density_maps = self
             .density_maps
             .values()
             .filter(|map| map.scene_uid == scene_uid)
-            .cloned()
             .collect::<Vec<_>>();
+        let map_uids: Vec<_> = density_maps.iter().map(|map| map.uid).collect();
         let views = self
             .command_manager
             .views()
@@ -1972,10 +2026,13 @@ impl DesktopAppState {
         for view in views {
             runtime.insert_view(view);
         }
+        if view_uid.get() == 0 {
+            runtime.insert_view(View::new(view_uid, scene_uid));
+        }
         for camera in cameras {
             runtime.set_camera(camera.name(), camera.clone());
         }
-        for object in &objects {
+        for object in objects {
             let mut runtime_object = cuemol_qsys::SceneObject::new(object.uid(), ());
             runtime_object.set_class_name(object.object_type());
             runtime_object.set_name(object.name());
@@ -1984,9 +2041,21 @@ impl DesktopAppState {
             for (name, value) in object.qsc_extra_attrs() {
                 runtime_object.set_property_str(name, value);
             }
+            if let Some(morph) = self.morphs.get(&object.uid()) {
+                runtime_object.set_class_name("MorphMol");
+                runtime_object.set_property_str("frame", morph.frame().to_string());
+            }
             for renderer in object.renderers() {
                 let alpha = renderer
                     .qsc_attr("alpha")
+                    .map(str::to_string)
+                    .or_else(|| {
+                        styles.resolve_style_attr(
+                            DEFAULT_STYLE_SCOPE,
+                            renderer.qsc_attr("style").unwrap_or(""),
+                            "alpha",
+                        )
+                    })
                     .and_then(|value| value.parse::<f64>().ok())
                     .unwrap_or(1.0);
                 let runtime_renderer = animation_runtime_renderer(
@@ -2002,7 +2071,7 @@ impl DesktopAppState {
             }
             runtime.insert_object(runtime_object);
         }
-        for surface in &surfaces {
+        for surface in surfaces {
             let summary = surface_summary(scene_uid, surface, &styles);
             let xform = surface
                 .qsc_node
@@ -2034,7 +2103,7 @@ impl DesktopAppState {
             }
             runtime.insert_object(runtime_object);
         }
-        for object in &lw_objects {
+        for object in lw_objects {
             let summary = lw_object_summary(scene_uid, object, &styles);
             let renderer_nodes = object
                 .qsc_node
@@ -2109,7 +2178,11 @@ impl DesktopAppState {
             runtime.insert_object(runtime_object);
         }
 
-        animation.go_time_in_scene(elapsed, &mut runtime, view_uid)?;
+        if let Some(elapsed) = elapsed {
+            animation.go_time_in_scene(elapsed, &mut runtime, view_uid)?;
+        } else {
+            animation.stop_in_scene(&mut runtime);
+        }
         let updated_camera = runtime
             .view(view_uid)
             .map(View::camera)
@@ -2139,17 +2212,32 @@ impl DesktopAppState {
                 .scene_manager_mut()
                 .scene_mut(scene_uid)
                 .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
-            for source_object in &objects {
-                let Some(updated) = runtime.object(source_object.uid()) else {
+            for object_uid in object_uids {
+                let Some(updated) = runtime.object(object_uid) else {
                     continue;
                 };
-                let Some(target) = scene.object_mut(source_object.uid()) else {
+                let Some(target) = scene.object_mut(object_uid) else {
                     continue;
                 };
-                target.set_visible(updated.visible());
-                target.set_xform_matrix(updated.xform_matrix());
+                if target.is_visible() != updated.visible() {
+                    target.set_visible(updated.visible());
+                }
+                if target.xform_matrix() != updated.xform_matrix() {
+                    target.set_xform_matrix(updated.xform_matrix());
+                }
+                let removed: Vec<_> = target
+                    .qsc_extra_attrs()
+                    .keys()
+                    .filter(|key| !updated.properties().contains_key(*key))
+                    .cloned()
+                    .collect();
+                for key in removed {
+                    target.remove_qsc_extra_attr(&key);
+                }
                 for (name, value) in updated.properties() {
-                    target.set_qsc_extra_attr(name, value);
+                    if target.qsc_extra_attrs().get(name) != Some(value) {
+                        target.set_qsc_extra_attr(name, value);
+                    }
                 }
                 for renderer_uid in updated.renderer_uids() {
                     let Some(updated_renderer) = updated.renderer(renderer_uid) else {
@@ -2158,29 +2246,31 @@ impl DesktopAppState {
                     let Some(target_renderer) = target.renderer_mut(renderer_uid) else {
                         continue;
                     };
-                    target_renderer.set_visible(updated_renderer.visible());
-                    target_renderer.set_qsc_attr("alpha", updated_renderer.alpha().to_string());
-                    target_renderer.set_qsc_attr(
-                        "xformMat",
-                        updated_renderer.xform_matrix().to_script_string(),
-                    );
+                    if target_renderer.is_visible() != updated_renderer.visible() {
+                        target_renderer.set_visible(updated_renderer.visible());
+                    }
+                    let removed: Vec<_> = target_renderer
+                        .qsc_attrs()
+                        .keys()
+                        .filter(|key| !updated_renderer.properties().contains_key(*key))
+                        .cloned()
+                        .collect();
+                    for key in removed {
+                        target_renderer.remove_qsc_attr(&key);
+                    }
                     for (name, value) in updated_renderer.properties() {
-                        if matches!(
-                            name.as_str(),
-                            "visible" | "alpha" | "default_alpha" | "xformMat"
-                        ) {
-                            continue;
+                        if target_renderer.qsc_attr(name) != Some(value.as_str()) {
+                            target_renderer.set_qsc_attr(name, value);
                         }
-                        target_renderer.set_qsc_attr(name, value);
                     }
                 }
             }
         }
-        for source_map in &density_maps {
-            let Some(updated) = runtime.object(source_map.uid) else {
+        for map_uid in map_uids {
+            let Some(updated) = runtime.object(map_uid) else {
                 continue;
             };
-            let Some(target) = self.density_maps.get_mut(&source_map.uid) else {
+            let Some(target) = self.density_maps.get_mut(&map_uid) else {
                 continue;
             };
             target.visible = updated.visible();
@@ -2197,20 +2287,8 @@ impl DesktopAppState {
                     continue;
                 };
                 target_renderer.visible = updated_renderer.visible();
-                target_renderer
-                    .attributes
-                    .insert("alpha".to_string(), updated_renderer.alpha().to_string());
-                target_renderer.attributes.insert(
-                    "xformMat".to_string(),
-                    updated_renderer.xform_matrix().to_script_string(),
-                );
+                target_renderer.attributes = updated_renderer.properties().clone();
                 for (name, value) in updated_renderer.properties() {
-                    if matches!(
-                        name.as_str(),
-                        "visible" | "alpha" | "default_alpha" | "xformMat"
-                    ) {
-                        continue;
-                    }
                     match name.as_str() {
                         "siglevel" => {
                             if let Ok(value) = value.parse() {
@@ -2250,14 +2328,14 @@ impl DesktopAppState {
                 }
             }
         }
-        for source_surface in &surfaces {
-            let Some(updated) = runtime.object(source_surface.uid) else {
+        for surface_uid in surface_uids {
+            let Some(updated) = runtime.object(surface_uid) else {
                 continue;
             };
             let Some(target) = self
                 .scene_manager_mut()
                 .scene_mut(scene_uid)
-                .and_then(|scene| scene.loaded_surface_mut(source_surface.uid))
+                .and_then(|scene| scene.loaded_surface_mut(surface_uid))
             else {
                 continue;
             };
@@ -2276,14 +2354,14 @@ impl DesktopAppState {
                 apply_animation_renderer_node(node, updated_renderer);
             }
         }
-        for source_object in &lw_objects {
-            let Some(updated) = runtime.object(source_object.uid) else {
+        for object_uid in lw_object_uids {
+            let Some(updated) = runtime.object(object_uid) else {
                 continue;
             };
             let Some(target) = self
                 .scene_manager_mut()
                 .scene_mut(scene_uid)
-                .and_then(|scene| scene.loaded_lw_object_mut(source_object.uid))
+                .and_then(|scene| scene.loaded_lw_object_mut(object_uid))
             else {
                 continue;
             };
@@ -2335,6 +2413,7 @@ impl DesktopAppState {
         for (object_uid, frame) in morph_frames {
             self.apply_morph_frame(object_uid, frame)?;
         }
+        self.animation_runtimes.insert(scene_uid, animation);
         Ok(updated_camera)
     }
 
@@ -3513,10 +3592,6 @@ impl DesktopAppState {
                 || object.source_type().is_empty()
                 || object.source().starts_with("datachunk:")
                 || object.modified();
-            if embed {
-                embedded_objects.push(object.uid());
-                continue;
-            }
             let Some(index) = tree
                 .top()
                 .children()
@@ -3536,6 +3611,11 @@ impl DesktopAppState {
             };
             used_nodes.insert(index);
             let node = &mut tree.top_mut().children_mut()[index];
+            if embed {
+                node.retain_children(|child| child.is_attr() || child.tag_name() != "ropts");
+                embedded_objects.push(object.uid());
+                continue;
+            }
             if let Some(chunk_id) = node.str_attr("src").as_str().strip_prefix("datachunk:") {
                 omitted_chunks.insert(chunk_id.to_string());
             }
@@ -3543,9 +3623,92 @@ impl DesktopAppState {
             node.set_str_attr("srctype", object.source_type());
         }
 
+        let auxiliary_base = scene.objects().len()
+            + scene
+                .objects()
+                .iter()
+                .map(|object| {
+                    object
+                        .qsc_extra_data_map()
+                        .keys()
+                        .filter(|source| source.starts_with("datachunk:"))
+                        .count()
+                })
+                .sum::<usize>();
+        let auxiliary = scene
+            .loaded_surfaces()
+            .iter()
+            .map(|object| {
+                (
+                    object.name.as_str(),
+                    object.object_type.as_str(),
+                    object.srctype.as_str(),
+                    if object.raw_data.is_empty() {
+                        object.data.as_bytes()
+                    } else {
+                        object.raw_data.as_slice()
+                    },
+                )
+            })
+            .chain(scene.loaded_density_maps().iter().map(|object| {
+                (
+                    object.name.as_str(),
+                    object.object_type.as_str(),
+                    object.srctype.as_str(),
+                    object.raw_data.as_ref(),
+                )
+            }))
+            .chain(scene.loaded_lw_objects().iter().map(|object| {
+                (
+                    object.name.as_str(),
+                    "LWObject",
+                    object.srctype.as_str(),
+                    object.raw_data.as_slice(),
+                )
+            }));
+        let mut chunks = suffix.to_vec();
+        for (offset, (name, class, storage_format, data)) in auxiliary.enumerate() {
+            let chunk_id = format!("{:05}", auxiliary_base + offset);
+            let Some(index) = tree
+                .top()
+                .children()
+                .iter()
+                .enumerate()
+                .find(|(index, node)| {
+                    !used_nodes.contains(index)
+                        && !node.is_attr()
+                        && node.tag_name() == "object"
+                        && node.str_attr("name").as_str() == name
+                        && node.type_name() == class
+                })
+                .map(|(index, _)| index)
+            else {
+                continue;
+            };
+            used_nodes.insert(index);
+            let node = &mut tree.top_mut().children_mut()[index];
+            let source = node.str_attr("src");
+            if options.embed_all || source.is_empty() || source.as_str().starts_with("datachunk:") {
+                if !source.as_str().starts_with("datachunk:") {
+                    chunks.extend_from_slice(
+                        format!("\n==========START datachunk:{chunk_id}==========\n").as_bytes(),
+                    );
+                    chunks.extend_from_slice(data);
+                    chunks.extend_from_slice(
+                        format!("\n==========END datachunk:{chunk_id}==========\n").as_bytes(),
+                    );
+                }
+                node.set_str_attr("src", format!("datachunk:{chunk_id}"));
+                node.set_str_attr("srctype", storage_format);
+                node.retain_children(|child| child.is_attr() || child.tag_name() != "ropts");
+            } else {
+                omitted_chunks.insert(chunk_id);
+            }
+        }
+
         let mut document =
             format!("{}\n\n{}", write_ldom2_xml(&tree), QSC_XML_END_MARKER).into_bytes();
-        document.extend_from_slice(&rewrite_qsc_data_chunks(suffix, &omitted_chunks, options)?);
+        document.extend_from_slice(&rewrite_qsc_data_chunks(&chunks, &omitted_chunks, options)?);
         Ok((document, embedded_objects))
     }
 
@@ -8037,6 +8200,8 @@ impl DesktopAppState {
         if !self.command_manager.destroy_scene_command(scene_uid) {
             return false;
         }
+        self.animation_runtimes.remove(&scene_uid);
+        self.animation_players.remove(&scene_uid);
         self.morphs.retain(|uid, _| !object_uids.contains(uid));
         self.trajectories
             .retain(|uid, _| !object_uids.contains(uid));
@@ -8055,6 +8220,8 @@ impl DesktopAppState {
 
     pub fn destroy_all_scenes(&mut self) {
         self.command_manager.destroy_all_scenes_command();
+        self.animation_runtimes.clear();
+        self.animation_players.clear();
         self.active_scene = None;
         self.morphs.clear();
         self.density_maps.clear();
@@ -12147,6 +12314,8 @@ impl DesktopAppState {
                     .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
                 scene.clear_all_data();
                 scene.set_name(&scene_name);
+                self.animation_runtimes.remove(&scene_uid);
+                self.animation_players.remove(&scene_uid);
                 scene_uid
             } else {
                 self.new_scene(&scene_name, true).result_scene
@@ -12201,6 +12370,15 @@ impl DesktopAppState {
         path: &Path,
         target_scene: Option<Uid>,
     ) -> Result<Option<Uid>> {
+        self.load_qsc_file_with_view_setup(path, target_scene, true)
+    }
+
+    fn load_qsc_file_with_view_setup(
+        &mut self,
+        path: &Path,
+        target_scene: Option<Uid>,
+        configure_views: bool,
+    ) -> Result<Option<Uid>> {
         let qsc_xml = read_qsc_xml_prefix(path)?;
         let replaced_object_uids = target_scene
             .and_then(|scene_uid| self.scene_manager().scene(scene_uid))
@@ -12219,19 +12397,22 @@ impl DesktopAppState {
         });
         let result = self
             .command_manager
-            .load_scene_command_with_molecule_reader(
+            .load_scene_command_with_reader_options(
                 path,
                 target_scene,
-                &trajectory_io::read_extra_qsc_molecule,
+                &trajectory_io::read_extra_qsc_molecule_with_options,
             )?;
         self.last_qsc_status = Some(result.status.clone());
         self.active_scene = result.result_scene;
         if let Some(scene_uid) = result.result_scene {
-            if !self
-                .command_manager
-                .views()
-                .iter()
-                .any(|view| view.scene_uid() == scene_uid)
+            self.animation_runtimes.remove(&scene_uid);
+            self.animation_players.remove(&scene_uid);
+            if configure_views
+                && !self
+                    .command_manager
+                    .views()
+                    .iter()
+                    .any(|view| view.scene_uid() == scene_uid)
             {
                 let camera = self.active_scene_saved_camera();
                 let view_uid = self.command_manager.new_view_command(scene_uid)?;
@@ -12261,7 +12442,7 @@ impl DesktopAppState {
             if let Some(tree) = &qsc_xml {
                 self.restore_named_qsc_camera_visibility(scene_uid, tree.top())?;
             }
-            if let Some(camera) = self.active_scene_saved_camera() {
+            if let Some(camera) = self.active_scene_saved_camera().filter(|_| configure_views) {
                 self.apply_scene_visibility_settings(scene_uid, camera.visibility_settings())?;
                 self.set_active_view_camera(&camera)?;
             }
@@ -12293,7 +12474,16 @@ impl DesktopAppState {
             })
             .unwrap_or_default();
         for (storage_index, loaded) in maps.into_iter().enumerate() {
-            let mut map = read_density_map_bytes(&loaded.raw_data, &loaded.srctype)?;
+            let reader_options = loaded.qsc_node.as_ref().and_then(|node| {
+                node.children()
+                    .iter()
+                    .find(|node| !node.is_attr() && node.tag_name() == "ropts")
+            });
+            let mut map = read_density_map_bytes_with_options(
+                &loaded.raw_data,
+                &loaded.srctype,
+                reader_options,
+            )?;
             if let Some(kind) = loaded
                 .qsc_node
                 .as_ref()
@@ -13447,6 +13637,17 @@ impl DesktopAppState {
             .add_molecule_with_source_type(object_name, molecule, "namdcoor");
         if let Some(object) = self.scene_manager_mut().object_mut(object_uid) {
             object.set_source(coor_path.to_string_lossy());
+            let mut options = LDom2Node::new();
+            options.set_tag_name("ropts");
+            options.set_type_name("NAMDCoorReader");
+            options.set_str_attr("subPath_topo", topology_path);
+            let compression = match coor_path.extension().and_then(|ext| ext.to_str()) {
+                Some("gz") => "gzip",
+                Some("xz") => "xzip",
+                _ => "none",
+            };
+            options.set_str_attr("compress", compression);
+            object.replace_qsc_extensions(vec![options], BTreeMap::new());
             object.set_modified(false);
         }
         self.put_config_value("cuemol2.ui.histories.namdcoor.psfpath", topology_path);
@@ -13776,7 +13977,20 @@ impl DesktopAppState {
             };
             loaded.name = state.name.clone();
             loaded.object_type = state.class_name.clone();
-            loaded.qsc_node = Some(density_map_qsc_node(&state, &loaded.srctype, source));
+            let source_type = if source.starts_with("datachunk:") {
+                &loaded.srctype
+            } else {
+                &state.format
+            };
+            let mut node = density_map_qsc_node(&state, source_type, source);
+            if let Some(options) = loaded.qsc_node.as_ref().and_then(|node| {
+                node.children()
+                    .iter()
+                    .find(|child| !child.is_attr() && child.tag_name() == "ropts")
+            }) {
+                node.append_child_node(options.clone());
+            }
+            loaded.qsc_node = Some(node);
         }
         Ok(())
     }
@@ -14685,7 +14899,9 @@ impl DesktopAppState {
             .scene(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
         let named_camera = exporter.scene().camera_name();
-        let camera = if named_camera.is_empty() {
+        let camera = if let Some(camera) = exporter.scene().camera_object() {
+            Some(camera.clone())
+        } else if named_camera.is_empty() {
             scene
                 .camera_by_name("__current")
                 .or_else(|| scene.cameras().first())
@@ -14793,7 +15009,9 @@ impl DesktopAppState {
             .scene(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
         let named_camera = exporter.scene().camera_name();
-        let camera = if named_camera.is_empty() {
+        let camera = if let Some(camera) = exporter.scene().camera_object() {
+            Some(camera.clone())
+        } else if named_camera.is_empty() {
             scene
                 .camera_by_name("__current")
                 .or_else(|| scene.cameras().first())
@@ -26330,7 +26548,11 @@ impl DesktopAppState {
             }
             Ok(())
         }
-        fn apply_script_animation_time(scene_uid: u64, value: i64, view_uid: Uid) -> JsResult<()> {
+        fn with_script_animation_scene<R>(
+            scene_uid: u64,
+            view_uid: Uid,
+            operation: impl FnOnce(&mut AnimMgr, &mut cuemol_qsys::Scene<()>) -> Result<R>,
+        ) -> JsResult<R> {
             let (mut animation, views, cameras, objects) = script_env::with(|env| {
                 let animation = if scene_uid == env.scene_uid {
                     Some(env.animation.clone())
@@ -26371,6 +26593,9 @@ impl DesktopAppState {
             for view in views {
                 scene.insert_view(view);
             }
+            if view_uid.get() == 0 {
+                scene.insert_view(View::new(view_uid, Uid::new(scene_uid)));
+            }
             for camera in cameras {
                 scene.set_camera(camera.name(), camera.clone());
             }
@@ -26380,18 +26605,20 @@ impl DesktopAppState {
                 target.set_name(object.name);
                 target.set_visible(object.visible);
                 target.set_xform_matrix(object.xform);
+                if let Some(frame) =
+                    script_env::with(|env| env.morphs.get(&object.uid).map(MorphMol::frame))
+                {
+                    target.set_property_str("frame", frame.to_string());
+                }
                 for renderer in object.renderers {
+                    let alpha = renderer_effective_attr(&renderer, "alpha", "1")
+                        .parse()
+                        .unwrap_or(1.0);
                     let mut target_renderer =
                         cuemol_qsys::Renderer::with_uid(renderer.rtype, Uid::new(renderer.uid));
                     target_renderer.set_name(renderer.name);
                     target_renderer.set_visible(renderer.visible);
-                    if let Some(alpha) = renderer
-                        .attributes
-                        .get("alpha")
-                        .and_then(|value| value.parse::<f64>().ok())
-                    {
-                        target_renderer.set_alpha(alpha);
-                    }
+                    target_renderer.set_alpha(alpha);
                     if let Some(matrix) = renderer
                         .attributes
                         .get("xformMat")
@@ -26406,8 +26633,7 @@ impl DesktopAppState {
                 }
                 scene.insert_object(target);
             }
-            animation
-                .go_time_in_scene(value, &mut scene, view_uid)
+            let result = operation(&mut animation, &mut scene)
                 .map_err(|error| script_error(error.to_string()))?;
             let morph_frames = scene
                 .get_obj_array()
@@ -26445,14 +26671,7 @@ impl DesktopAppState {
                             continue;
                         };
                         renderer.visible = updated.visible();
-                        renderer
-                            .attributes
-                            .insert("alpha".to_string(), updated.alpha().to_string());
-                        renderer.attributes.insert(
-                            "xformMat".to_string(),
-                            updated.xform_matrix().to_script_string(),
-                        );
-                        renderer.attributes.extend(updated.properties().clone());
+                        renderer.attributes = updated.properties().clone();
                     }
                 }
                 if scene_uid == env.scene_uid {
@@ -26466,7 +26685,7 @@ impl DesktopAppState {
             for (uid, frame) in morph_frames {
                 apply_script_morph_frame(uid, frame)?;
             }
-            Ok(())
+            Ok(result)
         }
         fn script_anim_motion(uid: u64) -> JsResult<AnimMotion> {
             script_env::with(|env| {
@@ -27266,11 +27485,18 @@ impl DesktopAppState {
             if view.scene_uid().get() != scene_uid {
                 return Err(script_error("View belongs to a different scene"));
             }
-            with_script_animation_mut(scene_uid, |animation| animation.start(&view))?;
+            with_flushed_script_app(ctx, None, |app| {
+                app.play_scene_animation(Uid::new(scene_uid), uid)
+            })?
+            .map_err(|error| script_error(error.to_string()))?;
             Ok(JsValue::undefined())
         }
         fn js_anim_stop(this: &JsValue, _args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
-            with_script_animation_mut(anim_manager_scene_uid(this, ctx)?, AnimMgr::stop)?;
+            let scene_uid = anim_manager_scene_uid(this, ctx)?;
+            with_flushed_script_app(ctx, None, |app| {
+                app.stop_scene_animation(Uid::new(scene_uid), Uid::new(0))
+            })?
+            .map_err(|error| script_error(error.to_string()))?;
             Ok(JsValue::undefined())
         }
         fn js_anim_pause(
@@ -27278,7 +27504,11 @@ impl DesktopAppState {
             _args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            with_script_animation_mut(anim_manager_scene_uid(this, ctx)?, AnimMgr::pause)?;
+            let scene_uid = anim_manager_scene_uid(this, ctx)?;
+            with_flushed_script_app(ctx, None, |app| {
+                app.pause_scene_animation(Uid::new(scene_uid))
+            })?
+            .map_err(|error| script_error(error.to_string()))?;
             Ok(JsValue::undefined())
         }
         fn js_anim_go_time(
@@ -27300,7 +27530,10 @@ impl DesktopAppState {
             }) {
                 return Err(script_error(format!("View {} is not available", uid.get())));
             }
-            apply_script_animation_time(scene_uid, value, uid)?;
+            with_flushed_script_app(ctx, None, |app| {
+                app.apply_scene_animation_time(Uid::new(scene_uid), value, uid)
+            })?
+            .map_err(|error| script_error(error.to_string()))?;
             Ok(JsValue::undefined())
         }
         fn js_anim_setup_render(
@@ -27309,6 +27542,10 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let scene_uid = anim_manager_scene_uid(this, ctx)?;
+            with_flushed_script_app(ctx, None, |app| {
+                app.pause_scene_animation(Uid::new(scene_uid))
+            })?
+            .map_err(|error| script_error(error.to_string()))?;
             let start =
                 time_value_to_nanos(&args.first().cloned().unwrap_or(JsValue::undefined()), ctx)?;
             let end =
@@ -27325,43 +27562,141 @@ impl DesktopAppState {
         }
         fn js_anim_write_frame(
             this: &JsValue,
-            _args: &[JsValue],
+            args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            let mut writer = cuemol_qsys::SceneExporter::default();
-            with_script_animation_mut(anim_manager_scene_uid(this, ctx)?, |animation| {
-                animation.write_frame(&mut writer)
-            })?;
+            let writer = args.first().cloned().unwrap_or(JsValue::undefined());
+            let key = script_scene_exporter_key(&writer, ctx)?;
+            let scene_uid = anim_manager_scene_uid(this, ctx)?;
+            if !begin_script_animation_frame(scene_uid, key, ctx)? {
+                return Ok(JsValue::undefined());
+            }
+            let result = match key {
+                ScriptSceneExporterKey::Native(_) => {
+                    js_native_scene_exporter_write(&writer, &[], ctx)
+                }
+                ScriptSceneExporterKey::Umbreon(_) => js_umbreon_write(&writer, &[], ctx),
+            };
+            if result.is_err() {
+                with_script_scene_exporter_mut(key, |exporter| exporter.detach())?;
+                result?;
+            }
+            end_script_animation_frame(scene_uid, key)?;
             Ok(JsValue::undefined())
         }
         fn js_anim_begin_frame(
             this: &JsValue,
-            _args: &[JsValue],
+            args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            let mut writer = cuemol_qsys::SceneExporter::default();
-            Ok(JsValue::new(with_script_animation_mut(
-                anim_manager_scene_uid(this, ctx)?,
-                |animation| animation.begin_frame(&mut writer),
+            let key = script_scene_exporter_key(
+                &args.first().cloned().unwrap_or(JsValue::undefined()),
+                ctx,
+            )?;
+            let scene_uid = anim_manager_scene_uid(this, ctx)?;
+            Ok(JsValue::new(begin_script_animation_frame(
+                scene_uid, key, ctx,
             )?))
         }
         fn js_anim_end_frame(
             this: &JsValue,
-            _args: &[JsValue],
+            args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            let mut writer = cuemol_qsys::SceneExporter::default();
-            with_script_animation_mut(anim_manager_scene_uid(this, ctx)?, |animation| {
-                animation.end_frame(&mut writer)
-            })?;
+            let key = script_scene_exporter_key(
+                &args.first().cloned().unwrap_or(JsValue::undefined()),
+                ctx,
+            )?;
+            end_script_animation_frame(anim_manager_scene_uid(this, ctx)?, key)?;
             Ok(JsValue::undefined())
+        }
+        #[derive(Clone, Copy)]
+        enum ScriptSceneExporterKey {
+            Native(u64),
+            Umbreon(u64),
+        }
+        fn script_scene_exporter_key(
+            value: &JsValue,
+            ctx: &mut Context,
+        ) -> JsResult<ScriptSceneExporterKey> {
+            let object = value
+                .as_object()
+                .ok_or_else(|| script_error("SceneExporter argument required"))?;
+            if let Some(id) = object
+                .get(js_string!("_native_exporter_id"), ctx)?
+                .as_number()
+            {
+                if script_env::with(|env| env.native_scene_exporters.contains_key(&(id as u64))) {
+                    return Ok(ScriptSceneExporterKey::Native(id as u64));
+                }
+            }
+            if let Some(id) = object.get(js_string!("_exporter_id"), ctx)?.as_number() {
+                if script_env::with(|env| env.umbreon_exporters.contains_key(&(id as u64))) {
+                    return Ok(ScriptSceneExporterKey::Umbreon(id as u64));
+                }
+            }
+            Err(script_error("SceneExporter argument is not available"))
+        }
+        fn with_script_scene_exporter_mut<R>(
+            key: ScriptSceneExporterKey,
+            operation: impl FnOnce(&mut cuemol_qsys::SceneExporter) -> R,
+        ) -> JsResult<R> {
+            match key {
+                ScriptSceneExporterKey::Native(id) => {
+                    with_script_native_scene_exporter_mut(id, |exporter| {
+                        operation(exporter.base_mut())
+                    })
+                }
+                ScriptSceneExporterKey::Umbreon(id) => {
+                    with_script_umbreon_mut(id, |exporter| operation(exporter.scene_mut()))
+                }
+            }
+        }
+        fn begin_script_animation_frame(
+            scene_uid: u64,
+            key: ScriptSceneExporterKey,
+            ctx: &mut Context,
+        ) -> JsResult<bool> {
+            with_flushed_script_app(ctx, None, |_| ())?;
+            let view_uid = script_env::with(|env| {
+                env.scenes
+                    .iter()
+                    .find(|scene| scene.uid == scene_uid)
+                    .and_then(|scene| scene.active_view_uid)
+                    .and_then(|uid| env.views.iter().find(|view| view.uid().get() == uid))
+                    .or_else(|| {
+                        env.views
+                            .iter()
+                            .find(|view| view.scene_uid().get() == scene_uid)
+                    })
+                    .map(View::uid)
+                    .unwrap_or(Uid::new(0))
+            });
+            let mut writer = with_script_scene_exporter_mut(key, |exporter| exporter.clone())?;
+            let started = with_script_animation_scene(scene_uid, view_uid, |animation, scene| {
+                animation.begin_frame_in_scene(&mut writer, scene, view_uid)
+            })?;
+            if started {
+                with_script_scene_exporter_mut(key, |exporter| *exporter = writer)?;
+            }
+            Ok(started)
+        }
+        fn end_script_animation_frame(scene_uid: u64, key: ScriptSceneExporterKey) -> JsResult<()> {
+            let mut animation = script_animation(scene_uid)?;
+            with_script_scene_exporter_mut(key, |exporter| animation.end_frame(exporter))?;
+            with_script_animation_mut(scene_uid, |target| *target = animation)
         }
         fn js_anim_clear(
             this: &JsValue,
             _args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            with_script_animation_mut(anim_manager_scene_uid(this, ctx)?, AnimMgr::clear)?;
+            let scene_uid = anim_manager_scene_uid(this, ctx)?;
+            with_flushed_script_app(ctx, None, |app| {
+                app.stop_scene_animation(Uid::new(scene_uid), Uid::new(0))
+            })?
+            .map_err(|error| script_error(error.to_string()))?;
+            with_script_animation_mut(scene_uid, AnimMgr::clear)?;
             Ok(JsValue::undefined())
         }
         fn js_anim_get_at(
@@ -28163,6 +28498,7 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let id = native_scene_exporter_proxy_id(this, ctx)?;
+            with_flushed_script_app(ctx, None, |_| ())?;
             let (render_scene, scene_name, camera, scene_uid, background_spec) =
                 script_env::with(|env| {
                     let exporter = env.native_scene_exporters.get(&id)?;
@@ -28170,7 +28506,9 @@ impl DesktopAppState {
                     let render_scene = env.render_scenes.get(&scene_uid)?.clone();
                     let scene = env.scenes.iter().find(|scene| scene.uid == scene_uid);
                     let camera_name = exporter.camera_name();
-                    let camera = if camera_name.is_empty() {
+                    let camera = if let Some(camera) = exporter.base().camera_object() {
+                        Some(camera.clone())
+                    } else if camera_name.is_empty() {
                         Some(render_scene.default_camera.clone())
                     } else {
                         scene
@@ -29026,7 +29364,9 @@ impl DesktopAppState {
                 let scene_uid = exporter.scene().client_scene()?.get();
                 let camera_name = exporter.scene().camera_name().to_string();
                 let render_scene = env.render_scenes.get(&scene_uid)?.clone();
-                let camera = if camera_name.is_empty() {
+                let camera = if let Some(camera) = exporter.scene().camera_object() {
+                    Some(camera.clone())
+                } else if camera_name.is_empty() {
                     Some(render_scene.default_camera)
                 } else {
                     env.scenes
@@ -29804,7 +30144,6 @@ impl DesktopAppState {
             if !target_scene.is_object() {
                 return Err(script_error("LoadObjectCommand.target_scene is required"));
             }
-            let target_scene_uid = object_number_prop(&target_scene, "uid", ctx)? as u64;
             let path = this_string_prop(this, "file_path", ctx);
             if path.trim().is_empty() {
                 return Err(script_error("LoadObjectCommand.file_path is required"));
@@ -29821,10 +30160,22 @@ impl DesktopAppState {
                 .rsplit("::")
                 .next()
                 .unwrap_or("ObjReader");
-            let handler = make_script_stream_handler(class_name, &handler_info, ctx);
+            let handler = make_script_stream_handler(class_name, &handler_info, true, ctx);
             iterator_object(&handler)?.set(
                 js_string!("path"),
                 JsString::from(path.as_str()),
+                true,
+                ctx,
+            )?;
+            let compression = match Path::new(&path).extension().and_then(|ext| ext.to_str()) {
+                Some("gz") => "gzip",
+                Some("xz") => "xzip",
+                Some("bz2") => "bzip2",
+                _ => "none",
+            };
+            iterator_object(&handler)?.set(
+                js_string!("compress"),
+                JsString::from(compression),
                 true,
                 ctx,
             )?;
@@ -29867,12 +30218,20 @@ impl DesktopAppState {
                 ctx,
             )?;
             iterator_object(this)?.set(js_string!("result_object"), target.clone(), true, ctx)?;
-            script_cmds::push(ScriptCmd::LoadObjectCommand {
-                target_scene: target_scene_uid,
-                path,
-                name,
-                format,
-            });
+            iterator_object(&target)?.set(
+                JsString::from(pending_object_property_key(MoleculeProperty::Source)),
+                JsString::from(path.as_str()),
+                true,
+                ctx,
+            )?;
+            iterator_object(&target)?.set(
+                JsString::from(pending_object_property_key(MoleculeProperty::SourceType)),
+                JsString::from(format.as_str()),
+                true,
+                ctx,
+            )?;
+            js_scene_add_object(&target_scene, std::slice::from_ref(&target), ctx)?;
+            with_flushed_script_app(ctx, None, |_| ())?;
             Ok(target)
         }
         fn command_run_load_scene(this: &JsValue, ctx: &mut Context) -> JsResult<JsValue> {
@@ -29922,11 +30281,11 @@ impl DesktopAppState {
                 true,
                 ctx,
             )?;
-            script_cmds::push(ScriptCmd::LoadScene {
-                class_name: class_name.to_string(),
-                path,
-                target_scene,
-            });
+            let set_camera = handler_bool_prop(this, "set_camera", true, ctx);
+            with_flushed_script_app(ctx, None, |app| {
+                app.read_script_scene(class_name, &path, target_scene, set_camera)
+            })?
+            .map_err(|error| script_error(error.to_string()))?;
             Ok(result_scene)
         }
         fn js_command_run(
@@ -30493,7 +30852,12 @@ impl DesktopAppState {
                 _ if initial.is_none() && stream_handler_info_for_class(&class_name).is_some() => {
                     let handler = stream_handler_info_for_class(&class_name)
                         .expect("stream handler checked above");
-                    Ok(make_script_stream_handler(&class_name, &handler, ctx))
+                    Ok(make_script_stream_handler(
+                        &class_name,
+                        &handler,
+                        false,
+                        ctx,
+                    ))
                 }
                 _ if initial.is_some() => Err(script_error(format!(
                     "createObj({class_name}) failed: class has no string conversion"
@@ -30959,7 +31323,7 @@ impl DesktopAppState {
                 modified,
                 source,
                 alt_source,
-                source_type,
+                source_type: source_type.clone(),
                 xform,
                 selection: selection.clone(),
                 coloring: coloring.clone(),
@@ -31009,6 +31373,7 @@ impl DesktopAppState {
                 modified,
                 source: object_string_prop(&value, "src", ctx),
                 alt_source: object_string_prop(&value, "alt_src", ctx),
+                source_type,
                 xform,
                 selection,
                 default_color,
@@ -31021,6 +31386,16 @@ impl DesktopAppState {
                     None
                 },
             });
+            if let Some(io_options) = object_optional_string_prop(&value, "_io_options", ctx) {
+                let options = parse_ldom2_xml(&io_options)
+                    .map_err(|error| script_error(error.to_string()))?;
+                script_cmds::push(ScriptCmd::SetObjectIoMetadata {
+                    uid: expected_uid,
+                    source: object_string_prop(&value, "src", ctx),
+                    source_type: object_string_prop(&value, "srctype", ctx),
+                    options: options.top().clone(),
+                });
+            }
             if !visible {
                 script_cmds::push(ScriptCmd::SetObjectVisible {
                     uid: expected_uid,
@@ -41732,11 +42107,47 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let reader = args.first().cloned().unwrap_or(JsValue::undefined());
-            let reader_name = object_string_prop(&reader, "name", ctx);
-            if reader_name.is_empty() {
+            let class = this_string_prop(&reader, "_class", ctx);
+            if !(handler_is_molecule_reader(&class)
+                || handler_is_density_map_reader(&class)
+                || handler_is_surface_reader(&class)
+                || handler_is_lw_reader(&class)
+                || handler_is_trajectory_reader(&class))
+            {
                 return Err(script_error("loadObjectAsync requires an ObjReader"));
             }
-            let id = script_env::with_mut(|env| env.stream_manager.load_object_async(&reader_name));
+            let expected_atoms = if handler_is_trajectory_reader(&class) {
+                let uid = object_number_prop(&reader, "targTrajUID", ctx)? as u64;
+                if uid == 0 {
+                    None
+                } else {
+                    Some(
+                        script_env::with(|env| {
+                            env.molecules
+                                .iter()
+                                .find(|object| object.uid == uid)
+                                .map(|object| object.molecule.atom_count())
+                        })
+                        .ok_or_else(|| script_error("trajectory target molecule was not found"))?,
+                    )
+                }
+            } else {
+                None
+            };
+            let config = script_reader::ReaderConfig {
+                class,
+                io: script_handler_io(&reader, ctx)?,
+                options: script_reader_options(&reader, ctx)?,
+                expected_atoms,
+            };
+            let id = script_env::with(|env| env.async_readers.start(config))
+                .map_err(|error| script_error(error.to_string()))?;
+            ctx.global_object().set(
+                JsString::from(format!("__cuemol_async_reader_{id}")),
+                reader,
+                true,
+                ctx,
+            )?;
             Ok(JsValue::new(id))
         }
         fn js_stream_supply_async(
@@ -41755,10 +42166,12 @@ impl DesktopAppState {
                 .cloned()
                 .unwrap_or(JsValue::undefined())
                 .to_i32(ctx)?;
-            script_env::with_mut(|env| {
-                env.stream_manager
-                    .supply_data_async(id, bytes.as_bytes(), length);
-            });
+            let data = usize::try_from(length)
+                .ok()
+                .and_then(|length| bytes.as_bytes().get(..length))
+                .ok_or_else(|| script_error("asynchronous input length is out of range"))?;
+            script_env::with(|env| env.async_readers.supply(id, data))
+                .map_err(|error| script_error(error.to_string()))?;
             Ok(JsValue::undefined())
         }
         fn js_stream_wait_async(
@@ -41771,42 +42184,119 @@ impl DesktopAppState {
                 .cloned()
                 .unwrap_or(JsValue::undefined())
                 .to_i32(ctx)?;
-            let loaded = script_env::with_mut(|env| env.stream_manager.wait_load_object_async(id))
+            let property = JsString::from(format!("__cuemol_async_reader_{id}"));
+            let original_reader = ctx.global_object().get(property.clone(), ctx)?;
+            ctx.global_object()
+                .delete_property_or_throw(property, ctx)?;
+            let completed = script_env::with(|env| env.async_readers.clone())
+                .wait(id)
                 .map_err(|error| script_error(error.to_string()))?;
-            let Some(loaded) = loaded else {
+            let Some((config, result)) = completed else {
                 return Ok(JsValue::null());
             };
-            match loaded {
-                cuemol_molstr::AsyncLoadedObject::Molecule(molecule) => {
-                    let value = make_molcoord("MolCoord", ctx);
-                    set_script_molecule_value(&value, molecule, ctx)?;
-                    Ok(value)
+            let info = stream_handler_info_for_class(&config.class)
+                .ok_or_else(|| script_error("asynchronous reader type is unavailable"))?;
+            let reader = make_script_stream_handler(&config.class, &info, false, ctx);
+            let reader_object = iterator_object(&reader)?;
+            reader_object.set(
+                js_string!("path"),
+                JsString::from(config.io.path()),
+                true,
+                ctx,
+            )?;
+            for property in config.options.children() {
+                let key = JsString::from(property.tag_name());
+                let current = reader_object.get(key.clone(), ctx)?;
+                let value: JsValue = if current.is_boolean() {
+                    qsc_bool(property.value()).into()
+                } else if current.is_number() {
+                    property.value().parse::<f64>().unwrap_or(0.).into()
+                } else {
+                    JsString::from(property.value()).into()
+                };
+                reader_object.set(key, value, true, ctx)?;
+            }
+            let target = js_handler_create_default_object(&reader, &[], ctx)?;
+            reader_object.set(js_string!("_target"), target.clone(), true, ctx)?;
+            match result.object {
+                script_reader::ReaderObject::Molecule(molecule) => {
+                    set_script_molecule_value(&target, molecule, ctx)?
                 }
-                cuemol_molstr::AsyncLoadedObject::GridMap(grid) => {
-                    let map = DensityMap::from_grid_map(grid);
-                    let value = make_pending_density_map("DensityMap", ctx);
-                    let map_id = object_number_prop(&value, "_pending_map_id", ctx)? as u64;
+                script_reader::ReaderObject::Density(map) => {
+                    let id = object_number_prop(&target, "_pending_map_id", ctx)? as u64;
                     script_env::with_mut(|env| {
-                        env.pending_density_maps.insert(map_id, map.clone());
+                        env.pending_density_maps.insert(id, map);
                     });
-                    Ok(value)
+                    let object = iterator_object(&target)?;
+                    object.set(
+                        js_string!("_format"),
+                        JsString::from(config.io.name()),
+                        true,
+                        ctx,
+                    )?;
+                    object.set(
+                        js_string!("_source"),
+                        JsString::from(config.io.path()),
+                        true,
+                        ctx,
+                    )?;
                 }
-                cuemol_molstr::AsyncLoadedObject::Buffered { reader_type, data } => {
-                    let bytes = make_byte_array(ctx);
-                    set_byte_array(&bytes, &data, ctx)?;
-                    Ok(ObjectInitializer::new(ctx)
-                        .property(js_string!("type"), js_string!("Object"), Attribute::all())
-                        .property(js_string!("_class"), js_string!("Object"), Attribute::all())
-                        .property(
-                            js_string!("reader_type"),
-                            JsString::from(reader_type),
-                            Attribute::all(),
-                        )
-                        .property(js_string!("data"), bytes, Attribute::all())
-                        .build()
-                        .into())
+                script_reader::ReaderObject::Surface(mesh) => {
+                    let mut surface = MolSurfObj::new();
+                    *surface.mesh_mut() = mesh;
+                    set_molsurf(&target, &surface, ctx)?;
+                }
+                script_reader::ReaderObject::Lightweight(object) => {
+                    let id = object_number_prop(&target, "_pending_lw_id", ctx)? as u64;
+                    let count = object.draw_elements().len();
+                    script_env::with_mut(|env| {
+                        env.pending_lw_objects.insert(id, object);
+                    });
+                    iterator_object(&target)?.set(
+                        js_string!("_draw_count"),
+                        count as f64,
+                        true,
+                        ctx,
+                    )?;
+                }
+                script_reader::ReaderObject::Trajectory(frames) => {
+                    let uid = object_number_prop(&target, "uid", ctx)? as u64;
+                    let format = match config.class.as_str() {
+                        "DCDTrajReader" => "DCD",
+                        "XtcTrajReader" => "XTC",
+                        "TrrTrajReader" => "TRR",
+                        _ => "NETCDF",
+                    };
+                    let stride = config
+                        .stride()
+                        .map_err(|error| script_error(error.to_string()))?;
+                    script_env::with_mut(|env| {
+                        env.trajectory_blocks.insert(
+                            uid,
+                            GuiTrajectoryBlockData {
+                                uid,
+                                stride,
+                                source: config.io.path().into(),
+                                format: format.into(),
+                                frames,
+                            },
+                        );
+                    });
                 }
             }
+            for (name, value) in result.properties {
+                let property: JsValue = if matches!(name.as_str(), "min_res" | "max_res") {
+                    value.parse::<f64>().unwrap_or(0.).into()
+                } else {
+                    JsString::from(value.as_str()).into()
+                };
+                reader_object.set(JsString::from(name.as_str()), property.clone(), true, ctx)?;
+                if let Some(original) = original_reader.as_object() {
+                    original.set(JsString::from(name.as_str()), property, true, ctx)?;
+                }
+            }
+            record_script_handler_source(&reader, true, ctx)?;
+            Ok(target)
         }
         fn js_handler_set_path(
             this: &JsValue,
@@ -42078,7 +42568,25 @@ impl DesktopAppState {
             let handler = script_handler_io(this, ctx)?;
             let stream_ccp4 = class_name == "CCP4MapReader"
                 && !handler.base64_flag()
+                && matches!(handler.compress_mode(), 0 | 1 | 3)
                 && cfg!(not(target_arch = "wasm32"));
+            if stream_ccp4 && handler.compress_mode() != 0 {
+                let mut prefix = [0; 6];
+                let mut file = fs::File::open(handler.path())
+                    .map_err(|error| script_error(error.to_string()))?;
+                std::io::Read::read_exact(&mut file, &mut prefix)
+                    .map_err(|error| script_error(error.to_string()))?;
+                let matches = match handler.compress_mode() {
+                    1 => prefix.starts_with(&[0x1f, 0x8b]),
+                    3 => prefix == *b"\xfd7zXZ\0",
+                    _ => true,
+                };
+                if !matches {
+                    return Err(script_error(
+                        "map input does not match the configured compression",
+                    ));
+                }
+            }
             let bytes = if stream_ccp4 {
                 Vec::new()
             } else {
@@ -42314,11 +42822,21 @@ impl DesktopAppState {
                 )
             };
             let path = this_string_prop(this, "path", ctx);
-            let indexed = cuemol_mdtools::IndexedTrajectory::open(
-                &path,
-                stride as usize,
-                expected.filter(|n| *n > 0),
-            )
+            let handler = script_handler_io(this, ctx)?;
+            let expected = expected.filter(|n| *n > 0);
+            let indexed = if handler.base64_flag() || handler.compress_mode() != 0 {
+                let bytes = handler
+                    .read_bytes()
+                    .map_err(|error| script_error(error.to_string()))?;
+                cuemol_mdtools::IndexedTrajectory::from_shared_bytes_with_name(
+                    bytes.into(),
+                    &path,
+                    stride as usize,
+                    expected,
+                )
+            } else {
+                cuemol_mdtools::IndexedTrajectory::open(&path, stride as usize, expected)
+            }
             .map_err(|error| script_error(error.to_string()))?;
             let format = indexed.format_name();
             let correct = matches!(
@@ -42373,6 +42891,119 @@ impl DesktopAppState {
             _args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
+            let result = read_script_handler_contents(this, ctx)?;
+            record_script_handler_source(this, true, ctx)?;
+            Ok(result)
+        }
+
+        fn script_reader_options(this: &JsValue, ctx: &mut Context) -> JsResult<LDom2Node> {
+            let mut options = LDom2Node::new();
+            options.set_tag_name("ropts");
+            options.set_type_name(this_string_prop(this, "_class", ctx));
+            for key in [
+                "compress",
+                "base64",
+                "loadmodel",
+                "loadanisou",
+                "loadaltconf",
+                "build2ndry",
+                "loadsegid",
+                "loadsecstr",
+                "autoTopoGen",
+                "load_cmpd_id",
+                "load_as_chain",
+                "chain_name",
+                "resid_index",
+                "normalize",
+                "truncate_min",
+                "min",
+                "truncate_max",
+                "max",
+                "subsample",
+                "max_voxels",
+                "use_header_stats",
+                "resolution",
+                "gridsize",
+                "clmn_F",
+                "clmn_PHI",
+                "clmn_WT",
+                "smooth",
+                "vertex_file",
+                "subPath_topo",
+                "bondmode",
+                "lazy_load",
+                "nevery",
+            ] {
+                let value = iterator_object(this)?.get(JsString::from(key), ctx)?;
+                if !value.is_undefined() {
+                    options.set_str_attr(key, value.to_string(ctx)?.to_std_string_escaped());
+                }
+            }
+            Ok(options)
+        }
+
+        fn record_script_handler_source(
+            this: &JsValue,
+            reading: bool,
+            ctx: &mut Context,
+        ) -> JsResult<()> {
+            let target = script_handler_target(this, ctx)?;
+            let source = this_string_prop(this, "path", ctx);
+            let source_type = this_string_prop(this, "name", ctx);
+            let options = script_reader_options(this, ctx)?;
+            let uid = object_number_prop(&target, "uid", ctx)? as u64;
+            let object = iterator_object(&target)?;
+            for (property, value) in [
+                (MoleculeProperty::Source, &source),
+                (MoleculeProperty::SourceType, &source_type),
+            ] {
+                object.set(
+                    JsString::from(pending_object_property_key(property)),
+                    JsString::from(value.as_str()),
+                    true,
+                    ctx,
+                )?;
+            }
+            object.set(
+                js_string!("_io_options"),
+                JsString::from(write_ldom2_xml(&LDom2Tree::from(options.clone()))),
+                true,
+                ctx,
+            )?;
+            if reading {
+                object.set(
+                    JsString::from(pending_object_property_key(MoleculeProperty::Modified)),
+                    false,
+                    true,
+                    ctx,
+                )?;
+            }
+            let attached = script_env::with_mut(|env| {
+                if reading {
+                    env.modified_molecule_uids.remove(&uid);
+                }
+                let Some(object) = env.objects.iter_mut().find(|object| object.uid == uid) else {
+                    return false;
+                };
+                object.source = source.clone();
+                object.source_type = source_type.clone();
+                if reading {
+                    object.modified = false;
+                }
+                true
+            });
+            if attached {
+                script_cmds::push(ScriptCmd::SetObjectIoMetadata {
+                    uid,
+                    source,
+                    source_type,
+                    options,
+                });
+            }
+            Ok(())
+        }
+
+        fn read_script_handler_contents(this: &JsValue, ctx: &mut Context) -> JsResult<JsValue> {
             let class_name = this_string_prop(this, "_class", ctx);
             if handler_is_trajectory_reader(&class_name) {
                 return js_handler_read_trajectory(this, &class_name, ctx);
@@ -42433,7 +43064,7 @@ impl DesktopAppState {
                             load_model: handler_bool_prop(this, "loadmodel", false, ctx),
                             load_anisou: handler_bool_prop(this, "loadanisou", true, ctx),
                             load_alt_conf: handler_bool_prop(this, "loadaltconf", true, ctx),
-                            load_secstr: handler_bool_prop(this, "loadsecstr", false, ctx),
+                            load_secstr: handler_bool_prop(this, "loadsecstr", true, ctx),
                             auto_topo_gen: handler_bool_prop(this, "autoTopoGen", true, ctx),
                         };
                         cuemol_molstr::read_mmcif_str_with_options(&input, options)
@@ -42458,7 +43089,13 @@ impl DesktopAppState {
                     }
                     "GROFileReader" => cuemol_mdtools::read_gro_str(&input),
                     "PsfReader" => cuemol_mdtools::read_psf_str(&input),
-                    "AmberPrmtopReader" => cuemol_mdtools::read_amber_prmtop_str(&input),
+                    "AmberPrmtopReader" => {
+                        let mode = trajectory_io::amber_bond_mode(&this_string_prop(
+                            this, "bondmode", ctx,
+                        ))
+                        .map_err(|error| script_error(error.to_string()))?;
+                        cuemol_mdtools::read_amber_prmtop_str_with_bond_mode(&input, mode)
+                    }
                     _ => unreachable!(),
                 }
                 .map_err(|error| script_error(error.to_string()))?
@@ -42495,11 +43132,12 @@ impl DesktopAppState {
         ) -> JsResult<JsValue> {
             let target = script_handler_target(this, ctx)?;
             let target_scene = object_number_prop(&target, "uid", ctx)? as u64;
-            script_cmds::push(ScriptCmd::LoadScene {
-                class_name: this_string_prop(this, "_class", ctx),
-                path: this_string_prop(this, "path", ctx),
-                target_scene,
-            });
+            let class_name = this_string_prop(this, "_class", ctx);
+            let path = this_string_prop(this, "path", ctx);
+            with_flushed_script_app(ctx, None, |app| {
+                app.read_script_scene(&class_name, &path, target_scene, false)
+            })?
+            .map_err(|error| script_error(error.to_string()))?;
             Ok(JsValue::undefined())
         }
         fn js_scene_handler_write(
@@ -42508,13 +43146,16 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let target = script_handler_target(this, ctx)?;
-            script_cmds::push(ScriptCmd::WriteScene {
-                path: this_string_prop(this, "path", ctx),
-                scene_uid: object_number_prop(&target, "uid", ctx)? as u64,
-                version: this_string_prop(this, "version", ctx),
-                compress: handler_compress_mode_prop(this, "compress", 0, ctx)?,
-                base64: handler_bool_prop(this, "base64", false, ctx),
-            });
+            let path = this_string_prop(this, "path", ctx);
+            let scene_uid = object_number_prop(&target, "uid", ctx)? as u64;
+            let version = this_string_prop(this, "version", ctx);
+            let compress = handler_compress_mode_prop(this, "compress", 0, ctx)?;
+            let base64 = handler_bool_prop(this, "base64", false, ctx);
+            let embed_all = handler_bool_prop(this, "embedAll", false, ctx);
+            with_flushed_script_app(ctx, None, |app| {
+                app.write_script_scene(&path, scene_uid, version, compress, base64, embed_all)
+            })?
+            .map_err(|error| script_error(error.to_string()))?;
             Ok(JsValue::undefined())
         }
         fn js_scene_writer_set_default_opts(
@@ -42644,7 +43285,7 @@ impl DesktopAppState {
             let target = script_handler_target(this, ctx)?;
             let selection = matches!(
                 class_name.as_str(),
-                "PDBFileWriter" | "PQRFileWriter" | "XYZRFileWriter"
+                "PDBFileWriter" | "PQRFileWriter" | "XYZRFileWriter" | "SDFMolWriter"
             )
             .then(|| {
                 let value = iterator_object(this)?.get(js_string!("sel"), ctx)?;
@@ -42657,9 +43298,11 @@ impl DesktopAppState {
                     selection.as_ref(),
                 )
                 .into_bytes(),
-                "SDFMolWriter" => {
-                    write_sdf_string(&script_target_molecule(&target, ctx)?).into_bytes()
-                }
+                "SDFMolWriter" => cuemol_molstr::write_sdf_string_with_selection(
+                    &script_target_molecule(&target, ctx)?,
+                    selection.as_ref().unwrap_or(&Selector::All),
+                )
+                .into_bytes(),
                 "PQRFileWriter" => {
                     let mut writer = PqrFileWriter::new();
                     writer.set_selection(selection.clone());
@@ -42691,6 +43334,9 @@ impl DesktopAppState {
             script_handler_io(this, ctx)?
                 .write_bytes(&output)
                 .map_err(|error| script_error(error.to_string()))?;
+            if handler_bool_prop(this, "convToLink", false, ctx) {
+                record_script_handler_source(this, false, ctx)?;
+            }
             Ok(JsValue::undefined())
         }
         fn stream_handler_info_for_class(
@@ -42730,6 +43376,7 @@ impl DesktopAppState {
         fn make_script_stream_handler(
             class_name: &str,
             handler: &cuemol_molstr::StreamHandlerInfo,
+            reset_defaults: bool,
             ctx: &mut Context,
         ) -> JsValue {
             let writer_selection = matches!(
@@ -42891,20 +43538,36 @@ impl DesktopAppState {
                         .property(js_string!("loadmodel"), false, Attribute::all())
                         .property(js_string!("loadanisou"), true, Attribute::all())
                         .property(js_string!("loadaltconf"), true, Attribute::all())
-                        .property(js_string!("loadsecstr"), false, Attribute::all())
+                        .property(js_string!("loadsecstr"), !reset_defaults, Attribute::all())
                         .property(js_string!("autoTopoGen"), true, Attribute::all());
                 }
                 "SDFMolReader" => {
                     object
                         .property(js_string!("load_cmpd_id"), -1, Attribute::all())
                         .property(js_string!("load_as_chain"), false, Attribute::all())
-                        .property(js_string!("chain_name"), js_string!("A"), Attribute::all())
+                        .property(
+                            js_string!("chain_name"),
+                            if reset_defaults {
+                                js_string!("_")
+                            } else {
+                                js_string!("A")
+                            },
+                            Attribute::all(),
+                        )
                         .property(js_string!("resid_index"), 1, Attribute::all());
                 }
                 "MOL2MolReader" => {
                     object
                         .property(js_string!("load_cmpd_id"), -1, Attribute::all())
-                        .property(js_string!("chain_name"), js_string!("A"), Attribute::all())
+                        .property(
+                            js_string!("chain_name"),
+                            if reset_defaults {
+                                js_string!("_")
+                            } else {
+                                js_string!("A")
+                            },
+                            Attribute::all(),
+                        )
                         .property(js_string!("resid_index"), 1, Attribute::all());
                 }
                 "CCP4MapReader" => {
@@ -43008,7 +43671,7 @@ impl DesktopAppState {
                 .next()
                 .unwrap_or("InOutHandler")
                 .to_string();
-            Ok(make_script_stream_handler(&class_name, &handler, ctx))
+            Ok(make_script_stream_handler(&class_name, &handler, true, ctx))
         }
         fn js_symm_sg_names(
             _t: &JsValue,
@@ -46417,6 +47080,105 @@ impl DesktopAppState {
     }
 
     #[cfg(feature = "scripting")]
+    fn read_script_scene(
+        &mut self,
+        class_name: &str,
+        path: &str,
+        target_scene: u64,
+        set_camera: bool,
+    ) -> Result<()> {
+        let target_scene = if target_scene == 0 {
+            self.ensure_active_scene()
+        } else {
+            Uid::new(target_scene)
+        };
+        if class_name == "SceneXMLReader" {
+            self.load_qsc_file_with_view_setup(Path::new(&path), Some(target_scene), false)?;
+        } else if class_name == "PSEFileReader" {
+            self.active_scene = Some(target_scene);
+            let object_name = default_object_name(Path::new(&path));
+            self.load_pse_objects(target_scene, Path::new(&path), &object_name)?;
+        } else {
+            return Err(CueMolError::invalid_argument(format!(
+                "unknown scene reader {class_name}"
+            )));
+        }
+        if set_camera {
+            if let Some(camera) = self
+                .scene_manager()
+                .scene(target_scene)
+                .and_then(|scene| scene.camera_by_name("__current"))
+                .cloned()
+            {
+                let views: Vec<_> = self
+                    .command_manager
+                    .views()
+                    .iter()
+                    .filter(|view| view.scene_uid() == target_scene)
+                    .map(|view| view.uid())
+                    .collect();
+                self.apply_scene_visibility_settings(target_scene, camera.visibility_settings())?;
+                for uid in views {
+                    self.command_manager
+                        .view_mut(uid)
+                        .unwrap()
+                        .set_camera(&camera);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "scripting")]
+    fn write_script_scene(
+        &mut self,
+        path: &str,
+        scene_uid: u64,
+        version: String,
+        compress: i32,
+        base64: bool,
+        embed_all: bool,
+    ) -> Result<()> {
+        let scene_uid = if scene_uid == 0 {
+            self.ensure_active_scene()
+        } else {
+            Uid::new(scene_uid)
+        };
+        let options = GuiSceneSaveOptions {
+            embed_all,
+            version: match version.as_str() {
+                "QDF0" | "" => GuiQscVersion::Qdf0,
+                "QDF1" => GuiQscVersion::Qdf1,
+                "QDF2" => GuiQscVersion::Qdf2,
+                "QDF3" => GuiQscVersion::Qdf3,
+                _ => {
+                    return Err(CueMolError::invalid_argument(format!(
+                        "unsupported QSC version: {version}"
+                    )))
+                }
+            },
+            compression: match compress {
+                0 => GuiQscCompression::None,
+                1 => GuiQscCompression::Gzip,
+                3 => GuiQscCompression::Xz,
+                _ => return Err(CueMolError::invalid_argument("unsupported QSC compression")),
+            },
+            base64,
+        }
+        .normalized();
+        self.sync_morph_qsc_nodes(scene_uid)?;
+        self.sync_density_map_qsc_nodes(scene_uid)?;
+        self.sync_trajectory_qsc_nodes(scene_uid, embed_all, Path::new(&path).parent())?;
+        let (document, _) = self.scene_qsc_with_save_options(scene_uid, options)?;
+        fs::write(path, document)?;
+        self.scene_manager_mut()
+            .scene_mut(scene_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?
+            .set_qsc_options(Some(qsc_save_options_node(options)))?;
+        Ok(())
+    }
+
+    #[cfg(feature = "scripting")]
     fn apply_script_batch(
         &mut self,
         updated_runtime: ScriptRuntimeUpdate,
@@ -46464,11 +47226,16 @@ impl DesktopAppState {
                         }
                     }
                 }
+                if self.scene_manager().scene(Uid::new(state.uid)).is_some() {
+                    self.animation_runtimes
+                        .insert(Uid::new(state.uid), state.animation.clone());
+                }
             }
             self.command_manager_mut().replace_views(updated_views);
             for state in objects {
                 if let Some(object) = self.scene_manager_mut().object_mut(Uid::new(state.uid)) {
                     object.set_source(state.source);
+                    object.set_source_type(state.source_type);
                     object.set_ui_locked(state.locked);
                     object.set_ui_collapsed(state.ui_collapsed);
                     object.set_ui_order(state.ui_order);
@@ -46479,6 +47246,15 @@ impl DesktopAppState {
                     for mut renderer_state in state.renderers {
                         if let Some(renderer) = object.renderer_mut(Uid::new(renderer_state.uid)) {
                             renderer.set_visible(renderer_state.visible);
+                            let removed: Vec<_> = renderer
+                                .qsc_attrs()
+                                .keys()
+                                .filter(|key| !renderer_state.attributes.contains_key(*key))
+                                .cloned()
+                                .collect();
+                            for key in removed {
+                                renderer.remove_qsc_attr(&key);
+                            }
                             for (name, value) in renderer_state.attributes {
                                 renderer.set_qsc_attr(name, value);
                             }
@@ -47071,6 +47847,7 @@ impl DesktopAppState {
                     modified,
                     source,
                     alt_source,
+                    source_type,
                     xform,
                     selection,
                     default_color,
@@ -47083,6 +47860,7 @@ impl DesktopAppState {
                         object.set_ui_collapsed(ui_collapsed);
                         object.set_ui_order(ui_order);
                         object.set_source(source);
+                        object.set_source_type(source_type);
                         object.set_alt_source(alt_source);
                         object.set_xform_matrix(xform);
                         object.set_qsc_coloring_node(coloring);
@@ -47163,6 +47941,19 @@ impl DesktopAppState {
                             );
                         }
                     }
+                }
+                ScriptCmd::SetObjectIoMetadata {
+                    uid,
+                    source,
+                    source_type,
+                    options,
+                } => {
+                    self.set_script_object_io_metadata(
+                        Uid::new(uid),
+                        source,
+                        source_type,
+                        options,
+                    )?;
                 }
                 ScriptCmd::CreateObject {
                     target_scene,
@@ -47374,82 +48165,6 @@ impl DesktopAppState {
                             qsc_node: None,
                         });
                     }
-                }
-                ScriptCmd::LoadObjectCommand {
-                    target_scene,
-                    path,
-                    name,
-                    format,
-                } => {
-                    let scene_uid = Uid::new(target_scene);
-                    let path = Path::new(&path);
-                    let _ = if is_density_map_format(&format) {
-                        self.load_density_map(scene_uid, path, name, &format)
-                            .map(|_| ())
-                    } else if is_surface_format(&format) {
-                        self.load_surface_object(scene_uid, path, name, &format, None)
-                            .map(|_| ())
-                    } else if format == "qdflwobj" {
-                        self.load_lw_object(scene_uid, path, name)
-                    } else if is_desktop_extension_format(&format) {
-                        self.load_extension_object(scene_uid, path, name, &format)
-                            .map(|_| ())
-                    } else {
-                        self.load_object(scene_uid, path, name, &format).map(|_| ())
-                    };
-                }
-                ScriptCmd::LoadScene {
-                    class_name,
-                    path,
-                    target_scene,
-                } => {
-                    let target_scene = if target_scene == 0 {
-                        self.ensure_active_scene()
-                    } else {
-                        Uid::new(target_scene)
-                    };
-                    if class_name == "SceneXMLReader" {
-                        let _ = self.load_qsc_file_into(Path::new(&path), Some(target_scene));
-                    } else if class_name == "PSEFileReader" {
-                        self.active_scene = Some(target_scene);
-                        let object_name = default_object_name(Path::new(&path));
-                        let _ = self.load_pse_objects(target_scene, Path::new(&path), &object_name);
-                    }
-                }
-                ScriptCmd::WriteScene {
-                    path,
-                    scene_uid,
-                    version,
-                    compress,
-                    base64,
-                } => {
-                    let scene_uid = if scene_uid == 0 {
-                        self.ensure_active_scene()
-                    } else {
-                        Uid::new(scene_uid)
-                    };
-                    if let Some(scene) = self.scene_manager_mut().scene_mut(scene_uid) {
-                        let mut options = scene.qsc_options().cloned().unwrap_or_default();
-                        options.set_tag_name("qsc_opts");
-                        options.set_type_name("qsc_opts");
-                        if !version.is_empty() {
-                            options.set_str_attr("version", version);
-                        }
-                        options.set_str_attr(
-                            "compress",
-                            match compress {
-                                1 => "gzip",
-                                2 => "bzip2",
-                                3 => "xzip",
-                                _ => "none",
-                            },
-                        );
-                        options.set_str_attr("base64", base64.to_string());
-                        let _ = scene.set_qsc_options(Some(options));
-                    }
-                    let _ = self
-                        .scene_manager()
-                        .write_qsc_file(scene_uid, Path::new(&path));
                 }
                 ScriptCmd::CreateRenderer {
                     object_uid,
@@ -47921,6 +48636,10 @@ impl DesktopAppState {
                     scene.set_animation_node(Some(state.animation.to_ldom2_node()))?;
                 }
             }
+            if self.scene_manager().scene(Uid::new(state.uid)).is_some() {
+                self.animation_runtimes
+                    .insert(Uid::new(state.uid), state.animation);
+            }
         }
         Ok((log, selection))
     }
@@ -47972,6 +48691,8 @@ impl DesktopAppState {
             return;
         };
         scene.apply_undo_changes(&from.scene, &to.scene);
+        self.animation_runtimes.remove(&scene_uid);
+        self.animation_players.remove(&scene_uid);
         let mut views = self.command_manager().views().to_vec();
         apply_sequence_changes(
             &mut views,
@@ -48204,7 +48925,10 @@ impl DesktopAppState {
                     alt_source: node
                         .map(|node| node.str_attr("alt_src").to_string())
                         .unwrap_or_default(),
-                    source_type: surface.srctype.clone(),
+                    source_type: node
+                        .map(|node| node.str_attr("srctype").to_string())
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or_else(|| surface.srctype.clone()),
                     xform,
                     selection: String::new(),
                     coloring: None,
@@ -48237,7 +48961,10 @@ impl DesktopAppState {
                     alt_source: node
                         .map(|node| node.str_attr("alt_src").to_string())
                         .unwrap_or_default(),
-                    source_type: object.srctype.clone(),
+                    source_type: node
+                        .map(|node| node.str_attr("srctype").to_string())
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or_else(|| object.srctype.clone()),
                     xform: object.xform,
                     selection: String::new(),
                     coloring: None,
@@ -48340,10 +49067,8 @@ impl DesktopAppState {
                     active_renderer_uid: scene.active_renderer_uid().map(Uid::get),
                     active_view_uid: scene.active_view_uid().map(Uid::get),
                     cameras: scene.cameras().to_vec(),
-                    animation: scene
-                        .animation_node()
-                        .map(AnimMgr::from_ldom2_node)
-                        .transpose()
+                    animation: self
+                        .scene_animation(scene.uid())
                         .ok()
                         .flatten()
                         .unwrap_or_default(),
@@ -48480,7 +49205,7 @@ impl DesktopAppState {
             event_manager: cuemol_qsys::ScrEventManager::new(),
             view_input_config: self.script_view_input_config.clone(),
             mol_client_manager: cuemol_molclient::MolClientManager::new(),
-            stream_manager: StreamManager::new(),
+            async_readers: self.async_readers.clone(),
             scene_listeners: BTreeMap::new(),
             next_scene_listener_id: 0,
             event_listener: None,
@@ -48621,6 +49346,12 @@ fn coloring_for_scheme(
 /// (single-threaded GUI, so a thread-local is the simplest safe channel).
 #[cfg(feature = "scripting")]
 enum ScriptCmd {
+    SetObjectIoMetadata {
+        uid: u64,
+        source: String,
+        source_type: String,
+        options: LDom2Node,
+    },
     SetTrajectory {
         object_uid: u64,
         trajectory: GuiTrajectoryData,
@@ -48712,6 +49443,7 @@ enum ScriptCmd {
         modified: bool,
         source: String,
         alt_source: String,
+        source_type: String,
         xform: Matrix4,
         selection: String,
         default_color: Option<cuemol_gfx::SolidColor>,
@@ -48754,24 +49486,6 @@ enum ScriptCmd {
         expected_uid: u64,
         name: String,
         object: cuemol_lwview::LWObject,
-    },
-    LoadObjectCommand {
-        target_scene: u64,
-        path: String,
-        name: String,
-        format: String,
-    },
-    LoadScene {
-        class_name: String,
-        path: String,
-        target_scene: u64,
-    },
-    WriteScene {
-        path: String,
-        scene_uid: u64,
-        version: String,
-        compress: i32,
-        base64: bool,
     },
     CreateRenderer {
         object_uid: Option<u64>,
@@ -49010,7 +49724,7 @@ struct ScriptEnv {
     event_manager: cuemol_qsys::ScrEventManager,
     view_input_config: cuemol_qsys::ViewInputConfig,
     mol_client_manager: cuemol_molclient::MolClientManager,
-    stream_manager: StreamManager,
+    async_readers: script_reader::AsyncReaders,
     scene_listeners: BTreeMap<i32, (u64, boa_engine::JsObject)>,
     next_scene_listener_id: i32,
     event_listener: Option<boa_engine::JsObject>,
@@ -52234,10 +52948,11 @@ fn scene_qsc_save_options(scene: &cuemol_molstr::MolScene) -> GuiSceneSaveOption
     };
     GuiSceneSaveOptions {
         embed_all: false,
-        version: if node.str_attr("version").as_str() == "QDF1" {
-            GuiQscVersion::Qdf1
-        } else {
-            GuiQscVersion::Qdf0
+        version: match node.str_attr("version").as_str() {
+            "QDF1" => GuiQscVersion::Qdf1,
+            "QDF2" => GuiQscVersion::Qdf2,
+            "QDF3" => GuiQscVersion::Qdf3,
+            _ => GuiQscVersion::Qdf0,
         },
         compression: match node.str_attr("compress").as_str() {
             "gzip" => GuiQscCompression::Gzip,
@@ -52313,6 +53028,12 @@ fn rewrite_qsc_data_chunks(
                     GuiQscVersion::Qdf0 => qdf0,
                     GuiQscVersion::Qdf1 => {
                         cuemol_qsys::encode_qdf0_bytes(&qdf0, 1, options.qdf_encoding())?
+                    }
+                    GuiQscVersion::Qdf2 => {
+                        cuemol_qsys::encode_qdf0_bytes(&qdf0, 2, options.qdf_encoding())?
+                    }
+                    GuiQscVersion::Qdf3 => {
+                        cuemol_qsys::encode_qdf0_bytes(&qdf0, 3, options.qdf_encoding())?
                     }
                 };
                 output.extend_from_slice(&encoded);
@@ -53472,17 +54193,13 @@ fn animation_runtime_renderer(
 
 fn apply_animation_renderer_node(node: &mut LDom2Node, renderer: &cuemol_qsys::Renderer) {
     set_qsc_bool_attr(node, "visible", renderer.visible(), true);
-    set_qsc_f64_attr(node, "alpha", renderer.alpha(), 1.0);
-    if renderer.xform_matrix() == Matrix4::IDENTITY {
-        node.remove_child("xformMat");
-    } else {
-        node.set_str_attr("xformMat", renderer.xform_matrix().to_script_string());
+    for name in ["alpha", "default_alpha", "xformMat"] {
+        if renderer.property_str(name).is_none() {
+            node.remove_child(name);
+        }
     }
     for (name, value) in renderer.properties() {
-        if matches!(
-            name.as_str(),
-            "visible" | "alpha" | "default_alpha" | "xformMat"
-        ) {
+        if name == "visible" {
             continue;
         }
         node.set_str_attr(name, value);
@@ -54416,11 +55133,37 @@ fn read_density_map(path: &Path, format: &str) -> Result<DensityMap> {
 }
 
 fn read_density_map_bytes(bytes: &[u8], format: &str) -> Result<DensityMap> {
+    read_density_map_bytes_with_options(bytes, format, None)
+}
+
+fn read_density_map_bytes_with_options(
+    bytes: &[u8],
+    format: &str,
+    options: Option<&LDom2Node>,
+) -> Result<DensityMap> {
+    let number = |key: &str, default: f64| {
+        options
+            .and_then(|node| node.str_attr(key).as_str().parse().ok())
+            .unwrap_or(default)
+    };
+    let boolean = |key: &str, default: bool| {
+        options
+            .filter(|node| !node.str_attr(key).is_empty())
+            .map(|node| node.bool_attr(key))
+            .unwrap_or(default)
+    };
     if format == "qdfmap" {
         return cuemol_xtal::read_qdf_denmap_bytes(bytes);
     }
     if format == "mtzmap" {
         let mut reader = Mtz2MapReader::new();
+        if let Some(options) = options {
+            reader.set_resolution(number("resolution", -1.));
+            reader.set_grid_size(number("gridsize", 0.33));
+            reader.set_column_f(options.str_attr("clmn_F").to_string());
+            reader.set_column_phi(options.str_attr("clmn_PHI").to_string());
+            reader.set_column_weight(options.str_attr("clmn_WT").to_string());
+        }
         reader.read_bytes(bytes)?;
         return reader.build_density_map();
     }
@@ -54429,11 +55172,27 @@ fn read_density_map_bytes(bytes: &[u8], format: &str) -> Result<DensityMap> {
         return Ok(density_map_from_electrostatic_map(&potential));
     }
     match format {
-        "apbs" => Ok(DensityMap::from_continuous_grid(read_opendx_str(
-            std::str::from_utf8(bytes)
-                .map_err(|error| CueMolError::parse(format!("OpenDX map is not UTF-8: {error}")))?,
-        )?)),
-        "ccp4map" => Ccp4MapReader::new().read_density_map_bytes(bytes),
+        "apbs" => {
+            let mut reader = cuemol_surface::OpenDxPotReader::new();
+            reader.set_smooth(number("smooth", -1.));
+            reader
+                .read_str(std::str::from_utf8(bytes).map_err(|error| {
+                    CueMolError::parse(format!("OpenDX map is not UTF-8: {error}"))
+                })?)
+                .map(|map| density_map_from_electrostatic_map(&map))
+        }
+        "ccp4map" => {
+            let mut reader = Ccp4MapReader::new();
+            reader.set_normalize(boolean("normalize", false));
+            reader.set_truncate_min(boolean("truncate_min", false));
+            reader.set_min(number("min", 0.));
+            reader.set_truncate_max(boolean("truncate_max", false));
+            reader.set_max(number("max", 5.));
+            reader.set_subsample(number("subsample", 1.).max(1.) as usize);
+            reader.set_max_voxels(number("max_voxels", 0.));
+            reader.set_use_header_stats(boolean("use_header_stats", true));
+            reader.read_density_map_bytes(bytes)
+        }
         "xplormap" => XplorMapReader::new().read_density_map_str(
             std::str::from_utf8(bytes)
                 .map_err(|error| CueMolError::parse(format!("XPLOR map is not UTF-8: {error}")))?,
@@ -54442,7 +55201,7 @@ fn read_density_map_bytes(bytes: &[u8], format: &str) -> Result<DensityMap> {
         "mmcifmap" => {
             let input = std::str::from_utf8(bytes)
                 .map_err(|error| CueMolError::parse(format!("mmCIF map is not UTF-8: {error}")))?;
-            density_map_from_cif(input, -1.0, 0.33)
+            density_map_from_cif(input, number("resolution", -1.0), number("gridsize", 0.33))
         }
         other => Err(CueMolError::invalid_argument(format!(
             "unknown density map format {other}"
@@ -55829,13 +56588,18 @@ mod tests {
                 let api = apis.get(*name)?;
                 let mut values = BTreeMap::new();
                 inherited_defaults(name, &apis, &mut values);
+                if *name == "MmcifMolReader" {
+                    // The C++ constructor overrides the QIF declaration.
+                    values.insert("loadsecstr".to_string(), "true".to_string());
+                }
+                if matches!(*name, "MOL2MolReader" | "SDFMolReader") {
+                    values.insert("chain_name".to_string(), "\"A\"".to_string());
+                }
                 let values = values
                     .into_iter()
                     .filter(|(property, _)| {
                         !((*name == "Color" && property == "alpha")
-                            || (*name == "JctTable" && property == "type")
-                            || (matches!(*name, "MOL2MolReader" | "SDFMolReader")
-                                && property == "chain_name"))
+                            || (*name == "JctTable" && property == "type"))
                     })
                     .map(|(property, value)| {
                         let kind = if value == "true" || value == "false" {
@@ -58098,10 +58862,10 @@ end_header
             qsc_path = qsc_path.to_string_lossy(),
         );
         let (log, _) = app.run_script_js(&source).unwrap();
-        assert_eq!(log, "result=qsc_xml:loaded-by-command:0:true\n");
+        assert_eq!(log, "result=qsc_xml:number_chain_atomintr1.qsc:1:true\n");
         let scene_uid = app.active_scene().unwrap();
         let scene = app.scene_manager().scene(scene_uid).unwrap();
-        assert_eq!(scene.name(), "loaded-by-command");
+        assert_eq!(scene.name(), "number_chain_atomintr1.qsc");
         assert!(!scene.objects().is_empty());
     }
 
@@ -59672,7 +60436,8 @@ end_header
                  manager.goTime(time(750), cuemol.getView({view})); \
                  var elapsed = manager.elapsed.millisec; manager.stop(); \
                  var frames = manager.setupRender(time(0), time(1000), 2); \
-                 var beforeFrame = manager.frameno; manager.writeFrame({{}}); \
+                 var beforeFrame = manager.frameno; var writer = cuemol.StlSceneExporter(); \
+                 manager.beginFrame(writer); manager.endFrame(writer); \
                  print('manager=' + manager.length.millisec + ':' + manager.startcam + ':' + \
                        manager.loop + ':' + running + ':' + paused + ':' + manager.playState + ':' + \
                        elapsed + ':' + frames + ':' + beforeFrame + ':' + manager.frameno + ':' + \
@@ -59686,7 +60451,7 @@ end_header
             "animation object log: {log:?}"
         );
         assert!(
-            log.contains("manager=2000:overview:true:play:pause:stop:750:3:0:1:true:true"),
+            log.contains("manager=2000:overview:true:play:pause:play:750:3:0:1:true:true"),
             "animation manager log: {log:?}"
         );
 
@@ -60200,6 +60965,30 @@ end_header
         assert!(!app.density_map_summary(map_uid).unwrap().renderers[0].visible);
         assert!(!app.surface_summary(surface_uid).unwrap().renderers[0].visible);
         assert!(!app.lw_object_summary(lw_uid).unwrap().renderers[0].visible);
+        app.stop_scene_animation(scene_uid, view_uid).unwrap();
+        let map = &app.density_map_summary(map_uid).unwrap().renderers[0];
+        assert!(map.visible);
+        assert_eq!(map.alpha, 1.0);
+        assert!(!map.specific.contains_key("alpha"));
+        assert!(!map.specific.contains_key("xformMat"));
+        let surface = &app.surface_summary(surface_uid).unwrap().renderers[0];
+        assert!(surface.visible);
+        assert_eq!(surface.alpha, 1.0);
+        assert!(!surface.specific.contains_key("alpha"));
+        assert!(!surface.specific.contains_key("xformMat"));
+        let lightweight = &app.lw_object_summary(lw_uid).unwrap().renderers[0];
+        assert!(lightweight.visible);
+        assert_eq!(lightweight.alpha, 1.0);
+        assert_eq!(
+            app.scene_manager()
+                .scene(scene_uid)
+                .unwrap()
+                .loaded_lw_object(lw_uid)
+                .unwrap()
+                .renderers[0]
+                .xform,
+            Matrix4::IDENTITY
+        );
     }
 
     #[cfg(feature = "scripting")]
@@ -69136,6 +69925,16 @@ attribute \"dep\" string \"positions\"
             assert_eq!(log, "-0.25:1.25\n");
             let map = scripted.density_maps.values().next().unwrap();
             assert_eq!(map.map.byte_values(), &[0, 42, 255]);
+            let qsc = path.with_extension("qsc");
+            scripted.run_script_js(&format!(
+                "var writer = cuemol.SceneXMLWriter(); writer.attach(scene); writer.path = {qsc:?}; writer.write();",
+                qsc = qsc.to_string_lossy(),
+            )).unwrap();
+            let mut restored = DesktopAppState::new();
+            restored.open_path(&qsc).unwrap();
+            let map = restored.density_maps.values().next().unwrap();
+            assert_eq!(map.map.byte_values(), &[0, 42, 255]);
+            fs::remove_file(qsc).unwrap();
         }
 
         let mut app = DesktopAppState::new();

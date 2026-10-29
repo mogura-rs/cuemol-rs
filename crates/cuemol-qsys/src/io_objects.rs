@@ -302,11 +302,12 @@ impl Default for ObjWriter {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SceneExporter {
     handler: InOutHandler,
     client_scene: Option<Uid>,
     camera_name: String,
+    camera_object: Option<Camera>,
     width: i32,
     height: i32,
     write_count: usize,
@@ -327,6 +328,7 @@ impl SceneExporter {
             ),
             client_scene: None,
             camera_name: String::new(),
+            camera_object: None,
             width: 0,
             height: 0,
             write_count: 0,
@@ -395,6 +397,14 @@ impl SceneExporter {
 
     pub fn set_camera(&mut self, value: impl Into<String>) {
         self.set_camera_name(value);
+    }
+
+    pub fn camera_object(&self) -> Option<&Camera> {
+        self.camera_object.as_ref()
+    }
+
+    pub fn set_camera_object(&mut self, camera: Option<Camera>) {
+        self.camera_object = camera;
     }
 
     pub fn width(&self) -> i32 {

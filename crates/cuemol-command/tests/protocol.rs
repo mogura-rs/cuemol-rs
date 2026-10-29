@@ -3,6 +3,76 @@ use cuemol_desktop_core::DesktopAppState;
 use cuemol_qsys::Camera;
 use serde_json::{json, Value};
 
+#[test]
+#[cfg(feature = "scripting")]
+fn script_playback_pauses_and_restores_renderer_transform_through_protocol() {
+    let mut state = DesktopAppState::new();
+    state.open_bytes("animation.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+    let scene = state.active_scene().unwrap();
+    let object = state.active_object_summaries()[0].uid;
+    let renderer = state
+        .new_renderer(scene, object, "cpk", "affine")
+        .unwrap()
+        .result_renderer;
+    let mut camera = Camera::new();
+    let mut protocol = Protocol::without_history();
+    request(
+        &mut protocol,
+        &mut state,
+        &mut camera,
+        "initialize",
+        json!({}),
+    );
+    call(
+        &mut protocol,
+        &mut state,
+        &mut camera,
+        "execute_script",
+        json!({"source":format!(
+        "function time(ms) {{var t=cuemol.TimeValue();t.millisec=ms;return t;}} \
+         cuemol.getObject({}).name='animated'; \
+         var manager=scene.getAnimMgr();manager.clear();manager.length=time(10000);manager.loop=true; \
+         var motion=cuemol.RendXformAnim();motion.rend='animated/affine'; \
+         motion.end_tran=cuemol.Vector('(6,0,0,0)');motion.end=time(10000);manager.append(motion); \
+         manager.start(cuemol.getView(scene.activeViewID));",object.get())}),
+    );
+    state
+        .advance_scene_animation_by(scene, std::time::Duration::from_millis(1500))
+        .unwrap();
+    call(
+        &mut protocol,
+        &mut state,
+        &mut camera,
+        "execute_script",
+        json!({"source":"scene.getAnimMgr().pause();"}),
+    );
+    let paused = state
+        .scene_manager()
+        .object(object)
+        .unwrap()
+        .renderer(renderer)
+        .unwrap()
+        .xform_matrix();
+    assert_ne!(paused, cuemol_core::Matrix4::IDENTITY);
+    call(
+        &mut protocol,
+        &mut state,
+        &mut camera,
+        "animate",
+        json!({"action":"stop"}),
+    );
+    assert_eq!(
+        state
+            .scene_manager()
+            .object(object)
+            .unwrap()
+            .renderer(renderer)
+            .unwrap()
+            .xform_matrix(),
+        cuemol_core::Matrix4::IDENTITY
+    );
+}
+
 fn request(
     protocol: &mut Protocol,
     state: &mut DesktopAppState,
