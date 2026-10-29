@@ -147,6 +147,11 @@ def main():
                           wheel_changed_label_pixels=True)
         except BaseException as error:
             report["error"] = str(error)
+            if "capture" in locals():
+                try:
+                    capture("failure.png")
+                except Exception as capture_error:
+                    report["capture_error"] = str(capture_error)
             raise
         finally:
             (work / "result.json").write_text(json.dumps(report, indent=2) + "\n")

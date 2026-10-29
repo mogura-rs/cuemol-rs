@@ -103,9 +103,9 @@ def main():
     env = {key: value for key, value in os.environ.items() if not key.startswith('CUEMOL_')}
     env.update(CUEMOL_CONFIG_DIR=str(config), CUEMOL_CACHE_DIR=str(work / 'cache'))
 
-    def call(name, arguments=None):
+    def call(name, arguments=None, timeout=10):
         raw = subprocess.check_output([str(binary), 'mcp', 'call', name, json.dumps(arguments or {})],
-                                      cwd=work, env=env, text=True, stderr=subprocess.PIPE, timeout=10)
+                                      cwd=work, env=env, text=True, stderr=subprocess.PIPE, timeout=timeout)
         outer = json.loads(raw)
         result = json.loads(outer['result']['content'][0]['text'])
         if not result['ok']:
@@ -151,8 +151,8 @@ def main():
             if colored < 100:
                 raise RuntimeError(f'The window contains too few colored pixels: {colored}')
 
-            def script(source):
-                return call('execute_script', {'source': source})
+            def script(source, timeout=10):
+                return call('execute_script', {'source': source}, timeout=timeout)
 
             def label_pixels():
                 image = capture()
@@ -195,12 +195,32 @@ def main():
                 wait_for(lambda: mask if (mask := label_pixels()) is not None
                          and ImageChops.difference(multiline, mask).getbbox() is None else None)
             capture('font-multiline.png')
+            python_source = """
+import json
+import cuemol as cm
+from cuemol import cmd, fileio, logging, mol_util, net_fetch, renderer, scene_util
+from cuemol.undo_txn import UndoTxn
+objects = json.loads(cm.scene().getObjectTreeJSON())
+molecule = cm.obj(objects[0]['ID'])
+assert isinstance(molecule, cm.getWrpClass('MolCoord'))
+assert len(list(mol_util.AtomIter(molecule))) == 3
+assert len(list(mol_util.ResidIter(molecule))) == 1
+fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
+                  {'sel': cm.sel('name O1', molecule.scene_uid)})
+"""
+            (work / 'python helper output.pdb').unlink(missing_ok=True)
+            script(f"getService('PythonBridge').runString({json.dumps(python_source)});", timeout=60)
+            exported = (work / 'python helper output.pdb').read_text().splitlines()
+            atoms = [line for line in exported if line.startswith(('ATOM  ', 'HETATM'))]
+            if len(atoms) != 1 or atoms[0][12:16].strip() != 'O1':
+                raise RuntimeError('Python helper selection did not export exactly the oxygen atom')
             report.update(ok=True, window=bounds, atoms=state['objects'][0]['atoms'],
                           rotation_before=before['rotation'], rotation_after=rotated['rotation'],
                           zoom_before=rotated['zoom'], zoom_after=zoomed['zoom'],
                           changed_pixels=changed, colored_pixels=colored,
                           font_family_pixels_changed=True, font_style_case_equal=True,
                           font_line_endings_equal=True,
+                          python_helpers=True,
                           font_pixels=styled.histogram()[255])
             print(json.dumps(report), flush=True)
         except BaseException as error:

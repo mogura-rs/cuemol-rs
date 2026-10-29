@@ -30,7 +30,7 @@ jobs:
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
       - name: Build the tagged Tauri source and fixture CLI
         working-directory: .cache/tauri-source
-        run: cargo build --locked --release -p cuemol-desktop -p cuemol-cli --features cuemol-desktop/tauri-gui
+        run: cargo build --locked --release -p cuemol-desktop -p cuemol-cli --features cuemol-desktop/tauri-gui,cuemol-cli/scripting
       - name: Check presented pixels and OS input
         run: |
           mkdir -p .cache/tauri-gui-check
