@@ -1215,3 +1215,76 @@ test('browser PyMOL import preserves molecular representations and saved camera'
   }).toBeGreaterThan(100);
   await page.screenshot({path:testInfo.outputPath('pymol-import.png')});
 });
+
+for (const backend of ['webgl','webgpu']) {
+  test(`stereo ${backend} displays both eyes, swaps them, and picks their labels`,async({page},testInfo)=>{
+    const errors=[];page.on('pageerror',error=>errors.push(error.message));
+    await page.goto(backend==='webgpu'?'./':'./?renderer=webgl');
+    await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId),{timeout:60000}).toBeGreaterThan(0);
+    const qsc=`<scene bgcolor="black"><object type="MolCoord" name="stereo" src="datachunk:00000" srctype="pdb"><renderer type="cpk" name="sphere" defaultcolor="#ff00ff"/></object><camera name="__current" center="(0,0,0)" zoom="12" slab="50" distance="100" stereoMode="para" stereoDist="20" centerMark="none"/></scene>
+========== End of XML ==========
+==========START datachunk:00000==========
+HETATM    1  C1  LIG A   1       0.000   0.000   3.000  1.00 10.00           C
+END
+==========END datachunk:00000==========
+`;
+    await load(page,'stereo.qsc',Buffer.from(qsc));
+    await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Loaded stereo.qsc');
+    const rect=await page.evaluate(()=>window.cuemol.status().ui.rects.Viewport);
+    const pixels=async()=>{
+      const png=PNG.sync.read(await page.screenshot({clip:{x:rect[0],y:rect[1],width:rect[2],height:rect[3]}}));
+      const halves=[{count:0,x:0,y:0},{count:0,x:0,y:0}];
+      for(let y=0;y<png.height;y++)for(let x=0;x<png.width;x++){
+        const i=4*(y*png.width+x),[r,g,b]=png.data.subarray(i,i+3);
+        if(r>100&&b>100&&g<70){const h=halves[x<Math.floor(png.width/2)?0:1];h.count++;h.x+=x;h.y+=y;}
+      }
+      return halves.map(h=>({count:h.count,x:h.x/h.count,y:h.y/h.count}));
+    };
+    await expect.poll(async()=>(await pixels()).map(h=>h.count).every(n=>n>300)).toBe(true);
+    const parallel=await pixels();
+    const leftOffset=parallel[0].x-rect[2]/4,rightOffset=parallel[1].x-3*rect[2]/4;
+    expect(Math.abs(leftOffset)).toBeGreaterThan(10);
+    expect(Math.abs(leftOffset+rightOffset)).toBeLessThan(3);
+    await call(page,'set_node_prop',{nodeType:'view',prop:'stereoMode',value:'cross'});
+    await expect.poll(async()=>Math.abs((await pixels())[0].x-(rect[2]/4-leftOffset))).toBeLessThan(3);
+    await call(page,'set_node_prop',{nodeType:'view',prop:'swapStereoEyes',value:'true'});
+    await expect.poll(async()=>Math.abs((await pixels())[0].x-parallel[0].x)).toBeLessThan(2);
+    for (let i=0;i<2;i++) {
+      // Separate single clicks beyond the reference double-click interval.
+      if(i===1)await page.waitForTimeout(550);
+      const point=parallel[i];
+      await page.mouse.move(rect[0]+point.x,rect[1]+point.y);
+      await expect.poll(()=>page.evaluate(()=>window.cuemol.status().ui.navigation.hover?.index)).toBe(0);
+      await page.mouse.click(rect[0]+point.x,rect[1]+point.y);
+      await expect.poll(()=>page.evaluate(()=>window.cuemol.status().ui.navigation.labels)).toBe(i===0?1:0);
+    }
+    await page.mouse.move(0,0);
+    const object=(await page.evaluate(()=>window.cuemol.status())).scene.objects[0].id;
+    const labeled=await call(page,'set_atom_labels',{objId:object,selection:'aid 1',format:'STEREO'});
+    const labelId=JSON.parse(labeled.message).rendererId;
+    await call(page,'execute_script',{source:`var r=cuemol.getRenderer(${labelId});r.label_on_top=true;r.font_size=24;r.color=cuemol.Color('#00ff00');r.dispx=30;r.dispy=0;`});
+    await expect.poll(async()=>{
+      const png=PNG.sync.read(await page.screenshot({clip:{x:rect[0],y:rect[1],width:rect[2],height:rect[3]}}));
+      const count=[0,0];for(let y=0;y<png.height;y++)for(let x=0;x<png.width;x++){
+        const i=4*(y*png.width+x);if(png.data[i+1]>100&&png.data[i]<80&&png.data[i+2]<80)count[x<png.width/2?0:1]++;
+      }return count.every(n=>n>20);
+    }).toBe(true);
+    const tool=await page.evaluate(()=>window.cuemol.status().ui.rects['Rect Select']);
+    await page.mouse.click(tool[0]+tool[2]/2,tool[1]+tool[3]/2);
+    const point=parallel[1];await page.mouse.move(rect[0]+point.x-10,rect[1]+point.y-10);await page.mouse.down();
+    await page.mouse.move(rect[0]+point.x+10,rect[1]+point.y+10,{steps:5});await page.mouse.up();
+    await expect.poll(()=>page.evaluate(()=>window.cuemol.status().selection)).toBe('aid 1');
+    await page.mouse.move(0,0);await page.screenshot({path:testInfo.outputPath('stereo.png')});
+    await call(page,'set_render_settings',{settings:'umbreon.useGI=false; umbreon.aoSamples=0; umbreon.supersample=1; umbreon.denoise=None'});
+    const rendered=await call(page,'get_screenshot',{width:193,height:96});
+    const cpu=PNG.sync.read(Buffer.from(JSON.parse(rendered.message)._image,'base64'));
+    const counts=[0,0],centers=[0,0];
+    for(let y=0;y<cpu.height;y++)for(let x=0;x<cpu.width;x++){
+      const i=4*(y*cpu.width+x),[r,g,b]=cpu.data.subarray(i,i+3);
+      if(r>100&&b>100&&g<70){const eye=x<96?0:1;counts[eye]++;centers[eye]+=x;}
+    }
+    expect(counts.every(n=>n>80)).toBe(true);
+    expect(Math.sign(centers[0]/counts[0]-48)).toBe(Math.sign(leftOffset));
+    expect(errors).toEqual([]);
+  });
+}

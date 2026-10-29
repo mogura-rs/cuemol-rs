@@ -351,7 +351,8 @@ pub fn options(
     (command, rect)
 }
 
-pub fn feedback(
+#[allow(clippy::too_many_arguments)]
+fn feedback(
     ui: &Ui,
     state: &DesktopAppState,
     navigation: &Navigation,
@@ -359,6 +360,7 @@ pub fn feedback(
     atoms: &[cuemol_render::RenderAtom],
     mvp: [[f32; 4]; 4],
     rect: Rect,
+    gpu_highlight: bool,
 ) {
     let pointer = ui.input(|i| i.pointer.hover_pos()).unwrap_or(rect.center());
     let screen = |hit: AtomHit| {
@@ -377,7 +379,7 @@ pub fn feedback(
             .map(|p| rect.min + egui::vec2(p[0] as f32, p[1] as f32))
             .min_by(|a, b| a.distance_sq(pointer).total_cmp(&b.distance_sq(pointer)))
     };
-    let painter = ui.painter();
+    let painter = ui.painter().with_clip_rect(rect);
     for hit in &navigation.picks {
         if let Some(p) = screen(*hit) {
             for d in [egui::vec2(7., 0.), egui::vec2(0., 7.)] {
@@ -390,9 +392,7 @@ pub fn feedback(
     }
     if let Some(hit) = hover {
         if let (Some(p), Ok(text)) = (screen(hit), hit.description(state)) {
-            if state.config_value("view_input:hover-highlight") != "false"
-                && !state.resolved_view_input(false).gpu_pick()
-            {
+            if state.config_value("view_input:hover-highlight") != "false" && !gpu_highlight {
                 painter.circle_stroke(p, 7., Stroke::new(2., Color32::from_rgb(255, 210, 70)));
             }
             let font = egui::FontId::proportional(12.);
@@ -409,7 +409,7 @@ pub fn feedback(
 }
 
 pub fn annotations(ui: &Ui, state: &DesktopAppState, mvp: [[f32; 4]; 4], rect: Rect) {
-    let painter = ui.painter();
+    let painter = ui.painter().with_clip_rect(rect);
     let color = |text: &str| {
         let value = text.trim_start_matches('#');
         if value.len() == 6 {
@@ -438,5 +438,71 @@ pub fn annotations(ui: &Ui, state: &DesktopAppState, mvp: [[f32; 4]; 4], rect: R
         } else {
             painter.line_segment([a, b], stroke);
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn feedback_camera(
+    ui: &Ui,
+    state: &DesktopAppState,
+    navigation: &Navigation,
+    hover: Option<AtomHit>,
+    atoms: &[cuemol_render::RenderAtom],
+    camera: &cuemol_qsys::Camera,
+    swap: bool,
+    rect: Rect,
+) {
+    for eye in
+        cuemol_qsys::stereo::viewports(camera, [rect.width() as f64, rect.height() as f64], swap)
+    {
+        let [x, y, w, h] = eye.rect.map(|v| v as f32);
+        let region = Rect::from_min_size(rect.min + egui::vec2(x, y), egui::vec2(w, h));
+        let mvp = cuemol_desktop_core::projection::camera_mvp(&eye.camera, eye.aspect());
+        annotations(ui, state, mvp, region);
+        let hover = hover.filter(|_| {
+            ui.input(|i| i.pointer.hover_pos())
+                .is_some_and(|p| region.contains(p))
+        });
+        let gpu_highlight = state.resolved_view_input(false).gpu_pick()
+            && camera.stereo_mode() == cuemol_qsys::StereoMode::None;
+        feedback(
+            ui,
+            state,
+            navigation,
+            hover,
+            atoms,
+            mvp,
+            region,
+            gpu_highlight,
+        );
+    }
+}
+
+pub fn center_mark(
+    ui: &Ui,
+    state: &DesktopAppState,
+    camera: &cuemol_qsys::Camera,
+    swap: bool,
+    rect: Rect,
+) {
+    let painter = ui.painter().with_clip_rect(rect);
+    for line in cuemol_desktop_core::stereo::center_mark_lines(
+        camera,
+        [rect.width(), rect.height()],
+        swap,
+        state.active_background_color().unwrap_or([0., 0., 0., 1.]),
+    ) {
+        let color = if line.color == "#202020" {
+            Color32::from_gray(32)
+        } else {
+            Color32::from_gray(224)
+        };
+        painter.line_segment(
+            [
+                rect.min + egui::vec2(line.x1, line.y1),
+                rect.min + egui::vec2(line.x2, line.y2),
+            ],
+            Stroke::new(line.width, color),
+        );
     }
 }

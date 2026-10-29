@@ -1333,8 +1333,8 @@ serialized attributes. Reset-all preserves names, styles and group membership.
 
 View command writes now update camera and view state, including stereo settings,
 center marks and input momentum. Unknown view properties and read-only values
-return errors. This verifies state routing; stereo display is being audited
-separately. `create_symmetry_copy` now uses the matrix API's one-based indices.
+return errors. Stereo display is covered by the subsequent audit below.
+`create_symmetry_copy` now uses the matrix API's one-based indices.
 Atom-label commands validate the shared format language before mutation and
 store live formats, so later coordinate/atom-property edits remain reflected.
 
@@ -1354,8 +1354,52 @@ Two byte-loader tests check QDF dispatch, surface geometry after embedded reload
 and equality with the native PyMOL import. Four rebuilt-browser cases pass,
 including measured surface-width changes and opacity restoration, PyMOL pixels,
 gradient identity and capped map coloring. Clippy completes with existing warnings;
-the warning in the new property helper was corrected. The complete browser suite
-is rerun after these focused checks.
+the warning in the new property helper was corrected. The subsequent complete
+browser rerun passes all 56 cases.
+
+### Stereo display, export and view synchronization
+
+Stored stereo properties previously left the actual viewport in mono. The shared
+camera helper now follows `GUIView::setUpModelMat`: each eye rotates around the
+view center by half the angular separation, in degrees. Parallel/cross modes,
+eye swapping and odd viewport widths share this calculation in native, browser,
+Tauri, CPU rendering and offscreen color/depth capture. Both eyes reuse scene
+geometry but retain independent GPU uniforms, volume inputs and AO/AA state.
+CPU filters, NPR and native/browser OIDN process each eye independently before
+joining the rows, including the public prepared-OIDN API.
+
+Labels use each eye's projection and depth, with clipping at the seam. Point and
+region picking use the same eye cameras and deduplicate atoms selected in both
+halves. Stereo uses CPU picking; GPU picking remains available in mono. View
+options survive tab inheritance and activation, while console-script camera
+changes now reach the native viewport. Tauri scene/tab changes restore their own
+eye-order and momentum flags. The legacy Umbreon exporter also uses the actual
+scene background instead of a fixed gray value.
+
+Four actual Metal tests compare both halves with independently rendered eyes,
+including perspective, volumes, labels, depth, supersampling, eye swapping and
+an odd image width. Four command tests cover label anchors, both-eye picks,
+deduplicated regions, script hits, view inheritance and the configured Umbreon
+export. The CPU regression compares RGBA output after A-trous, OIDN and NPR,
+and checks cancellation. The Tauri tab regression checks inheritance and reset
+of eye order and momentum.
+
+The headless workspace run passes 1,236 tests across 100 executables. Separate
+scripting-enabled runs pass 47 command and 230 shared-core tests with the
+reference checkout present. Native GUI tests pass 168 cases, and Tauri passes
+144 ordinary cases. Actual Linux GUI checks pass label toggles, residue/range
+selection, measurements, lasso, bond edits, undo and affine geometry; both eye
+centers also accept clicks after parallel/cross switching and eye swapping.
+The 56 existing browser cases and two additional WebGL/WebGPU cases pass.
+The stereo cases inspect both image halves, toggled labels, region selection,
+CPU image export and eye order. Clippy completes with existing style warnings.
+
+The shared center mark draws a cross or three rotated axes in each eye. It uses
+a contrasting gray line instead of the reference OpenGL invert blend. Hardware
+quad-buffer stereo remains unavailable and reports a false capability; selecting
+that mode produces mono. The single-point `View.projToScreen` API retains the
+reference's central, full-width projection; interactive stereo picking does not
+use that ambiguous projection.
 
 ### Documentation reconciled with implementation
 

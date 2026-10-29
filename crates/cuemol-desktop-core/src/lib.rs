@@ -4,6 +4,10 @@ pub use property_access::auxiliary_property_readonly;
 mod density_view;
 mod map_surface;
 pub mod picking;
+pub mod projection;
+pub mod stereo;
+mod view_state;
+pub use view_state::GuiViewOptions;
 #[cfg(test)]
 mod transform_tests;
 pub use density_view::DensityViewSync;
@@ -1145,6 +1149,7 @@ pub struct GuiAtomLabel {
     pub anchor: [f32; 2],
     pub depth: f32,
     pub on_top: bool,
+    pub clip: Option<[f32; 4]>,
 }
 
 /// A projected screen-space line for renderers whose width is defined in pixels.
@@ -1198,6 +1203,7 @@ impl GuiAtomLabel {
             anchor: style.anchor,
             depth: 0.,
             on_top: style.on_top,
+            clip: None,
         }
     }
 }
@@ -7890,6 +7896,7 @@ impl DesktopAppState {
         name: impl Into<String>,
         inherited_camera: Option<&cuemol_qsys::Camera>,
     ) -> Result<Uid> {
+        let options = inherited_camera.map(|_| self.active_view_options());
         let view_uid = self.command_manager.new_view_command(scene_uid)?;
         let view = self
             .command_manager
@@ -7900,6 +7907,9 @@ impl DesktopAppState {
         }
         view.set_name(name);
         self.active_scene = Some(scene_uid);
+        if let Some(options) = options {
+            self.set_active_view_options(options);
+        }
         Ok(view_uid)
     }
 
@@ -14689,7 +14699,11 @@ impl DesktopAppState {
             )
         }
         .unwrap_or_else(|| auto_frame_camera(&snapshot));
-        exporter.write_snapshot(&snapshot, &camera, [0.1, 0.1, 0.12, 1.0])
+        let camera = cuemol_qsys::stereo::with_eye_order(
+            &camera,
+            self.active_scene == Some(scene_uid) && self.active_view_options().swap_stereo_eyes,
+        );
+        exporter.write_snapshot(&snapshot, &camera, scene_background_color(scene)?)
     }
 
     /// Render the active scene to a PNG file via the offscreen wgpu renderer.
@@ -14794,6 +14808,10 @@ impl DesktopAppState {
         }
         .unwrap_or_else(|| auto_frame_camera(&snapshot));
         let background = scene_background_color(scene)?;
+        let camera = cuemol_qsys::stereo::with_eye_order(
+            &camera,
+            self.active_scene == Some(scene_uid) && self.active_view_options().swap_stereo_eyes,
+        );
         let rgba = if exporter.use_depth() {
             crate::offscreen::render_snapshot_depth_offscreen(&snapshot, &camera, width, height)
         } else {
@@ -49074,33 +49092,50 @@ impl ScriptEnv {
                         continue;
                     }
                 }
-                let projected = view.proj_to_screen(pick.position);
-                if !projected.z.is_finite() || projected.z < -1. || projected.z > 1. {
-                    continue;
-                }
-                let position = object.xform.mul_vec(atom.position);
-                let mut fragment = MolRenderer::atom_hit_fragment(atom, position);
-                let names = if group.symm_id >= 0 {
-                    fragment.push_str(&format!(
-                        "\"symm_id\":{},\"symm_name\":{:?},",
-                        group.symm_id, group.symm_name
-                    ));
-                    vec![group.symm_id, atom.serial]
+                let projected = if matches!(
+                    view.stereo_mode(),
+                    cuemol_qsys::StereoMode::Parallel | cuemol_qsys::StereoMode::Cross
+                ) {
+                    crate::stereo::project(
+                        &view.camera(),
+                        [view.width() as f64, view.height() as f64],
+                        view.swap_stereo_eyes(),
+                        pick.position,
+                    )
+                    .into_iter()
+                    .map(|p| Vector4::new3(p[0], p[1], p[2] * 2. - 1.))
+                    .collect::<Vec<_>>()
                 } else {
-                    vec![atom.serial]
+                    vec![view.proj_to_screen(pick.position)]
                 };
-                candidates.push(cuemol_qsys::ViewHitCandidate {
-                    x: projected.x,
-                    y: projected.y,
-                    depth: projected.z,
-                    renderer_id: Uid::new(renderer.uid),
-                    renderer_type: renderer.rtype.clone(),
-                    renderer_name: renderer.name.clone(),
-                    object_id: Uid::new(object.uid),
-                    object_name: object.name.clone(),
-                    names,
-                    hit_fragment: fragment,
-                });
+                for projected in projected {
+                    if !projected.z.is_finite() || projected.z < -1. || projected.z > 1. {
+                        continue;
+                    }
+                    let position = object.xform.mul_vec(atom.position);
+                    let mut fragment = MolRenderer::atom_hit_fragment(atom, position);
+                    let names = if group.symm_id >= 0 {
+                        fragment.push_str(&format!(
+                            "\"symm_id\":{},\"symm_name\":{:?},",
+                            group.symm_id, group.symm_name
+                        ));
+                        vec![group.symm_id, atom.serial]
+                    } else {
+                        vec![atom.serial]
+                    };
+                    candidates.push(cuemol_qsys::ViewHitCandidate {
+                        x: projected.x,
+                        y: projected.y,
+                        depth: projected.z,
+                        renderer_id: Uid::new(renderer.uid),
+                        renderer_type: renderer.rtype.clone(),
+                        renderer_name: renderer.name.clone(),
+                        object_id: Uid::new(object.uid),
+                        object_name: object.name.clone(),
+                        names,
+                        hit_fragment: fragment,
+                    });
+                }
             }
         }
         view.set_hit_candidates(candidates);

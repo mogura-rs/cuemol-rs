@@ -1112,19 +1112,13 @@ impl App {
                 pixels,
             );
         }
-        let mvp = cuemol_desktop_core::offscreen::camera_mvp(
+        let labels = cuemol_desktop_core::stereo::labels(
+            &self.state,
             &self.camera,
-            f64::from(size.x / size.y.max(1.)),
+            [size.x, size.y],
+            cuemol_desktop_core::stereo::swap_eyes(&self.state),
+            1000,
         );
-        let labels = self
-            .state
-            .active_name_labels(mvp, size.x, size.y, 1000)
-            .into_iter()
-            .chain(
-                self.state
-                    .active_atom_intr_labels(mvp, size.x, size.y, 1000),
-            )
-            .collect::<Vec<_>>();
         self.labels.prepare(
             &self.gpu.device,
             &self.gpu.queue,

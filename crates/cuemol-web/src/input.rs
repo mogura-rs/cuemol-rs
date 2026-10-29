@@ -35,8 +35,9 @@ impl App {
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0) as i64;
         let momentum = self.state.config_value("cuemol2.ui.mouse-momentum-scroll") == "true";
-        self.input.translate_momentum = momentum;
-        self.input.rotate_momentum = momentum;
+        let options = self.state.active_view_options();
+        self.input.translate_momentum = momentum || options.trans_mms;
+        self.input.rotate_momentum = momentum || options.rot_mms;
         self.input.tick(&mut self.camera, size[1], time);
         let mut clicks = Vec::new();
         for event in std::mem::take(&mut self.input_events) {

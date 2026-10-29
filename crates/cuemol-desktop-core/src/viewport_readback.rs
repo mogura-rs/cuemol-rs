@@ -54,6 +54,63 @@ pub(crate) fn draw_interactive(
     mut interaction: Option<Interaction<'_>>,
 ) -> Option<Vec<u8>> {
     let [width, height] = size.map(|n| n.max(1));
+    let swap = match &effects {
+        Effects::Live(_, options) | Effects::Export(_, options) => options.swap_stereo_eyes,
+        _ => false,
+    };
+    let eyes = cuemol_qsys::stereo::viewports(camera, [width as f64, height as f64], swap);
+    if eyes.len() == 2 {
+        interaction = None;
+        if matches!(effects, Effects::None | Effects::Export(..)) {
+            let mut image = vec![0; width as usize * height as usize * 4];
+            for eye in eyes {
+                let x = eye.rect[0] as u32;
+                let eye_width = eye.rect[2] as u32;
+                let eye_effects = match &mut effects {
+                    Effects::Export(effects, options) => Effects::Export(effects, *options),
+                    _ => Effects::None,
+                };
+                let eye_labels = labels
+                    .as_ref()
+                    .map(|(_, labels)| {
+                        labels
+                            .iter()
+                            .filter(|label| label.clip.is_none_or(|clip| clip[0] == x as f32))
+                            .cloned()
+                            .map(|mut label| {
+                                label.x -= x as f32;
+                                label.clip = Some([0., 0., eye_width as f32, height as f32]);
+                                label
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let eye_labels = labels
+                    .as_mut()
+                    .map(|(renderer, _)| (&mut **renderer, eye_labels.as_slice()));
+                let eye_image = draw_interactive(
+                    renderer,
+                    device,
+                    queue,
+                    snapshot,
+                    &eye.camera,
+                    [eye_width, height],
+                    background,
+                    level,
+                    eye_effects,
+                    eye_labels,
+                    None,
+                )?;
+                for y in 0..height as usize {
+                    let start = (y * width as usize + x as usize) * 4;
+                    image[start..start + eye_width as usize * 4].copy_from_slice(
+                        &eye_image[y * eye_width as usize * 4..(y + 1) * eye_width as usize * 4],
+                    );
+                }
+            }
+            return Some(image);
+        }
+    }
     let extent = wgpu::Extent3d {
         width,
         height,

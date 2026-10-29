@@ -745,8 +745,8 @@ pub struct ViewportRenderer {
     vertices: ReusableGpuBuffer,
     indices: ReusableGpuBuffer,
     quad: wgpu::Buffer,
-    camera: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
+    camera: [wgpu::Buffer; 2],
+    bind_group: [wgpu::BindGroup; 2],
     atom_pipeline: wgpu::RenderPipeline,
     bond_pipeline: wgpu::RenderPipeline,
     mesh_pipeline: wgpu::RenderPipeline,
@@ -761,11 +761,13 @@ pub struct ViewportRenderer {
 
 impl ViewportRenderer {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
-        let camera = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("camera"),
-            size: std::mem::size_of::<CameraUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+        let camera = std::array::from_fn(|_| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("camera"),
+                size: std::mem::size_of::<CameraUniform>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("camera-layout"),
@@ -780,13 +782,15 @@ impl ViewportRenderer {
                 count: None,
             }],
         });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("camera-bind-group"),
-            layout: &layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera.as_entire_binding(),
-            }],
+        let bind_group = std::array::from_fn(|eye| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("camera-bind-group"),
+                layout: &layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera[eye].as_entire_binding(),
+                }],
+            })
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("molecule"),
@@ -924,7 +928,7 @@ impl ViewportRenderer {
         region: Option<[f32; 4]>,
     ) {
         self.render_attachments(
-            encoder, queue, target, depth, uniform, background, region, None,
+            encoder, queue, target, depth, uniform, background, region, None, 0,
         );
     }
 
@@ -942,17 +946,19 @@ impl ViewportRenderer {
         uniform: &CameraUniform,
         region: Option<[f32; 4]>,
         linear: bool,
+        eye: usize,
     ) {
         self.volumes.render(
             encoder,
             queue,
             target,
             depth,
-            &self.bind_group,
+            &self.bind_group[eye],
             uniform,
             region,
             linear,
             !linear && self.output_srgb,
+            eye,
         );
     }
 
@@ -966,6 +972,7 @@ impl ViewportRenderer {
         encoded_depth: &wgpu::TextureView,
         uniform: &CameraUniform,
         background: wgpu::Color,
+        eye: usize,
     ) {
         self.render_attachments(
             encoder,
@@ -976,6 +983,7 @@ impl ViewportRenderer {
             background,
             None,
             Some((normal, encoded_depth)),
+            eye,
         );
     }
 
@@ -989,8 +997,9 @@ impl ViewportRenderer {
         background: wgpu::Color,
         region: Option<[f32; 4]>,
         normal: Option<(&wgpu::TextureView, &wgpu::TextureView)>,
+        eye: usize,
     ) {
-        queue.write_buffer(&self.camera, 0, bytemuck::bytes_of(uniform));
+        queue.write_buffer(&self.camera[eye], 0, bytemuck::bytes_of(uniform));
         let output_srgb = self.output_srgb && normal.is_none();
         let mut attachments = vec![Some(wgpu::RenderPassColorAttachment {
             view: target,
@@ -1034,7 +1043,7 @@ impl ViewportRenderer {
         if let Some([x, y, width, height]) = region {
             pass.set_viewport(x, y, width, height, 0.0, 1.0);
         }
-        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_bind_group(0, &self.bind_group[eye], &[]);
         for draw in &self.draws {
             if !draw.bonds.is_empty() {
                 pass.set_pipeline(if normal.is_some() {
@@ -1069,7 +1078,7 @@ impl ViewportRenderer {
         }
         drop(pass);
         if normal.is_none() {
-            self.render_volumes(encoder, queue, target, depth, uniform, region, false);
+            self.render_volumes(encoder, queue, target, depth, uniform, region, false, eye);
         }
     }
 }

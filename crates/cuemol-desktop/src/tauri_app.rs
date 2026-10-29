@@ -20,15 +20,16 @@ use cuemol_render::{
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::offscreen::{camera_mvp, camera_pick_mvp, encode_rgba_png, SceneRenderer};
+#[cfg(test)]
+use crate::offscreen::camera_mvp;
+use crate::offscreen::{camera_pick_mvp, encode_rgba_png, SceneRenderer};
 use crate::{
-    atoms_in_screen_rect, collect_scene_pov_labels, create_apbs_work_dir, create_pov_work_dir,
-    overlay_pov_labels, pick_atom_screen, run_apbs_process, run_pov_process,
-    run_pov_process_with_poll, AnimKind, ApbsProcessOutput, ApbsProcessTask, DesktopAppState,
-    GuiApbsChargeMethod, GuiApbsOptions, GuiApbsPaths, GuiAtomLabel, GuiPovSceneOptions,
-    PovProcessOptions, PovProcessOutput, PovProcessTask, WorkspaceCameraClipboard,
-    WorkspaceObjectClipboard, WorkspaceRendererClipboard, WorkspaceStyleClipboard,
-    MOLECULE_RENDERER_TYPES,
+    collect_scene_pov_labels, create_apbs_work_dir, create_pov_work_dir, overlay_pov_labels,
+    pick_atom_screen, run_apbs_process, run_pov_process, run_pov_process_with_poll, AnimKind,
+    ApbsProcessOutput, ApbsProcessTask, DesktopAppState, GuiApbsChargeMethod, GuiApbsOptions,
+    GuiApbsPaths, GuiAtomLabel, GuiPovSceneOptions, PovProcessOptions, PovProcessOutput,
+    PovProcessTask, WorkspaceCameraClipboard, WorkspaceObjectClipboard, WorkspaceRendererClipboard,
+    WorkspaceStyleClipboard, MOLECULE_RENDERER_TYPES,
 };
 use cuemol_desktop_core::effects::ViewportOptions;
 
@@ -947,6 +948,7 @@ struct ViewportLineDto {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ViewportDto {
+    center_mark_embedded: bool,
     labels_embedded: bool,
     map_refine_pending: bool,
     image: Option<String>,
@@ -6049,6 +6051,8 @@ impl AppModel {
         self.trans_mms = input.trans_mms;
         self.rot_mms = input.rot_mms;
         self.swap_stereo_eyes = input.swap_stereo_eyes;
+        self.store_view_options();
+        let _ = self.desktop.set_active_view_camera(&self.camera);
         self.status = "View properties updated".to_string();
         Ok(())
     }
@@ -6255,16 +6259,13 @@ impl AppModel {
     ) -> Option<Vec<u8>> {
         let mut background = background_rgba(&self.background).unwrap_or([0.0, 0.0, 0.0, 1.0]);
         background[3] = 1.0;
-        let mvp = camera_mvp(&self.camera, f64::from(width) / f64::from(height.max(1)));
-        let labels = self
-            .desktop
-            .active_name_labels(mvp, width as f32, height as f32, 1000)
-            .into_iter()
-            .chain(
-                self.desktop
-                    .active_atom_intr_labels(mvp, width as f32, height as f32, 1000),
-            )
-            .collect::<Vec<_>>();
+        let labels = cuemol_desktop_core::stereo::labels(
+            &self.desktop,
+            &self.camera,
+            [width as f32, height as f32],
+            self.swap_stereo_eyes,
+            1000,
+        );
         let input = self.desktop.resolved_view_input(false);
         if input.gpu_pick() && self.camera.stereo_mode() == cuemol_qsys::StereoMode::None {
             let color = input.hover_hl_color();
@@ -6276,7 +6277,10 @@ impl AppModel {
                 &self.camera,
                 [width, height],
                 background,
-                ViewportOptions::from_state(&self.desktop),
+                ViewportOptions {
+                    swap_stereo_eyes: self.swap_stereo_eyes,
+                    ..ViewportOptions::from_state(&self.desktop)
+                },
                 &labels,
                 self.snapshot_revision,
                 hit,
@@ -6293,7 +6297,10 @@ impl AppModel {
             width,
             height,
             background,
-            ViewportOptions::from_state(&self.desktop),
+            ViewportOptions {
+                swap_stereo_eyes: self.swap_stereo_eyes,
+                ..ViewportOptions::from_state(&self.desktop)
+            },
             &labels,
         )
     }
@@ -6365,16 +6372,15 @@ impl AppModel {
         let height = height.clamp(64, MAX_VIEW_DIM);
         self.view_width = width;
         self.view_height = height;
-        let mvp = camera_mvp(&self.camera, f64::from(width) / f64::from(height));
-        let mut labels =
-            self.desktop
-                .active_atom_intr_labels(mvp, width as f32, height as f32, 1_000);
-        let remaining = 1_000_usize.saturating_sub(labels.len());
-        labels.extend(
-            self.desktop
-                .active_name_labels(mvp, width as f32, height as f32, remaining),
+        let labels = cuemol_desktop_core::stereo::labels(
+            &self.desktop,
+            &self.camera,
+            [width as f32, height as f32],
+            self.swap_stereo_eyes,
+            1000,
         );
         ViewportDto {
+            center_mark_embedded: true,
             labels_embedded: true,
             map_refine_pending: false,
             image: None,
@@ -6386,7 +6392,33 @@ impl AppModel {
             slab: self.camera.slab_depth(),
             perspective: self.camera.is_perspective(),
             center_mark: center_mark_name(self.camera.center_mark()).to_string(),
-            lines: Vec::new(),
+            lines: cuemol_desktop_core::stereo::annotation_lines(
+                &self.desktop,
+                &self.camera,
+                [width as f32, height as f32],
+                self.swap_stereo_eyes,
+            )
+            .into_iter()
+            .chain(cuemol_desktop_core::stereo::center_mark_lines(
+                &self.camera,
+                [width as f32, height as f32],
+                self.swap_stereo_eyes,
+                self.desktop
+                    .active_background_color()
+                    .unwrap_or([0., 0., 0., 1.]),
+            ))
+            .map(|line| ViewportLineDto {
+                x1: line.x1,
+                y1: line.y1,
+                x2: line.x2,
+                y2: line.y2,
+                width: line.width,
+                color: line.color,
+                end_color: None,
+                stipple: line.stipple,
+                point: false,
+            })
+            .collect(),
             labels: labels
                 .into_iter()
                 .map(|label| ViewportLabelDto {
@@ -6587,7 +6619,10 @@ impl AppModel {
             index,
             total_frames,
             snapshot,
-            camera: self.camera.clone(),
+            camera: cuemol_qsys::stereo::with_eye_order(
+                &self.camera,
+                input.backend == "umbreon" && self.swap_stereo_eyes,
+            ),
             labels,
             background: [
                 background[0] as f32,
@@ -6752,7 +6787,27 @@ impl AppModel {
         Ok(())
     }
 
+    fn store_view_options(&mut self) {
+        self.desktop
+            .set_active_view_options(cuemol_desktop_core::GuiViewOptions {
+                trans_mms: self.trans_mms,
+                rot_mms: self.rot_mms,
+                swap_stereo_eyes: self.swap_stereo_eyes,
+            });
+    }
+
+    fn restore_script_view(&mut self) {
+        if let Some(camera) = self.desktop.active_view_camera() {
+            self.camera = camera;
+        }
+        let options = self.desktop.active_view_options();
+        self.trans_mms = options.trans_mms;
+        self.rot_mms = options.rot_mms;
+        self.swap_stereo_eyes = options.swap_stereo_eyes;
+    }
+
     fn persist_camera(&mut self) -> Result<(), String> {
+        self.store_view_options();
         let mut camera = self.camera.clone();
         camera.set_name("__current");
         if self.desktop.active_view_summary().is_some() {
@@ -6924,13 +6979,10 @@ impl AppModel {
             .as_ref()
             .and_then(|image| image.hit_at([x, y], [width as f64, height as f64], precision))
             .or_else(|| {
-                cuemol_desktop_core::picking::cpu_hit(
+                cuemol_desktop_core::stereo::cpu_hit(
                     self.render_snapshot.as_ref()?,
-                    (if image.is_some() {
-                        camera_pick_mvp
-                    } else {
-                        camera_mvp
-                    })(&self.camera, width as f64 / height.max(1) as f64),
+                    &self.camera,
+                    self.swap_stereo_eyes,
                     [x, y],
                     [width as f64, height as f64],
                     precision,
@@ -7039,21 +7091,16 @@ impl AppModel {
         width: u32,
         height: u32,
     ) -> Result<(), String> {
-        let atoms = self
-            .desktop
-            .active_pick_atoms(&self.selection)
-            .map_err(|error| error.to_string())?;
-        let mvp = camera_pick_mvp(
+        let hits = cuemol_command::navigation::polygon_hits_camera(
+            &self.desktop,
             &self.camera,
-            f64::from(width.max(1)) / f64::from(height.max(1)),
-        );
-        let hits = atoms_in_screen_rect(
-            &atoms,
-            mvp,
-            (x1, y1),
-            (x2, y2),
-            (f64::from(width), f64::from(height)),
-        );
+            self.swap_stereo_eyes,
+            [f64::from(width), f64::from(height)],
+            &[[x1, y1], [x2, y1], [x2, y2], [x1, y2]],
+        )
+        .into_iter()
+        .map(|hit| (hit.object.get(), hit.index))
+        .collect::<Vec<_>>();
         let serials = hits
             .into_iter()
             .filter_map(|(object_uid, atom_index)| {
@@ -10824,6 +10871,7 @@ fn handle_model_request(
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "Untitled 1".to_string());
             model.desktop.new_scene(name, true);
+            model.restore_script_view();
             model.selection.clear();
             model.reset_animation_playback();
             model.sync_active_scene_properties();
@@ -10870,6 +10918,7 @@ fn handle_model_request(
                 }
                 other => return Err(format!("unsupported new tab mode: {other}")),
             }
+            model.restore_script_view();
             model.selection.clear();
             if model.desktop.active_scene() != previous_scene {
                 model.reset_animation_playback();
@@ -10889,9 +10938,7 @@ fn handle_model_request(
             if !model.desktop.set_active_scene(Some(Uid::new(scene_uid))) {
                 return Err(format!("scene {scene_uid} was not found"));
             }
-            if let Some(camera) = model.desktop.active_view_camera() {
-                model.camera = camera;
-            }
+            model.restore_script_view();
             if model.desktop.active_scene() != previous_scene {
                 model.reset_animation_playback();
             }
@@ -10911,6 +10958,7 @@ fn handle_model_request(
                 .desktop
                 .activate_view(Uid::new(view_uid))
                 .map_err(|error| error.to_string())?;
+            model.restore_script_view();
             if model.desktop.active_scene() != previous_scene {
                 model.reset_animation_playback();
             }
@@ -10931,6 +10979,7 @@ fn handle_model_request(
                 .close_active_view()
                 .map_err(|error| error.to_string())?;
             model.camera = model.desktop.active_view_camera().unwrap_or_default();
+            model.restore_script_view();
             if model.desktop.active_scene() != closed_scene {
                 model.reset_animation_playback();
             }
@@ -12325,6 +12374,7 @@ fn handle_model_request(
             if script.is_empty() {
                 return Ok(ModelResponse::Snapshot(Box::new(model.snapshot())));
             }
+            model.persist_camera()?;
             let undo = model.capture_undo();
             model.log_lines.push(format!("> {script}"));
             match model.desktop.run_script_js(script) {
@@ -12345,6 +12395,7 @@ fn handle_model_request(
             if let Some(scene_uid) = model.desktop.active_scene() {
                 model.modified_scenes.insert(scene_uid);
             }
+            model.restore_script_view();
             model.invalidate_snapshot(false);
             model.push_undo(undo);
             model.touch_structure_details();
@@ -12355,6 +12406,7 @@ fn handle_model_request(
             if script.trim().is_empty() {
                 return Err("a script is required".to_string());
             }
+            model.persist_camera()?;
             let undo = model.capture_undo();
             let (log, selection) = model
                 .desktop
@@ -12369,6 +12421,7 @@ fn handle_model_request(
             model
                 .log_lines
                 .push(format!("Exec internal JS: {path} done."));
+            model.restore_script_view();
             model.invalidate_snapshot(false);
             model.status = "Script executed".to_string();
             model.push_undo(undo);
@@ -16878,6 +16931,8 @@ mod tests {
         assert_eq!(first_summary.name, "0");
         let first_view = first_summary.uid;
         model.camera.set_zoom(81.0);
+        model.swap_stereo_eyes = true;
+        model.trans_mms = true;
         let response = handle_model_request(
             &mut model,
             ModelRequest::NewTab {
@@ -16896,10 +16951,14 @@ mod tests {
             .iter()
             .any(|view| view.name == "Detail" && view.active));
         assert_eq!(model.camera.zoom(), 81.0);
+        assert!(model.swap_stereo_eyes && model.trans_mms);
 
         model.camera.set_zoom(42.0);
+        model.swap_stereo_eyes = false;
+        model.trans_mms = false;
         handle_model_request(&mut model, ModelRequest::ActivateView(first_view.get())).unwrap();
         assert_eq!(model.camera.zoom(), 81.0);
+        assert!(model.swap_stereo_eyes && model.trans_mms);
 
         let response = handle_model_request(
             &mut model,
@@ -16916,6 +16975,9 @@ mod tests {
         assert_eq!(snapshot.scenes.len(), 2);
         assert_eq!(snapshot.views.len(), 3);
         assert!(snapshot.scenes.iter().any(|scene| scene.name == "Second"));
+        assert!(!model.swap_stereo_eyes && !model.trans_mms);
+        handle_model_request(&mut model, ModelRequest::CloseActiveScene).unwrap();
+        assert!(model.swap_stereo_eyes && model.trans_mms);
     }
 
     #[test]
@@ -23991,6 +24053,7 @@ mod tests {
             labels: vec![GuiAtomLabel {
                 anchor: [0., 1.],
                 depth: 0.,
+                clip: None,
                 on_top: true,
                 x: 8.0,
                 y: 24.0,

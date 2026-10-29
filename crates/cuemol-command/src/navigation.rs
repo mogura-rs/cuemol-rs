@@ -420,10 +420,36 @@ pub fn polygon_hits(
         .iter()
         .filter_map(|atom| {
             let screen = project(mvp, atom.center, size)?;
+            if screen[0] < 0. || screen[0] >= size[0] || screen[1] < 0. || screen[1] >= size[1] {
+                return None;
+            }
             polygon_contains(points, [screen[0], screen[1]]).then_some(AtomHit {
                 object: Uid::new(atom.object_uid?),
                 index: atom.atom_index?,
             })
         })
         .collect()
+}
+
+pub fn polygon_hits_camera(
+    state: &DesktopAppState,
+    camera: &cuemol_qsys::Camera,
+    swap: bool,
+    size: [f64; 2],
+    points: &[[f64; 2]],
+) -> Vec<AtomHit> {
+    let mut hits = Vec::new();
+    for eye in cuemol_qsys::stereo::viewports(camera, size, swap) {
+        let local = points
+            .iter()
+            .map(|p| [p[0] - eye.rect[0], p[1] - eye.rect[1]])
+            .collect::<Vec<_>>();
+        let mvp = cuemol_desktop_core::projection::camera_pick_mvp(&eye.camera, eye.aspect());
+        for hit in polygon_hits(state, mvp, [eye.rect[2], eye.rect[3]], &local) {
+            if !hits.contains(&hit) {
+                hits.push(hit);
+            }
+        }
+    }
+    hits
 }

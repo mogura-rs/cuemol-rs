@@ -90,9 +90,7 @@ impl GuiApplication {
         let Some(viewport) = self.viewport_rect else {
             return;
         };
-        let mvp = camera
-            .view_projection(viewport.aspect_ratio())
-            .to_cols_array_2d();
+
         let points = if self.navigation.tool == ViewportTool::LassoSelect {
             self.lasso_points.clone()
         } else {
@@ -112,9 +110,10 @@ impl GuiApplication {
                 ]
             })
             .collect::<Vec<_>>();
-        let hits = shared::polygon_hits(
+        let hits = shared::polygon_hits_camera(
             &self.state,
-            mvp,
+            &camera.to_qsys_camera("__current"),
+            camera.swap_stereo_eyes,
             [viewport.width() as f64, viewport.height() as f64],
             &points,
         );
@@ -180,13 +179,14 @@ impl GuiApplication {
             self.hover_sample = None;
         }
 
-        cuemol_ui::navigation::feedback(
+        cuemol_ui::navigation::feedback_camera(
             ui,
             &self.state,
             &self.navigation,
             self.hover_hit,
             &self.pick_atoms,
-            mvp,
+            &camera.to_qsys_camera("__current"),
+            camera.swap_stereo_eyes,
             rect,
         );
     }
@@ -225,6 +225,48 @@ mod tests {
             .collect();
         (app, camera, id, points)
     }
+    #[test]
+    fn stereo_picks_and_script_view_updates_reach_the_native_camera() {
+        let (mut app, mut camera, id, _) = app();
+        camera.target = Vec3::ZERO;
+        camera.ortho_scale = 10.;
+        camera.distance = 40.;
+        camera.stereo_mode = StereoMode::Cross;
+        camera.stereo_distance = 14.;
+        camera.swap_stereo_eyes = true;
+        let rect = app.viewport_rect.unwrap();
+        let position = app.state.scene_manager().object(id).unwrap().mol().atoms()[1].position;
+        for point in cuemol_desktop_core::stereo::project(
+            &camera.to_qsys_camera("__current"),
+            [rect.width() as f64, rect.height() as f64],
+            true,
+            position,
+        ) {
+            let p = rect.min + egui::vec2(point[0] as f32, point[1] as f32);
+            let hit = app.pick_record(&camera, rect, p).unwrap();
+            assert_eq!((hit.object_id, hit.atom_index), (id.get(), 1));
+        }
+        camera.store_view_options(&mut app.state);
+        app.state
+            .set_active_view_camera(&camera.to_qsys_camera("__current"))
+            .unwrap();
+        let view = app.state.active_view_summary().unwrap().uid;
+        app.console_input=format!("var v=cuemol.getView({});v.zoom=14;v.stereoMode='para';v.swapStereoEyes=false;v.trans_mms=true;",view.get());
+        app.execute_console_input();
+        app.apply_script_view(&mut camera);
+        assert_eq!(camera.ortho_scale, 7.);
+        assert_eq!(camera.stereo_mode, StereoMode::Parallel);
+        assert!(!camera.swap_stereo_eyes && camera.trans_mms);
+        let mut next = camera.to_qsys_camera("__current");
+        next.set_zoom(16.);
+        camera.apply_qsys_camera(&next);
+        assert!(camera.trans_mms);
+        app.undo(&mut camera);
+        assert_eq!(camera.stereo_mode, StereoMode::Cross);
+        assert_eq!(camera.ortho_scale, 10.);
+        assert!(camera.swap_stereo_eyes && !camera.trans_mms);
+    }
+
     fn move_to(app: &mut GuiApplication, camera: &mut CameraController, p: egui::Pos2) {
         app.handle_window_event(
             &WindowEvent::CursorMoved {

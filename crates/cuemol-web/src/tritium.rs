@@ -181,6 +181,26 @@ impl App {
                                 );
                             }
                         }
+                        ui.menu_button("Stereo", |ui| {
+                            for (mode,value,label) in [(cuemol_qsys::StereoMode::None,"none","None"),
+                                (cuemol_qsys::StereoMode::Parallel,"para","Parallel"),
+                                (cuemol_qsys::StereoMode::Cross,"cross","Cross")] {
+                                if ui.selectable_label(self.camera.stereo_mode()==mode,label).clicked() {
+                                    self.call("set_node_prop",json!({"nodeType":"view","prop":"stereoMode","value":value}));
+                                }
+                            }
+                            let mut swap=self.state.active_view_options().swap_stereo_eyes;
+                            if ui.checkbox(&mut swap,"Swap eyes").changed() {
+                                self.call("set_node_prop",json!({"nodeType":"view","prop":"swapStereoEyes","value":swap.to_string()}));
+                            }
+                            let mut angle=self.camera.stereo_distance();
+                            ui.horizontal(|ui| {
+                                ui.label("Eye angle (°)");
+                                if ui.add(egui::DragValue::new(&mut angle).speed(0.1).range(0.0..=180.0)).changed() {
+                                    self.call("set_node_prop",json!({"nodeType":"view","prop":"stereoDist","value":angle.to_string()}));
+                                }
+                            });
+                        });
                         if ui.button("Fit scene").clicked() {
                             self.fit(false);
                             ui.close();

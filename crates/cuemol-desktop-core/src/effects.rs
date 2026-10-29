@@ -35,6 +35,7 @@ pub struct ViewportOptions {
     pub antialiasing: Antialiasing,
     pub jitter_level: i32,
     pub smaa_threshold: f32,
+    pub swap_stereo_eyes: bool,
 }
 
 impl Default for ViewportOptions {
@@ -49,6 +50,7 @@ impl Default for ViewportOptions {
             antialiasing: Antialiasing::Fxaa,
             jitter_level: 0,
             smaa_threshold: 0.05,
+            swap_stereo_eyes: false,
         }
     }
 }
@@ -80,15 +82,21 @@ impl ViewportOptions {
             },
             jitter_level: number("aaJitterLevel", 0.0).clamp(0.0, 5.0) as i32,
             smaa_threshold: number("aaSmaaThreshold", 0.05).clamp(0.0, 1.0),
+            swap_stereo_eyes: false,
         }
     }
 
     pub fn from_state(state: &crate::DesktopAppState) -> Self {
-        state
+        let mut options = state
             .active_scene()
             .and_then(|uid| state.scene_manager().scene(uid))
             .map(Self::from_scene)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        options.swap_stereo_eyes = state
+            .active_view_summary()
+            .and_then(|view| state.command_manager().view(view.uid))
+            .is_some_and(|view| view.swap_stereo_eyes());
+        options
     }
 }
 
@@ -300,6 +308,9 @@ pub struct ViewportEffects {
     output_srgb: bool,
     targets: Option<Targets>,
     refinement: Refinement,
+    format: wgpu::TextureFormat,
+    right_eye: Option<Box<ViewportEffects>>,
+    stereo_depth: Option<([u32; 2], wgpu::TextureView)>,
 }
 
 impl ViewportEffects {
@@ -458,6 +469,9 @@ impl ViewportEffects {
             output_srgb: format.is_srgb(),
             targets: None,
             refinement: Refinement::default(),
+            format,
+            right_eye: None,
+            stereo_depth: None,
         }
     }
 
@@ -541,6 +555,7 @@ impl ViewportEffects {
         uniform: &CameraUniform,
         options: ViewportOptions,
         half: bool,
+        eye: usize,
     ) {
         let t = self.targets.as_ref().unwrap();
         let pass = |encoder: &mut wgpu::CommandEncoder, pipeline, output, color, aux| {
@@ -575,7 +590,7 @@ impl ViewportEffects {
             );
             color = &t.composite;
         }
-        renderer.render_volumes(encoder, queue, color, &t.depth, uniform, None, true);
+        renderer.render_volumes(encoder, queue, color, &t.depth, uniform, None, true, eye);
         match options.antialiasing {
             Antialiasing::None => pass(encoder, &self.copy, &t.sample, color, color),
             Antialiasing::Fxaa => pass(encoder, &self.fxaa, &t.sample, color, color),
@@ -589,10 +604,13 @@ impl ViewportEffects {
 
     /// Packed depth from the most recent scene pass, including primitive impostors.
     pub fn label_depth(&self) -> Option<&wgpu::TextureView> {
-        self.targets.as_ref().map(|targets| &targets.encoded_depth)
+        self.stereo_depth
+            .as_ref()
+            .map(|(_, depth)| depth)
+            .or_else(|| self.targets.as_ref().map(|targets| &targets.encoded_depth))
     }
 
-    /// Returns whether another frame is needed to refine AO or temporal AA.
+    /// Render both eye viewports with shared geometry and independent frame uniforms.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -606,6 +624,128 @@ impl ViewportEffects {
         background: wgpu::Color,
         region: Option<[f32; 4]>,
         options: ViewportOptions,
+    ) -> bool {
+        let size = size.map(|n| n.max(1));
+        let eyes =
+            cuemol_qsys::stereo::viewports(camera, size.map(f64::from), options.swap_stereo_eyes);
+        if eyes.len() == 1 {
+            self.right_eye = None;
+            self.stereo_depth = None;
+            return self.render_eye(
+                renderer,
+                device,
+                queue,
+                encoder,
+                target,
+                &eyes[0].camera,
+                size,
+                background,
+                region,
+                options,
+                0,
+                true,
+            );
+        }
+        if self.right_eye.is_none() {
+            self.right_eye = Some(Box::new(Self::new(device, queue, self.format)));
+        }
+        let left_width = size[0] / 2;
+        let right_width = size[0] - left_width;
+        let [x, y, width, height] = region.unwrap_or([0., 0., size[0] as f32, size[1] as f32]);
+        let split_width = width * left_width as f32 / size[0] as f32;
+        let left_pending = self.render_eye(
+            renderer,
+            device,
+            queue,
+            encoder,
+            target,
+            &eyes[0].camera,
+            [left_width, size[1]],
+            background,
+            Some([x, y, split_width, height]),
+            options,
+            0,
+            true,
+        );
+        let right_pending = self.right_eye.as_mut().unwrap().render_eye(
+            renderer,
+            device,
+            queue,
+            encoder,
+            target,
+            &eyes[1].camera,
+            [right_width, size[1]],
+            background,
+            Some([x + split_width, y, width - split_width, height]),
+            options,
+            1,
+            false,
+        );
+        if self
+            .stereo_depth
+            .as_ref()
+            .is_none_or(|(old, _)| *old != size)
+        {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("stereo-label-depth"),
+                size: wgpu::Extent3d {
+                    width: size[0],
+                    height: size[1],
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: COLOR,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            self.stereo_depth = Some((size, texture.create_view(&Default::default())));
+        }
+        let depth = &self.stereo_depth.as_ref().unwrap().1;
+        let left = &self.targets.as_ref().unwrap().encoded_depth;
+        self.pass(
+            device,
+            encoder,
+            &self.copy,
+            depth,
+            left,
+            left,
+            Some(wgpu::Color::WHITE),
+            Some([0., 0., left_width as f32, size[1] as f32]),
+        );
+        let right = self.right_eye.as_ref().unwrap();
+        let image = &right.targets.as_ref().unwrap().encoded_depth;
+        right.pass(
+            device,
+            encoder,
+            &right.copy,
+            depth,
+            image,
+            image,
+            None,
+            Some([left_width as f32, 0., right_width as f32, size[1] as f32]),
+        );
+        left_pending || right_pending
+    }
+
+    /// Returns whether another frame is needed to refine AO or temporal AA.
+    #[allow(clippy::too_many_arguments)]
+    fn render_eye(
+        &mut self,
+        renderer: &ViewportRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        camera: &Camera,
+        size: [u32; 2],
+        background: wgpu::Color,
+        region: Option<[f32; 4]>,
+        options: ViewportOptions,
+        eye: usize,
+        clear: bool,
     ) -> bool {
         let size = size.map(|n| n.max(1));
         self.ensure_size(device, size);
@@ -641,9 +781,10 @@ impl ViewportEffects {
                 &t.encoded_depth,
                 &uniform,
                 background,
+                eye,
             );
             self.postprocess(
-                device, renderer, queue, encoder, &uniform, options, plan.half,
+                device, renderer, queue, encoder, &uniform, options, plan.half, eye,
             );
             if let Some(index) = plan.sample {
                 self.pass(
@@ -670,7 +811,7 @@ impl ViewportEffects {
             target,
             color,
             color,
-            Some(target_clear_color(background, self.output_srgb)),
+            clear.then(|| target_clear_color(background, self.output_srgb)),
             region,
         );
         plan.pending
@@ -691,6 +832,8 @@ impl ViewportEffects {
         background: wgpu::Color,
         mut options: ViewportOptions,
     ) {
+        self.right_eye = None;
+        self.stereo_depth = None;
         let size = size.map(|n| n.max(1));
         self.ensure_size(device, size);
         self.refinement = Refinement::default();
@@ -708,8 +851,9 @@ impl ViewportEffects {
             &t.encoded_depth,
             uniform,
             background,
+            0,
         );
-        self.postprocess(device, renderer, queue, encoder, uniform, options, false);
+        self.postprocess(device, renderer, queue, encoder, uniform, options, false, 0);
         self.pass(
             device,
             encoder,

@@ -33,7 +33,9 @@ use cuemol_render::{
 #[cfg(test)]
 use cuemol_render::{RenderAtom, RenderBond};
 use egui_wgpu::ScreenDescriptor;
-use glam::{Mat4, Quat, Vec3, Vec4 as GlamVec4};
+#[cfg(test)]
+use glam::Vec4 as GlamVec4;
+use glam::{Mat4, Quat, Vec3};
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -626,7 +628,10 @@ impl NativeRunner {
                         revision: app.snapshot_revision,
                         background: app.background.clear_color(),
                         viewport: app.viewport_rect,
-                        options: ViewportOptions::from_state(&app.state),
+                        options: ViewportOptions {
+                            swap_stereo_eyes: gpu.camera.swap_stereo_eyes,
+                            ..ViewportOptions::from_state(&app.state)
+                        },
                     },
                     &paint_jobs,
                     &full_output.textures_delta,
@@ -741,8 +746,12 @@ impl NativeRunner {
             }
             let mutating =
                 is_call && name != "clear_undo" && cuemol_command::tool_is_mutating(name);
-            let undo =
-                (is_call && cuemol_command::tool_records_history(name)).then(|| app.capture_undo());
+            gpu.camera.store_view_options(&mut app.state);
+            let undo = (is_call && cuemol_command::tool_records_history(name)).then(|| {
+                let mut undo = app.capture_undo();
+                undo.camera = Some(gpu.camera.to_qsys_camera("__current"));
+                undo
+            });
             let mut camera = gpu.camera.to_qsys_camera("__current");
             let response = self
                 .protocol
@@ -754,7 +763,8 @@ impl NativeRunner {
                 if let Some(undo) = undo {
                     app.push_undo_snapshot(undo);
                 }
-                gpu.camera = CameraController::from_qsys_camera(&camera);
+                gpu.camera.apply_qsys_camera(&camera);
+                gpu.camera.read_view_options(&app.state);
                 let _ = app.state.set_active_view_camera(&camera);
                 app.sync_active_scene_properties();
                 app.invalidate_molecule_panel_caches();
@@ -1343,6 +1353,7 @@ struct GuiApplication {
     url_download_receiver: Option<mpsc::Receiver<std::result::Result<PathBuf, String>>>,
     script_path: String,
     console_input: String,
+    pending_script_view: bool,
     command_history: Vec<String>,
     command_history_position: usize,
     selection_text: String,
@@ -5058,6 +5069,7 @@ impl GuiApplication {
             url_download_receiver: None,
             script_path: "script.js".to_string(),
             console_input: String::new(),
+            pending_script_view: false,
             command_history: Vec::new(),
             command_history_position: 0,
             selection_text: String::new(),
@@ -5455,7 +5467,8 @@ impl GuiApplication {
                     self.push_undo_snapshot(undo);
                 }
                 self.agent.changed_scene = true;
-                *camera = CameraController::from_qsys_camera(&view);
+                camera.apply_qsys_camera(&view);
+                camera.read_view_options(&self.state);
                 let _ = self.state.set_active_view_camera(&view);
                 self.sync_active_scene_properties();
                 self.invalidate_molecule_panel_caches();
@@ -5485,6 +5498,11 @@ impl GuiApplication {
     }
 
     fn ui(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
+        self.apply_script_view(camera);
+        camera.store_view_options(&mut self.state);
+        let _ = self
+            .state
+            .set_active_view_camera(&camera.to_qsys_camera("__current"));
         let mut input_camera = camera.to_qsys_camera("__current");
         let height = self.viewport_rect.map_or(600.0, |r| r.height()) as f64;
         if self.input.tick(
@@ -5526,7 +5544,7 @@ impl GuiApplication {
                             .fit_selected_molecule_view(uid, &mut view)
                             .unwrap_or(false)
                         {
-                            *camera = CameraController::from_qsys_camera(&view.camera());
+                            camera.apply_qsys_camera(&view.camera());
                         }
                     }
                 }
@@ -5535,7 +5553,7 @@ impl GuiApplication {
         let mut command_camera = camera.to_qsys_camera("__current");
         if cuemol_command::advance_animation(&mut self.state, &mut command_camera).unwrap_or(false)
         {
-            *camera = CameraController::from_qsys_camera(&command_camera);
+            camera.apply_qsys_camera(&command_camera);
             self.rebuild_snapshot();
             ctx.request_repaint();
         }
@@ -5589,6 +5607,7 @@ impl GuiApplication {
         self.tritium_layout(ctx, camera);
         self.updates.show(ctx);
         self.dialogs(ctx, camera);
+        self.apply_script_view(camera);
         self.keyboard_shortcuts(ctx, camera);
         let layers = ctx.memory(|memory| memory.areas().visible_layer_ids());
         self.viewport_overlays = layers
@@ -5787,7 +5806,10 @@ impl GuiApplication {
                         let current = camera.to_qsys_camera("__current");
                         let _ = self.state.set_active_view_camera(&current);
                         match self.state.activate_view(view.uid) {
-                            Ok(next) => *camera = CameraController::from_qsys_camera(&next),
+                            Ok(next) => {
+                                camera.apply_qsys_camera(&next);
+                                camera.read_view_options(&self.state);
+                            }
                             Err(error) => {
                                 self.set_error(error);
                                 continue;
@@ -6045,6 +6067,25 @@ impl GuiApplication {
                         self.set_status("Orthographic projection");
                     }
                     ui.separator();
+                    ui.menu_button("Stereo", |ui| {
+                        for (mode, label) in [
+                            (StereoMode::None, "None"),
+                            (StereoMode::Parallel, "Parallel"),
+                            (StereoMode::Cross, "Cross"),
+                        ] {
+                            ui.radio_value(&mut camera.stereo_mode, mode, label);
+                        }
+                        ui.checkbox(&mut camera.swap_stereo_eyes, "Swap eyes");
+                        ui.horizontal(|ui| {
+                            ui.label("Eye angle (°)");
+                            ui.add(
+                                egui::DragValue::new(&mut camera.stereo_distance)
+                                    .speed(0.1)
+                                    .range(0.0..=180.0),
+                            );
+                        });
+                        camera.store_view_options(&mut self.state);
+                    });
                     ui.menu_button("Center mark", |ui| {
                         ui.radio_value(&mut camera.center_mark, CenterMark::Cross, "Cross");
                         ui.radio_value(&mut camera.center_mark, CenterMark::Axis, "Axis");
@@ -10289,10 +10330,11 @@ impl GuiApplication {
         self.sync_active_scene_properties();
         self.rebuild_snapshot();
         if let Some(next) = self.state.active_view_camera() {
-            *camera = CameraController::from_qsys_camera(&next);
+            camera.apply_qsys_camera(&next);
         } else {
             camera.fit_snapshot(&self.snapshot);
         }
+        camera.read_view_options(&self.state);
     }
 
     fn selected_renderer_is_group(&self) -> bool {
@@ -10384,7 +10426,7 @@ impl GuiApplication {
             }
         };
         if fitted {
-            *camera = CameraController::from_qsys_camera(&view.camera());
+            camera.apply_qsys_camera(&view.camera());
         }
         Ok(fitted)
     }
@@ -10812,7 +10854,7 @@ impl GuiApplication {
                     viewport.y.max(1.0).round() as u32,
                 );
                 match self.state.fit_selected_molecule_view(object_uid, &mut view) {
-                    Ok(true) => *camera = CameraController::from_qsys_camera(&view.camera()),
+                    Ok(true) => camera.apply_qsys_camera(&view.camera()),
                     Ok(false) => {}
                     Err(error) => self.set_error(error),
                 }
@@ -13585,7 +13627,7 @@ impl GuiApplication {
             .state
             .apply_scene_animation_time(scene_uid, time_from_seconds(elapsed), view_uid)
             .map_err(|error| error.to_string())?;
-        *camera = CameraController::from_qsys_camera(&animated_camera);
+        camera.apply_qsys_camera(&animated_camera);
         self.rebuild_snapshot();
         Ok(())
     }
@@ -13961,12 +14003,15 @@ impl GuiApplication {
             .state
             .apply_scene_animation_time(scene_uid, time_from_seconds(elapsed), view_uid)
             .map_err(|error| error.to_string())?;
-        *camera = CameraController::from_qsys_camera(&animated_camera);
+        camera.apply_qsys_camera(&animated_camera);
         self.animation_elapsed = elapsed as f32;
         self.rebuild_snapshot();
         let mut frame_camera = camera.clone();
         frame_camera.perspective = job.settings.perspective;
-        let qsys_camera = frame_camera.to_qsys_camera("__animation_render");
+        let qsys_camera = cuemol_qsys::stereo::with_eye_order(
+            &frame_camera.to_qsys_camera("__animation_render"),
+            job.settings.backend == "Umbreon" && frame_camera.swap_stereo_eyes,
+        );
         let labels = animation_frame_labels(&self.state, &job.settings, &qsys_camera);
         let snapshot = self.snapshot.clone();
         let background = self.background.rgba_f32();
@@ -15186,6 +15231,16 @@ impl GuiApplication {
             .unwrap_or_default();
     }
 
+    fn apply_script_view(&mut self, camera: &mut CameraController) {
+        if !std::mem::take(&mut self.pending_script_view) {
+            return;
+        }
+        if let Some(view) = self.state.active_view_camera() {
+            camera.apply_qsys_camera(&view);
+            camera.read_view_options(&self.state);
+        }
+    }
+
     fn execute_console_input(&mut self) {
         let command = self.console_input.trim().to_string();
         if command.is_empty() {
@@ -15194,9 +15249,11 @@ impl GuiApplication {
         self.log_lines.push(format!("> {command}"));
         self.remember_command(&command);
         self.console_input.clear();
-        let undo = self.capture_undo();
+        let mut undo = self.capture_undo();
+        undo.camera = self.state.active_view_camera();
         match self.state.run_script_js(&command) {
             Ok((log, selection)) => {
+                self.pending_script_view = true;
                 self.log_lines.extend(log.lines().map(str::to_string));
                 if let Some(selection) = selection {
                     self.selection_text = selection.clone();
@@ -18041,7 +18098,7 @@ impl GuiApplication {
                 self.rebuild_snapshot();
                 let saved_camera = self.state.active_scene_saved_camera();
                 match saved_camera {
-                    Some(saved) => *camera = CameraController::from_qsys_camera(&saved),
+                    Some(saved) => camera.apply_qsys_camera(&saved),
                     None => camera.fit_snapshot(&self.snapshot),
                 }
                 let skipped = self.state.active_scene_skipped_objects();
@@ -18114,7 +18171,7 @@ impl GuiApplication {
                 // Restore the scene's saved view (a `.qsc` `<camera>`); only a
                 // camera-less scene falls back to auto-framing the bounding box.
                 match self.state.active_scene_saved_camera() {
-                    Some(saved) => *camera = CameraController::from_qsys_camera(&saved),
+                    Some(saved) => camera.apply_qsys_camera(&saved),
                     None => camera.fit_snapshot(&self.snapshot),
                 }
             }
@@ -18319,7 +18376,7 @@ impl GuiApplication {
                 self.sync_active_scene_properties();
                 self.rebuild_snapshot();
                 match self.state.active_scene_saved_camera() {
-                    Some(saved) => *camera = CameraController::from_qsys_camera(&saved),
+                    Some(saved) => camera.apply_qsys_camera(&saved),
                     None => camera.fit_snapshot(&self.snapshot),
                 }
                 self.set_status(format!(
@@ -18424,9 +18481,10 @@ impl GuiApplication {
                 match self.state.new_view(scene_uid, name, inherited) {
                     Ok(_) => {
                         self.push_undo_snapshot(undo);
-                        *camera = CameraController::from_qsys_camera(
+                        camera.apply_qsys_camera(
                             &self.state.active_view_camera().unwrap_or_default(),
                         );
+                        camera.read_view_options(&self.state);
                         self.set_status(format!("New view: {name}"));
                     }
                     Err(error) => self.set_error(error),
@@ -18535,7 +18593,7 @@ impl GuiApplication {
                 self.set_status("Current tab closed");
                 self.rebuild_snapshot();
                 if let Some(next) = self.state.active_view_camera() {
-                    *camera = CameraController::from_qsys_camera(&next);
+                    camera.apply_qsys_camera(&next);
                 } else {
                     camera.fit_snapshot(&self.snapshot);
                 }
@@ -19006,9 +19064,12 @@ impl GuiApplication {
                 return false;
             }
         };
+        let mut undo = self.capture_undo();
+        undo.camera = self.state.active_view_camera();
         // Run the JS with the embedded boa engine (cuemol.print/select/color).
         match self.state.run_script_js(&script) {
             Ok((log, selection)) => {
+                self.pending_script_view = true;
                 for line in log.lines() {
                     self.log_lines.push(format!("  {line}"));
                 }
@@ -19020,6 +19081,7 @@ impl GuiApplication {
                 self.log_lines
                     .push(format!("Exec internal JS: {} done.", self.script_path));
                 self.set_status("Script executed");
+                self.push_undo_snapshot(undo);
                 true
             }
             Err(error) => {
@@ -20058,11 +20120,6 @@ impl GuiApplication {
             let (Some(object_uid), Some(atom_index)) = (atom.object_uid, atom.atom_index) else {
                 continue;
             };
-            let Some((screen, _depth)) =
-                camera.project_to_viewport(vec3_from_vector(atom.center), rect)
-            else {
-                continue;
-            };
             let label = match self
                 .state
                 .atom_summary(cuemol_core::Uid::new(object_uid), atom_index)
@@ -20075,13 +20132,20 @@ impl GuiApplication {
                 ),
                 Err(_) => continue,
             };
-            painter.text(
-                screen,
-                egui::Align2::LEFT_BOTTOM,
-                label,
-                egui::FontId::proportional(11.0),
-                color,
-            );
+            for point in cuemol_desktop_core::stereo::project(
+                &camera.to_qsys_camera("__current"),
+                [rect.width() as f64, rect.height() as f64],
+                camera.swap_stereo_eyes,
+                atom.center,
+            ) {
+                painter.text(
+                    rect.min + egui::vec2(point[0] as f32, point[1] as f32),
+                    egui::Align2::LEFT_BOTTOM,
+                    &label,
+                    egui::FontId::proportional(11.0),
+                    color,
+                );
+            }
         }
     }
 
@@ -20089,67 +20153,23 @@ impl GuiApplication {
         let Some(rect) = self.viewport_rect else {
             return Vec::new();
         };
-        let mvp = camera
-            .view_projection(rect.width() / rect.height().max(1.))
-            .to_cols_array_2d();
-        self.state
-            .active_name_labels(mvp, rect.width(), rect.height(), 1000)
-            .into_iter()
-            .chain(
-                self.state
-                    .active_atom_intr_labels(mvp, rect.width(), rect.height(), 1000),
-            )
-            .collect()
+        cuemol_desktop_core::stereo::labels(
+            &self.state,
+            &camera.to_qsys_camera("__current"),
+            [rect.width(), rect.height()],
+            camera.swap_stereo_eyes,
+            1000,
+        )
     }
 
     fn draw_center_mark(&self, ui: &egui::Ui, rect: egui::Rect, camera: &CameraController) {
-        if camera.center_mark == CenterMark::None {
-            return;
-        }
-        let center = rect.center();
-        let stroke = egui::Stroke::new(
-            1.0,
-            self.background.foreground(
-                egui::Color32::from_rgb(25, 30, 36),
-                egui::Color32::from_rgb(220, 226, 235),
-            ),
+        cuemol_ui::navigation::center_mark(
+            ui,
+            &self.state,
+            &camera.to_qsys_camera("__current"),
+            camera.swap_stereo_eyes,
+            rect,
         );
-        let painter = ui.painter();
-        match camera.center_mark {
-            CenterMark::Cross => {
-                painter.line_segment(
-                    [
-                        egui::pos2(center.x - 10.0, center.y),
-                        egui::pos2(center.x + 10.0, center.y),
-                    ],
-                    stroke,
-                );
-                painter.line_segment(
-                    [
-                        egui::pos2(center.x, center.y - 10.0),
-                        egui::pos2(center.x, center.y + 10.0),
-                    ],
-                    stroke,
-                );
-            }
-            CenterMark::Axis => {
-                painter.line_segment(
-                    [
-                        egui::pos2(center.x - 14.0, center.y),
-                        egui::pos2(center.x + 14.0, center.y),
-                    ],
-                    egui::Stroke::new(1.0, egui::Color32::from_rgb(220, 68, 68)),
-                );
-                painter.line_segment(
-                    [
-                        egui::pos2(center.x, center.y - 14.0),
-                        egui::pos2(center.x, center.y + 14.0),
-                    ],
-                    egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 180, 96)),
-                );
-            }
-            CenterMark::None => {}
-        }
     }
 
     fn dialogs(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
@@ -24422,7 +24442,7 @@ impl GuiApplication {
             .load_scene_camera(summary.scene_uid, &summary.name, load_visibility)
         {
             Ok(saved) => {
-                *camera = CameraController::from_qsys_camera(&saved);
+                camera.apply_qsys_camera(&saved);
                 if let Some(undo) = undo {
                     self.push_undo_snapshot(undo);
                     self.modified_scenes.insert(summary.scene_uid);
@@ -24498,7 +24518,7 @@ impl GuiApplication {
         match self.state.load_scene_camera_file(scene_uid, path) {
             Ok(name) => match self.state.load_scene_camera(scene_uid, &name, true) {
                 Ok(saved) => {
-                    *camera = CameraController::from_qsys_camera(&saved);
+                    camera.apply_qsys_camera(&saved);
                     self.push_undo_snapshot(undo);
                     self.modified_scenes.insert(scene_uid);
                     self.rebuild_snapshot();
@@ -25831,6 +25851,10 @@ impl GuiApplication {
             match update_result {
                 Ok(()) => {
                     if self.editing_saved_camera.is_none() {
+                        camera.store_view_options(&mut self.state);
+                        let _ = self
+                            .state
+                            .set_active_view_camera(&camera.to_qsys_camera("__current"));
                         self.set_status("View properties updated");
                     }
                     if accept {
@@ -29629,8 +29653,9 @@ impl GuiApplication {
         let view = snapshot.camera.clone();
         self.restore_gui_undo_state(snapshot);
         if let Some(view) = view {
-            *camera = CameraController::from_qsys_camera(&view);
+            camera.apply_qsys_camera(&view);
         }
+        camera.read_view_options(&self.state);
     }
 
     fn undo(&mut self, camera: &mut CameraController) {
@@ -31421,16 +31446,10 @@ impl GuiApplication {
             .as_ref()
             .and_then(|image| image.hit_at(point, size, precision))
             .or_else(|| {
-                cuemol_desktop_core::picking::cpu_hit(
+                cuemol_desktop_core::stereo::cpu_hit(
                     &self.snapshot,
-                    (if image.is_some() {
-                        cuemol_desktop_core::offscreen::camera_pick_mvp
-                    } else {
-                        cuemol_desktop_core::offscreen::camera_mvp
-                    })(
-                        &camera.to_qsys_camera("__current"),
-                        viewport.aspect_ratio() as f64,
-                    ),
+                    &camera.to_qsys_camera("__current"),
+                    camera.swap_stereo_eyes,
                     point,
                     size,
                     precision,
@@ -31469,20 +31488,26 @@ impl GuiApplication {
                 if atom.hit.is_none() || atom.object_uid.is_none() {
                     continue;
                 }
-                let center = vec3_from_vector(atom.center);
-                let Some((screen, depth)) = camera.project_to_viewport(center, viewport) else {
-                    continue;
-                };
-                let distance = screen.distance(position);
-                if distance > hit_precision {
-                    continue;
-                }
-                let score = distance + depth * 0.001;
-                if best
-                    .as_ref()
-                    .is_none_or(|(best_score, _)| score < *best_score)
-                {
-                    best = Some((score, PickHit::Lightweight { snapshot_index }));
+                for projected in cuemol_desktop_core::stereo::project(
+                    &camera.to_qsys_camera("__current"),
+                    [viewport.width() as f64, viewport.height() as f64],
+                    camera.swap_stereo_eyes,
+                    atom.center,
+                ) {
+                    let screen =
+                        viewport.min + egui::vec2(projected[0] as f32, projected[1] as f32);
+                    let depth = projected[2] as f32;
+                    let distance = screen.distance(position);
+                    if distance > hit_precision {
+                        continue;
+                    }
+                    let score = distance + depth * 0.001;
+                    if best
+                        .as_ref()
+                        .is_none_or(|(best_score, _)| score < *best_score)
+                    {
+                        best = Some((score, PickHit::Lightweight { snapshot_index }));
+                    }
                 }
             }
         }
@@ -31700,6 +31725,7 @@ impl CameraController {
         self.orientation
     }
 
+    #[cfg(test)]
     fn eye(&self) -> Vec3 {
         self.target + self.rotation() * Vec3::new(0.0, 0.0, self.distance)
     }
@@ -31711,6 +31737,7 @@ impl CameraController {
         ))
     }
 
+    #[cfg(test)]
     fn project_to_viewport(&self, point: Vec3, viewport: egui::Rect) -> Option<(egui::Pos2, f32)> {
         let aspect = (viewport.width() / viewport.height().max(1.0)).max(0.01);
         let clip = self.view_projection(aspect) * GlamVec4::new(point.x, point.y, point.z, 1.0);
@@ -31792,6 +31819,27 @@ center_mark\t{}\n",
     /// the exact inverse of [`to_qsys_camera`], so a save → load round-trips. The
     /// transient fields reset. CueMol zoom is the full view height. Its clockwise
     /// quaternion matrix is the inverse of glam's matrix for the same components.
+    fn apply_qsys_camera(&mut self, camera: &cuemol_qsys::Camera) {
+        let options = (self.trans_mms, self.rot_mms, self.swap_stereo_eyes);
+        *self = Self::from_qsys_camera(camera);
+        (self.trans_mms, self.rot_mms, self.swap_stereo_eyes) = options;
+    }
+
+    fn read_view_options(&mut self, state: &DesktopAppState) {
+        let options = state.active_view_options();
+        self.trans_mms = options.trans_mms;
+        self.rot_mms = options.rot_mms;
+        self.swap_stereo_eyes = options.swap_stereo_eyes;
+    }
+
+    fn store_view_options(&self, state: &mut DesktopAppState) {
+        state.set_active_view_options(cuemol_desktop_core::GuiViewOptions {
+            trans_mms: self.trans_mms,
+            rot_mms: self.rot_mms,
+            swap_stereo_eyes: self.swap_stereo_eyes,
+        });
+    }
+
     fn from_qsys_camera(camera: &cuemol_qsys::Camera) -> Self {
         let q = camera.rotation();
         let zoom = camera.zoom();
@@ -35175,6 +35223,7 @@ mod tests {
         let label = GuiAtomLabel {
             anchor: [0., 1.],
             depth: 0.,
+            clip: None,
             on_top: true,
             x: 10.0,
             y: 60.0,

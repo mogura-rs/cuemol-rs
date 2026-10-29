@@ -37,13 +37,10 @@ impl App {
             .as_ref()
             .and_then(|image| image.hit_at(point, size, precision))
             .or_else(|| {
-                cuemol_desktop_core::picking::cpu_hit(
+                cuemol_desktop_core::stereo::cpu_hit(
                     self.snapshot.as_ref()?,
-                    (if image.is_some() {
-                        cuemol_desktop_core::offscreen::camera_pick_mvp
-                    } else {
-                        cuemol_desktop_core::offscreen::camera_mvp
-                    })(&self.camera, viewport.aspect_ratio() as f64),
+                    &self.camera,
+                    cuemol_desktop_core::stereo::swap_eyes(&self.state),
                     point,
                     size,
                     precision,
@@ -152,13 +149,11 @@ impl App {
                 ]
             })
             .collect::<Vec<_>>();
-        let mvp = cuemol_desktop_core::offscreen::camera_pick_mvp(
-            &self.camera,
-            viewport.aspect_ratio() as f64,
-        );
-        let hits = shared::polygon_hits(
+
+        let hits = shared::polygon_hits_camera(
             &self.state,
-            mvp,
+            &self.camera,
+            cuemol_desktop_core::stereo::swap_eyes(&self.state),
             [viewport.width() as f64, viewport.height() as f64],
             &points,
         );
@@ -211,14 +206,21 @@ impl App {
             self.hover_sample = None;
         }
 
-        cuemol_ui::navigation::annotations(ui, &self.state, mvp, rect);
-        cuemol_ui::navigation::feedback(
+        cuemol_ui::navigation::center_mark(
+            ui,
+            &self.state,
+            &self.camera,
+            cuemol_desktop_core::stereo::swap_eyes(&self.state),
+            rect,
+        );
+        cuemol_ui::navigation::feedback_camera(
             ui,
             &self.state,
             &self.navigation,
             self.hover_hit,
             &self.pick_atoms,
-            mvp,
+            &self.camera,
+            cuemol_desktop_core::stereo::swap_eyes(&self.state),
             rect,
         );
     }

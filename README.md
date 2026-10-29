@@ -39,6 +39,10 @@ is required for network installation; a source checkout alone is insufficient.
 The native and browser interfaces use Tritium's activity bar, Explorer,
 scene tabs, right-hand Inspector, viewport tools, and bottom panels for console,
 output, animation, sequence and trajectories. Both support light and dark themes.
+The View menu provides parallel and cross stereo, eye swapping, and angular
+separation. Each eye has its own projection, picking, labels and post-processing;
+CPU image exports and offscreen depth captures use the same eye cameras.
+Hardware quad-buffer stereo is unavailable on the wgpu frontends.
 
 Open files on the command line, through the file dialog, or by drag and drop.
 The initial representation uses a protein ribbon, a nucleic-acid cartoon, and

@@ -15,6 +15,7 @@ pub mod render_base;
 pub mod renderer_factory;
 pub mod scalar_object;
 pub mod scene;
+pub mod stereo;
 pub mod style;
 pub mod style_sheet;
 pub mod sys_config;

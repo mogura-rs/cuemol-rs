@@ -84,6 +84,7 @@ pub struct UmbreonRenderParams {
     pub width: i32,
     pub height: i32,
     pub perspective: bool,
+    pub swap_stereo_eyes: bool,
     pub use_clip_z: bool,
     pub supersample: i32,
     pub aa_mode: i32,
@@ -128,6 +129,7 @@ impl Default for UmbreonRenderParams {
             width: 640,
             height: 480,
             perspective: true,
+            swap_stereo_eyes: false,
             use_clip_z: true,
             supersample: 3,
             aa_mode: 0,
@@ -682,6 +684,88 @@ impl FloatFrame {
     }
 }
 fn render_with_hatch(
+    snapshot: &RenderSceneSnapshot,
+    camera: &Camera,
+    background: [f32; 4],
+    params: &UmbreonRenderParams,
+    async_state: Option<(&AtomicU32, &AtomicBool)>,
+    hatch: Option<&npr::ResolvedHatch>,
+) -> Result<UmbreonFrame> {
+    let eyes = cuemol_qsys::stereo::viewports(
+        camera,
+        [params.width as f64, params.height as f64],
+        params.swap_stereo_eyes,
+    );
+    if eyes.len() == 2 {
+        let mut frames = Vec::with_capacity(2);
+        let progress = AtomicU32::new(0);
+        for (index, eye) in eyes.into_iter().enumerate() {
+            let mut settings = params.clone();
+            settings.width = eye.rect[2] as i32;
+            frames.push(render_eye_with_hatch(
+                snapshot,
+                &eye.camera,
+                background,
+                &settings,
+                async_state.map(|(_, cancel)| (&progress, cancel)),
+                hatch,
+            )?);
+            if let Some((progress, _)) = async_state {
+                progress.store((index as u32 + 1) * 50, Ordering::Relaxed);
+            }
+        }
+        return join_stereo_frames(frames);
+    }
+    render_eye_with_hatch(snapshot, camera, background, params, async_state, hatch)
+}
+
+fn join_stereo_frames(mut frames: Vec<UmbreonFrame>) -> Result<UmbreonFrame> {
+    if frames.len() != 2 {
+        return Err(CueMolError::invalid_argument(
+            "two stereo frames are required",
+        ));
+    }
+    let right = frames.pop().unwrap();
+    let left = frames.pop().unwrap();
+    if left.height != right.height || left.components != right.components {
+        return Err(CueMolError::invalid_argument(
+            "stereo frame dimensions differ",
+        ));
+    }
+    let width = left
+        .width
+        .checked_add(right.width)
+        .ok_or_else(|| CueMolError::invalid_argument("stereo frame width overflow"))?;
+    let mut frame = UmbreonFrame {
+        width,
+        height: left.height,
+        components: left.components,
+        pixels: Vec::new(),
+        render_seconds: left.render_seconds + right.render_seconds,
+    };
+    if left.pixels.is_empty() || right.pixels.is_empty() {
+        return Ok(frame);
+    }
+    let left_stride = left.width as usize * left.components as usize;
+    let right_stride = right.width as usize * right.components as usize;
+    frame
+        .pixels
+        .try_reserve_exact(left.pixels.len() + right.pixels.len())
+        .map_err(|e| {
+            CueMolError::invalid_argument(format!("cannot allocate stereo render: {e}"))
+        })?;
+    for (a, b) in left
+        .pixels
+        .chunks_exact(left_stride)
+        .zip(right.pixels.chunks_exact(right_stride))
+    {
+        frame.pixels.extend_from_slice(a);
+        frame.pixels.extend_from_slice(b);
+    }
+    Ok(frame)
+}
+
+fn render_eye_with_hatch(
     snapshot: &RenderSceneSnapshot,
     camera: &Camera,
     background: [f32; 4],

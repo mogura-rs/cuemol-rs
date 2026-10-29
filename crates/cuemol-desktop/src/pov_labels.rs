@@ -125,6 +125,7 @@ mod tests {
             &[GuiAtomLabel {
                 anchor: [0., 1.],
                 depth: 0.,
+                clip: None,
                 on_top: true,
                 x: 8.0,
                 y: 24.0,

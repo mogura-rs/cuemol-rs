@@ -17331,6 +17331,7 @@ function applyViewport(result, sequence) {
     snapshot.perspective = result.perspective;
     renderProjectionControls();
   }
+  centerMarkElement.style.display = result.centerMarkEmbedded ? "none" : "";
   if (typeof result.centerMark === "string") {
     const mark = result.centerMark === "crosshair" ? "cross" : result.centerMark;
     if (mark !== centerMark) applyCenterMark(mark);

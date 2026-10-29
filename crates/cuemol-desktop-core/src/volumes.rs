@@ -18,8 +18,8 @@ struct Grid {
     source: RenderVolume,
     _density: wgpu::Texture,
     transfer: wgpu::Texture,
-    parameters: wgpu::Buffer,
-    bindings: wgpu::BindGroup,
+    parameters: [wgpu::Buffer; 2],
+    bindings: [wgpu::BindGroup; 2],
 }
 
 pub struct VolumeRenderer {
@@ -188,34 +188,38 @@ impl VolumeRenderer {
                 view_formats: &[],
             });
             write_transfer(queue, &transfer, source);
-            let parameters = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("volume-parameters"),
-                contents: bytemuck::bytes_of(&<Parameters as bytemuck::Zeroable>::zeroed()),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            let parameters = std::array::from_fn(|_| {
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("volume-parameters"),
+                    contents: bytemuck::bytes_of(&<Parameters as bytemuck::Zeroable>::zeroed()),
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                })
             });
             let density_view = density.create_view(&Default::default());
             let transfer_view = transfer.create_view(&Default::default());
-            let bindings = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("volume-bindings"),
-                layout: &self.layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: parameters.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&density_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&transfer_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler),
-                    },
-                ],
+            let bindings = std::array::from_fn(|eye| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("volume-bindings"),
+                    layout: &self.layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: parameters[eye].as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&density_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&transfer_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                    ],
+                })
             });
             let grid = Grid {
                 source: source.clone(),
@@ -244,6 +248,7 @@ impl VolumeRenderer {
         region: Option<[f32; 4]>,
         linear: bool,
         output_srgb: bool,
+        eye_index: usize,
     ) {
         let vector = |v: [f32; 4]| Vector4::new3(v[0] as f64, v[1] as f64, v[2] as f64);
         let right = vector(camera.right);
@@ -273,7 +278,11 @@ impl VolumeRenderer {
                     f32::from(output_srgb),
                 ],
             };
-            queue.write_buffer(&grid.parameters, 0, bytemuck::bytes_of(&parameters));
+            queue.write_buffer(
+                &grid.parameters[eye_index],
+                0,
+                bytemuck::bytes_of(&parameters),
+            );
             planes.extend((0..slices.count).map(|plane| {
                 (
                     slices.lower[2] + f64::from(plane) * slices.thickness,
@@ -327,7 +336,7 @@ impl VolumeRenderer {
             {
                 end += 1;
             }
-            pass.set_bind_group(1, &self.grids[grid].bindings, &[]);
+            pass.set_bind_group(1, &self.grids[grid].bindings[eye_index], &[]);
             pass.draw(0..6, first..first + (end - index) as u32);
             index = end;
         }

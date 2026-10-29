@@ -44,6 +44,7 @@ fn labels_depth_test_each_pixel_and_keep_explicit_overlay_order() {
         font_weight: "normal".into(),
         anchor: [0.5, 0.5],
         depth,
+        clip: None,
         on_top: false,
     };
     let options = ViewportOptions {

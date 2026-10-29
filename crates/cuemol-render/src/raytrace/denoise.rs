@@ -7,6 +7,7 @@ pub(super) fn needs_oidn(p: &UmbreonRenderParams) -> bool {
 }
 
 pub struct OidnRender {
+    stereo_partner: Option<Box<OidnRender>>,
     width: usize,
     height: usize,
     components: i32,
@@ -53,7 +54,17 @@ impl OidnRender {
             render_seconds: self.render_seconds,
         })
     }
-    pub fn run(self) -> Result<UmbreonFrame> {
+    pub fn run(mut self) -> Result<UmbreonFrame> {
+        let partner = self.stereo_partner.take();
+        let first = self.run_eye()?;
+        if let Some(partner) = partner {
+            join_stereo_frames(vec![first, partner.run_eye()?])
+        } else {
+            Ok(first)
+        }
+    }
+
+    fn run_eye(self) -> Result<UmbreonFrame> {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let mut render = self;
@@ -75,6 +86,17 @@ impl OidnRender {
     }
     #[cfg(target_arch = "wasm32")]
     pub async fn run_async(mut self) -> Result<UmbreonFrame> {
+        let partner = self.stereo_partner.take();
+        let first = self.run_eye_async().await?;
+        if let Some(partner) = partner {
+            join_stereo_frames(vec![first, partner.run_eye_async().await?])
+        } else {
+            Ok(first)
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn run_eye_async(mut self) -> Result<UmbreonFrame> {
         use wasm_bindgen::{prelude::*, JsCast};
         #[wasm_bindgen]
         extern "C" {
@@ -127,6 +149,31 @@ fn rgba(frame: &FloatFrame) -> Vec<f32> {
 }
 
 pub fn prepare_oidn_render(
+    snapshot: &RenderSceneSnapshot,
+    camera: &Camera,
+    background: [f32; 4],
+    params: &UmbreonRenderParams,
+    hatch: Option<&HatchRenderParams>,
+) -> Result<OidnRender> {
+    let eyes = cuemol_qsys::stereo::viewports(
+        camera,
+        [params.width as f64, params.height as f64],
+        params.swap_stereo_eyes,
+    );
+    if eyes.len() == 2 {
+        let mut prepared = eyes.into_iter().map(|eye| {
+            let mut settings = params.clone();
+            settings.width = eye.rect[2] as i32;
+            prepare_oidn_eye(snapshot, &eye.camera, background, &settings, hatch)
+        });
+        let mut first = prepared.next().unwrap()?;
+        first.stereo_partner = Some(Box::new(prepared.next().unwrap()?));
+        return Ok(first);
+    }
+    prepare_oidn_eye(snapshot, camera, background, params, hatch)
+}
+
+fn prepare_oidn_eye(
     snapshot: &RenderSceneSnapshot,
     camera: &Camera,
     background: [f32; 4],
@@ -241,6 +288,36 @@ async fn render_float_async(
 }
 #[cfg(target_arch = "wasm32")]
 pub async fn render_umbreon_snapshot_async(
+    snapshot: &RenderSceneSnapshot,
+    camera: &Camera,
+    background: [f32; 4],
+    params: &UmbreonRenderParams,
+    hatch: Option<&HatchRenderParams>,
+    cancel: Option<&AtomicBool>,
+) -> Result<UmbreonFrame> {
+    let eyes = cuemol_qsys::stereo::viewports(
+        camera,
+        [params.width as f64, params.height as f64],
+        params.swap_stereo_eyes,
+    );
+    if eyes.len() == 2 {
+        let mut frames = Vec::with_capacity(2);
+        for eye in eyes {
+            check_cancel(cancel)?;
+            let mut settings = params.clone();
+            settings.width = eye.rect[2] as i32;
+            frames.push(
+                render_eye_async(snapshot, &eye.camera, background, &settings, hatch, cancel)
+                    .await?,
+            );
+        }
+        return join_stereo_frames(frames);
+    }
+    render_eye_async(snapshot, camera, background, params, hatch, cancel).await
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn render_eye_async(
     snapshot: &RenderSceneSnapshot,
     camera: &Camera,
     background: [f32; 4],
@@ -431,6 +508,7 @@ fn prepare_with_direct(
         None
     };
     Ok(OidnRender {
+        stereo_partner: None,
         width,
         height,
         components,
@@ -485,6 +563,7 @@ mod tests {
             mse(&filtered)
         );
         let frame = OidnRender {
+            stereo_partner: None,
             width,
             height,
             components: 4,
@@ -505,6 +584,7 @@ mod tests {
     #[test]
     fn indirect_recombination_keeps_direct_edges_and_unlit_annotations() {
         let input = OidnRender {
+            stereo_partner: None,
             width: 2,
             height: 1,
             components: 4,

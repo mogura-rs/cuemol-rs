@@ -276,18 +276,35 @@ impl LabelRenderer {
             let top = label.y - (label.anchor[1] * texture.logical[1] + 2.) / scale;
             let right = left + texture.size[0] as f32 / scale;
             let bottom = top + texture.size[1] as f32 / scale;
+            let [cx, cy, cw, ch] = label.clip.unwrap_or([0., 0., size[0], size[1]]);
+            let clipped = [
+                left.max(cx),
+                top.max(cy),
+                right.min(cx + cw),
+                bottom.min(cy + ch),
+            ];
+            if clipped[0] >= clipped[2] || clipped[1] >= clipped[3] {
+                continue;
+            }
+            let uv = [
+                (clipped[0] - left) / (right - left),
+                (clipped[1] - top) / (bottom - top),
+                (clipped[2] - left) / (right - left),
+                (clipped[3] - top) / (bottom - top),
+            ];
+            let [left, top, right, bottom] = clipped;
             let color = cuemol_gfx::parse_color(&label.color)
                 .ok()
                 .and_then(|c| c.rgba8())
                 .map(|c| [c.r, c.g, c.b, c.a].map(|c| f32::from(c) / 255.))
                 .unwrap_or([1., 1., 0., 1.]);
             for (x, y, u, v) in [
-                (left, top, 0., 0.),
-                (right, top, 1., 0.),
-                (left, bottom, 0., 1.),
-                (left, bottom, 0., 1.),
-                (right, top, 1., 0.),
-                (right, bottom, 1., 1.),
+                (left, top, uv[0], uv[1]),
+                (right, top, uv[2], uv[1]),
+                (left, bottom, uv[0], uv[3]),
+                (left, bottom, uv[0], uv[3]),
+                (right, top, uv[2], uv[1]),
+                (right, bottom, uv[2], uv[3]),
             ] {
                 vertices.push(Vertex {
                     position: [

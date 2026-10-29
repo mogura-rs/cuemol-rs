@@ -533,6 +533,7 @@ pub fn prepare_render(
             params.ambient_fraction = 0.16;
         }
     }
+    params.swap_stereo_eyes = state.active_view_options().swap_stereo_eyes;
     let background = state.active_background_color()?;
     let hatch = if npr {
         Some(hatch_params(&settings, prefix)?)

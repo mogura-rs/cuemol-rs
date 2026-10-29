@@ -6,7 +6,10 @@
 
 use wgpu::util::DeviceExt;
 
-use cuemol_core::{CueMolError, Matrix4, Result, Uid};
+#[cfg(test)]
+use crate::projection::projection_matrix;
+pub use crate::projection::{camera_depth_range, camera_mvp, camera_pick_mvp};
+use cuemol_core::{CueMolError, Result, Uid};
 use cuemol_gfx::{jitter_offset, jitter_sample_count};
 use cuemol_qsys::{Camera, View, ViewCap};
 use cuemol_render::{tessellate_snapshot, MeshVertex, RenderMesh, RenderSceneSnapshot};
@@ -468,6 +471,37 @@ impl SceneRenderer {
         Some(resolve_rgba(&accumulated, sample_count))
     }
 
+    pub fn render_camera_depth(
+        &self,
+        snapshot: &RenderSceneSnapshot,
+        camera: &Camera,
+        width: u32,
+        height: u32,
+    ) -> Option<Vec<u8>> {
+        let (width, height) = (width.max(1), height.max(1));
+        let mesh = tessellate_snapshot(snapshot);
+        let mut pixels = vec![0; width as usize * height as usize * 4];
+        for eye in cuemol_qsys::stereo::viewports(camera, [width as f64, height as f64], false) {
+            let eye_width = eye.rect[2] as u32;
+            let (near, far) = camera_depth_range(&eye.camera);
+            let image = self.render_depth(
+                std::slice::from_ref(&mesh),
+                camera_mvp(&eye.camera, eye.aspect()),
+                eye_width,
+                height,
+                near,
+                far,
+                eye.camera.is_perspective(),
+            )?;
+            for y in 0..height as usize {
+                let start = (y * width as usize + eye.rect[0] as usize) * 4;
+                let length = eye_width as usize * 4;
+                pixels[start..start + length].copy_from_slice(&image[y * length..(y + 1) * length]);
+            }
+        }
+        Some(pixels)
+    }
+
     /// Render meshes as a linearized grayscale depth image while reusing the
     /// persistent device and depth pipeline.
     #[allow(clippy::too_many_arguments)]
@@ -606,21 +640,10 @@ impl OffScreenView {
             return false;
         }
 
-        let camera = self.view.camera();
-        let aspect = f64::from(width) / f64::from(height);
-        let mvp = camera_mvp(&camera, aspect);
-        let mesh = tessellate_snapshot(snapshot);
+        let camera =
+            cuemol_qsys::stereo::with_eye_order(&self.view.camera(), self.view.swap_stereo_eyes());
         let pixels = if self.depth_mode {
-            let (near, far) = camera_depth_range(&camera);
-            renderer.render_depth(
-                &[mesh],
-                mvp,
-                width,
-                height,
-                near,
-                far,
-                camera.is_perspective(),
-            )
+            renderer.render_camera_depth(snapshot, &camera, width, height)
         } else {
             background[3] = if self.background_transparent {
                 0.0
@@ -1091,99 +1114,6 @@ fn draw_meshes(
     Some(out)
 }
 
-/// A row-major translation matrix.
-fn translation(tx: f64, ty: f64, tz: f64) -> Matrix4 {
-    let mut m = Matrix4 {
-        values: [[0.0; 4]; 4],
-    };
-    for i in 0..4 {
-        m.values[i][i] = 1.0;
-    }
-    m.values[0][3] = tx;
-    m.values[1][3] = ty;
-    m.values[2][3] = tz;
-    m
-}
-
-/// Build the row-major projection matrix for a [`Camera`] — orthographic, or
-/// perspective when the camera's `perspective` flag is set. The focal plane at
-/// `cam_dist` has half-height `zoom/2` (width scaled by `aspect`) in both modes;
-/// the display clip planes map to wgpu depth `[0, 1]`.
-fn projection_matrix(camera: &Camera, aspect: f64) -> Matrix4 {
-    projection_matrix_with_range(camera, aspect, camera_depth_range(camera))
-}
-
-fn projection_matrix_with_range(camera: &Camera, aspect: f64, range: (f64, f64)) -> Matrix4 {
-    let cam_dist = camera.cam_dist();
-    let half_h = (camera.zoom() / 2.0).max(1.0e-6);
-    let half_w = (half_h * aspect).max(1.0e-6);
-    let (near_dist, far_dist) = range;
-    let mut p = Matrix4 {
-        values: [[0.0; 4]; 4],
-    };
-    if camera.is_perspective() {
-        let f = cam_dist / half_h; // 1 / tan(half_fov_y)
-        p.values[0][0] = f / aspect;
-        p.values[1][1] = f;
-        p.values[2][2] = far_dist / (near_dist - far_dist);
-        p.values[2][3] = near_dist * far_dist / (near_dist - far_dist);
-        p.values[3][2] = -1.0; // perspective divide by -z_view
-    } else {
-        p.values[0][0] = 1.0 / half_w;
-        p.values[1][1] = 1.0 / half_h;
-        p.values[2][2] = -1.0 / (far_dist - near_dist);
-        p.values[2][3] = -near_dist / (far_dist - near_dist);
-        p.values[3][3] = 1.0;
-    }
-    p
-}
-
-/// Build the column-major MVP matrix WGSL expects from a scene [`Camera`].
-///
-/// Mirrors the CueMol camera model: view = `T(0,0,-cam_dist) · R(rotation) ·
-/// T(-center)`, then the [`projection_matrix`] (orthographic or perspective).
-pub fn camera_mvp(camera: &Camera, aspect: f64) -> [[f32; 4]; 4] {
-    camera_mvp_with_projection(camera, projection_matrix(camera, aspect))
-}
-
-/// Picking stops at the fog end; fully fogged geometry remains in display depth.
-pub fn camera_pick_mvp(camera: &Camera, aspect: f64) -> [[f32; 4]; 4] {
-    let (near, _) = camera_depth_range(camera);
-    let far = (camera.cam_dist() + camera.slab_depth() * 0.5).max(near + 0.1);
-    camera_mvp_with_projection(
-        camera,
-        projection_matrix_with_range(camera, aspect, (near, far)),
-    )
-}
-
-fn camera_mvp_with_projection(camera: &Camera, projection: Matrix4) -> [[f32; 4]; 4] {
-    let center = camera.center();
-    let rotation = camera.rotation().to_matrix();
-    let cam_dist = camera.cam_dist();
-    let view = translation(0.0, 0.0, -cam_dist)
-        .mul_mat(rotation)
-        .mul_mat(translation(-center.x, -center.y, -center.z));
-
-    let mvp = projection.mul_mat(view);
-    // Row-major Matrix4 -> column-major array for WGSL (out[col][row]).
-    let mut out = [[0.0f32; 4]; 4];
-    for (col, out_col) in out.iter_mut().enumerate() {
-        for (row, slot) in out_col.iter_mut().enumerate() {
-            *slot = mvp.values[row][col] as f32;
-        }
-    }
-    out
-}
-
-/// Near and far distances used by [`camera_mvp`].
-pub fn camera_depth_range(camera: &Camera) -> (f64, f64) {
-    let slab = camera.slab_depth().max(0.1);
-    (
-        (camera.cam_dist() - slab / 2.0).max(0.1),
-        camera.cam_dist() + slab,
-    )
-}
-
 pub(crate) fn jittered_mvp(
     mut mvp: [[f32; 4]; 4],
     width: u32,
@@ -1280,19 +1210,7 @@ pub fn render_snapshot_depth_offscreen(
     width: u32,
     height: u32,
 ) -> Option<Vec<u8>> {
-    let aspect = width.max(1) as f64 / height.max(1) as f64;
-    let mvp = camera_mvp(camera, aspect);
-    let (near, far) = camera_depth_range(camera);
-    let mesh = tessellate_snapshot(snapshot);
-    render_meshes_depth_offscreen(
-        &[mesh],
-        mvp,
-        width,
-        height,
-        near,
-        far,
-        camera.is_perspective(),
-    )
+    SceneRenderer::new()?.render_camera_depth(snapshot, camera, width, height)
 }
 
 /// Encode an RGBA8 image (`width*height*4` bytes, row-major) as PNG bytes.
