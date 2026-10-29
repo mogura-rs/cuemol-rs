@@ -1450,6 +1450,7 @@ dependencies = [
  "cuemol-core",
  "cuemol-desktop-core",
  "cuemol-gfx",
+ "cuemol-lwview",
  "cuemol-mdtools",
  "cuemol-molstr",
  "cuemol-qsys",

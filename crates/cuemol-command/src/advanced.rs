@@ -109,7 +109,7 @@ pub fn call_tool(
             let mut matrix = Matrix4::new();
             for row in 0..4 {
                 for col in 0..4 {
-                    matrix.set_at(row, col, values[row * 4 + col])?;
+                    matrix.set_at(row + 1, col + 1, values[row * 4 + col])?;
                 }
             }
             let mut mol = state
@@ -511,6 +511,11 @@ fn molecule_annotations(state: &mut DesktopAppState, name: &str, args: &Value) -
             "exactly one atom is required",
         ));
     }
+    let format = args["format"].as_str().unwrap_or("");
+    cuemol_molstr::label_format::LabelFormat::new(format)?;
+    if name == "set_atom_labels" && !args["format"].is_null() && indices.is_empty() {
+        return Err(CueMolError::not_found("atoms matching label selection"));
+    }
     let label = args["rendererName"].as_str().unwrap_or("");
     let object = state.scene_manager_mut().object_mut(id).unwrap();
     let show = if name == "set_atom_label" {
@@ -525,45 +530,54 @@ fn molecule_annotations(state: &mut DesktopAppState, name: &str, args: &Value) -
         .map(|r| r.uid());
     let renderer = match renderer {
         Some(id) => id,
-        None if show => object.add_renderer("*namelabel", label),
+        None if show => {
+            let id = object.add_renderer("*namelabel", label);
+            object
+                .renderer_mut(id)
+                .unwrap()
+                .set_qsc_attr("style", "DefaultLabel");
+            id
+        }
         None => return Ok(json!({"labels":0})),
     };
     let labels = indices
         .iter()
-        .map(|i| {
-            let a = &object.mol().atoms()[*i];
-            let resid = format!(
-                "{}{}",
-                a.res_id,
-                a.ins_code.map(|c| c.to_string()).unwrap_or_default()
-            );
-            let aid = crate::navigation::atom_reference(a);
-            let format = args["format"].as_str().unwrap_or("");
-            let value = format
-                .replace("{resn}", &a.res_name)
-                .replace("{resi}", &resid)
-                .replace("{chain}", &a.chain_id)
-                .replace("{name}", a.name.trim())
-                .replace("{elem}", &a.element)
-                .replace("{id}", &a.serial.to_string());
-            (aid, value)
-        })
+        .map(|index| crate::navigation::atom_reference(&object.mol().atoms()[*index]))
         .collect::<Vec<_>>();
     let r = object.renderer_mut(renderer).unwrap();
+    let mut max_labels = r
+        .qsc_attr("maxlabel")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(50);
+    if show && name == "set_atom_labels" {
+        max_labels = max_labels.saturating_add(labels.len());
+        r.set_qsc_attr("maxlabel", max_labels.to_string());
+    }
     let mut nodes = r.qsc_children().to_vec();
     nodes.retain(|n| {
-        n.tag_name() != "label"
-            || !labels
-                .iter()
-                .any(|(aid, _)| n.str_attr("aid").as_str() == aid)
+        n.tag_name() != "label" || !labels.iter().any(|aid| n.str_attr("aid").as_str() == aid)
     });
     if show {
-        for (aid, value) in &labels {
+        for aid in &labels {
             let mut node = LDom2Node::new();
             node.set_tag_name("label");
             node.set_str_attr("aid", aid.as_str());
-            node.set_str_attr("text", value.as_str());
+            if !format.is_empty() {
+                node.set_str_attr("format", format);
+            }
             nodes.push(node);
+        }
+    }
+    if show {
+        while nodes
+            .iter()
+            .filter(|node| node.tag_name() == "label")
+            .count()
+            > max_labels
+        {
+            if let Some(index) = nodes.iter().position(|node| node.tag_name() == "label") {
+                nodes.remove(index);
+            }
         }
     }
     r.set_qsc_children(nodes);

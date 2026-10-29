@@ -169,6 +169,14 @@ The optional second argument is the frame stride. Legacy `dcd-info`, `xtc-info`,
 All installed entry points use `cuemol`; no separate JavaScript MCP launcher is
 needed. The running native GUI exposes an authenticated loopback MCP endpoint.
 
+Property commands edit molecular, map, surface and lightweight objects through
+shared state. They preserve renderer identities even when names are empty or
+duplicated, and resets restore the effective values used for rendering. View
+properties update the active view and camera; unknown view properties fail.
+Browser file loading accepts OBJ/PLY surfaces, QDF molecules/maps/potentials/
+surfaces/lightweight objects, and PyMOL sessions in addition to the molecular and
+map formats. QDF dispatch uses its content rather than assuming a molecule.
+
 ```sh
 cuemol mcp config
 cuemol mcp status

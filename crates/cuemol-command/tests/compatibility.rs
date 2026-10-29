@@ -244,6 +244,86 @@ fn measurement_references_follow_coordinate_changes() {
 }
 
 #[test]
+fn command_labels_use_live_validated_formats() {
+    let mut state = DesktopAppState::new();
+    let mut camera = Camera::new();
+    let id = molecule(&mut state, &mut camera, "labels", 0.0);
+    let result = call(
+        &mut state,
+        &mut camera,
+        "set_atom_labels",
+        json!({"objId":id,"selection":"aid 1","format":"{molname}:{bfac:.2f}:{aid:03d}"}),
+    );
+    let renderer = Uid::new(result["rendererId"].as_u64().unwrap());
+    let text = |state: &DesktopAppState| {
+        let object = state.scene_manager().object(Uid::new(id)).unwrap();
+        object.name_label_entries(object.renderer(renderer).unwrap())[0]
+            .1
+            .clone()
+    };
+    assert_eq!(text(&state), "labels.pdb:10.00:001");
+    state
+        .scene_manager_mut()
+        .object_mut(Uid::new(id))
+        .unwrap()
+        .mol_mut()
+        .atoms_mut()[0]
+        .b_factor = 23.75;
+    assert_eq!(text(&state), "labels.pdb:23.75:001");
+    let before = state.active_scene_bytes().unwrap();
+    assert!(call_tool(
+        &mut state,
+        &mut camera,
+        "set_atom_labels",
+        &json!({"objId":id,"selection":"aid 1","format":"{missing}"})
+    )
+    .is_err());
+    assert_eq!(state.active_scene_bytes().unwrap(), before);
+    let mut restored = DesktopAppState::new();
+    restored.open_bytes("labels.qsc", &before).unwrap();
+    let object = restored
+        .scene_manager()
+        .scene(restored.active_scene().unwrap())
+        .unwrap()
+        .objects()
+        .first()
+        .unwrap();
+    let renderer = object
+        .renderers()
+        .iter()
+        .find(|renderer| renderer.renderer_type() == "*namelabel")
+        .unwrap();
+    assert_eq!(
+        object.name_label_entries(renderer)[0].1,
+        "labels.pdb:23.75:001"
+    );
+}
+
+#[test]
+fn symmetry_copy_applies_row_major_matrix_coordinates() {
+    let mut state = DesktopAppState::new();
+    let mut camera = Camera::new();
+    let id = molecule(&mut state, &mut camera, "original", 0.0);
+    let result = call(
+        &mut state,
+        &mut camera,
+        "create_symmetry_copy",
+        json!({"objId":id,"name":"translated","matrix":"1 0 0 7 0 1 0 -3 0 0 1 2 0 0 0 1","rendererType":"cpk"}),
+    );
+    let original = state.scene_manager().object(Uid::new(id)).unwrap();
+    let copy = state
+        .scene_manager()
+        .object(Uid::new(result["objectId"].as_u64().unwrap()))
+        .unwrap();
+    for (a, b) in original.mol().atoms().iter().zip(copy.mol().atoms()) {
+        assert!(
+            (b.position - a.position - cuemol_core::Vector4::new3(7.0, -3.0, 2.0)).length3d()
+                < 1e-9
+        );
+    }
+}
+
+#[test]
 fn animation_identity_camera_seek_and_saved_timeline() {
     let mut state = DesktopAppState::new();
     let mut camera = Camera::new();

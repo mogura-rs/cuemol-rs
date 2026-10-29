@@ -1150,7 +1150,7 @@ fn sniff_text(input: &str, sniffer: HandlerSniffer) -> ContentVerdict {
     }
 }
 
-fn sniff_bytes(bytes: &[u8], sniffer: HandlerSniffer) -> ContentVerdict {
+pub fn sniff_bytes(bytes: &[u8], sniffer: HandlerSniffer) -> ContentVerdict {
     match sniffer {
         HandlerSniffer::AmberPrmtop => sniff_amber_prmtop(bytes),
         HandlerSniffer::NamdCoor => sniff_namd_coor(bytes),

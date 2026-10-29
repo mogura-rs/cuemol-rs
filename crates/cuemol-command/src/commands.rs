@@ -83,6 +83,42 @@ pub(crate) fn fit(
     zoom: bool,
 ) -> Result<()> {
     let scene_uid = scene(state)?;
+    if object.is_some_and(|id| state.scene_manager().object(id).is_none())
+        || (object.is_none()
+            && state
+                .object_summaries(scene_uid)
+                .iter()
+                .all(|object| object.atom_count == 0))
+    {
+        let snapshot = if let Some(id) = object {
+            state.workspace_object_render_snapshot(id)?
+        } else {
+            state.active_render_snapshot("")?
+        };
+        let (min, max) = snapshot
+            .bounds
+            .ok_or_else(|| CueMolError::not_found("object geometry"))?;
+        if zoom {
+            let points = [min.x, max.x].into_iter().flat_map(|x| {
+                [min.y, max.y].into_iter().flat_map(move |y| {
+                    [min.z, max.z]
+                        .into_iter()
+                        .map(move |z| Vector4::new3(x, y, z))
+                })
+            });
+            let aspect = state
+                .active_view_summary()
+                .and_then(|view| state.command_manager().view(view.uid))
+                .filter(|view| view.width() > 0 && view.height() > 0)
+                .map_or(1.0, |view| {
+                    f64::from(view.width()) / f64::from(view.height())
+                });
+            camera.fit_positions(points, aspect);
+        } else {
+            camera.set_center((min + max).scale(0.5));
+        }
+        return Ok(());
+    }
     let ids = object.map(|id| vec![id]).unwrap_or_else(|| {
         state
             .object_summaries(scene_uid)
@@ -212,6 +248,8 @@ pub fn call_tool(
         "list_renderer_types" => {
             let id=uid(args,"objId")?;
             let types=if state.density_map_summary(id).is_some() { state.density_map_renderer_setup_options() }
+                else if state.surface_summary(id).is_some() { state.surface_renderer_setup_options() }
+                else if state.lw_object_summary(id).is_some() { vec![cuemol_desktop_core::GuiRendererSetupOption {name:"lwrend".into(),description:"Lightweight renderer".into(),preset:false}] }
                 else { state.scene_manager().object(id).ok_or_else(||CueMolError::not_found("object"))?; state.molecule_renderer_setup_options(scene(state)?)? };
             Ok(json!({"rendererTypes":types.iter().filter(|t|!t.preset).map(|t|&t.name).collect::<Vec<_>>(),"presetTypes":types.iter().filter(|t|t.preset).map(|t|&t.name).collect::<Vec<_>>()}))
         }
@@ -219,8 +257,21 @@ pub fn call_tool(
             let object=uid(args,"objId")?;
             let kind=text(args,if name=="create_renderer" {"rendererType"} else {"preset"})?;
             let label=args["name"].as_str().map(str::to_string).unwrap_or(state.suggest_renderer_name(scene(state)?,kind)?);
-            let renderer=if state.density_map_summary(object).is_some() {state.add_density_renderer(object,kind)?}
-                else {state.new_renderer_from_setup(scene(state)?,object,kind,&label,args["selection"].as_str())?};
+            let renderer=if state.density_map_summary(object).is_some() {
+                let id=state.add_density_renderer(object,kind)?;
+                state.rename_density_renderer(object,id,&label)?; id
+            } else if state.surface_summary(object).is_some() {
+                if kind!="molsurf" { return Err(CueMolError::invalid_argument("surface objects require a molsurf renderer")); }
+                let id=state.add_surface_renderer(object)?;
+                state.rename_surface_renderer(object,id,&label)?; id
+            } else if state.lw_object_summary(object).is_some() {
+                if kind!="lwrend" { return Err(CueMolError::invalid_argument("lightweight objects require a lwrend renderer")); }
+                let id=state.add_lw_renderer(object)?;
+                state.rename_lw_renderer(object,id,&label)?; id
+            } else {state.new_renderer_from_setup(scene(state)?,object,kind,&label,args["selection"].as_str())?};
+            if let Some(selection)=args["selection"].as_str().filter(|_| state.scene_manager().object(object).is_none()) {
+                state.set_auxiliary_renderer_property(object,renderer,"sel",selection)?;
+            }
             if args["centerView"] == true { fit(state,camera,Some(object),args["selection"].as_str(),true)?; }
             Ok(json!({"objectId":object.get(),"rendererId":renderer.get(),"name":label}))
         }
@@ -231,7 +282,9 @@ pub fn call_tool(
         }
         "set_renderer_selection" => {
             let id=uid(args,"rendId")?;let object=renderer_owner(state,id)?;
-            state.set_renderer_selection_text(object,id,text(args,"selection")?)?;
+            if state.scene_manager().object(object).is_some() {
+                state.set_renderer_selection_text(object,id,text(args,"selection")?)?;
+            } else { state.set_auxiliary_renderer_property(object,id,"sel",text(args,"selection")?)?; }
             Ok(json!({"rendererId":id.get()}))
         }
         "set_visible" | "delete_node" | "rename_node" => crate::nodes::edit_node(state,name,args),

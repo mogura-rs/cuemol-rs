@@ -1,4 +1,6 @@
 mod command_support;
+mod property_access;
+pub use property_access::auxiliary_property_readonly;
 mod density_view;
 mod map_surface;
 pub mod picking;
@@ -8440,6 +8442,14 @@ impl DesktopAppState {
         renderer_uid: Uid,
         visible: bool,
     ) -> Result<()> {
+        if self.scene_manager().object(object_uid).is_none() {
+            return self.set_auxiliary_renderer_property(
+                object_uid,
+                renderer_uid,
+                "visible",
+                &visible.to_string(),
+            );
+        }
         let object = self
             .scene_manager_mut()
             .object_mut(object_uid)
@@ -11137,6 +11147,10 @@ impl DesktopAppState {
         key: impl Into<String>,
         value: impl Into<String>,
     ) -> Result<()> {
+        let (key, value) = (key.into(), value.into());
+        if self.scene_manager().object(object_uid).is_none() {
+            return self.set_auxiliary_renderer_property(object_uid, renderer_uid, &key, &value);
+        }
         let object = self
             .scene_manager_mut()
             .object_mut(object_uid)
@@ -11144,8 +11158,12 @@ impl DesktopAppState {
         let renderer = object
             .renderer_mut(renderer_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
-        let (key, value) = (key.into(), value.into());
-        property_catalog::validate_renderer_attr(renderer.renderer_type(), &key, &value)?;
+        property_access::validate_auxiliary_property(renderer.renderer_type(), &key, &value)?;
+        match key.as_str() {
+            "name" => renderer.set_name(&value),
+            "sel" => renderer.set_selection(parse_selector(&value)?),
+            _ => {}
+        }
         renderer.set_qsc_attr(key, value);
         Ok(())
     }
@@ -11156,6 +11174,9 @@ impl DesktopAppState {
         renderer_uid: Uid,
         key: &str,
     ) -> Result<()> {
+        if self.scene_manager().object(object_uid).is_none() {
+            return self.reset_auxiliary_renderer_property(object_uid, renderer_uid, key);
+        }
         let object = self
             .scene_manager_mut()
             .object_mut(object_uid)
@@ -11163,6 +11184,20 @@ impl DesktopAppState {
         let renderer = object
             .renderer_mut(renderer_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
+        match key {
+            "name" => renderer.set_name(""),
+            "sel" => renderer.set_selection(Selector::All),
+            "defaultcolor" => {
+                renderer.set_default_color(cuemol_gfx::SolidColor::from_rgb(1.0, 1.0, 1.0))
+            }
+            "coloring" => {
+                renderer.set_coloring(cuemol_molstr::SolidColoring::new());
+                let mut children = renderer.qsc_children().to_vec();
+                children.retain(|node| node.tag_name() != "coloring");
+                renderer.set_qsc_children(children);
+            }
+            _ => {}
+        }
         renderer.remove_qsc_attr(key);
         Ok(())
     }
@@ -12900,6 +12935,7 @@ impl DesktopAppState {
         let object_node = ensure_surface_qsc_node(surface);
         let mut renderer_node = default_surface_renderer_node(1);
         renderer_node.set_str_attr("name", setup.renderer_name.trim());
+        object_node.retain_children(|node| node.is_attr() || node.tag_name() != "renderer");
         object_node.append_child_node(renderer_node);
         Ok(GuiLoadedPath::Scene { scene_uid })
     }
@@ -13415,9 +13451,19 @@ impl DesktopAppState {
     ) -> Result<Vec<Uid>> {
         let mut reader = PseFileReader::new();
         reader.set_path(path.to_string_lossy());
-        let camera = reader.read_camera()?;
-        let records = reader.read_molecule_records()?;
-        let measurement_records = reader.read_measurement_records()?;
+        let tree = reader.parse_pickle_tree()?;
+        self.load_pse_tree(scene_uid, &tree, fallback_name)
+    }
+
+    fn load_pse_tree(
+        &mut self,
+        scene_uid: Uid,
+        tree: &cuemol_importers::PickleValue,
+        fallback_name: &str,
+    ) -> Result<Vec<Uid>> {
+        let camera = cuemol_importers::extract_pse_camera(tree);
+        let records = cuemol_importers::extract_pse_molecule_records(tree);
+        let measurement_records = cuemol_importers::extract_pse_measurement_records(tree);
         let mut object_uids = Vec::with_capacity(records.len());
         for (index, record) in records.into_iter().enumerate() {
             let name = if record.name().trim().is_empty() {
@@ -46457,6 +46503,14 @@ impl DesktopAppState {
                     map.source = state.source;
                     map.alt_source = state.alt_source;
                     map.xform = state.xform;
+                    map.renderer_groups = state
+                        .renderers
+                        .iter()
+                        .filter(|renderer| {
+                            matches!(renderer.rtype.as_str(), "*group" | "RendGroup")
+                        })
+                        .map(script_surface_renderer_node)
+                        .collect();
                     let previous = std::mem::take(&mut map.renderers);
                     map.renderers = state
                         .renderers
@@ -47528,16 +47582,16 @@ impl DesktopAppState {
                     children,
                 } => {
                     let object_uid = Uid::new(object_uid);
-                    if let Some(map) = self.density_maps.get_mut(&object_uid) {
-                        if let Some(target) = map
-                            .renderers
-                            .iter_mut()
-                            .find(|r| r.uid.get() == renderer_uid)
-                        {
-                            target.children = children;
-                            map.modified = true;
-                            continue;
-                        }
+                    if self.scene_manager().object(object_uid).is_none()
+                        && self
+                            .set_auxiliary_renderer_children(
+                                object_uid,
+                                Uid::new(renderer_uid),
+                                children.clone(),
+                            )
+                            .is_ok()
+                    {
+                        continue;
                     }
                     let renderer_uid = self
                         .scene_manager()
@@ -48198,6 +48252,14 @@ impl DesktopAppState {
                     .renderers
                     .iter()
                     .map(|renderer| density_renderer_to_script(map, renderer))
+                    .chain(map.renderer_groups.iter().enumerate().map(|(index, node)| {
+                        script_auxiliary_renderer(
+                            node,
+                            aux_renderer_group_uid(map.uid, index),
+                            map.uid,
+                            map.scene_uid,
+                        )
+                    }))
                     .collect(),
                 scalar_map: Some(map.map.clone()),
                 surface: None,
@@ -48447,7 +48509,34 @@ impl DesktopAppState {
                 .objects()
                 .iter()
                 .find(|object| object.renderer(uid).is_some())
-                .map(|object| (object.uid(), uid));
+                .map(|object| (object.uid(), uid))
+                .or_else(|| {
+                    self.density_map_summaries(scene_uid)
+                        .into_iter()
+                        .find(|object| {
+                            object.renderers.iter().any(|r| r.uid == uid)
+                                || object.renderer_groups.iter().any(|r| r.uid == uid)
+                        })
+                        .map(|object| (object.uid, uid))
+                })
+                .or_else(|| {
+                    self.surface_summaries(scene_uid)
+                        .into_iter()
+                        .find(|object| {
+                            object.renderers.iter().any(|r| r.uid == uid)
+                                || object.renderer_groups.iter().any(|r| r.uid == uid)
+                        })
+                        .map(|object| (object.uid, uid))
+                })
+                .or_else(|| {
+                    self.lw_object_summaries(scene_uid)
+                        .into_iter()
+                        .find(|object| {
+                            object.renderers.iter().any(|r| r.uid == uid)
+                                || object.renderer_groups.iter().any(|r| r.uid == uid)
+                        })
+                        .map(|object| (object.uid, uid))
+                });
         }
         self.renderer_uid_by_name_in_scene(scene_uid, object, renderer)
     }
@@ -49328,59 +49417,71 @@ fn sync_loaded_surface_geometry(surface: &mut LoadedSurface, object: &MolSurfObj
 }
 
 #[cfg(feature = "scripting")]
+fn script_auxiliary_renderer(node: &LDom2Node, uid: Uid, owner: Uid, scene: Uid) -> ScriptRend {
+    ScriptRend {
+        uid: uid.get(),
+        object_uid: owner.get(),
+        scene_uid: scene.get(),
+        name: node.str_attr("name").to_string(),
+        rtype: node.type_name().to_string(),
+        visible: node
+            .find_child("visible")
+            .is_none_or(|child| qsc_bool(child.value())),
+        attributes: node
+            .children()
+            .iter()
+            .filter(|child| child.is_attr())
+            .map(|child| (child.tag_name().to_string(), child.value().to_string()))
+            .collect(),
+        children: node
+            .children()
+            .iter()
+            .filter(|child| !child.is_attr())
+            .cloned()
+            .collect(),
+        ..ScriptRend::default()
+    }
+}
+
+#[cfg(feature = "scripting")]
 fn script_surface_renderers(
     surface: &LoadedSurface,
     scene_uid: Uid,
     styles: &StyleManager,
 ) -> Vec<ScriptRend> {
-    surface
+    let fallback = default_surface_renderer_node(1);
+    let nodes = surface
         .qsc_node
         .as_ref()
-        .into_iter()
-        .flat_map(|node| node.children())
-        .filter(|node| node.tag_name() == "renderer" && !node.is_attr())
-        .enumerate()
-        .map(|(index, node)| {
-            let rtype = node.type_name().to_string();
-            let attributes = node
-                .children()
+        .map(|node| {
+            node.children()
                 .iter()
-                .filter(|child| child.is_attr())
-                .map(|child| (child.tag_name().to_string(), child.value().to_string()))
-                .collect::<BTreeMap<_, _>>();
-            let mut style_node = LDom2Node::new();
-            style_node.set_tag_name("renderer");
-            style_node.set_type_name(rtype.clone());
-            for child in node.children() {
-                style_node.append_child_node(child.clone());
+                .filter(|child| child.tag_name() == "renderer" && !child.is_attr())
+                .collect::<Vec<_>>()
+        })
+        .filter(|nodes| !nodes.is_empty())
+        .unwrap_or_else(|| vec![&fallback]);
+    let (mut renderer_index, mut group_index) = (0, 0);
+    nodes
+        .into_iter()
+        .map(|node| {
+            let uid = if matches!(node.type_name(), "*group" | "RendGroup") {
+                let uid = aux_renderer_group_uid(surface.uid, group_index);
+                group_index += 1;
+                uid
+            } else {
+                let uid = surface_renderer_uid(scene_uid, surface.uid, renderer_index);
+                renderer_index += 1;
+                uid
+            };
+            let mut renderer = script_auxiliary_renderer(node, uid, surface.uid, scene_uid);
+            if matches!(
+                renderer.rtype.as_str(),
+                "molsurf" | "dsurface" | "directsurf" | "dsurf2"
+            ) {
+                renderer.multi_gradient = Some(density_multi_gradient(node, styles));
             }
-            ScriptRend {
-                uid: surface_renderer_uid(scene_uid, surface.uid, index).get(),
-                object_uid: surface.uid.get(),
-                scene_uid: scene_uid.get(),
-                name: attributes
-                    .get("name")
-                    .cloned()
-                    .filter(|name| !name.is_empty())
-                    .unwrap_or_else(|| rtype.clone()),
-                rtype: rtype.clone(),
-                visible: attributes
-                    .get("visible")
-                    .is_none_or(|value| qsc_bool(value)),
-                attributes,
-                children: node
-                    .children()
-                    .iter()
-                    .filter(|child| !child.is_attr())
-                    .cloned()
-                    .collect(),
-                atom_intr_lines: Vec::new(),
-                multi_gradient: (matches!(
-                    rtype.as_str(),
-                    "molsurf" | "dsurface" | "directsurf" | "dsurf2"
-                ))
-                .then(|| density_multi_gradient(&style_node, styles)),
-            }
+            renderer
         })
         .collect()
 }
@@ -49540,59 +49641,60 @@ fn sync_script_surface(surface: &mut LoadedSurface, state: &ScriptObj) {
 
 #[cfg(feature = "scripting")]
 fn script_lw_renderers(object: &LoadedLWObject, scene_uid: Uid) -> Vec<ScriptRend> {
-    object
+    let mut renderers = object
         .renderers
         .iter()
         .enumerate()
         .map(|(index, renderer)| {
-            let source_node = object.qsc_node.as_ref().and_then(|node| {
-                node.children()
-                    .iter()
-                    .filter(|child| child.tag_name() == "renderer" && !child.is_attr())
-                    .find(|child| child.str_attr("name").as_str() == renderer.name)
-                    .or_else(|| {
-                        node.children()
-                            .iter()
-                            .filter(|child| child.tag_name() == "renderer" && !child.is_attr())
-                            .nth(index)
-                    })
-            });
-            let mut attributes = source_node
-                .into_iter()
-                .flat_map(|node| node.children())
-                .filter(|child| child.is_attr())
-                .map(|child| (child.tag_name().to_string(), child.value().to_string()))
-                .collect::<BTreeMap<_, _>>();
-            attributes.insert("data_id".to_string(), renderer.data_id.to_string());
-            if renderer.xform != Matrix4::IDENTITY {
-                attributes.insert("xformMat".to_string(), renderer.xform.to_script_string());
-            }
-            ScriptRend {
-                uid: lw_renderer_uid(scene_uid, object.uid, index).get(),
-                object_uid: object.uid.get(),
-                scene_uid: scene_uid.get(),
-                name: renderer.name.clone(),
-                rtype: "lwrend".to_string(),
-                visible: renderer.visible,
-                attributes,
-                children: source_node
-                    .into_iter()
-                    .flat_map(|node| node.children())
-                    .filter(|child| !child.is_attr())
-                    .cloned()
-                    .collect(),
-                atom_intr_lines: Vec::new(),
-                multi_gradient: None,
-            }
+            let mut node = object
+                .qsc_node
+                .as_ref()
+                .and_then(|node| {
+                    node.children()
+                        .iter()
+                        .filter(|child| {
+                            child.tag_name() == "renderer"
+                                && !child.is_attr()
+                                && child.type_name() == "lwrend"
+                        })
+                        .nth(index)
+                })
+                .cloned()
+                .unwrap_or_else(|| lw_renderer_qsc_node(renderer));
+            node.set_str_attr("name", &renderer.name);
+            node.set_str_attr("visible", renderer.visible.to_string());
+            node.set_str_attr("data_id", renderer.data_id.to_string());
+            node.set_str_attr("xformMat", renderer.xform.to_script_string());
+            script_auxiliary_renderer(
+                &node,
+                lw_renderer_uid(scene_uid, object.uid, index),
+                object.uid,
+                scene_uid,
+            )
         })
-        .collect()
+        .collect::<Vec<_>>();
+    if let Some(node) = object.qsc_node.as_ref() {
+        renderers.extend(
+            aux_renderer_group_nodes(node)
+                .enumerate()
+                .map(|(index, node)| {
+                    script_auxiliary_renderer(
+                        node,
+                        aux_renderer_group_uid(object.uid, index),
+                        object.uid,
+                        scene_uid,
+                    )
+                }),
+        );
+    }
+    renderers
 }
 
 #[cfg(feature = "scripting")]
 fn script_lw_renderer_node(renderer: &ScriptRend) -> LDom2Node {
     let mut node = LDom2Node::new();
     node.set_tag_name("renderer");
-    node.set_type_name("lwrend");
+    node.set_type_name(&renderer.rtype);
     for (name, value) in &renderer.attributes {
         if matches!(name.as_str(), "type" | "name" | "visible") {
             continue;
@@ -51570,14 +51672,7 @@ fn density_renderer_configs(
                 .unwrap_or_else(|| cuemol_gfx::parse_color("#0000ff").unwrap());
             Some(GuiDensityRenderer {
                 uid: Uid::new(0),
-                name: {
-                    let name = node.str_attr("name").to_string();
-                    if name.is_empty() {
-                        renderer_type.clone()
-                    } else {
-                        name
-                    }
-                },
+                name: node.str_attr("name").to_string(),
                 renderer_type,
                 kind,
                 visible: attr("visible").as_deref().is_none_or(qsc_bool),
@@ -53255,6 +53350,7 @@ fn ensure_surface_qsc_node(surface: &mut LoadedSurface) -> &mut LDom2Node {
         node.set_str_attr("name", surface.name.clone());
         node.set_str_attr("src", "datachunk:");
         node.set_str_attr("srctype", surface.srctype.clone());
+        node.append_child_node(default_surface_renderer_node(1));
         surface.qsc_node = Some(node);
     }
     surface
@@ -53700,7 +53796,9 @@ fn surface_renderer_summary(
         ui_order: node
             .and_then(|node| node.str_attr("ui_order").as_str().parse().ok())
             .unwrap_or(fallback_ui_order),
-        name: attr("name", &format!("molsurf {}", renderer_index + 1)),
+        name: node
+            .map(|node| node.str_attr("name").to_string())
+            .unwrap_or_else(|| format!("molsurf {}", renderer_index + 1)),
         renderer_type: "molsurf".to_string(),
         selection: attr("sel", "*"),
         visible: qsc_bool(&attr("visible", "true")),
@@ -58162,7 +58260,7 @@ end_header
             .iter()
             .find(|object| object.name == "source-surface")
             .unwrap();
-        assert_eq!(surface.renderers[0].name, "(molsurf)");
+        assert_eq!(surface.renderers[0].name, "molsurf 1");
         assert_eq!(
             cuemol_lwview::read_qdf_lwobj_bytes(&surface.raw_data)
                 .unwrap()

@@ -82,12 +82,124 @@ impl DesktopAppState {
             }
             return result;
         }
-        let map_format = match extension.as_str() {
+        use cuemol_molstr::{ContentVerdict, HandlerSniffer};
+        let sniff = |kind| cuemol_molstr::stream::sniff_bytes(bytes, kind) == ContentVerdict::Yes;
+        let format = match extension.as_str() {
+            "qdf" => [
+                (HandlerSniffer::QdfMol, "qdfmol"),
+                (HandlerSniffer::QdfMap, "qdfmap"),
+                (HandlerSniffer::QdfSurf, "qdfsurf"),
+                (HandlerSniffer::QdfPot, "qdfpot"),
+                (HandlerSniffer::QdfLwObj, "qdflwobj"),
+            ]
+            .into_iter()
+            .find_map(|(kind, name)| sniff(kind).then_some(name))
+            .ok_or_else(|| CueMolError::parse("unknown or invalid QDF object type"))?,
+            "cif" | "mmcif"
+                if [
+                    "_refln.pdbx_FWT",
+                    "_refln.pdbx_DELFWT",
+                    "_refln.pdbx_PHWT",
+                    "_refln.pdbx_DELPHWT",
+                ]
+                .iter()
+                .any(|tag| byte_index(bytes, tag.as_bytes()).is_some()) =>
+            {
+                "mmcifmap"
+            }
+            "map" if sniff(HandlerSniffer::XplorMap) => "xplor",
+            other => other,
+        };
+        if format == "pse" {
+            let data = cuemol_core::compressed::decode_bytes(bytes)?;
+            let tree = cuemol_importers::parse_pickle(&data)?;
+            let scene_uid = self.ensure_active_scene();
+            self.load_pse_tree(scene_uid, &tree, name)?;
+            if let Some(camera) = self.active_scene_saved_camera() {
+                self.set_active_view_camera(&camera)?;
+            }
+            return Ok(GuiLoadedPath::Scene { scene_uid });
+        }
+        if matches!(format, "obj" | "ply" | "qdfsurf") {
+            match format {
+                "obj" => {
+                    cuemol_surface::read_obj_str(
+                        std::str::from_utf8(bytes)
+                            .map_err(|e| CueMolError::parse(e.to_string()))?,
+                    )?;
+                }
+                "ply" => {
+                    cuemol_surface::read_ply_bytes(bytes)?;
+                }
+                _ => {
+                    cuemol_surface::qdf::read_qdf_surface_bytes(bytes)?;
+                }
+            }
+            let scene_uid = self.ensure_active_scene();
+            let mut surface = LoadedSurface {
+                uid: Uid::new(0),
+                name: name.into(),
+                object_type: "MolSurfObj".into(),
+                srctype: format.into(),
+                data: if format == "obj" {
+                    String::from_utf8_lossy(bytes).into_owned()
+                } else {
+                    String::new()
+                },
+                raw_data: bytes.to_vec(),
+                qsc_node: None,
+            };
+            ensure_surface_qsc_node(&mut surface);
+            self.scene_manager_mut()
+                .scene_mut(scene_uid)
+                .unwrap()
+                .add_loaded_surface(surface);
+            return Ok(GuiLoadedPath::Scene { scene_uid });
+        }
+        if format == "qdflwobj" {
+            let object = cuemol_lwview::read_qdf_lwobj_bytes(bytes)?;
+            let ids = object
+                .draw_elements()
+                .iter()
+                .map(cuemol_lwview::LWDrawElement::data_id)
+                .filter(|id| *id != 0)
+                .collect::<BTreeSet<_>>();
+            let renderers = ids
+                .into_iter()
+                .map(|data_id| LoadedLWRenderer {
+                    name: format!("lwrend_{data_id}"),
+                    data_id,
+                    visible: true,
+                    xform: Matrix4::IDENTITY,
+                })
+                .collect();
+            let scene_uid = self.ensure_active_scene();
+            let mut object = LoadedLWObject {
+                uid: Uid::new(0),
+                name: name.into(),
+                srctype: "qdflwobj".into(),
+                raw_data: bytes.to_vec(),
+                visible: true,
+                xform: Matrix4::IDENTITY,
+                renderers,
+                qsc_node: None,
+            };
+            ensure_lw_qsc_node(&mut object);
+            self.scene_manager_mut()
+                .scene_mut(scene_uid)
+                .unwrap()
+                .add_loaded_lw_object(object);
+            return Ok(GuiLoadedPath::Scene { scene_uid });
+        }
+        let map_format = match format {
             "map" | "mrc" | "ccp4" => Some("ccp4map"),
             "dx" => Some("apbs"),
-            "xplor" => Some("xplormap"),
+            "xplor" | "cns" => Some("xplormap"),
             "brix" | "omap" => Some("brix"),
             "mtz" => Some("mtzmap"),
+            "mmcifmap" => Some("mmcifmap"),
+            "qdfmap" => Some("qdfmap"),
+            "qdfpot" => Some("qdfpot"),
             _ => None,
         };
         if let Some(format) = map_format {
@@ -99,7 +211,7 @@ impl DesktopAppState {
             return Ok(GuiLoadedPath::Map { scene_uid, map_uid });
         }
         let text = || std::str::from_utf8(bytes).map_err(|e| CueMolError::parse(e.to_string()));
-        let mol = match extension.as_str() {
+        let mol = match format {
             "pdb" | "ent" => read_pdb_str(text()?)?,
             "cif" | "mmcif" => read_mmcif_str(text()?)?,
             "sdf" | "mol" => read_sdf_str(text()?)?,
@@ -107,7 +219,8 @@ impl DesktopAppState {
             "gro" => cuemol_mdtools::read_gro_str(text()?)?,
             "psf" => cuemol_mdtools::read_psf_str(text()?)?,
             "prmtop" | "parm7" | "top" => cuemol_mdtools::read_amber_prmtop_str(text()?)?,
-            "qdf" | "qdfmol" => read_qdf_mol_bytes(bytes)?,
+            "qdfmol" => read_qdf_mol_bytes(bytes)?,
+            "qdfpdb" => cuemol_molstr::read_qdfpdb_str(text()?)?,
             _ => {
                 return Err(CueMolError::invalid_argument(format!(
                     "unsupported file format: {extension}"
@@ -277,6 +390,140 @@ impl DesktopAppState {
 mod tests {
     use super::*;
     const PDB: &[u8] = b"HETATM    1  C1  LIG A   1       1.000   2.000   3.000  1.00 10.00           C  \nHETATM    2  O1  LIG A   1       2.300   2.000   3.000  1.00 10.00           O  \nEND\n";
+    #[test]
+    fn byte_loader_dispatches_qdf_objects_and_roundtrips_surface_formats() {
+        let obj = b"v 0 0 0\nv 2 0 0\nv 0 2 0\nf 1 2 3\n";
+        let ply = b"ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\nelement face 1\nproperty list uchar int vertex_indices\nend_header\n0 0 0\n2 0 0\n0 2 0\n3 0 1 2\n";
+        let mut surface = cuemol_surface::MolSurfObj::new();
+        *surface.mesh_mut() =
+            cuemol_surface::read_obj_str(std::str::from_utf8(obj).unwrap()).unwrap();
+        let qdf = cuemol_surface::qdf::write_qdf_surface_bytes(&surface);
+        for (name, bytes) in [
+            ("surface.obj", obj.as_slice()),
+            ("surface.ply", ply.as_slice()),
+            ("surface.qdf", qdf.as_slice()),
+        ] {
+            let mut state = DesktopAppState::new();
+            state.open_bytes(name, bytes).unwrap();
+            let scene = state.active_scene().unwrap();
+            let surfaces = state.surface_summaries(scene);
+            assert_eq!(surfaces.len(), 1, "{name}");
+            assert_eq!(surfaces[0].renderers.len(), 1, "{name}");
+            let geometry = state.active_render_snapshot("").unwrap();
+            assert_eq!(geometry.meshes[0].indices.len(), 3, "{name}");
+            let saved = state.active_scene_bytes().unwrap();
+            let mut restored = DesktopAppState::new();
+            restored.open_bytes("surface.qsc", &saved).unwrap();
+            assert_eq!(
+                restored.active_render_snapshot("").unwrap().meshes,
+                geometry.meshes,
+                "{name}"
+            );
+        }
+        let molecule = read_pdb_str(std::str::from_utf8(PDB).unwrap()).unwrap();
+        let mut state = DesktopAppState::new();
+        state
+            .open_bytes("molecule.qdf", &write_qdf_mol_bytes(&molecule))
+            .unwrap();
+        assert_eq!(state.active_object_summaries()[0].atom_count, 2);
+        let map = DensityMap::from_grid_map(cuemol_xtal::GridMap {
+            counts: [2; 3],
+            origin: Vector4::ZERO,
+            delta: [
+                Vector4::new3(1., 0., 0.),
+                Vector4::new3(0., 1., 0.),
+                Vector4::new3(0., 0., 1.),
+            ],
+            values: vec![0., 1., 2., 3., 4., 5., 6., 7.],
+        });
+        let pot = electrostatic_map_from_density_map(&map);
+        for (bytes, kind) in [
+            (cuemol_xtal::write_qdf_denmap_bytes(&map), "DensityMap"),
+            (
+                cuemol_surface::qdf::write_qdf_potential_bytes(&pot),
+                "ElePotMap",
+            ),
+        ] {
+            let mut state = DesktopAppState::new();
+            let GuiLoadedPath::Map { map_uid, .. } = state.open_bytes("map.qdf", &bytes).unwrap()
+            else {
+                panic!("map expected")
+            };
+            assert_eq!(state.density_maps[&map_uid].class_name, kind);
+            assert_eq!(state.density_maps[&map_uid].map.col_no(), 2);
+        }
+        let mut lw = cuemol_lwview::LWObject::new();
+        lw.add_draw_element(cuemol_lwview::LWDrawElement::new(
+            7,
+            cuemol_gfx::AbstDrawElem::DRAW_TRIANGLES as i8,
+            1.,
+            [255, 0, 0, 255],
+            cuemol_lwview::LWDrawData::Vertices(vec![[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]]),
+        ));
+        let mut state = DesktopAppState::new();
+        state
+            .open_bytes(
+                "lightweight.qdf",
+                &cuemol_lwview::write_qdf_lwobj_bytes(&lw),
+            )
+            .unwrap();
+        let objects = state.lw_object_summaries(state.active_scene().unwrap());
+        assert_eq!(objects[0].renderers[0].data_id, 7);
+        assert_eq!(
+            state.active_render_snapshot("").unwrap().meshes[0]
+                .indices
+                .len(),
+            3
+        );
+        assert!(state.open_bytes("broken.qdf", b"not a QDF").is_err());
+        assert_eq!(
+            state
+                .lw_object_summaries(state.active_scene().unwrap())
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn byte_loader_preserves_native_pymol_representations_and_camera() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../cuemol-importers/tests/fixtures/mol3.pse");
+        let bytes = std::fs::read(&path).unwrap();
+        let mut native = DesktopAppState::new();
+        native.open_path(&path).unwrap();
+        let mut memory = DesktopAppState::new();
+        memory.open_bytes("session.pse", &bytes).unwrap();
+        let summary = |state: &DesktopAppState| {
+            state
+                .scene_manager()
+                .scene(state.active_scene().unwrap())
+                .unwrap()
+                .objects()
+                .iter()
+                .map(|object| {
+                    (
+                        object.name().to_string(),
+                        object.mol().atom_count(),
+                        object
+                            .renderers()
+                            .iter()
+                            .map(|r| r.renderer_type().to_string())
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(summary(&memory), summary(&native));
+        assert_eq!(
+            memory.active_scene_saved_camera(),
+            native.active_scene_saved_camera()
+        );
+        assert_eq!(
+            memory.active_render_snapshot("").unwrap(),
+            native.active_render_snapshot("").unwrap()
+        );
+    }
+
     #[test]
     fn browser_export_preserves_existing_and_multiple_external_trajectory_blocks() {
         let mut state = DesktopAppState::new();

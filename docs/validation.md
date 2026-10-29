@@ -1318,6 +1318,45 @@ source browser directory. Staging also requires these five files. The six
 portable-distribution checks pass; the installed artifact check compares every
 served asset's bytes against its manifest hash.
 
+### Additional command and byte-loading audit
+
+Generic command tools had several paths that reported success without changing
+live state, or that only supported molecular objects. Common object transforms,
+renderer material/alpha/edge properties, renderer groups and resets now use the
+shared state for maps, saved surfaces and lightweight objects. Creating these
+renderers preserves the requested name. Renderer lookup and nested gradient
+updates use identifiers, so duplicate and empty names cannot redirect edits to a
+sibling. Materializing a standalone surface preserves its implicit renderer,
+while an explicit file-load setup replaces that default instead of adding a
+second copy. Molecular selection/name resets update the typed fields as well as
+serialized attributes. Reset-all preserves names, styles and group membership.
+
+View command writes now update camera and view state, including stereo settings,
+center marks and input momentum. Unknown view properties and read-only values
+return errors. This verifies state routing; stereo display is being audited
+separately. `create_symmetry_copy` now uses the matrix API's one-based indices.
+Atom-label commands validate the shared format language before mutation and
+store live formats, so later coordinate/atom-property edits remain reflected.
+
+The byte loader previously rejected standalone surfaces and interpreted every
+`.qdf` as a molecule. It now dispatches all five QDF object types using the shared
+sniffers, accepts OBJ/PLY, preserves those objects in embedded scenes, and handles
+map-CIF and XPLOR aliases. PyMOL byte loads share the native import logic for
+representations, labels, measurements and saved cameras. Native PyMOL imports
+also parse their pickle once instead of three times. Browser object loads fit
+the geometry while actual scene/session loads restore their saved camera.
+
+Validation passes 43 command tests, 230 shared-core tests with the reference tree
+present, 167 native GUI tests and 144 ordinary Tauri tests. Optional renderer/GPU
+cases remain explicit, separate checks. Seven command property regressions cover
+all auxiliary kinds, invalid values, resets, groups and duplicate identities.
+Two byte-loader tests check QDF dispatch, surface geometry after embedded reload,
+and equality with the native PyMOL import. Four rebuilt-browser cases pass,
+including measured surface-width changes and opacity restoration, PyMOL pixels,
+gradient identity and capped map coloring. Clippy completes with existing warnings;
+the warning in the new property helper was corrected. The complete browser suite
+is rerun after these focused checks.
+
 ### Documentation reconciled with implementation
 
 The implementation takes precedence over stale descriptions. Corrections found
@@ -1347,3 +1386,4 @@ during this work are collected here; the read-only reference itself was not edit
 | Earlier validation entries described the registry audit as unfinished. | Checkpoints are marked as historical and linked to the completed integrated audit. |
 | The legacy CLI claimed to honor all saved renderer geometry independently. | Both scene-export commands now use the shared GUI geometry and render settings. |
 | The browser manifest listed assets that the executable's fixed list omitted. | Embedding follows the manifest, including the five missing license/provenance files. |
+| The byte-loader comment described native-reader behavior without stating its molecule-only QDF dispatch and missing surface/session paths. | Byte loads now use the matching domain readers and shared PyMOL import logic. |

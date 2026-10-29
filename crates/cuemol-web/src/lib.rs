@@ -627,7 +627,18 @@ impl App {
                             };
                             self.dirty = true;
                             self.rebuild();
-                            if matches!(loaded, GuiLoadedPath::Scene { .. }) {
+                            let mut filename = name.to_ascii_lowercase();
+                            for suffix in [".gz", ".bz2", ".xz"] {
+                                if let Some(base) = filename.strip_suffix(suffix) {
+                                    filename = base.to_string();
+                                    break;
+                                }
+                            }
+                            if matches!(loaded, GuiLoadedPath::Scene { .. })
+                                && [".qsc", ".qsl", ".pse"]
+                                    .iter()
+                                    .any(|suffix| filename.ends_with(suffix))
+                            {
                                 self.frame = 0;
                                 self.playing = false;
                                 self.camera = self.state.active_view_camera().unwrap_or_default();

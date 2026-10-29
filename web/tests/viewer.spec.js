@@ -1162,3 +1162,56 @@ END
     return count;
   }).toBeGreaterThan(500);
 });
+
+test('shared property commands transform surface geometry and reset opacity in the browser',async({page},testInfo)=>{
+  await ready(page);
+  await load(page,'surface.obj',Buffer.from('v -1 -1 0\nv 1 -1 0\nv 1 1 0\nv -1 1 0\nf 1 2 3\nf 1 3 4\n'));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Loaded surface.obj');
+  const ids=await call(page,'execute_script',{source:"var o=cuemol.getObject('surface.obj');print(o.uid+':'+o.rend_uids);"});
+  const [object,renderer]=JSON.parse(ids.message).log.trim().split(/[:,]/).map(Number);
+  expect(object).toBeGreaterThan(0);expect(renderer).toBeGreaterThan(0);
+  await call(page,'set_prop',{path:`#${renderer}.defaultcolor`,value:'#ff00ff'});
+  await call(page,'set_view',{center:[0,0,0],zoom:10,slab:30,distance:100});
+  const rect=await page.evaluate(()=>window.cuemol.status().ui.rects.Viewport);
+  const pixels=async()=>{
+    const png=PNG.sync.read(await page.screenshot({clip:{x:rect[0],y:rect[1],width:rect[2],height:rect[3]}}));
+    let count=0,min=png.width,max=-1;
+    for(let y=0;y<png.height;y++)for(let x=0;x<png.width;x++){
+      const i=4*(y*png.width+x),[r,g,b]=png.data.subarray(i,i+3);
+      if(r>g+60&&b>g+60){count++;min=Math.min(min,x);max=Math.max(max,x);}
+    }
+    return {count,width:max-min+1};
+  };
+  await expect.poll(async()=>(await pixels()).count).toBeGreaterThan(1000);
+  const initial=await pixels();
+  const scale='(2,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1)';
+  await call(page,'set_prop',{path:`#${object}.xformMat`,value:scale});
+  await expect.poll(async()=>(await pixels()).width).toBeGreaterThan(initial.width*1.9);
+  await call(page,'reset_prop',{path:`#${object}.xformMat`});
+  await expect.poll(async()=>(await pixels()).width).toBe(initial.width);
+  await call(page,'set_prop',{path:`#${renderer}.xformMat`,value:scale});
+  await expect.poll(async()=>(await pixels()).width).toBeGreaterThan(initial.width*1.9);
+  await call(page,'set_prop',{path:`#${renderer}.alpha`,value:'0'});
+  await expect.poll(async()=>(await pixels()).count).toBe(0);
+  await call(page,'reset_prop',{path:`#${renderer}.alpha`});
+  await expect.poll(async()=>(await pixels()).width).toBeGreaterThan(initial.width*1.9);
+  await page.screenshot({path:testInfo.outputPath('surface-properties.png')});
+});
+
+test('browser PyMOL import preserves molecular representations and saved camera',async({page},testInfo)=>{
+  await ready(page);
+  const bytes=readFileSync(new URL('../../crates/cuemol-importers/tests/fixtures/mol3.pse',import.meta.url));
+  await load(page,'session.pse',bytes);
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toBe('Loaded session.pse');
+  const state=await page.evaluate(()=>window.cuemol.status());
+  expect(state.scene.objects.reduce((total,object)=>total+object.atoms,0)).toBe(3);
+  expect(state.scene.objects.some(object=>object.renderers.length>0)).toBe(true);
+  const rect=state.ui.rects.Viewport;
+  await expect.poll(async()=>{
+    const png=PNG.sync.read(await page.screenshot({clip:{x:rect[0],y:rect[1],width:rect[2],height:rect[3]}}));
+    let colored=0;
+    for(let i=0;i<png.data.length;i+=4)if(Math.max(...png.data.subarray(i,i+3))-Math.min(...png.data.subarray(i,i+3))>40)colored++;
+    return colored;
+  }).toBeGreaterThan(100);
+  await page.screenshot({path:testInfo.outputPath('pymol-import.png')});
+});

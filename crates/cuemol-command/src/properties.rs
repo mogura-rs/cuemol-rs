@@ -469,6 +469,11 @@ fn properties(
     let sid = scene(state)?;
     if name == "set_node_prop" || name == "set_prop" {
         let value = text(args, "value")?;
+        if property_readonly(state, &kind, id, &prop) {
+            return Err(CueMolError::invalid_argument(format!(
+                "{prop} is read-only"
+            )));
+        }
         match kind.as_str() {
             "renderer" | "rendGroup" => nodes::set_renderer_property(
                 state,
@@ -482,34 +487,7 @@ fn properties(
                 &prop,
                 value,
             )?,
-            "view" => {
-                let number = || {
-                    value
-                        .parse::<f64>()
-                        .ok()
-                        .filter(|v| v.is_finite() && *v > 0.)
-                        .ok_or_else(|| {
-                            CueMolError::invalid_argument("expected positive finite number")
-                        })
-                };
-                match prop.as_str() {
-                    "zoom" => camera.set_zoom(number()?),
-                    "slab" | "slabdepth" => camera.set_slab_depth(number()?),
-                    "distance" | "camdist" => camera.set_cam_dist(number()?),
-                    "center" | "viewcenter" => {
-                        camera.set_center(Vector4::from_script_string(value)?)
-                    }
-                    "rotation" | "rotQuat" => camera.set_rotation(parse_rotation(value)?),
-                    "perspective" => camera.set_perspective(
-                        value
-                            .parse()
-                            .map_err(|_| CueMolError::invalid_argument("expected true or false"))?,
-                    ),
-                    _ => {
-                        state.put_config_value(&format!("view.{prop}"), value);
-                    }
-                }
-            }
+            "view" => set_view_property(state, camera, &prop, value)?,
             "scene" => {
                 validate_view_effect_property(&prop, value)?;
                 if prop == "bgcolor" {
@@ -529,7 +507,9 @@ fn properties(
             "renderer" | "rendGroup" => {
                 let id = id.unwrap();
                 let owner = renderer_owner(state, id)?;
-                if prop == "*" {
+                if state.scene_manager().object(owner).is_none() {
+                    state.reset_auxiliary_renderer_property(owner, id, &prop)?;
+                } else if prop == "*" {
                     let keys = state
                         .scene_manager()
                         .object(owner)
@@ -539,7 +519,9 @@ fn properties(
                         })?
                         .qsc_attrs()
                         .keys()
-                        .filter(|k| !matches!(k.as_str(), "name" | "type" | "ui_order"))
+                        .filter(|k| {
+                            !matches!(k.as_str(), "name" | "type" | "ui_order" | "style" | "group")
+                        })
                         .cloned()
                         .collect::<Vec<_>>();
                     for key in keys {
@@ -558,13 +540,7 @@ fn properties(
                     .unwrap()
                     .remove_scene_attribute(&prop);
             }
-            "object" => {
-                let object = state
-                    .scene_manager_mut()
-                    .object_mut(id.unwrap())
-                    .ok_or_else(|| CueMolError::not_found("molecule"))?;
-                object.remove_qsc_extra_attr(&prop);
-            }
+            "object" => reset_object_property(state, id.unwrap(), &prop)?,
             _ => {
                 return Err(CueMolError::invalid_argument(
                     "this property has no default",
@@ -591,22 +567,26 @@ fn properties(
             }
             v
         }
-        "view" => BTreeMap::from([
-            ("zoom".into(), camera.zoom().to_string()),
-            ("slab".into(), camera.slab_depth().to_string()),
-            ("distance".into(), camera.cam_dist().to_string()),
-            ("center".into(), camera.center().to_string()),
-            ("rotation".into(), camera.rotation().to_string()),
-            ("perspective".into(), camera.is_perspective().to_string()),
-        ]),
+        "view" => view_properties(state, camera),
         _ => return Err(CueMolError::invalid_argument("unknown node type")),
     };
     if name == "list_node_props" {
-        Ok(
-            json!({"properties":values.iter().map(|(key,value)|json!({"key":key,"value":value,"readonly":false})).collect::<Vec<_>>()}),
-        )
+        Ok(json!({"properties":values.iter().map(|(key,value)| {
+                let readonly = property_readonly(state, &kind, id, key);
+                let allowed = property_allowed(key);
+                let mut row = json!({"key":key,"value":value,"readonly":readonly});
+                if !allowed.is_empty() { row["allowed"] = json!(allowed); }
+                row
+            }).collect::<Vec<_>>()}))
     } else {
-        Ok(json!({"prop":prop,"value":values.remove(&prop)}))
+        let value = if prop == "*" {
+            Value::Null
+        } else {
+            json!(values
+                .remove(&prop)
+                .ok_or_else(|| CueMolError::not_found(format!("{kind} property {prop}")))?)
+        };
+        Ok(json!({"prop":prop,"value":value}))
     }
 }
 
@@ -626,10 +606,230 @@ fn object_properties(state: &DesktopAppState, id: Uid) -> Result<BTreeMap<String
     } else {
         return Err(CueMolError::not_found("object"));
     };
+    p.insert(
+        "xformMat".into(),
+        state.workspace_object_transform(id)?.to_script_string(),
+    );
     p.insert("name".into(), name);
     p.insert("visible".into(), visible.to_string());
     p.insert("locked".into(), locked.to_string());
     Ok(p)
+}
+
+fn reset_object_property(state: &mut DesktopAppState, id: Uid, prop: &str) -> Result<()> {
+    let keys = if prop == "*" {
+        vec!["name", "visible", "locked", "xformMat"]
+    } else {
+        vec![prop]
+    };
+    for key in keys {
+        match key {
+            "name" => set_object_property(state, id, key, "")?,
+            "visible" => set_object_property(state, id, key, "true")?,
+            "locked" => set_object_property(state, id, key, "false")?,
+            "xformMat" => {
+                state.set_workspace_object_transform(id, &Matrix4::IDENTITY.to_script_string())?
+            }
+            "sel" => state.set_molecule_selection_text(id, "")?,
+            _ => {
+                let object = state.scene_manager_mut().object_mut(id).ok_or_else(|| {
+                    CueMolError::invalid_argument(format!("{key} has no default"))
+                })?;
+                if !object.remove_qsc_extra_attr(key) {
+                    return Err(CueMolError::invalid_argument(format!(
+                        "{key} has no default"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn property_allowed(key: &str) -> &'static [&'static str] {
+    match key {
+        "stereoMode" => &["none", "para", "cross", "hardware"],
+        "centerMark" => &["none", "crosshair", "axis"],
+        "egtype" => &["none", "edges", "silhouette"],
+        "drawmode" => &["fill", "line", "point"],
+        "region_mode" => &["auto", "box", "full"],
+        "lod" => &["auto", "step1", "step2", "step4", "step8"],
+        "cap_mode" => &["auto", "on", "off"],
+        "aa_method" => &["none", "fxaa", "smaa"],
+        _ => &[],
+    }
+}
+
+fn property_readonly(state: &DesktopAppState, kind: &str, id: Option<Uid>, key: &str) -> bool {
+    if matches!(
+        key,
+        "uid" | "scene_uid" | "type_name" | "src" | "alt_src" | "srctype" | "modified"
+    ) {
+        return true;
+    }
+    if kind == "view" {
+        return matches!(
+            key,
+            "width" | "height" | "hasHWStereo" | "up_vec" | "right_vec" | "forward_vec" | "style"
+        );
+    }
+    if matches!(kind, "renderer" | "rendGroup") {
+        if cuemol_desktop_core::auxiliary_property_readonly(key) {
+            return true;
+        }
+        if let Some(renderer) = id.and_then(|id| {
+            renderer_owner(state, id)
+                .ok()
+                .and_then(|owner| state.scene_manager().object(owner)?.renderer(id))
+        }) {
+            return cuemol_desktop_core::property_catalog::renderer_attr_properties(
+                renderer.renderer_type(),
+            )
+            .iter()
+            .any(|property| property.key == key && !property.writable);
+        }
+    }
+    false
+}
+
+fn view_properties(state: &DesktopAppState, camera: &Camera) -> BTreeMap<String, String> {
+    use cuemol_qsys::{CenterMark, StereoMode};
+    let mut values = BTreeMap::from([
+        ("zoom".into(), camera.zoom().to_string()),
+        ("slab".into(), camera.slab_depth().to_string()),
+        ("distance".into(), camera.cam_dist().to_string()),
+        ("center".into(), camera.center().to_string()),
+        ("rotation".into(), camera.rotation().to_string()),
+        ("perspective".into(), camera.is_perspective().to_string()),
+        (
+            "stereoMode".into(),
+            match camera.stereo_mode() {
+                StereoMode::None => "none",
+                StereoMode::Parallel => "para",
+                StereoMode::Cross => "cross",
+                StereoMode::Hardware => "hardware",
+            }
+            .into(),
+        ),
+        ("stereoDist".into(), camera.stereo_distance().to_string()),
+        (
+            "centerMark".into(),
+            match camera.center_mark() {
+                CenterMark::None => "none",
+                CenterMark::Cross => "crosshair",
+                CenterMark::Axis => "axis",
+            }
+            .into(),
+        ),
+    ]);
+    for (alias, key) in [
+        ("slabdepth", "slab"),
+        ("camdist", "distance"),
+        ("viewcenter", "center"),
+        ("rotQuat", "rotation"),
+    ] {
+        values.insert(alias.into(), values[key].clone());
+    }
+    let view = state
+        .active_view_summary()
+        .and_then(|summary| state.command_manager().view(summary.uid));
+    let defaults = View::new(Uid::new(0), Uid::new(0));
+    let mut current = view.unwrap_or(&defaults).clone();
+    current.set_camera(camera);
+    for (key, value) in [
+        ("name", view.map_or("", View::name).to_string()),
+        ("active", current.active().to_string()),
+        ("width", current.width().to_string()),
+        ("height", current.height().to_string()),
+        ("trans_mms", current.trans_mms().to_string()),
+        ("rot_mms", current.rot_mms().to_string()),
+        ("swapStereoEyes", current.swap_stereo_eyes().to_string()),
+        ("hasHWStereo", current.has_hw_stereo().to_string()),
+        ("up_vec", current.up_vec().to_string()),
+        ("right_vec", current.right_vec().to_string()),
+        ("forward_vec", current.forward_vec().to_string()),
+        ("style", current.style().into()),
+    ] {
+        values.insert(key.into(), value);
+    }
+    values
+}
+
+fn set_view_property(
+    state: &mut DesktopAppState,
+    camera: &mut Camera,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    use cuemol_qsys::{CenterMark, StereoMode};
+    let invalid = || CueMolError::invalid_argument(format!("invalid view property {key}: {value}"));
+    let number = || {
+        value
+            .parse::<f64>()
+            .ok()
+            .filter(|v| v.is_finite())
+            .ok_or_else(invalid)
+    };
+    let positive = || number().and_then(|v| if v > 0.0 { Ok(v) } else { Err(invalid()) });
+    let boolean = || value.parse::<bool>().map_err(|_| invalid());
+    match key {
+        "zoom" => camera.set_zoom(positive()?),
+        "slab" | "slabdepth" => camera.set_slab_depth(positive()?),
+        "distance" | "camdist" => camera.set_cam_dist(positive()?),
+        "center" | "viewcenter" => {
+            let center = Vector4::from_script_string(value)?;
+            if ![center.x, center.y, center.z].iter().all(|v| v.is_finite()) {
+                return Err(invalid());
+            }
+            camera.set_center(center);
+        }
+        "rotation" | "rotQuat" => camera.set_rotation(parse_rotation(value)?),
+        "perspective" => camera.set_perspective(boolean()?),
+        "stereoMode" => camera.set_stereo_mode(match value {
+            "none" => StereoMode::None,
+            "para" => StereoMode::Parallel,
+            "cross" => StereoMode::Cross,
+            "hardware" => StereoMode::Hardware,
+            _ => return Err(invalid()),
+        }),
+        "stereoDist" => {
+            let distance = number()?;
+            if distance < 0.0 {
+                return Err(invalid());
+            }
+            camera.set_stereo_distance(distance);
+        }
+        "centerMark" => camera.set_center_mark(match value {
+            "none" => CenterMark::None,
+            "crosshair" => CenterMark::Cross,
+            "axis" => CenterMark::Axis,
+            _ => return Err(invalid()),
+        }),
+        "name" | "active" | "trans_mms" | "rot_mms" | "swapStereoEyes" => {
+            let flag = if key == "name" { false } else { boolean()? };
+            let id = state
+                .active_view_summary()
+                .ok_or_else(|| CueMolError::not_found("active view"))?
+                .uid;
+            let view = state.command_manager_mut().view_mut(id).unwrap();
+            match key {
+                "name" => view.set_name(value),
+                "active" => view.set_active(flag),
+                "trans_mms" => view.set_trans_mms(flag),
+                "rot_mms" => view.set_rot_mms(flag),
+                _ => view.set_swap_stereo_eyes(flag),
+            }
+        }
+        _ => {
+            return Err(CueMolError::invalid_argument(format!(
+                "unknown or read-only view property {key}"
+            )))
+        }
+    }
+    if state.active_view_summary().is_some() {
+        state.set_active_view_camera(camera)?;
+    }
+    Ok(())
 }
 
 fn set_object_property(
@@ -668,11 +868,7 @@ fn set_object_property(
             }
         }
         "sel" => state.set_molecule_selection_text(id, value)?,
-        "xformMat" => state
-            .scene_manager_mut()
-            .object_mut(id)
-            .ok_or_else(|| CueMolError::not_found("molecule"))?
-            .set_xform_matrix(Matrix4::from_script_string(value)?),
+        "xformMat" => state.set_workspace_object_transform(id, value)?,
         _ => {
             let object = state
                 .scene_manager_mut()

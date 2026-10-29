@@ -382,6 +382,24 @@ impl crate::DesktopAppState {
                 )
             })
             .collect::<std::collections::BTreeMap<_, _>>();
+        for (key, default) in [
+            ("alpha", "1"),
+            ("material", ""),
+            ("egtype", "none"),
+            ("eglinew", "0.01"),
+            ("egcolor", "#000000"),
+        ] {
+            values.insert(
+                key.into(),
+                renderer
+                    .resolved_attr(key, &styles, scene_uid.get())
+                    .unwrap_or_else(|| default.into()),
+            );
+        }
+        values.insert(
+            "xformMat".into(),
+            renderer.xform_matrix().to_script_string(),
+        );
         values.extend(renderer.qsc_attrs().clone());
         Ok(values)
     }
@@ -406,6 +424,14 @@ impl crate::DesktopAppState {
                 self.surface_potential.as_ref(),
                 &self.density_maps,
                 scene,
+            );
+        } else if self.density_maps.contains_key(&object_uid) {
+            self.append_saved_density_geometry_filtered(
+                &mut snapshot,
+                sid,
+                Some(object_uid),
+                None,
+                true,
             );
         } else if let Some(surface) = scene.loaded_surface(object_uid) {
             snapshot.meshes =
