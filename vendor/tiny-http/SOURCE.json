@@ -1,0 +1,9 @@
+{
+  "package": "tiny_http",
+  "version": "0.12.0",
+  "registry": "https://crates.io/crates/tiny_http/0.12.0",
+  "crateSha256": "389915df6413a2e74fb181895f933386023c71110878cd0825588928e64cdc82",
+  "upstream": "https://github.com/tiny-http/tiny-http",
+  "upstreamRevision": "212b1c45852fef2093dc1374875a9393c55eb4b9",
+  "modification": "Account for queued connection tasks when deciding whether an idle worker is available."
+}

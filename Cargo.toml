@@ -26,6 +26,10 @@ members = [
   "crates/cuemol-py",
 ]
 resolver = "2"
+exclude = ["vendor/tiny-http"]
+
+[patch.crates-io]
+tiny_http = { path = "vendor/tiny-http" }
 
 [workspace.package]
 edition = "2021"

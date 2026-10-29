@@ -50,6 +50,13 @@ cargo test --locked -p cuemol-desktop --features egui-gui --lib
 scripts/test-install.sh target/debug/cuemol
 ```
 
+The vendored `tiny_http` patch prevents accepted connections from remaining
+queued behind idle keep-alive clients. Its upstream revision and local change
+are recorded in `vendor/tiny-http/SOURCE.json` and `PATCHES.md`. The Linux CLI
+regression uses `taskset` from util-linux and `kill` to submit a connection burst
+before the server can dispatch it; every client must receive a response while
+all connections remain open.
+
 ### Browser checks
 
 For browser regression checks, build the web target and install Node.js with npm,

@@ -1,5 +1,6 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -12,19 +13,12 @@ impl Drop for Server {
     }
 }
 
-#[test]
-fn a_slow_asset_download_does_not_block_other_requests() {
-    let work = tempfile::tempdir().unwrap();
-    std::fs::File::create(work.path().join("large.wasm"))
-        .unwrap()
-        .set_len(64 * 1024 * 1024)
-        .unwrap();
-    std::fs::write(work.path().join("input.js"), "export const ready = true;").unwrap();
+fn start_server(command: &mut Command, directory: &Path) -> (Server, String) {
     let mut server = Server(
-        Command::new(env!("CARGO_BIN_EXE_cuemol"))
+        command
             .args(["web", "serve", "--port", "0", "--no-open", "--dir"])
-            .arg(work.path())
-            .env("CUEMOL_CONFIG_DIR", work.path().join("config"))
+            .arg(directory)
+            .env("CUEMOL_CONFIG_DIR", directory.join("config"))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .spawn()
@@ -38,8 +32,22 @@ fn a_slow_asset_download_does_not_block_other_requests() {
         .trim()
         .strip_prefix("cuemol-rs: http://")
         .unwrap()
-        .trim_end_matches('/');
-    let mut slow = TcpStream::connect(address).unwrap();
+        .trim_end_matches('/')
+        .to_owned();
+    (server, address)
+}
+
+#[test]
+fn a_slow_asset_download_does_not_block_other_requests() {
+    let work = tempfile::tempdir().unwrap();
+    std::fs::File::create(work.path().join("large.wasm"))
+        .unwrap()
+        .set_len(64 * 1024 * 1024)
+        .unwrap();
+    std::fs::write(work.path().join("input.js"), "export const ready = true;").unwrap();
+    let (_server, address) =
+        start_server(&mut Command::new(env!("CARGO_BIN_EXE_cuemol")), work.path());
+    let mut slow = TcpStream::connect(&address).unwrap();
     slow.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     slow.write_all(b"GET /large.wasm HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .unwrap();
@@ -52,7 +60,7 @@ fn a_slow_asset_download_does_not_block_other_requests() {
     }
     assert!(header.starts_with(b"HTTP/1.1 200"));
 
-    let mut other = TcpStream::connect(address).unwrap();
+    let mut other = TcpStream::connect(&address).unwrap();
     other
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
@@ -65,4 +73,66 @@ fn a_slow_asset_download_does_not_block_other_requests() {
         .expect("a stalled download blocked an unrelated asset");
     assert!(response.starts_with("HTTP/1.1 200"));
     assert!(response.ends_with("export const ready = true;"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_connection_burst_is_served_before_keep_alive_clients_disconnect() {
+    let work = tempfile::tempdir().unwrap();
+    let body = b"export const ready = true;";
+    std::fs::write(work.path().join("input.js"), body).unwrap();
+    let process = std::fs::read_to_string("/proc/self/status").unwrap();
+    let cpu = process
+        .lines()
+        .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+        .unwrap()
+        .trim()
+        .split([',', '-'])
+        .next()
+        .unwrap();
+    let mut command = Command::new("taskset");
+    command.args(["-c", cpu, env!("CARGO_BIN_EXE_cuemol")]);
+    let (server, address) = start_server(&mut command, work.path());
+    std::thread::sleep(Duration::from_millis(100));
+    let signal = |name| {
+        assert!(Command::new("kill")
+            .arg(name)
+            .arg(server.0.id().to_string())
+            .status()
+            .unwrap()
+            .success());
+    };
+    signal("-STOP");
+    let mut clients: Vec<_> = (0..12)
+        .map(|_| TcpStream::connect(&address).unwrap())
+        .collect();
+    for client in &mut clients {
+        client
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        client
+            .write_all(
+                b"GET /input.js HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n",
+            )
+            .unwrap();
+    }
+    signal("-CONT");
+    for (index, client) in clients.iter_mut().enumerate() {
+        let mut reader = BufReader::new(client);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap_or_else(|error| {
+            panic!("connection {index} remained queued: {error}");
+        });
+        assert!(line.starts_with("HTTP/1.1 200"));
+        loop {
+            line.clear();
+            assert!(reader.read_line(&mut line).unwrap() > 0);
+            if line == "\r\n" {
+                break;
+            }
+        }
+        let mut response = vec![0; body.len()];
+        reader.read_exact(&mut response).unwrap();
+        assert_eq!(response, body);
+    }
 }
