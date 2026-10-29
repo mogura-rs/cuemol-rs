@@ -107,7 +107,7 @@ fn align_arrays(
         .map_err(|_| CueMolError::invalid_argument("invalid pivot atom"))?;
     let mut matrix = [0.; 12];
     let mut scores = [0.; 6];
-    let mut error = [0i8; 512];
+    let mut error = [0 as std::ffi::c_char; 512];
     // The buffers have one residue name and three coordinates per atom; outputs are fixed size.
     let status = unsafe {
         cuemol_usalign(
