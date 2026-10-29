@@ -6,9 +6,9 @@
 
 Molecular graphics for the desktop, browser and command line, built in Rust.
 cuemol-rs ports CueMol2's scene and scripting interfaces and CueMol3's Tritium UI
-to a shared wgpu viewport,
-with molecular dynamics playback and image rendering.
+to a shared wgpu viewport, with molecular dynamics playback and image rendering.
 
+[Open in browser](https://mogura-rs.github.io/cuemol-rs/) ·
 [Installation](#installation) · [Quick start](#quick-start) ·
 [User guide](docs/usage.md) · [Development](docs/development.md) ·
 [Validation](docs/validation.md)
@@ -147,9 +147,9 @@ tools, tests, release packaging and Pages deployment.
 | [Architecture](CLAUDE.md) | Crate boundaries and implementation conventions |
 
 The [completion audit](docs/validation.md#completion-audit) records the functional
-repairs, measured costs and remaining verification boundaries. Command coverage does not imply pixel-identical
-rendering or equivalence for every parameter combination. Browser filesystem
-and process access differ from
-native execution, and hardware quad-buffer stereo is unavailable. Read the
+repairs, measured costs and remaining verification boundaries. Command coverage
+does not imply pixel-identical rendering or equivalence for every parameter
+combination. Browser filesystem and process access differ from native execution,
+and hardware quad-buffer stereo is unavailable. Read the
 [compatibility boundaries](docs/usage.md#compatibility-boundaries) when comparing
-reference scenes. Local validation does not publish a release or a Pages site.
+reference scenes.

@@ -5,6 +5,114 @@ results are historical. Generated inputs and logs stay in the ignored checkout
 cache. The current repairs and their limits appear in the completion audit;
 passing tests do not establish equivalence for every parameter combination.
 
+## Public release and installation
+
+The [v0.1.1 release](https://github.com/mogura-rs/cuemol-rs/releases/tag/v0.1.1)
+was published on 2026-10-29 from application revision `c073b9a`.
+Its [release workflow](https://github.com/mogura-rs/cuemol-rs/actions/runs/40867588832)
+completed the shared and browser tests, five native builds, installed-tool
+calculations, installer/self-update checks and publication. The native targets
+were Linux x86-64 and ARM64, macOS Intel and Apple Silicon, and Windows x86-64.
+The failed initial `v0.1.0` workflow did not publish a release; its tag was not
+reassigned.
+
+All eight public archives were downloaded and checked against the published
+`SHA256SUMS`. Archive manifests, target identities, version, source revision,
+browser payload and required license/provenance files were inspected. The
+macOS bundles also had the expected executable name, version and supplied icon.
+This checks the published bytes, separately from Actions artifacts.
+
+Fresh isolated installations on Linux x86-64 and macOS Apple Silicon used the
+public installer and latest-release URLs. Self-update replaced each executable
+and retained the published binary hash; `self-upgrade --check` identified
+`v0.1.1` in the renamed repository. The tests removed tool-path and dynamic-library
+overrides and ran from an otherwise empty directory. Both installations passed:
+
+- APBS produced 35,937 finite potential samples with the expected decay away
+  from a positive ion.
+- PDB2PQR converted 1CRN into 642 atoms with finite charges and nonnegative radii.
+- FFmpeg encoded and decoded four distinct 64 x 64 video frames.
+- POV-Ray rendered an exported molecular scene, and native OIDN denoised a
+  molecular render; both produced nonuniform 96 x 96 images.
+- MCP tool discovery, the missing-GUI connection error and 128 x 128 PNG output
+  passed. All 29 embedded browser assets matched their manifest.
+
+The Linux installation passed 17 browser cases through its embedded server,
+covering WebGL/WebGPU pixels and input, read-only scripts and history, streamed
+readers, trajectories, animation, affine transforms, visibility, PyMOL import
+and stereo picking. Its native window was also operated under Xvfb. Visible
+pixel and state checks passed labels, residue/range selection, Undo, distance,
+angle and torsion measurements, lasso, bond editing, affine transforms,
+both-eye stereo picking, and script/toolbar animation pause and stop.
+
+The published Apple Silicon application bundle was updated from a path with
+spaces after its version/provenance metadata was made stale and its bundled
+tools were removed from their expected location. Self-update replaced the
+executable with the published hash, corrected both metadata files and restored
+the tools under `Contents/Resources`. Startup loaded 1CRN through the bundle's
+GUI process. A further direct mouse check was blocked by the locked desktop;
+the earlier actual macOS Tauri interaction checks are recorded below.
+
+Generated release evidence is retained in the ignored validation cache,
+including archive/install results, browser and native-window results, macOS
+bundle-update results and tool-calculation logs. The five-platform Actions
+checks do not establish interactive GUI behavior on Windows, Linux ARM64 or
+Intel macOS. The macOS bundles remain unsigned.
+
+### Platform failures repaired before publication
+
+Actual matrix failures led to these repairs: APBS static BLAS dependencies on
+Linux ARM64, the required ISPC version for ARM64 OIDN, portable macOS APBS
+libraries, Windows APBS's matching Python runtime, the obsolete POV-Ray
+`std::binary_function` base, Windows surface-library math constants, and
+USalign's platform-dependent `c_char` buffer type. Windows self-update now
+removes inherited `PSModulePath` from its Windows PowerShell child. This avoids
+loading PowerShell 7 module paths when the update starts from `pwsh`.
+The final release executed the native calculations and platform installer checks
+successfully on all five targets.
+
+The Intel macOS cold build had also exceeded its job limit. Its allowance is
+now 45 minutes, and completed tool caches are saved before application builds;
+Rust caches are retained after downstream failure. The final run completed.
+These operational observations are not a controlled build-speed benchmark.
+
+## Public Pages checks
+
+The renamed [public browser application](https://mogura-rs.github.io/cuemol-rs/)
+was checked at application revision `c073b9a`. Its
+[CI run](https://github.com/mogura-rs/cuemol-rs/actions/runs/40867507458)
+passed 1,632 Rust tests with one explicit ignored case, and 72 browser cases
+with one missing-reference-profile skip. Compatibility tests that return early
+when fixtures are absent are not counted as executed reference comparisons.
+The separate reference-present checks remain recorded below.
+
+The [Pages deployment](https://github.com/mogura-rs/cuemol-rs/actions/runs/40868785741)
+published the expected commit and repository identity. All 29 public asset
+hashes matched the manifest. Twenty-one browser cases had run against the public
+URL at `2a3922b`, covering WebGL/WebGPU pixels and input, scripts and history,
+trajectories, USalign, ICC handling, analytic surfaces, OIDN, affine geometry,
+visibility, PyMOL import and stereo picking. The additional CMYK proof case
+passed with the reference ICC profile available, for 22 public checks in total.
+All 29 browser assets at `c073b9a` were byte-identical to that tested deployment;
+the manifest recorded the newer source commit.
+
+### Connection-pool repair
+
+A separate release run exposed an HTTP startup stall before the application
+module executed. The trace showed `input.js` waiting without response while
+other modules completed. A direct server reproduction pinned the server to one
+CPU, queued twelve keep-alive connections while it was stopped, then resumed
+it. The upstream HTTP pool served four connections and left eight waiting.
+The Rust regression reproduced the same failure on connection four.
+
+The pool counted notified workers as idle even when queued jobs had already
+reserved them. The local patch accounts for those jobs before accepting another
+reservation. After the change, the Rust test passed, twenty repeated bursts
+served all twelve clients each, and six repeated WebGPU/WebGL effect cases
+passed. A separate slow-download test covers response-worker concurrency.
+These tests establish the reproduced transport failure and its repair; they do
+not imply that every possible browser startup failure has the same cause.
+
 ## Completion audit
 
 The audit of application revision `092272a` found reproducible failures in
@@ -23,6 +131,10 @@ entry points and related failures found while tracing their callers.
 | Script edits | Flush queued object insertion before subsequent atom edits; preserve intentionally empty surface-renderer lists. |
 | Tauri interaction | Update camera motion during a drag, coalesce pending requests, avoid applying deltas twice, preserve full resolution, settle rendering after cancellation and map HiDPI input to render pixels. Disable smart quote replacement in code inputs. |
 | Application shell | Use Tritium activities, inspector and docks with persistent themes; recover from missing or damaged layout settings. Use the `cuemol-rs` name and supplied PNG logo. |
+| Web asset serving | Serve independent requests with eight workers so a stalled large download does not stop every other asset. A slow-reader regression failed before the change and passed afterward; both formerly failing browser scenarios passed five repetitions each. |
+| HTTP connection dispatch | Account for queued jobs when reserving idle workers. The upstream pool accepted twelve simultaneous keep-alive connections but served only four; the remaining connections could wait indefinitely. |
+| MCP entry points | Bare `mcp` reports the same connection error as `mcp connect` instead of panicking. `render_image` declares file writes while preserving scene state and Redo. |
+| Application updates | Replace the actual renamed executable, install missing resources into the application bundle, and update its version and provenance metadata with rollback on replacement failure. |
 
 The original style probe used `linew` on `SimpleRenderer`. That property name was
 incorrect: the simple renderer uses `width`. The `alpha` loss was a valid
@@ -106,6 +218,10 @@ within 613 ms and a first update at 48 ms. Observation includes input dispatch
 and accessibility polling, so these are interaction samples rather than a
 steady-state frame-rate benchmark. The viewport retained full resolution.
 Literal double quotes were preserved and the console executed the test script.
+A later check refreshed the accessibility tree for each observation and saw 26
+viewport updates during a 914 ms drag, with the first change at 35.9 ms. The
+final rotation matched all 30 submitted input steps, and the captured viewport
+remained 972 x 486 pixels. These observations include accessibility overhead.
 A separate optimized 1280 x 720 offscreen profile measured median rendering
 at 3.978 ms and PNG encoding at 0.426 ms over 15 frames; it excludes WebView
 transport and display latency.
@@ -132,7 +248,7 @@ reference Python helper module or arbitrary third-party Python packages.
 Hardware quad-buffer stereo is unavailable. Fonts and center-mark blending can
 differ, and the Rust ray tracer does not promise the reference integrator's
 exact pixels. Real AI providers and every platform credential store remain
-outside the mock-provider tests. Release and Pages checks below distinguish
+outside the mock-provider tests. The public release and Pages checks distinguish
 local execution from actual public deployment.
 
 ## Functional checks
@@ -195,12 +311,12 @@ binary, embedded browser assets, and scientific tool bundle. Archive creation
 with gzip level three took 10.74 seconds in one local run. This excludes the
 native build and first-time tool downloads/builds.
 
-## Remaining verification scope
+## Historical verification scope
 
-Release workflows are configured for Linux x86_64/ARM64, macOS Intel/Apple
-Silicon, and Windows x86_64. Local Linux and Apple Silicon builds plus browser checks were
-executed during this work; the other native release targets and published
-installation must be verified when pushing and running Actions is authorized.
+Release workflows were configured for Linux x86_64/ARM64, macOS Intel/Apple
+Silicon, and Windows x86_64. At this checkpoint, local Linux and Apple Silicon
+builds plus browser checks had run; other native targets and public installation
+were waiting for authorization. Later public results are recorded separately.
 The README lists implementation boundaries that also limit parity claims.
 
 ## Browser numerical kernels
@@ -320,8 +436,9 @@ installation, self-upgrade, bundled PDB2PQR and image-rendering checks. A browse
 smoke test passed with the staged assets served below a repository-style subpath.
 The release build embeds the isolated, verified browser artifact through
 `CUEMOL_WEB_DIR`; source-tree test files are not part of that artifact.
-All five workflow files pass actionlint. GitHub-hosted release and Pages runs
-remain unexecuted because these changes have not been pushed.
+All five workflow files passed actionlint. At this earlier checkpoint, the
+changes had not been pushed, so GitHub-hosted release and Pages runs had not
+executed. Later public results are recorded separately above.
 
 ## Backbone geometry and secondary structure
 
@@ -481,8 +598,8 @@ From an empty working directory, the installed binary served its embedded viewer
 All 21 browser tests passed there, covering WebGPU presentation, molecular edits,
 trajectory seeking, exports, numerical kernels, AI mock-provider interaction,
 input settings, and cancellable rendering. A final macOS GUI build with the same
-browser assets also passed. These remain local checks; release publication and
-GitHub Pages execution are intentionally pending authorization to push.
+browser assets also passed. These were local checks; release publication and
+GitHub Pages execution had not yet been authorized at this checkpoint.
 
 
 ## Viewport navigation and selection audit
@@ -1287,8 +1404,8 @@ Browser image commands use the shared renderer and browser downloads. The script
 exporter's native file thread API now returns a descriptive error on WASM instead
 of attempting unsupported thread creation. Rebuilt browser checks exercise this
 guard along with exporter settings, adaptive AA/AO, lighting and NPR output.
-Public workflows and release installation remain unexecuted because these
-changes have not been pushed.
+Public workflows and release installation had not executed at this checkpoint
+because those changes had not yet been pushed.
 
 ### Partial spline selections
 
@@ -1413,8 +1530,8 @@ test rendered a 48 by 48 PNG using input/output paths with spaces. Mock process
 tests still cover cancellation and post-blend passes; they are not used as the
 only evidence that the external renderer works. All 33 command tests and 144
 ordinary Tauri tests pass; the real renderer test also passes explicitly on Linux
-and macOS. Windows and the other native release targets still require execution
-in the unpublished release matrix.
+and macOS. At this checkpoint, Windows and the other native targets had not yet
+executed in the release matrix. Later public results are recorded separately above.
 
 ### Shared command exports and complete browser embedding
 
@@ -1628,11 +1745,11 @@ during this work are collected here; the read-only reference itself was not edit
 | Proline donor exclusion depended on case. | Proline is excluded regardless of case. |
 | DefaultRibbon section dimensions and all axial detail defaults were shared. | Style-specific dimensions are used; tube/spline default to six subdivisions, while named ribbon styles and cartoon use eight. |
 | The current C++ trajectory reader was eager. | The reference also indexes frames; Rust playback and memory claims now state their measured scope. |
-| Native layout and snapshot comments described XUL. | The default native/browser controls follow Tritium; the optional Tauri shell retains the legacy layout. |
+| Native layout and snapshot comments described XUL; a later entry still called Tauri a legacy layout. | Native, browser and Tauri shells follow Tritium, with toolkit-specific widgets. |
 | Surface previews were uniformly light gray. | Preview geometry uses atom colors. |
 | Object coloring implicitly supplied the historical palette. | `$molcol` follows the object's solid default or explicit coloring scheme. |
 | README/browser help described earlier custom mouse bindings. | They now describe the reference presets and their configurable bindings. |
-| Repository metadata used an old organization URL. | It follows the configured repository used by installation and updates. |
+| Repository metadata used an old organization URL and the previous repository name. | Documentation, installers and update discovery follow `mogura-rs/cuemol-rs`; persisted camera/view format identifiers remain compatible. |
 | Native annotations described only atom labels. | Measurement values and their positions are included. |
 | A missing custom pivot produced no backbone. | The reference falls back to the residue's normal pivot. |
 | Both `VALIDATION.md` and `validation.md` existed with different content. | Evidence is consolidated in `docs/validation.md`. |
@@ -1654,3 +1771,8 @@ during this work are collected here; the read-only reference itself was not edit
 | README said every unsupported setting returned an error. | Legacy PNG `interlace` and `compresslev` remain accepted but ineffective, as in the C++ exporter. |
 | SDF/MOL2 declarations set `chain_name="_"`, while their constructors set `"A"`. | Direct construction uses `"A"`; factories and QSC source readers reset to `"_"` before explicit options. |
 | MCP annotations labeled animation, focus, history clearing and file writes as read-only. | Their side effects are declared; scene changes trigger viewport refresh separately from file writes and undo recording. |
+| The first completion-audit example used `SimpleRenderer.linew`. | The actual property is `width`; the separate `alpha` loss was a valid failure. |
+| Python was described only as a binding facade. | The native bridge now keeps interpreter state and connects Python objects and callbacks to the live scene. |
+| Historical validation entries said publishing was still waiting for permission. | Those statements now identify their earlier checkpoint; current public validation is recorded separately. |
+| The reference-render test bypassed the documented fixture discovery with a machine-specific path. | It uses `CUEMOL2_REF_DIR` or the sibling reference checkout, writes to a temporary directory and fails export errors other than a missing GPU adapter. |
+| The HTTP pool description did not distinguish an idle worker from one already reserved by queued work. | The worker-allocation check and comment now account for queued connections. |
