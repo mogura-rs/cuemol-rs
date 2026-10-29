@@ -38,6 +38,14 @@ const MIN_INTERACTIVE_RENDER_SCALE: f64 = 0.5;
 
 static SHARED_SCENE_RENDERER: OnceLock<Option<Arc<SceneRenderer>>> = OnceLock::new();
 
+fn valid_view_pixel_ratio(ratio: f32) -> Result<f32, String> {
+    if ratio.is_finite() && ratio > 0. && ratio <= 16. {
+        Ok(ratio)
+    } else {
+        Err("viewport pixel ratio must be finite and between 0 and 16".into())
+    }
+}
+
 fn shared_scene_renderer() -> Option<Arc<SceneRenderer>> {
     SHARED_SCENE_RENDERER
         .get_or_init(|| SceneRenderer::new().map(Arc::new))
@@ -1554,6 +1562,7 @@ struct AppModel {
     animation_started_from_ui: bool,
     view_width: u32,
     view_height: u32,
+    view_pixel_ratio: f32,
     trans_mms: bool,
     rot_mms: bool,
     swap_stereo_eyes: bool,
@@ -1752,6 +1761,7 @@ impl AppModel {
             animation_started_from_ui: false,
             view_width: 100,
             view_height: 100,
+            view_pixel_ratio: 1.,
             trans_mms: false,
             rot_mms: false,
             swap_stereo_eyes: false,
@@ -6268,7 +6278,10 @@ impl AppModel {
         let labels = cuemol_desktop_core::stereo::labels(
             &self.desktop,
             &self.camera,
-            [width as f32, height as f32],
+            [
+                width as f32 / self.view_pixel_ratio,
+                height as f32 / self.view_pixel_ratio,
+            ],
             self.swap_stereo_eyes,
             1000,
         );
@@ -6285,6 +6298,7 @@ impl AppModel {
                 background,
                 ViewportOptions {
                     swap_stereo_eyes: self.swap_stereo_eyes,
+                    pixels_per_point: self.view_pixel_ratio,
                     ..ViewportOptions::from_state(&self.desktop)
                 },
                 &labels,
@@ -6305,6 +6319,7 @@ impl AppModel {
             background,
             ViewportOptions {
                 swap_stereo_eyes: self.swap_stereo_eyes,
+                pixels_per_point: self.view_pixel_ratio,
                 ..ViewportOptions::from_state(&self.desktop)
             },
             &labels,
@@ -6337,15 +6352,7 @@ impl AppModel {
         viewport.map_refine_pending = map_update.pending;
         let width = viewport.width;
         let height = viewport.height;
-        if self.renderer.is_none()
-            && self.render_snapshot.as_ref().is_some_and(|snapshot| {
-                snapshot.atom_count()
-                    + snapshot.bond_count()
-                    + snapshot.mesh_triangle_count()
-                    + snapshot.volumes.len()
-                    > 0
-            })
-        {
+        if self.renderer.is_none() {
             self.finish_renderer_warmup();
         }
         viewport.image = self
@@ -6353,14 +6360,6 @@ impl AppModel {
             .as_ref()
             .zip(self.render_snapshot.as_ref())
             .and_then(|(renderer, snapshot)| {
-                if snapshot.atom_count()
-                    + snapshot.bond_count()
-                    + snapshot.mesh_triangle_count()
-                    + snapshot.volumes.len()
-                    == 0
-                {
-                    return None;
-                }
                 self.render_snapshot_rgba(renderer, snapshot, width, height)
                     .map(|rgba| {
                         let png = encode_rgba_png(&rgba, width, height);
@@ -6404,20 +6403,12 @@ impl AppModel {
                 self.swap_stereo_eyes,
             )
             .into_iter()
-            .chain(cuemol_desktop_core::stereo::center_mark_lines(
-                &self.camera,
-                [width as f32, height as f32],
-                self.swap_stereo_eyes,
-                self.desktop
-                    .active_background_color()
-                    .unwrap_or([0., 0., 0., 1.]),
-            ))
             .map(|line| ViewportLineDto {
                 x1: line.x1,
                 y1: line.y1,
                 x2: line.x2,
                 y2: line.y2,
-                width: line.width,
+                width: line.width * self.view_pixel_ratio,
                 color: line.color,
                 end_color: None,
                 stipple: line.stipple,
@@ -8407,6 +8398,7 @@ enum ModelRequest {
     Render {
         width: u32,
         height: u32,
+        pixel_ratio: f32,
     },
     UpdateCamera {
         action: String,
@@ -8415,6 +8407,7 @@ enum ModelRequest {
         width: u32,
         height: u32,
         render_scale: f64,
+        pixel_ratio: f32,
     },
     SaveScene {
         path: String,
@@ -13107,8 +13100,17 @@ fn handle_model_request(
                 base64_encode(&image)
             )))
         }
-        ModelRequest::Render { width, height } => {
-            Ok(ModelResponse::Viewport(model.render(width, height)))
+        ModelRequest::Render {
+            width,
+            height,
+            pixel_ratio,
+        } => {
+            let pixel_ratio = valid_view_pixel_ratio(pixel_ratio)?;
+            let (render_width, render_height) = scaled_viewport_dimensions(width, height, 1.);
+            model.view_pixel_ratio = pixel_ratio * render_width as f32 / width.max(1) as f32;
+            Ok(ModelResponse::Viewport(
+                model.render(render_width, render_height),
+            ))
         }
         ModelRequest::UpdateCamera {
             action,
@@ -13117,10 +13119,13 @@ fn handle_model_request(
             width,
             height,
             render_scale,
+            pixel_ratio,
         } => {
+            let pixel_ratio = valid_view_pixel_ratio(pixel_ratio)?;
             model.update_camera(&action, x, y, height)?;
             let (render_width, render_height) =
                 scaled_viewport_dimensions(width, height, render_scale);
+            model.view_pixel_ratio = pixel_ratio * render_width as f32 / width.max(1) as f32;
             Ok(ModelResponse::Viewport(model.render_navigation_frame(
                 render_width,
                 render_height,
@@ -16112,11 +16117,16 @@ fn reveal_animation_render_movie(
 fn render_viewport(
     width: u32,
     height: u32,
+    pixel_ratio: Option<f32>,
     state: State<'_, ManagedState>,
 ) -> Result<ViewportDto, String> {
     viewport_response(request_model(
         &state,
-        ModelRequest::Render { width, height },
+        ModelRequest::Render {
+            width,
+            height,
+            pixel_ratio: pixel_ratio.unwrap_or(1.),
+        },
     )?)
 }
 
@@ -16128,6 +16138,7 @@ fn update_camera(
     width: u32,
     height: u32,
     render_scale: Option<f64>,
+    pixel_ratio: Option<f32>,
     state: State<'_, ManagedState>,
 ) -> Result<ViewportDto, String> {
     viewport_response(request_model(
@@ -16139,6 +16150,7 @@ fn update_camera(
             width,
             height,
             render_scale: render_scale.unwrap_or(1.0),
+            pixel_ratio: pixel_ratio.unwrap_or(1.),
         },
     )?)
 }
@@ -16665,6 +16677,7 @@ mod tests {
             animation_started_from_ui: false,
             view_width: 100,
             view_height: 100,
+            view_pixel_ratio: 1.,
             trans_mms: false,
             rot_mms: false,
             swap_stereo_eyes: false,
@@ -16858,6 +16871,55 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a GPU"]
+    fn tauri_center_marks_render_empty_scenes_and_keep_logical_hidpi_size() {
+        let mut model = model_without_gpu();
+        model.background = "#3366b3".into();
+        model.renderer = shared_scene_renderer();
+        assert!(model.renderer.is_some(), "a GPU adapter is required");
+        for ratio in [1., 2.] {
+            model.view_pixel_ratio = ratio;
+            model.camera.set_center_mark(cuemol_qsys::CenterMark::None);
+            let initial = model.render(128, 96);
+            assert!(
+                initial.image.is_some(),
+                "empty scenes still display the viewport"
+            );
+            let renderer = model.renderer.as_ref().unwrap();
+            let snapshot = model.render_snapshot.as_ref().unwrap();
+            let plain = model
+                .render_snapshot_rgba(renderer, snapshot, 128, 96)
+                .unwrap();
+            model.camera.set_center_mark(cuemol_qsys::CenterMark::Cross);
+            let marked = model
+                .render_snapshot_rgba(renderer, snapshot, 128, 96)
+                .unwrap();
+            let mut xs = Vec::new();
+            for (index, (before, after)) in plain
+                .chunks_exact(4)
+                .zip(marked.chunks_exact(4))
+                .enumerate()
+            {
+                if before == after {
+                    continue;
+                }
+                assert_eq!(before[3], after[3]);
+                for channel in 0..3 {
+                    assert!(
+                        (i16::from(before[channel]) + i16::from(after[channel]) - 255).abs() <= 1
+                    );
+                }
+                xs.push(index % 128);
+            }
+            assert!(xs.len() >= 30);
+            assert_eq!(
+                xs.iter().max().unwrap() - xs.iter().min().unwrap() + 1,
+                (20. * ratio) as usize
+            );
+        }
+    }
+
+    #[test]
     #[ignore = "requires a GPU and CUEMOL_UI_PROFILE_FILE"]
     fn tauri_interactive_frame_profile() {
         use std::time::Instant;
@@ -16925,6 +16987,7 @@ mod tests {
                 width: 1_000,
                 height: 800,
                 render_scale: 0.625,
+                pixel_ratio: 2.,
             },
         )
         .unwrap();
@@ -16932,6 +16995,7 @@ mod tests {
             panic!("expected interactive viewport response");
         };
         assert_eq!((viewport.width, viewport.height), (625, 500));
+        assert_eq!(model.view_pixel_ratio, 1.25);
     }
 
     #[test]

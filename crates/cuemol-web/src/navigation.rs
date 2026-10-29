@@ -206,13 +206,6 @@ impl App {
             self.hover_sample = None;
         }
 
-        cuemol_ui::navigation::center_mark(
-            ui,
-            &self.state,
-            &self.camera,
-            cuemol_desktop_core::stereo::swap_eyes(&self.state),
-            rect,
-        );
         cuemol_ui::navigation::feedback_camera(
             ui,
             &self.state,

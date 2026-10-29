@@ -477,32 +477,3 @@ pub fn feedback_camera(
         );
     }
 }
-
-pub fn center_mark(
-    ui: &Ui,
-    state: &DesktopAppState,
-    camera: &cuemol_qsys::Camera,
-    swap: bool,
-    rect: Rect,
-) {
-    let painter = ui.painter().with_clip_rect(rect);
-    for line in cuemol_desktop_core::stereo::center_mark_lines(
-        camera,
-        [rect.width(), rect.height()],
-        swap,
-        state.active_background_color().unwrap_or([0., 0., 0., 1.]),
-    ) {
-        let color = if line.color == "#202020" {
-            Color32::from_gray(32)
-        } else {
-            Color32::from_gray(224)
-        };
-        painter.line_segment(
-            [
-                rect.min + egui::vec2(line.x1, line.y1),
-                rect.min + egui::vec2(line.x2, line.y2),
-            ],
-            Stroke::new(line.width, color),
-        );
-    }
-}

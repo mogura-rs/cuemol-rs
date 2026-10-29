@@ -105,6 +105,23 @@ precise speedup ratio. At 64 KiB, median process peak RSS fell from 31.76 MiB to
 The affected core, Python and command suites passed 324 tests; the additional
 Python-to-Umbreon output check passed afterward.
 
+## Center marks and display scaling
+
+Live center marks now invert the displayed RGB channels after molecular geometry
+and labels, using the reference blend factors. Alpha remains unchanged. The
+same GPU implementation draws the cross or rotated axes in native, browser and
+Tauri viewports, including both stereo eyes. The previous implementation chose
+a fixed gray from the background color and could lose contrast over objects.
+
+Metal pixel tests cover colored backgrounds, transparent output, molecular
+geometry, both eyes and rotated axes. Browser WebGL and WebGPU tests check
+inversion, removal and a 20-logical-pixel cross at display scale two. Tauri also
+renders marks in empty scenes. Display scaling now keeps its marks, labels and
+selection outlines at their intended logical size, including reduced-resolution
+navigation frames. GPU tests cover label scale one and two. The affected Tauri
+suite passed 147 tests, its explicit GPU case passed, and all nine shell cases
+passed. The native Linux window also passed OS drag and wheel input checks.
+
 ### Platform failures repaired before publication
 
 Actual matrix failures led to these repairs: APBS static BLAS dependencies on
@@ -291,8 +308,8 @@ read individual frames with `File.slice`.
 
 Python execution requires native `uv`; supported helpers are listed above.
 The reference `povrender` module and third-party Python packages are not bundled.
-Hardware quad-buffer stereo is unavailable. Fonts and center-mark blending can
-differ, and the Rust ray tracer does not promise the reference integrator's
+Hardware quad-buffer stereo is unavailable. Font rasterization can differ,
+and the Rust ray tracer does not promise the reference integrator's
 exact pixels. Real AI providers and every platform credential store remain
 outside the mock-provider tests. The public release and Pages checks distinguish
 local execution from actual public deployment.
@@ -1685,8 +1702,8 @@ The 56 existing browser cases and two additional WebGL/WebGPU cases pass.
 The stereo cases inspect both image halves, toggled labels, region selection,
 CPU image export and eye order. Clippy completes with existing style warnings.
 
-The shared center mark draws a cross or three rotated axes in each eye. It uses
-a contrasting gray line instead of the reference OpenGL invert blend. Hardware
+The shared center mark draws a cross or three rotated axes in each eye. It now
+uses the reference RGB inversion, as checked above. Hardware
 quad-buffer stereo remains unavailable and reports a false capability; selecting
 that mode produces mono. The single-point `View.projToScreen` API retains the
 reference's central, full-width projection; interactive stereo picking does not

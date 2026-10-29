@@ -17205,6 +17205,7 @@ function viewportDimensions(forceMeasure = false) {
   cachedViewportDimensions = {
     width: Math.max(64, Math.round(bounds.width * scale)),
     height: Math.max(64, Math.round(bounds.height * scale)),
+    pixelRatio: scale,
   };
   return cachedViewportDimensions;
 }
@@ -18922,7 +18923,7 @@ async function start() {
     await setupApplicationCloseGuard();
     syncEmptyMoleculeDetails();
     applyViewport(initial.viewport, sequence);
-    if (snapshotHasRenderableContent()) void renderViewport();
+    void renderViewport();
     renderShell();
     scheduleMoleculeDetailsRefresh();
     const preloadPdbHistory = () => void requestPdbHistory();

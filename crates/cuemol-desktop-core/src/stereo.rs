@@ -85,17 +85,12 @@ pub fn project(camera: &Camera, size: [f64; 2], swap: bool, position: Vector4) -
         .collect()
 }
 
-pub fn center_mark_lines(
+#[cfg(feature = "offscreen")]
+pub(crate) fn center_mark_segments(
     camera: &Camera,
     size: [f32; 2],
     swap: bool,
-    background: [f32; 4],
-) -> Vec<crate::GuiScreenLine> {
-    let color = if background[0] + background[1] + background[2] > 1.5 {
-        "#202020"
-    } else {
-        "#e0e0e0"
-    };
+) -> Vec<[[f32; 2]; 2]> {
     let mut lines = Vec::new();
     for eye in cuemol_qsys::stereo::viewports(camera, size.map(f64::from), swap) {
         let [x, y, w, h] = eye.rect.map(|v| v as f32);
@@ -118,15 +113,10 @@ pub fn center_mark_lines(
             .collect(),
         };
         for (from, to) in directions {
-            lines.push(crate::GuiScreenLine {
-                x1: center[0] + from[0],
-                y1: center[1] + from[1],
-                x2: center[0] + to[0],
-                y2: center[1] + to[1],
-                width: 1.,
-                color: color.into(),
-                stipple: false,
-            });
+            lines.push([
+                [center[0] + from[0], center[1] + from[1]],
+                [center[0] + to[0], center[1] + to[1]],
+            ]);
         }
     }
     lines

@@ -58,6 +58,14 @@ pub(crate) fn draw_interactive(
         Effects::Live(_, options) | Effects::Export(_, options) => options.swap_stereo_eyes,
         _ => false,
     };
+    let pixels_per_point = match &effects {
+        Effects::Live(_, options)
+            if options.pixels_per_point.is_finite() && options.pixels_per_point > 0. =>
+        {
+            options.pixels_per_point
+        }
+        _ => 1.,
+    };
     let eyes = cuemol_qsys::stereo::viewports(camera, [width as f64, height as f64], swap);
     if eyes.len() == 2 {
         interaction = None;
@@ -161,7 +169,16 @@ pub(crate) fn draw_interactive(
     };
     renderer.upload(device, queue, snapshot);
     if let Some((renderer, labels)) = &mut labels {
-        renderer.prepare(device, queue, labels, [width as f32, height as f32], 1.);
+        renderer.prepare(
+            device,
+            queue,
+            labels,
+            [
+                width as f32 / pixels_per_point,
+                height as f32 / pixels_per_point,
+            ],
+            pixels_per_point,
+        );
     }
     let level = level.clamp(0, 5);
     let live = matches!(effects, Effects::Live(..));
@@ -258,7 +275,7 @@ pub(crate) fn draw_interactive(
                     background.b as f32,
                 ],
                 [0., 0., width as f32, height as f32],
-                1.,
+                pixels_per_point,
             );
         }
         if let Some((renderer, _)) = &labels {
@@ -275,6 +292,17 @@ pub(crate) fn draw_interactive(
                     [0., 0., width as f32, height as f32],
                 );
             }
+        }
+        if let Effects::Live(effects, options) = &effects {
+            effects.render_center_mark(
+                queue,
+                &mut encoder,
+                &color_view,
+                camera,
+                [0., 0., width as f32, height as f32],
+                pixels_per_point,
+                options.swap_stereo_eyes,
+            );
         }
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {

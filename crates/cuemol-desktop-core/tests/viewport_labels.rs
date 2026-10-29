@@ -85,3 +85,62 @@ fn labels_depth_test_each_pixel_and_keep_explicit_overlay_order() {
     assert!(count(&aligned, true) > 40);
     assert_eq!(count(&aligned, false), 0);
 }
+
+#[test]
+fn live_label_dimensions_follow_logical_pixels_at_hidpi() {
+    let renderer = SceneRenderer::new().expect("a GPU adapter is required");
+    let mut camera = Camera::new();
+    camera.set_center_mark(cuemol_qsys::CenterMark::None);
+    let label = GuiAtomLabel {
+        x: 64.,
+        y: 48.,
+        text: "MW".into(),
+        color: "#ff0000".into(),
+        font_size: 24.,
+        font_name: "monospace".into(),
+        font_style: "normal".into(),
+        font_weight: "normal".into(),
+        anchor: [0.5, 0.5],
+        depth: 0.,
+        clip: None,
+        on_top: true,
+    };
+    let mut dimensions = Vec::new();
+    for ratio in [1_u32, 2] {
+        let width = 128 * ratio;
+        let pixels = renderer
+            .render_viewport_with_labels(
+                &RenderSceneSnapshot::empty(),
+                &camera,
+                width,
+                96 * ratio,
+                [0., 0., 0., 1.],
+                ViewportOptions {
+                    antialiasing: Antialiasing::None,
+                    pixels_per_point: ratio as f32,
+                    ..Default::default()
+                },
+                std::slice::from_ref(&label),
+            )
+            .unwrap();
+        let mut bounds = [u32::MAX, u32::MAX, 0, 0];
+        for (index, pixel) in pixels.chunks_exact(4).enumerate() {
+            if pixel[0] > 128 && pixel[1] < 10 && pixel[2] < 10 {
+                let x = index as u32 % width;
+                let y = index as u32 / width;
+                bounds[0] = bounds[0].min(x);
+                bounds[1] = bounds[1].min(y);
+                bounds[2] = bounds[2].max(x);
+                bounds[3] = bounds[3].max(y);
+            }
+        }
+        assert!(bounds[0] < bounds[2] && bounds[1] < bounds[3]);
+        dimensions.push([bounds[2] - bounds[0] + 1, bounds[3] - bounds[1] + 1]);
+    }
+    for axis in 0..2 {
+        assert!(
+            dimensions[1][axis].abs_diff(dimensions[0][axis] * 2) <= 2,
+            "{dimensions:?}"
+        );
+    }
+}

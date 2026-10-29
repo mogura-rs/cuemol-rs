@@ -91,6 +91,8 @@ use std::sync::{Mutex, OnceLock};
 // front end composites). Behind the `offscreen` feature so the default build is
 // GPU-free; GUI crates that show a 3D view enable it.
 #[cfg(feature = "offscreen")]
+mod center_mark;
+#[cfg(feature = "offscreen")]
 pub mod effects;
 #[cfg(feature = "offscreen")]
 pub mod labels;

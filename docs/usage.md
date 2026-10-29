@@ -20,6 +20,8 @@ The View menu provides parallel and cross stereo, eye swapping, and angular
 separation. Each eye has its own projection, picking, labels and post-processing;
 CPU image exports and offscreen depth captures use the same eye cameras.
 Hardware quad-buffer stereo is unavailable on the wgpu frontends.
+Center marks invert the displayed colors so they remain visible over molecular
+geometry. Crosses, axes and labels retain their logical size on HiDPI displays.
 
 ### Representations and rendering
 

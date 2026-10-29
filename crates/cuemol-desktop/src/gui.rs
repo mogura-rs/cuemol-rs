@@ -5671,7 +5671,6 @@ impl GuiApplication {
             .show(ctx, |ui| {
                 let rect = ui.max_rect();
                 self.viewport_rect = Some(rect);
-                self.draw_center_mark(ui, rect, camera);
                 self.draw_atom_labels(ui, camera, rect);
                 ui.allocate_ui(rect.size(), |ui| {
                     ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
@@ -20231,16 +20230,6 @@ impl GuiApplication {
         )
     }
 
-    fn draw_center_mark(&self, ui: &egui::Ui, rect: egui::Rect, camera: &CameraController) {
-        cuemol_ui::navigation::center_mark(
-            ui,
-            &self.state,
-            &camera.to_qsys_camera("__current"),
-            camera.swap_stereo_eyes,
-            rect,
-        );
-    }
-
     fn dialogs(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         self.native_render_dialog(ctx, camera);
         self.about_dialog(ctx);
@@ -34164,7 +34153,11 @@ impl GpuState {
             height: size.height.max(1),
             present_mode,
             alpha_mode: caps.alpha_modes[0],
-            view_formats: Vec::new(),
+            view_formats: if format.is_srgb() {
+                vec![format.remove_srgb_suffix()]
+            } else {
+                Vec::new()
+            },
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
@@ -34324,6 +34317,19 @@ impl GpuState {
             self.labels
                 .render(&self.device, &mut encoder, &view, depth, [vx, vy, vw, vh]);
         }
+        let mark_view = frame.texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(self.config.format.remove_srgb_suffix()),
+            ..Default::default()
+        });
+        self.effects.render_center_mark(
+            &self.queue,
+            &mut encoder,
+            &mark_view,
+            &camera,
+            [vx, vy, vw, vh],
+            pixels_per_point,
+            scene.options.swap_stereo_eyes,
+        );
         {
             let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("egui-render-pass"),

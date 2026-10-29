@@ -36,6 +36,7 @@ pub struct ViewportOptions {
     pub jitter_level: i32,
     pub smaa_threshold: f32,
     pub swap_stereo_eyes: bool,
+    pub pixels_per_point: f32,
 }
 
 impl Default for ViewportOptions {
@@ -51,6 +52,7 @@ impl Default for ViewportOptions {
             jitter_level: 0,
             smaa_threshold: 0.05,
             swap_stereo_eyes: false,
+            pixels_per_point: 1.,
         }
     }
 }
@@ -83,6 +85,7 @@ impl ViewportOptions {
             jitter_level: number("aaJitterLevel", 0.0).clamp(0.0, 5.0) as i32,
             smaa_threshold: number("aaSmaaThreshold", 0.05).clamp(0.0, 1.0),
             swap_stereo_eyes: false,
+            pixels_per_point: 1.,
         }
     }
 
@@ -289,6 +292,7 @@ impl Targets {
 }
 
 pub struct ViewportEffects {
+    center_mark: crate::center_mark::CenterMarkRenderer,
     layout: wgpu::BindGroupLayout,
     uniform: wgpu::Buffer,
     linear: wgpu::Sampler,
@@ -426,6 +430,7 @@ impl ViewportEffects {
             texture.create_view(&Default::default())
         };
         Self {
+            center_mark: crate::center_mark::CenterMarkRenderer::new(device, format),
             gtao: pipeline("gtao_fs", COLOR, None),
             denoise: pipeline("denoise_fs", COLOR, None),
             composite: pipeline("composite_fs", COLOR, None),
@@ -473,6 +478,29 @@ impl ViewportEffects {
             right_eye: None,
             stereo_depth: None,
         }
+    }
+
+    /// Draw UI marks after labels, using an unorm view of the presented target.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_center_mark(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        camera: &Camera,
+        viewport: [f32; 4],
+        pixels_per_point: f32,
+        swap: bool,
+    ) {
+        self.center_mark.render(
+            queue,
+            encoder,
+            target,
+            camera,
+            viewport,
+            pixels_per_point,
+            swap,
+        );
     }
 
     fn ensure_size(&mut self, device: &wgpu::Device, size: [u32; 2]) {

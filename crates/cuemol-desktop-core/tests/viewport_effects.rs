@@ -83,6 +83,15 @@ impl Gpu {
                 None,
                 options,
             );
+            self.effects.render_center_mark(
+                &self.queue,
+                &mut encoder,
+                &view,
+                camera,
+                [0., 0., 129., 127.],
+                1.,
+                options.swap_stereo_eyes,
+            );
             encoder.copy_texture_to_buffer(
                 wgpu::TexelCopyTextureInfo {
                     texture: &target,

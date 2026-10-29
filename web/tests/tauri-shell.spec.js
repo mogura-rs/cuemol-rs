@@ -185,6 +185,9 @@ test('Tauri HiDPI picking uses render pixels and the tool palette does not rotat
     const page = await context.newPage();
     const errors = await openShell(page);
     const rect = await page.locator('#viewport').boundingBox();
+    await expect.poll(() => page.evaluate(() => window.__shellCalls.filter(call => call.command === 'render_viewport').length)).toBeGreaterThan(0);
+    const render = await page.evaluate(() => window.__shellCalls.find(call => call.command === 'render_viewport'));
+    expect(render.args.pixelRatio).toBe(2);
     await page.mouse.click(rect.x + 150, rect.y + 150);
     await expect.poll(() => page.evaluate(() => window.__shellCalls.filter(call => call.command === 'pick_atom').length)).toBe(1);
     const pick = await page.evaluate(() => window.__shellCalls.find(call => call.command === 'pick_atom'));

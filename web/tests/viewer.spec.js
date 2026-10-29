@@ -2,6 +2,7 @@ import {test,expect} from '@playwright/test';
 import {PNG} from 'pngjs';
 import {gzipSync} from 'node:zlib';
 import {existsSync, readFileSync} from 'node:fs';
+import {load,call} from './support.js';
 const structure=`HETATM    1  C1  LIG A   1      -2.000   0.000   0.000  1.00 10.00           C  
 HETATM    2  O1  LIG A   1       0.000   0.000   0.000  1.00 10.00           O  
 HETATM    3  N1  LIG A   1       1.300   1.000   0.000  1.00 10.00           N  
@@ -13,16 +14,6 @@ async function ready(page){
   await page.goto('./?renderer=webgl');
   await expect.poll(()=>page.evaluate(()=>!!window.cuemol),{timeout:60000}).toBe(true);
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.sceneId)).toBeGreaterThan(0);
-}
-async function load(page,name,buffer){
-  await page.locator('#files').setInputFiles({name,mimeType:'application/octet-stream',buffer});
-}
-async function call(page,name,args={}){
-  const id=await page.evaluate(([name,args])=>window.cuemol.command(name,args),[name,args]);
-  await expect.poll(()=>page.evaluate(id=>{
-    const state=window.cuemol.status();return state.lastCommand===id&&!state.busy;
-  },id),{timeout:60000}).toBe(true);
-  return page.evaluate(()=>window.cuemol.status());
 }
 for (const backend of ['webgl','webgpu']) {
   test(`read-only scripts ${backend} preserve undo redo and geometry`,async({page})=>{

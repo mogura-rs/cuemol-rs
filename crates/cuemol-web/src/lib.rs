@@ -1143,6 +1143,15 @@ impl App {
                 [0., 0., resolution[0] as f32, resolution[1] as f32],
             );
         }
+        self.effects.render_center_mark(
+            &self.gpu.queue,
+            &mut encoder,
+            &target.view,
+            &self.camera,
+            [0., 0., resolution[0] as f32, resolution[1] as f32],
+            pixels,
+            cuemol_desktop_core::stereo::swap_eyes(&self.state),
+        );
         self.gpu.queue.submit([encoder.finish()]);
         self.picking.start_readback();
         if pending || self.picking.is_pending() {

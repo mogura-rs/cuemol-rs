@@ -31,6 +31,7 @@ fn volume(color: [u8; 4]) -> RenderVolume {
 
 fn camera() -> Camera {
     let mut camera = Camera::new();
+    camera.set_center_mark(cuemol_qsys::CenterMark::None);
     camera.set_zoom(8.);
     camera.set_cam_dist(20.);
     camera.set_slab_depth(30.);
