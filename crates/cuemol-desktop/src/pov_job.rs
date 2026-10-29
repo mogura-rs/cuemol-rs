@@ -78,8 +78,8 @@ pub(crate) struct PovProcessOutput {
 pub(crate) fn povray_args(task: &PovProcessTask) -> Vec<String> {
     let options = &task.options;
     let mut args = vec![
-        format!("+I{}", task.input_path.to_string_lossy()),
-        format!("+O{}", task.output_path.to_string_lossy()),
+        cuemol_command::external::povray_path_arg("+I", &task.input_path.to_string_lossy()),
+        cuemol_command::external::povray_path_arg("+O", &task.output_path.to_string_lossy()),
         format!("+W{}", options.width.max(1)),
         format!("+H{}", options.height.max(1)),
         "+FN8".to_string(),
@@ -100,10 +100,16 @@ pub(crate) fn povray_args(task: &PovProcessTask) -> Vec<String> {
         format!("Declare=_amb_frac={}", options.ambient_fraction),
     ];
     if let Some(input_dir) = task.input_path.parent() {
-        args.push(format!("+L{}", input_dir.to_string_lossy()));
+        args.push(cuemol_command::external::povray_path_arg(
+            "+L",
+            &input_dir.to_string_lossy(),
+        ));
     }
     if !task.include_dir.trim().is_empty() {
-        args.push(format!("+L{}", task.include_dir.trim()));
+        args.push(cuemol_command::external::povray_path_arg(
+            "+L",
+            task.include_dir.trim(),
+        ));
     }
     if options.light_spread > 1 {
         args.push(format!(
@@ -434,6 +440,53 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires CUEMOL_TEST_POVRAY pointing to a real renderer"]
+    fn real_povray_renders_paths_with_spaces() {
+        let executable = std::env::var("CUEMOL_TEST_POVRAY").expect("real POV-Ray executable");
+        let root = create_pov_work_dir().unwrap();
+        let work = root.join("input and output");
+        fs::create_dir(&work).unwrap();
+        let input_path = work.join("render scene.pov");
+        let output_path = work.join("render image.png");
+        fs::write(
+            &input_path,
+            "#version 3.7;\n#include \"colors.inc\"\nglobal_settings { assumed_gamma 1 }\n\
+             camera { location <0,0,-4> look_at 0 }\n\
+             light_source { <-3,4,-4> color White }\n\
+             sphere { 0,1 pigment { color Blue } }\n",
+        )
+        .unwrap();
+        let result = run_pov_process(
+            PovProcessTask {
+                executable,
+                include_dir: String::new(),
+                input_path,
+                output_path: output_path.clone(),
+                options: PovProcessOptions {
+                    width: 48,
+                    height: 48,
+                    ..PovProcessOptions::default()
+                },
+            },
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        assert_eq!(result.output_path, output_path);
+        let image = image::load_from_memory(&fs::read(&output_path).unwrap())
+            .unwrap()
+            .to_rgb8();
+        assert_eq!(image.dimensions(), (48, 48));
+        assert!(
+            image
+                .pixels()
+                .filter(|pixel| pixel[2] > 80 && pixel[0] < 20)
+                .count()
+                > 100
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn runs_povray_with_reference_options_and_collects_output() {
         let dir =
             std::env::temp_dir().join(format!("cuemol-pov-process-test-{}", std::process::id()));
@@ -493,7 +546,7 @@ mod tests {
             "Declare=_light_spread=3",
             "Declare=_radiosity=7",
             "Declare=_transpbg=1",
-            "+L/tmp/pov include",
+            "+L\"/tmp/pov include\"",
         ] {
             assert!(
                 args.lines().any(|argument| argument == expected),

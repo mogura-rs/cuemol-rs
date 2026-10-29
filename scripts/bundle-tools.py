@@ -176,6 +176,7 @@ def main():
         return
     apbs(output, args.apbs_source)
     python_tools(output)
+    run(sys.executable, ROOT / "scripts/bundle-povray.py", "--out", output / "povray")
     run(sys.executable, ROOT / "scripts/bundle-oidn.py", "--out", output / "oidn")
     license_file = fetch('https://raw.githubusercontent.com/FFmpeg/FFmpeg/n7.0.2/COPYING.GPLv3',
                          'ffmpeg-COPYING.GPLv3', '8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903')
@@ -183,12 +184,12 @@ def main():
 
     (output / 'SOURCES.json').write_text(json.dumps(SOURCES, indent=2) + '\n')
     (output / 'README.txt').write_text(
-        'APBS, PDB2PQR and FFmpeg are separate executables distributed with CueMol.\n'
+        'APBS, PDB2PQR, FFmpeg and POV-Ray are separate executables distributed with CueMol.\n'
         'The OIDN runtime and its source manifest are under oidn/.\n'
         'Their original licenses are in licenses/. Pinned sources and package versions\n'
         'are recorded in SOURCES.json and python-packages.json. FFmpeg is built and\n'
         'distributed by imageio-ffmpeg; its build configuration is in ffmpeg-build.txt.\n'
-        'Umbreon and USalign are compiled into cuemol. POV-Ray is an optional adapter.\n')
+        'Umbreon and USalign are compiled into cuemol. POV-Ray sources and licenses are under povray/.\n')
     print(f'Bundled tools: {output}')
 
 

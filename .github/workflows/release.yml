@@ -76,13 +76,16 @@ jobs:
         id: tools
         with:
           path: .cache/bundled-tools
-          key: tools-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ hashFiles('scripts/bundle-tools.py', 'scripts/bundle-oidn.py', 'scripts/tool-requirements.txt') }}
+          key: tools-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ hashFiles('scripts/bundle-tools.py', 'scripts/bundle-oidn.py', 'scripts/bundle-povray.py', 'scripts/tool-requirements.txt') }}
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libsuitesparse-dev libopenblas-dev gfortran
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libsuitesparse-dev libopenblas-dev gfortran autoconf automake libboost-thread-dev libpng-dev libjpeg-dev libtiff-dev patchelf
       - name: Install macOS source-build dependencies
         if: runner.os == 'macOS' && runner.arch == 'ARM64' && steps.tools.outputs.cache-hit != 'true'
         run: brew install suite-sparse openblas gettext libiconv libomp
+      - name: Install macOS POV-Ray build dependencies
+        if: runner.os == 'macOS' && steps.tools.outputs.cache-hit != 'true'
+        run: brew install autoconf automake boost libpng jpeg-turbo libtiff
       - name: Build native tools
         if: steps.tools.outputs.cache-hit != 'true'
         run: uv run --no-project python scripts/bundle-tools.py
@@ -109,6 +112,7 @@ jobs:
           "$binary" mcp tools > .cache/native-tools.json
           "$binary" tools run pdb2pqr --version
           "$binary" tools run ffmpeg -version
+          uv run --no-project python scripts/check-povray.py --binary "$binary"
       - name: Test Unix installer and self-upgrade
         if: runner.os != 'Windows'
         shell: bash

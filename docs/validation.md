@@ -1249,6 +1249,39 @@ and invalidating click coordinates. The panel now reserves its assigned height,
 and Console/Output scroll areas retain it regardless of log length. Navigation,
 trackpad scaling, log growth and affine glyph checks pass together.
 
+### Bundled POV-Ray and real process validation
+
+POV-Ray is now part of the native tools bundle. The source archive is pinned to
+[the upstream 3.8.0 beta 2 release](https://github.com/POV-Ray/povray/releases/tag/v3.8.0-beta.2)
+and verified by SHA-256 before building. Unix builds use the upstream console;
+Windows uses its console project with the current MSVC toolset. Standard include
+files, runtime libraries, licenses, original sources and the build helper travel
+with the executable. The native release cache includes the new helper, and each
+release platform must render a CueMol-exported scene before packaging.
+
+The Unix build disables fast-math because the upstream parser uses infinity as
+a sentinel; GCC's finite-math assumptions otherwise reject a default camera.
+The macOS build supplies the missing 32-bit TrueType alias. Unix builds omit the
+optional OpenEXR input codec; the CueMol PNG rendering path is unchanged. These
+build changes are recorded in the helper shipped beside the original source.
+
+The command launcher discovers standard include files relative to the renderer.
+POV-Ray parses its own arguments, so input, output and include paths containing
+spaces require quotes inside each argument. Both desktop frontends share this
+handling. Tauri also resolves its default executable names through the shared
+tool configuration, including APBS/PDB2PQR calculation and FFmpeg animation output.
+
+A complete Linux tools bundle was rebuilt successfully. The Linux and macOS
+binaries each rendered a CueMol-exported molecular scene to a 96 by 96 PNG with
+62 distinct colors. The macOS bundle also passed after relocation to a directory
+containing spaces, without build-library search paths. A real desktop process
+test rendered a 48 by 48 PNG using input/output paths with spaces. Mock process
+tests still cover cancellation and post-blend passes; they are not used as the
+only evidence that the external renderer works. All 33 command tests and 144
+ordinary Tauri tests pass; the real renderer test also passes explicitly on Linux
+and macOS. Windows and the other native release targets still require execution
+in the unpublished release matrix.
+
 ### Documentation reconciled with implementation
 
 The implementation takes precedence over stale descriptions. Corrections found
@@ -1274,3 +1307,4 @@ during this work are collected here; the read-only reference itself was not edit
 | A spline helper comment said Catmull-Rom. | The implementation uses a natural cubic spline. |
 | Snapshot transform comments combined object and renderer transforms and described rotation-only normals. | Object coordinates are transformed before glyph construction; renderer geometry uses affine transforms and inverse-transpose normals. |
 | Sphere/cylinder helper comments said flat shading. | Their radial vertex normals support smooth shading. |
+| README called POV-Ray an optional external installation. | Native distributions now include its console renderer, runtime, standard files and sources. |

@@ -229,10 +229,13 @@ Script file-export threads require a native filesystem and report an error in
 the browser. The Rust integrator does not promise pixel identity with Embree.
 
 USalign is compiled from the vendored reference implementation; its source
-and license are retained. Release tool bundles contain APBS, PDB2PQR, FFmpeg, and the Intel OIDN runtime,
-including a private PDB2PQR runtime. They do not require a system Python install.
+and license are retained. Release tool bundles contain APBS, PDB2PQR, FFmpeg,
+POV-Ray and the Intel OIDN runtime, including a private PDB2PQR runtime. They do
+not require a system Python install.
 Tool lookup checks configured paths, `CUEMOL_TOOLS_DIR`, the binary/application
-bundle, the cache, and `PATH`. POV-Ray remains an optional external backend.
+bundle, the cache, and `PATH`. The POV-Ray console build includes its standard
+include files, native runtime libraries, licenses and pinned source archive.
+`cuemol tools run povray` and both desktop rendering dialogs use that bundle.
 
 ## AI Agent
 

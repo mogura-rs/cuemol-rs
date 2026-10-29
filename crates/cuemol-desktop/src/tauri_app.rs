@@ -11822,7 +11822,17 @@ fn handle_model_request(
             model.status = format!("APBS files written for {} atom(s)", summary.atom_count);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
-        ModelRequest::StartApbsCalculation(input) => {
+        ModelRequest::StartApbsCalculation(mut input) => {
+            input.apbs_executable = cuemol_command::external::resolve_default(
+                &model.desktop,
+                "apbs",
+                &input.apbs_executable,
+            );
+            input.pdb2pqr_executable = cuemol_command::external::resolve_default(
+                &model.desktop,
+                "pdb2pqr",
+                &input.pdb2pqr_executable,
+            );
             if model.apbs_job.is_some() {
                 return Err("an APBS calculation is already running".to_string());
             }
@@ -12378,7 +12388,12 @@ fn handle_model_request(
             model.log_lines.push(format!("POV-Ray scene: {path}"));
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
-        ModelRequest::StartPovRender(input) => {
+        ModelRequest::StartPovRender(mut input) => {
+            input.executable = cuemol_command::external::resolve_default(
+                &model.desktop,
+                "povray",
+                &input.executable,
+            );
             if model.pov_render_job.is_some() {
                 return Err("a POV-Ray rendering job is already running".to_string());
             }
@@ -12612,7 +12627,17 @@ fn handle_model_request(
             }
             Ok(ModelResponse::Message("cleared".to_string()))
         }
-        ModelRequest::StartAnimationRender(input) => {
+        ModelRequest::StartAnimationRender(mut input) => {
+            input.povray_executable = cuemol_command::external::resolve_default(
+                &model.desktop,
+                "povray",
+                &input.povray_executable,
+            );
+            input.ffmpeg_executable = cuemol_command::external::resolve_default(
+                &model.desktop,
+                "ffmpeg",
+                &input.ffmpeg_executable,
+            );
             if model.animation_render_job.is_some() {
                 return Err("an animation rendering job is already running".to_string());
             }
@@ -23777,6 +23802,10 @@ mod tests {
         permissions.set_mode(0o755);
         fs::set_permissions(&script, permissions).unwrap();
 
+        model.desktop.put_config_value(
+            "cuemol2.ui.apbs-exe-path",
+            script.to_string_lossy().into_owned(),
+        );
         let response = handle_model_request(
             &mut model,
             ModelRequest::StartApbsCalculation(ApbsCalculationInput {
@@ -23791,7 +23820,7 @@ mod tests {
                 grid_spacing: 1.0,
                 water_dielectric: 78.54,
                 protein_dielectric: 2.0,
-                apbs_executable: script.to_string_lossy().into_owned(),
+                apbs_executable: "apbs".to_string(),
                 pdb2pqr_executable: String::new(),
             }),
         )
@@ -23855,6 +23884,10 @@ mod tests {
         permissions.set_mode(0o755);
         fs::set_permissions(&script, permissions).unwrap();
 
+        model.desktop.put_config_value(
+            "cuemol2.ui.render.pov-exe-path",
+            script.to_string_lossy().into_owned(),
+        );
         let response = handle_model_request(
             &mut model,
             ModelRequest::StartPovRender(PovRenderInput {
@@ -23871,7 +23904,7 @@ mod tests {
                 post_blend: true,
                 edge_lines: true,
                 pixel_labels: false,
-                executable: script.to_string_lossy().into_owned(),
+                executable: "povray".to_string(),
                 include_dir: String::new(),
                 radiosity: 7,
                 shadow: true,
