@@ -106,9 +106,11 @@ def main():
     env.update(CUEMOL_CONFIG_DIR=str(config), CUEMOL_CACHE_DIR=str(work / 'cache'))
 
     def call(name, arguments=None, timeout=10):
-        raw = subprocess.check_output([str(binary), 'mcp', 'call', name, json.dumps(arguments or {})],
-                                      cwd=work, env=env, text=True, stderr=subprocess.PIPE, timeout=timeout)
-        outer = json.loads(raw)
+        response = subprocess.run([str(binary), 'mcp', 'call', name, json.dumps(arguments or {})],
+                                  cwd=work, env=env, text=True, capture_output=True, timeout=timeout)
+        if response.returncode:
+            raise RuntimeError(f'{name} failed: {response.stdout}\n{response.stderr}')
+        outer = json.loads(response.stdout)
         result = json.loads(outer['result']['content'][0]['text'])
         if not result['ok']:
             raise RuntimeError(result)
