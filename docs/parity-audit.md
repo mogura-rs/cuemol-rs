@@ -722,6 +722,11 @@ twenty cases had passed in the full run with the same corrected test double.
 The core follow-up also passed empty/whitespace fallback and global-definition
 checks without a runtime change.
 
+A second public review of `d7713d4` found no high-confidence defect. The two
+lower-confidence concerns were checked against the callees: the molecule setter
+retains the submitted expression exactly, and history-save warnings call the
+global error handler rather than the disposed pane's local handler.
+
 ## Clipboard comparison and repairs
 
 The reference uses typed XML/QDF payloads for objects, renderers, cameras and
