@@ -1605,8 +1605,8 @@ impl MolObject {
         self.atom_intr_segments_with_orientation(renderer, false)
     }
 
-    /// Fancy angle and torsion arms start at their vertex so asymmetric caps
-    /// and dash patterns follow CueMol's cylinder direction.
+    /// The first fancy angle or torsion arm starts at its vertex so asymmetric
+    /// caps and dash patterns follow CueMol's cylinder direction.
     pub fn atom_intr_fancy_segments(&self, renderer: &MolRenderer) -> Vec<(Vector4, Vector4)> {
         self.atom_intr_segments_with_orientation(renderer, true)
     }
