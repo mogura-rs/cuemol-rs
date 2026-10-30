@@ -1602,6 +1602,20 @@ impl MolObject {
     /// [`MolScene::resolve_atom_intr_renderer`] to obtain world coordinates
     /// and resolve references to other molecules.
     pub fn atom_intr_segments(&self, renderer: &MolRenderer) -> Vec<(Vector4, Vector4)> {
+        self.atom_intr_segments_with_orientation(renderer, false)
+    }
+
+    /// Fancy angle and torsion arms start at their vertex so asymmetric caps
+    /// and dash patterns follow CueMol's cylinder direction.
+    pub fn atom_intr_fancy_segments(&self, renderer: &MolRenderer) -> Vec<(Vector4, Vector4)> {
+        self.atom_intr_segments_with_orientation(renderer, true)
+    }
+
+    fn atom_intr_segments_with_orientation(
+        &self,
+        renderer: &MolRenderer,
+        fancy: bool,
+    ) -> Vec<(Vector4, Vector4)> {
         renderer
             .atom_intr_lines
             .iter()
@@ -1611,7 +1625,14 @@ impl MolObject {
                     .map(|points| {
                         points
                             .windows(2)
-                            .map(|pair| (pair[0], pair[1]))
+                            .enumerate()
+                            .map(|(index, pair)| {
+                                if fancy && index == 0 && line.kind != AtomIntrKind::Distance {
+                                    (pair[1], pair[0])
+                                } else {
+                                    (pair[0], pair[1])
+                                }
+                            })
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default()

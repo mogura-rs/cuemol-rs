@@ -526,6 +526,11 @@ fn run() -> Result<(), String> {
                 .ok_or_else(|| "loaded scene not found".to_string())?;
             let styles = scene_style_manager(scene);
             let scope = cuemol_molvis::DEFAULT_STYLE_SCOPE;
+            let selections = styles
+                .str_data_entries("sel", scope)
+                .into_iter()
+                .filter_map(|(name, text)| parse_selector(&text).ok().map(|sel| (name, sel)))
+                .collect();
             println!("objects={}", scene.objects().len());
             for object in scene.objects() {
                 println!("object={}", object.name());
@@ -547,7 +552,9 @@ fn run() -> Result<(), String> {
                         println!(
                             "measurements={}",
                             object.atom_intr_measurements_json(
-                                &scene.resolve_atom_intr_renderer(object, renderer)
+                                &scene.resolve_atom_intr_renderer_with(object, renderer, |text| {
+                                    cuemol_molstr::parse_named_selector(text, &selections).ok()
+                                })
                             )
                         );
                     }

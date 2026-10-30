@@ -14994,7 +14994,9 @@ impl DesktopAppState {
                 }
                 let label_style = gui_renderer_label_style(renderer, &styles);
                 let xform = renderer.xform_matrix();
-                let resolved = scene.resolve_atom_intr_renderer(object, renderer);
+                let resolved = scene.resolve_atom_intr_renderer_with(object, renderer, |text| {
+                    parse_selector_with_styles(text, &styles, scene_uid.get()).ok()
+                });
                 for (mut position, text) in object.atom_intr_labels(&resolved) {
                     if out.len() >= max {
                         return out;
@@ -15053,7 +15055,9 @@ impl DesktopAppState {
                     a: 255,
                 }));
                 let xform = renderer.xform_matrix();
-                let resolved = scene.resolve_atom_intr_renderer(object, renderer);
+                let resolved = scene.resolve_atom_intr_renderer_with(object, renderer, |text| {
+                    parse_selector_with_styles(text, &styles, scene_uid.get()).ok()
+                });
                 for (mut from, mut to) in object.atom_intr_segments(&resolved) {
                     if out.len() >= max {
                         return out;
@@ -39469,10 +39473,11 @@ impl DesktopAppState {
                                 .find(|o| o.scene_uid == renderer.scene_uid && o.name == *name),
                             _ => env.objects.iter().find(|o| o.uid == renderer.object_uid),
                         }?;
-                        let molecule =
-                            &env.molecules.iter().find(|m| m.uid == object.uid)?.molecule;
+                        let entry = env.molecules.iter().find(|m| m.uid == object.uid)?;
+                        let molecule = &entry.molecule;
                         let mut point = if let Some(selector) = &selector {
-                            let indices = molecule.select_indices(selector);
+                            let selector = selector_in_script_scene(env, entry, selector);
+                            let indices = molecule.select_indices(&selector);
                             if indices.is_empty() {
                                 return None;
                             }
@@ -39506,8 +39511,7 @@ impl DesktopAppState {
             let selections = (0..kind.atom_count())
                 .map(|index| {
                     let text = argn(args, index, ctx);
-                    parse_script_selector(&text, renderer.scene_uid)
-                        .map(|selector| selector.to_string())
+                    parse_script_selector(&text, renderer.scene_uid).map(|_| text)
                 })
                 .collect::<JsResult<Vec<_>>>();
             let Ok(selections) = selections else {
@@ -51823,7 +51827,11 @@ fn append_object_renderer_snapshot(
     scalar_maps: &BTreeMap<Uid, GuiDensityMapObject>,
     scene: &MolScene,
 ) {
-    let resolved_renderer = renderer.map(|r| scene.resolve_atom_intr_renderer(object, r));
+    let resolved_renderer = renderer.map(|r| {
+        scene.resolve_atom_intr_renderer_with(object, r, |text| {
+            parse_selector_with_styles(text, styles, style_scope_id).ok()
+        })
+    });
     let renderer = resolved_renderer.as_deref();
     let renderer_type = renderer.map(MolRenderer::renderer_type).unwrap_or("simple");
     let mut options = renderer_render_options(
@@ -51956,11 +51964,20 @@ fn append_object_renderer_snapshot(
         // An atom-interaction renderer draws measurement lines between its atom
         // pairs, NOT the whole molecule — route it to the measurement geometry so
         // it stops dumping every atom (the gap this closes).
-        ("atomintr", Some(renderer)) => cuemol_render::atom_intr_snapshot_with_options(
-            &object.atom_intr_segments(renderer),
-            Some(object.uid().get()),
-            &atom_intr_render_options(renderer, styles, style_scope_id),
-        ),
+        ("atomintr", Some(renderer)) => {
+            let options = atom_intr_render_options(renderer, styles, style_scope_id);
+            let segments = match options.mode {
+                cuemol_render::AtomIntrRenderMode::Simple => object.atom_intr_segments(renderer),
+                cuemol_render::AtomIntrRenderMode::Fancy => {
+                    object.atom_intr_fancy_segments(renderer)
+                }
+            };
+            cuemol_render::atom_intr_snapshot_with_options(
+                &segments,
+                Some(object.uid().get()),
+                &options,
+            )
+        }
         // Anisotropic thermal ellipsoids with the C++ ORTEP disc controls.
         ("anisou", renderer) => {
             let resolved = |name: &str| {
@@ -54057,16 +54074,8 @@ fn parse_selector_with_styles(
     styles: &StyleManager,
     scope_id: u64,
 ) -> Result<cuemol_molstr::Selector> {
-    let registry = styles
-        .str_data_entries("sel", scope_id)
-        .into_iter()
-        .filter_map(|(name, expression)| {
-            parse_selector(&expression)
-                .ok()
-                .map(|selector| (name, selector))
-        })
-        .collect::<std::collections::HashMap<_, _>>();
-    cuemol_molstr::parse_named_selector(selection_text, &registry)
+    let selector = parse_selector(selection_text)?;
+    selection_support::resolve(&selector, || styles, scope_id).map(|selector| selector.into_owned())
 }
 
 /// CueMol2 AtomIntr measurement from atom positions: 2 → distance, 3 → angle, 4 →

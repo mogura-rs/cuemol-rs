@@ -37,7 +37,7 @@ speedup from a single optimized stage or compare timings from different hosts.
 | Scripts and services | JavaScript/Python helpers, retained state, callbacks, errors, file arguments and asynchronous readers | Previous compatibility checks exist; shared workload comparison pending |
 | File and scene I/O | Reader options, saved cameras, source metadata, selections, linked/embedded data and cancellation | Embedded QDF/PDB secondary-structure defaults and topology transfers repaired; paired scene loading measured below; broader I/O comparison pending |
 | Navigation and cameras | Rotation, pan, zoom, fitting, clipping, bookmarks, visibility and screen coordinates | Previous numeric and interaction oracles exist; integrated comparison pending |
-| Selection and annotation | Expressions, residue ranges, lasso, named selections, labels and measurement modes | Sequence actions, selection pickers and the live Selection pane now share behavior across frontends; scene-scoped names, insertion codes, pivot centering and cross-molecule distances repaired; broader annotation comparison remains pending |
+| Selection and annotation | Expressions, residue ranges, lasso, named selections, labels and measurement modes | Sequence actions, selection pickers and the live Selection pane now share behavior across frontends; scene-scoped names, insertion codes, pivot centering, cross-molecule selections and measurement operands repaired; broader annotation comparison remains pending |
 | Molecular editing | Merge/delete, chain/residue changes, secondary structure, transformations and undo/redo | Command coverage exists; dialog and edge-case comparison pending |
 | Analysis and surfaces | Alignment, interactions, surface creation/regeneration/cutting and electrostatics | Numerical/tool checks exist; dialog and performance comparison pending |
 | Viewport rendering | Molecular/map/surface representations, transparency, lighting, edges, fog, AA and AO | Ribbon widths, topology links, applied pivots and secondary-structure junctions repaired; remaining viewport effects and scene comparisons are pending |
@@ -1331,3 +1331,76 @@ uv run --no-project python scripts/benchmark-styles.py \
 Omit `--baseline` when capturing the first build. The report records platform,
 binary hash, operation counts, per-process RSS, timings and a content digest.
 Use the existing `benchmark-inspector.py` command for the property measurement.
+
+## Scene-dependent measurement operands
+
+Measurement selection operands previously ran without the scene context.
+Expressions such as `name C1 around 1.5 [Target]` therefore produced no
+centroid: script append methods returned `-1`, and loaded measurements had no
+values, labels or lines. The scene resolver and script evaluator now bind each
+operand to its source object and the current scene before selecting atoms.
+Centroids are transformed to world coordinates once. Screen labels, simple
+lines, export geometry and `qsc-info` use this resolution, including named
+selection definitions. The resolver clones the renderer when needed, while
+borrowing molecule storage; it does not cache selection results across edits.
+
+Script append methods also retain the input selection name. Previously they
+stored its expanded expression, losing the named dependency in saved scenes.
+The current definition is resolved when evaluating or drawing the measurement.
+An empty or removed definition hides the affected measurement; restoring it
+restores the value and geometry without recreating the measurement. QSC saves
+retain the expression instead of baking the evaluated coordinates.
+
+The first fancy-mode arm of an angle or torsion was also reversed. The reference
+draws this arm from the vertex toward the first atom, whereas simple mode uses
+the declared atom order. The reversed fancy arm placed asymmetric arrow caps
+and dash phases at the wrong end. Export and viewport geometry now select the
+appropriate segment direction after resolving the renderer's mode, including
+style inheritance. Distance segments keep their declared direction.
+
+Fresh measurements in the installed CueMol 2.4.1.547 application supplied the
+following oracle. The same six-atom input and selection-centroid operands were
+used in both implementations; each target transform was tested independently.
+
+| Target translation | Distance | Angle (degrees) | Torsion (degrees) |
+| --- | ---: | ---: | ---: |
+| `(0, 0, 0)` | 0.5 | 135 | 90 |
+| `(1, 0, 0)` | 0.3333333333 | 45 | 90 |
+| `(2, 1, 1)` | 2.1794494718 | 13.2626760083 | approximately 0 |
+| `(20, 0, 0)` | no centroid | no centroid | no centroid |
+
+The Rust values agree within two millionths. Shared regressions also translate
+both objects together, save/reload the definitions, and check current values
+after later target movement. Named-definition checks cover screen labels,
+export meshes, removal and restoration. The command-line regression checks
+numeric and unresolved diagnostic output from saved scenes.
+
+Two reference behaviors are intentionally not copied. In a separate live probe,
+measurements created before moving the target retained their original values;
+fresh measurements reflected each new transform. Changing a named definition
+also left an existing reference measurement unchanged, while fresh measurements
+used the new definition and retained its name in `getDefsJSON`. Rust reevaluates
+these definitions against the current scene. An additional reference fixture
+rejected a valid right-angle torsion through `VectorHelper::isNear8(costh, 0)`;
+Rust retains its valid geometric result. These observations limit the parity
+claim to the fresh numeric oracles, not the reference's stale live results.
+
+A separate angle fixture confirmed the misplaced end cap in 640 x 480 native
+exports with matching camera, direct lighting and 3 x 3 supersampling. There is
+an additional export difference: the reference Umbreon adapter approximates
+cone arrowheads with mean-radius cylinders. Rust retains cone geometry, as
+requested by the measurement renderer. This comparison does not establish
+pixel equivalence for arrowheads between the two Umbreon exports.
+
+The new WebGL and WebGPU regressions both reproduced the original append
+failure against the preceding browser build. The two arrow-pixel checks also
+failed before the direction repair. After rebuilding, all twenty browser cases
+passed: measurement values, live labels, simple/fancy pixels, saved definitions,
+arrow endpoints, navigation, cross-molecule selections and script/GUI styles.
+The final native and browser images were inspected.
+
+Before the direction follow-up, the broad shared run passed 687 tests and the
+command-line diagnostic/export run passed twelve. After that follow-up, all six
+measurement integration cases, 250 molecular tests and four focused core tests
+passed. Native GUI tests passed 178 cases with the unrelated real-POV-Ray case
+ignored. Public review and terminal CI/delivery are recorded after completion.

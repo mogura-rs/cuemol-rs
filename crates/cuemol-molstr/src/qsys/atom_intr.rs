@@ -27,12 +27,25 @@ impl MolScene {
         owner: &MolObject,
         renderer: &'a MolRenderer,
     ) -> Cow<'a, MolRenderer> {
+        self.resolve_atom_intr_renderer_with(owner, renderer, |text| {
+            crate::parse_selector(text).ok()
+        })
+    }
+
+    /// Resolve selection operands with caller-provided named definitions before
+    /// binding them to the current scene and object transforms.
+    pub fn resolve_atom_intr_renderer_with<'a>(
+        &self,
+        owner: &MolObject,
+        renderer: &'a MolRenderer,
+        mut resolve_selection: impl FnMut(&str) -> Option<Selector>,
+    ) -> Cow<'a, MolRenderer> {
         if renderer.renderer_type() != "atomintr"
             || (owner.xform_matrix() == Matrix4::IDENTITY
                 && renderer
                     .atom_intr_lines
                     .iter()
-                    .all(|line| line.object_refs.is_empty()))
+                    .all(|line| line.object_refs.is_empty() && line.selectors.is_empty()))
         {
             return Cow::Borrowed(renderer);
         }
@@ -40,30 +53,26 @@ impl MolScene {
         for line in &mut resolved.atom_intr_lines {
             let points = if !line.positions.is_empty() {
                 Some(line.positions.clone())
-            } else if line.object_refs.is_empty() {
-                owner.atom_intr_points(line).map(|points| {
-                    points
-                        .into_iter()
-                        .map(|mut p| {
-                            owner.xform_matrix().xform3d(&mut p);
-                            p
-                        })
-                        .collect()
-                })
             } else {
                 (0..line.kind.atom_count())
                     .map(|index| {
-                        let (uid, name) = line.object_refs.get(index)?;
-                        let object = match uid {
-                            Some(uid) => self.object(*uid)?,
-                            None if name.is_empty() => owner,
-                            None => self.object_by_name(name)?,
+                        let object = if line.object_refs.is_empty() {
+                            owner
+                        } else {
+                            let (uid, name) = line.object_refs.get(index)?;
+                            match uid {
+                                Some(uid) => self.object(*uid)?,
+                                None if name.is_empty() => owner,
+                                None => self.object_by_name(name)?,
+                            }
                         };
                         let point = if let Some(aid) = line.aids.get(index) {
                             object.resolve_atom(aid)?.position
                         } else if let Some(selection) = line.selectors.get(index) {
-                            let selection = crate::parse_selector(selection).ok()?;
-                            let indices = object.mol.select_indices(&selection);
+                            let selection = resolve_selection(selection)?;
+                            let indices = object
+                                .mol
+                                .select_indices(&selection.bind_to_scene(object, self));
                             if indices.is_empty() {
                                 return None;
                             }
