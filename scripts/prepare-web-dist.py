@@ -24,6 +24,7 @@ REQUIRED = (
     'pkg/kernels/USalign-LICENSE',
     'pkg/kernels/EDTSurf-LICENSE', 'pkg/kernels/EDTSurf-SOURCE.json',
     'pkg/licenses/molstar.txt', 'pkg/licenses/smaa.txt', 'pkg/licenses/xegtao.txt',
+    'pkg/licenses/phosphor.txt',
     'pkg/fonts/NotoSansJP-Regular.ttf', 'pkg/fonts/OFL.txt', 'pkg/fonts/SOURCE.json',
 )
 

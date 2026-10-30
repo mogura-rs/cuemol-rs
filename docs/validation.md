@@ -5,6 +5,65 @@ results are historical. Generated inputs and logs stay in the ignored checkout
 cache. The current repairs and their limits appear in the completion audit;
 passing tests do not establish equivalence for every parameter combination.
 
+## Render interface and image-export performance
+
+The shell was compared with the distributed CueMol 2.4.1 application. Activity
+and toolbar icons now use the same Phosphor family. Scene rows use hierarchy
+arrows and visibility eyes, and the browser Color panel exposes paint targets,
+named-color swatches, entry editing, reordering and deletion. Bottom-panel tabs
+use the reference order and underline treatment. These checks cover the changed
+panels; they do not establish exact parity for every dialog or console dialect.
+
+The native and browser Render windows now share a preview, Image/Render settings
+tabs, Start, Stop, Save PNG and a render log. They read the stored dimensions
+instead of resetting them when opened. Cancellation retains the last completed
+image. PNG image commands include the selected DPI in their physical-resolution
+metadata; direct command calls retain their existing download/result behavior.
+Physical size fields retain their unrounded values when DPI changes. A browser
+regression reproduced a 1-inch image staying 64 pixels after changing 64 DPI to
+128 DPI; the repair now changes the pixel dimensions while preserving inches.
+The regression also checks fractional inch dimensions and saved PNG metadata.
+
+`web/benchmarks/render.mjs` compared the public browser build at `5d0d695` with
+the repair on the same macOS host using Chrome 156. Each row is the median of
+three runs, with the default scene geometry, perspective projection, 32 GI
+samples, 3x supersampling and OIDN unchanged. The browser processes ran
+sequentially. The measurements cover command-based Render image export, not
+interactive viewport rendering or a comparison against the C++ renderer.
+
+| Input and image size | Before | After | Speedup | Maximum WASM memory before / after |
+| --- | ---: | ---: | ---: | ---: |
+| 1CRN, 327 atoms, 640 x 480 | 5.41 s | 2.90 s | 1.86x | 63.75 / 64.63 MiB |
+| 1CRN, 327 atoms, 1200 x 1200 | 26.02 s | 14.09 s | 1.85x | 168.25 / 169.13 MiB |
+| 4HHB, 4,779 atoms, 640 x 480 | 18.76 s | 11.19 s | 1.68x | 114.69 / 100.06 MiB |
+
+All decoded RGBA hashes matched across both builds and all samples. PNG byte
+hashes differ because the new files contain DPI metadata. The largest observed
+frame gap fell from 300 to 50.1 ms for the 1200-square case and from 166.7 to
+83.4 ms for 4HHB. These memory values describe WebAssembly linear memory, not
+whole-browser peak RSS; small-scene memory did not decrease.
+
+The changes optimize the hot render/core WebAssembly code, reuse ray inverses,
+visit nearer BVH nodes first and retain the original tie order for coincident
+surfaces. The browser reuses its ray index across passes and yields through
+MessageChannel between ray and denoising-guide batches. Regression checks cover
+parallel/boundary rays, distance limits, accepted-hit filters and coincident
+surfaces. The native GUI suite passed 173 tests with one explicit POV-Ray
+exclusion, and all 69 shell compatibility checks passed. An input regression
+checks selection, drag payloads, visibility, locking and tree expansion without
+overlapping drag handlers. A Linux source window passed OS drag/wheel input,
+font-family and multiline rendering, and Python helper export. Separate OS mouse
+checks toggled object visibility and started a render; the displayed 64 x 48
+preview matched the command-generated image pixel for pixel.
+
+Browser checks cover the preview/save/cancel flow, a small window, physical units,
+visibility and undo, and paint entry editing, addition, reordering and deletion.
+They also reproduce two repaired paint defects: adding an entry passed an
+unsupported argument, and selection was clamped against the old entry list before
+the new entry could be moved. Named-color swatches are checked against the active
+style definitions. Cross-browser input checks keep the Chromium-only IME
+protocol case explicitly skipped on Firefox and WebKit.
+
 ## Browser text input and default appearance
 
 The post-v0.1.6 browser repair follows the reported input and appearance defects.

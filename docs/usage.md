@@ -273,6 +273,15 @@ Configuration inspection does not execute startup scripts. Download caches use
 
 ### Image rendering
 
+Open Render to preview an image before saving it. The Image tab sets the size,
+physical units, DPI and transparent background; the Render tab controls quality,
+projection, lighting and NPR settings. Start Render uses the current view and the
+saved scene settings. Stop cancels the running render and retains the previous
+completed preview. Save PNG writes that preview, including its DPI metadata.
+When dimensions use inches, centimeters or millimeters, changing DPI preserves
+the physical size and updates the output pixel count.
+The command APIs retain their direct image/download behavior.
+
 Umbreon is implemented in Rust and uses a BVH for primary, shadow, AO, and GI
 rays. Its script exporter applies typed scene render settings, including physical
 image size, DPI, lighting, adaptive antialiasing, reduced-resolution AO and NPR
@@ -354,8 +363,9 @@ WebGL2 fallback. Local file data stays in the browser unless shared through the 
 File selection, drag and drop,
 representations, properties, sequence, saved cameras, commands, undo, animation,
 PNG export, and embedded QSC download use the shared Rust core. Image rendering
-yields between row batches so the viewport remains interactive, and can be
-cancelled from the status bar. Browser settings and startup scripts are stored in localStorage for that origin.
+yields between ray-tracing and denoising-guide batches so the viewport remains
+interactive. Stop in the Render window or Cancel in the status bar cancels it.
+Browser settings and startup scripts are stored in localStorage for that origin.
 
 ### Trajectories and browser storage
 

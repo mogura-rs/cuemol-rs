@@ -59,7 +59,7 @@ enum Event {
     Trajectory(u64, Uid, BrowserTrajectory, cuemol_mdtools::TrajectoryFrame),
     Frame(Uid, usize, cuemol_mdtools::TrajectoryFrame, u64),
     Command(u32, String, Value),
-    Rendered(cuemol_core::Result<Value>, Option<String>),
+    Rendered(cuemol_core::Result<Value>, Option<String>, bool),
 }
 fn enqueue(event: Event) {
     EVENTS.with(|events| events.borrow_mut().push_back(event));
@@ -138,6 +138,7 @@ pub async fn start(
                         .or_default()
                         .push("Noto Sans JP".into());
                 }
+                cuemol_ui::shell::configure_fonts(&mut fonts);
                 cc.egui_ctx.set_fonts(fonts);
                 Ok(Box::new(App::new(cc)?))
             }),
@@ -226,7 +227,6 @@ struct App {
     selected: Option<Uid>,
     selection: String,
     representation: String,
-    coloring: String,
     pdb_id: String,
     console_tool: String,
     console_args: String,
@@ -256,6 +256,9 @@ struct App {
     render_lighting: cuemol_render::UmbreonRenderParams,
     render_size: [u32; 2],
     render_transparent: bool,
+    render_panel: cuemol_ui::RenderPanel,
+    paint_selected: usize,
+    paint_editor: Option<(String, u64, usize, String, String)>,
     show_timeline: bool,
     settings_text: String,
     startup_text: String,
@@ -375,7 +378,6 @@ impl App {
             selected: None,
             selection: String::new(),
             representation: "ribbon".into(),
-            coloring: "rainbow".into(),
             pdb_id: String::new(),
             console_tool: "get_scene_state".into(),
             console_args: "{}".into(),
@@ -404,8 +406,11 @@ impl App {
             render_hatch: Default::default(),
             render_lighting: cuemol_command::rendering_params(&serde_json::Map::new(), "umbreon")
                 .unwrap(),
-            render_size: [1200, 900],
+            render_size: [1200, 1200],
             render_transparent: false,
+            render_panel: cuemol_ui::RenderPanel::default(),
+            paint_selected: 0,
+            paint_editor: None,
             show_timeline: false,
             settings_text: String::new(),
             input: Default::default(),
@@ -470,7 +475,7 @@ impl App {
             } else {
                 None
             };
-            self.render_async(name, &args, download);
+            self.render_async(name, &args, download, false);
             return;
         }
         if name == "list_trajectories" {
@@ -555,7 +560,7 @@ impl App {
             self.camera.set_slab_depth(extent * 2.0);
         }
     }
-    fn events(&mut self) {
+    fn events(&mut self, ctx: &egui::Context) {
         let events = EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()));
         for event in events {
             self.validate_source_scene();
@@ -707,12 +712,17 @@ impl App {
                     self.call(&name, args);
                     self.last_command = id;
                 }
-                Event::Rendered(result, name) => {
+                Event::Rendered(result, name, preview) => {
                     self.busy = false;
                     self.render_cancel = None;
                     match result {
                         Ok(value) => {
-                            if let Some(name) = name {
+                            if preview {
+                                match self.render_panel.result(ctx, &value) {
+                                    Ok(()) => self.message = self.render_panel.message.clone(),
+                                    Err(error) => self.message = error,
+                                }
+                            } else if let Some(name) = name {
                                 match base64::engine::general_purpose::STANDARD
                                     .decode(value["_image"].as_str().unwrap_or(""))
                                 {
@@ -726,7 +736,12 @@ impl App {
                                 self.message = serde_json::to_string_pretty(&value).unwrap();
                             }
                         }
-                        Err(e) => self.message = e.to_string(),
+                        Err(e) => {
+                            self.message = e.to_string();
+                            if preview {
+                                self.render_panel.message = self.message.clone();
+                            }
+                        }
                     }
                 }
             }
@@ -853,7 +868,7 @@ impl App {
         }
         self.dirty = false;
     }
-    fn render_async(&mut self, name: &str, args: &Value, download: Option<String>) {
+    fn render_async(&mut self, name: &str, args: &Value, download: Option<String>, preview: bool) {
         if self.busy {
             self.message = "Wait for the current operation to finish.".into();
             return;
@@ -868,10 +883,16 @@ impl App {
                     enqueue(Event::Rendered(
                         render.run_async_with_cancel(Some(&cancel)).await,
                         download,
+                        preview,
                     ));
                 });
             }
-            Err(e) => self.message = e.to_string(),
+            Err(e) => {
+                self.message = e.to_string();
+                if preview {
+                    self.render_panel.message = self.message.clone();
+                }
+            }
         }
     }
     fn export_png(&mut self) {
@@ -879,6 +900,7 @@ impl App {
             "get_screenshot",
             &json!({"width":self.render_size[0],"height":self.render_size[1]}),
             Some("cuemol.png".into()),
+            false,
         );
     }
     fn viewport(&mut self, ui: &mut egui::Ui) {
@@ -1117,7 +1139,7 @@ impl App {
 }
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.events();
+        self.events(ctx);
         if let Some(tool) = cuemol_ui::navigation::tool_shortcut(ctx) {
             self.navigation.set_tool(tool);
         }

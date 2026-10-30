@@ -23,3 +23,8 @@ pub mod navigation;
 mod inspector;
 #[cfg(feature = "egui")]
 pub use inspector::{Inspector, InspectorTarget};
+
+#[cfg(feature = "egui")]
+mod render;
+#[cfg(feature = "egui")]
+pub use render::{RenderAction, RenderControls, RenderPanel};

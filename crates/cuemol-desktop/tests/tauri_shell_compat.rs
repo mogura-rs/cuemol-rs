@@ -764,7 +764,9 @@ fn tauri_output_prompt_executes_javascript_with_reference_history() {
         .nth(1)
         .and_then(|source| source.split("fn load_command_history(").next())
         .expect("native Output panel");
-    assert!(!native_output.contains("button(\"Clear\")"));
+    assert!(native_output.contains("small_button(\"Clear\")"));
+    assert!(native_output.contains("self.clear_log()"));
+    assert!(native_output.contains("small_button(\"Help\")"));
     assert!(!native_output.contains("button(\"Save As\")"));
 }
 
@@ -877,18 +879,19 @@ fn paint_coloring_columns_are_resizable_and_persistent() {
         .nth(1)
         .and_then(|source| source.split("fn electrostatic_coloring_ui(").next())
         .expect("native Paint coloring panel");
-    assert!(native_paint.contains("RichText::new(\"Selection\").strong()"));
-    assert!(native_paint.contains("RichText::new(\"Color\").strong()"));
+    assert!(native_paint.contains("ui.weak(\"Selection\")"));
+    assert!(native_paint.contains("ui.weak(\"Color\")"));
     assert!(native_paint.contains("coloring_paint:selection_width"));
     assert!(native_paint.contains("splitter.drag_delta().x"));
-    assert!(native_paint.contains("ui.monospace(color)"));
+    assert!(native_paint.contains("ui.label(color)"));
+    assert!(native_paint.contains("self.state.active_style_color(color)"));
     let native_gradient = NATIVE_GUI_RS
         .split("fn multi_gradient_coloring_ui(")
         .nth(1)
         .and_then(|source| source.split("fn default_coloring_details(").next())
         .expect("native Multi-gradient coloring panel");
     assert!(native_gradient.contains("RichText::new(\"Param\").strong()"));
-    assert!(native_gradient.contains("RichText::new(\"Color\").strong()"));
+    assert!(native_gradient.contains("ui.weak(\"Color\")"));
     assert!(native_gradient.contains("coloring_gradient:param_width"));
     assert!(native_gradient.contains("splitter.drag_delta().x"));
     assert!(native_gradient.contains("ui.monospace(color)"));
@@ -2768,19 +2771,20 @@ fn tauri_workspace_exposes_reference_visibility_and_lock_columns() {
         .nth(1)
         .and_then(|source| source.split("fn workspace_aux_renderer_group_name(").next())
         .expect("native Workspace panel");
-    assert!(native_workspace.contains("RichText::new(\"V\").strong()"));
-    assert!(native_workspace.contains("RichText::new(\"Name\").strong()"));
-    assert!(native_workspace.contains("workspace_panel:state_width"));
-    assert!(native_workspace.contains("splitter.drag_delta().x"));
-    assert!(native_workspace.contains("egui::vec2(state_width, ui.spacing().interact_size.y)"));
-    assert!(NATIVE_GUI_RS.contains("fn workspace_align_state_column("));
-    assert!(NATIVE_GUI_RS.contains("fn workspace_name_column<R>("));
-    assert!(NATIVE_GUI_RS.contains("ui.add_space(-indent)"));
-    assert!(native_workspace.contains("self.workspace_column_left = ui.cursor().left()"));
+    assert_eq!(native_workspace.matches("workspace_node_row(").count(), 4);
     assert_eq!(
-        native_workspace.matches("workspace_name_column(").count(),
+        native_workspace
+            .matches("set_workspace_object_visibility(")
+            .count(),
+        2
+    );
+    assert_eq!(
+        native_workspace
+            .matches("set_workspace_object_locked(")
+            .count(),
         4
     );
+    assert!(NATIVE_GUI_RS.contains("fn workspace_clicks_remain_independent_from_row_dragging("));
 }
 
 #[test]

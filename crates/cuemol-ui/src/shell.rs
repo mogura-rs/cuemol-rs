@@ -75,6 +75,26 @@ pub enum Icon {
     Angle,
     Torsion,
     Bond,
+    File,
+    Fetch,
+    Eye,
+    EyeClosed,
+    Atom,
+    Console,
+    Output,
+    Sequence,
+    Animation,
+    Trajectory,
+    Down,
+    Right,
+    Close,
+    Play,
+    Stop,
+    Up,
+    Delete,
+    Color,
+    Lock,
+    Unlock,
 }
 
 pub fn theme(ctx: &Context, light: bool) {
@@ -156,11 +176,29 @@ pub fn header(ui: &mut Ui, title: &str) {
             Color32::from_rgb(232, 233, 236)
         },
     );
+    let icon = match title {
+        "Explorer" => Icon::Explorer,
+        "View" => Icon::Camera,
+        "Selection" => Icon::Selection,
+        "Crystal" => Icon::Crystal,
+        "Actions" => Icon::History,
+        "AI Agent" => Icon::Agent,
+        _ => Icon::Settings,
+    };
+    paint_icon(
+        ui,
+        icon,
+        Rect::from_center_size(
+            rect.left_center() + egui::vec2(13., 0.),
+            egui::vec2(14., 14.),
+        ),
+        ui.visuals().weak_text_color(),
+    );
     ui.painter().text(
-        rect.left_center() + egui::vec2(8., 0.),
+        rect.left_center() + egui::vec2(26., 0.),
         egui::Align2::LEFT_CENTER,
-        title,
-        egui::FontId::proportional(13.),
+        title.to_uppercase(),
+        egui::FontId::proportional(12.),
         ui.visuals().text_color(),
     );
 }
@@ -172,7 +210,7 @@ pub fn activity_bar(ctx: &Context, active: &mut Option<Activity>) -> bool {
         .frame(egui::Frame::NONE.fill(ctx.style().visuals.extreme_bg_color))
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing.y = 0.;
-            logo(ui, 44.);
+            ui.add_space(4.);
             for view in Activity::ALL {
                 if icon_button(
                     ui,
@@ -223,7 +261,10 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, label: &str, selected: bool, size: V
     paint_icon(
         ui,
         icon,
-        Rect::from_center_size(rect.center(), egui::vec2(22., 22.)),
+        Rect::from_center_size(
+            rect.center(),
+            egui::Vec2::splat((size.x.min(size.y) - 6.).clamp(12., 22.)),
+        ),
         ui.visuals().text_color(),
     );
     response.widget_info(|| {
@@ -238,14 +279,14 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, label: &str, selected: bool, size: V
 }
 pub fn toolbar_button(ui: &mut Ui, icon: Icon, label: &str, collapsed: bool) -> Response {
     if collapsed {
-        return icon_button(ui, icon, label, false, egui::vec2(28., 26.));
+        return icon_button(ui, icon, label, false, egui::vec2(28., 24.));
     }
     let font = egui::FontId::proportional(12.);
     let text = ui
         .painter()
         .layout_no_wrap(label.into(), font, ui.visuals().text_color());
     let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(text.size().x + 32., 26.), Sense::click());
+        ui.allocate_exact_size(egui::vec2(text.size().x + 32., 24.), Sense::click());
     if response.hovered() {
         ui.painter()
             .rect_filled(rect, 3., ui.visuals().widgets.hovered.bg_fill);
@@ -270,164 +311,211 @@ pub fn toolbar_button(ui: &mut Ui, icon: Icon, label: &str, collapsed: bool) -> 
     response
 }
 
-fn paint_icon(ui: &Ui, icon: Icon, rect: Rect, color: Color32) {
-    let p = ui.painter();
-    let s = Stroke::new(1.4, color);
-    let at = |x: f32, y: f32| {
-        Pos2::new(
-            rect.left() + x * rect.width() / 24.,
-            rect.top() + y * rect.height() / 24.,
-        )
+pub fn configure_fonts(fonts: &mut egui::FontDefinitions) {
+    egui_phosphor::add_to_fonts(fonts, egui_phosphor::Variant::Regular);
+}
+
+pub fn paint_icon(ui: &Ui, icon: Icon, rect: Rect, color: Color32) {
+    use egui_phosphor::regular as glyph;
+    let text = match icon {
+        Icon::Explorer => glyph::TREE_STRUCTURE,
+        Icon::Camera => glyph::BINOCULARS,
+        Icon::Selection => glyph::SELECTION,
+        Icon::Crystal => glyph::CUBE,
+        Icon::History => glyph::SCROLL,
+        Icon::Agent => glyph::ROBOT,
+        Icon::Settings => glyph::GEAR,
+        Icon::New => glyph::PLUS,
+        Icon::File => glyph::FILE,
+        Icon::Open => glyph::FOLDER_OPEN,
+        Icon::Fetch => glyph::CLOUD_ARROW_DOWN,
+        Icon::Save => glyph::FLOPPY_DISK,
+        Icon::Reload => glyph::ARROW_CLOCKWISE,
+        Icon::Render => glyph::IMAGE,
+        Icon::Undo => glyph::ARROW_U_UP_LEFT,
+        Icon::Redo => glyph::ARROW_U_UP_RIGHT,
+        Icon::Rotate => glyph::ARROWS_OUT_CARDINAL,
+        Icon::Fit => glyph::CROSSHAIR,
+        Icon::Measure => glyph::RULER,
+        Icon::Lasso => glyph::LASSO,
+        Icon::Angle => glyph::ANGLE,
+        Icon::Torsion => glyph::ARROWS_CLOCKWISE,
+        Icon::Bond => glyph::LINE_SEGMENT,
+        Icon::Eye => glyph::EYE,
+        Icon::EyeClosed => glyph::EYE_SLASH,
+        Icon::Atom => glyph::ATOM,
+        Icon::Console => glyph::TERMINAL_WINDOW,
+        Icon::Output => glyph::TERMINAL,
+        Icon::Sequence => glyph::LIST,
+        Icon::Animation => glyph::FILM_STRIP,
+        Icon::Trajectory => glyph::WAVES,
+        Icon::Down => glyph::CARET_DOWN,
+        Icon::Right => glyph::CARET_RIGHT,
+        Icon::Close => glyph::X,
+        Icon::Play => glyph::PLAY,
+        Icon::Stop => glyph::STOP,
+        Icon::Up => glyph::ARROW_UP,
+        Icon::Delete => glyph::TRASH,
+        Icon::Color => glyph::DROP,
+        Icon::Lock => glyph::LOCK_SIMPLE,
+        Icon::Unlock => glyph::LOCK_SIMPLE_OPEN,
     };
-    let line = |points: &[(f32, f32)]| {
-        p.add(egui::Shape::line(
-            points.iter().map(|&(x, y)| at(x, y)).collect(),
-            s,
-        ));
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        text,
+        egui::FontId::proportional(rect.height()),
+        color,
+    );
+}
+
+pub fn tab(ui: &mut Ui, label: &str, selected: bool) -> Response {
+    let icon = match label {
+        "Console" => Icon::Console,
+        "Output" => Icon::Output,
+        "Sequence" => Icon::Sequence,
+        "Animation" => Icon::Animation,
+        "MD Trajectory" => Icon::Trajectory,
+        _ => Icon::Render,
     };
-    let box_ = |x: f32, y: f32, w: f32, h: f32| {
-        p.rect_stroke(
-            Rect::from_min_max(at(x, y), at(x + w, y + h)),
-            2.,
-            s,
-            egui::StrokeKind::Inside,
-        );
-    };
-    match icon {
-        Icon::Explorer => {
-            box_(4., 2., 13., 17.);
-            line(&[(8., 6.), (20., 6.), (20., 22.), (8., 22.)]);
-        }
-        Icon::Camera | Icon::Render => {
-            box_(2., 7., 20., 14.);
-            line(&[(6., 7.), (8., 3.), (16., 3.), (18., 7.)]);
-            p.circle_stroke(at(12., 14.), rect.width() * 0.19, s);
-        }
-        Icon::Lasso => {
-            line(&[
-                (7., 18.),
-                (3., 12.),
-                (4., 6.),
-                (12., 3.),
-                (20., 6.),
-                (21., 13.),
-                (15., 18.),
-                (7., 18.),
-                (8., 23.),
-            ]);
-        }
-        Icon::Angle => {
-            line(&[(5., 3.), (5., 20.), (22., 20.)]);
-            line(&[(5., 12.), (11., 14.), (13., 20.)]);
-        }
-        Icon::Torsion => {
-            line(&[(3., 17.), (9., 6.), (15., 18.), (21., 7.)]);
-            for (x, y) in [(3., 17.), (9., 6.), (15., 18.), (21., 7.)] {
-                p.circle_filled(at(x, y), 1.8, color);
-            }
-        }
-        Icon::Bond => {
-            line(&[(6., 18.), (18., 6.)]);
-            p.circle_stroke(at(5., 19.), rect.width() * 0.14, s);
-            p.circle_stroke(at(19., 5.), rect.width() * 0.14, s);
-        }
-        Icon::Selection => {
-            for (x, y, sx, sy) in [
-                (3., 3., 1., 1.),
-                (21., 3., -1., 1.),
-                (3., 21., 1., -1.),
-                (21., 21., -1., -1.),
-            ] {
-                line(&[(x, y + sy * 5.), (x, y), (x + sx * 5., y)]);
-            }
-            line(&[(9., 9.), (17., 13.), (13., 14.), (12., 18.), (9., 9.)]);
-        }
-        Icon::Crystal => {
-            line(&[
-                (12., 2.),
-                (22., 7.),
-                (22., 17.),
-                (12., 22.),
-                (2., 17.),
-                (2., 7.),
-                (12., 2.),
-                (12., 22.),
-            ]);
-            line(&[(2., 7.), (12., 12.), (22., 7.)]);
-        }
-        Icon::History => {
-            p.circle_stroke(at(13., 12.), rect.width() * 0.38, s);
-            line(&[(3., 3.), (3., 9.), (8., 9.)]);
-            line(&[(13., 6.), (13., 12.), (17., 15.)]);
-        }
-        Icon::Agent => {
-            box_(3., 7., 18., 14.);
-            line(&[(12., 2.), (12., 7.)]);
-            p.circle_filled(at(8., 13.), 1.5, color);
-            p.circle_filled(at(16., 13.), 1.5, color);
-            line(&[(8., 17.), (16., 17.)]);
-        }
-        Icon::Settings => {
-            p.circle_stroke(at(12., 12.), rect.width() * 0.29, s);
-            p.circle_stroke(at(12., 12.), rect.width() * 0.11, s);
-            for i in 0..8 {
-                let a = i as f32 * std::f32::consts::TAU / 8.;
-                line(&[
-                    (12. + a.cos() * 8., 12. + a.sin() * 8.),
-                    (12. + a.cos() * 11., 12. + a.sin() * 11.),
-                ]);
-            }
-        }
-        Icon::New => {
-            box_(3., 3., 18., 18.);
-            line(&[(12., 7.), (12., 17.)]);
-            line(&[(7., 12.), (17., 12.)]);
-        }
-        Icon::Open => {
-            line(&[
-                (2., 19.),
-                (2., 5.),
-                (9., 5.),
-                (11., 8.),
-                (21., 8.),
-                (21., 11.),
-                (6., 11.),
-                (2., 21.),
-                (19., 21.),
-                (22., 11.),
-            ]);
-        }
-        Icon::Save => {
-            box_(3., 3., 18., 18.);
-            box_(7., 3., 10., 6.);
-            box_(7., 14., 10., 7.);
-        }
-        Icon::Reload | Icon::Rotate => {
-            p.circle_stroke(at(12., 12.), rect.width() * 0.36, s);
-            line(&[(21., 3.), (21., 10.), (15., 10.)]);
-        }
-        Icon::Undo => {
-            line(&[(9., 4.), (3., 10.), (9., 16.)]);
-            line(&[(3., 10.), (15., 10.), (20., 13.), (20., 20.)]);
-        }
-        Icon::Redo => {
-            line(&[(15., 4.), (21., 10.), (15., 16.)]);
-            line(&[(21., 10.), (9., 10.), (4., 13.), (4., 20.)]);
-        }
-        Icon::Fit => {
-            line(&[(2., 8.), (2., 2.), (8., 2.)]);
-            line(&[(16., 2.), (22., 2.), (22., 8.)]);
-            line(&[(2., 16.), (2., 22.), (8., 22.)]);
-            line(&[(16., 22.), (22., 22.), (22., 16.)]);
-            p.circle_stroke(at(12., 12.), rect.width() * 0.16, s);
-        }
-        Icon::Measure => {
-            line(&[(2., 17.), (17., 2.), (22., 7.), (7., 22.), (2., 17.)]);
-            for n in [6., 10., 14.] {
-                line(&[(n, 19. - n), (n + 3., 22. - n)]);
-            }
-        }
+    let text = ui.painter().layout_no_wrap(
+        label.to_uppercase(),
+        egui::FontId::proportional(12.),
+        ui.visuals().text_color(),
+    );
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(text.size().x + 34., 28.), Sense::click());
+    if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, 0., ui.visuals().widgets.hovered.bg_fill);
     }
+    if selected {
+        ui.painter().line_segment(
+            [rect.left_bottom(), rect.right_bottom()],
+            Stroke::new(2., ui.visuals().hyperlink_color),
+        );
+    }
+    paint_icon(
+        ui,
+        icon,
+        Rect::from_center_size(
+            rect.left_center() + egui::vec2(12., 0.),
+            egui::vec2(14., 14.),
+        ),
+        ui.visuals().weak_text_color(),
+    );
+    ui.painter().galley(
+        rect.left_center() + egui::vec2(24., -text.size().y * 0.5),
+        text,
+        ui.visuals().text_color(),
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            ui.is_enabled(),
+            selected,
+            label,
+        )
+    });
+    response
+}
+
+pub fn visibility(ui: &mut Ui, visible: &mut bool) -> Response {
+    let mut response = icon_button(
+        ui,
+        if *visible { Icon::Eye } else { Icon::EyeClosed },
+        if *visible { "Hide" } else { "Show" },
+        false,
+        egui::vec2(22., 22.),
+    );
+    if response.clicked() {
+        *visible = !*visible;
+        response.mark_changed();
+    }
+    response
+}
+
+pub fn tree_row(
+    ui: &mut Ui,
+    label: &str,
+    icon: Icon,
+    selected: bool,
+    open: Option<&mut bool>,
+    visible: Option<&mut bool>,
+) -> Response {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.), Sense::hover());
+    let left = rect.left() + 18.;
+    let right = rect.right() - if visible.is_some() { 24. } else { 0. };
+    let response = ui.interact(
+        Rect::from_min_max(
+            egui::pos2(left, rect.top()),
+            egui::pos2(right, rect.bottom()),
+        ),
+        ui.id().with((label, "row")),
+        Sense::click_and_drag(),
+    );
+    if selected || response.hovered() {
+        ui.painter().rect_filled(
+            rect,
+            0.,
+            if selected {
+                ui.visuals().selection.bg_fill
+            } else {
+                ui.visuals().widgets.hovered.bg_fill
+            },
+        );
+    }
+    if let Some(open) = open {
+        let chevron = Rect::from_min_size(rect.min, egui::vec2(18., 22.));
+        if ui
+            .interact(chevron, ui.id().with((label, "expand")), Sense::click())
+            .clicked()
+        {
+            *open = !*open;
+        }
+        paint_icon(
+            ui,
+            if *open { Icon::Down } else { Icon::Right },
+            Rect::from_center_size(chevron.center(), egui::vec2(12., 12.)),
+            ui.visuals().text_color(),
+        );
+    }
+    paint_icon(
+        ui,
+        icon,
+        Rect::from_center_size(egui::pos2(left + 8., rect.center().y), egui::vec2(14., 14.)),
+        ui.visuals().weak_text_color(),
+    );
+    ui.painter().with_clip_rect(response.rect).text(
+        egui::pos2(left + 20., rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(13.),
+        ui.visuals().text_color(),
+    );
+    if let Some(visible) = visible {
+        let eye = Rect::from_min_size(egui::pos2(right, rect.top()), egui::vec2(24., 22.));
+        let eye_response = ui.interact(eye, ui.id().with((label, "visible")), Sense::click());
+        if eye_response.clicked() {
+            *visible = !*visible;
+        }
+        paint_icon(
+            ui,
+            if *visible { Icon::Eye } else { Icon::EyeClosed },
+            Rect::from_center_size(eye.center(), egui::vec2(14., 14.)),
+            ui.visuals().weak_text_color(),
+        );
+        eye_response.on_hover_text(if *visible { "Hide" } else { "Show" });
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            ui.is_enabled(),
+            selected,
+            label,
+        )
+    });
+    response.on_hover_text(label)
 }
 
 pub fn logo(ui: &mut Ui, size: f32) {

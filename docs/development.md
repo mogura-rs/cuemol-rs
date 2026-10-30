@@ -45,6 +45,21 @@ and webview copy; browser builds copy it into `pkg`, and macOS packaging generat
 the ICNS sizes. These derived assets are ignored. Use a release build when
 measuring interactive performance.
 
+The native and browser egui shells use the Phosphor regular icon font through
+`egui-phosphor`. Its notices are retained in `licenses/phosphor.txt` and included
+in both browser assets and native tool bundles. The shared Render panel owns
+preview/display state; rendering and PNG encoding remain in the command layer.
+
+`web/benchmarks/render.mjs` measures browser image export at fixed quality. It
+records PNG and decoded RGBA hashes, frame gaps, and WebAssembly linear-memory
+sizes; those memory values are not total browser-process memory. For example:
+
+```sh
+cd web
+node benchmarks/render.mjs --url http://localhost:8097/ --fixture ../example.pdb \
+  --output ../.cache/render-benchmark --samples 3 --sizes 640x480,1200x1200
+```
+
 ## Run checks
 
 ```sh

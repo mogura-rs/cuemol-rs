@@ -14,8 +14,9 @@ serde_json = { version = "1", optional = true }
 base64 = { version = "0.22", optional = true }
 zeroize = { version = "1", optional = true }
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+egui-phosphor = { version = "0.11", optional = true }
 egui = { version = "0.33.3", optional = true }
 
 [features]
 default = []
-egui = ["dep:egui", "dep:cuemol-agent", "dep:cuemol-command", "dep:cuemol-desktop-core", "dep:cuemol-qsys", "dep:serde_json", "dep:base64", "dep:zeroize", "dep:image"]
+egui = ["cuemol-command/scripting", "dep:egui-phosphor", "dep:egui", "dep:cuemol-agent", "dep:cuemol-command", "dep:cuemol-desktop-core", "dep:cuemol-qsys", "dep:serde_json", "dep:base64", "dep:zeroize", "dep:image"]

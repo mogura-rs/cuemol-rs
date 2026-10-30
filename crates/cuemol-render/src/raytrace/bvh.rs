@@ -1,5 +1,29 @@
 use super::*;
 
+struct BoundsRay {
+    origin: [f64; 3],
+    inverse_direction: [f64; 3],
+    parallel: [bool; 3],
+}
+
+impl BoundsRay {
+    fn new(ray: Ray) -> Self {
+        let direction = [ray.direction.x, ray.direction.y, ray.direction.z];
+        let parallel = direction.map(|value| value.abs() < 1e-30);
+        Self {
+            origin: [ray.origin.x, ray.origin.y, ray.origin.z],
+            inverse_direction: std::array::from_fn(|axis| {
+                if parallel[axis] {
+                    0.
+                } else {
+                    1. / direction[axis]
+                }
+            }),
+            parallel,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Bounds {
     min: [f64; 3],
@@ -24,27 +48,28 @@ impl Bounds {
             self.max[i] = self.max[i].max(b.max[i]);
         }
     }
-    fn intersects(self, ray: Ray, limit: f64) -> bool {
+    fn intersects(self, ray: &BoundsRay, limit: f64) -> bool {
+        self.entry_distance(ray, limit).is_some()
+    }
+    fn entry_distance(self, ray: &BoundsRay, limit: f64) -> Option<f64> {
         let mut near = 0.0f64;
         let mut far = limit;
-        let origin = [ray.origin.x, ray.origin.y, ray.origin.z];
-        let direction = [ray.direction.x, ray.direction.y, ray.direction.z];
         for i in 0..3 {
-            if direction[i].abs() < 1e-30 {
-                if origin[i] < self.min[i] || origin[i] > self.max[i] {
-                    return false;
+            if ray.parallel[i] {
+                if ray.origin[i] < self.min[i] || ray.origin[i] > self.max[i] {
+                    return None;
                 }
                 continue;
             }
-            let a = (self.min[i] - origin[i]) / direction[i];
-            let b = (self.max[i] - origin[i]) / direction[i];
+            let a = (self.min[i] - ray.origin[i]) * ray.inverse_direction[i];
+            let b = (self.max[i] - ray.origin[i]) * ray.inverse_direction[i];
             near = near.max(a.min(b));
             far = far.min(a.max(b));
             if near > far {
-                return false;
+                return None;
             }
         }
-        true
+        Some(near)
     }
 }
 #[derive(Clone, Copy)]
@@ -57,6 +82,7 @@ enum Shape {
 struct Primitive {
     shape: Shape,
     group: Option<usize>,
+    tie_priority: usize,
 }
 struct Node {
     bounds: Bounds,
@@ -163,7 +189,11 @@ impl<'a> RayIndex<'a> {
                 id: index.primitives.len(),
                 bounds,
             });
-            index.primitives.push(Primitive { shape, group });
+            index.primitives.push(Primitive {
+                shape,
+                group,
+                tie_priority: 0,
+            });
         };
         for (id, atom) in snapshot
             .atoms
@@ -235,6 +265,14 @@ impl<'a> RayIndex<'a> {
             index.build(&mut entries, 0);
         }
         index.order = entries.into_iter().map(|e| e.id).collect();
+        // Keep the original right-first traversal order for coincident surfaces.
+        let mut priority = 0;
+        for node in index.nodes.iter().rev().filter(|n| n.count > 0) {
+            for &id in &index.order[node.first..node.first + node.count] {
+                index.primitives[id].tie_priority = priority;
+                priority += 1;
+            }
+        }
         index
     }
     fn build(&mut self, entries: &mut [Entry], offset: usize) -> usize {
@@ -274,13 +312,14 @@ impl<'a> RayIndex<'a> {
         if self.nodes.is_empty() {
             return;
         }
+        let bounds_ray = BoundsRay::new(ray);
         // Median splits bound depth by log2(primitive count), below usize::BITS.
         let mut stack = [0usize; usize::BITS as usize + 1];
         let mut top = 1;
         while top > 0 {
             top -= 1;
             let node = &self.nodes[stack[top]];
-            if !node.bounds.intersects(ray, limit) {
+            if !node.bounds.intersects(&bounds_ray, limit) {
                 continue;
             }
             if node.count != 0 {
@@ -454,28 +493,67 @@ impl<'a> RayIndex<'a> {
         if self.nodes.is_empty() {
             return None;
         }
-        let mut result = None;
-        let mut stack = [0usize; usize::BITS as usize + 1];
+        let bounds_ray = BoundsRay::new(ray);
+        let near = self.nodes[0].bounds.entry_distance(&bounds_ray, limit)?;
+        let mut result: Option<Hit> = None;
+        let mut stack = [(0usize, 0.0); usize::BITS as usize + 1];
+        stack[0] = (0, near);
         let mut top = 1;
         while top > 0 {
             top -= 1;
-            let node = &self.nodes[stack[top]];
-            if !node.bounds.intersects(ray, limit) {
+            let (node_id, near) = stack[top];
+            if near > limit {
                 continue;
             }
+            let node = &self.nodes[node_id];
             if node.count != 0 {
                 for &id in &self.order[node.first..node.first + node.count] {
                     if let Some(hit) = self.hit(id, ray, group) {
-                        if hit.distance > 1e-4 && hit.distance <= limit && accept(hit) {
+                        if hit.distance > 1e-4
+                            && hit.distance <= limit
+                            && accept(hit)
+                            && result.is_none_or(|previous| {
+                                hit.distance < previous.distance
+                                    || self.primitives[hit.order].tie_priority
+                                        >= self.primitives[previous.order].tie_priority
+                            })
+                        {
                             limit = hit.distance;
                             result = Some(hit);
                         }
                     }
                 }
             } else {
-                stack[top] = node.first;
-                stack[top + 1] = node.right;
-                top += 2;
+                let left = self.nodes[node.first]
+                    .bounds
+                    .entry_distance(&bounds_ray, limit);
+                let right = self.nodes[node.right]
+                    .bounds
+                    .entry_distance(&bounds_ray, limit);
+                match (left, right) {
+                    (Some(left), Some(right)) => {
+                        let (near, far) = if left < right {
+                            ((node.first, left), (node.right, right))
+                        } else {
+                            ((node.right, right), (node.first, left))
+                        };
+                        stack[top] = far;
+                        stack[top + 1] = near;
+                        top += 2;
+                    }
+                    (Some(near), None) | (None, Some(near)) => {
+                        stack[top] = (
+                            if left.is_some() {
+                                node.first
+                            } else {
+                                node.right
+                            },
+                            near,
+                        );
+                        top += 1;
+                    }
+                    (None, None) => {}
+                }
             }
         }
         result
@@ -496,6 +574,62 @@ impl<'a> RayIndex<'a> {
 mod tests {
     use super::*;
     use crate::{MeshVertex, RenderAtom, RenderBond, RenderEdgeMode, RenderEdgeStyle, RenderMesh};
+
+    #[test]
+    fn bounds_rays_keep_parallel_boundary_and_distance_limits() {
+        let bounds = Bounds {
+            min: [-1.; 3],
+            max: [1.; 3],
+        };
+        for (origin, direction, limit, expected) in [
+            ([1., 0., 3.], [0., -0., -1.], 2., true),
+            ([1., 0., 3.], [0., 0., -1.], 1.999, false),
+            ([1.000001, 0., 3.], [0., 0., -1.], 4., false),
+            ([1.000001, 0., 3.], [-1e-31, 0., -1.], 4., false),
+            ([0., 0., 0.], [1., 0., 0.], 0., true),
+            ([3., 0., 0.], [1., 0., 0.], f64::INFINITY, false),
+            ([3., 0., 0.], [-1., 0., 0.], 2., true),
+        ] {
+            let ray = BoundsRay::new(Ray {
+                origin: Vector4::new3(origin[0], origin[1], origin[2]),
+                direction: Vector4::new3(direction[0], direction[1], direction[2]),
+            });
+            assert_eq!(bounds.intersects(&ray, limit), expected);
+        }
+    }
+
+    #[test]
+    fn nearest_keeps_traversal_ties_for_coincident_surfaces() {
+        let mut scene = RenderSceneSnapshot::empty();
+        for _ in 0..37 {
+            scene.atoms.push(RenderAtom::new(Vector4::ZERO, 1., None));
+        }
+        let index = RayIndex::new(&scene);
+        let ray = Ray {
+            origin: Vector4::new3(0., 0., 4.),
+            direction: Vector4::new3(0., 0., -1.),
+        };
+        let previous = index.hits(ray, None).last().unwrap().order;
+        assert_eq!(
+            index.nearest(ray, f64::INFINITY, None).unwrap().order,
+            previous
+        );
+        let previous = index
+            .hits(ray, None)
+            .into_iter()
+            .filter(|h| h.order % 2 == 0)
+            .last()
+            .unwrap()
+            .order;
+        assert_eq!(
+            index
+                .nearest_where(ray, f64::INFINITY, None, |h| h.order % 2 == 0)
+                .unwrap()
+                .order,
+            previous
+        );
+    }
+
     #[test]
     fn indexed_hits_match_brute_force_at_boundaries_and_for_shadow_rays() {
         let mut scene = RenderSceneSnapshot::empty();
@@ -556,6 +690,16 @@ mod tests {
                 assert_eq!(a.normal, b.normal);
             }
             for max in [0.01, 7., 12., f64::INFINITY] {
+                let nearest = index.nearest(ray, max, None);
+                let brute = expected
+                    .iter()
+                    .find(|h| h.distance > 1e-4 && h.distance <= max);
+                assert_eq!(nearest.map(|h| h.distance), brute.map(|h| h.distance));
+                let accepted = index.nearest_where(ray, max, None, |h| h.position.x > 0.);
+                let brute = expected
+                    .iter()
+                    .find(|h| h.distance > 1e-4 && h.distance <= max && h.position.x > 0.);
+                assert_eq!(accepted.map(|h| h.distance), brute.map(|h| h.distance));
                 assert_eq!(
                     index.occluded(ray, max, None),
                     expected

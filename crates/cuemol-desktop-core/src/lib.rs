@@ -14392,6 +14392,20 @@ impl DesktopAppState {
         Ok(self.active_scene)
     }
 
+    pub fn active_style_color(&self, value: &str) -> Option<cuemol_gfx::Rgba8> {
+        let scene = self
+            .active_scene
+            .and_then(|id| self.scene_manager().scene(id))?;
+        let styles = scene_style_manager(scene);
+        cuemol_gfx::parse_color(value)
+            .ok()?
+            .resolve(
+                |name| styles.get_color(name, scene.uid().get()).cloned(),
+                None,
+            )
+            .map(|color| color.rgba8())
+    }
+
     pub fn active_background_color(&self) -> Result<[f32; 4]> {
         let scene = self
             .active_scene

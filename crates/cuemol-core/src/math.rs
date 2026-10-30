@@ -13,10 +13,12 @@ pub struct Vector4 {
 impl Vector4 {
     pub const ZERO: Self = Self::new4(0.0, 0.0, 0.0, 0.0);
 
+    #[inline]
     pub const fn new3(x: f64, y: f64, z: f64) -> Self {
         Self::new4(x, y, z, 0.0)
     }
 
+    #[inline]
     pub const fn new4(x: f64, y: f64, z: f64, w: f64) -> Self {
         Self { x, y, z, w }
     }
@@ -91,18 +93,22 @@ impl Vector4 {
         self.w = value;
     }
 
+    #[inline]
     pub fn sqlen(self) -> f64 {
         self.x * self.x + self.y * self.y + self.z * self.z + self.w * self.w
     }
 
+    #[inline]
     pub fn sqlen3d(self) -> f64 {
         self.x * self.x + self.y * self.y + self.z * self.z
     }
 
+    #[inline]
     pub fn length(self) -> f64 {
         self.sqlen().sqrt()
     }
 
+    #[inline]
     pub fn length3d(self) -> f64 {
         self.sqlen3d().sqrt()
     }
@@ -119,6 +125,7 @@ impl Vector4 {
         self.x.abs() < tolerance && self.y.abs() < tolerance && self.z.abs() < tolerance
     }
 
+    #[inline]
     pub fn scale(self, value: f64) -> Self {
         Self::new4(
             self.x * value,
@@ -128,6 +135,7 @@ impl Vector4 {
         )
     }
 
+    #[inline]
     pub fn divide(self, value: f64) -> Result<Self> {
         if value == 0.0 {
             return Err(CueMolError::invalid_argument("division by zero"));
@@ -148,14 +156,17 @@ impl Vector4 {
         self.divide(self.length3d())
     }
 
+    #[inline]
     pub fn dot(self, rhs: Self) -> f64 {
         self.x * rhs.x + self.y * rhs.y + self.z * rhs.z + self.w * rhs.w
     }
 
+    #[inline]
     pub fn dot3d(self, rhs: Self) -> f64 {
         self.x * rhs.x + self.y * rhs.y + self.z * rhs.z
     }
 
+    #[inline]
     pub fn cross(self, rhs: Self) -> Self {
         Self::new3(
             self.y * rhs.z - self.z * rhs.y,
@@ -229,6 +240,7 @@ impl Vector4 {
         Self::torsion(i, j, k, l)
     }
 
+    #[inline]
     pub fn add_vec(self, rhs: Self) -> Self {
         Self::new4(
             self.x + rhs.x,
@@ -238,6 +250,7 @@ impl Vector4 {
         )
     }
 
+    #[inline]
     pub fn sub_vec(self, rhs: Self) -> Self {
         Self::new4(
             self.x - rhs.x,
@@ -351,6 +364,7 @@ impl fmt::Display for Vector4 {
 impl Add for Vector4 {
     type Output = Self;
 
+    #[inline]
     fn add(self, rhs: Self) -> Self::Output {
         self.add_vec(rhs)
     }
@@ -359,6 +373,7 @@ impl Add for Vector4 {
 impl Sub for Vector4 {
     type Output = Self;
 
+    #[inline]
     fn sub(self, rhs: Self) -> Self::Output {
         self.sub_vec(rhs)
     }
@@ -367,6 +382,7 @@ impl Sub for Vector4 {
 impl Mul<f64> for Vector4 {
     type Output = Self;
 
+    #[inline]
     fn mul(self, rhs: f64) -> Self::Output {
         self.scale(rhs)
     }
@@ -375,6 +391,7 @@ impl Mul<f64> for Vector4 {
 impl Div<f64> for Vector4 {
     type Output = Self;
 
+    #[inline]
     fn div(self, rhs: f64) -> Self::Output {
         self.divide(rhs).expect("division by zero")
     }
@@ -383,6 +400,7 @@ impl Div<f64> for Vector4 {
 impl Neg for Vector4 {
     type Output = Self;
 
+    #[inline]
     fn neg(self) -> Self::Output {
         Self::new4(-self.x, -self.y, -self.z, -self.w)
     }

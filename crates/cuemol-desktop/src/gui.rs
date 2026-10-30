@@ -64,9 +64,6 @@ const COLORING_PAINT_SELECTION_COLUMN_DEFAULT_WIDTH: f32 = 105.0;
 const COLORING_PAINT_SELECTION_COLUMN_MIN_WIDTH: f32 = 60.0;
 const COLORING_PAINT_COLUMN_SPLITTER_WIDTH: f32 = 5.0;
 const COLORING_GRADIENT_PARAM_COLUMN_DEFAULT_WIDTH: f32 = 105.0;
-const WORKSPACE_STATE_COLUMN_DEFAULT_WIDTH: f32 = 44.0;
-const WORKSPACE_STATE_COLUMN_MIN_WIDTH: f32 = 36.0;
-const WORKSPACE_COLUMN_SPLITTER_WIDTH: f32 = 5.0;
 const BOND_ATOM0_COLUMN_DEFAULT_WIDTH: f32 = 220.0;
 const BOND_ATOM_COLUMN_MIN_WIDTH: f32 = 120.0;
 const BOND_COLUMN_SPLITTER_WIDTH: f32 = 5.0;
@@ -320,11 +317,15 @@ struct NativeRunner {
 
 impl NativeRunner {
     fn new(event_proxy: EventLoopProxy<()>, startup_paths: Vec<PathBuf>) -> Self {
+        let egui_ctx = egui::Context::default();
+        let mut fonts = egui::FontDefinitions::default();
+        cuemol_ui::shell::configure_fonts(&mut fonts);
+        egui_ctx.set_fonts(fonts);
         Self {
             api: None,
             protocol: cuemol_command::Protocol::without_history(),
             window: None,
-            egui_ctx: egui::Context::default(),
+            egui_ctx,
             egui_state: None,
             gpu: None,
             gpu_init_receiver: None,
@@ -1372,9 +1373,6 @@ struct GuiApplication {
     workspace_aux_selection: Option<WorkspaceAuxSelection>,
     workspace_multiple_selection: Vec<NativeWorkspaceTarget>,
     workspace_selection_order: Vec<NativeWorkspaceTarget>,
-    workspace_state_column_width: f32,
-    workspace_state_column_drag_start_width: Option<f32>,
-    workspace_column_left: f32,
     editing_saved_camera: Option<(cuemol_core::Uid, String)>,
     camera_visibility_draft: Option<NativeCameraVisibilityDraft>,
     style_properties_draft: Option<NativeStyleProperties>,
@@ -1496,6 +1494,8 @@ struct GuiApplication {
     ray_hatching: bool,
     ray_hatch: cuemol_render::HatchRenderParams,
     ray_transparent: bool,
+    ray_panel: cuemol_ui::RenderPanel,
+    ray_cancel: Option<Arc<AtomicBool>>,
     ray_lighting: cuemol_render::UmbreonRenderParams,
     ray_job: Option<mpsc::Receiver<std::result::Result<serde_json::Value, String>>>,
     pov_render_settings: NativePovRenderSettings,
@@ -3998,46 +3998,60 @@ fn workspace_linked_text(source: &str, source_type: &str) -> String {
 }
 
 fn workspace_lock_toggle(ui: &mut egui::Ui, locked: bool, enabled: bool) -> Option<bool> {
-    let label = if locked { "🔒" } else { "🔓" };
-    ui.add_enabled(enabled, egui::Button::new(label).frame(false))
-        .on_hover_text(if locked { "Unlock" } else { "Lock" })
-        .clicked()
-        .then_some(!locked)
-}
-
-fn workspace_collapse_toggle(
-    ui: &mut egui::Ui,
-    collapsed: bool,
-    has_children: bool,
-) -> Option<bool> {
-    if !has_children {
-        return None;
-    }
-    ui.add(egui::Button::new(if collapsed { "▶" } else { "▼" }).frame(false))
-        .on_hover_text(if collapsed { "Expand" } else { "Collapse" })
-        .clicked()
-        .then_some(!collapsed)
-}
-
-fn workspace_align_state_column(ui: &mut egui::Ui, column_left: f32) -> f32 {
-    let indent = (ui.cursor().left() - column_left).max(0.0);
-    ui.add_space(-indent);
-    indent
-}
-
-fn workspace_name_column<R>(
-    ui: &mut egui::Ui,
-    column_left: f32,
-    state_width: f32,
-    add: impl FnOnce(&mut egui::Ui) -> R,
-) -> R {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        let name_indent = workspace_align_state_column(ui, column_left);
-        ui.add_space(state_width + WORKSPACE_COLUMN_SPLITTER_WIDTH + name_indent);
-        add(ui)
+    use cuemol_ui::shell::{self, Icon};
+    ui.add_enabled_ui(enabled, |ui| {
+        shell::icon_button(
+            ui,
+            if locked { Icon::Lock } else { Icon::Unlock },
+            if locked { "Unlock" } else { "Lock" },
+            false,
+            egui::vec2(20., 22.),
+        )
     })
     .inner
+    .clicked()
+    .then_some(!locked)
+}
+
+fn workspace_node_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    icon: cuemol_ui::shell::Icon,
+    selected: bool,
+    expanded: Option<&mut bool>,
+    visible: &mut bool,
+    locked: &mut bool,
+    lock_enabled: bool,
+) -> egui::Response {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.;
+        let lock_width = if lock_enabled || *locked { 20. } else { 0. };
+        let size = egui::vec2((ui.available_width() - lock_width).max(60.), 22.);
+        let response = ui
+            .allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                cuemol_ui::shell::tree_row(ui, label, icon, selected, expanded, Some(visible))
+            })
+            .inner;
+        if lock_width > 0. {
+            if let Some(value) = workspace_lock_toggle(ui, *locked, lock_enabled) {
+                *locked = value;
+            }
+        }
+        response
+    })
+    .inner
+}
+
+fn workspace_drag_source<Payload: std::any::Any + Send + Sync>(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    payload: Payload,
+    add_contents: impl FnOnce(&mut egui::Ui) -> egui::Response,
+) -> egui::InnerResponse<()> {
+    let content = ui.push_id(id, add_contents);
+    let response = content.inner.on_hover_cursor(egui::CursorIcon::Grab);
+    response.dnd_set_drag_payload(payload);
+    egui::InnerResponse::new((), response | content.response)
 }
 
 fn workspace_paint_menu(ui: &mut egui::Ui, enabled: bool, mut insert: impl FnMut(&str)) {
@@ -5000,11 +5014,6 @@ impl GuiApplication {
             .parse::<f32>()
             .unwrap_or(COLORING_GRADIENT_PARAM_COLUMN_DEFAULT_WIDTH)
             .clamp(COLORING_PAINT_SELECTION_COLUMN_MIN_WIDTH, 400.0);
-        let workspace_state_column_width = state
-            .config_value("workspace_panel:state_width")
-            .parse::<f32>()
-            .unwrap_or(WORKSPACE_STATE_COLUMN_DEFAULT_WIDTH)
-            .clamp(WORKSPACE_STATE_COLUMN_MIN_WIDTH, 100.0);
         let bond_atom0_column_width = state
             .config_value("bond_editor:atom0_width")
             .parse::<f32>()
@@ -5087,9 +5096,6 @@ impl GuiApplication {
             workspace_aux_selection: None,
             workspace_multiple_selection: Vec::new(),
             workspace_selection_order: Vec::new(),
-            workspace_state_column_width,
-            workspace_state_column_drag_start_width: None,
-            workspace_column_left: 0.0,
             editing_saved_camera: None,
             camera_visibility_draft: None,
             style_properties_draft: None,
@@ -5171,6 +5177,8 @@ impl GuiApplication {
             ray_hatching: false,
             ray_hatch: Default::default(),
             ray_transparent: false,
+            ray_panel: cuemol_ui::RenderPanel::default(),
+            ray_cancel: None,
             ray_lighting: cuemol_command::rendering_params(&serde_json::Map::new(), "umbreon")
                 .unwrap(),
             ray_job: None,
@@ -5601,7 +5609,7 @@ impl GuiApplication {
         self.poll_animation_render(camera);
         self.poll_apbs_calculation();
         self.poll_pov_render();
-        self.poll_native_render();
+        self.poll_native_render(ctx);
         self.pixels_per_point = ctx.pixels_per_point();
         cuemol_ui::shell::theme(ctx, self.light_theme);
         self.agent.docked = true;
@@ -6982,77 +6990,6 @@ impl GuiApplication {
     /// Workspace section — the scene/object/renderer tree (CueMol2 `objectTree`).
     fn workspace_section(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
         self.workspace_selection_order = self.workspace_targets_in_tree_order();
-        self.workspace_column_left = ui.cursor().left();
-        let available_width = ui
-            .available_width()
-            .max(WORKSPACE_STATE_COLUMN_MIN_WIDTH + WORKSPACE_COLUMN_SPLITTER_WIDTH + 80.0);
-        let state_width = self.workspace_state_column_width.clamp(
-            WORKSPACE_STATE_COLUMN_MIN_WIDTH,
-            (available_width - WORKSPACE_COLUMN_SPLITTER_WIDTH - 80.0)
-                .max(WORKSPACE_STATE_COLUMN_MIN_WIDTH),
-        );
-        let name_width =
-            (available_width - state_width - WORKSPACE_COLUMN_SPLITTER_WIDTH).max(80.0);
-        let header_height = ui.spacing().interact_size.y;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
-            ui.add_sized(
-                [state_width, header_height],
-                egui::Label::new(egui::RichText::new("V").strong()),
-            );
-            let (splitter_rect, splitter) = ui.allocate_exact_size(
-                egui::vec2(WORKSPACE_COLUMN_SPLITTER_WIDTH, header_height),
-                egui::Sense::drag(),
-            );
-            let splitter = splitter
-                .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
-                .on_hover_text("Resize visibility column; double-click to reset");
-            ui.painter().line_segment(
-                [splitter_rect.center_top(), splitter_rect.center_bottom()],
-                egui::Stroke::new(
-                    1.0,
-                    if splitter.hovered() || splitter.dragged() {
-                        ui.visuals().text_color()
-                    } else {
-                        ui.visuals().widgets.noninteractive.bg_stroke.color
-                    },
-                ),
-            );
-            if splitter.double_clicked() {
-                self.workspace_state_column_width = WORKSPACE_STATE_COLUMN_DEFAULT_WIDTH;
-                self.workspace_state_column_drag_start_width = None;
-                self.state.put_config_value(
-                    "workspace_panel:state_width",
-                    self.workspace_state_column_width.to_string(),
-                );
-            } else {
-                if splitter.drag_started() {
-                    self.workspace_state_column_drag_start_width = Some(state_width);
-                }
-                if splitter.dragged() {
-                    if let Some(initial_width) = self.workspace_state_column_drag_start_width {
-                        let maximum = (available_width - WORKSPACE_COLUMN_SPLITTER_WIDTH - 80.0)
-                            .max(WORKSPACE_STATE_COLUMN_MIN_WIDTH);
-                        self.workspace_state_column_width = (initial_width
-                            + splitter.drag_delta().x)
-                            .clamp(WORKSPACE_STATE_COLUMN_MIN_WIDTH, maximum);
-                        ui.ctx().request_repaint();
-                    }
-                }
-                if splitter.drag_stopped() {
-                    self.workspace_state_column_drag_start_width = None;
-                    self.state.put_config_value(
-                        "workspace_panel:state_width",
-                        self.workspace_state_column_width.to_string(),
-                    );
-                }
-            }
-            ui.add_sized(
-                [name_width, header_height],
-                egui::Label::new(egui::RichText::new("Name").strong()),
-            );
-        });
-        ui.separator();
         for scene in self.state.scene_summaries() {
             let objects = self.state.object_summaries(scene.uid);
             let density_maps = self.state.density_map_summaries(scene.uid);
@@ -7060,8 +6997,6 @@ impl GuiApplication {
             let lw_objects = self.state.lw_object_summaries(scene.uid);
             let cameras = self.state.camera_summaries(scene.uid);
             let styles = self.state.style_summaries(scene.uid);
-            let object_count =
-                objects.len() + density_maps.len() + surfaces.len() + lw_objects.len();
             let mut workspace_objects = objects
                 .into_iter()
                 .map(NativeWorkspaceObjectSummary::Molecule)
@@ -7082,15 +7017,19 @@ impl GuiApplication {
                 )
                 .collect::<Vec<_>>();
             workspace_objects.sort_by_key(NativeWorkspaceObjectSummary::sort_key);
-            let scene_label = format!("{}  [{} objects]", scene.name, object_count);
-            let selected_scene = Some(scene.uid) == self.state.active_scene();
-            let scene_response = ui
-                .horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    ui.add_space(state_width + WORKSPACE_COLUMN_SPLITTER_WIDTH);
-                    ui.selectable_label(selected_scene, scene_label)
-                })
-                .inner;
+            let scene_label = format!("Scene: {}", scene.name);
+            let selected_scene = Some(scene.uid) == self.state.active_scene()
+                && self.selected_object.is_none()
+                && self.workspace_aux_selection.is_none()
+                && self.workspace_multiple_selection.is_empty();
+            let scene_response = cuemol_ui::shell::tree_row(
+                ui,
+                &scene_label,
+                cuemol_ui::shell::Icon::File,
+                selected_scene,
+                None,
+                None,
+            );
             if scene_response.clicked() {
                 self.activate_workspace_scene(scene.uid, camera);
                 self.workspace_multiple_selection.clear();
@@ -7180,56 +7119,41 @@ impl GuiApplication {
                                 self.workspace_aux_selection.is_none()
                                     && self.selected_object == Some(object.uid),
                             );
-                            let label = format!(
-                                "{}  [{} atoms, {} bonds]",
-                                object.name, object.atom_count, object.bond_count
-                            );
                             let mut visible = object.visible;
-                            let drag_source = ui.dnd_drag_source(
+                            let drag_source = workspace_drag_source(
+                                ui,
                                 egui::Id::new(("workspace-object-drag", owner)),
                                 self.workspace_object_drag_payload(scene.uid, owner),
                                 |ui| {
                                     ui.horizontal(|ui| {
-                                        let name_indent = workspace_align_state_column(
+                                        let mut expanded = !object.ui_collapsed;
+                                        let mut locked = object.locked;
+                                        let label = format!("{} (MolCoord)", object.name);
+                                        let response = workspace_node_row(
                                             ui,
-                                            self.workspace_column_left,
-                                        );
-                                        ui.allocate_ui_with_layout(
-                                            egui::vec2(state_width, ui.spacing().interact_size.y),
-                                            egui::Layout::left_to_right(egui::Align::Center),
-                                            |ui| {
-                                                ui.spacing_mut().item_spacing.x = 0.0;
-                                                if ui
-                                                    .checkbox(&mut visible, "")
-                                                    .on_hover_text("Visible")
-                                                    .changed()
-                                                {
-                                                    self.set_workspace_object_visibility(
-                                                        NativePropertyObject::Molecule(object.uid),
-                                                        visible,
-                                                    );
-                                                }
-                                                if let Some(locked) =
-                                                    workspace_lock_toggle(ui, object.locked, true)
-                                                {
-                                                    self.set_workspace_object_locked(
-                                                        NativePropertyObject::Molecule(object.uid),
-                                                        locked,
-                                                    );
-                                                }
+                                            &label,
+                                            cuemol_ui::shell::Icon::Crystal,
+                                            selected,
+                                            if object.renderer_count > 0 {
+                                                Some(&mut expanded)
+                                            } else {
+                                                None
                                             },
+                                            &mut visible,
+                                            &mut locked,
+                                            true,
                                         );
-                                        ui.add_space(name_indent + WORKSPACE_COLUMN_SPLITTER_WIDTH);
-                                        if let Some(collapsed) = workspace_collapse_toggle(
-                                            ui,
-                                            object.ui_collapsed,
-                                            object.renderer_count > 0,
-                                        ) {
+                                        if visible != object.visible {
+                                            self.set_workspace_object_visibility(owner, visible);
+                                        }
+                                        if locked != object.locked {
+                                            self.set_workspace_object_locked(owner, locked);
+                                        }
+                                        if expanded == object.ui_collapsed {
                                             self.set_workspace_object_collapsed(
-                                                scene.uid, owner, collapsed,
+                                                scene.uid, owner, !expanded,
                                             );
                                         }
-                                        let response = ui.selectable_label(selected, label);
                                         if response.clicked() {
                                             self.activate_workspace_scene(scene.uid, camera);
                                             let (multiple, range) = ui.input(|input| {
@@ -7246,7 +7170,9 @@ impl GuiApplication {
                                         if response.double_clicked() {
                                             self.open_object_properties(object.uid);
                                         }
+                                        response
                                     })
+                                    .inner
                                 },
                             );
                             self.workspace_object_drop_target(
@@ -7317,52 +7243,42 @@ impl GuiApplication {
                             );
                             let mut visible = map.visible;
                             let owner = NativePropertyObject::DensityMap(map.uid);
-                            let drag_source = ui.dnd_drag_source(
+                            let drag_source = workspace_drag_source(
+                                ui,
                                 egui::Id::new(("workspace-object-drag", owner)),
                                 self.workspace_object_drag_payload(scene.uid, owner),
                                 |ui| {
                                     ui.horizontal(|ui| {
-                                        let name_indent = workspace_align_state_column(
+                                        let mut expanded = !map.ui_collapsed;
+                                        let mut locked = map.locked;
+                                        let label = format!("{} ({})", map.name, map.class_name);
+                                        let response = workspace_node_row(
                                             ui,
-                                            self.workspace_column_left,
-                                        );
-                                        ui.allocate_ui_with_layout(
-                                            egui::vec2(state_width, ui.spacing().interact_size.y),
-                                            egui::Layout::left_to_right(egui::Align::Center),
-                                            |ui| {
-                                                ui.spacing_mut().item_spacing.x = 0.0;
-                                                if ui
-                                                    .checkbox(&mut visible, "")
-                                                    .on_hover_text("Visible")
-                                                    .changed()
-                                                {
-                                                    self.set_density_map_visibility(
-                                                        map.uid, visible,
-                                                    );
-                                                }
-                                                if let Some(locked) =
-                                                    workspace_lock_toggle(ui, map.locked, true)
-                                                {
-                                                    self.set_workspace_object_locked(
-                                                        NativePropertyObject::DensityMap(map.uid),
-                                                        locked,
-                                                    );
-                                                }
+                                            &label,
+                                            cuemol_ui::shell::Icon::Crystal,
+                                            selected,
+                                            if !map.renderers.is_empty()
+                                                || !map.renderer_groups.is_empty()
+                                            {
+                                                Some(&mut expanded)
+                                            } else {
+                                                None
                                             },
+                                            &mut visible,
+                                            &mut locked,
+                                            true,
                                         );
-                                        ui.add_space(name_indent + WORKSPACE_COLUMN_SPLITTER_WIDTH);
-                                        if let Some(collapsed) = workspace_collapse_toggle(
-                                            ui,
-                                            map.ui_collapsed,
-                                            !map.renderers.is_empty()
-                                                || !map.renderer_groups.is_empty(),
-                                        ) {
+                                        if visible != map.visible {
+                                            self.set_density_map_visibility(map.uid, visible);
+                                        }
+                                        if locked != map.locked {
+                                            self.set_workspace_object_locked(owner, locked);
+                                        }
+                                        if expanded == map.ui_collapsed {
                                             self.set_workspace_object_collapsed(
-                                                scene.uid, owner, collapsed,
+                                                scene.uid, owner, !expanded,
                                             );
                                         }
-                                        let label = format!("{} ({})", map.name, map.class_name);
-                                        let response = ui.selectable_label(selected, label);
                                         if response.clicked() {
                                             self.activate_workspace_scene(scene.uid, camera);
                                             let (multiple, range) = ui.input(|input| {
@@ -7380,7 +7296,9 @@ impl GuiApplication {
                                         if response.double_clicked() {
                                             self.open_density_map_properties(map.uid);
                                         }
+                                        response
                                     })
+                                    .inner
                                 },
                             );
                             self.workspace_object_drop_target(
@@ -7450,54 +7368,43 @@ impl GuiApplication {
                             );
                             let mut visible = surface.visible;
                             let owner = NativePropertyObject::Surface(surface.uid);
-                            let drag_source = ui.dnd_drag_source(
+                            let drag_source = workspace_drag_source(
+                                ui,
                                 egui::Id::new(("workspace-object-drag", owner)),
                                 self.workspace_object_drag_payload(scene.uid, owner),
                                 |ui| {
                                     ui.horizontal(|ui| {
-                                        let name_indent = workspace_align_state_column(
-                                            ui,
-                                            self.workspace_column_left,
-                                        );
-                                        ui.allocate_ui_with_layout(
-                                            egui::vec2(state_width, ui.spacing().interact_size.y),
-                                            egui::Layout::left_to_right(egui::Align::Center),
-                                            |ui| {
-                                                ui.spacing_mut().item_spacing.x = 0.0;
-                                                if ui
-                                                    .checkbox(&mut visible, "")
-                                                    .on_hover_text("Visible")
-                                                    .changed()
-                                                {
-                                                    self.set_surface_visibility(
-                                                        surface.uid,
-                                                        visible,
-                                                    );
-                                                }
-                                                if let Some(locked) =
-                                                    workspace_lock_toggle(ui, surface.locked, true)
-                                                {
-                                                    self.set_workspace_object_locked(
-                                                        NativePropertyObject::Surface(surface.uid),
-                                                        locked,
-                                                    );
-                                                }
-                                            },
-                                        );
-                                        ui.add_space(name_indent + WORKSPACE_COLUMN_SPLITTER_WIDTH);
-                                        if let Some(collapsed) = workspace_collapse_toggle(
-                                            ui,
-                                            surface.ui_collapsed,
-                                            !surface.renderers.is_empty()
-                                                || !surface.renderer_groups.is_empty(),
-                                        ) {
-                                            self.set_workspace_object_collapsed(
-                                                scene.uid, owner, collapsed,
-                                            );
-                                        }
+                                        let mut expanded = !surface.ui_collapsed;
+                                        let mut locked = surface.locked;
                                         let label =
                                             format!("{} ({})", surface.name, surface.class_name);
-                                        let response = ui.selectable_label(selected, label);
+                                        let response = workspace_node_row(
+                                            ui,
+                                            &label,
+                                            cuemol_ui::shell::Icon::Crystal,
+                                            selected,
+                                            if !surface.renderers.is_empty()
+                                                || !surface.renderer_groups.is_empty()
+                                            {
+                                                Some(&mut expanded)
+                                            } else {
+                                                None
+                                            },
+                                            &mut visible,
+                                            &mut locked,
+                                            true,
+                                        );
+                                        if visible != surface.visible {
+                                            self.set_surface_visibility(surface.uid, visible);
+                                        }
+                                        if locked != surface.locked {
+                                            self.set_workspace_object_locked(owner, locked);
+                                        }
+                                        if expanded == surface.ui_collapsed {
+                                            self.set_workspace_object_collapsed(
+                                                scene.uid, owner, !expanded,
+                                            );
+                                        }
                                         if response.clicked() {
                                             self.activate_workspace_scene(scene.uid, camera);
                                             let (multiple, range) = ui.input(|input| {
@@ -7515,7 +7422,9 @@ impl GuiApplication {
                                         if response.double_clicked() {
                                             self.open_surface_properties(surface.uid);
                                         }
+                                        response
                                     })
+                                    .inner
                                 },
                             );
                             self.workspace_object_drop_target(
@@ -7585,50 +7494,43 @@ impl GuiApplication {
                             );
                             let mut visible = object.visible;
                             let owner = NativePropertyObject::Lightweight(object.uid);
-                            let drag_source = ui.dnd_drag_source(
+                            let drag_source = workspace_drag_source(
+                                ui,
                                 egui::Id::new(("workspace-object-drag", owner)),
                                 self.workspace_object_drag_payload(scene.uid, owner),
                                 |ui| {
                                     ui.horizontal(|ui| {
-                                        let name_indent = workspace_align_state_column(
-                                            ui,
-                                            self.workspace_column_left,
-                                        );
-                                        ui.allocate_ui_with_layout(
-                                            egui::vec2(state_width, ui.spacing().interact_size.y),
-                                            egui::Layout::left_to_right(egui::Align::Center),
-                                            |ui| {
-                                                ui.spacing_mut().item_spacing.x = 0.0;
-                                                if ui
-                                                    .checkbox(&mut visible, "")
-                                                    .on_hover_text("Visible")
-                                                    .changed()
-                                                {
-                                                    self.set_workspace_object_visibility(
-                                                        owner, visible,
-                                                    );
-                                                }
-                                                if let Some(locked) =
-                                                    workspace_lock_toggle(ui, object.locked, true)
-                                                {
-                                                    self.set_workspace_object_locked(owner, locked);
-                                                }
-                                            },
-                                        );
-                                        ui.add_space(name_indent + WORKSPACE_COLUMN_SPLITTER_WIDTH);
-                                        if let Some(collapsed) = workspace_collapse_toggle(
-                                            ui,
-                                            object.ui_collapsed,
-                                            !object.renderers.is_empty()
-                                                || !object.renderer_groups.is_empty(),
-                                        ) {
-                                            self.set_workspace_object_collapsed(
-                                                scene.uid, owner, collapsed,
-                                            );
-                                        }
+                                        let mut expanded = !object.ui_collapsed;
+                                        let mut locked = object.locked;
                                         let label =
                                             format!("{} ({})", object.name, object.class_name);
-                                        let response = ui.selectable_label(selected, label);
+                                        let response = workspace_node_row(
+                                            ui,
+                                            &label,
+                                            cuemol_ui::shell::Icon::Crystal,
+                                            selected,
+                                            if !object.renderers.is_empty()
+                                                || !object.renderer_groups.is_empty()
+                                            {
+                                                Some(&mut expanded)
+                                            } else {
+                                                None
+                                            },
+                                            &mut visible,
+                                            &mut locked,
+                                            true,
+                                        );
+                                        if visible != object.visible {
+                                            self.set_workspace_object_visibility(owner, visible);
+                                        }
+                                        if locked != object.locked {
+                                            self.set_workspace_object_locked(owner, locked);
+                                        }
+                                        if expanded == object.ui_collapsed {
+                                            self.set_workspace_object_collapsed(
+                                                scene.uid, owner, !expanded,
+                                            );
+                                        }
                                         if response.clicked() {
                                             self.activate_workspace_scene(scene.uid, camera);
                                             let (multiple, range) = ui.input(|input| {
@@ -7646,7 +7548,9 @@ impl GuiApplication {
                                         if response.double_clicked() {
                                             self.open_lw_object_properties(object.uid);
                                         }
+                                        response
                                     })
+                                    .inner
                                 },
                             );
                             self.workspace_object_drop_target(
@@ -7706,10 +7610,14 @@ impl GuiApplication {
                 };
                 let root_selected = self.selected_object.is_none()
                     && self.workspace_aux_selection == Some(root_selection);
-                let root_response =
-                    workspace_name_column(ui, self.workspace_column_left, state_width, |ui| {
-                        ui.selectable_label(root_selected, "Camera")
-                    });
+                let root_response = cuemol_ui::shell::tree_row(
+                    ui,
+                    "Camera",
+                    cuemol_ui::shell::Icon::Camera,
+                    root_selected,
+                    None,
+                    None,
+                );
                 if root_response.clicked() {
                     self.activate_workspace_scene(scene.uid, camera);
                     self.workspace_multiple_selection.clear();
@@ -7777,19 +7685,18 @@ impl GuiApplication {
                             self.selected_object.is_none()
                                 && self.workspace_aux_selection == Some(selection),
                         );
-                        let mut label = summary.name.clone();
-                        if !summary.source.is_empty() {
-                            label.push_str("  ↗");
-                        }
-                        if summary.visibility_count > 0 {
-                            label.push_str("  ◉");
-                        }
-                        let response = workspace_name_column(
+                        let response = cuemol_ui::shell::tree_row(
                             ui,
-                            self.workspace_column_left,
-                            state_width,
-                            |ui| ui.selectable_label(selected, label),
-                        );
+                            &summary.name,
+                            cuemol_ui::shell::Icon::Camera,
+                            selected,
+                            None,
+                            None,
+                        )
+                        .on_hover_text(format!(
+                            "Stored visibility flags: {}",
+                            summary.visibility_count
+                        ));
                         if response.clicked() {
                             self.activate_workspace_scene(scene.uid, camera);
                             let (multiple, range) =
@@ -7906,10 +7813,14 @@ impl GuiApplication {
                 };
                 let root_selected = self.selected_object.is_none()
                     && self.workspace_aux_selection == Some(root_selection);
-                let root_response =
-                    workspace_name_column(ui, self.workspace_column_left, state_width, |ui| {
-                        ui.selectable_label(root_selected, "Styles")
-                    });
+                let root_response = cuemol_ui::shell::tree_row(
+                    ui,
+                    "Styles",
+                    cuemol_ui::shell::Icon::Open,
+                    root_selected,
+                    None,
+                    None,
+                );
                 if root_response.clicked() {
                     self.activate_workspace_scene(scene.uid, camera);
                     self.workspace_multiple_selection.clear();
@@ -7966,19 +7877,24 @@ impl GuiApplication {
                         let selected = target.map_or(single_selected, |target| {
                             self.workspace_target_selected(target, single_selected)
                         });
-                        let mut label = summary.name.clone();
-                        if summary.read_only || summary.scene_uid.get() == 0 {
-                            label.push_str("  🔒");
-                        }
-                        if !summary.source.is_empty() {
-                            label.push_str("  ↗");
-                        }
-                        let response = workspace_name_column(
+                        let read_only = summary.read_only || summary.scene_uid.get() == 0;
+                        let response = cuemol_ui::shell::tree_row(
                             ui,
-                            self.workspace_column_left,
-                            state_width,
-                            |ui| ui.selectable_label(selected, label),
-                        );
+                            &summary.name,
+                            if read_only {
+                                cuemol_ui::shell::Icon::Lock
+                            } else {
+                                cuemol_ui::shell::Icon::Color
+                            },
+                            selected,
+                            None,
+                            None,
+                        )
+                        .on_hover_text(if read_only {
+                            "Read-only style"
+                        } else {
+                            "Editable style"
+                        });
                         if response.clicked() {
                             self.activate_workspace_scene(scene.uid, camera);
                             let (multiple, range) =
@@ -8977,66 +8893,57 @@ impl GuiApplication {
             self.selected_object.is_none() && self.workspace_aux_selection == Some(selection),
         );
         let payload = self.workspace_renderer_drag_payload(target, owner, renderer.uid, is_group);
-        let state_width = self.workspace_state_column_width;
-        let drag_source = ui.dnd_drag_source(
+        let drag_source = workspace_drag_source(
+            ui,
             egui::Id::new(("workspace-aux-renderer-drag", renderer.uid.get())),
             payload,
             |ui| {
                 let mut visible = renderer.visible;
                 ui.horizontal(|ui| {
-                    let name_indent = workspace_align_state_column(ui, self.workspace_column_left);
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(state_width, ui.spacing().interact_size.y),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            ui.spacing_mut().item_spacing.x = 0.0;
-                            if ui
-                                .checkbox(&mut visible, "")
-                                .on_hover_text(if is_group {
-                                    "Toggle all renderers in this group"
-                                } else {
-                                    "Visible"
-                                })
-                                .changed()
-                            {
-                                self.set_workspace_aux_renderer_visibility(
-                                    owner,
-                                    renderer.uid,
-                                    is_group,
-                                    visible,
-                                );
-                            }
-                            if let Some(locked) =
-                                workspace_lock_toggle(ui, renderer.locked, !is_group)
-                            {
-                                self.set_workspace_renderer_locked(owner, renderer.uid, locked);
-                            }
-                        },
+                    let mut expanded = !renderer.ui_collapsed;
+                    let mut locked = renderer.locked;
+                    let label = format!(
+                        "{} ({})",
+                        renderer.name,
+                        if is_group {
+                            "group"
+                        } else {
+                            &renderer.renderer_type
+                        }
                     );
-                    ui.add_space(name_indent + WORKSPACE_COLUMN_SPLITTER_WIDTH);
-                    if is_group
-                        && ui
-                            .small_button(if renderer.ui_collapsed { "▶" } else { "▼" })
-                            .on_hover_text(if renderer.ui_collapsed {
-                                "Expand renderer group"
-                            } else {
-                                "Collapse renderer group"
-                            })
-                            .clicked()
-                    {
+                    let response = workspace_node_row(
+                        ui,
+                        &label,
+                        if is_group {
+                            cuemol_ui::shell::Icon::Open
+                        } else {
+                            cuemol_ui::shell::Icon::Atom
+                        },
+                        selected,
+                        if is_group { Some(&mut expanded) } else { None },
+                        &mut visible,
+                        &mut locked,
+                        !is_group,
+                    );
+                    if visible != renderer.visible {
+                        self.set_workspace_aux_renderer_visibility(
+                            owner,
+                            renderer.uid,
+                            is_group,
+                            visible,
+                        );
+                    }
+                    if locked != renderer.locked {
+                        self.set_workspace_renderer_locked(owner, renderer.uid, locked);
+                    }
+                    if is_group && expanded == renderer.ui_collapsed {
                         self.set_workspace_renderer_group_collapsed(
                             scene_uid,
                             owner,
                             renderer.uid,
-                            !renderer.ui_collapsed,
+                            !expanded,
                         );
                     }
-                    let label = if is_group {
-                        format!("{} (group)", renderer.name)
-                    } else {
-                        format!("{} ({})", renderer.name, renderer.renderer_type)
-                    };
-                    let response = ui.selectable_label(selected, label);
                     if response.clicked() {
                         self.activate_workspace_scene(scene_uid, camera);
                         let (multiple, range) =
@@ -9054,7 +8961,9 @@ impl GuiApplication {
                             self.open_aux_properties(selection);
                         }
                     }
-                });
+                    response
+                })
+                .inner
             },
         );
         drag_source.response.context_menu(|ui| {
@@ -9154,69 +9063,56 @@ impl GuiApplication {
                 && self.selected_renderer == Some(renderer.uid),
         );
         let payload = self.workspace_renderer_drag_payload(target, owner, renderer.uid, is_group);
-        let state_width = self.workspace_state_column_width;
-        let drag_source = ui.dnd_drag_source(
+        let drag_source = workspace_drag_source(
+            ui,
             egui::Id::new(("workspace-renderer-drag", renderer.uid.get())),
             payload,
             |ui| {
                 let mut visible = renderer.visible;
                 ui.horizontal(|ui| {
-                    let name_indent = workspace_align_state_column(ui, self.workspace_column_left);
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(state_width, ui.spacing().interact_size.y),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            ui.spacing_mut().item_spacing.x = 0.0;
-                            if ui
-                                .checkbox(&mut visible, "")
-                                .on_hover_text(if is_group {
-                                    "Toggle all renderers in this group"
-                                } else {
-                                    "Visible"
-                                })
-                                .changed()
-                            {
-                                if is_group {
-                                    self.set_renderer_group_visibility(
-                                        object_uid,
-                                        renderer.uid,
-                                        visible,
-                                    );
-                                } else {
-                                    self.set_renderer_visibility(object_uid, renderer.uid, visible);
-                                }
-                            }
-                            if let Some(locked) =
-                                workspace_lock_toggle(ui, renderer.locked, !is_group)
-                            {
-                                self.set_workspace_renderer_locked(owner, renderer.uid, locked);
-                            }
-                        },
+                    let mut expanded = !renderer.ui_collapsed;
+                    let mut locked = renderer.locked;
+                    let label = format!(
+                        "{} ({})",
+                        renderer.name,
+                        if is_group {
+                            "group"
+                        } else {
+                            &renderer.renderer_type
+                        }
                     );
-                    ui.add_space(name_indent + WORKSPACE_COLUMN_SPLITTER_WIDTH);
-                    if is_group
-                        && ui
-                            .small_button(if renderer.ui_collapsed { "▶" } else { "▼" })
-                            .on_hover_text(if renderer.ui_collapsed {
-                                "Expand renderer group"
-                            } else {
-                                "Collapse renderer group"
-                            })
-                            .clicked()
-                    {
+                    let response = workspace_node_row(
+                        ui,
+                        &label,
+                        if is_group {
+                            cuemol_ui::shell::Icon::Open
+                        } else {
+                            cuemol_ui::shell::Icon::Atom
+                        },
+                        selected,
+                        if is_group { Some(&mut expanded) } else { None },
+                        &mut visible,
+                        &mut locked,
+                        !is_group,
+                    );
+                    if visible != renderer.visible {
+                        if is_group {
+                            self.set_renderer_group_visibility(object_uid, renderer.uid, visible);
+                        } else {
+                            self.set_renderer_visibility(object_uid, renderer.uid, visible);
+                        }
+                    }
+                    if locked != renderer.locked {
+                        self.set_workspace_renderer_locked(owner, renderer.uid, locked);
+                    }
+                    if is_group && expanded == renderer.ui_collapsed {
                         self.set_workspace_renderer_group_collapsed(
                             scene_uid,
                             owner,
                             renderer.uid,
-                            !renderer.ui_collapsed,
+                            !expanded,
                         );
                     }
-                    let label = if is_group {
-                        format!("{} (group)", renderer.name)
-                    } else {
-                        format!("{} ({})", renderer.name, renderer.renderer_type)
-                    };
-                    let response = ui.selectable_label(selected, label);
                     if response.clicked() {
                         self.activate_workspace_scene(scene_uid, camera);
                         let (multiple, range) =
@@ -9372,7 +9268,9 @@ impl GuiApplication {
                             }
                         }
                     });
-                });
+                    response
+                })
+                .inner
             },
         );
         let drop_rect = drag_source.response.rect;
@@ -11330,16 +11228,41 @@ impl GuiApplication {
             selected_target,
             Some(NativeColoringTarget::Object(_) | NativeColoringTarget::Renderer { .. })
         );
+        let color_class = selected_target.and_then(|target| match target {
+            NativeColoringTarget::Object(id) => self
+                .state
+                .scene_manager()
+                .object(id)
+                .and_then(|object| object.coloring_type())
+                .map(str::to_string),
+            NativeColoringTarget::Renderer {
+                object_uid,
+                renderer_uid,
+            } => self
+                .state
+                .renderer_coloring_state(object_uid, renderer_uid)
+                .map(|state| state.0),
+            _ => None,
+        });
+        let mode_label = match color_class.as_deref() {
+            Some("PaintColoring") => "Paint",
+            Some("SolidColoring") => "Solid",
+            Some("CPKColoring") => "CPK",
+            Some("BfacColoring") => "B factor",
+            Some("RainbowColoring") => "Rainbow",
+            _ => "Color",
+        };
         let mut requested_mode = None;
         ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt("coloring-target")
+                .width((ui.available_width() - 82.).max(80.))
                 .selected_text(name)
                 .show_ui(ui, |ui| {
                     for (target, name) in &targets {
                         ui.selectable_value(&mut selected_target, Some(*target), name);
                     }
                 });
-            ui.menu_button("▾", |ui| {
+            ui.menu_button(mode_label, |ui| {
                 for (label, mode) in mode_options {
                     if ui.button(*label).clicked() {
                         requested_mode = Some(*mode);
@@ -11772,6 +11695,41 @@ impl GuiApplication {
         {
             self.coloring_paint_selected = paint_entries.len().checked_sub(1);
         }
+        let mut changed = false;
+        let (mut add, mut delete, mut clear, mut move_up, mut move_down) =
+            (false, false, false, false, false);
+        ui.horizontal(|ui| {
+            use cuemol_ui::shell::{self, Icon};
+            ui.add_space((ui.available_width() - 124.).max(0.));
+            let button = |ui: &mut egui::Ui, enabled, icon, title| {
+                ui.add_enabled_ui(enabled, |ui| {
+                    shell::icon_button(ui, icon, title, false, egui::vec2(20., 20.))
+                })
+                .inner
+                .clicked()
+            };
+            add = button(ui, true, Icon::New, "Add before selected");
+            move_up = button(
+                ui,
+                self.coloring_paint_selected.is_some_and(|i| i > 0),
+                Icon::Up,
+                "Move up",
+            );
+            move_down = button(
+                ui,
+                self.coloring_paint_selected
+                    .is_some_and(|i| i + 1 < paint_entries.len()),
+                Icon::Down,
+                "Move down",
+            );
+            delete = button(
+                ui,
+                self.coloring_paint_selected.is_some(),
+                Icon::Delete,
+                "Delete selected",
+            );
+            clear = button(ui, !paint_entries.is_empty(), Icon::Close, "Delete all");
+        });
         let minimum_width =
             2.0 * COLORING_PAINT_SELECTION_COLUMN_MIN_WIDTH + COLORING_PAINT_COLUMN_SPLITTER_WIDTH;
         let available_width = ui.available_width().max(minimum_width);
@@ -11788,9 +11746,13 @@ impl GuiApplication {
         let header_height = ui.spacing().interact_size.y;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
-            ui.add_sized(
-                [selection_width, header_height],
-                egui::Label::new(egui::RichText::new("Selection").strong()),
+            ui.allocate_ui_with_layout(
+                egui::vec2(selection_width, header_height),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_min_width(selection_width);
+                    ui.weak("Selection");
+                },
             );
             let (splitter_rect, splitter) = ui.allocate_exact_size(
                 egui::vec2(COLORING_PAINT_COLUMN_SPLITTER_WIDTH, header_height),
@@ -11844,9 +11806,13 @@ impl GuiApplication {
                     );
                 }
             }
-            ui.add_sized(
-                [color_width, header_height],
-                egui::Label::new(egui::RichText::new("Color").strong()),
+            ui.allocate_ui_with_layout(
+                egui::vec2(color_width, header_height),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_min_width(color_width);
+                    ui.weak("Color");
+                },
             );
         });
         ui.separator();
@@ -11859,13 +11825,18 @@ impl GuiApplication {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 0.0;
                         let response = ui
-                            .add_sized(
-                                [selection_width, row_height],
-                                egui::Button::selectable(
-                                    self.coloring_paint_selected == Some(index),
-                                    selection,
-                                ),
+                            .allocate_ui_with_layout(
+                                egui::vec2(selection_width, row_height),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.set_min_width(selection_width);
+                                    ui.selectable_label(
+                                        self.coloring_paint_selected == Some(index),
+                                        selection,
+                                    )
+                                },
                             )
+                            .inner
                             .on_hover_text(selection);
                         if response.clicked() {
                             self.coloring_paint_selected = Some(index);
@@ -11882,17 +11853,26 @@ impl GuiApplication {
                             egui::vec2(color_width, row_height),
                             egui::Layout::left_to_right(egui::Align::Center),
                             |ui| {
-                                if let Some(swatch) = native_style_color(color) {
-                                    ui.colored_label(swatch, "■");
+                                if let Some(color) = self.state.active_style_color(color) {
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        egui::vec2(14., 12.),
+                                        egui::Sense::hover(),
+                                    );
+                                    ui.painter().rect_filled(
+                                        rect,
+                                        0.,
+                                        egui::Color32::from_rgba_unmultiplied(
+                                            color.r, color.g, color.b, color.a,
+                                        ),
+                                    );
                                 }
-                                ui.monospace(color);
+                                ui.label(color);
                             },
                         );
                     });
                 }
             });
 
-        let mut changed = false;
         if let Some(index) = self.coloring_paint_selected {
             if let Some((selection, color)) = paint_entries.get_mut(index) {
                 ui.horizontal(|ui| {
@@ -11903,43 +11883,6 @@ impl GuiApplication {
             }
         }
 
-        let mut add = false;
-        let mut delete = false;
-        let mut clear = false;
-        let mut move_up = false;
-        let mut move_down = false;
-        ui.horizontal(|ui| {
-            add = ui
-                .button("＋")
-                .on_hover_text("Add before selected")
-                .clicked();
-            delete = ui
-                .add_enabled(
-                    self.coloring_paint_selected.is_some(),
-                    egui::Button::new("−"),
-                )
-                .on_hover_text("Delete selected")
-                .clicked();
-            clear = ui
-                .add_enabled(!paint_entries.is_empty(), egui::Button::new("×"))
-                .on_hover_text("Delete all")
-                .clicked();
-            move_up = ui
-                .add_enabled(
-                    self.coloring_paint_selected.is_some_and(|index| index > 0),
-                    egui::Button::new("↑"),
-                )
-                .on_hover_text("Move up")
-                .clicked();
-            move_down = ui
-                .add_enabled(
-                    self.coloring_paint_selected
-                        .is_some_and(|index| index + 1 < paint_entries.len()),
-                    egui::Button::new("↓"),
-                )
-                .on_hover_text("Move down")
-                .clicked();
-        });
         if add {
             let index = self.coloring_paint_selected.unwrap_or(paint_entries.len());
             let selection = self.selection_text.trim();
@@ -12180,9 +12123,12 @@ impl GuiApplication {
                     );
                 }
             }
-            ui.add_sized(
-                [color_width, header_height],
-                egui::Label::new(egui::RichText::new("Color").strong()),
+            ui.allocate_ui_with_layout(
+                egui::vec2(color_width, header_height),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.weak("Color");
+                },
             );
         });
         ui.separator();
@@ -15188,6 +15134,13 @@ impl GuiApplication {
     }
 
     fn output_tab(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.weak("JavaScript");
+            if ui.small_button("Clear").clicked() { self.clear_log(); }
+            if ui.small_button("Help").clicked() {
+                self.log_lines.push("JavaScript console: use cuemol, scene and view to access the current scene. Press Enter to run; Up/Down recalls command history.".into());
+            }
+        });
         let log_height = (ui.available_height() - 26.0).max(20.0);
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -16807,25 +16760,7 @@ impl GuiApplication {
 
     fn open_native_render(&mut self) {
         if let Ok(settings) = cuemol_command::render_settings(&self.state) {
-            let dpi = settings
-                .get("dpi")
-                .and_then(serde_json::Value::as_f64)
-                .unwrap_or(300.);
-            let scale = match settings
-                .get("unit")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("px")
-            {
-                "in" => dpi,
-                "cm" => dpi / 2.54,
-                "mm" => dpi / 25.4,
-                _ => 1.,
-            };
-            for (i, key) in ["width", "height"].iter().enumerate() {
-                if let Some(value) = settings.get(*key).and_then(serde_json::Value::as_f64) {
-                    self.ray_size[i] = (value * scale).round().clamp(1., 8192.) as u32;
-                }
-            }
+            self.ray_panel.read_settings(&settings, &mut self.ray_size);
             self.ray_hatching = settings.get("backend").is_some_and(|v| v == "umbreon_npr");
             if let Ok(params) = cuemol_command::rendering_params(
                 &settings,
@@ -16840,6 +16775,9 @@ impl GuiApplication {
             if let Ok(hatch) = cuemol_command::hatch_params(&settings, "umbreon_npr") {
                 self.ray_hatch = hatch;
             }
+            self.ray_lighting.perspective = settings
+                .get("projection")
+                .is_some_and(|v| v == "perspective");
             self.ray_transparent = settings.get("transparentBg").is_some_and(|v| v == true);
         }
         if self.export_path.is_empty() || !self.export_path.ends_with(".png") {
@@ -16853,116 +16791,120 @@ impl GuiApplication {
             return;
         }
         let mut open = true;
-        egui::Window::new("Render image")
-            .open(&mut open)
-            .resizable(true)
-            .vscroll(true)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("PNG file");
-                    ui.text_edit_singleline(&mut self.export_path);
-                    if ui.button("Browse...").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("PNG image", &["png"])
-                            .set_file_name("render.png")
-                            .save_file()
-                        {
-                            self.export_path = path.to_string_lossy().into_owned();
+        let action = self.ray_panel.show(
+            ctx,
+            &mut open,
+            self.ray_job.is_some(),
+            cuemol_ui::RenderControls {
+                size: &mut self.ray_size,
+                transparent: &mut self.ray_transparent,
+                hatching: &mut self.ray_hatching,
+                lighting: &mut self.ray_lighting,
+                hatch: &mut self.ray_hatch,
+            },
+        );
+        match action {
+            cuemol_ui::RenderAction::Stop => {
+                if let Some(cancel) = &self.ray_cancel {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            }
+            cuemol_ui::RenderAction::Save => {
+                if let Some(bytes) = &self.ray_panel.png {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("PNG image", &["png"])
+                        .set_file_name("render.png")
+                        .save_file()
+                    {
+                        let result = fs::write(&path, bytes);
+                        match result {
+                            Ok(()) => self.set_status(format!("Saved {}", path.display())),
+                            Err(error) => self.set_status(error.to_string()),
                         }
                     }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Width");
-                    ui.add(egui::DragValue::new(&mut self.ray_size[0]).range(1..=8192));
-                    ui.label("Height");
-                    ui.add(egui::DragValue::new(&mut self.ray_size[1]).range(1..=8192));
-                });
-                ui.checkbox(&mut self.ray_hatching, "Hatched illustration");
-                ui.checkbox(&mut self.ray_transparent, "Transparent background");
-                if self.ray_hatching {
-                    cuemol_ui::hatch_controls(ui, &mut self.ray_hatch);
                 }
-                cuemol_ui::lighting_controls(ui, &mut self.ray_lighting, self.ray_hatching);
-                if self.ray_job.is_some() {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Rendering...");
-                    });
-                }
-                if ui
-                    .add_enabled(self.ray_job.is_none(), egui::Button::new("Render"))
-                    .clicked()
-                {
-                    let mut current = camera.to_qsys_camera("__current");
-                    let backend = if self.ray_hatching {
-                        "umbreon_npr"
+            }
+            cuemol_ui::RenderAction::Start => {
+                let mut current = camera.to_qsys_camera("__current");
+                let backend = if self.ray_hatching {
+                    "umbreon_npr"
+                } else {
+                    "umbreon"
+                };
+                let mut settings = format!(
+                    "{}; transparentBg={}; backend={backend}; projection={}; clipPlane={}; {}",
+                    self.ray_panel.image_settings(self.ray_size),
+                    self.ray_transparent,
+                    if self.ray_lighting.perspective {
+                        "perspective"
                     } else {
-                        "umbreon"
-                    };
-                    let mut settings = format!(
-                        "width={}; height={}; unit=px; transparentBg={}; backend={backend}",
-                        self.ray_size[0], self.ray_size[1], self.ray_transparent
-                    );
+                        "orthographic"
+                    },
+                    self.ray_lighting.use_clip_z,
+                    cuemol_command::rendering_settings(&self.ray_lighting, backend)
+                );
+                if self.ray_hatching {
                     settings.push_str("; ");
-                    settings.push_str(&cuemol_command::rendering_settings(
-                        &self.ray_lighting,
-                        backend,
-                    ));
-                    if self.ray_hatching {
-                        settings.push_str("; ");
-                        settings.push_str(&cuemol_command::hatch_settings(&self.ray_hatch));
-                    }
-                    let result = cuemol_command::call_tool(
-                        &mut self.state,
-                        &mut current,
-                        "set_render_settings",
-                        &serde_json::json!({"settings": settings}),
+                    settings.push_str(&cuemol_command::hatch_settings(&self.ray_hatch));
+                }
+                let result = cuemol_command::call_tool(
+                    &mut self.state,
+                    &mut current,
+                    "set_render_settings",
+                    &serde_json::json!({"settings":settings}),
+                )
+                .and_then(|_| {
+                    cuemol_command::prepare_render(
+                        &self.state,
+                        &current,
+                        "get_screenshot",
+                        &serde_json::json!({"width":self.ray_size[0],"height":self.ray_size[1]}),
                     )
-                    .and_then(|_| {
-                        cuemol_command::prepare_render(
-                            &self.state,
-                            &current,
-                            "render_image",
-                            &serde_json::json!({
-                                "fileName": self.export_path,
-                                "width": self.ray_size[0],
-                                "height": self.ray_size[1],
-                                "style": if self.ray_hatching { "npr" } else { "gi" },
-                            }),
-                        )
-                    });
-                    match result {
-                        Ok(prepared) => {
-                            let (sender, receiver) = mpsc::channel();
-                            std::thread::spawn(move || {
-                                let _ =
-                                    sender.send(prepared.run().map_err(|error| error.to_string()));
-                            });
-                            self.ray_job = Some(receiver);
-                            self.set_status("Rendering image...");
-                        }
-                        Err(error) => self.set_error(error),
+                });
+                match result {
+                    Ok(prepared) => {
+                        let (sender, receiver) = mpsc::channel();
+                        let cancel = Arc::new(AtomicBool::new(false));
+                        self.ray_cancel = Some(cancel.clone());
+                        std::thread::spawn(move || {
+                            let _ = sender
+                                .send(prepared.run_with_cancel(&cancel).map_err(|e| e.to_string()));
+                        });
+                        self.ray_panel.begin(ctx);
+                        self.ray_job = Some(receiver);
+                        self.set_status("Rendering image...");
+                    }
+                    Err(error) => {
+                        self.ray_panel.message = error.to_string();
+                        self.set_error(error);
                     }
                 }
-            });
+            }
+            cuemol_ui::RenderAction::None => {}
+        }
         if !open {
             self.tool_dialog = None;
         }
     }
 
-    fn poll_native_render(&mut self) {
+    fn poll_native_render(&mut self, ctx: &egui::Context) {
         let Some(receiver) = self.ray_job.take() else {
             return;
         };
-        match receiver.try_recv() {
-            Err(mpsc::TryRecvError::Empty) => self.ray_job = Some(receiver),
-            Err(mpsc::TryRecvError::Disconnected) => self.set_status("Render worker disconnected"),
-            Ok(Err(error)) => self.set_status(error),
-            Ok(Ok(value)) => self.set_status(format!(
-                "Rendered image: {}",
-                value["path"].as_str().unwrap_or("")
-            )),
+        let result = match receiver.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => {
+                self.ray_job = Some(receiver);
+                return;
+            }
+            Err(mpsc::TryRecvError::Disconnected) => Err("Render worker disconnected".into()),
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(value)) => self.ray_panel.result(ctx, &value),
+        };
+        self.ray_cancel = None;
+        if let Err(error) = result {
+            self.ray_panel.message = error;
         }
+        self.set_status(self.ray_panel.message.clone());
     }
 
     fn open_pov_render_tool(&mut self) {
@@ -21285,13 +21227,6 @@ impl GuiApplication {
             .unwrap_or(COLORING_GRADIENT_PARAM_COLUMN_DEFAULT_WIDTH)
             .clamp(COLORING_PAINT_SELECTION_COLUMN_MIN_WIDTH, 400.0);
         self.coloring_gradient_param_column_drag_start_width = None;
-        self.workspace_state_column_width = self
-            .state
-            .config_value("workspace_panel:state_width")
-            .parse::<f32>()
-            .unwrap_or(WORKSPACE_STATE_COLUMN_DEFAULT_WIDTH)
-            .clamp(WORKSPACE_STATE_COLUMN_MIN_WIDTH, 100.0);
-        self.workspace_state_column_drag_start_width = None;
         self.bond_atom0_column_width = self
             .state
             .config_value("bond_editor:atom0_width")
@@ -34674,6 +34609,159 @@ mod tests {
     use super::*;
 
     #[test]
+    fn workspace_clicks_remain_independent_from_row_dragging() {
+        fn frame(
+            ctx: &egui::Context,
+            flags: &mut [bool; 4],
+            events: Vec<egui::Event>,
+        ) -> egui::Rect {
+            let mut rect = egui::Rect::NOTHING;
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(500., 300.),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        workspace_drag_source(ui, egui::Id::new("object-drag"), 7_u32, |ui| {
+                            let [expanded, visible, locked, selected] = flags;
+                            let response = workspace_node_row(
+                                ui,
+                                "Molecule",
+                                cuemol_ui::shell::Icon::Crystal,
+                                *selected,
+                                Some(expanded),
+                                visible,
+                                locked,
+                                true,
+                            );
+                            if response.clicked() {
+                                *selected = true;
+                            }
+                            rect = response.rect;
+                            response
+                        });
+                    });
+                },
+            );
+            rect
+        }
+        fn click(ctx: &egui::Context, flags: &mut [bool; 4], pos: egui::Pos2) {
+            for pressed in [true, false] {
+                frame(
+                    ctx,
+                    flags,
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+            }
+        }
+        let ctx = egui::Context::default();
+        let mut flags = [true, true, false, false];
+        frame(&ctx, &mut flags, vec![]);
+        let row = frame(&ctx, &mut flags, vec![]);
+        click(
+            &ctx,
+            &mut flags,
+            egui::pos2(row.right() + 12., row.center().y),
+        );
+        assert!(!flags[1], "the eye must hide the object");
+        click(
+            &ctx,
+            &mut flags,
+            egui::pos2(row.right() + 34., row.center().y),
+        );
+        assert!(flags[2], "the lock must remain clickable");
+        click(
+            &ctx,
+            &mut flags,
+            egui::pos2(row.left() - 9., row.center().y),
+        );
+        assert!(!flags[0], "the chevron must collapse children");
+        click(&ctx, &mut flags, row.center());
+        assert!(flags[3], "the draggable name must also select the row");
+        flags[3] = false;
+        let start = row.center();
+        frame(
+            &ctx,
+            &mut flags,
+            vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let end = start + egui::vec2(50., 30.);
+        frame(&ctx, &mut flags, vec![egui::Event::PointerMoved(end)]);
+        assert_eq!(egui::DragAndDrop::payload::<u32>(&ctx).as_deref(), Some(&7));
+        frame(
+            &ctx,
+            &mut flags,
+            vec![egui::Event::PointerButton {
+                pos: end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(!flags[3], "dragging must not activate the row");
+    }
+
+    #[test]
+    fn native_render_preview_retains_completed_image_after_cancellation() {
+        let mut app = GuiApplication::new();
+        app.state.open_bytes("preview.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C  \nEND\n").unwrap();
+        let mut camera = cuemol_qsys::Camera::new();
+        camera.set_zoom(8.);
+        cuemol_command::call_tool(&mut app.state, &mut camera, "set_render_settings", &serde_json::json!({
+            "settings":"backend=umbreon; width=64; height=48; unit=px; dpi=300; umbreon.useGI=false; umbreon.aoEnabled=false; umbreon.supersample=1; umbreon.denoise=None"
+        })).unwrap();
+        app.open_native_render();
+        assert_eq!(app.ray_size, [64, 48]);
+        let prepared = cuemol_command::prepare_render(
+            &app.state,
+            &camera,
+            "get_screenshot",
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        let value = prepared.run_with_cancel(&AtomicBool::new(false)).unwrap();
+        assert!(value.get("path").is_none());
+        let ctx = egui::Context::default();
+        let (sender, receiver) = mpsc::channel();
+        sender.send(Ok(value)).unwrap();
+        app.ray_job = Some(receiver);
+        app.poll_native_render(&ctx);
+        let png = app.ray_panel.png.clone().unwrap();
+        let decoded = image::load_from_memory(&png).unwrap();
+        assert_eq!([decoded.width(), decoded.height()], [64, 48]);
+        assert!(app.ray_panel.message.contains("Rendered 64"));
+        let (sender, receiver) = mpsc::channel();
+        sender.send(Err("Render cancelled".into())).unwrap();
+        app.ray_job = Some(receiver);
+        app.ray_cancel = Some(Arc::new(AtomicBool::new(true)));
+        app.poll_native_render(&ctx);
+        assert_eq!(app.ray_panel.png.as_deref(), Some(png.as_slice()));
+        assert!(app.ray_job.is_none() && app.ray_cancel.is_none());
+        assert_eq!(app.ray_panel.message, "Render cancelled");
+    }
+
+    #[test]
     fn native_new_window_command_relaunches_without_test_exit_timer() {
         let executable = Path::new("/tmp/cuemol-desktop");
         let command = native_window_command(executable);
@@ -35452,7 +35540,7 @@ mod tests {
         );
         assert_eq!(app.left_panel_order[0], LeftPanel::Animation);
         assert_eq!(app.left_panel_width, 310.0);
-        assert_eq!(app.workspace_state_column_width, 58.0);
+        assert_eq!(app.state.config_value("workspace_panel:state_width"), "58");
         assert_eq!(app.bond_atom0_column_width, 260.0);
         assert_eq!(app.atom_intr_column_widths, [100.0, 110.0, 120.0]);
         assert_eq!(app.morph_name_column_width, 210.0);

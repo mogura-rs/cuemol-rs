@@ -78,3 +78,9 @@ strip = "debuginfo"
 [profile.web]
 inherits = "release"
 opt-level = "s"
+
+[profile.web.package.cuemol-render]
+opt-level = 3
+
+[profile.web.package.cuemol-core]
+opt-level = 3

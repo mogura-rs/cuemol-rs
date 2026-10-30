@@ -194,7 +194,7 @@ fn build(args: &[String]) -> Result<()> {
         .map_err(|e| e.to_string())?;
     let licenses = out.join("pkg/licenses");
     std::fs::create_dir_all(&licenses).map_err(|e| e.to_string())?;
-    for name in ["smaa.txt", "molstar.txt", "xegtao.txt"] {
+    for name in ["smaa.txt", "molstar.txt", "xegtao.txt", "phosphor.txt"] {
         std::fs::copy(root.join("licenses").join(name), licenses.join(name))
             .map_err(|e| e.to_string())?;
     }

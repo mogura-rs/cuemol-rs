@@ -158,26 +158,31 @@ impl App {
             return;
         }
         let mut open = true;
-        let mut render = false;
-        egui::Window::new("Render image")
-            .open(&mut open)
-            .vscroll(true)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Width");
-                    ui.add(egui::DragValue::new(&mut self.render_size[0]).range(1..=8192));
-                    ui.label("Height");
-                    ui.add(egui::DragValue::new(&mut self.render_size[1]).range(1..=8192));
-                });
-                ui.checkbox(&mut self.render_hatching, "Hatched illustration");
-                ui.checkbox(&mut self.render_transparent, "Transparent background");
-                if self.render_hatching {
-                    cuemol_ui::hatch_controls(ui, &mut self.render_hatch);
-                }
-                cuemol_ui::lighting_controls(ui, &mut self.render_lighting, self.render_hatching);
-                render = ui.button("Render PNG").clicked();
-            });
+        let action = self.render_panel.show(
+            ctx,
+            &mut open,
+            self.render_cancel.is_some(),
+            cuemol_ui::RenderControls {
+                size: &mut self.render_size,
+                transparent: &mut self.render_transparent,
+                hatching: &mut self.render_hatching,
+                lighting: &mut self.render_lighting,
+                hatch: &mut self.render_hatch,
+            },
+        );
+        self.ui_rects.extend(self.render_panel.rects.clone());
         self.show_render = open;
+        if action == cuemol_ui::RenderAction::Stop {
+            self.call("cancel_render", json!({}));
+        }
+        if action == cuemol_ui::RenderAction::Save {
+            if let Some(bytes) = &self.render_panel.png {
+                if let Err(error) = download("cuemol.png", bytes, "image/png") {
+                    self.message = js_error(error);
+                }
+            }
+        }
+        let render = action == cuemol_ui::RenderAction::Start;
         if render {
             let backend = if self.render_hatching {
                 "umbreon_npr"
@@ -185,8 +190,15 @@ impl App {
                 "umbreon"
             };
             let mut settings = format!(
-                "backend={backend}; width={}; height={}; unit=px; transparentBg={}",
-                self.render_size[0], self.render_size[1], self.render_transparent
+                "backend={backend}; {}; transparentBg={}; projection={}; clipPlane={}",
+                self.render_panel.image_settings(self.render_size),
+                self.render_transparent,
+                if self.render_lighting.perspective {
+                    "perspective"
+                } else {
+                    "orthographic"
+                },
+                self.render_lighting.use_clip_z
             );
             settings.push_str("; ");
             settings.push_str(&cuemol_command::rendering_settings(
@@ -203,7 +215,15 @@ impl App {
                 "set_render_settings",
                 &json!({"settings":settings}),
             ) {
-                Ok(_) => self.export_png(),
+                Ok(_) => {
+                    self.render_panel.begin(ctx);
+                    self.render_async(
+                        "get_screenshot",
+                        &json!({"width":self.render_size[0],"height":self.render_size[1]}),
+                        None,
+                        true,
+                    );
+                }
                 Err(e) => self.message = e.to_string(),
             }
         }

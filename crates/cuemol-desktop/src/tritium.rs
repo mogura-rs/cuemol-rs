@@ -76,7 +76,7 @@ impl GuiApplication {
                         self.open_new_tab_dialog();
                     }
                     ui.separator();
-                    if shell::toolbar_button(ui, Icon::Open, "Open File", compact).clicked() {
+                    if shell::toolbar_button(ui, Icon::File, "Open File", compact).clicked() {
                         self.choose_open_file(camera);
                     }
                     if shell::toolbar_button(ui, Icon::Save, "Save As", compact).clicked() {
@@ -93,7 +93,7 @@ impl GuiApplication {
                         self.save_current_scene(camera);
                     }
                     ui.separator();
-                    if shell::toolbar_button(ui, Icon::Open, "Get PDB", compact).clicked() {
+                    if shell::toolbar_button(ui, Icon::Fetch, "Get PDB", compact).clicked() {
                         self.show_get_pdb = true;
                     }
                     ui.separator();
@@ -156,7 +156,7 @@ impl GuiApplication {
                     .resizable(true)
                     .show_inside(ui, |ui| {
                         egui::CollapsingHeader::new(if activity == Activity::Explorer {
-                            "Scene"
+                            "SCENE"
                         } else {
                             first_title
                         })
@@ -175,7 +175,7 @@ impl GuiApplication {
                         });
                     });
                 egui::CollapsingHeader::new(if activity == Activity::Explorer {
-                    "Color"
+                    "COLOR"
                 } else {
                     second.title()
                 })
@@ -294,21 +294,32 @@ impl GuiApplication {
                 for (tab, label) in [
                     (BottomTab::Console, "Console"),
                     (BottomTab::Output, "Output"),
-                    (BottomTab::Animation, "Animation"),
                     (BottomTab::Sequence, "Sequence"),
+                    (BottomTab::Animation, "Animation"),
                     (BottomTab::Trajectory, "MD Trajectory"),
                 ] {
-                    if ui
-                        .selectable_value(&mut self.bottom_tab, tab, label)
-                        .clicked()
-                    {
+                    if shell::tab(ui, label, self.bottom_tab == tab).clicked() {
+                        self.bottom_tab = tab;
                         self.show_bottom_panel = true;
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .small_button(if self.show_bottom_panel { "▾" } else { "▴" })
-                        .clicked()
+                    if shell::icon_button(
+                        ui,
+                        if self.show_bottom_panel {
+                            Icon::Down
+                        } else {
+                            Icon::Up
+                        },
+                        if self.show_bottom_panel {
+                            "Collapse panel"
+                        } else {
+                            "Expand panel"
+                        },
+                        false,
+                        egui::vec2(20., 20.),
+                    )
+                    .clicked()
                     {
                         self.show_bottom_panel = !self.show_bottom_panel;
                     }

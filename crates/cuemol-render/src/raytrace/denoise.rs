@@ -204,16 +204,20 @@ fn prepare_oidn_eye(
 
 #[cfg(target_arch = "wasm32")]
 async fn yield_browser() -> Result<()> {
-    use wasm_bindgen::prelude::*;
-    #[wasm_bindgen]
-    extern "C" {
-        #[wasm_bindgen(js_name=setTimeout)]
-        fn set_timeout(callback: &js_sys::Function, milliseconds: i32);
-    }
-    let promise = js_sys::Promise::new(&mut |resolve, _| set_timeout(&resolve, 0));
-    wasm_bindgen_futures::JsFuture::from(promise)
-        .await
+    use wasm_bindgen::{JsCast, JsValue};
+    let channel = web_sys::MessageChannel::new()
         .map_err(|_| CueMolError::Io("Browser scheduling failed".into()))?;
+    let promise = js_sys::Promise::new(&mut |resolve, reject| {
+        channel.port1().set_onmessage(Some(resolve.unchecked_ref()));
+        channel.port1().start();
+        if let Err(error) = channel.port2().post_message(&JsValue::NULL) {
+            let _ = reject.call1(&JsValue::NULL, &error);
+        }
+    });
+    let result = wasm_bindgen_futures::JsFuture::from(promise).await;
+    channel.port1().close();
+    channel.port2().close();
+    result.map_err(|_| CueMolError::Io("Browser scheduling failed".into()))?;
     Ok(())
 }
 #[cfg(target_arch = "wasm32")]
@@ -232,12 +236,9 @@ async fn render_float_async(
     params: &UmbreonRenderParams,
     hatch: Option<&npr::ResolvedHatch>,
     cancel: Option<&AtomicBool>,
+    index: &RayIndex<'_>,
 ) -> Result<FloatFrame> {
     let started = Instant::now();
-    let index = RayIndex::with_pixel_scale(
-        snapshot,
-        (camera.zoom() / params.height.max(1) as f64) as f32,
-    );
     let mut frame = FloatFrame {
         width: params.width,
         height: params.height,
@@ -257,7 +258,7 @@ async fn render_float_async(
         .try_reserve_exact(length)
         .map_err(|e| CueMolError::invalid_argument(format!("Cannot allocate render: {e}")))?;
     let mut row = 0;
-    let mut rows = 4;
+    let mut rows = 1;
     while row < params.height as usize {
         yield_browser().await?;
         check_cancel(cancel)?;
@@ -270,12 +271,12 @@ async fn render_float_async(
             None,
             hatch,
             row..end,
-            Some(&index),
+            Some(index),
         )?;
         rows = if tile.render_seconds > 0.02 {
             (rows / 2).max(1)
         } else if tile.render_seconds < 0.008 {
-            (rows * 2).min(32)
+            (rows + 1).min(8)
         } else {
             rows
         };
@@ -332,6 +333,12 @@ async fn render_eye_async(
         .as_ref()
         .map(|r| r.render_settings(params, background))
         .unwrap_or_else(|| (params.clone(), background));
+    yield_browser().await?;
+    check_cancel(cancel)?;
+    let index = RayIndex::with_pixel_scale(
+        snapshot,
+        (camera.zoom() / settings.height.max(1) as f64) as f32,
+    );
     let raw = render_float_async(
         snapshot,
         camera,
@@ -339,17 +346,27 @@ async fn render_eye_async(
         &settings,
         resolved.as_ref(),
         cancel,
+        &index,
     )
     .await?;
     if needs_oidn(&settings) {
         let direct = if settings.denoiser != 2 && settings.use_gi && resolved.is_none() {
             let mut params = settings.clone();
             params.gi_intensity = 0.;
-            Some(render_float_async(snapshot, camera, background, &params, None, cancel).await?)
+            Some(
+                render_float_async(snapshot, camera, background, &params, None, cancel, &index)
+                    .await?,
+            )
         } else {
             None
         };
         check_cancel(cancel)?;
+        let mut guides = DenoiseGuides::new(raw.width as usize, raw.height as usize);
+        for row in (0..guides.height).step_by(4) {
+            yield_browser().await?;
+            check_cancel(cancel)?;
+            guides.render_rows(&index, camera, &settings, row..(row + 4).min(guides.height))?;
+        }
         let prepared = prepare_with_direct(
             snapshot,
             camera,
@@ -359,6 +376,7 @@ async fn render_eye_async(
             None,
             resolved.as_ref(),
             direct,
+            Some(guides),
         )?;
         yield_browser().await?;
         check_cancel(cancel)?;
@@ -396,6 +414,7 @@ pub(super) fn prepare(
         async_state,
         hatch,
         None,
+        None,
     )
 }
 
@@ -408,6 +427,7 @@ fn prepare_with_direct(
     async_state: Option<(&AtomicU32, &AtomicBool)>,
     hatch: Option<&npr::ResolvedHatch>,
     direct_override: Option<FloatFrame>,
+    guides_override: Option<DenoiseGuides>,
 ) -> Result<OidnRender> {
     let width = raw.width as usize;
     let height = raw.height as usize;
@@ -415,68 +435,28 @@ fn prepare_with_direct(
     let mut render_seconds = raw.render_seconds;
     let mut color = rgba(&raw);
     drop(raw);
-    let mut albedo = vec![0.; color.len()];
-    let mut normal = vec![0.; color.len()];
-    let mut preserve = vec![true; width * height];
-    let index = RayIndex::with_pixel_scale(
-        snapshot,
-        (camera.zoom() / params.height.max(1) as f64) as f32,
-    );
-    let inverse = camera.rotation().inv()?.to_matrix();
-    let rotation = camera.rotation().to_matrix();
-    let half_h = camera.zoom() * 0.5;
-    let half_w = half_h * width as f64 / height as f64;
-    for y in 0..height {
-        if async_state.is_some_and(|(_, cancel)| cancel.load(Ordering::Relaxed)) {
-            return Err(CueMolError::invalid_argument("Render cancelled"));
-        }
-        for x in 0..width {
-            let eye_x = ((x as f64 + 0.5) / width as f64 * 2. - 1.) * half_w;
-            let eye_y = (1. - (y as f64 + 0.5) / height as f64 * 2.) * half_h;
-            let (origin, direction) = if params.perspective {
-                (
-                    Vector4::new3(0., 0., camera.cam_dist()),
-                    normalize(Vector4::new3(eye_x, eye_y, -camera.cam_dist())),
-                )
-            } else {
-                (
-                    Vector4::new3(eye_x, eye_y, camera.cam_dist()),
-                    Vector4::new3(0., 0., -1.),
-                )
-            };
-            let ray = Ray {
-                origin: camera.center() + transform_direction(inverse, origin),
-                direction: normalize(transform_direction(inverse, direction)),
-            };
-            let hit = std::iter::once(None)
-                .chain(index.translucent_groups.iter().map(|(g, _)| Some(*g)))
-                .filter_map(|group| {
-                    index.nearest_where(ray, f64::INFINITY, group, |h| {
-                        h.color[3] > 0.
-                            && (!params.use_clip_z
-                                || transform_direction(rotation, h.position - camera.center())
-                                    .z
-                                    .abs()
-                                    <= camera.slab_depth() * 0.5)
-                    })
-                })
-                .min_by(|a, b| a.distance.total_cmp(&b.distance));
-            let o = 4 * (y * width + x);
-            if let Some(h) = hit {
-                preserve[y * width + x] =
-                    h.unlit || edge_at(&index, h, ray, camera, params, h.transparency_group, false);
-                let n = transform_direction(rotation, h.normal);
-                albedo[o..o + 3].copy_from_slice(&[
-                    h.color[0] as f32,
-                    h.color[1] as f32,
-                    h.color[2] as f32,
-                ]);
-                normal[o..o + 3].copy_from_slice(&[n.x as f32, n.y as f32, n.z as f32]);
+    let guides = if let Some(guides) = guides_override {
+        guides
+    } else {
+        let mut guides = DenoiseGuides::new(width, height);
+        let index = RayIndex::with_pixel_scale(
+            snapshot,
+            (camera.zoom() / params.height.max(1) as f64) as f32,
+        );
+        for y in 0..height {
+            if async_state.is_some_and(|(_, cancel)| cancel.load(Ordering::Relaxed)) {
+                return Err(CueMolError::invalid_argument("Render cancelled"));
             }
-            albedo[o + 3] = 1.;
-            normal[o + 3] = 1.;
+            guides.render_rows(&index, camera, params, y..y + 1)?;
         }
-    }
+        guides
+    };
+    let DenoiseGuides {
+        albedo,
+        normal,
+        preserve,
+        ..
+    } = guides;
     let direct = if params.denoiser != 2 && params.use_gi && hatch.is_none() {
         let mut direct_params = params.clone();
         direct_params.gi_intensity = 0.;
@@ -519,6 +499,88 @@ fn prepare_with_direct(
         preserve,
         render_seconds,
     })
+}
+
+struct DenoiseGuides {
+    width: usize,
+    height: usize,
+    albedo: Vec<f32>,
+    normal: Vec<f32>,
+    preserve: Vec<bool>,
+}
+impl DenoiseGuides {
+    fn new(width: usize, height: usize) -> Self {
+        Self {
+            width,
+            height,
+            albedo: vec![0.; width * height * 4],
+            normal: vec![0.; width * height * 4],
+            preserve: vec![true; width * height],
+        }
+    }
+    fn render_rows(
+        &mut self,
+        index: &RayIndex<'_>,
+        camera: &Camera,
+        params: &UmbreonRenderParams,
+        rows: std::ops::Range<usize>,
+    ) -> Result<()> {
+        let width = self.width;
+        let height = self.height;
+        let inverse = camera.rotation().inv()?.to_matrix();
+        let rotation = camera.rotation().to_matrix();
+        let half_h = camera.zoom() * 0.5;
+        let half_w = half_h * width as f64 / height as f64;
+        for y in rows {
+            for x in 0..width {
+                let eye_x = ((x as f64 + 0.5) / width as f64 * 2. - 1.) * half_w;
+                let eye_y = (1. - (y as f64 + 0.5) / height as f64 * 2.) * half_h;
+                let (origin, direction) = if params.perspective {
+                    (
+                        Vector4::new3(0., 0., camera.cam_dist()),
+                        normalize(Vector4::new3(eye_x, eye_y, -camera.cam_dist())),
+                    )
+                } else {
+                    (
+                        Vector4::new3(eye_x, eye_y, camera.cam_dist()),
+                        Vector4::new3(0., 0., -1.),
+                    )
+                };
+                let ray = Ray {
+                    origin: camera.center() + transform_direction(inverse, origin),
+                    direction: normalize(transform_direction(inverse, direction)),
+                };
+                let hit = std::iter::once(None)
+                    .chain(index.translucent_groups.iter().map(|(g, _)| Some(*g)))
+                    .filter_map(|group| {
+                        index.nearest_where(ray, f64::INFINITY, group, |h| {
+                            h.color[3] > 0.
+                                && (!params.use_clip_z
+                                    || transform_direction(rotation, h.position - camera.center())
+                                        .z
+                                        .abs()
+                                        <= camera.slab_depth() * 0.5)
+                        })
+                    })
+                    .min_by(|a, b| a.distance.total_cmp(&b.distance));
+                let o = 4 * (y * width + x);
+                if let Some(h) = hit {
+                    self.preserve[y * width + x] = h.unlit
+                        || edge_at(index, h, ray, camera, params, h.transparency_group, false);
+                    let n = transform_direction(rotation, h.normal);
+                    self.albedo[o..o + 3].copy_from_slice(&[
+                        h.color[0] as f32,
+                        h.color[1] as f32,
+                        h.color[2] as f32,
+                    ]);
+                    self.normal[o..o + 3].copy_from_slice(&[n.x as f32, n.y as f32, n.z as f32]);
+                }
+                self.albedo[o + 3] = 1.;
+                self.normal[o + 3] = 1.;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

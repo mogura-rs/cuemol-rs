@@ -287,12 +287,12 @@ impl App {
                     let compact = ui.available_width() < 1000.;
                     for (label, icon) in [
                         ("New Tab", Icon::New),
-                        ("Open File", Icon::Open),
+                        ("Open File", Icon::File),
                         ("Save As", Icon::Save),
                         ("Open Scene", Icon::Open),
                         ("Reload Scene", Icon::Reload),
                         ("Save Scene", Icon::Save),
-                        ("Get PDB", Icon::Open),
+                        ("Get PDB", Icon::Fetch),
                         ("Render", Icon::Render),
                         ("Undo", Icon::Undo),
                         ("Redo", Icon::Redo),
@@ -404,6 +404,8 @@ impl App {
     }
     fn open_render(&mut self) {
         if let Ok(settings) = cuemol_command::render_settings(&self.state) {
+            self.render_panel
+                .read_settings(&settings, &mut self.render_size);
             self.render_hatching = settings.get("backend").is_some_and(|v| v == "umbreon_npr");
             if let Ok(params) = cuemol_command::rendering_params(
                 &settings,
@@ -415,6 +417,9 @@ impl App {
             ) {
                 self.render_lighting = params;
             }
+            self.render_lighting.perspective = settings
+                .get("projection")
+                .is_some_and(|v| v == "perspective");
             self.render_transparent = settings.get("transparentBg").is_some_and(|v| v == true);
             if let Ok(hatch) = cuemol_command::hatch_params(&settings, "umbreon_npr") {
                 self.render_hatch = hatch;
@@ -456,7 +461,7 @@ impl App {
                     .height_range(34.0..=ui.available_height() - 40.)
                     .resizable(true)
                     .show_inside(ui, |ui| {
-                        egui::CollapsingHeader::new(a)
+                        egui::CollapsingHeader::new(a.to_uppercase())
                             .default_open(true)
                             .show(ui, |ui| {
                                 egui::ScrollArea::both()
@@ -493,7 +498,7 @@ impl App {
                                     });
                             });
                     });
-                egui::CollapsingHeader::new(b)
+                egui::CollapsingHeader::new(b.to_uppercase())
                     .default_open(true)
                     .show(ui, |ui| {
                         egui::ScrollArea::vertical()
@@ -534,40 +539,70 @@ impl App {
             &json!({}),
         )
         .unwrap_or(Value::Null);
-        for scene in self.state.scene_summaries() {
-            if ui.selectable_label(scene.active, &scene.name).clicked() {
-                self.call("switch_scene", json!({"sceneId":scene.uid.get()}));
-                self.open_properties("scene", Some(scene.uid.get()));
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.;
+            for scene in self.state.scene_summaries() {
+                let response = shell::tree_row(
+                    ui,
+                    &format!("Scene: {}", scene.name),
+                    Icon::History,
+                    false,
+                    None,
+                    None,
+                );
+                if response.clicked() {
+                    self.call("switch_scene", json!({"sceneId":scene.uid.get()}));
+                    self.open_properties("scene", Some(scene.uid.get()));
+                }
             }
-        }
-        for object in data["objects"].as_array().into_iter().flatten() {
-            let Some(id) = object["id"].as_u64() else {
-                continue;
-            };
-            ui.horizontal(|ui| {
-                let mut visible = object["visible"] == true;
-                if ui.checkbox(&mut visible, "").changed() {
+            for object in data["objects"].as_array().into_iter().flatten() {
+                let Some(id) = object["id"].as_u64() else {
+                    continue;
+                };
+                let key = egui::Id::new(("object-expanded", id));
+                let mut open = ui
+                    .ctx()
+                    .data_mut(|d| d.get_persisted::<bool>(key))
+                    .unwrap_or(true);
+                let before = object["visible"] == true;
+                let mut visible = before;
+                let label = format!(
+                    "{} ({})",
+                    object["name"].as_str().unwrap_or("Object"),
+                    object["className"].as_str().unwrap_or("Object")
+                );
+                let response = ui
+                    .push_id(id, |ui| {
+                        shell::tree_row(
+                            ui,
+                            &label,
+                            Icon::Crystal,
+                            self.selected.map(Uid::get) == Some(id),
+                            Some(&mut open),
+                            Some(&mut visible),
+                        )
+                    })
+                    .inner;
+                self.record_ui_rect(&format!("object:{id}"), &response);
+                self.ui_rects.insert(
+                    format!("object-visibility:{id}"),
+                    [response.rect.right(), response.rect.top(), 24., 22.],
+                );
+                self.ui_rects.insert(
+                    format!("object-expand:{id}"),
+                    [response.rect.left() - 18., response.rect.top(), 18., 22.],
+                );
+                ui.ctx().data_mut(|d| d.insert_persisted(key, open));
+                if visible != before {
                     self.call(
                         "set_visible",
                         json!({"nodeType":"object","nodeId":id,"visible":visible}),
                     );
                 }
-                let response = ui.selectable_label(
-                    self.selected.map(Uid::get) == Some(id),
-                    object["name"].as_str().unwrap_or("Object"),
-                );
-                self.ui_rects.insert(
-                    format!("object:{id}"),
-                    [
-                        response.rect.min.x,
-                        response.rect.min.y,
-                        response.rect.width(),
-                        response.rect.height(),
-                    ],
-                );
                 if response.clicked() {
                     self.selected = Some(Uid::new(id));
                     self.open_properties("object", Some(id));
+                    self.paint_selected = 0;
                 }
                 response.context_menu(|ui| {
                     if ui.button("Center").clicked() {
@@ -579,59 +614,77 @@ impl App {
                         ui.close();
                     }
                 });
-            });
-            ui.indent(id, |ui| {
-                for renderer in object["renderers"].as_array().into_iter().flatten() {
-                    if renderer["type"] == "*selection" {
-                        continue;
-                    }
-                    let Some(rid) = renderer["id"].as_u64() else {
-                        continue;
-                    };
-                    ui.horizontal(|ui| {
-                        let mut visible = renderer["visible"] == true;
-                        if ui.checkbox(&mut visible, "").changed() {
-                            self.call(
-                                "set_visible",
-                                json!({"nodeType":"renderer","nodeId":rid,"visible":visible}),
-                            );
-                        }
-                        let response = ui.selectable_label(
-                            self.inspector_target
-                                .as_ref()
-                                .is_some_and(|t| t.kind == "renderer" && t.id == Some(rid)),
-                            renderer["name"].as_str().unwrap_or("Renderer"),
-                        );
-                        if response.clicked() {
-                            self.selected = Some(Uid::new(id));
-                            self.open_properties("renderer", Some(rid));
-                        }
-                        response.context_menu(|ui| {
-                            if ui.button("Delete").clicked() {
-                                self.call(
-                                    "delete_node",
-                                    json!({"nodeType":"renderer","nodeId":rid}),
-                                );
-                                ui.close();
+                if open {
+                    ui.indent(id, |ui| {
+                        for renderer in object["renderers"].as_array().into_iter().flatten() {
+                            if renderer["type"] == "*selection" {
+                                continue;
                             }
-                        });
+                            let Some(rid) = renderer["id"].as_u64() else {
+                                continue;
+                            };
+                            let before = renderer["visible"] == true;
+                            let mut visible = before;
+                            let selected = self
+                                .inspector_target
+                                .as_ref()
+                                .is_some_and(|t| t.kind == "renderer" && t.id == Some(rid));
+                            let label = format!(
+                                "{} ({})",
+                                renderer["name"].as_str().unwrap_or("Renderer"),
+                                renderer["type"].as_str().unwrap_or("")
+                            );
+                            let response = ui
+                                .push_id(rid, |ui| {
+                                    shell::tree_row(
+                                        ui,
+                                        &label,
+                                        Icon::Atom,
+                                        selected,
+                                        None,
+                                        Some(&mut visible),
+                                    )
+                                })
+                                .inner;
+                            self.record_ui_rect(&format!("renderer:{rid}"), &response);
+                            self.ui_rects.insert(
+                                format!("renderer-visibility:{rid}"),
+                                [response.rect.right(), response.rect.top(), 24., 22.],
+                            );
+                            if visible != before {
+                                self.call(
+                                    "set_visible",
+                                    json!({"nodeType":"renderer","nodeId":rid,"visible":visible}),
+                                );
+                            }
+                            if response.clicked() {
+                                self.selected = Some(Uid::new(id));
+                                self.open_properties("renderer", Some(rid));
+                                self.paint_selected = 0;
+                            }
+                            response.context_menu(|ui| {
+                                if ui.button("Delete").clicked() {
+                                    self.call(
+                                        "delete_node",
+                                        json!({"nodeType":"renderer","nodeId":rid}),
+                                    );
+                                    ui.close();
+                                }
+                            });
+                        }
                     });
                 }
-            });
-        }
-        ui.separator();
-        egui::ComboBox::from_label("Representation")
-            .selected_text(&self.representation)
-            .show_ui(ui, |ui| {
-                for kind in cuemol_desktop_core::MOLECULE_RENDERER_TYPES {
-                    ui.selectable_value(&mut self.representation, kind.to_string(), *kind);
-                }
-            });
-        if ui.button("Add representation").clicked() {
-            if let Some(id) = self.selected {
-                self.call("create_renderer",json!({"objId":id.get(),"rendererType":self.representation,"selection":if self.selection.is_empty(){"*"}else{&self.selection}}));
             }
-        }
+        });
+        ui.separator();
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("representation-kind").selected_text(&self.representation).show_ui(ui,|ui| {
+                for kind in cuemol_desktop_core::MOLECULE_RENDERER_TYPES {ui.selectable_value(&mut self.representation,kind.to_string(),*kind);}
+            });
+            if shell::icon_button(ui,Icon::New,"Add representation",false,egui::vec2(22.,22.)).clicked() {
+                if let Some(id)=self.selected {self.call("create_renderer",json!({"objId":id.get(),"rendererType":self.representation,"selection":if self.selection.is_empty(){"*"}else{&self.selection}}));}
+            }
+        });
     }
     fn object_picker(&mut self, ui: &mut egui::Ui) {
         let objects = self.state.active_object_summaries();
@@ -649,21 +702,237 @@ impl App {
             });
     }
     fn color_controls(&mut self, ui: &mut egui::Ui) {
-        self.object_picker(ui);
-        egui::ComboBox::from_label("Coloring")
-            .selected_text(&self.coloring)
-            .show_ui(ui, |ui| {
-                for kind in ["cpk", "rainbow", "bfac"] {
-                    ui.selectable_value(&mut self.coloring, kind.into(), kind);
+        let Some(object_id) = self.selected else {
+            ui.label("Select a molecule or renderer.");
+            return;
+        };
+        let objects = self.state.active_object_summaries();
+        let Some(object) = objects.iter().find(|o| o.uid == object_id) else {
+            return;
+        };
+        let renderer_id = self
+            .inspector_target
+            .as_ref()
+            .filter(|t| t.kind == "renderer")
+            .and_then(|t| t.id)
+            .map(Uid::new)
+            .filter(|id| self.state.renderer_coloring_state(object_id, *id).is_some());
+        let (kind, id, title, color_type, entries) = if let Some(id) = renderer_id {
+            let (color_type, _, entries) =
+                self.state.renderer_coloring_state(object_id, id).unwrap();
+            let name = self
+                .state
+                .renderer_summaries(object_id)
+                .into_iter()
+                .find(|r| r.uid == id)
+                .map(|r| r.name)
+                .unwrap_or_default();
+            (
+                "renderer",
+                id,
+                format!("{name} (renderer)"),
+                color_type,
+                entries,
+            )
+        } else {
+            let Some(mol) = self.state.scene_manager().object(object_id) else {
+                return;
+            };
+            (
+                "object",
+                object_id,
+                format!("{} (object)", object.name),
+                mol.coloring_type().unwrap_or("CPKColoring").to_string(),
+                mol.paint_coloring().to_vec(),
+            )
+        };
+        let target = json!({"nodeType":kind,"nodeId":id.get()});
+        let modes = [
+            ("PaintColoring", "paint", "Paint"),
+            ("CPKColoring", "cpk", "CPK"),
+            ("RainbowColoring", "rainbow", "Rainbow"),
+            ("BfacColoring", "bfac", "B factor"),
+            ("SolidColoring", "solid", "Solid"),
+            ("MolColorRef", "resetdef", "Inherited"),
+        ];
+        let mut mode = modes.iter().position(|m| m.0 == color_type).unwrap_or(5);
+        let before = mode;
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("color-target")
+                .width((ui.available_width() - 88.).max(80.))
+                .selected_text(title)
+                .show_ui(ui, |ui| {
+                    for object in &objects {
+                        if ui
+                            .selectable_label(id == object.uid, format!("{} (object)", object.name))
+                            .clicked()
+                        {
+                            self.selected = Some(object.uid);
+                            self.inspector_target = Some(cuemol_ui::InspectorTarget {
+                                kind: "object".into(),
+                                id: Some(object.uid.get()),
+                            });
+                            self.paint_selected = 0;
+                        }
+                        for renderer in self.state.renderer_summaries(object.uid) {
+                            if renderer.renderer_type == "*selection" {
+                                continue;
+                            }
+                            if ui
+                                .selectable_label(
+                                    id == renderer.uid,
+                                    format!("{} ({})", renderer.name, renderer.renderer_type),
+                                )
+                                .clicked()
+                            {
+                                self.selected = Some(object.uid);
+                                self.inspector_target = Some(cuemol_ui::InspectorTarget {
+                                    kind: "renderer".into(),
+                                    id: Some(renderer.uid.get()),
+                                });
+                                self.paint_selected = 0;
+                            }
+                        }
+                    }
+                });
+            let response = egui::ComboBox::from_id_salt("color-mode")
+                .width(72.)
+                .selected_text(modes[mode].2)
+                .show_ui(ui, |ui| {
+                    for (i, (_, _, label)) in modes.iter().enumerate() {
+                        let response = ui.selectable_value(&mut mode, i, *label);
+                        self.record_ui_rect(&format!("Color mode {label}"), &response);
+                    }
+                })
+                .response;
+            self.record_ui_rect("Color mode", &response);
+        });
+        if mode != before {
+            let mut args = target.clone();
+            args["mode"] = json!(format!("paint-type-{}", modes[mode].1));
+            self.call("set_renderer_coloring", args);
+            self.paint_selected = 0;
+        }
+        if color_type == "PaintColoring" {
+            self.paint_selected = self.paint_selected.min(entries.len().saturating_sub(1));
+            ui.horizontal(|ui| {
+                ui.add_space((ui.available_width() - 104.).max(0.));
+                for (icon, label, command, by) in [
+                    (Icon::New, "Add paint", "add_paint_at", 0),
+                    (Icon::Up, "Move paint up", "move_paint", -1),
+                    (Icon::Down, "Move paint down", "move_paint", 1),
+                    (Icon::Delete, "Delete paint", "remove_paint", 0),
+                ] {
+                    let response = ui
+                        .add_enabled_ui(command == "add_paint_at" || !entries.is_empty(), |ui| {
+                            shell::icon_button(ui, icon, label, false, egui::vec2(20., 20.))
+                        })
+                        .inner;
+                    self.record_ui_rect(label, &response);
+                    if response.clicked() {
+                        let mut args = target.clone();
+                        if command == "add_paint_at" {
+                            args["selection"] = json!(if self.selection.is_empty() {
+                                "*"
+                            } else {
+                                &self.selection
+                            });
+                            args["color"] = json!("white");
+                            self.paint_selected = entries.len();
+                        } else {
+                            args["number"] = json!(self.paint_selected + 1);
+                        }
+                        if command == "move_paint" {
+                            args["by"] = json!(by);
+                            self.paint_selected = (self.paint_selected as i64 + by)
+                                .clamp(0, entries.len().saturating_sub(1) as i64)
+                                as usize;
+                        }
+                        self.call(command, args);
+                    }
                 }
             });
-        if ui.button("Apply").clicked() {
-            if let Some(id) = self.selected {
-                self.call("set_renderer_coloring",json!({"nodeId":id.get(),"nodeType":"object","mode":format!("paint-type-{}",self.coloring)}));
-            }
+            ui.separator();
+            egui::Grid::new(("paint-entries", id.get()))
+                .num_columns(2)
+                .min_col_width((ui.available_width() - 12.) * 0.45)
+                .show(ui, |ui| {
+                    ui.weak("Selection");
+                    ui.weak("Color");
+                    ui.end_row();
+                    for (index, (selection, color)) in entries.iter().enumerate() {
+                        let response = ui.selectable_label(self.paint_selected == index, selection);
+                        self.record_ui_rect(&format!("paint:{index}"), &response);
+                        if response.clicked() {
+                            self.paint_selected = index;
+                        }
+                        if response.double_clicked() {
+                            self.paint_editor = Some((
+                                kind.into(),
+                                id.get(),
+                                index,
+                                selection.clone(),
+                                color.clone(),
+                            ));
+                        }
+                        let response = ui
+                            .horizontal(|ui| {
+                                let rgb = self.state.active_style_color(color);
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(14., 12.),
+                                    egui::Sense::hover(),
+                                );
+                                self.ui_rects.insert(
+                                    format!("paint-swatch:{index}"),
+                                    [rect.min.x, rect.min.y, rect.width(), rect.height()],
+                                );
+                                if let Some(c) = rgb {
+                                    ui.painter().rect_filled(
+                                        rect,
+                                        0.,
+                                        egui::Color32::from_rgb(c.r, c.g, c.b),
+                                    );
+                                }
+                                ui.selectable_label(false, color)
+                            })
+                            .inner;
+                        self.record_ui_rect(&format!("paint-color:{index}"), &response);
+                        if response.clicked() {
+                            self.paint_selected = index;
+                            self.paint_editor = Some((
+                                kind.into(),
+                                id.get(),
+                                index,
+                                selection.clone(),
+                                color.clone(),
+                            ));
+                        }
+                        ui.end_row();
+                    }
+                });
         }
-        if ui.button("Paint selection…").clicked() {
-            self.select_tool("paint");
+        if let Some((kind, id, index, mut selection, mut color)) = self.paint_editor.take() {
+            let mut open = true;
+            let mut apply = false;
+            egui::Window::new("Paint entry")
+                .id(egui::Id::new("paint-editor"))
+                .open(&mut open)
+                .show(ui.ctx(), |ui| {
+                    ui.label("Selection");
+                    let response = ui.text_edit_singleline(&mut selection);
+                    self.record_ui_rect("Paint selection", &response);
+                    ui.label("Color");
+                    let response = ui.text_edit_singleline(&mut color);
+                    self.record_ui_rect("Paint color", &response);
+                    let response = ui.button("Apply");
+                    self.record_ui_rect("Apply paint", &response);
+                    apply = response.clicked();
+                });
+            if apply {
+                self.call("set_paint",json!({"nodeType":kind,"nodeId":id,"number":index+1,"selection":selection,"color":color}));
+            } else if open {
+                self.paint_editor = Some((kind, id, index, selection, color));
+            }
         }
     }
     fn camera_list(&mut self, ui: &mut egui::Ui) {
@@ -781,11 +1050,14 @@ impl App {
                     for tab in [
                         "Console",
                         "Output",
-                        "Animation",
                         "Sequence",
+                        "Animation",
                         "MD Trajectory",
                     ] {
-                        let response = ui.selectable_value(&mut self.bottom_tab, tab.into(), tab);
+                        let response = shell::tab(ui, tab, self.bottom_tab == tab);
+                        if response.clicked() {
+                            self.bottom_tab = tab.into();
+                        }
                         self.record_ui_rect(tab, &response);
                         if response.clicked() {
                             self.bottom_open = true;
@@ -806,6 +1078,15 @@ impl App {
                 ui.separator();
                 match self.bottom_tab.as_str() {
                     "Console" => {
+                        ui.horizontal(|ui| {
+                            ui.weak("JavaScript");
+                            if ui.small_button("Clear").clicked() {
+                                self.logs.clear();
+                            }
+                            if ui.small_button("Help").clicked() {
+                                self.show_help = true;
+                            }
+                        });
                         egui::ScrollArea::vertical()
                             .auto_shrink([false, false])
                             .min_scrolled_height(0.)
