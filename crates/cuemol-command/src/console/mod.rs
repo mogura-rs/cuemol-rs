@@ -1,3 +1,4 @@
+pub mod actions;
 mod completion;
 mod parser;
 mod pymol;
@@ -127,6 +128,8 @@ pub struct Session {
     qax_log: Option<qax::Log>,
     log_label: String,
     log_source: String,
+    pub action_record: actions::Record,
+    prepared_record: Option<cuemol_core::LDom2Node>,
     render: Option<RenderedImage>,
     revision: u64,
     pub trajectory_frames: BTreeMap<u64, usize>,
@@ -148,6 +151,8 @@ impl Default for Session {
             qax_log: None,
             log_label: String::new(),
             log_source: String::new(),
+            action_record: actions::Record::default(),
+            prepared_record: None,
             render: None,
             revision: 0,
             trajectory_frames: BTreeMap::new(),

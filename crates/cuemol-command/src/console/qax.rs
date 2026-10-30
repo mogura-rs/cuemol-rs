@@ -12,10 +12,9 @@ pub(super) struct Log {
     path: PathBuf,
     document: LDom2Node,
     pending: Vec<LDom2Node>,
-    prepared: Option<LDom2Node>,
 }
 
-fn elements(node: &LDom2Node) -> impl Iterator<Item = &LDom2Node> {
+pub(super) fn elements(node: &LDom2Node) -> impl Iterator<Item = &LDom2Node> {
     node.children().iter().filter(|child| !child.is_attr())
 }
 
@@ -149,7 +148,10 @@ impl Session {
             if !arg.str_attr("param").is_empty() {
                 return Err("Macro arguments require a bound macro".into());
             }
-            if elements(arg).next().is_some() {
+            if elements(arg).next().is_some()
+                || spec.semantics.get(&key).is_some_and(|kind| kind == "atoms")
+                    && arg.contents().is_empty()
+            {
                 atoms.insert(key, json!(elements(arg).map(|atom| json!({"chain":atom.str_attr("chain").to_string(),"resid":atom.str_attr("resid").to_string(),"atomName":atom.str_attr("name").to_string()})).collect::<Vec<_>>()));
             } else if !arg.str_attr("path").is_empty() {
                 bound.insert(key, json!(arg.str_attr("path").to_string()).to_string());
@@ -194,8 +196,9 @@ impl Session {
             "cmd"
         }
         .into();
+        self.action_record = super::actions::Record::new(&self.log_label, &self.log_source);
+        self.prepared_record = None;
         if let Some(log) = &mut self.qax_log {
-            log.prepared = None;
             log.pending.clear();
         }
     }
@@ -208,12 +211,25 @@ impl Session {
     }
 
     pub fn prepare_record(&mut self, state: &DesktopAppState, name: &str, args: &Value) {
-        if self.qax_log.is_none() {
-            return;
+        self.prepared_record = Self::record_operation(state, name, args);
+    }
+
+    pub fn record_operation(
+        state: &DesktopAppState,
+        name: &str,
+        args: &Value,
+    ) -> Option<LDom2Node> {
+        if name == "set_prop" {
+            let (kind, id, prop) =
+                crate::properties::resolve_property_path(state, args["path"].as_str()?).ok()?;
+            return Self::record_operation(
+                state,
+                "set_node_prop",
+                &json!({"nodeType":kind,"nodeId":id.map(|id| id.get()),"prop":prop,"value":args["value"]}),
+            );
         }
-        self.qax_log.as_mut().unwrap().prepared = None;
         if !crate::tool_records_history(name) {
-            return;
+            return None;
         }
         let Some(spec) = catalog()
             .get(name)
@@ -224,7 +240,7 @@ impl Session {
                     .find(|spec| spec.tool == name && spec.fixed.is_empty())
             })
         else {
-            return;
+            return None;
         };
         let inventory = nodes(state).unwrap_or_default();
         let mut op = LDom2Node::new();
@@ -275,22 +291,23 @@ impl Session {
                 arg.set_contents(argument_text(value));
             }
         }
-        self.qax_log.as_mut().unwrap().prepared = Some(op);
+        Some(op)
     }
 
     pub fn complete_record(&mut self, changed: bool) {
-        if let Some(log) = &mut self.qax_log {
-            if let Some(op) = log.prepared.take().filter(|_| changed) {
+        if let Some(op) = self.prepared_record.take().filter(|_| changed) {
+            self.action_record.append(op.clone());
+            if let Some(log) = &mut self.qax_log {
                 log.pending.push(op);
             }
         }
     }
 
     pub fn finish_submission(&mut self) -> Result<(), String> {
+        self.prepared_record = None;
         let Some(log) = &mut self.qax_log else {
             return Ok(());
         };
-        log.prepared = None;
         if log.pending.is_empty() {
             return Ok(());
         }
@@ -337,7 +354,6 @@ impl Session {
                 path: path.clone(),
                 document,
                 pending: Vec::new(),
-                prepared: None,
             };
             write_log(&log)?;
             self.qax_log = Some(log);
@@ -355,14 +371,15 @@ impl Session {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn serialize(root: &LDom2Node) -> String {
+pub(super) fn serialize(root: &LDom2Node) -> String {
     fn escape(text: &str) -> String {
         text.replace('&', "&amp;")
             .replace('<', "&lt;")
             .replace('>', "&gt;")
             .replace('"', "&quot;")
             .replace('\r', "&#13;")
+            .replace('\n', "&#10;")
+            .replace('\t', "&#9;")
     }
     fn node(output: &mut String, value: &LDom2Node, depth: usize) {
         let pad = "  ".repeat(depth);

@@ -46,7 +46,53 @@ pub enum ConsoleStep {
     Done,
 }
 
+#[derive(Debug)]
+pub struct ConsoleCheckpoint {
+    state: DesktopAppState,
+    camera: Camera,
+    selection: String,
+}
+
+impl ConsoleCheckpoint {
+    pub fn new(state: &DesktopAppState, camera: &Camera, selection: &str) -> Self {
+        Self {
+            state: state.clone(),
+            camera: camera.clone(),
+            selection: selection.into(),
+        }
+    }
+
+    pub fn update(&mut self, state: &DesktopAppState, camera: &Camera, selection: &str) -> bool {
+        let changed = !self.state.same_undo_state(state)
+            || !cuemol_command::console::same_camera_view(&self.camera, camera)
+            || self.selection != selection;
+        if changed {
+            *self = Self::new(state, camera, selection);
+        }
+        changed
+    }
+}
+
 impl ConsoleRunner {
+    pub fn library(
+        source: &str,
+        macro_name: Option<&str>,
+        targets: &[u64],
+    ) -> Result<Self, String> {
+        Ok(Self {
+            submission: Submission::library(source, macro_name, targets)?,
+            pending: None,
+            ready: VecDeque::new(),
+            single_command: false,
+        })
+    }
+
+    pub fn skip_failed_target(&mut self) -> bool {
+        self.pending = None;
+        self.ready.clear();
+        self.submission.skip_failed_target()
+    }
+
     pub fn new(source: &str, dialect: Dialect) -> Result<Self, String> {
         Ok(Self {
             submission: Submission::new(source, dialect)?,

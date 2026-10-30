@@ -33,6 +33,8 @@ pub use render::{RenderAction, RenderControls, RenderPanel};
 pub mod sequence;
 
 #[cfg(feature = "egui")]
+pub mod actions;
+#[cfg(feature = "egui")]
 pub mod console;
 #[cfg(feature = "console-runtime")]
 pub mod console_runtime;

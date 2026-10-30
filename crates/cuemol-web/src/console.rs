@@ -6,6 +6,7 @@ use cuemol_ui::{
 };
 
 pub(super) struct ConsoleExecution {
+    checkpoint: cuemol_ui::console_runtime::ConsoleCheckpoint,
     runner: ConsoleRunner,
     undo: Option<HistoryEntry>,
     revision: u64,
@@ -15,6 +16,42 @@ pub(super) struct ConsoleExecution {
 }
 
 impl App {
+    pub(super) fn run_library_action(
+        &mut self,
+        source: &str,
+        macro_name: Option<&str>,
+        label: &str,
+    ) -> Result<(), String> {
+        let targets = cuemol_command::console::actions::targets(
+            &self.state,
+            &self.selected.into_iter().map(Uid::get).collect::<Vec<_>>(),
+        )
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>();
+        let runner = ConsoleRunner::library(source, macro_name, &targets)?;
+        self.cancel_console("Replaced by an action.");
+        self.console_session
+            .begin_submission(label, cuemol_command::console::Dialect::CueMol);
+        self.console_session.sync_revision(self.revision);
+        self.console_generation = self.console_generation.wrapping_add(1);
+        self.console_run = Some(ConsoleExecution {
+            checkpoint: cuemol_ui::console_runtime::ConsoleCheckpoint::new(
+                &self.state,
+                &self.camera,
+                &self.selection,
+            ),
+            runner,
+            undo: Some(self.capture_history()),
+            revision: self.revision,
+            camera: self.camera.clone(),
+            waiting: false,
+            changed: false,
+        });
+        let context = CONTEXT.with(|ctx| ctx.borrow().clone()).unwrap_or_default();
+        self.poll_console(&context);
+        Ok(())
+    }
     pub(super) fn console_intent(&mut self, intent: Option<ConsoleIntent>) {
         match intent {
             Some(ConsoleIntent::Run) => self.execute_console_source(),
@@ -51,6 +88,7 @@ impl App {
         let runner = match ConsoleRunner::new(&source, self.console.dialect) {
             Ok(runner) => runner,
             Err(error) => {
+                self.console.source = source;
                 self.message = error;
                 return;
             }
@@ -60,6 +98,11 @@ impl App {
         self.console_session.sync_revision(self.revision);
         self.console_generation = self.console_generation.wrapping_add(1);
         self.console_run = Some(ConsoleExecution {
+            checkpoint: cuemol_ui::console_runtime::ConsoleCheckpoint::new(
+                &self.state,
+                &self.camera,
+                &self.selection,
+            ),
             runner,
             undo: Some(self.capture_history()),
             revision: self.revision,
@@ -114,14 +157,15 @@ impl App {
                 }
             }
         }
-        let changed = run.undo.as_ref().is_none_or(|before| {
-            !before.state.same_undo_state(&self.state)
-                || before.selection != self.selection
-                || before.camera != self.camera
-        });
-        self.console_session.complete_record(changed);
+        let changed = cuemol_command::tool_records_history(name)
+            && run
+                .checkpoint
+                .update(&self.state, &self.camera, &self.selection);
+        self.console_session
+            .complete_record(changed && !result.is_null());
         if changed && cuemol_command::tool_records_history(name) {
-            if let Some(before) = run.undo.take() {
+            if let Some(mut before) = run.undo.take() {
+                before.record = self.console_session.action_record.clone();
                 self.history.push(before);
                 if self.history.len() > 12 {
                     self.history.remove(0);
@@ -163,6 +207,7 @@ impl App {
                     .into(),
             );
             self.message = "Console cancelled".into();
+            self.finish_console();
             return;
         }
         let result = result.and_then(|frame| {
@@ -182,6 +227,7 @@ impl App {
                 ) {
                     self.logs.push(error);
                     self.message = "Console error".into();
+                    self.finish_console();
                     return;
                 }
                 run.waiting = false;
@@ -190,6 +236,7 @@ impl App {
             Err(error) => {
                 self.logs.push(error);
                 self.message = "Console error".into();
+                self.finish_console();
             }
         }
     }
@@ -205,6 +252,7 @@ impl App {
                 "Scene or camera changed outside the console; remaining commands cancelled.".into(),
             );
             self.message = "Console cancelled".into();
+            self.finish_console();
             return;
         }
         if run.waiting {
@@ -235,6 +283,9 @@ impl App {
                 Err(error) => {
                     self.logs.push(error);
                     self.message = "Console error".into();
+                    if run.runner.skip_failed_target() {
+                        continue;
+                    }
                     keep = false;
                     break;
                 }
@@ -340,6 +391,9 @@ impl App {
                                 let _ = self.console_result(&mut run, &name, &args, &Value::Null);
                                 self.logs.push(error);
                                 self.message = "Console error".into();
+                                if run.runner.skip_failed_target() {
+                                    continue;
+                                }
                                 keep = false;
                                 break;
                             }
@@ -348,6 +402,9 @@ impl App {
                     Action::Transaction(label) => {
                         if let Err(error) = self.console_session.begin_transaction(&label) {
                             self.logs.push(error);
+                            self.message = "Console error".into();
+                            keep = false;
+                            break;
                         }
                         run.undo = Some(self.capture_history());
                         run.changed = false;
@@ -392,7 +449,13 @@ impl App {
             run.camera = self.camera.clone();
             self.console_run = Some(run);
             ctx.request_repaint_after(std::time::Duration::from_millis(30));
-        } else if let Err(error) = self.console_session.finish_submission() {
+        } else {
+            self.finish_console();
+        }
+    }
+
+    fn finish_console(&mut self) {
+        if let Err(error) = self.console_session.finish_submission() {
             self.logs.push(error);
         }
     }

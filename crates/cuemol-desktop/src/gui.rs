@@ -1,3 +1,5 @@
+#[path = "gui_actions.rs"]
+mod actions;
 #[path = "navigation.rs"]
 mod navigation;
 #[path = "tritium.rs"]
@@ -1363,6 +1365,7 @@ struct GuiApplication {
     pdb_download_canceling: bool,
     url_download_receiver: Option<mpsc::Receiver<std::result::Result<PathBuf, String>>>,
     script_path: String,
+    actions_panel: cuemol_ui::actions::ActionsPanel,
     console: cuemol_ui::console::ConsoleEditor,
     console_session: cuemol_command::console::Session,
     console_run: Option<GuiConsoleExecution>,
@@ -1678,6 +1681,7 @@ struct GuiApplication {
 
 #[derive(Debug, Clone)]
 struct GuiUndoSnapshot {
+    record: cuemol_command::console::actions::Record,
     camera: Option<cuemol_qsys::Camera>,
     state: DesktopAppState,
     selected_object: Option<cuemol_core::Uid>,
@@ -1691,6 +1695,7 @@ struct GuiUndoSnapshot {
 
 #[derive(Debug)]
 struct GuiConsoleExecution {
+    checkpoint: cuemol_ui::console_runtime::ConsoleCheckpoint,
     runner: cuemol_ui::console_runtime::ConsoleRunner,
     undo: Option<GuiUndoSnapshot>,
     camera: cuemol_qsys::Camera,
@@ -4980,6 +4985,11 @@ impl GuiApplication {
             pdb_download_canceling: false,
             url_download_receiver: None,
             script_path: "script.js".to_string(),
+            actions_panel: cuemol_ui::actions::ActionsPanel::with_files(
+                cuemol_command::console::actions::read_library(
+                    &cuemol_command::config::directory().join("actions"),
+                ),
+            ),
             console: cuemol_ui::console::ConsoleEditor::default(),
             console_session: cuemol_command::console::Session::default(),
             console_run: None,
@@ -15121,6 +15131,7 @@ impl GuiApplication {
             match cuemol_ui::console_runtime::ConsoleRunner::new(&source, self.console.dialect) {
                 Ok(runner) => runner,
                 Err(error) => {
+                    self.console.source = source;
                     self.log_lines.push(error);
                     self.set_status("Console error");
                     return;
@@ -15133,6 +15144,11 @@ impl GuiApplication {
         let mut undo = self.capture_script_undo();
         undo.camera = Some(camera.clone());
         self.console_run = Some(GuiConsoleExecution {
+            checkpoint: cuemol_ui::console_runtime::ConsoleCheckpoint::new(
+                &self.state,
+                &camera,
+                &self.selection_text,
+            ),
             runner,
             undo: Some(undo),
             camera,
@@ -15173,12 +15189,12 @@ impl GuiApplication {
             self.workspace_aux_selection = None;
         }
         let _ = self.state.set_active_view_camera(&run.camera);
-        let changed = run.undo.as_ref().is_none_or(|before| {
-            !before.state.same_undo_state(&self.state)
-                || before.selection_text != self.selection_text
-                || before.camera.as_ref() != Some(&run.camera)
-        });
-        self.console_session.complete_record(changed);
+        let changed = cuemol_command::tool_records_history(name)
+            && run
+                .checkpoint
+                .update(&self.state, &run.camera, &self.selection_text);
+        self.console_session
+            .complete_record(changed && !value.is_null());
         if name == "save_scene" && !value.is_null() {
             if let Some(scene) = self.state.active_scene() {
                 self.modified_scenes.remove(&scene);
@@ -15188,7 +15204,8 @@ impl GuiApplication {
             }
         }
         if changed && cuemol_command::tool_records_history(name) {
-            if let Some(before) = run.undo.take() {
+            if let Some(mut before) = run.undo.take() {
+                before.record = self.console_session.action_record.clone();
                 self.push_undo_snapshot(before);
             }
         }
@@ -15237,6 +15254,9 @@ impl GuiApplication {
                 Err(error) => {
                     self.log_lines.push(error);
                     self.set_status("Console error");
+                    if run.runner.skip_failed_target() {
+                        continue;
+                    }
                     keep = false;
                     break;
                 }
@@ -15298,6 +15318,9 @@ impl GuiApplication {
                                 );
                                 self.log_lines.push(error.to_string());
                                 self.set_status("Console error");
+                                if run.runner.skip_failed_target() {
+                                    continue;
+                                }
                                 keep = false;
                                 break;
                             }
@@ -29309,6 +29332,7 @@ impl GuiApplication {
 
     fn capture_script_undo(&self) -> GuiUndoSnapshot {
         GuiUndoSnapshot {
+            record: Default::default(),
             camera: None,
             state: self.state.clone(),
             selected_object: self.selected_object,
@@ -29386,6 +29410,7 @@ impl GuiApplication {
         if snapshot.camera.is_some() {
             redo.camera = Some(camera.to_qsys_camera("__current"));
         }
+        redo.record = snapshot.record.clone();
         self.restore_undo_snapshot(snapshot, camera);
         self.redo_stack.push(redo);
         self.set_status("Undo");
@@ -29400,6 +29425,7 @@ impl GuiApplication {
         if snapshot.camera.is_some() {
             undo.camera = Some(camera.to_qsys_camera("__current"));
         }
+        undo.record = snapshot.record.clone();
         self.restore_undo_snapshot(snapshot, camera);
         self.undo_stack.push(undo);
         self.set_status("Redo");
@@ -40460,6 +40486,50 @@ mod tests {
         app.request_open_recent_path(&mut camera);
         assert_eq!(app.recent_paths.first(), Some(&script));
         let _ = std::fs::remove_file(&script);
+    }
+
+    #[test]
+    fn native_actions_run_and_restore_a_single_recorded_step() {
+        use cuemol_command::console::actions::PRESETS;
+        use cuemol_ui::actions::Intent;
+        let mut app = GuiApplication::new();
+        app.config_path.clear();
+        app.state.open_bytes("probe.pdb", b"ATOM      1  CA  GLY A   1       1.000   0.000   0.000  1.00 10.00           C\nHETATM    2  C1  LIG A   2       2.000   2.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let id = app.state.active_object_summaries()[0].uid;
+        app.selected_object = Some(id);
+        let mut camera = CameraController::default();
+        app.apply_action_intent(
+            Intent::Run {
+                source: PRESETS.into(),
+                macro_name: Some("cartoon-ligand".into()),
+                label: "Cartoon + ligand".into(),
+            },
+            &mut camera,
+        );
+        assert_eq!(app.status, "Console executed", "{:?}", app.log_lines);
+        assert_eq!(app.undo_stack.len(), 1);
+        assert_eq!(app.undo_stack[0].record.entry_count(), 3);
+        let record = app.undo_stack[0].record.id();
+        assert!(!app.snapshot.atoms.is_empty());
+        assert!(app
+            .state
+            .renderer_summaries(id)
+            .iter()
+            .any(|renderer| renderer.name == "p_cartoon"));
+        app.apply_action_intent(Intent::MoveTo(0), &mut camera);
+        assert!(!app
+            .state
+            .renderer_summaries(id)
+            .iter()
+            .any(|renderer| renderer.name == "p_cartoon"));
+        assert_eq!(app.redo_stack[0].record.id(), record);
+        app.apply_action_intent(Intent::MoveTo(1), &mut camera);
+        assert_eq!(app.undo_stack[0].record.id(), record);
+        assert!(app
+            .state
+            .renderer_summaries(id)
+            .iter()
+            .any(|renderer| renderer.name == "p_cartoon"));
     }
 
     #[test]

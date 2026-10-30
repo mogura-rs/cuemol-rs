@@ -38,7 +38,13 @@ fn last_word(text: &str) -> &str {
 }
 
 fn quote(text: &str) -> String {
-    if text.contains([',', ';', ' ', '"', '\'', '\\', '*', '?']) {
+    if text.chars().any(|ch| {
+        ch.is_whitespace()
+            || matches!(
+                ch,
+                ',' | ';' | '"' | '\'' | '\\' | '*' | '?' | '=' | '(' | ')' | '[' | ']' | '{' | '}'
+            )
+    }) {
         serde_json::to_string(text).unwrap()
     } else {
         text.into()
@@ -47,26 +53,48 @@ fn quote(text: &str) -> String {
 
 pub(super) struct Context<'a> {
     pub source: &'a str,
+    pub line: &'a str,
     pub command: &'a str,
     pub rest: &'a str,
     pub current: &'a str,
     pub typed: &'a str,
     pub key: String,
     pub bound: BTreeMap<String, String>,
+    pub valid: bool,
 }
 
 impl<'a> Context<'a> {
     pub fn new(source: &'a str, params: &[String]) -> Self {
-        let line = parser::split_groups(source, ';', true)
+        Self::with_rule(source, params, false)
+    }
+
+    pub fn native(source: &'a str, params: &[String]) -> Self {
+        Self::with_rule(source, params, true)
+    }
+
+    fn with_rule(source: &'a str, params: &[String], native: bool) -> Self {
+        let line = parser::split_groups_raw(source, ';', true)
             .ok()
             .and_then(|parts| parts.last().copied())
             .unwrap_or(source);
         let line = line.rsplit('\n').next().unwrap_or(line).trim_start();
-        let (command, rest) = parser::head(line);
-        let parts = parser::split_groups(rest, ',', true).unwrap_or_default();
-        let current = parts.last().copied().unwrap_or("");
+        let line = line.strip_prefix("_ ").unwrap_or(line).trim_start();
+        let (command, rest) = line
+            .find(char::is_whitespace)
+            .map_or((line, &line[line.len()..]), |at| {
+                (&line[..at], line[at..].trim_start())
+            });
+        let parts = parser::split_groups_raw(rest, ',', true).unwrap_or_default();
+        let current = parts.last().copied().unwrap_or(rest).trim_start();
         let previous = parts[..parts.len().saturating_sub(1)].join(",");
-        let bound = parser::bind_pymol_arguments(params, &previous, false).unwrap_or_default();
+        let bound = if native {
+            parser::parse_arguments(&previous, false)
+                .and_then(|args| parser::bind_arguments(params, &args))
+        } else {
+            parser::bind_pymol_arguments(params, &previous, false)
+        };
+        let valid = bound.is_ok();
+        let bound = bound.unwrap_or_default();
         let (key, typed) = current
             .split_once('=')
             .filter(|(key, _)| params.iter().any(|p| p == key.trim()))
@@ -85,12 +113,14 @@ impl<'a> Context<'a> {
             );
         Self {
             source,
+            line,
             command,
             rest,
             current,
             typed,
             key,
             bound,
+            valid,
         }
     }
 
@@ -108,7 +138,7 @@ impl<'a> Context<'a> {
         let offset = if typed.is_empty() {
             self.source.len()
         } else {
-            self.source.trim_end().len().saturating_sub(typed.len())
+            self.source.len().saturating_sub(typed.len())
         };
         let prefix = &self.source[..offset];
         let mut values = values.into_iter().collect::<Vec<_>>();
@@ -135,10 +165,7 @@ impl<'a> Context<'a> {
         let prefix = &self.source[..if self.current.is_empty() {
             self.source.len()
         } else {
-            self.source
-                .trim_end()
-                .len()
-                .saturating_sub(self.current.len())
+            self.source.len().saturating_sub(self.current.len())
         }];
         params
             .iter()
@@ -167,7 +194,7 @@ impl<'a> Context<'a> {
             let offset = if raw.is_empty() {
                 self.source.len()
             } else {
-                self.source.trim_end().len().saturating_sub(raw.len())
+                self.source.len().saturating_sub(raw.len())
             };
             let prefix = &self.source[..offset];
             if let Some(pattern) = typed
@@ -275,8 +302,8 @@ fn property_paths(state: &DesktopAppState, pattern: &str) -> Vec<String> {
 }
 
 pub(super) fn native(session: &Session, state: &DesktopAppState, source: &str) -> Vec<Completion> {
-    let initial = Context::new(source, &[]);
-    let line = source.rsplit('\n').next().unwrap_or(source).trim_start();
+    let initial = Context::native(source, &[]);
+    let line = initial.line;
     if !line.contains(char::is_whitespace) && !line.starts_with('@') {
         return initial
             .offers(
@@ -299,7 +326,14 @@ pub(super) fn native(session: &Session, state: &DesktopAppState, source: &str) -
             })
             .collect();
     }
-    if initial.command == "help" {
+    let name = parser::lookup(
+        initial.command,
+        catalog()
+            .keys()
+            .map(String::as_str)
+            .chain(BUILTINS.iter().copied()),
+    );
+    if name == Ok("help") {
         let mut values = catalog()
             .keys()
             .cloned()
@@ -317,24 +351,33 @@ pub(super) fn native(session: &Session, state: &DesktopAppState, source: &str) -
         };
         return context.files(session, false, false);
     }
-    if matches!(initial.command, "cd" | "ls" | "run" | "open_log") {
-        let params = vec![
-            if matches!(initial.command, "cd" | "ls") {
-                "dir"
-            } else {
-                "file"
-            }
-            .into(),
-            "mode".into(),
-        ];
-        let context = Context::new(source, &params);
-        return context.files(session, initial.command == "cd", false);
+    if matches!(name, Ok("cd" | "ls" | "run" | "open_log")) {
+        let name = name.unwrap();
+        let params = match name {
+            "cd" | "ls" => vec!["dir".into()],
+            "open_log" => vec!["file".into(), "mode".into()],
+            _ => vec!["file".into()],
+        };
+        let context = Context::native(source, &params);
+        if !context.valid {
+            return Vec::new();
+        }
+        return if context.key == "mode" {
+            context.offers(["w".into(), "a".into()], "", false)
+        } else {
+            context.files(session, name == "cd", false)
+        };
     }
-    let Ok(name) = parser::lookup(initial.command, catalog().keys().map(String::as_str)) else {
+    let Ok(name) = name else {
         return initial.files(session, false, false);
     };
-    let spec = &catalog()[name];
-    let context = Context::new(source, &spec.params);
+    let Some(spec) = catalog().get(name) else {
+        return Vec::new();
+    };
+    let context = Context::native(source, &spec.params);
+    if !context.valid {
+        return Vec::new();
+    }
     let key = context.key.as_str();
     let semantic = spec.semantics.get(key).map(String::as_str).unwrap_or("");
     let mut results = context.parameters(&spec.params);
@@ -438,6 +481,78 @@ pub(super) fn native(session: &Session, state: &DesktopAppState, source: &str) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_completion_preserves_command_segments_and_open_list_words() {
+        let state = super::super::tests::state();
+        let session = Session::default();
+        for (source, replacement) in [
+            ("show protein; hid", "show protein; hide "),
+            ("hide protein; ", "hide protein; show "),
+            ("hide protein; _ sh", "hide protein; _ show "),
+            ("hide protein ", "hide protein protein "),
+        ] {
+            assert!(
+                native(&session, &state, source)
+                    .iter()
+                    .any(|entry| entry.replacement == replacement),
+                "{source}: {:?}",
+                native(&session, &state, source)
+            );
+        }
+        assert!(native(
+            &session,
+            &state,
+            "create_renderer objId=protein, ballstick, n"
+        )
+        .is_empty());
+        assert!(
+            super::super::pymol::complete(&session, &state, "show spheres; ")
+                .iter()
+                .any(|entry| entry.replacement == "show spheres; hide ")
+        );
+    }
+
+    #[test]
+    fn completed_filenames_survive_command_binding() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session = Session::default();
+        session.cwd = directory.path().to_owned();
+        let state = DesktopAppState::new();
+        let names = [
+            "one=two.pdb",
+            "unbalanced(.pdb",
+            "tab\tname.pdb",
+            "quote\"name.pdb",
+            "日本語.pdb",
+        ];
+        for name in names {
+            std::fs::write(directory.path().join(name), b"").unwrap();
+        }
+        let entries = native(&session, &state, "load ");
+        for name in names {
+            let entry = entries.iter().find(|entry| entry.display == name).unwrap();
+            let actions = session.plan(&state, &entry.replacement).unwrap();
+            let Some(super::super::Action::Tool { args, .. }) = actions.last() else {
+                panic!("Expected a load operation");
+            };
+            assert_eq!(
+                std::path::Path::new(args["path"].as_str().unwrap())
+                    .file_name()
+                    .unwrap(),
+                std::ffi::OsStr::new(name)
+            );
+        }
+        assert!(native(&session, &state, "load first.pdb ")
+            .iter()
+            .any(|entry| entry.replacement == "load first.pdb 日本語.pdb "));
+        assert!(native(&session, &state, "op_l ")
+            .iter()
+            .any(|entry| entry.display == "日本語.pdb"));
+        assert!(native(&session, &state, "open_log out.qax, ")
+            .iter()
+            .all(|entry| ["w", "a"].contains(&entry.display.as_str())));
+    }
 
     #[test]
     fn completion_uses_argument_roles_and_does_not_modify_the_scene() {

@@ -446,7 +446,7 @@ fn validate_view_effect_property(key: &str, value: &str) -> Result<()> {
     }
 }
 
-fn resolve_property_path(
+pub(crate) fn resolve_property_path(
     state: &DesktopAppState,
     path: &str,
 ) -> Result<(String, Option<Uid>, String)> {

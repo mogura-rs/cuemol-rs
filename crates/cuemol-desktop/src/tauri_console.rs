@@ -4,6 +4,7 @@ use cuemol_ui::console_runtime::{ConsoleRunner, ConsoleStep};
 use serde_json::Value;
 
 pub(super) struct Execution {
+    checkpoint: cuemol_ui::console_runtime::ConsoleCheckpoint,
     runner: ConsoleRunner,
     undo: Option<AppModelUndo>,
     revision: u64,
@@ -28,6 +29,33 @@ pub(super) fn dialect(name: &str) -> Result<Dialect, String> {
 }
 
 impl AppModel {
+    pub(super) fn start_library_action(
+        &mut self,
+        source: &str,
+        macro_name: Option<&str>,
+        label: &str,
+        targets: &[u64],
+    ) -> Result<Update, String> {
+        let runner = ConsoleRunner::library(source, macro_name, targets)?;
+        self.stop_console();
+        self.persist_camera()?;
+        self.console_session
+            .begin_submission(label, Dialect::CueMol);
+        self.console_session.sync_revision(self.snapshot_revision);
+        self.console_run = Some(Execution {
+            checkpoint: cuemol_ui::console_runtime::ConsoleCheckpoint::new(
+                &self.desktop,
+                &self.camera,
+                &self.selection,
+            ),
+            runner,
+            undo: Some(self.capture_script_undo()),
+            revision: self.snapshot_revision,
+            camera: self.camera.clone(),
+            changed: false,
+        });
+        self.poll_console()
+    }
     pub(super) fn start_console(
         &mut self,
         source: &str,
@@ -39,6 +67,11 @@ impl AppModel {
         self.persist_camera()?;
         self.console_session.sync_revision(self.snapshot_revision);
         self.console_run = Some(Execution {
+            checkpoint: cuemol_ui::console_runtime::ConsoleCheckpoint::new(
+                &self.desktop,
+                &self.camera,
+                &self.selection,
+            ),
             runner: ConsoleRunner::new(source, dialect)?,
             undo: Some(self.capture_script_undo()),
             revision: self.snapshot_revision,
@@ -87,12 +120,12 @@ impl AppModel {
             }
             self.restore_script_view();
         }
-        let changed = run.undo.as_ref().is_none_or(|before| {
-            !before.desktop.same_undo_state(&self.desktop)
-                || before.selection != self.selection
-                || !same_camera_view(&before.camera, &self.camera)
-        });
-        self.console_session.complete_record(changed);
+        let changed = cuemol_command::tool_records_history(name)
+            && run
+                .checkpoint
+                .update(&self.desktop, &self.camera, &self.selection);
+        self.console_session
+            .complete_record(changed && !result.is_null());
         if name == "save_scene" && !result.is_null() {
             if let Some(scene) = self.desktop.active_scene() {
                 self.modified_scenes.remove(&scene);
@@ -102,6 +135,10 @@ impl AppModel {
             if let Some(before) = run.undo.take() {
                 self.status = "Console command".into();
                 self.push_undo(before);
+                if let Some(entry) = self.undo_stack.last_mut() {
+                    entry.record = self.console_session.action_record.clone();
+                    entry.description = entry.record.label();
+                }
             }
         }
         if changed && cuemol_command::tool_changes_scene(name) {
@@ -223,6 +260,9 @@ impl AppModel {
                 Err(error) => {
                     self.log_lines.push(error);
                     self.status = "Console error".into();
+                    if run.runner.skip_failed_target() {
+                        continue;
+                    }
                     keep = false;
                     break;
                 }

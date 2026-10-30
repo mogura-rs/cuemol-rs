@@ -68,6 +68,13 @@ async function openShell(page, storage = {}, options = {}) {
         return {snapshot: structuredClone(snapshot), viewport};
       }
       if (command === 'get_pdb_history') return [];
+      if (command === 'actions_request') {
+        if (args.operation === 'list') return {steps: options.actions ? [{id:7,label:'Cartoon + ligand',entryCount:3,undone:false},{id:8,label:'Hide',entryCount:1,undone:false}] : [],done:options.actions ? 2 : 0,running:false,
+          files:[{name:'Presets',bundled:true,actionCount:0,macros:[{name:'cartoon-ligand',label:'Cartoon + ligand',target_type:'MolCoord',description:'Show cartoon and ligand.'}]}]};
+        if (args.operation === 'inspect') return {id:args.args.id,label:'Cartoon + ligand',source:'cmd',entries:[{command:'create_renderer',args:[['objId','Probe']],note:false}]};
+        if (args.operation === 'run' || args.operation === 'goto') return {snapshot:structuredClone(snapshot),running:false};
+        if (args.operation === 'save_history') return {ok:true};
+      }
       if (command === 'execute_script') return structuredClone(snapshot);
       if (command === 'console_start' || command === 'console_stop' || command === 'console_poll') return {snapshot: structuredClone(snapshot), running: command !== 'console_stop' && Boolean(options.consoleRunning)};
       if (command === 'console_complete') return [{display: 'Probe', replacement: 'select Probe'}];
@@ -134,11 +141,35 @@ test('Tauri activities keep molecule panels reachable and collapse reversibly', 
     await expect(page.locator('[data-panel-name="Workspace"]')).not.toBeVisible();
   }
   await page.getByRole('button', {name: 'Actions', exact: true}).click();
-  await expect(page.getByRole('button', {name: 'Superposition', exact: true})).toBeVisible();
+  await expect(page.locator('#action-history-list')).toBeVisible();
+  await expect(page.locator('#action-library-list')).toContainText('Cartoon + ligand');
   await page.getByRole('button', {name: 'Actions', exact: true}).click();
   await expect(page.locator('.side-panel')).not.toBeVisible();
   await page.getByRole('button', {name: 'Explorer', exact: true}).click();
   await expect(page.locator('[data-panel-name="Workspace"]')).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test('Tauri Actions selects ranges, inspects operations and runs on the selected object', async ({page}) => {
+  const errors = await openShell(page, {}, {actions:true});
+  await page.getByRole('button', {name:'Actions',exact:true}).click();
+  const history = page.locator('#action-history-list');
+  await history.locator('[data-step-id="7"]').click();
+  await history.locator('[data-step-id="8"]').click({modifiers:['Shift']});
+  await expect(history.locator('[aria-selected="true"]')).toHaveCount(2);
+  await page.getByRole('button', {name:'Save to Actions…',exact:true}).click();
+  await page.getByLabel('Action name').fill('Saved view');
+  await page.getByRole('button', {name:'Save',exact:true}).click();
+  await expect.poll(() => page.evaluate(() => window.__shellCalls.filter(call => call.command === 'actions_request' && call.args.operation === 'save_history').length)).toBe(1);
+  const save = await page.evaluate(() => window.__shellCalls.find(call => call.command === 'actions_request' && call.args.operation === 'save_history').args.args);
+  expect(save).toEqual({ids:[7,8],name:'Saved view',asMacro:true});
+  await history.locator('[data-step-id="7"]').dblclick();
+  await expect(page.locator('#inspector-fields')).toContainText('create_renderer');
+  await page.locator('#action-library-list').getByRole('treeitem',{name:'Cartoon + ligand',exact:true}).click();
+  await page.locator('#action-library-controls').getByRole('button',{name:'Run',exact:true}).click();
+  await expect.poll(() => page.evaluate(() => window.__shellCalls.filter(call => call.command === 'actions_request' && call.args.operation === 'run').length)).toBe(1);
+  const run = await page.evaluate(() => window.__shellCalls.find(call => call.command === 'actions_request' && call.args.operation === 'run').args.args);
+  expect(run).toEqual({file:'Presets',bundled:true,macro:'cartoon-ligand',targetIds:[3]});
   expect(errors).toEqual([]);
 });
 

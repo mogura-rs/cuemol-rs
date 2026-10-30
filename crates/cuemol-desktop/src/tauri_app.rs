@@ -33,6 +33,8 @@ use crate::{
 };
 use cuemol_desktop_core::effects::ViewportOptions;
 
+#[path = "tauri_actions.rs"]
+mod actions;
 #[path = "tauri_console.rs"]
 mod console;
 
@@ -916,6 +918,7 @@ struct AppSnapshot {
     trajectories: Vec<TrajectoryDto>,
     can_undo: bool,
     can_redo: bool,
+    action_history_key: Vec<(usize, usize, bool)>,
     undo_descriptions: Vec<String>,
     redo_descriptions: Vec<String>,
     opened_paths: Vec<String>,
@@ -1674,6 +1677,7 @@ struct AppModelUndo {
 
 #[derive(Clone)]
 struct AppModelUndoEntry {
+    record: cuemol_command::console::actions::Record,
     snapshot: AppModelUndo,
     description: String,
 }
@@ -2456,6 +2460,17 @@ impl AppModel {
             trajectories,
             can_undo: !self.undo_stack.is_empty(),
             can_redo: !self.redo_stack.is_empty(),
+            action_history_key: self
+                .undo_stack
+                .iter()
+                .map(|entry| (entry.record.id(), entry.record.entry_count(), false))
+                .chain(
+                    self.redo_stack
+                        .iter()
+                        .rev()
+                        .map(|entry| (entry.record.id(), entry.record.entry_count(), true)),
+                )
+                .collect(),
             undo_descriptions: self
                 .undo_stack
                 .iter()
@@ -7786,6 +7801,7 @@ impl AppModel {
             self.status.clone()
         };
         self.undo_stack.push(AppModelUndoEntry {
+            record: cuemol_command::console::actions::Record::new(&description, "gui"),
             snapshot,
             description,
         });
@@ -7842,6 +7858,7 @@ impl AppModel {
             description = entry.description.clone();
             self.restore_undo(entry.snapshot)?;
             self.redo_stack.push(AppModelUndoEntry {
+                record: entry.record,
                 snapshot: redo,
                 description: entry.description,
             });
@@ -7863,6 +7880,7 @@ impl AppModel {
             description = entry.description.clone();
             self.restore_undo(entry.snapshot)?;
             self.undo_stack.push(AppModelUndoEntry {
+                record: entry.record,
                 snapshot: undo,
                 description: entry.description,
             });
@@ -7879,6 +7897,10 @@ impl AppModel {
 }
 
 enum ModelRequest {
+    Actions {
+        operation: String,
+        args: serde_json::Value,
+    },
     StartRendererWarmup,
     GetSnapshot,
     GetDensityHistogram {
@@ -8475,6 +8497,7 @@ enum ModelRequest {
 }
 
 enum ModelResponse {
+    Actions(serde_json::Value),
     Console(console::Update),
     ConsoleCompletions(Vec<serde_json::Value>),
     Snapshot(Box<AppSnapshot>),
@@ -9834,6 +9857,7 @@ fn handle_model_request(
     request: ModelRequest,
 ) -> Result<ModelResponse, String> {
     match request {
+        ModelRequest::Actions { operation, args } => Ok(ModelResponse::Actions(model.actions_request(&operation, &args)?)),
         ModelRequest::StartRendererWarmup => {
             model.start_renderer_warmup();
             Ok(ModelResponse::Message(
@@ -13339,6 +13363,7 @@ fn snapshot_response(response: ModelResponse) -> Result<AppSnapshot, String> {
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Console(_)
+        | ModelResponse::Actions(_)
         | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => Err("unexpected non-snapshot response".to_string()),
     }
@@ -13366,6 +13391,7 @@ fn molecule_details_response(response: ModelResponse) -> Result<MoleculeDetailsD
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Console(_)
+        | ModelResponse::Actions(_)
         | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => Err("unexpected non-molecule-details response".to_string()),
     }
@@ -13393,6 +13419,7 @@ fn viewport_response(response: ModelResponse) -> Result<ViewportDto, String> {
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Console(_)
+        | ModelResponse::Actions(_)
         | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => Err("unexpected non-viewport response".to_string()),
     }
@@ -13420,6 +13447,7 @@ fn animation_frame_response(response: ModelResponse) -> Result<AnimationFrameDto
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Console(_)
+        | ModelResponse::Actions(_)
         | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => Err("unexpected animation frame response".to_string()),
     }
@@ -13447,6 +13475,7 @@ fn trajectory_frame_response(response: ModelResponse) -> Result<TrajectoryFrameD
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Console(_)
+        | ModelResponse::Actions(_)
         | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => Err("unexpected trajectory frame response".to_string()),
     }
@@ -13474,6 +13503,7 @@ fn application_info_response(response: ModelResponse) -> Result<ApplicationInfoD
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Console(_)
+        | ModelResponse::Actions(_)
         | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => Err("unexpected application info response".to_string()),
     }
@@ -13501,6 +13531,7 @@ fn preferences_response(response: ModelResponse) -> Result<PreferencesDto, Strin
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Console(_)
+        | ModelResponse::Actions(_)
         | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => Err("unexpected non-preferences response".to_string()),
     }
@@ -13528,6 +13559,7 @@ fn preferences_update_response(response: ModelResponse) -> Result<PreferencesUpd
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Console(_)
+        | ModelResponse::Actions(_)
         | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => {
             Err("unexpected non-preferences-update response".to_string())
@@ -13557,6 +13589,7 @@ fn initial_state_response(response: ModelResponse) -> Result<InitialStateDto, St
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Console(_)
+        | ModelResponse::Actions(_)
         | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => Err("unexpected non-initial-state response".to_string()),
     }
@@ -13593,6 +13626,7 @@ fn view_properties_response(response: ModelResponse) -> Result<ViewPropertiesDto
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Console(_)
+        | ModelResponse::Actions(_)
         | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => Err("unexpected non-view-properties response".to_string()),
     }
@@ -13661,6 +13695,7 @@ fn view_properties_update_response(
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Console(_)
+        | ModelResponse::Actions(_)
         | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => {
             Err("unexpected non-view-properties-update response".to_string())
@@ -16035,6 +16070,18 @@ fn clear_log(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(&state, ModelRequest::ClearLog)?)
 }
 
+#[tauri::command]
+fn actions_request(
+    operation: String,
+    args: serde_json::Value,
+    state: State<'_, ManagedState>,
+) -> Result<serde_json::Value, String> {
+    match request_model(&state, ModelRequest::Actions { operation, args })? {
+        ModelResponse::Actions(value) => Ok(value),
+        _ => Err("Unexpected actions response".into()),
+    }
+}
+
 fn console_response(response: ModelResponse) -> Result<console::Update, String> {
     match response {
         ModelResponse::Console(update) => Ok(update),
@@ -16680,6 +16727,7 @@ pub fn run() -> Result<(), tauri::Error> {
             tick_animation,
             tick_animation_frame,
             clear_log,
+            actions_request,
             console_start,
             console_poll,
             console_stop,
@@ -24680,6 +24728,91 @@ mod tests {
         );
         assert_eq!(snapshot.status, "Script executed");
         let _ = std::fs::remove_file(script_path);
+    }
+
+    #[test]
+    fn actions_history_exports_macros_and_ignores_unchanged_commands() {
+        use cuemol_command::console::Dialect;
+        use serde_json::json;
+        let directory = tempfile::tempdir().unwrap();
+        let mut model = model_without_gpu();
+        model.config_path = Some(directory.path().join("config.json"));
+        model.desktop.open_bytes("probe.pdb", b"ATOM      1  CA  ALA A   1       1.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let id = model.desktop.active_object_summaries()[0].uid;
+        model
+            .desktop
+            .scene_manager_mut()
+            .object_mut(id)
+            .unwrap()
+            .set_name("probe");
+        model
+            .start_console(
+                "hide probe; hide probe; rename probe, changed; rename changed, changed",
+                Dialect::CueMol,
+            )
+            .unwrap();
+        assert_eq!(model.status, "Console executed", "{:?}", model.log_lines);
+        assert_eq!(model.undo_stack.len(), 1);
+        assert_eq!(model.undo_stack[0].record.entry_count(), 2);
+        let record_id = model.undo_stack[0].record.id();
+        model.actions_request("goto", &json!({"id":0})).unwrap();
+        assert_eq!(model.redo_stack[0].record.id(), record_id);
+        model
+            .actions_request("goto", &json!({"id":record_id}))
+            .unwrap();
+        assert_eq!(model.undo_stack[0].record.id(), record_id);
+        model.actions_request("goto", &json!({"id":0})).unwrap();
+        model.actions_request("run", &json!({"file":"Presets","bundled":true,"macro":"cartoon-ligand","targetIds":[id.get()]})).unwrap();
+        while model.console_run.is_some() {
+            model.poll_console().unwrap();
+        }
+        assert_eq!(model.status, "Console executed", "{:?}", model.log_lines);
+        assert_eq!(model.undo_stack.len(), 1);
+        let record_id = model.undo_stack[0].record.id();
+        let inspected = model
+            .actions_request("inspect", &json!({"id":record_id}))
+            .unwrap();
+        assert_eq!(inspected["entries"].as_array().unwrap().len(), 3);
+        model
+            .actions_request(
+                "save_history",
+                &json!({"ids":[record_id],"name":"Reusable view","asMacro":true}),
+            )
+            .unwrap();
+        let source =
+            fs::read_to_string(directory.path().join("actions/Reusable view.qax")).unwrap();
+        assert!(source.contains("param=\"target\""));
+        assert!(source.contains("sub=\"p_cartoon\""));
+        model.undo(0).unwrap();
+        model
+            .desktop
+            .scene_manager_mut()
+            .object_mut(id)
+            .unwrap()
+            .set_name("other molecule");
+        model.actions_request("run", &json!({"file":"Reusable view","bundled":false,"macro":"Reusable view","targetIds":[id.get()]})).unwrap();
+        while model.console_run.is_some() {
+            model.poll_console().unwrap();
+        }
+        assert_eq!(model.status, "Console executed", "{:?}", model.log_lines);
+        assert!(model
+            .desktop
+            .renderer_summaries(id)
+            .iter()
+            .any(|renderer| renderer.name == "p_cartoon"));
+        let list = model.actions_request("list", &json!({})).unwrap();
+        assert_eq!(list["files"].as_array().unwrap().len(), 2);
+        model
+            .actions_request("rename", &json!({"file":"Reusable view","name":"Renamed"}))
+            .unwrap();
+        assert!(!directory.path().join("actions/Reusable view.qax").exists());
+        model
+            .actions_request("delete", &json!({"file":"Renamed"}))
+            .unwrap();
+        assert!(!directory.path().join("actions/Renamed.qax").exists());
+        assert!(model
+            .actions_request("delete", &json!({"file":"Presets","bundled":true}))
+            .is_err());
     }
 
     #[test]

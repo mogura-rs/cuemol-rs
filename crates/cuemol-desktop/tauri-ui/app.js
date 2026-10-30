@@ -17307,6 +17307,7 @@ function renderShell() {
   renderInspector(workspaceRenderKey);
   renderMolStruct();
   renderTritiumShell();
+  refreshActionsPane();
   scheduleSecondaryPanelRender();
 }
 

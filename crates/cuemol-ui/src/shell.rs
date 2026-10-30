@@ -203,6 +203,14 @@ pub fn header(ui: &mut Ui, title: &str) {
     );
 }
 pub fn activity_bar(ctx: &Context, active: &mut Option<Activity>) -> bool {
+    activity_bar_observed(ctx, active, |_, _| {})
+}
+
+pub fn activity_bar_observed(
+    ctx: &Context,
+    active: &mut Option<Activity>,
+    mut observe: impl FnMut(Activity, Rect),
+) -> bool {
     let mut settings = false;
     egui::SidePanel::left("activity-bar")
         .exact_width(44.)
@@ -212,15 +220,15 @@ pub fn activity_bar(ctx: &Context, active: &mut Option<Activity>) -> bool {
             ui.spacing_mut().item_spacing.y = 0.;
             ui.add_space(4.);
             for view in Activity::ALL {
-                if icon_button(
+                let response = icon_button(
                     ui,
                     view.icon(),
                     view.title(),
                     *active == Some(view),
                     egui::vec2(44., 44.),
-                )
-                .clicked()
-                {
+                );
+                observe(view, response.interact_rect);
+                if response.clicked() {
                     *active = if *active == Some(view) {
                         None
                     } else {

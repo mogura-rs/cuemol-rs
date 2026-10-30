@@ -659,7 +659,7 @@ pub(super) fn complete(
     use super::completion::Context;
     let initial = Context::new(source, &[]);
     let (word, rest) = (initial.command, initial.rest);
-    if !source.ends_with(char::is_whitespace) && rest.is_empty() {
+    if initial.line.is_empty() || !initial.line.contains(char::is_whitespace) && rest.is_empty() {
         let prefix = &source[..source.len() - word.len()];
         return catalog()
             .keys()
@@ -679,6 +679,9 @@ pub(super) fn complete(
         .map(|p| p.name.clone())
         .collect::<Vec<_>>();
     let context = Context::new(source, &params);
+    if !context.valid {
+        return Vec::new();
+    }
     let key = context.key.as_str();
     let mut results = context.parameters(&params);
     if matches!(key, "filename" | "file" | "path" | "directory")

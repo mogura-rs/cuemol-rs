@@ -63,7 +63,12 @@ impl App {
             self.agent.visible = false;
         }
         let before = self.activity;
-        if shell::activity_bar(ctx, &mut self.activity) {
+        if shell::activity_bar_observed(ctx, &mut self.activity, |activity, rect| {
+            self.ui_rects.insert(
+                activity.title().into(),
+                [rect.min.x, rect.min.y, rect.width(), rect.height()],
+            );
+        }) {
             self.settings_text = self.state.config_text();
             self.show_settings = true;
         }
@@ -77,14 +82,18 @@ impl App {
             }
         }
         self.shell_sidebar(ctx);
-        self.inspector.inspect(
-            &mut self.state,
-            &mut self.camera,
-            self.inspector_target.clone(),
-            self.revision,
-        );
-        for args in self.inspector.panel(ctx) {
-            self.call("set_node_prop", args);
+        if self.activity == Some(Activity::Actions) {
+            self.actions_panel.inspector(ctx);
+        } else {
+            self.inspector.inspect(
+                &mut self.state,
+                &mut self.camera,
+                self.inspector_target.clone(),
+                self.revision,
+            );
+            for args in self.inspector.panel(ctx) {
+                self.call("set_node_prop", args);
+            }
         }
         self.shell_bottom(ctx);
         egui::TopBottomPanel::top("scene-tabs")
@@ -483,15 +492,30 @@ impl App {
                                             }
                                         }
                                         Activity::Actions => {
-                                            ui.label(format!(
-                                                "{} completed steps",
-                                                self.history.len()
-                                            ));
-                                            if ui.button("Undo").clicked() {
-                                                self.call("undo", json!({}));
-                                            }
-                                            if ui.button("Redo").clicked() {
-                                                self.call("redo", json!({}));
+                                            let done: Vec<_> = self
+                                                .history
+                                                .iter()
+                                                .map(|entry| entry.record.clone())
+                                                .collect();
+                                            let future: Vec<_> = self
+                                                .future
+                                                .iter()
+                                                .map(|entry| entry.record.clone())
+                                                .collect();
+                                            let intent = self.actions_panel.history(
+                                                ui,
+                                                &done,
+                                                &future,
+                                                self.busy || self.console_run.is_some(),
+                                            );
+                                            self.ui_rects.extend(
+                                                self.actions_panel
+                                                    .rects
+                                                    .iter()
+                                                    .map(|(key, value)| (key.clone(), *value)),
+                                            );
+                                            if let Some(intent) = intent {
+                                                self.apply_action_intent(intent);
                                             }
                                         }
                                         _ => {}
@@ -519,11 +543,31 @@ impl App {
                                     }
                                 }
                                 Activity::Actions => {
-                                    if ui.button("Commands…").clicked() {
-                                        self.show_console = true;
-                                    }
-                                    if ui.button("Run JavaScript…").clicked() {
-                                        self.select_tool("execute_script");
+                                    let targets = cuemol_command::console::actions::targets(
+                                        &self.state,
+                                        &self
+                                            .selected
+                                            .into_iter()
+                                            .map(Uid::get)
+                                            .collect::<Vec<_>>(),
+                                    );
+                                    let names = targets
+                                        .into_iter()
+                                        .map(|(_, name)| name)
+                                        .collect::<Vec<_>>();
+                                    let intent = self.actions_panel.library(
+                                        ui,
+                                        &names,
+                                        self.busy || self.console_run.is_some(),
+                                    );
+                                    self.ui_rects.extend(
+                                        self.actions_panel
+                                            .rects
+                                            .iter()
+                                            .map(|(key, value)| (key.clone(), *value)),
+                                    );
+                                    if let Some(intent) = intent {
+                                        self.apply_action_intent(intent);
                                     }
                                 }
                                 _ => {}

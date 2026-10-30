@@ -46,16 +46,23 @@ impl GuiApplication {
             }
             _ => None,
         };
-        let mut view = camera.to_qsys_camera("__current");
-        self.inspector
-            .inspect(&mut self.state, &mut view, target, self.snapshot_revision);
-        for args in self.inspector.panel(ctx) {
-            self.tritium_command("set_node_prop", args, camera);
+        if self.activity == Some(Activity::Actions) {
+            self.actions_panel.inspector(ctx);
+        } else {
+            let mut view = camera.to_qsys_camera("__current");
+            self.inspector
+                .inspect(&mut self.state, &mut view, target, self.snapshot_revision);
+            for args in self.inspector.panel(ctx) {
+                self.tritium_command("set_node_prop", args, camera);
+            }
         }
         self.tritium_bottom(ctx, camera);
         self.scene_tab_strip(ctx, camera);
         self.central_view(ctx, camera);
         self.viewport_palette(ctx, camera);
+        if let Some(intent) = self.actions_panel.dialogs(ctx, &self.state) {
+            self.apply_action_intent(intent, camera);
+        }
     }
     fn tritium_toolbar(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
         egui::TopBottomPanel::top("toolbar")
@@ -220,41 +227,44 @@ impl GuiApplication {
         }
     }
     fn action_sidebar(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
+        let done: Vec<_> = self
+            .undo_stack
+            .iter()
+            .map(|entry| entry.record.clone())
+            .collect();
+        let future: Vec<_> = self
+            .redo_stack
+            .iter()
+            .map(|entry| entry.record.clone())
+            .collect();
+        let busy = self.console_run.is_some();
         egui::CollapsingHeader::new("History")
             .default_open(true)
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(!self.undo_stack.is_empty(), egui::Button::new("Undo"))
-                        .clicked()
-                    {
-                        self.undo(camera);
-                    }
-                    if ui
-                        .add_enabled(!self.redo_stack.is_empty(), egui::Button::new("Redo"))
-                        .clicked()
-                    {
-                        self.redo(camera);
-                    }
-                });
-                ui.label(format!(
-                    "{} completed steps · {} redo steps",
-                    self.undo_stack.len(),
-                    self.redo_stack.len()
-                ));
+                egui::ScrollArea::vertical()
+                    .id_salt("action_history")
+                    .max_height((ui.available_height() * 0.5).max(100.))
+                    .show(ui, |ui| {
+                        if let Some(intent) = self.actions_panel.history(ui, &done, &future, busy) {
+                            self.apply_action_intent(intent, camera);
+                        }
+                    });
             });
+        let targets = self.action_targets();
+        let names: Vec<_> = targets.iter().map(|(_, name)| name.clone()).collect();
         egui::CollapsingHeader::new("Actions")
             .default_open(true)
             .show(ui, |ui| {
-                if ui.button("Open script…").clicked() {
-                    self.choose_execute_script();
-                }
-                if ui.button("Console").clicked() {
-                    self.bottom_tab = BottomTab::Console;
-                    self.show_bottom_panel = true;
-                }
+                egui::ScrollArea::vertical()
+                    .id_salt("action_library")
+                    .show(ui, |ui| {
+                        if let Some(intent) = self.actions_panel.library(ui, &names, busy) {
+                            self.apply_action_intent(intent, camera);
+                        }
+                    });
             });
     }
+
     fn tritium_command(
         &mut self,
         name: &str,
@@ -264,6 +274,7 @@ impl GuiApplication {
         let mut view = camera.to_qsys_camera("__current");
         let mut undo = self.capture_undo();
         undo.camera = Some(view.clone());
+        undo.record = cuemol_command::console::actions::Record::operation(&self.state, name, &args);
         match cuemol_command::call_tool(&mut self.state, &mut view, name, &args) {
             Ok(_) => {
                 if cuemol_command::tool_records_history(name) {

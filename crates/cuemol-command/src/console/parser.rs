@@ -13,6 +13,17 @@ pub struct Argument {
 }
 
 pub fn split_groups(text: &str, separator: char, partial: bool) -> Result<Vec<&str>, String> {
+    Ok(split_groups_raw(text, separator, partial)?
+        .into_iter()
+        .map(str::trim)
+        .collect())
+}
+
+pub(super) fn split_groups_raw(
+    text: &str,
+    separator: char,
+    partial: bool,
+) -> Result<Vec<&str>, String> {
     let mut parts = Vec::new();
     let mut stack = Vec::new();
     let mut quote = None;
@@ -47,7 +58,7 @@ pub fn split_groups(text: &str, separator: char, partial: bool) -> Result<Vec<&s
                 }
             }
             _ if ch == separator && stack.is_empty() => {
-                parts.push(text[start..offset].trim());
+                parts.push(&text[start..offset]);
                 start = offset + ch.len_utf8();
             }
             _ => {}
@@ -56,7 +67,7 @@ pub fn split_groups(text: &str, separator: char, partial: bool) -> Result<Vec<&s
     if !partial && (quote.is_some() || !stack.is_empty()) {
         return Err("Unclosed quote or bracket".into());
     }
-    parts.push(text[start..].trim());
+    parts.push(&text[start..]);
     Ok(parts)
 }
 
@@ -86,7 +97,7 @@ pub fn split_commands(source: &str) -> Result<Vec<CommandLine>, String> {
         }
         pending.clear();
     }
-    if !pending.trim().is_empty() {
+    if !pending.trim().is_empty() && !pending.trim_start().starts_with('#') {
         for part in split_groups(&pending, ';', false)? {
             let (text, quiet) = part
                 .strip_prefix("_ ")
@@ -270,6 +281,9 @@ mod tests {
 
     #[test]
     fn commands_keep_quoted_delimiters_and_join_continuations() {
+        assert!(split_commands("# unfinished comment \\")
+            .unwrap()
+            .is_empty());
         let lines = split_commands("# comment\nselect mol, (chain A, chain B); set bgcolor, '#204080'\n_ rename mol, \\\n'日本語; molecule'\n").unwrap();
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0].text, "select mol, (chain A, chain B)");

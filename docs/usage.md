@@ -187,6 +187,26 @@ The optional second argument is the frame stride. Legacy `dcd-info`, `xtc-info`,
 
 ## Commands, MCP and configuration
 
+### Console and reusable actions
+
+The Console offers CueMol, PyMOL and JavaScript dialects. Enter runs a command,
+Shift-Enter adds a line, Tab completes a command or argument, and Up/Down recall
+previous submissions at the ends of the input. A multiline submission creates
+one undo step. Stop keeps completed edits and prevents pending results from
+changing the scene. The Help button lists the selected dialect's commands.
+
+The Actions sidebar shows undo steps and their operations. Select several steps
+with Shift or Ctrl/Cmd, then copy their commands, export QAX or save a reusable
+macro. Include renderer creation when the macro edits that renderer. Select a
+target molecule before running a macro from the library. The library includes
+the reference presets and supports importing, exporting, renaming and deleting
+user files. Native files are stored in the configuration directory's `actions`
+subdirectory; browser files remain in local storage until exported or deleted.
+
+In the native CueMol dialect, `open_log actions.qax` records subsequent edits,
+`close_log` closes the log, and `run actions.qax` replays it. A QAX file can
+contain separate undo steps. Commands that open or save a scene must run alone.
+
 ### Agent skill
 
 `cuemol skill` prints the bundled [agent skill](../skills/cuemol/SKILL.md) as

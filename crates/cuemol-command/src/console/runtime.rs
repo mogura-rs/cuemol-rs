@@ -13,6 +13,10 @@ pub(super) fn outside_transaction(name: &str, args: &serde_json::Value) -> bool 
 
 #[derive(Debug)]
 enum Work {
+    MacroTarget {
+        definition: std::sync::Arc<cuemol_core::LDom2Node>,
+        target: Option<u64>,
+    },
     Line {
         dialect: Dialect,
         text: String,
@@ -33,6 +37,71 @@ pub struct Submission {
 }
 
 impl Submission {
+    pub fn library(
+        source: &str,
+        macro_name: Option<&str>,
+        targets: &[u64],
+    ) -> Result<Self, String> {
+        let mut work = VecDeque::new();
+        if let Some(name) = macro_name {
+            let definition = std::sync::Arc::new(super::actions::macro_node(source, name)?);
+            let count = super::qax::elements(&definition)
+                .filter(|node| node.tag_name() == "param")
+                .count();
+            if count > 1 {
+                return Err("Only one object parameter can be bound.".into());
+            }
+            if count == 0 {
+                work.push_back(Work::MacroTarget {
+                    definition,
+                    target: None,
+                });
+            } else {
+                if targets.is_empty() {
+                    return Err("Select an object for this macro.".into());
+                }
+                let mut seen = std::collections::BTreeSet::new();
+                for id in targets.iter().filter(|id| seen.insert(**id)) {
+                    work.push_back(Work::MacroTarget {
+                        definition: definition.clone(),
+                        target: Some(*id),
+                    });
+                }
+            }
+        } else {
+            let actions = super::qax::actions(source, true)?;
+            if actions
+                .iter()
+                .any(|action| matches!(action, Action::Native(_)))
+            {
+                return Err("Command lines in QAX files run only from the Console.".into());
+            }
+            for action in actions {
+                work.push_back(Work::Action {
+                    dialect: Dialect::CueMol,
+                    action,
+                    depth: 1,
+                });
+            }
+        }
+        Ok(Self {
+            work,
+            standalone: false,
+        })
+    }
+
+    pub fn skip_failed_target(&mut self) -> bool {
+        let Some(index) = self
+            .work
+            .iter()
+            .position(|work| matches!(work, Work::MacroTarget { .. }))
+        else {
+            return false;
+        };
+        self.work.drain(..index);
+        true
+    }
+
     pub fn new(source: &str, dialect: Dialect) -> Result<Self, String> {
         let mut submission = Self {
             work: VecDeque::new(),
@@ -79,6 +148,21 @@ impl Submission {
         loop {
             match self.work.pop_front() {
                 None => return Ok(None),
+                Some(Work::MacroTarget { definition, target }) => {
+                    let actions = super::actions::bind_macro(state, &definition, target)?;
+                    for action in actions.into_iter().rev() {
+                        self.work.push_front(Work::Action {
+                            dialect: Dialect::CueMol,
+                            action,
+                            depth: 1,
+                        });
+                    }
+                    if let Some(id) = target {
+                        return Ok(Some(Action::Output(format!(
+                            "Running macro on object #{id}"
+                        ))));
+                    }
+                }
                 Some(Work::Line {
                     dialect,
                     text,

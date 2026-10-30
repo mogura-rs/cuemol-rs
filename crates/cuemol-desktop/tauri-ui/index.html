@@ -6,7 +6,9 @@
     <meta name="color-scheme" content="dark light" />
     <title>cuemol-rs</title>
     <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./actions.css">
     <script src="./shell.js" defer></script>
+    <script src="./actions.js" defer></script>
     <script src="./app.js" defer></script>
   </head>
   <body>
@@ -392,19 +394,18 @@
 
 
           <section class="action-panel" data-activity-panel="actions">
-            <h2>Molecule</h2>
-            <button type="button" data-dialog="Molecular superposition">Superposition</button>
-            <button type="button" data-dialog="Interaction">Interactions</button>
-            <button type="button" data-dialog="Mol bond editor">Bond editor</button>
-            <button type="button" data-dialog="Reassign secondary str">Secondary structure</button>
-            <h2>Surface and potential</h2>
-            <button type="button" data-dialog="Mol surface generation">Generate surface</button>
-            <button type="button" data-dialog="Mol surface cutter">Cut surface</button>
-            <button type="button" data-dialog="APBS elepot calculation">Electrostatic potential</button>
-            <h2>Animation and scripting</h2>
-            <button type="button" data-dialog="Mol morphing animation">Molecular morphing</button>
-            <button type="button" data-dialog="Animation rendering">Render animation</button>
-            <button type="button" data-dialog="Execute script">Execute script</button>
+            <div class="action-history-pane">
+              <h2>History</h2>
+              <div id="action-history-controls" class="action-controls"></div>
+              <div id="action-history-list" role="tree" aria-label="Action history" tabindex="0"></div>
+            </div>
+            <div class="action-library-pane">
+              <h2>Actions</h2>
+              <div id="action-library-controls" class="action-controls"></div>
+              <p id="action-targets"></p>
+              <div id="action-library-list" role="tree" aria-label="Action library" tabindex="0"></div>
+              <p id="action-description"></p>
+            </div>
           </section>
           <section class="camera-panel" data-activity-panel="view">
             <h2>Cameras</h2><div id="camera-list"></div>

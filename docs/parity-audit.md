@@ -31,8 +31,8 @@ speedup from a single optimized stage or compare timings from different hosts.
 | Shell | Activities, menus, toolbar, tab order, docks, compact windows, themes and keyboard access | Previous focused checks exist; full control inventory pending |
 | Explorer and Inspector | Object/renderer/group hierarchy, selection, visibility, locking, drag/drop, context menus and property editors | Previous focused checks exist; dialog comparison pending |
 | Color and styles | Coloring modes, paint entries, palettes, property inheritance, style creation/apply/edit/save | Previous focused checks exist; complete editor comparison pending |
-| Console | CueMol/PyMOL dialects, command arguments, completion, history, multiline input, IME and transaction behavior | Shared CueMol/PyMOL interpreters, completion, native QAX logging/replay and cancellable execution implemented; focused shared, browser and OS-input checks passed; affected regression checks passed; public review and delivery pending |
-| Actions | History rows, operation inspection, QAX export, bundled/user macros and reusable actions | Confirmed difference: existing sidebar offers Undo/Redo and script launch; history selection and macro library remain to be implemented |
+| Console | CueMol/PyMOL dialects, command arguments, completion, history, multiline input, IME and transaction behavior | Shared CueMol/PyMOL interpreters, completion, native QAX logging/replay and cancellable execution implemented; focused shared, browser and OS-input checks passed; affected regression checks, CI and Pages passed at `99b7c16`; public review repairs and release delivery are in progress |
+| Actions | History rows, operation inspection, QAX export, bundled/user macros and reusable actions | History selection, operation inspection, QAX export and bundled/user macro libraries are implemented in native, WASM and Tauri; model and focused screen checks passed; final regression and public review are in progress |
 | Scripts and services | JavaScript/Python helpers, retained state, callbacks, errors, file arguments and asynchronous readers | Previous compatibility checks exist; shared workload comparison pending |
 | File and scene I/O | Reader options, saved cameras, source metadata, selections, linked/embedded data and cancellation | Previous compatibility checks exist; paired performance comparison pending |
 | Navigation and cameras | Rotation, pan, zoom, fitting, clipping, bookmarks, visibility and screen coordinates | Previous numeric and interaction oracles exist; integrated comparison pending |
@@ -260,6 +260,54 @@ One pre-existing documentation mismatch was also repaired: `add_paint` promised
 to insert the newest paint above earlier entries, while the implementation
 appended it. It now inserts first and updates the molecule selection as the
 reference does. `add_paint_at` retains explicit placement and selection.
+
+## Actions comparison and review repairs
+
+The Actions sidebar now displays history steps and their recorded operations,
+selects multiple steps, moves to a chosen state, copies commands and exports
+QAX. A saved macro can bind its target to a different selected molecule.
+The library includes the twelve presets from the published reference, alongside
+user files. Native files live under the configuration directory's `actions`
+subdirectory; browser files persist in local storage and support import/export.
+The three frontends use the same QAX and macro engine. History records retain
+operations, while existing shared undo snapshots retain scene data.
+
+A macro resolves renderer names after earlier operations create them. Failed
+targets do not replay completed targets, and partial changes retain an undo
+entry. Recording now resolves property targets before the edit, allowing a
+saved macro to change a new target instead of the molecule used to record it.
+The shared tests cover replay, target rebinding, failures, file collisions and
+unsupported library commands. Native and Tauri model tests cover history
+movement; real-WASM tests cover preset execution, exported QAX replay and
+cross-molecule reuse. The Tauri shell tests exercise the corresponding IPC
+controls. These checks do not establish every preset's scientific output.
+
+Public Console review identified missing log finalization on cancellation and
+no-op operations recorded after the first mutation. The frontends now finalize
+interrupted submissions, compare each completed operation with its preceding
+state and omit failed operations from the replay log. Empty atom lists and
+XML attribute whitespace retain their meaning when QAX is read again.
+
+A separate public review found completion errors after semicolons, at the end
+of a target list and for filenames containing parser delimiters. Completion now
+preserves the current segment and trailing spaces, applies each dialect's
+argument rules and quotes filenames that would otherwise be parsed as syntax.
+File patterns keep metacharacters in the working directory literal, explicit
+null arguments stay null, and a continued comment at EOF remains a comment.
+The final affected regression run passed 35 command tests, four shared UI tests,
+177 native tests with one ignored, 68 shell structure checks, and 152 Tauri
+model tests with six ignored. The Linux screen check ran the cartoon preset
+and verified its scene state and displayed image before and after Undo/Redo.
+The rebuilt WASM passed eight Actions/Console cases, and the Tauri shell passed
+thirteen cases with mocked IPC. Public review and delivery remain separate gates.
+
+Several review concerns match the published reference's explicit behavior:
+plain numeric references are UIDs, `#number` is a UID hint, and `/` separates
+objects and renderers. Environment-variable names appear in reference path
+completion, but its path resolver only expands a leading tilde; environment
+expansion therefore remains an inherited limitation. A suggestion that quoted
+space-containing names contradict the syntax help was not a discrepancy: the
+help already requires those names to be quoted.
 
 ## Repeated object metadata
 

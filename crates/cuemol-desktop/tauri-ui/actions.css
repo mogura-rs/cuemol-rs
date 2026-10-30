@@ -1,0 +1,32 @@
+.action-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+.action-history-pane, .action-library-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 80px;
+  overflow: auto;
+  padding: 4px 8px;
+}
+.action-history-pane { flex: 0 1 45%; resize: vertical; border-bottom: 1px solid var(--border); }
+.action-library-pane { flex: 1 1 55%; }
+.action-controls { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+.action-controls button { width: auto; min-height: 24px; font-size: 11px; padding: 2px 6px; }
+.action-row { display: flex; align-items: center; min-height: 22px; padding: 2px 4px; cursor: default; }
+.action-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.action-row > button { flex: none; width: 20px; padding: 0; margin: 0; border: 0; background: transparent; }
+.action-row.current { font-weight: 600; }
+.action-row.undone { color: var(--text-muted); }
+.action-row[aria-selected="true"], .action-library-row[aria-selected="true"] { background: var(--bg-active); outline: 1px solid var(--accent); outline-offset: -1px; }
+.action-operation { display: block; width: calc(100% - 24px); margin-left: 24px; text-align: left; }
+.action-library-row { display: block; width: 100%; border: 0; background: transparent; text-align: left; font-size: 12px; }
+.action-library-pane details > summary { font-size: 12px; font-weight: 600; margin: 6px 0; }
+#action-targets, #action-description { margin: 4px 0; font-size: 11px; color: var(--text-secondary); }
+.action-name-dialog { color: var(--text-primary); background: var(--bg-surface); border: 1px solid var(--border); border-radius: 5px; max-width: 420px; padding: 16px; }
+.action-name-dialog label { display: block; margin: 10px 0; }
+.action-name-dialog input:not([type="checkbox"]) { display: block; width: 100%; margin-top: 5px; }
+.action-name-dialog button { margin-right: 5px; }
+.action-error { color: #ed7777; }

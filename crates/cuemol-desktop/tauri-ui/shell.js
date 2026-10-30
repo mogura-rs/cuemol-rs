@@ -65,6 +65,7 @@ function selectCueMolActivity(name, toggle = true) {
   if (cueMolActivity && sidePanelWidth === 0) setSidePanelWidth(expandedSidePanelWidth);
   syncSidePanelVisibility();
   saveCueMolShell();
+  if (cueMolActivity === "actions") refreshActionsPane(true);
   if (snapshot) scheduleRender(0);
 }
 
@@ -79,6 +80,7 @@ function setCueMolInspectorWidth(value) {
 }
 
 function renderTritiumInspector(owner, camera, style) {
+  if (cueMolActivity === "actions" && renderActionInspector()) return;
   const rendererUid = workspaceSelectionKind === "densityRenderer" ? selectedDensityRendererUid
     : workspaceSelectionKind === "surfaceRenderer" ? selectedSurfaceRendererUid
     : workspaceSelectionKind === "lwRenderer" ? selectedLwRendererUid

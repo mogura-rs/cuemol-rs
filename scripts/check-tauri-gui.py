@@ -32,6 +32,7 @@ reader.attach(object); reader.path = {json.dumps(str(molecule))}; reader.read();
 scene.addObject(object); object.name = 'Tauri probe';
 object.createRenderer('ballstick');
 var label = object.createRenderer('*namelabel');
+label.name = 'probe-label';
 label.font_name = 'serif'; label.font_size = 26;
 label.font_weight = 'BOLD'; label.font_style = 'ITALIC';
 label.color = cuemol.makeColor('#ff00ff'); label.label_on_top = true;
@@ -85,15 +86,16 @@ def main():
             bounds = wait_for(visible_window, timeout=90)
             x, y, width, height = bounds
 
-            def capture(name=None):
+            def capture(name=None, color="magenta"):
                 if process.poll() is not None:
                     raise helpers["ApplicationExited"]("The Tauri process exited; see gui.log")
                 image = ImageGrab.grab(bbox=(x, y, x + width, y + height)).convert("RGB")
                 if name:
                     image.save(work / name)
                 mask = Image.new("L", image.size)
-                mask.putdata([255 if r > 180 and g < 60 and b > 180 else 0
-                              for r, g, b in image.getdata()])
+                mask.putdata([255 if b > 180 and
+                              ((r > 180 and g < 60) if color == "magenta" else (g > 180 and r < 60))
+                              else 0 for r, g, b in image.getdata()])
                 return mask
 
             def settled():
@@ -147,9 +149,23 @@ def main():
             if not ImageChops.difference(rotated, settled()).getbbox():
                 raise RuntimeError("Wheel input did not persist after rendering settled")
             capture("zoomed.png")
+            zoomed = settled()
+            pyautogui.click(x + width * 0.6, y + height - 43)
+            pyautogui.write('set "Tauri probe/probe-label.color", cyan', interval=0.01)
+            pyautogui.hotkey('shift', 'enter')
+            pyautogui.write('set "Tauri probe/probe-label.font_size", 40', interval=0.01)
+            pyautogui.press('enter')
+            wait_for(lambda: mask if (mask := capture(color="cyan")).histogram()[255] > 100 else None)
+            if capture().histogram()[255] != 0:
+                raise RuntimeError("The console did not replace the label color")
+            capture("console-multiline.png")
+            pyautogui.write('undo', interval=0.03)
+            pyautogui.press('enter')
+            wait_for(lambda: mask if not ImageChops.difference(zoomed, mask := capture()).getbbox() else None)
+            capture("console-undo.png")
             report.update(ok=True, window=bounds, label_pixels=before.histogram()[255],
                           updates_before_release=changes, drag_seconds=duration,
-                          wheel_changed_label_pixels=True)
+                          wheel_changed_label_pixels=True, console_multiline_undo=True)
         except BaseException as error:
             report["error"] = str(error)
             if "capture" in locals():

@@ -8,6 +8,16 @@ pub(super) struct Word {
 }
 
 pub(super) fn words(text: &str) -> Vec<Word> {
+    if let Ok(value) = serde_json::from_str::<String>(text) {
+        let pattern = value.chars().fold(String::new(), |mut pattern, ch| {
+            if matches!(ch, '\\' | '*' | '?') {
+                pattern.push('\\');
+            }
+            pattern.push(ch);
+            pattern
+        });
+        return vec![Word { value, pattern }];
+    }
     let mut out = Vec::new();
     let mut word: Option<Word> = None;
     let mut quote = None;
@@ -294,8 +304,12 @@ pub(super) fn files(session: &Session, pattern: &str) -> Result<Vec<String>, Str
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let path = session.resolve_path(pattern);
-        let mut paths = vec![std::path::PathBuf::new()];
+        let path = std::path::Path::new(pattern);
+        let mut paths = vec![if path.is_absolute() {
+            std::path::PathBuf::new()
+        } else {
+            session.cwd().to_owned()
+        }];
         for component in path.components() {
             let std::path::Component::Normal(segment) = component else {
                 for path in &mut paths {
@@ -322,7 +336,11 @@ pub(super) fn files(session: &Session, pattern: &str) -> Result<Vec<String>, Str
                         }
                     }
                 } else {
-                    let candidate = path.join(literal(&pattern));
+                    let candidate = if pattern == "~" && path == session.cwd() {
+                        session.resolve_path("~")
+                    } else {
+                        path.join(literal(&pattern))
+                    };
                     if candidate.exists() {
                         next.push(candidate);
                     }
@@ -356,7 +374,10 @@ pub(super) fn expand(
         {
             continue;
         }
-        let Some(raw) = bound.get(key).filter(|value| !value.is_empty()) else {
+        let Some(raw) = bound
+            .get(key)
+            .filter(|value| !value.is_empty() && value.trim() != "null")
+        else {
             continue;
         };
         let words = words(raw);
@@ -521,6 +542,33 @@ mod tests {
             .unwrap()
             .iter()
             .any(|action| matches!(action, Action::Output(value) if value.contains("No matches"))));
+    }
+
+    #[test]
+    fn native_paths_keep_working_directory_metacharacters_literal_and_preserve_null() {
+        let directory = tempfile::tempdir().unwrap();
+        let literal = directory.path().join("data*set");
+        let sibling = directory.path().join("dataXset");
+        std::fs::create_dir(&literal).unwrap();
+        std::fs::create_dir(&sibling).unwrap();
+        std::fs::write(literal.join("one.pdb"), b"").unwrap();
+        std::fs::write(sibling.join("other.pdb"), b"").unwrap();
+        let mut session = Session::default();
+        session.cwd = literal.clone();
+        assert_eq!(
+            files(&session, "*.pdb").unwrap(),
+            [literal.join("one.pdb").to_string_lossy()]
+        );
+        let state = DesktopAppState::new();
+        let actions = session
+            .plan(
+                &state,
+                "set_node_prop nodeId=null, nodeType=scene, prop=bgcolor, value=white",
+            )
+            .unwrap();
+        assert!(
+            matches!(actions.as_slice(), [Action::Tool { args, .. }] if args["nodeId"].is_null() && args["nodeType"] == "scene")
+        );
     }
 
     #[test]

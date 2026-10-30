@@ -1,4 +1,5 @@
 #![cfg(target_arch = "wasm32")]
+mod actions;
 mod console;
 mod input;
 mod loading;
@@ -56,6 +57,7 @@ enum Event {
         cuemol_agent::ToolReply,
         u64,
     ),
+    ImportActions(String, String),
     Source(web_sys::File),
     SourceFinished(u64),
     SourceError(u64, String),
@@ -81,6 +83,24 @@ fn js_error(error: JsValue) -> String {
 }
 #[wasm_bindgen]
 pub fn open_file(file: web_sys::File) {
+    if file.name().to_ascii_lowercase().ends_with(".qax") {
+        if file.size() > 8_388_608. {
+            enqueue(Event::Error(
+                "Action files must be smaller than 8 MiB.".into(),
+            ));
+            return;
+        }
+        spawn_local(async move {
+            match JsFuture::from(file.text()).await {
+                Ok(text) => enqueue(Event::ImportActions(
+                    file.name(),
+                    text.as_string().unwrap_or_default(),
+                )),
+                Err(error) => enqueue(Event::Error(js_error(error))),
+            }
+        });
+        return;
+    }
     enqueue(Event::Source(file));
 }
 #[wasm_bindgen]
@@ -190,6 +210,7 @@ struct Target {
     size: [u32; 2],
 }
 struct HistoryEntry {
+    record: cuemol_command::console::actions::Record,
     selection: String,
     state: DesktopAppState,
     camera: Camera,
@@ -215,6 +236,7 @@ struct App {
     bottom_tab: String,
     bottom_open: bool,
     sequence_panel: cuemol_ui::sequence::SequencePanel,
+    actions_panel: cuemol_ui::actions::ActionsPanel,
     console: cuemol_ui::console::ConsoleEditor,
     console_session: cuemol_command::console::Session,
     console_run: Option<console::ConsoleExecution>,
@@ -370,6 +392,7 @@ impl App {
             bottom_tab: "Console".into(),
             bottom_open: true,
             sequence_panel: cuemol_ui::sequence::SequencePanel::default(),
+            actions_panel: cuemol_ui::actions::ActionsPanel::with_files(actions::read_library()),
             console: {
                 let mut editor = cuemol_ui::console::ConsoleEditor::default();
                 if let Some(history) = storage
@@ -451,6 +474,7 @@ impl App {
     }
     fn capture_history(&self) -> HistoryEntry {
         HistoryEntry {
+            record: Default::default(),
             selection: self.selection.clone(),
             state: self.state.clone(),
             camera: self.camera.clone(),
@@ -534,7 +558,8 @@ impl App {
                 self.future.pop()
             };
             if let Some(snapshot) = snapshot {
-                let current = self.capture_history();
+                let mut current = self.capture_history();
+                current.record = snapshot.record.clone();
                 if name == "undo" {
                     self.future.push(current);
                 } else {
@@ -552,7 +577,12 @@ impl App {
         }
         let mutating = cuemol_command::tool_changes_scene(name);
         let record_history = cuemol_command::tool_records_history(name);
-        let before = record_history.then(|| self.capture_history());
+        let before = record_history.then(|| {
+            let mut before = self.capture_history();
+            before.record =
+                cuemol_command::console::actions::Record::operation(&self.state, name, &args);
+            before
+        });
         match cuemol_command::call_tool(&mut self.state, &mut self.camera, name, &args) {
             Ok(value) => {
                 let changed = before.as_ref().is_none_or(|before| {
@@ -595,6 +625,12 @@ impl App {
         for event in events {
             self.validate_source_scene();
             match event {
+                Event::ImportActions(name, source) => {
+                    self.apply_action_intent(cuemol_ui::actions::Intent::Save {
+                        name: name.trim_end_matches(".qax").to_string(),
+                        source,
+                    })
+                }
                 Event::Input(event) => self.input_events.push_back(event),
                 Event::AgentCancel => self.agent.cancel("Cancelled; completed edits are kept."),
                 Event::AgentFrame(id, index, result, reply, revision) => {
@@ -1200,6 +1236,15 @@ impl eframe::App for App {
             ctx.request_repaint();
         }
         self.shell(ctx);
+        if let Some(intent) = self.actions_panel.dialogs(ctx, &self.state) {
+            self.apply_action_intent(intent);
+        }
+        self.ui_rects.extend(
+            self.actions_panel
+                .rects
+                .iter()
+                .map(|(key, value)| (key.clone(), *value)),
+        );
         if self.playing && !self.busy {
             let now = ctx.input(|i| i.time);
             if now >= self.next_frame {
