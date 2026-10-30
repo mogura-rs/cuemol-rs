@@ -68,7 +68,7 @@ impl GuiApplication {
             let mut view = camera.to_qsys_camera("__current");
             self.inspector
                 .inspect(&mut self.state, &mut view, target, self.snapshot_revision);
-            for (tool, args) in self.inspector.panel(ctx) {
+            for (tool, args) in self.inspector.panel(ctx, &self.state) {
                 self.tritium_command(tool, args, camera);
             }
         }
@@ -325,6 +325,9 @@ impl GuiApplication {
                     self.push_undo_snapshot(undo);
                 }
                 *camera = CameraController::from_qsys_camera(&view);
+                if cuemol_command::selection::remember_property_edit(&mut self.state, name, &args) {
+                    self.selection_history = self.state.selection_history();
+                }
                 self.sync_active_scene_properties();
                 self.rebuild_snapshot();
             }

@@ -535,6 +535,45 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             wait_for(lambda: label_font() == 'Ubuntu')
             pyautogui.hotkey(primary, 'shift', 'z')
             wait_for(lambda: label_font() == 'monospace')
+            properties = call('list_node_props', {'nodeType': 'renderer', 'nodeId': labels_id})['properties']
+            if not next(row for row in properties if row['key'] == 'sel')['readonly']:
+                raise RuntimeError('The label renderer exposes an editable unsupported selection')
+            script(f'var obj=cuemol.getObject(JSON.parse(scene.getObjectTreeJSON())[0].ID);'
+                   f'obj.destroyRenderer({labels_id});'
+                   'var builder=obj.createRenderer("tube");builder.name="Selection builder";')
+            builder_id = next(renderer['id'] for renderer in call('get_scene_state')['objects'][0]['renderers']
+                              if renderer['name'] == 'Selection builder')
+            pyautogui.click(x + 175, y + 188)
+            time.sleep(0.2)
+            inspector_filter('sel')
+            def renderer_selection():
+                return call('get_prop', {'path': f'#{builder_id}.sel'})['value']
+            initial_selection = renderer_selection()
+            call('clear_undo')
+            pyautogui.click(x + width - 47, y + 225)
+            time.sleep(0.2)
+            capture('inspector-selection-open.png')
+            pyautogui.click(x + width - 215, y + 272)
+            time.sleep(0.2)
+            pyautogui.click(x + width - 280, y + 309)
+            time.sleep(0.2)
+            capture('inspector-selection-keywords.png')
+            pyautogui.click(x + width - 280, y + 415)
+            time.sleep(0.2)
+            pyautogui.click(x + width - 250, y + 335)
+            pyautogui.write('A')
+            pyautogui.click(x + width - 275, y + 362)
+            time.sleep(0.2)
+            capture('inspector-selection-draft.png')
+            if renderer_selection() != initial_selection:
+                raise RuntimeError('A selection-builder draft changed the renderer before commit')
+            pyautogui.click(x + width * 0.5, y + height * 0.5)
+            wait_for(lambda: renderer_selection() == "chain 'A'")
+            capture('inspector-selection-applied.png')
+            pyautogui.hotkey(primary, 'z')
+            wait_for(lambda: renderer_selection() == initial_selection)
+            pyautogui.hotkey(primary, 'shift', 'z')
+            wait_for(lambda: renderer_selection() == "chain 'A'")
             report.update(ok=True, window=bounds,
                           work_area=[available_x, available_y, available_width, available_height],
                           window_contained=True, atoms=state['objects'][0]['atoms'],
@@ -557,6 +596,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                           inspector_derived_axes=True,
                           inspector_optional_value=True,
                           inspector_font_choices=True,
+                          inspector_selection_builder=True,
                           font_pixels=styled.histogram()[255])
             print(json.dumps(report), flush=True)
         except BaseException as error:

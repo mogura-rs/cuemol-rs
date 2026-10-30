@@ -52,6 +52,17 @@ struct NumericEdit {
     optional_value: Option<f64>,
 }
 
+#[derive(Debug)]
+struct SelectionDraft {
+    key: String,
+    original: String,
+    value: String,
+    anchor: egui::Rect,
+    layer: egui::LayerId,
+    fresh: bool,
+    close_requested: bool,
+}
+
 #[derive(Debug, Default)]
 pub struct Inspector {
     pub visible: bool,
@@ -75,6 +86,9 @@ pub struct Inspector {
     font_generation: u32,
     font_listener: bool,
     font_previews: fonts::FontPreviews,
+    selection_draft: Option<SelectionDraft>,
+    selection_builder: crate::selection::Builder,
+    selection_operands: BTreeMap<String, cuemol_command::selection::Draft>,
 }
 
 impl Inspector {
@@ -87,6 +101,8 @@ impl Inspector {
         self.numeric_edits.clear();
         self.local_toggles.clear();
         self.color_draft = None;
+        self.selection_draft = None;
+        self.selection_operands.clear();
     }
 
     pub fn inspect(
@@ -143,6 +159,9 @@ impl Inspector {
         if target != self.target || context != self.context {
             self.numeric_edits.clear();
             self.local_toggles.clear();
+            self.selection_draft = None;
+            self.selection_builder = crate::selection::Builder::default();
+            self.selection_operands.clear();
         }
         if target != self.target {
             self.visible = target.is_some();
@@ -312,6 +331,13 @@ impl Inspector {
                     .iter()
                     .map(|row| (row.key.clone(), row.value.clone()))
                     .collect();
+                if self
+                    .selection_draft
+                    .as_ref()
+                    .is_some_and(|draft| self.committed.get(&draft.key) != Some(&draft.original))
+                {
+                    self.selection_draft = None;
+                }
                 for row in &mut self.rows {
                     if let Some((previous, draft)) = drafts.get(&row.key) {
                         if previous.as_ref() == Some(&row.value) {
@@ -328,7 +354,11 @@ impl Inspector {
         }
     }
 
-    pub fn panel(&mut self, ctx: &egui::Context) -> Vec<(&'static str, Value)> {
+    pub fn panel(
+        &mut self,
+        ctx: &egui::Context,
+        state: &DesktopAppState,
+    ) -> Vec<(&'static str, Value)> {
         self.rects.clear();
         let mut changes = Vec::new();
         if !self.visible || self.target.is_none() {
@@ -352,7 +382,7 @@ impl Inspector {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let close = ui.small_button("×").on_hover_text("Close Inspector");
                     record(&mut self.rects, "Close Inspector", close.rect);
-                    if close.clicked() { self.visible = false; }
+                    if close.clicked() { self.visible = false; self.selection_draft = None; }
                 });
             });
             ui.separator();
@@ -402,7 +432,13 @@ impl Inspector {
                                     ui.add_enabled_ui(editable && enabled, |ui| {
                                         ui.allocate_ui_with_layout(egui::vec2(field_width, 24.), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                                             ui.set_width(field_width);
-                                            changed = edit_field(ui, row, &mut self.rects, &mut self.color_draft, &mut self.numeric_edits, &mut self.font_previews, structured);
+                                            changed = edit_field(ui, row, &self.committed, FieldEditors {
+                                                rects: &mut self.rects,
+                                                color: &mut self.color_draft,
+                                                numeric_edits: &mut self.numeric_edits,
+                                                font_previews: &mut self.font_previews,
+                                                selection: &mut self.selection_draft,
+                                            }, structured);
                                         });
                                     });
                                     if row.has_default && !row.readonly {
@@ -435,6 +471,108 @@ impl Inspector {
                 }
             });
         });
+        if let Some(mut draft) = self.selection_draft.take() {
+            if draft.fresh {
+                self.selection_builder.opened();
+                self.selection_builder.draft = self
+                    .selection_operands
+                    .get(&draft.key)
+                    .cloned()
+                    .unwrap_or_default();
+                draft.fresh = false;
+            }
+            let molecule =
+                cuemol_command::selection::property_molecule(state, &target.kind, target.id);
+            let mut open = !draft.close_requested;
+            draft.close_requested = false;
+            let mut quick = false;
+            let cancelled = ctx.input(|input| input.key_pressed(egui::Key::Escape));
+            let room = ctx.content_rect();
+            let close_behavior = if egui::Popup::is_any_open(ctx)
+                || ctx.input(|input| {
+                    input
+                        .pointer
+                        .interact_pos()
+                        .is_some_and(|pos| draft.anchor.contains(pos))
+                }) {
+                egui::PopupCloseBehavior::IgnoreClicks
+            } else {
+                egui::PopupCloseBehavior::CloseOnClickOutside
+            };
+            let popup = egui::Popup::new(
+                egui::Id::new("inspector-selection-picker"),
+                ctx.clone(),
+                draft.anchor,
+                draft.layer,
+            )
+            .open_bool(&mut open)
+            .close_behavior(close_behavior)
+            .width(300.0_f32.min(room.width() - 24.))
+            .show(|ui| {
+                ui.set_max_width(300.0_f32.min(room.width() - 24.));
+                let height = (room.bottom() - draft.anchor.bottom())
+                    .max(draft.anchor.top() - room.top())
+                    - 24.;
+                ui.set_max_height(height.max(100.));
+                egui::ScrollArea::vertical()
+                    .max_height(height.max(100.))
+                    .show(ui, |ui| {
+                        ui.monospace(&draft.value);
+                        if let Some(action) = self.selection_builder.show(
+                            ui,
+                            state,
+                            molecule,
+                            self.revision,
+                            &draft.value,
+                        ) {
+                            draft.value = action.expression;
+                            quick = action.quick;
+                        }
+                    });
+            });
+            if let Some(popup) = popup {
+                record(&mut self.rects, "Selection popup", popup.response.rect);
+            }
+            self.rects.extend(self.selection_builder.rects.clone());
+            self.selection_operands
+                .insert(draft.key.clone(), self.selection_builder.draft.clone());
+            if let Some(row) = self.rows.iter_mut().find(|row| row.key == draft.key) {
+                row.value = if cancelled {
+                    draft.original.clone()
+                } else {
+                    draft.value.clone()
+                };
+                if cancelled {
+                    open = false;
+                }
+                if quick {
+                    open = false;
+                }
+                if !open && !cancelled && draft.value != draft.original {
+                    match state
+                        .active_scene()
+                        .map(|scene| state.parse_scene_selector(scene, &draft.value))
+                    {
+                        Some(Ok(_)) => changes.push(property_change(
+                            &target,
+                            row,
+                            &self.committed,
+                            self.tab == 0,
+                        )),
+                        Some(Err(error)) => {
+                            self.error = error.to_string();
+                            open = true;
+                        }
+                        None => {
+                            self.error = "No active scene".into();
+                        }
+                    }
+                }
+                if open {
+                    self.selection_draft = Some(draft);
+                }
+            }
+        }
         if let Some(draft) = &mut self.color_draft {
             let mut open = true;
             let mut apply = false;
@@ -586,15 +724,28 @@ fn record(rects: &mut BTreeMap<String, [f32; 4]>, name: &str, rect: egui::Rect) 
     );
 }
 
+struct FieldEditors<'a> {
+    rects: &'a mut BTreeMap<String, [f32; 4]>,
+    color: &'a mut Option<ColorDraft>,
+    numeric_edits: &'a mut BTreeMap<String, NumericEdit>,
+    font_previews: &'a mut fonts::FontPreviews,
+    selection: &'a mut Option<SelectionDraft>,
+}
+
 fn edit_field(
     ui: &mut egui::Ui,
     row: &mut Property,
-    rects: &mut BTreeMap<String, [f32; 4]>,
-    color: &mut Option<ColorDraft>,
-    numeric_edits: &mut BTreeMap<String, NumericEdit>,
-    font_previews: &mut fonts::FontPreviews,
+    committed: &BTreeMap<String, String>,
+    editors: FieldEditors<'_>,
     structured: bool,
 ) -> bool {
+    let FieldEditors {
+        rects,
+        color,
+        numeric_edits,
+        font_previews,
+        selection,
+    } = editors;
     let schema = row.schema.as_ref().filter(|_| structured);
     let value_text = if structured {
         row.structured_value.as_mut().unwrap_or(&mut row.value)
@@ -606,7 +757,56 @@ fn edit_field(
         .as_deref()
         .filter(|_| structured)
         .unwrap_or(&row.allowed);
-    let (response, changed) = if !choices.is_empty() {
+    let (response, changed) = if structured && row.kind == "selection" {
+        let width = (ui.available_width() - 26.).max(24.);
+        let response = ui.add_sized(
+            [width, 22.],
+            egui::TextEdit::singleline(value_text).hint_text("* (all atoms)"),
+        );
+        let caret = crate::shell::icon_button(
+            ui,
+            crate::shell::Icon::Down,
+            "Build selection",
+            false,
+            egui::vec2(22., 22.),
+        );
+        record(rects, &format!("Build {}", row.key), caret.rect);
+        if let Some(draft) = selection.as_mut().filter(|draft| draft.key == row.key) {
+            draft.anchor = response.rect.union(caret.rect);
+            draft.layer = caret.layer_id;
+        }
+        if caret.clicked() {
+            if let Some(draft) = selection.as_mut().filter(|draft| draft.key == row.key) {
+                draft.close_requested = true;
+            } else {
+                *selection = Some(SelectionDraft {
+                    key: row.key.clone(),
+                    original: value_text.clone(),
+                    value: value_text.clone(),
+                    anchor: response.rect.union(caret.rect),
+                    layer: caret.layer_id,
+                    fresh: true,
+                    close_requested: false,
+                });
+            }
+        }
+        if response.changed() {
+            if let Some(draft) = selection.as_mut().filter(|draft| draft.key == row.key) {
+                draft.value.clone_from(value_text);
+            }
+        }
+        let mut changed = (response.lost_focus()
+            || response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)))
+            && selection.as_ref().is_none_or(|draft| draft.key != row.key);
+        if response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+            if let Some(original) = committed.get(&row.key) {
+                value_text.clone_from(original);
+            }
+            response.surrender_focus();
+            changed = false;
+        }
+        (response, changed)
+    } else if !choices.is_empty() {
         let mut changed = false;
         let label = |value: &str| {
             row.schema
@@ -797,6 +997,101 @@ mod tests {
     use super::*;
 
     #[test]
+    fn selection_popup_keeps_nested_choices_open_for_editing() {
+        let mut state = DesktopAppState::new();
+        state.new_scene("selection", true);
+        state.open_bytes("selection.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let object = state.active_object_summaries()[0].uid;
+        let mut inspector = Inspector::default();
+        inspector.inspect(
+            &mut state,
+            &mut Camera::new(),
+            Some(InspectorTarget {
+                kind: "object".into(),
+                id: Some(object.get()),
+            }),
+            0,
+        );
+        inspector.filter = "sel".into();
+        let ctx = egui::Context::default();
+        let mut frame = 0;
+        let mut step = |inspector: &mut Inspector, events: Vec<egui::Event>| {
+            frame += 1;
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1280., 900.),
+                    )),
+                    time: Some(frame as f64 / 60.),
+                    events,
+                    focused: true,
+                    ..Default::default()
+                },
+                |ctx| {
+                    assert!(inspector.panel(ctx, &state).is_empty());
+                },
+            );
+        };
+        step(&mut inspector, vec![]);
+        step(&mut inspector, vec![]);
+        for key in [
+            "Build sel",
+            "Selection tab Term",
+            "Selection keyword",
+            "Selection keyword chain",
+            "sel",
+        ] {
+            let [x, y, w, h] = inspector.rects[key];
+            let pos = egui::pos2(x + w / 2., y + h / 2.);
+            for pressed in [true, false] {
+                step(
+                    &mut inspector,
+                    vec![
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::default(),
+                        },
+                    ],
+                );
+            }
+            step(&mut inspector, vec![]);
+            step(&mut inspector, vec![]);
+            assert!(inspector.selection_draft.is_some(), "closed after {key}");
+        }
+        assert_eq!(inspector.selection_builder.draft.keyword, "chain");
+        assert!(inspector.rects.contains_key("Selection value"));
+        let [x, y, w, h] = inspector.rects["sel"];
+        let pos = egui::pos2(x + w / 2., y + h / 2.);
+        step(
+            &mut inspector,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        step(&mut inspector, vec![]);
+        assert!(
+            inspector.selection_draft.is_some(),
+            "closed after same-frame click"
+        );
+    }
+
+    #[test]
     fn map_center_reset_tracks_both_explicit_flags() {
         let mut state = DesktopAppState::new();
         state.open_bytes("map.dx", b"object 1 class gridpositions counts 2 2 2\norigin 0 0 0\ndelta 1 0 0\ndelta 0 1 0\ndelta 0 0 1\nobject 2 class gridconnections counts 2 2 2\nobject 3 class array type double rank 0 items 8 data follows\n0 1 2 3 4 5 6 7\n").unwrap();
@@ -866,7 +1161,7 @@ mod tests {
         for tab in 0..2 {
             inspector.tab = tab;
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                assert!(inspector.panel(ctx).is_empty());
+                assert!(inspector.panel(ctx, &state).is_empty());
             });
         }
         assert!(inspector.rows.is_empty());

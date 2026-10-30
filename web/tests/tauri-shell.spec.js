@@ -119,6 +119,21 @@ async function openShell(page, storage = {}, options = {}) {
       }
       if (command === 'console_complete') return [{display: 'Probe', replacement: 'select Probe'}];
       if (command === 'inspector_request') {
+        if (args.tool === 'selection_info') {
+          const request=args.args;
+          if(request.action==='context') return {current:'name O1',scene:['carbon'],global:['protein'],history:['name C1'],keywords:[
+            {key:'hierarchical',label:'hier',kind:'hierarchical'},
+            {key:'name',label:'name',kind:'nameList',candidates:'aname'},
+          ]};
+          if(request.action==='values') return ['C1','O1'];
+          if(request.action==='compose') return {expression:request.draft.fields.value ? `name ${request.draft.fields.value}` : null};
+          if(request.action==='evaluate') {
+            const result={valid:request.expression!=='chain (',count:1,error:request.expression==='chain ('?'Invalid selection':null};
+            if(window.__delaySelection) {window.__delaySelection=false;return new Promise(resolve=>{window.__releaseSelection=()=>resolve(result);});}
+            return result;
+          }
+          throw new Error(`Unexpected selection action: ${request.action}`);
+        }
         if (['scene','view'].includes(args.args.nodeType)) {
           const isScene=args.args.nodeType==='scene';
           const values=isScene ? sceneValues : {name:snapshot.views[0].name,uid:'2',zoom:String(viewport.zoom)};
@@ -143,8 +158,9 @@ async function openShell(page, storage = {}, options = {}) {
         const defaults = {alpha:'1', visible:'true', detail:'4', egtype:'none',...(options.inspectorPages ? {ring:'false',thickness:'0.2','section.width':'1','section.tuber':'0.5',helix_ribbon:'false',loopsize2:'-1',autoupdate:'true',dragupdate:'false'} : {})};
         const values = {name:target.name, visible:String(target.visible), uid:String(target.uid),
           ...(target === renderer ? {...inspectorValues,alpha:String(renderer.alpha), detail:String(renderer.detail), egtype:renderer.edgeType, style:renderer.style} : {})};
+        if(options.selectionPicker) values.sel=target.selection;
         const rows = () => Object.entries(values).map(([key,value]) => ({key,value,
-          type: ['visible','ring','helix_ribbon','autoupdate','dragupdate'].includes(key) ? 'boolean' : ['alpha','thickness','section.width','section.tuber','loopsize2'].includes(key) || key.startsWith('stipple') ? 'real' : key === 'detail' || key === 'uid' ? 'integer' : key === 'egtype' ? 'enum' : 'string',
+          type: key==='sel' ? 'selection' : ['visible','ring','helix_ribbon','autoupdate','dragupdate'].includes(key) ? 'boolean' : ['alpha','thickness','section.width','section.tuber','loopsize2'].includes(key) || key.startsWith('stipple') ? 'real' : key === 'detail' || key === 'uid' ? 'integer' : key === 'egtype' ? 'enum' : 'string',
           category: ['name','visible'].includes(key) ? 'Common' : key === 'uid' ? 'Identity' : 'Appearance',
           readonly: ['uid','style'].includes(key), hasdefault:Object.hasOwn(defaults,key),
           isdefault:value === defaults[key], defaultValue:defaults[key], allowed:key === 'egtype' ? ['none','edges','silhouette'] : undefined,
@@ -173,12 +189,13 @@ async function openShell(page, storage = {}, options = {}) {
               {label:'Automatic',patch:{autoupdate:'true',dragupdate:'false'}},
               {label:'Automatic (drag)',patch:{autoupdate:'true',dragupdate:'true'}},
             ]},
-          ]}] : [];
+          ]}] : options.selectionPicker ? [{title:'Basic settings',expanded:true,rows:[{key:'sel',label:'Selection'}]}] : [];
           return {properties,sections};
         }
         const set = (key,value) => {
           values[key]=value;
           if(key==='name') target.name=value;
+          if(key==='sel') target.selection=value;
           if(key==='visible') target.visible=value==='true';
           if(key==='alpha') renderer.alpha=Number(value);
           if(key==='detail') renderer.detail=Number(value);
@@ -646,6 +663,52 @@ test('Tauri inspector uses typed fields and rejects late results after changing 
   await expect(page.getByLabel('Inspected name')).toHaveValue('Atoms');
   await page.evaluate(()=>window.__releaseInspector());
   await expect(page.getByLabel('Inspected name')).toHaveValue('Atoms');
+  expect(errors).toEqual([]);
+});
+
+test('Tauri selection picker commits on close, cancels drafts, and ignores late validation', async ({page}) => {
+  const errors=await openShell(page,{}, {selectionPicker:true});
+  await page.locator('.tree-renderer').filter({hasText:'Atoms'}).click();
+  const input=page.getByLabel('Inspected sel',{exact:true});
+  const popup=page.getByRole('dialog',{name:'Build selection',exact:true});
+  const writes=()=>page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='inspector_request'&&call.args.tool==='set_node_prop'&&call.args.args.prop==='sel'));
+  await page.getByRole('button',{name:'Build sel',exact:true}).click();
+  await page.getByRole('button',{name:'Selection tab Term',exact:true}).click();
+  await page.getByLabel('Selection keyword',{exact:true}).selectOption('name');
+  await page.getByLabel('Selection value',{exact:true}).fill('C1');
+  await page.getByRole('button',{name:'Selection Set',exact:true}).click();
+  await expect(input).toHaveValue('name C1');
+  expect(await writes()).toHaveLength(0);
+  await page.keyboard.press('Escape');
+  await expect(popup).not.toBeVisible();
+  await expect(input).toHaveValue('*');
+  expect(await writes()).toHaveLength(0);
+  await page.getByRole('button',{name:'Build sel',exact:true}).click();
+  await page.getByRole('button',{name:'Selection tab Term',exact:true}).click();
+  await expect(page.getByLabel('Selection keyword',{exact:true})).toHaveValue('name');
+  await expect(page.getByLabel('Selection value',{exact:true})).toHaveValue('C1');
+  await page.getByRole('button',{name:'Selection tab Named',exact:true}).click();
+  await page.getByRole('button',{name:'Selection choice carbon',exact:true}).click();
+  await expect(popup).not.toBeVisible();
+  await expect(input).toHaveValue('carbon');
+  expect((await writes()).map(call=>call.args.args.value)).toEqual(['carbon']);
+  await page.getByRole('button',{name:'Build sel',exact:true}).click();
+  await input.fill('chain (');
+  await page.getByRole('button',{name:'Build sel',exact:true}).click();
+  await expect(popup).toBeVisible();
+  await expect(popup).toContainText('Invalid selection');
+  expect(await writes()).toHaveLength(1);
+  await page.keyboard.press('Escape');
+  await expect(input).toHaveValue('carbon');
+  await page.getByRole('button',{name:'Build sel',exact:true}).click();
+  await page.getByRole('button',{name:'Selection tab History',exact:true}).click();
+  await page.evaluate(()=>{window.__delaySelection=true;});
+  await page.getByRole('button',{name:'Selection choice name C1',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>typeof window.__releaseSelection)).toBe('function');
+  await page.locator('#scene-tree button').filter({hasText:'Probe'}).first().click();
+  await page.evaluate(()=>window.__releaseSelection());
+  await expect(popup).not.toBeVisible();
+  expect(await writes()).toHaveLength(1);
   expect(errors).toEqual([]);
 });
 

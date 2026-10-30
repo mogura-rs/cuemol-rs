@@ -57,7 +57,8 @@ use winit::window::{Window, WindowId};
 use cuemol_desktop_core::effects::{ViewportEffects, ViewportOptions};
 use cuemol_desktop_core::viewport::*;
 const MAX_RECENT_PATHS: usize = 10;
-const MAX_SELECTION_HISTORY: usize = 10;
+#[cfg(test)]
+const MAX_SELECTION_HISTORY: usize = cuemol_desktop_core::MAX_SELECTION_HISTORY;
 const ANIMATION_NAME_COLUMN_DEFAULT_WIDTH: f32 = 110.0;
 const ANIMATION_TIME_COLUMN_DEFAULT_WIDTH: f32 = 52.0;
 const ANIMATION_NAME_COLUMN_MIN_WIDTH: f32 = 60.0;
@@ -4894,17 +4895,7 @@ fn load_recent_paths(state: &DesktopAppState) -> Vec<PathBuf> {
 }
 
 fn load_selection_history(state: &DesktopAppState) -> Vec<String> {
-    let length = state
-        .config_value("selection_history:length")
-        .parse::<usize>()
-        .unwrap_or(0)
-        .min(MAX_SELECTION_HISTORY);
-    (0..length)
-        .filter_map(|index| {
-            let selection = state.config_value(&format!("selection_history:{index}"));
-            (!selection.trim().is_empty()).then_some(selection)
-        })
-        .collect()
+    state.selection_history()
 }
 
 impl GuiApplication {
@@ -10989,30 +10980,8 @@ impl GuiApplication {
     }
 
     fn remember_selection_history(&mut self, selection: &str) {
-        let selection = selection.trim();
-        if selection.is_empty() {
-            return;
-        }
-        self.selection_history.retain(|entry| entry != selection);
-        self.selection_history.insert(0, selection.to_string());
-        self.selection_history.truncate(MAX_SELECTION_HISTORY);
-        self.persist_selection_history();
-    }
-
-    fn persist_selection_history(&mut self) {
-        self.state.put_config_value(
-            "selection_history:length",
-            self.selection_history.len().to_string(),
-        );
-        for index in 0..MAX_SELECTION_HISTORY {
-            self.state.put_config_value(
-                &format!("selection_history:{index}"),
-                self.selection_history
-                    .get(index)
-                    .cloned()
-                    .unwrap_or_default(),
-            );
-        }
+        self.state.remember_selection(selection);
+        self.selection_history = self.state.selection_history();
     }
 
     /// Coloring section: target selector, coloring menu, and per-type editing deck.
@@ -29328,7 +29297,10 @@ impl GuiApplication {
     }
 
     fn restore_gui_undo_state(&mut self, snapshot: GuiUndoSnapshot) {
+        let selection_history = self.state.selection_history();
         self.state = snapshot.state;
+        self.state.restore_selection_history(&selection_history);
+        self.selection_history = selection_history;
         self.animation_playing = false;
         self.animation_elapsed = 0.0;
         self.animation_start_camera = None;
@@ -34520,15 +34492,15 @@ mod tests {
     #[test]
     fn native_selection_history_persists_the_reference_order_and_limit() {
         let mut app = GuiApplication::new();
-        for index in 0..12 {
+        for index in 0..102 {
             app.remember_selection_history(&format!("chain {index}"));
         }
         app.remember_selection_history("chain 5");
 
         assert_eq!(app.selection_history.len(), MAX_SELECTION_HISTORY);
         assert_eq!(app.selection_history[0], "chain 5");
-        assert_eq!(app.selection_history[1], "chain 11");
-        assert_eq!(app.state.config_value("selection_history:length"), "10");
+        assert_eq!(app.selection_history[1], "chain 101");
+        assert_eq!(app.state.config_value("selection_history:length"), "100");
         assert_eq!(load_selection_history(&app.state), app.selection_history);
     }
 

@@ -318,6 +318,13 @@ impl App {
         {
             let _ = state.load_config_text(&config);
         }
+        if let Some(history) = storage
+            .as_ref()
+            .and_then(|storage| storage.get_item("cuemol.selection.history").ok().flatten())
+            .and_then(|text| serde_json::from_str::<Vec<String>>(&text).ok())
+        {
+            state.restore_selection_history(&history);
+        }
         if let Some(storage) = &storage {
             for i in 0..storage.length().unwrap_or(0) {
                 let Some(key) = storage.key(i).ok().flatten() else {
@@ -491,10 +498,21 @@ impl App {
             selected: self.selected,
         }
     }
+    fn persist_selection_history(&self) {
+        if let Some(storage) =
+            web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+        {
+            if let Ok(history) = serde_json::to_string(&self.state.selection_history()) {
+                let _ = storage.set_item("cuemol.selection.history", &history);
+            }
+        }
+    }
     fn restore_history(&mut self, snapshot: HistoryEntry) {
         self.navigation.cancel();
+        let selection_history = self.state.selection_history();
         self.selection = snapshot.selection;
         self.state = snapshot.state;
+        self.state.restore_selection_history(&selection_history);
         self.camera = snapshot.camera;
         self.trajectories = snapshot.trajectories;
         self.frame = snapshot.frame;
@@ -611,6 +629,9 @@ impl App {
                 }
                 self.message = serde_json::to_string_pretty(&value).unwrap();
                 self.dirty |= mutating && changed;
+                if cuemol_command::selection::remember_property_edit(&mut self.state, name, &args) {
+                    self.persist_selection_history();
+                }
             }
             Err(e) => {
                 if let Some(before) = before {

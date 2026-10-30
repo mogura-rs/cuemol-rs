@@ -51,6 +51,99 @@ async function number(page,key,value) {
   await page.keyboard.press('Enter');
 }
 
+test('Selection picker keeps its text field editable and rejects invalid drafts', async ({page}, testInfo) => {
+  const {id} = await setup(page);
+  const original = await prop(page,id,'sel');
+  await click(page,'Properties tab');
+  await filter(page,'sel');
+  await click(page,'Build sel');
+  await expect.poll(async()=>(await status(page)).ui.inspector['Selection popup']?.length).toBe(4);
+  await click(page,'sel');
+  await expect.poll(async()=>(await status(page)).ui.inspector['Selection popup']?.length).toBe(4);
+  await page.keyboard.press('ControlOrMeta+a');
+  await page.keyboard.insertText('chain (');
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await click(page,'Filter properties');
+  await expect.poll(async()=>(await status(page)).ui.inspector['Selection popup']?.length).toBe(4);
+  expect(await prop(page,id,'sel')).toBe(original);
+  await page.keyboard.press('Escape');
+  await expect.poll(async()=>(await status(page)).ui.inspector['Selection popup']).toBeUndefined();
+  await page.screenshot({path:testInfo.outputPath('selection-cancelled.png')});
+});
+
+test('Selection picker composes drafts without mutating the molecule and keeps history across Undo', async ({page}, testInfo) => {
+  const {object,id} = await setup(page);
+  await command(page,'set_mol_selection',{objId:object.id,selection:'name O1'});
+  await command(page,'define_selection',{name:'carbon',selection:'name C1'});
+  const original = await prop(page,id,'sel');
+  await command(page,'clear_undo');
+  await click(page,'Properties tab');
+  await filter(page,'sel');
+  await click(page,'Build sel');
+  await expect.poll(async()=>(await status(page)).ui.inspector['Selection choice carbon']?.length).toBe(4);
+  await click(page,'Selection tab Term');
+  await click(page,'Selection keyword');
+  const [kx,ky,kw,kh]=(await status(page)).ui.inspector['Selection keyword'];
+  await page.mouse.move(kx+kw/2,ky+kh+80);
+  await page.mouse.wheel(0,160);
+  await expect.poll(async()=>(await status(page)).ui.inspector['Selection keyword name']?.length).toBe(4);
+  await page.screenshot({path:testInfo.outputPath('selection-keywords.png')});
+  await click(page,'Selection keyword name');
+  await click(page,'Selection value');
+  await page.keyboard.insertText('C1');
+  await click(page,'Selection Set');
+  expect(await prop(page,id,'sel')).toBe(original);
+  expect(await prop(page,object.id,'sel')).toBe('name O1');
+  await page.keyboard.press('Escape');
+  await expect.poll(async()=>(await status(page)).ui.inspector['Selection popup']).toBeUndefined();
+  expect(await prop(page,id,'sel')).toBe(original);
+  await click(page,'Build sel');
+  await click(page,'Selection tab Term');
+  await click(page,'Selection Set');
+  await click(page,'Filter properties');
+  await expect.poll(()=>prop(page,id,'sel')).toBe('name C1');
+  expect(await prop(page,object.id,'sel')).toBe('name O1');
+  await command(page,'undo');
+  expect(await prop(page,id,'sel')).toBe(original);
+  await click(page,'Build sel');
+  await click(page,'Selection tab History');
+  await click(page,'Selection choice name C1');
+  await expect.poll(()=>prop(page,id,'sel')).toBe('name C1');
+  await expect.poll(async()=>(await status(page)).ui.inspector['Selection popup']).toBeUndefined();
+  await command(page,'undo');
+  expect(await prop(page,id,'sel')).toBe(original);
+  expect(await prop(page,object.id,'sel')).toBe('name O1');
+  expect((await command(page,'count_selection',{objId:object.id,selection:'carbon'})).count).toBe(1);
+  await click(page,'Build sel');
+  await click(page,'Selection choice carbon');
+  await expect.poll(()=>prop(page,id,'sel')).toBe('carbon');
+  expect(await prop(page,object.id,'sel')).toBe('name O1');
+  await click(page,'Build sel');
+  await click(page,'sel');
+  await page.keyboard.press('ControlOrMeta+a');
+  await page.keyboard.insertText('chain (');
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await click(page,'Filter properties');
+  await expect.poll(async()=>(await status(page)).ui.inspector['Selection popup']?.length).toBe(4);
+  expect(await prop(page,id,'sel')).toBe('carbon');
+  await page.keyboard.press('Escape');
+  await expect.poll(async()=>(await status(page)).ui.inspector['Selection popup']).toBeUndefined();
+  await click(page,'sel');
+  await page.keyboard.press('ControlOrMeta+a');
+  await page.keyboard.insertText('name C1');
+  await page.keyboard.press('Escape');
+  await click(page,'Filter properties');
+  expect(await prop(page,id,'sel')).toBe('carbon');
+  await page.screenshot({path:testInfo.outputPath('selection-picker.png')});
+  const reloaded = await setup(page);
+  await click(page,'Properties tab');
+  await filter(page,'sel');
+  await click(page,'Build sel');
+  await click(page,'Selection tab History');
+  await click(page,'Selection choice name C1');
+  await expect.poll(()=>prop(page,reloaded.id,'sel')).toBe('name C1');
+});
+
 for (const fontAccess of ['resolved', 'denied']) {
   test(`Font picker preserves scene fonts and handles ${fontAccess} local enumeration`, async ({page}, testInfo) => {
     await page.addInitScript(access => {

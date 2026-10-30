@@ -739,7 +739,7 @@ impl StyleManager {
             .is_some_and(|set| set.remove_str_data(category, key))
     }
 
-    pub fn str_data_defs_json(&self, category: &str, scope_id: u64) -> String {
+    pub fn str_data_names_in_scope(&self, category: &str, scope_id: u64) -> Vec<String> {
         let prefix = format!("string\t{category}\t");
         let names = self
             .scopes
@@ -747,8 +747,18 @@ impl StyleManager {
             .into_iter()
             .flatten()
             .flat_map(|set| set.strings.keys())
-            .filter_map(|key| key.strip_prefix(&prefix));
-        json_names(names)
+            .filter_map(|key| key.strip_prefix(&prefix))
+            .map(str::to_string)
+            .collect::<std::collections::BTreeSet<_>>();
+        names.into_iter().collect()
+    }
+
+    pub fn str_data_defs_json(&self, category: &str, scope_id: u64) -> String {
+        json_names(
+            self.str_data_names_in_scope(category, scope_id)
+                .iter()
+                .map(String::as_str),
+        )
     }
 
     pub fn get_str_data_defs_json(&self, category: &str, scope_id: u64) -> String {

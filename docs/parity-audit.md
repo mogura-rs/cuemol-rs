@@ -30,7 +30,7 @@ speedup from a single optimized stage or compare timings from different hosts.
 | Feature family | Required comparison | Current audit status |
 | --- | --- | --- |
 | Shell | Activities, menus, toolbar, tab order, docks, compact windows, themes and keyboard access | Application shortcuts, browser tab closing and menu access, shared history dropdowns, Tauri palette folding and tree/text clipboard routing repaired and checked; browser recent files and remaining pane controls are still under comparison |
-| Explorer and Inspector | Object/renderer/group hierarchy, selection, visibility, locking, drag/drop, context menus and property editors | Typed fields, nested properties, defaults/resets, group writes, Scene/View targets, quality presets, renderer pages and font choices repaired and checked below; selection pickers, remaining targets and live previews are under comparison |
+| Explorer and Inspector | Object/renderer/group hierarchy, selection, visibility, locking, drag/drop, context menus and property editors | Typed fields, nested properties, defaults/resets, group writes, Scene/View targets, quality presets, renderer pages, font choices and selection pickers repaired and checked below; remaining targets and live previews are under comparison |
 | Color and styles | Coloring modes, paint entries, palettes, property inheritance, style creation/apply/edit/save | Previous focused checks exist; complete editor comparison pending |
 | Console | CueMol/PyMOL dialects, command arguments, completion, history, multiline input, IME and transaction behavior | Shared CueMol/PyMOL interpreters, completion, native QAX logging/replay and cancellable execution implemented; focused shared, browser and OS-input checks passed; affected regression checks, CI and Pages passed at `99b7c16`; public review repairs and release delivery are in progress |
 | Actions | History rows, operation inspection, QAX export, bundled/user macros and reusable actions | History selection, operation inspection, QAX export and bundled/user macro libraries are implemented in native, WASM and Tauri; CI, Pages and the macOS window check passed at `488ce9c`; review repairs passed affected checks and were published at `53100c5` |
@@ -539,6 +539,50 @@ uv run --no-project python scripts/benchmark-inspector.py \
 
 Pass `--baseline` with an earlier report to require unchanged canonical output.
 Reports include fixture/binary hashes, cold/repeated timings and per-process RSS.
+
+## Selection picker comparison and repairs
+
+Structured Inspector selection fields now use the reference's Named, History,
+Term and Mod tabs. Named/history picks commit immediately; term and modifier
+operations only update the draft until the picker closes. Escape restores the
+original field. The inspected molecule's own selection supplies read-only
+context and is never replaced by a renderer-property draft. Scene and global
+named definitions remain separate, and nested keyword menus remain open while
+choosing an operand. Both the native/browser picker and the Tauri adapter use
+the shared expression builder, validation and candidate queries.
+
+The builder preserves case-sensitive chain names, insertion-code ranges and
+parentheses around combined expressions. Candidate queries run only for an
+opened field; atom-name and element suggestions sample at most 40 residues,
+matching the reference. Count requests are debounced and retained until the
+expression or scene changes, rather than repeated every frame. This bounds
+repeated UI work but does not establish a speedup for complex expressions.
+
+Inspector edits and native selection commands share a 100-entry recent-history
+list. Empty selections, `*` and `none` are omitted, and reusing an expression
+moves it to the front. Native settings and browser storage retain the list;
+scene Undo/Redo preserves it. Operand drafts survive closing and reopening the
+same field. Browser tests also reload the application before selecting a saved
+history entry. Tauri rejects late query results after the inspected node changes.
+
+The audit found two inconsistencies beyond the missing picker. The parser
+accepted an incomplete unquoted `chain (` argument that the published reference
+rejects. It now stops at the opening parenthesis and reports the syntax error.
+Label and selection-overlay renderers also advertised an editable selection
+although their command setter rejects it; metadata now uses the setter's same
+read-only rule. The actual OS-input probe checks that rule before editing a tube
+renderer instead.
+
+Validation passed six selection compatibility cases, four command-model cases,
+seven shared Inspector cases, and the Tauri history/Undo model case. The existing
+Inspector run passed ten other real-browser cases and 23 Tauri DOM cases. Two
+selection browser cases subsequently passed against the final build, covering
+nested choices, draft isolation, cancellation, validation, history and reload.
+A failing anchor-click case reproduced premature popup closure before the
+repair; clicking the selection text field now keeps the picker open. The Linux
+OS-input check built and committed an expression with mouse/keyboard input and
+restored both values with Undo/Redo. Selection panes, Paint-table cells and other
+dialogs remain part of the broader editor comparison.
 
 ## Clipboard comparison and repairs
 

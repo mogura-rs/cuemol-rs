@@ -99,6 +99,13 @@ pub fn renderer_child_specs(kind: RendererChildKind) -> &'static [RendererAttrPr
     }
 }
 
+pub fn renderer_selection_readonly(renderer_type: &str) -> bool {
+    matches!(
+        renderer_type,
+        "*selection" | "selection" | "*namelabel" | "name_label" | "*group"
+    )
+}
+
 pub fn renderer_property_spec(renderer_type: &str, key: &str) -> Option<RendererAttrProperty> {
     renderer_common_or_child_property(renderer_type, key).or_else(|| {
         renderer_attr_properties(renderer_type)

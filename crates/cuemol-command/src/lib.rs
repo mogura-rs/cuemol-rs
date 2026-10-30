@@ -12,6 +12,7 @@ pub use downloads::{load_fetched, prepare_fetch, FetchPlan};
 pub mod navigation;
 mod nodes;
 mod properties;
+pub mod selection;
 pub use animation::advance_animation;
 pub use properties::render_settings;
 pub mod config;

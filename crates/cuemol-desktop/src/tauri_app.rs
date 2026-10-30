@@ -7844,7 +7844,9 @@ impl AppModel {
     }
 
     fn restore_undo(&mut self, snapshot: AppModelUndo) -> Result<(), String> {
+        let selection_history = self.desktop.selection_history();
         self.desktop = snapshot.desktop;
+        self.desktop.restore_selection_history(&selection_history);
         self.camera = snapshot.camera;
         self.structure_revision = snapshot.structure_revision;
         self.selection = snapshot.selection;
@@ -16852,6 +16854,39 @@ mod tests {
             assert!(before.desktop.same_undo_state(&model.desktop));
             assert!(model.undo_stack.is_empty());
         }
+    }
+
+    #[test]
+    fn inspector_selection_queries_and_history_preserve_scene_undo() {
+        let mut model = model_without_gpu();
+        model.desktop.open_bytes("selection.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let object = model.desktop.active_object_summaries()[0].uid;
+        let renderer = model
+            .desktop
+            .scene_manager_mut()
+            .object_mut(object)
+            .unwrap()
+            .add_renderer("ribbon", "selection");
+        let target = serde_json::json!({"nodeType":"renderer","nodeId":renderer.get()});
+        let mut args = target.clone();
+        args["prop"] = serde_json::json!("sel");
+        args["value"] = serde_json::json!("name C1");
+        model.inspector_request("set_node_prop", &args).unwrap();
+        assert_eq!(model.undo_stack.len(), 1);
+        assert_eq!(model.desktop.selection_history(), ["name C1"]);
+        model.undo(0).unwrap();
+        assert_eq!(model.desktop.selection_history(), ["name C1"]);
+        let before = model.desktop.clone();
+        let mut args = target;
+        args["action"] = serde_json::json!("evaluate");
+        args["expression"] = serde_json::json!("name C1");
+        let result = model.inspector_request("selection_info", &args).unwrap();
+        assert_eq!(result["count"], 1);
+        assert!(before.same_undo_state(&model.desktop));
+        assert_eq!(model.redo_stack.len(), 1);
+        model.redo(0).unwrap();
+        assert_eq!(model.desktop.selection_history(), ["name C1"]);
+        assert_eq!(model.desktop.molecule_selection_text(object).unwrap(), "");
     }
 
     #[test]

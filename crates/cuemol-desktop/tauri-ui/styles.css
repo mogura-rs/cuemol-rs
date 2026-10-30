@@ -4748,3 +4748,12 @@ svg { flex: none; }
 .inspector-unit { flex: 0 0 auto; font-size: 0.8em; opacity: 0.7; }
 .inspector-property > button { padding: 2px; min-width: 24px; }
 .inspector-error { color: var(--danger, #f87171); overflow-wrap: anywhere; }
+.selection-builder-popup { position:fixed; z-index:10000; padding:10px; border:1px solid var(--border); border-radius:5px; background:var(--bg-surface); color:var(--text-primary); box-shadow:0 5px 20px #0006; overflow:auto; }
+.selection-builder-tabs,.selection-builder-fields { display:flex; gap:4px; margin-bottom:8px; }
+.selection-builder-tabs button,.selection-builder-fields input,.selection-builder-fields select { min-width:0; flex:1; }
+.selection-builder-body>button { display:block; width:100%; text-align:left; margin:2px 0; }
+.selection-builder-body select { max-width:100%; margin-bottom:6px; }
+.selection-builder-heading,.selection-builder-status { padding:6px 0; opacity:.8; font-size:12px; }
+.selection-builder-operations { display:grid; grid-template-columns:1fr 1fr; gap:4px; }
+.selection-builder-popup button.active { background:var(--selection); }
+.selection-builder-status.error { color:#f59191; opacity:1; }

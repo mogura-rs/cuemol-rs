@@ -3,6 +3,10 @@ use serde_json::{json, Value};
 
 impl AppModel {
     pub(super) fn inspector_request(&mut self, tool: &str, args: &Value) -> Result<Value, String> {
+        if tool == "selection_info" {
+            return cuemol_command::selection::request(&self.desktop, args)
+                .map_err(|error| error.to_string());
+        }
         if !matches!(
             tool,
             "list_node_props" | "set_node_prop" | "set_node_props" | "reset_node_props"
@@ -37,6 +41,7 @@ impl AppModel {
             }
             self.invalidate_snapshot(false);
         }
+        cuemol_command::selection::remember_property_edit(&mut self.desktop, tool, args);
         Ok(json!({"result":result,"snapshot":self.snapshot()}))
     }
 }

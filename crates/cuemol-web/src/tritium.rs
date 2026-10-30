@@ -195,7 +195,7 @@ impl App {
                 self.inspector_target.clone(),
                 self.revision,
             );
-            for (tool, args) in self.inspector.panel(ctx) {
+            for (tool, args) in self.inspector.panel(ctx, &self.state) {
                 self.call(tool, args);
             }
         }

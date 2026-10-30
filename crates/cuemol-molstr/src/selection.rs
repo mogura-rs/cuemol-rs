@@ -1476,7 +1476,7 @@ impl<'a> Parser<'a> {
                     regex = true;
                     pos += ch.len_utf8();
                 }
-                ')' | '&' | '|' => break,
+                '(' | ')' | '&' | '|' => break,
                 ch if ch.is_whitespace() => {
                     let after_ws = skip_ws_at(self.input, pos);
                     if starts_word_at(self.input, after_ws, "and")

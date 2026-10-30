@@ -1,6 +1,17 @@
 use cuemol_molstr::SelCommand;
 
 #[test]
+fn incomplete_arguments_match_published_reference_validation() {
+    let mut command = SelCommand::new();
+    for expression in ["chain (", "(", "resid nope", "chain A and"] {
+        assert!(!command.compile(expression, 0), "{expression}");
+    }
+    for expression in ["chain 'A'", "'A'.-2:-1.*", "not ('A'.-2:-1.*)"] {
+        assert!(command.compile(expression, 0), "{expression}");
+    }
+}
+
+#[test]
 fn residue_insertion_selection_matches_published_reference() {
     let mut pdb = String::new();
     for (index, (residue, insertion)) in

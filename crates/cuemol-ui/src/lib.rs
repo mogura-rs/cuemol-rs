@@ -35,6 +35,9 @@ pub use render::{RenderAction, RenderControls, RenderPanel};
 pub mod sequence;
 
 #[cfg(feature = "egui")]
+pub mod selection;
+
+#[cfg(feature = "egui")]
 pub mod actions;
 #[cfg(feature = "egui")]
 pub mod console;

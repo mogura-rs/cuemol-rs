@@ -92,7 +92,7 @@ function setCueMolInspectorWidth(value) {
   splitter.setAttribute("aria-valuemax", String(Math.round(maximum)));
 }
 
-const cueMolPropertyInspector = {key: '', target: null, rows: [], sections: [], source: null, serial: 0, tab: 'Properties', filter: '', error: '', localToggles: {}, optionalValues: {}};
+const cueMolPropertyInspector = {key: '', target: null, rows: [], sections: [], source: null, serial: 0, tab: 'Properties', filter: '', error: '', localToggles: {}, optionalValues: {}, selectionDrafts:new Map()};
 let cueMolViewInspectorTimer = null;
 
 function refreshCueMolViewInspector() {
@@ -117,6 +117,7 @@ function renderTritiumInspector(owner, camera, style) {
   const target = context || renderer || owner || camera || style;
   const key = target ? `${snapshot?.activeSceneUid}:${workspaceSelectionKind}:${target.uid ?? target.name}` : "";
   if (key !== cueMolInspectorTarget) {
+    cueMolSelectionPicker?.cancel();
     cueMolInspectorTarget = key;
     cueMolInspectorClosed = false;
     cueMolPropertyInspector.tab = workspaceSelectionKind === 'view' ? 'Generic' : 'Properties';
@@ -140,7 +141,7 @@ function renderTritiumInspector(owner, camera, style) {
   inspector.target = node;
   inspector.source = snapshot;
   inspector.error = '';
-  if (selectedChanged) { inspector.rows = []; inspector.localToggles = {}; inspector.optionalValues = {}; fields.textContent = 'Loading properties…'; }
+  if (selectedChanged) { inspector.rows = []; inspector.localToggles = {}; inspector.optionalValues = {}; inspector.selectionDrafts.clear(); fields.textContent = 'Loading properties…'; }
   const serial = ++inspector.serial;
   void invoke('inspector_request', {tool:'list_node_props', args:node}).then(result => {
     if (inspector.serial !== serial || inspector.key !== key) return;
@@ -336,6 +337,7 @@ function paintCueMolPropertyRows() {
         if (!on) { input.value=String(remembered); input.disabled=true; }
       }
       input.addEventListener('change', () => {
+        if (cueMolSelectionPicker?.owns(input)) return;
         if (input.type === 'number' && row.schema?.min !== undefined && row.schema?.max !== undefined && input.value !== '' && Number.isFinite(Number(input.value))) {
           const fine=Number(input.step);
           const value=Math.max(row.schema.min,Math.min(row.schema.max,Number(input.value)));
@@ -359,6 +361,7 @@ function paintCueMolPropertyRows() {
         }); controls.append(color);
       }
       controls.append(input);
+      if (structured && row.type === 'selection') attachCueMolSelectionPicker(input, controls, {...inspector.target}, commit);
       if (row.schema?.unit) { const unit=document.createElement('span'); unit.className='inspector-unit'; unit.textContent=row.schema.unit; controls.append(unit); }
       line.append(controls);
       if (row.hasdefault && !row.readonly) {

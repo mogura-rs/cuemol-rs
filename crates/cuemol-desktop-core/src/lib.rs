@@ -1,7 +1,9 @@
 mod animation;
 mod clipboard;
 pub use clipboard::GuiClipboardPayload;
+mod selection_support;
 mod sequence;
+pub use selection_support::MAX_SELECTION_HISTORY;
 pub use sequence::{sequence_residue_number, GuiSequenceLayout};
 mod command_support;
 mod property_access;
@@ -9488,10 +9490,8 @@ impl DesktopAppState {
         let renderer = object
             .renderer_mut(renderer_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
-        let selection_readonly = matches!(
-            renderer.renderer_type(),
-            "*selection" | "selection" | "*namelabel" | "name_label" | "*group"
-        );
+        let selection_readonly =
+            property_catalog::renderer_selection_readonly(renderer.renderer_type());
         let selector = if selection_readonly {
             None
         } else if selection_text.is_empty() || selection_text == "*" {
@@ -9548,10 +9548,7 @@ impl DesktopAppState {
         let renderer = object
             .renderer_mut(renderer_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
-        if matches!(
-            renderer.renderer_type(),
-            "*selection" | "selection" | "*namelabel" | "name_label" | "*group"
-        ) {
+        if property_catalog::renderer_selection_readonly(renderer.renderer_type()) {
             return Err(CueMolError::invalid_argument(format!(
                 "renderer {} has a read-only selection",
                 renderer_uid.get()

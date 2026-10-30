@@ -1,7 +1,7 @@
 use super::*;
 use cuemol_desktop_core::property_catalog::{
     map_renderer_attr_property, renderer_attr_properties, renderer_common_or_child_property,
-    renderer_property_allowed,
+    renderer_property_allowed, renderer_selection_readonly,
 };
 
 fn scalar_type(key: &str, value: &str) -> &'static str {
@@ -149,7 +149,10 @@ pub(super) fn rows(
             && matches!(key.as_str(), "name" | "basePath" | "obj_uids" | "view_uids")
             || spec.is_some_and(|property| !property.writable)
             || matches!(kind, "renderer" | "rendGroup")
-                && (key == "style" || cuemol_desktop_core::auxiliary_property_readonly(&key))
+                && (key == "style"
+                    || cuemol_desktop_core::auxiliary_property_readonly(&key)
+                    || matches!(key.as_str(), "sel" | "selection")
+                        && renderer_selection_readonly(&renderer_type))
             || kind == "view"
                 && matches!(
                     key.as_str(),
