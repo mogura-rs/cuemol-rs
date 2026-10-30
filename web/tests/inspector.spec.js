@@ -58,6 +58,7 @@ for (const fontAccess of ['resolved', 'denied']) {
       window.fontPreviewReads = 0;
       window.queryLocalFonts = () => {
         window.fontQueries++;
+        window.fontQueryActivated = navigator.userActivation.isActive;
         if (access === 'denied') return Promise.reject(new DOMException('Not allowed', 'NotAllowedError'));
         return new Promise(resolve => { window.resolveFonts = resolve; });
       };
@@ -66,6 +67,7 @@ for (const fontAccess of ['resolved', 'denied']) {
       const fill = prototype.fillText, read = prototype.getImageData;
       prototype.fillText = function(text, ...args) {
         if (text.startsWith('Test font ')) previews.add(this);
+        if (text==='123 Face') window.numberedFontStyle=this.font;
         return fill.call(this,text,...args);
       };
       prototype.getImageData = function(...args) {
@@ -80,13 +82,16 @@ for (const fontAccess of ['resolved', 'denied']) {
     await click(page,`renderer:${id}`,false);
     await click(page,'Properties tab');
     await filter(page,'font_name');
-    await expect.poll(()=>page.evaluate(()=>window.fontQueries)).toBe(1);
+    expect(await page.evaluate(()=>window.fontQueries)).toBe(0);
     await click(page,'font_name');
+    await expect.poll(()=>page.evaluate(()=>window.fontQueries)).toBe(1);
+    expect(await page.evaluate(()=>window.fontQueryActivated)).toBe(true);
     await expect.poll(async()=>(await status(page)).ui.inspector['font_name option Scene-only family']?.length).toBe(4);
     await expect.poll(async()=>(await status(page)).ui.inspector['font_name option Arial']?.length).toBe(4);
     if (fontAccess === 'resolved') {
-      await page.evaluate(()=>window.resolveFonts(Array.from({length:500},(_,index)=>({family:`Test font ${String(index).padStart(3,'0')}`}))));
+      await page.evaluate(()=>window.resolveFonts([{family:'123 Face'},...Array.from({length:500},(_,index)=>({family:`Test font ${String(index).padStart(3,'0')}`}))]));
       await expect.poll(async()=>(await status(page)).ui.inspector['font_name option Test font 000']?.length).toBe(4);
+      await expect.poll(()=>page.evaluate(()=>window.numberedFontStyle)).toContain('"123 Face"');
       expect(await prop(page,id,'font_name')).toBe('Scene-only family');
       const reads = await page.evaluate(()=>window.fontPreviewReads);
       expect(reads).toBeGreaterThan(0);
@@ -104,6 +109,42 @@ for (const fontAccess of ['resolved', 'denied']) {
     expect(await page.evaluate(()=>window.fontQueries)).toBe(1);
   });
 }
+
+test('Font picker reads installed families through the real permission-gated API', async ({page,context}) => {
+  await context.grantPermissions(['local-fonts']);
+  await page.addInitScript(()=>{
+    const query=window.queryLocalFonts.bind(window);
+    window.fontQueries=0;
+    window.localFontFamilies=[];
+    window.queryLocalFonts=async()=>{
+      window.fontQueries++;
+      window.fontQueryActivated=navigator.userActivation.isActive;
+      const fonts=await query();
+      window.localFontFamilies=[...new Set(fonts.map(font=>font.family))];
+      return fonts;
+    };
+  });
+  const {object}=await setup(page);
+  await command(page,'execute_script',{source:`var labels=cuemol.getObject(${object.id}).createRenderer('*namelabel');labels.name='Local fonts';`});
+  const id=(await status(page)).scene.objects.find(item=>item.id===object.id).renderers.find(renderer=>renderer.name==='Local fonts').id;
+  await command(page,'list_node_props',{nodeType:'renderer',nodeId:id});
+  expect(await page.evaluate(()=>window.fontQueries)).toBe(0);
+  await click(page,`renderer:${id}`,false);
+  await click(page,'Properties tab');
+  await filter(page,'font_name');
+  await click(page,'font_name');
+  await expect.poll(()=>page.evaluate(()=>window.localFontFamilies.length)).toBeGreaterThan(0);
+  expect(await page.evaluate(()=>window.fontQueryActivated)).toBe(true);
+  const families=await page.evaluate(()=>window.localFontFamilies);
+  let choice;
+  await expect.poll(async()=>{
+    choice=Object.keys((await status(page)).ui.inspector).find(key=>key.startsWith('font_name option ') && families.includes(key.slice('font_name option '.length)));
+    return Boolean(choice);
+  }).toBe(true);
+  await click(page,choice);
+  expect(await prop(page,id,'font_name')).toBe(choice.slice('font_name option '.length));
+  expect(await page.evaluate(()=>window.fontQueries)).toBe(1);
+});
 
 test('Optional loop sizes remember values and dash toggles undo the complete pattern', async ({page},testInfo) => {
   const {object}=await setup(page);
@@ -138,6 +179,11 @@ test('Optional loop sizes remember values and dash toggles undo the complete pat
   await click(page,'stipple2'); await page.keyboard.press('Tab');
   await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
   expect(await prop(page,rid,'stipple2')).toBe('-2.5');
+  await command(page,'set_node_prop',{nodeType:'renderer',nodeId:rid,prop:'stipple2',value:'0'});
+  await click(page,'stipple2'); await page.keyboard.press('ControlOrMeta+a');
+  await page.keyboard.insertText('-0'); await page.keyboard.press('Enter');
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  expect(await prop(page,rid,'stipple2')).toBe('0');
   await command(page,'set_node_props',{nodeType:'renderer',nodeId:rid,updates:Array.from({length:6},(_,i)=>({prop:`stipple${i}`,value:'-1'}))});
   await click(page,`renderer:${rid}`,false);
   await filter(page,'dash-pattern');

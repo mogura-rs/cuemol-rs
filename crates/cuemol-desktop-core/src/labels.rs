@@ -29,6 +29,11 @@ pub(crate) fn on_font_catalog_change(callback: impl Fn() + 'static) {
     browser::on_font_catalog_change(callback);
 }
 
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn request_font_catalog() {
+    browser::request_font_catalog();
+}
+
 pub struct LabelImage {
     pub width: u32,
     pub height: u32,

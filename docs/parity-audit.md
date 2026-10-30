@@ -463,9 +463,11 @@ catalog entry is missing. All 16 affected map tests passed after this change.
 Label and measurement pages offer installed font families, the reference's
 generic families and a fallback list when enumeration is unavailable. A saved
 family absent from the local system remains selectable. Native enumeration
-shares the label rasterizer's existing font database. Browser enumeration runs
-once asynchronously; completion invalidates the cached list and requests a
-frame even when the application is idle. A denied request retains the fallback
+shares the label rasterizer's existing font database. Browser enumeration starts
+asynchronously when the user opens the font picker, satisfying the
+[Local Font Access API activation requirement](https://wicg.github.io/local-font-access/#dom-window-querylocalfonts).
+Completion invalidates the cached list and requests a frame even when the
+application is idle. A denied request retains the fallback
 choices. Only visible options are rasterized, and the preview cache holds at
 most 64 textures. Changing a font uses the ordinary property transaction and
 undo path. Generic retains its text field.
@@ -476,6 +478,12 @@ tests cover delayed and denied enumeration, a saved unknown family, selection
 and undo, and bounded preview work with 500 returned families. These tests mock
 the operating system's enumeration result while using the real WASM Inspector
 and canvas text rasterizer; they do not establish a browser permission grant.
+An additional browser test grants `local-fonts` in an isolated test context and
+reads installed families through the actual API after clicking the picker.
+It checks that property queries do not request access and that a returned
+family can be selected. This exercises real enumeration, not the browser's
+permission-prompt UI. Native and browser catalogs remain cached for the session,
+matching the reference's policy.
 The complete affected run passed nine browser cases and 22 Tauri DOM cases.
 The Tauri checks also verify option faces and the Generic text field. All six
 shared Inspector regressions passed with the GUI feature enabled, alongside
@@ -486,6 +494,22 @@ the family, selected `monospace`, and restored both states with Undo/Redo.
 Screenshots show the option faces and the selected property. The existing
 navigation, label rendering, Console, clipboard and other Inspector checks
 passed in the same window run.
+
+Public review of `5bfdfdd` found no high-confidence defect. Follow-up checks
+confirmed two smaller differences: CSS rejected an unquoted family beginning
+with digits, and the shared dash editor treated `-0` as a different stored
+value from `0`. Browser tests reproduced both. Font previews and label text now
+quote literal CSS family names while preserving generic families, and both
+dash editors normalize signed zero. The map-writability concern was checked
+against the original read-only list; all flags match. Font enumeration and
+listener registration run in the same synchronous frame, so promise completion
+cannot occur between them; each browser application owns one Inspector.
+
+The follow-up passed all 26 affected browser and Tauri shell cases, including
+real installed-font enumeration with a test permission grant. The two core
+font tests and six shared Inspector tests also passed. Three new cases first
+failed against the preceding revision, covering unsolicited font access,
+signed zero and an unquoted numeric font-family name.
 
 ### Property-query cost
 

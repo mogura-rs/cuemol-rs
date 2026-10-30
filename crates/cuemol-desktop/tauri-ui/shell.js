@@ -284,8 +284,8 @@ function paintCueMolPropertyRows() {
       input.setAttribute('aria-label', row.key === 'name' ? 'Inspected name' : `Inspected ${row.key}`);
       if (choices?.length) {
         if (row.type === 'preset' && row.value === 'Custom') { const option = document.createElement('option'); option.value='Custom'; option.textContent='Custom'; option.disabled=true; input.append(option); }
-        for (const value of choices) { const option = document.createElement('option'); option.value=value; option.textContent=row.schema?.labels?.[value] || value; if (row.schema?.font) option.style.fontFamily=value; input.append(option); }
-        if (row.schema?.font) input.style.fontFamily=row.value;
+        for (const value of choices) { const option = document.createElement('option'); option.value=value; option.textContent=row.schema?.labels?.[value] || value; if (row.schema?.font) option.style.fontFamily=cueMolFontFamily(value); input.append(option); }
+        if (row.schema?.font) input.style.fontFamily=cueMolFontFamily(row.value);
       } else if (row.type === 'boolean' || row.type === 'toggle') { input.type='checkbox'; input.checked=row.value === 'true'; }
       else if (row.type === 'integer' || row.type === 'real') {
         input.type='number'; input.step=row.type === 'integer' ? '1' : row.schema?.fineStep ?? (row.schema?.step ? row.schema.step/10 : 'any');

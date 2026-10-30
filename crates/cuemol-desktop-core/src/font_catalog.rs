@@ -71,6 +71,11 @@ pub fn generation() -> u32 {
     }
 }
 
+pub fn request() {
+    #[cfg(all(feature = "offscreen", target_arch = "wasm32"))]
+    crate::labels::request_font_catalog();
+}
+
 pub fn on_change(callback: impl Fn() + 'static) {
     #[cfg(all(feature = "offscreen", target_arch = "wasm32"))]
     crate::labels::on_font_catalog_change(callback);
@@ -82,6 +87,31 @@ pub struct FontPreview {
     pub width: u32,
     pub height: u32,
     pub alpha: Vec<u8>,
+}
+
+pub fn css_family(family: &str) -> String {
+    use std::fmt::Write;
+    if GENERIC
+        .iter()
+        .any(|generic| generic.eq_ignore_ascii_case(family))
+    {
+        return family.into();
+    }
+    let mut value = String::from("\"");
+    for character in family.chars() {
+        match character {
+            '"' | '\\' => {
+                value.push('\\');
+                value.push(character);
+            }
+            character if character.is_ascii_control() => {
+                let _ = write!(value, "\\{:x} ", character as u32);
+            }
+            _ => value.push(character),
+        }
+    }
+    value.push('"');
+    value
 }
 
 pub fn preview(family: &str, text: &str, scale: f32) -> Option<FontPreview> {
@@ -136,5 +166,17 @@ mod tests {
             (mono.width, mono.alpha),
             (proportional.width, proportional.alpha)
         );
+    }
+}
+
+#[cfg(test)]
+mod css_tests {
+    #[test]
+    fn css_faces_preserve_generic_families_and_quote_literal_names() {
+        use super::css_family;
+        assert_eq!(css_family("serif"), "serif");
+        assert_eq!(css_family("8514oem"), "\"8514oem\"");
+        assert_eq!(css_family("Times New Roman"), "\"Times New Roman\"");
+        assert_eq!(css_family("A\"\\\nB"), "\"A\\\"\\\\\\a B\"");
     }
 }

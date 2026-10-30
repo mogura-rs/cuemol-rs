@@ -7,6 +7,10 @@ let fontGeneration = 0;
 let fontsRequested = false;
 let fontChange;
 export function cuemolFontFamilies() {
+  return fontFamilies;
+}
+export function cuemolRequestFontCatalog() {
+  if (globalThis.navigator?.userActivation && !navigator.userActivation.isActive) return;
   if (!fontsRequested) {
     fontsRequested = true;
     if (typeof globalThis.queryLocalFonts === 'function') {
@@ -17,7 +21,6 @@ export function cuemolFontFamilies() {
       }).catch(() => {});
     }
   }
-  return fontFamilies;
 }
 export function cuemolFontCatalogGeneration() { return fontGeneration; }
 export function cuemolFontCatalogListener(callback) { fontChange = callback; }
@@ -27,6 +30,8 @@ extern "C" {
     fn browser_font_families() -> String;
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = cuemolFontCatalogGeneration)]
     pub(super) fn font_catalog_generation() -> u32;
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = cuemolRequestFontCatalog)]
+    pub(super) fn request_font_catalog();
     #[wasm_bindgen::prelude::wasm_bindgen(js_name = cuemolFontCatalogListener)]
     fn font_catalog_listener(callback: &wasm_bindgen::JsValue);
 }
@@ -82,7 +87,7 @@ pub(super) fn rasterize(label: &GuiAtomLabel, scale: f32, limit: u32) -> Option<
         "{style} {} {}px {}",
         font_weight(label),
         size.floor(),
-        label.font_name
+        crate::font_catalog::css_family(&label.font_name)
     );
     context.set_font(&fallback);
     context.set_font(&requested);

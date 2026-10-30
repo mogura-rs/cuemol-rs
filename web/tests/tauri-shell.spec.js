@@ -156,7 +156,7 @@ async function openShell(page, storage = {}, options = {}) {
             {key:'name',label:'Name'},{key:'alpha',label:'Opacity',min:0,max:1,step:0.1},
             {key:'detail',label:'Detail',choices:['2','4','8','16','24','32']},
             {key:'material',label:'Material',choices:['','Matte'],labels:{'':'(none)'}},
-            {key:'font_name',label:'Font name',font:true,choices:['Portable face','serif','monospace']},
+            {key:'font_name',label:'Font name',font:true,choices:['Portable face','8514oem','serif','monospace']},
           ]},{title:'Geometry',expanded:true,rows:[
             {key:'ring',label:'Show ring'},{key:'thickness',label:'Thickness',min:0,max:3,step:0.01,unit:'Å',disabled:values.ring!=='true'},
             {key:'section.width',label:'Width1',min:0.01,max:3,step:0.01,writes:[{prop:'section.width'},{prop:'section.tuber',inverse:Number(values['section.width'])*Number(values['section.tuber'])}]},
@@ -668,6 +668,9 @@ test('Tauri renderer schema applies ranges, gates, choices and derived atomic wr
   await input('material').selectOption('Matte');
   await expect(input('material')).toHaveValue('Matte');
   await expect(input('font_name')).toHaveValue('Portable face');
+  await expect(input('font_name').locator('option[value="8514oem"]')).toHaveCSS('font-family','"8514oem"');
+  await input('font_name').selectOption('8514oem');
+  await expect(input('font_name')).toHaveCSS('font-family','"8514oem"');
   await expect(input('font_name').locator('option[value="serif"]')).toHaveCSS('font-family','serif');
   await input('font_name').selectOption('serif');
   await expect(input('font_name')).toHaveCSS('font-family','serif');

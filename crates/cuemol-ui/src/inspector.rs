@@ -483,6 +483,7 @@ fn blank_negative_value(value: &str) -> String {
         .parse::<f64>()
         .ok()
         .filter(|value| value.is_finite() && *value >= 0.)
+        .map(|value| if value == 0. { 0. } else { value })
         .unwrap_or(-1.)
         .to_string()
 }
@@ -637,6 +638,9 @@ fn edit_field(
                 }
             })
             .response;
+        if response.clicked() && schema.is_some_and(|schema| schema["font"] == true) {
+            cuemol_desktop_core::font_catalog::request();
+        }
         (response, changed)
     } else if matches!(row.kind.as_str(), "boolean" | "toggle") {
         let mut flag = value_text == "true";

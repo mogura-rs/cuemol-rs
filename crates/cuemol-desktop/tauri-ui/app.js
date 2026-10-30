@@ -1,5 +1,11 @@
 "use strict";
 
+function cueMolFontFamily(family) {
+  if (/^(sans-serif|serif|monospace|cursive|fantasy)$/i.test(family)) return family;
+  return '"' + family.replace(/["\\\u0000-\u001f\u007f]/g, character =>
+    character === '"' || character === '\\' ? '\\' + character : '\\' + character.codePointAt(0).toString(16) + ' ') + '"';
+}
+
 const appShell = document.querySelector(".app-shell");
 const ribbon = document.querySelector(".ribbon");
 const ribbonCollapse = document.querySelector("[data-ribbon-collapse]");
@@ -1782,7 +1788,7 @@ function optionsEditor(source) {
   sample.textContent = "Atom label sample: CA 123";
   labelGroup.append(sample);
   function updateSample() {
-    sample.style.fontFamily = draft.atomLabelFont;
+    sample.style.fontFamily = cueMolFontFamily(draft.atomLabelFont);
     sample.style.fontSize = `${Math.max(4, Number(draft.atomLabelSize) || 12)}px`;
     sample.style.color = draft.atomLabelColor;
     sample.style.fontStyle = draft.atomLabelItalic ? "italic" : "normal";
@@ -17477,7 +17483,7 @@ function applyViewport(result, sequence) {
       element.style.top = `${(Number(label.y) / Math.max(1, result.height)) * 100}%`;
       element.style.color = label.color || "#ffff00";
       element.style.fontSize = `${Number(label.fontSize) || 12}px`;
-      element.style.fontFamily = label.fontName || "sans-serif";
+      element.style.fontFamily = cueMolFontFamily(label.fontName || "sans-serif");
       element.style.fontStyle = label.fontStyle || "normal";
       element.style.fontWeight = label.fontWeight || "normal";
       viewportLabels.append(element);
