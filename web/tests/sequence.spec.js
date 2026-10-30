@@ -22,11 +22,11 @@ async function cell(page,column,row=0) {
   const [x,y,w,h]=(await status(page)).ui.rects['Sequence origin'];
   return [x+(column+0.5)*w,y+(row+0.5)*h];
 }
-async function setup(page,theme='dark',source=pdb) {
+async function setup(page,theme='dark',source=pdb,name='sequence.pdb') {
   await page.addInitScript(theme=>localStorage.setItem('cuemol.theme',theme),theme);
   await page.goto('./?renderer=webgl');
   await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId),{timeout:60000}).toBeGreaterThan(0);
-  await page.locator('#files').setInputFiles({name:'sequence.pdb',mimeType:'application/octet-stream',buffer:Buffer.from(source)});
+  await page.locator('#files').setInputFiles({name,mimeType:'application/octet-stream',buffer:Buffer.from(source)});
   await expect.poll(async()=>(await status(page)).scene.objects.length).toBe(1);
   await choose(page,'Sequence');
   await expect.poll(async()=>(await status(page)).ui.rects['Sequence origin']?.length).toBe(4);
@@ -84,6 +84,41 @@ for(const theme of ['dark','light'])test(`sequence clicks, shift ranges, drag tr
   await expect.poll(()=>selectionCount(page,id)).toBe(3);
   await page.mouse.click(...await cell(page,3),{button:'right'});await choose(page,'Unselect all');
   await expect.poll(async()=>(await status(page)).selection).toBe('');
+});
+
+test('sequence clicks both integer limits and insertion codes through compact gaps',async({page},testInfo)=>{
+  const source=`data_sparse
+loop_
+_atom_site.group_PDB
+_atom_site.id
+_atom_site.type_symbol
+_atom_site.label_atom_id
+_atom_site.label_comp_id
+_atom_site.label_asym_id
+_atom_site.label_seq_id
+_atom_site.pdbx_PDB_ins_code
+_atom_site.Cartn_x
+_atom_site.Cartn_y
+_atom_site.Cartn_z
+ATOM 1 C CA GLY A -2147483648 ? 0 0 0
+ATOM 2 C CA GLY A -2147483648 A 10 0 0
+ATOM 3 C CA GLY A 0 ? 20 0 0
+ATOM 4 C CA GLY A 2147483647 ? 30 0 0
+ATOM 5 C CA GLY A 2147483647 B 40 0 0
+#
+`;
+  const id=await setup(page,'dark',source,'sparse.cif');
+  for(const [column,index] of [[0,'-2147483648'],[1,'-2147483648A'],[3,'0'],[5,'2147483647'],[6,'2147483647B']]){
+    await command(page,'set_mol_selection',{objId:id,selection:''});
+    await page.mouse.click(...await cell(page,column));
+    await expect.poll(async()=>(await status(page)).selection).toBe(`'A'.${index}.*`);
+    expect(await selectionCount(page,id)).toBe(1);
+  }
+  await command(page,'set_mol_selection',{objId:id,selection:''});
+  await page.mouse.click(...await cell(page,0));
+  await page.keyboard.down('Shift');await page.mouse.click(...await cell(page,6));await page.keyboard.up('Shift');
+  await expect.poll(()=>selectionCount(page,id)).toBe(5);
+  await page.screenshot({path:testInfo.outputPath('sequence-integer-limits.png')});
 });
 
 test('sequence refreshes after another molecule is loaded and selects the clicked object',async({page},testInfo)=>{

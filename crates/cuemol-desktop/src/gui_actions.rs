@@ -23,7 +23,12 @@ impl GuiApplication {
         actions::targets(&self.state, &ids.into_iter().collect::<Vec<_>>())
     }
 
-    pub(super) fn apply_action_intent(&mut self, intent: Intent, camera: &mut CameraController) {
+    pub(super) fn apply_action_intent(
+        &mut self,
+        intent: Intent,
+        camera: &mut CameraController,
+        ctx: &egui::Context,
+    ) {
         let directory = cuemol_command::config::directory().join("actions");
         let result = (|| -> std::result::Result<(), String> {
             match intent {
@@ -74,7 +79,7 @@ impl GuiApplication {
                         revision: self.snapshot_revision,
                         changed: false,
                     });
-                    self.poll_console(&egui::Context::default());
+                    self.poll_console(ctx);
                     self.apply_script_view(camera);
                 }
                 Intent::Export { name, source } => {
@@ -92,16 +97,11 @@ impl GuiApplication {
                     self.actions_panel.saved();
                 }
                 Intent::Rename { from, to } => {
-                    let old = directory.join(actions::validate_file_name(&from)?);
-                    let source =
-                        std::fs::read_to_string(&old).map_err(|error| error.to_string())?;
-                    actions::save_library(&directory, &to, &source)?;
-                    std::fs::remove_file(old).map_err(|error| error.to_string())?;
+                    actions::rename_library_file(&directory, &from, &to)?;
                     self.actions_panel.saved();
                 }
                 Intent::Delete(name) => {
-                    std::fs::remove_file(directory.join(actions::validate_file_name(&name)?))
-                        .map_err(|error| error.to_string())?;
+                    actions::delete_library_file(&directory, &name)?;
                 }
                 Intent::Import => {
                     if let Some(path) = rfd::FileDialog::new()

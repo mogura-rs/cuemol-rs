@@ -61,7 +61,7 @@ impl GuiApplication {
         self.central_view(ctx, camera);
         self.viewport_palette(ctx, camera);
         if let Some(intent) = self.actions_panel.dialogs(ctx, &self.state) {
-            self.apply_action_intent(intent, camera);
+            self.apply_action_intent(intent, camera, ctx);
         }
     }
     fn tritium_toolbar(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
@@ -246,7 +246,7 @@ impl GuiApplication {
                     .max_height((ui.available_height() * 0.5).max(100.))
                     .show(ui, |ui| {
                         if let Some(intent) = self.actions_panel.history(ui, &done, &future, busy) {
-                            self.apply_action_intent(intent, camera);
+                            self.apply_action_intent(intent, camera, ui.ctx());
                         }
                     });
             });
@@ -259,7 +259,7 @@ impl GuiApplication {
                     .id_salt("action_library")
                     .show(ui, |ui| {
                         if let Some(intent) = self.actions_panel.library(ui, &names, busy) {
-                            self.apply_action_intent(intent, camera);
+                            self.apply_action_intent(intent, camera, ui.ctx());
                         }
                     });
             });

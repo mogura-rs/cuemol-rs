@@ -199,12 +199,31 @@ pub struct ChainSummary {
     pub residue_keys: Vec<ResidueKey>,
 }
 
+type ResiduePivots = BTreeMap<String, BTreeMap<(i32, Option<char>), Arc<str>>>;
+
+fn remove_residue_pivot(pivots: &mut ResiduePivots, key: &ResidueKey) -> Option<Arc<str>> {
+    let chain = pivots.get_mut(&key.chain_id)?;
+    let name = chain.remove(&(key.res_id, key.ins_code));
+    if chain.is_empty() {
+        pivots.remove(&key.chain_id);
+    }
+    name
+}
+
+fn insert_residue_pivot(pivots: &mut ResiduePivots, key: &ResidueKey, name: Arc<str>) {
+    pivots
+        .entry(key.chain_id.clone())
+        .or_default()
+        .insert((key.res_id, key.ins_code), name);
+}
+
 #[derive(Debug, Clone)]
 pub struct MolCoord {
     atoms: Arc<Vec<Atom>>,
     residue_count: OnceLock<usize>,
     bonds: Arc<Vec<Bond>>,
     residue_props: Arc<BTreeMap<ResidueKey, BTreeMap<String, String>>>,
+    residue_pivots: Arc<ResiduePivots>,
     selection: Selector,
     selection_text: String,
     coloring: SolidColoring,
@@ -219,6 +238,8 @@ pub struct MoleculeData {
     atoms: Arc<Vec<Atom>>,
     bonds: Arc<Vec<Bond>>,
     residue_props: Arc<BTreeMap<ResidueKey, BTreeMap<String, String>>>,
+    #[serde(default)]
+    residue_pivots: Arc<ResiduePivots>,
     selection_text: String,
     default_color: SolidColor,
     atoms_moved_generation: usize,
@@ -240,6 +261,7 @@ impl MoleculeData {
             atoms: self.atoms,
             bonds: self.bonds,
             residue_props: self.residue_props,
+            residue_pivots: self.residue_pivots,
             default_color: self.default_color,
             atoms_moved_generation: self.atoms_moved_generation,
             cell_params: self.cell_params,
@@ -256,6 +278,8 @@ impl PartialEq for MolCoord {
             && (Arc::ptr_eq(&self.bonds, &other.bonds) || self.bonds == other.bonds)
             && (Arc::ptr_eq(&self.residue_props, &other.residue_props)
                 || self.residue_props == other.residue_props)
+            && (Arc::ptr_eq(&self.residue_pivots, &other.residue_pivots)
+                || self.residue_pivots == other.residue_pivots)
             && self.selection == other.selection
             && self.selection_text == other.selection_text
             && self.coloring == other.coloring
@@ -277,6 +301,7 @@ impl MolCoord {
             atoms: self.atoms.clone(),
             bonds: self.bonds.clone(),
             residue_props: self.residue_props.clone(),
+            residue_pivots: self.residue_pivots.clone(),
             selection_text: self.selection_text.clone(),
             default_color: self.default_color.clone(),
             atoms_moved_generation: self.atoms_moved_generation,
@@ -320,6 +345,16 @@ impl MolCoord {
                 cuemol_core::snapshot::apply_map_changes,
             );
         }
+        if !Arc::ptr_eq(&from.residue_pivots, &to.residue_pivots)
+            && from.residue_pivots != to.residue_pivots
+        {
+            cuemol_core::snapshot::apply_map_changes_with(
+                Arc::make_mut(&mut self.residue_pivots),
+                &from.residue_pivots,
+                &to.residue_pivots,
+                cuemol_core::snapshot::apply_map_changes,
+            );
+        }
         if !Arc::ptr_eq(&from.atoms, &to.atoms) && from.atoms != to.atoms {
             self.atoms_moved_generation = self.atoms_moved_generation.wrapping_add(1);
         }
@@ -331,6 +366,7 @@ impl MolCoord {
             residue_count: OnceLock::new(),
             bonds: Arc::default(),
             residue_props: Arc::default(),
+            residue_pivots: Arc::default(),
             selection: Selector::All,
             selection_text: String::new(),
             coloring: SolidColoring::new(),
@@ -346,6 +382,7 @@ impl MolCoord {
             residue_count: OnceLock::new(),
             bonds: Arc::default(),
             residue_props: Arc::default(),
+            residue_pivots: Arc::default(),
             selection: Selector::All,
             selection_text: String::new(),
             coloring: SolidColoring::new(),
@@ -556,7 +593,11 @@ impl MolCoord {
         let Some(first) = atoms.first() else {
             return Ok(None);
         };
-        if let Some(name) = crate::toppar::TopoDB::global().pivot_atom(&first.res_name) {
+        if let Some(name) = self
+            .residue_pivots
+            .get(chain)
+            .and_then(|pivots| pivots.get(&(first.res_id, first.ins_code)))
+        {
             if let Some(atom) = self.atom_by_spec(chain, sindex, name)? {
                 return Ok(Some(atom.position));
             }
@@ -567,6 +608,10 @@ impl MolCoord {
                 .fold(Vector4::ZERO, |sum, atom| sum + atom.position)
                 / atoms.len() as f64,
         ))
+    }
+
+    pub(crate) fn set_topology_pivot(&mut self, key: &ResidueKey, name: Arc<str>) {
+        insert_residue_pivot(Arc::make_mut(&mut self.residue_pivots), key, name);
     }
 
     pub fn get_residue(&self, chain: &str, sindex: &str) -> Result<Option<ResidueSummary>> {
@@ -1039,6 +1084,14 @@ impl MolCoord {
         for (new, props) in moved {
             Arc::make_mut(&mut self.residue_props).insert(new, props);
         }
+        let pivots = Arc::make_mut(&mut self.residue_pivots);
+        let moved: Vec<_> = prop_moves
+            .iter()
+            .filter_map(|(old, new)| remove_residue_pivot(pivots, old).map(|name| (new, name)))
+            .collect();
+        for (key, name) in moved {
+            insert_residue_pivot(pivots, key, name);
+        }
         true
     }
 
@@ -1480,6 +1533,12 @@ impl MolCoord {
         self.bonds = Arc::new(bonds);
         let live_residues = self.atoms.iter().map(residue_key).collect::<BTreeSet<_>>();
         Arc::make_mut(&mut self.residue_props).retain(|key, _| live_residues.contains(key));
+        Arc::make_mut(&mut self.residue_pivots).retain(|chain, pivots| {
+            pivots.retain(|(index, insertion), _| {
+                live_residues.contains(&ResidueKey::new(chain, *index, *insertion))
+            });
+            !pivots.is_empty()
+        });
         selected.len()
     }
 
@@ -1526,7 +1585,11 @@ impl MolCoord {
             }
         }
         if let Some(props) = Arc::make_mut(&mut self.residue_props).remove(&old_key) {
-            Arc::make_mut(&mut self.residue_props).insert(new_key, props);
+            Arc::make_mut(&mut self.residue_props).insert(new_key.clone(), props);
+        }
+        let pivots = Arc::make_mut(&mut self.residue_pivots);
+        if let Some(name) = remove_residue_pivot(pivots, &old_key) {
+            insert_residue_pivot(pivots, &new_key, name);
         }
         Ok(true)
     }
@@ -1555,7 +1618,11 @@ impl MolCoord {
             }
         }
         if let Some(props) = Arc::make_mut(&mut self.residue_props).remove(&old_key) {
-            Arc::make_mut(&mut self.residue_props).insert(new_key, props);
+            Arc::make_mut(&mut self.residue_props).insert(new_key.clone(), props);
+        }
+        let pivots = Arc::make_mut(&mut self.residue_pivots);
+        if let Some(name) = remove_residue_pivot(pivots, &old_key) {
+            insert_residue_pivot(pivots, &new_key, name);
         }
         Ok(true)
     }
@@ -1615,9 +1682,16 @@ impl MolCoord {
             let key = residue_key(&source.atoms[*index]);
             if let Some(props) = source.residue_props.get(&key) {
                 Arc::make_mut(&mut self.residue_props)
-                    .entry(key)
+                    .entry(key.clone())
                     .or_default()
                     .extend(props.clone());
+            }
+            if let Some(name) = source
+                .residue_pivots
+                .get(&key.chain_id)
+                .and_then(|pivots| pivots.get(&(key.res_id, key.ins_code)))
+            {
+                self.set_topology_pivot(&key, name.clone());
             }
         }
 
@@ -1977,6 +2051,65 @@ mod tests {
             int_props: BTreeMap::new(),
             real_props: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn topology_pivots_survive_residue_edits_transfer_and_undo() {
+        let mut molecule = MolCoord::with_atoms(vec![
+            atom(1, "A", 1, "N", 0.0),
+            atom(2, "A", 1, "CA", 10.0),
+            atom(3, "A", 1, "C", 40.0),
+        ]);
+        let mut db = crate::TopoDB::global().clone();
+        let mut residue = db.residue("ALA").unwrap().clone();
+        residue.pivot_atom = "N".into();
+        db.put(residue);
+        molecule.apply_topology_with_db(&db);
+        assert_eq!(
+            molecule.residue_pivot_pos("A", "1").unwrap().unwrap().x(),
+            0.0
+        );
+        let original = molecule.clone();
+        for atom in molecule.atoms_mut() {
+            atom.res_name = "LIG".into();
+        }
+        assert_eq!(
+            molecule.residue_pivot_pos("A", "1").unwrap().unwrap().x(),
+            0.0
+        );
+        molecule.change_chain_name("A", "1", "B").unwrap();
+        molecule.change_res_index("B", "1", "-2A").unwrap();
+        let transferred = molecule.transfer_data().into_molecule().unwrap();
+        assert_eq!(
+            transferred
+                .residue_pivot_pos("B", "-2A")
+                .unwrap()
+                .unwrap()
+                .x(),
+            0.0
+        );
+        let mut copy = MolCoord::new();
+        copy.copy_selected_atoms_from(&transferred, &Selector::All)
+            .unwrap();
+        assert_eq!(
+            copy.residue_pivot_pos("B", "-2A").unwrap().unwrap().x(),
+            0.0
+        );
+        assert!(copy.relabel_residue_keys(|_| Some(ResidueKey::new("C", 4, None))));
+        assert_eq!(copy.residue_pivot_pos("C", "4").unwrap().unwrap().x(), 0.0);
+        copy.remove_atom(1);
+        assert_eq!(copy.residue_pivot_pos("C", "4").unwrap().unwrap().x(), 25.0);
+        let changed = molecule.clone();
+        molecule.apply_undo_changes(&changed, &original);
+        assert_eq!(
+            molecule.residue_pivot_pos("A", "1").unwrap().unwrap().x(),
+            0.0
+        );
+        assert!(molecule.residue_pivot_pos("B", "-2A").unwrap().is_none());
+        assert_eq!(
+            original.residue_pivot_pos("A", "1").unwrap().unwrap().x(),
+            0.0
+        );
     }
 
     #[test]

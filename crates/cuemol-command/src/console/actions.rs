@@ -256,23 +256,29 @@ pub struct MacroInfo {
 
 #[derive(Clone, Debug)]
 pub struct LibraryFile {
+    pub key: String,
     pub name: String,
     pub source: String,
     pub bundled: bool,
     pub macros: Vec<MacroInfo>,
     pub action_count: usize,
     pub error: Option<String>,
+    #[cfg(not(target_arch = "wasm32"))]
+    path: Option<std::path::PathBuf>,
 }
 
 impl LibraryFile {
     pub fn parse(name: &str, source: String, bundled: bool) -> Self {
         let mut file = Self {
+            key: name.into(),
             name: name.into(),
             source,
             bundled,
             macros: Vec::new(),
             action_count: 0,
             error: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            path: None,
         };
         match qax::parse(&file.source) {
             Err(error) => file.error = Some(error),
@@ -346,7 +352,12 @@ pub(super) fn bind_macro(
         let inventory = nodes(state)?;
         let node = resolve_node(&inventory, &format!("#{id}"), "object")?;
         let class = param.str_attr("type").to_string();
-        if ![node.class.as_str(), "Object", "object"].contains(&class.as_str()) {
+        let semantic = if matches!(class.as_str(), "Object" | "object") {
+            "object".into()
+        } else {
+            format!("{class} object")
+        };
+        if !super::node_accepts(node, &semantic) {
             return Err(format!("{} is not a {class} object.", node.name));
         }
         if inventory
@@ -483,7 +494,13 @@ pub fn make_macro(
         let class = nodes(state)?
             .into_iter()
             .find(|node| node.kind == "object" && node.path == target)
-            .map(|node| node.class)
+            .map(|node| {
+                if super::node_accepts(&node, "MolCoord object") {
+                    "MolCoord".into()
+                } else {
+                    node.class
+                }
+            })
             .unwrap_or("Object".into());
         let param = mac.append_child("param");
         param.set_str_attr("name", "target");
@@ -530,16 +547,79 @@ pub fn read_library(directory: &std::path::Path) -> Vec<LibraryFile> {
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
-        match std::fs::read_to_string(&path) {
-            Ok(source) => files.push(LibraryFile::parse(&name, source, false)),
+        let mut file = match std::fs::read_to_string(&path) {
+            Ok(source) => LibraryFile::parse(&name, source, false),
             Err(error) => {
                 let mut file = LibraryFile::parse(&name, String::new(), false);
                 file.error = Some(error.to_string());
-                files.push(file);
+                file
             }
-        }
+        };
+        file.key = format!(
+            "file:{}",
+            path.file_name()
+                .unwrap_or_default()
+                .as_encoded_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        file.path = Some(path);
+        files.push(file);
     }
     files
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn resolve_library_file(
+    directory: &std::path::Path,
+    key: &str,
+    bundled: bool,
+) -> Result<LibraryFile, String> {
+    let files = read_library(directory);
+    if let Some(file) = files
+        .iter()
+        .find(|file| file.bundled == bundled && file.key == key)
+    {
+        return Ok(file.clone());
+    }
+    let mut matching = files
+        .into_iter()
+        .filter(|file| file.bundled == bundled && file.name == key);
+    let file = matching.next().ok_or("Action file not found.")?;
+    if matching.next().is_some() {
+        return Err("More than one action file has that name. Select a library entry.".into());
+    }
+    Ok(file)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn delete_library_file(directory: &std::path::Path, key: &str) -> Result<(), String> {
+    let file = resolve_library_file(directory, key, false)?;
+    std::fs::remove_file(file.path.ok_or("Presets are read-only.")?)
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn rename_library_file(
+    directory: &std::path::Path,
+    key: &str,
+    name: &str,
+) -> Result<(), String> {
+    let file = resolve_library_file(directory, key, false)?;
+    let old = file.path.as_ref().ok_or("Presets are read-only.")?;
+    let new = directory.join(validate_file_name(name)?);
+    if *old == new {
+        return Ok(());
+    }
+    save_library(directory, name, &file.source)?;
+    if let Err(error) = std::fs::remove_file(old) {
+        if let Err(cleanup) = std::fs::remove_file(&new) {
+            return Err(format!("Could not remove the old action: {error}; could not remove its new copy: {cleanup}"));
+        }
+        return Err(error.to_string());
+    }
+    Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]

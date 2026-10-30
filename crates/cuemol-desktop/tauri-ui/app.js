@@ -9202,6 +9202,7 @@ function showConsoleUpdate(update) {
     void renderViewport();
     scheduleMoleculeDetailsRefresh();
   }
+  void refreshActionsPane();
 }
 
 function scheduleConsolePoll(generation) {
@@ -16211,7 +16212,10 @@ function drawSequenceRuler(firstColumn, lastColumn) {
   context.textBaseline = "alphabetic";
   const layout = moleculeDetails.sequenceLayout;
   const insertions = layout?.insertions || [];
+  const gaps = layout?.gaps || [];
   let inserted = lowerSequenceBound(insertions, firstColumn, (value) => value[2]);
+  let gapIndex = lowerSequenceBound(gaps, firstColumn, (value) => value.column);
+  let previousLabelRight = -Infinity;
   context.beginPath();
   for (let column = firstColumn; column < lastColumn; column += 1) {
     const x = (column + 0.5) * sequenceCellWidth - sequenceScroller.scrollLeft;
@@ -16221,10 +16225,23 @@ function drawSequenceRuler(firstColumn, lastColumn) {
       inserted += 1;
       continue;
     }
-    const number = (layout?.minimum || 0) + column - inserted;
-    if (number !== 0 && number % 5 === 0) {
+    if (gaps[gapIndex]?.column === column) {
+      context.fillText("…", x - context.measureText("…").width / 2, 10);
+      gapIndex += 1;
+      continue;
+    }
+    const removed = gapIndex ? gaps[gapIndex - 1].removed : 0;
+    const number = (layout?.minimum || 0) + column - inserted + removed;
+    if (number >= -2147483648 && number <= 2147483647 && number !== 0 && number % 5 === 0) {
       const label = String(number);
-      context.fillText(label, x - context.measureText(label).width / 2, 10);
+      const labelWidth = context.measureText(label).width;
+      const left = x - labelWidth / 2;
+      const right = left + labelWidth;
+      const firstGap = lowerSequenceBound(gaps, left + sequenceScroller.scrollLeft, gap => (gap.column + 1) * sequenceCellWidth);
+      if (left >= previousLabelRight + 4 && (!gaps[firstGap] || gaps[firstGap].column * sequenceCellWidth - sequenceScroller.scrollLeft >= right)) {
+        context.fillText(label, left, 10);
+        previousLabelRight = right;
+      }
     }
   }
   context.stroke();

@@ -40498,6 +40498,7 @@ mod tests {
         let id = app.state.active_object_summaries()[0].uid;
         app.selected_object = Some(id);
         let mut camera = CameraController::default();
+        let ctx = egui::Context::default();
         app.apply_action_intent(
             Intent::Run {
                 source: PRESETS.into(),
@@ -40505,6 +40506,7 @@ mod tests {
                 label: "Cartoon + ligand".into(),
             },
             &mut camera,
+            &ctx,
         );
         assert_eq!(app.status, "Console executed", "{:?}", app.log_lines);
         assert_eq!(app.undo_stack.len(), 1);
@@ -40516,14 +40518,14 @@ mod tests {
             .renderer_summaries(id)
             .iter()
             .any(|renderer| renderer.name == "p_cartoon"));
-        app.apply_action_intent(Intent::MoveTo(0), &mut camera);
+        app.apply_action_intent(Intent::MoveTo(0), &mut camera, &ctx);
         assert!(!app
             .state
             .renderer_summaries(id)
             .iter()
             .any(|renderer| renderer.name == "p_cartoon"));
         assert_eq!(app.redo_stack[0].record.id(), record);
-        app.apply_action_intent(Intent::MoveTo(1), &mut camera);
+        app.apply_action_intent(Intent::MoveTo(1), &mut camera, &ctx);
         assert_eq!(app.undo_stack[0].record.id(), record);
         assert!(app
             .state

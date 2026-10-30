@@ -2237,6 +2237,7 @@ pub fn build_topology_bonds_with_db_options(mol: &mut MolCoord, db: &TopoDB, aut
     // OXT, unknown ligand atoms, …). A residue with no template falls through to a
     // full per-residue distance autogeneration.
     let mut contexts: Vec<ResidueCtx> = Vec::with_capacity(summaries.len());
+    let mut pivot_names: HashMap<&str, std::sync::Arc<str>> = HashMap::new();
     for summary in &summaries {
         let map = build_name_map(mol, &summary.atom_indices);
         let mut templated = std::collections::HashSet::new();
@@ -2254,6 +2255,12 @@ pub fn build_topology_bonds_with_db_options(mol: &mut MolCoord, db: &TopoDB, aut
         let allow_autogen = auto_generate && !no_autogen;
         let group = match top {
             Some(top) if top.atom_count() > 0 => {
+                if !top.pivot_atom.is_empty() {
+                    let name = pivot_names
+                        .entry(&top.pivot_atom)
+                        .or_insert_with(|| std::sync::Arc::from(top.pivot_atom.as_str()));
+                    mol.set_topology_pivot(&summary.key, name.clone());
+                }
                 for bond in &top.bonds {
                     for (i, j) in bond_named(mol, &map, &bond.a1, &map, &bond.a2, bond.order, None)
                     {

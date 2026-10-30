@@ -527,6 +527,7 @@ impl SequencePanel {
             .ceil()
             .max(0.) as usize)
             .min(layout.columns);
+        let mut previous_label_right = f32::NEG_INFINITY;
         for column in first_column..last_column {
             let x = origin.x + (column as f32 + 0.5) * cell_width;
             painter.line_segment(
@@ -536,17 +537,39 @@ impl SequencePanel {
                 ],
                 egui::Stroke::new(1., colors.ruler),
             );
+            if layout.is_gap(column) {
+                painter.text(
+                    egui::pos2(x, ruler.top()),
+                    egui::Align2::CENTER_TOP,
+                    "…",
+                    egui::FontId::monospace(10.),
+                    colors.ruler,
+                );
+                continue;
+            }
             if let Some(number) = layout
                 .ruler_number(column)
                 .filter(|number| *number != 0 && number % 5 == 0)
             {
-                painter.text(
-                    egui::pos2(x, ruler.top()),
-                    egui::Align2::CENTER_TOP,
-                    number,
+                let label = painter.layout_no_wrap(
+                    number.to_string(),
                     egui::FontId::monospace(10.),
                     colors.ruler,
                 );
+                let left = x - label.size().x * 0.5;
+                let right = left + label.size().x;
+                let gap = layout
+                    .gaps
+                    .partition_point(|gap| origin.x + (gap.column + 1) as f32 * cell_width <= left);
+                if left >= previous_label_right + 4.
+                    && layout
+                        .gaps
+                        .get(gap)
+                        .is_none_or(|gap| origin.x + gap.column as f32 * cell_width >= right)
+                {
+                    painter.galley(egui::pos2(left, ruler.top()), label, colors.ruler);
+                    previous_label_right = right;
+                }
             }
         }
         if ui.input(|input| input.pointer.primary_released()) {
@@ -991,6 +1014,58 @@ mod tests {
         );
         assert_eq!(panel.layout.ruler_number(5004), Some(5000));
         assert_eq!(panel.layout.ruler_number(4), None);
+    }
+
+    #[test]
+    fn sequence_clicks_full_integer_span_without_large_canvas_coordinates() {
+        let mut state = DesktopAppState::new();
+        state.ensure_active_scene();
+        let data = b"data_sparse\nloop_\n_atom_site.group_PDB\n_atom_site.id\n_atom_site.type_symbol\n_atom_site.label_atom_id\n_atom_site.label_comp_id\n_atom_site.label_asym_id\n_atom_site.label_seq_id\n_atom_site.pdbx_PDB_ins_code\n_atom_site.Cartn_x\n_atom_site.Cartn_y\n_atom_site.Cartn_z\n\
+            ATOM 1 C CA GLY A -2147483648 ? 0 0 0\n\
+            ATOM 2 C CA GLY A -2147483648 A 10 0 0\n\
+            ATOM 3 C CA GLY A 0 ? 20 0 0\n\
+            ATOM 4 C CA GLY A 2147483647 ? 30 0 0\n\
+            ATOM 5 C CA GLY A 2147483647 B 40 0 0\n#\n";
+        state
+            .open_prepared(PreparedFile::parse("sparse.cif", data).unwrap())
+            .unwrap();
+        let ctx = egui::Context::default();
+        let mut panel = SequencePanel::default();
+        let modifiers = egui::Modifiers::default();
+        frame(&ctx, &mut panel, &mut state, Vec::new(), modifiers, 0);
+        frame(&ctx, &mut panel, &mut state, Vec::new(), modifiers, 0);
+        assert!(panel.layout.columns < 20);
+        for (column, index) in [
+            (0, "-2147483648"),
+            (1, "-2147483648A"),
+            (3, "0"),
+            (5, "2147483647"),
+            (6, "2147483647B"),
+        ] {
+            let point = cell(&panel, column);
+            frame(
+                &ctx,
+                &mut panel,
+                &mut state,
+                pointer(point, egui::PointerButton::Primary, true, modifiers),
+                modifiers,
+                0,
+            );
+            let action = frame(
+                &ctx,
+                &mut panel,
+                &mut state,
+                pointer(point, egui::PointerButton::Primary, false, modifiers),
+                modifiers,
+                0,
+            );
+            assert!(
+                matches!(action,
+                Some(SequenceAction::Range { center_selection: Some(ref selection), .. })
+                    if selection == &format!("'A'.{index}.*")),
+                "{index}: {action:?}"
+            );
+        }
     }
 
     #[test]

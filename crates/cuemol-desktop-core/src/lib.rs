@@ -64437,11 +64437,7 @@ end_header
              HETATM    8  C1  LIG A   4      60.000   0.000   0.000  1.00 10.00           C  \n\
              HETATM    9  C2  LIG A   4      80.000   0.000   0.000  1.00 10.00           C  \nEND\n",
         ).unwrap();
-        for atom in molecule.atoms_mut() {
-            if atom.chain_id == "_" {
-                atom.chain_id.clear();
-            }
-        }
+        molecule.change_chain_name("_", "1", "").unwrap();
         let object = app
             .scene_manager_mut()
             .scene_mut(scene)

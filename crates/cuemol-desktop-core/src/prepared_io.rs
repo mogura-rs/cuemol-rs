@@ -48,13 +48,13 @@ impl PreparedFile {
 
     /// The transfer protocol is private to matching application builds.
     pub fn encode(&self) -> Result<Vec<u8>> {
-        postcard::to_extend(self, b"CMPL\x01".to_vec())
+        postcard::to_extend(self, b"CMPL\x02".to_vec())
             .map_err(|error| CueMolError::parse(error.to_string()))
     }
 
     pub fn decode(data: &[u8]) -> Result<Self> {
         let data = data
-            .strip_prefix(b"CMPL\x01")
+            .strip_prefix(b"CMPL\x02")
             .ok_or_else(|| CueMolError::parse("unsupported prepared-file version"))?;
         let (value, remaining) = postcard::take_from_bytes(data)
             .map_err(|error| CueMolError::parse(error.to_string()))?;
@@ -373,6 +373,33 @@ mod tests {
     use super::*;
 
     const PDB: &[u8] = b"ATOM     17  CA  GLY A   1       1.000   2.000   3.000  0.75 12.00           C  \nATOM     93  C   GLY A   1       2.400   2.000   3.000  1.00 10.00           C  \nEND\n";
+
+    #[test]
+    fn transfer_keeps_applied_custom_topology_pivots() {
+        let mut molecule = read_pdb_str(std::str::from_utf8(PDB).unwrap()).unwrap();
+        let mut topology = cuemol_molstr::TopoDB::global().clone();
+        let mut residue = topology.residue("GLY").unwrap().clone();
+        residue.pivot_atom = "C".into();
+        topology.put(residue);
+        molecule.apply_topology_with_db(&topology);
+        let prepared = PreparedFile {
+            name: "custom.pdb".into(),
+            contents: PreparedContents::Molecule(molecule.transfer_data()),
+        };
+        let encoded = prepared.encode().unwrap();
+        let restored = PreparedFile::decode(&encoded).unwrap();
+        let PreparedContents::Molecule(data) = restored.contents else {
+            panic!("molecule expected")
+        };
+        let molecule = data.into_molecule().unwrap();
+        assert_eq!(
+            molecule.residue_pivot_pos("A", "1").unwrap().unwrap().x,
+            2.4
+        );
+        let mut incompatible = encoded;
+        incompatible[4] = 1;
+        assert!(PreparedFile::decode(&incompatible).is_err());
+    }
 
     #[test]
     fn transfer_preserves_molecular_precision_ids_properties_and_bonds() {

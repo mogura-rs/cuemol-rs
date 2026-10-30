@@ -48,6 +48,77 @@ fn recording_survives_shared_undo_handles_and_exports_portable_commands() {
 }
 
 #[test]
+fn molecular_presets_accept_derived_molecules_and_export_the_base_parameter() {
+    for class in ["AnimMol", "MorphMol", "Trajectory"] {
+        let mut state = super::super::tests::state();
+        let id = state.active_object_summaries()[0].uid;
+        state
+            .scene_manager_mut()
+            .object_mut(id)
+            .unwrap()
+            .set_object_type(class);
+        let mut session = Session::default();
+        session.begin_submission("Preset", Dialect::CueMol);
+        run(
+            &mut Submission::library(PRESETS, Some("cartoon-ligand"), &[id.get()]).unwrap(),
+            &mut state,
+            &mut session,
+        )
+        .unwrap();
+        assert!(state
+            .renderer_summaries(id)
+            .iter()
+            .any(|renderer| renderer.name == "p_cartoon"));
+        let source =
+            make_macro(&[session.action_record.clone()], "again", "Again", &state).unwrap();
+        assert!(source.contains("type=\"MolCoord\""), "{class}: {source}");
+    }
+}
+
+#[test]
+fn library_edits_use_exact_external_filenames() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = "<cuemol-actions version=\"1\"><action label=\"Original\"/></cuemol-actions>";
+    for name in ["Upper.QAX", " spaced .qax"] {
+        std::fs::write(directory.path().join(name), source).unwrap();
+    }
+    let files = read_library(directory.path());
+    let upper = files.iter().find(|file| file.name == "Upper").unwrap();
+    let spaced = files.iter().find(|file| file.name == " spaced ").unwrap();
+    delete_library_file(directory.path(), &upper.key).unwrap();
+    assert!(!directory.path().join("Upper.QAX").exists());
+    rename_library_file(directory.path(), &spaced.key, "Renamed").unwrap();
+    assert!(!directory.path().join(" spaced .qax").exists());
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("Renamed.qax")).unwrap(),
+        source
+    );
+    assert!(delete_library_file(directory.path(), "../Renamed").is_err());
+    #[cfg(target_os = "linux")]
+    {
+        for name in ["same.qax", "same.QAX", "a:b.qax"] {
+            std::fs::write(directory.path().join(name), source).unwrap();
+        }
+        let files = read_library(directory.path());
+        let upper = files
+            .iter()
+            .find(|file| {
+                file.path
+                    .as_ref()
+                    .is_some_and(|path| path.file_name().unwrap() == "same.QAX")
+            })
+            .unwrap();
+        delete_library_file(directory.path(), &upper.key).unwrap();
+        assert!(directory.path().join("same.qax").exists());
+        assert!(!directory.path().join("same.QAX").exists());
+        let colon = files.iter().find(|file| file.name == "a:b").unwrap();
+        rename_library_file(directory.path(), &colon.key, "Portable").unwrap();
+        assert!(!directory.path().join("a:b.qax").exists());
+        assert!(directory.path().join("Portable.qax").exists());
+    }
+}
+
+#[test]
 fn macro_parameterizes_only_renderers_created_by_its_steps() {
     let mut state = super::super::tests::state();
     let mut session = Session::default();

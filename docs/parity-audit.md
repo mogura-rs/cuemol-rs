@@ -28,11 +28,11 @@ speedup from a single optimized stage or compare timings from different hosts.
 
 | Feature family | Required comparison | Current audit status |
 | --- | --- | --- |
-| Shell | Activities, menus, toolbar, tab order, docks, compact windows, themes and keyboard access | Previous focused checks exist; full control inventory pending |
+| Shell | Activities, menus, toolbar, tab order, docks, compact windows, themes and keyboard access | Built-in activities and toolbar compared with the published source; browser menu entries and application shortcuts have confirmed gaps; full control inventory in progress |
 | Explorer and Inspector | Object/renderer/group hierarchy, selection, visibility, locking, drag/drop, context menus and property editors | Previous focused checks exist; dialog comparison pending |
 | Color and styles | Coloring modes, paint entries, palettes, property inheritance, style creation/apply/edit/save | Previous focused checks exist; complete editor comparison pending |
 | Console | CueMol/PyMOL dialects, command arguments, completion, history, multiline input, IME and transaction behavior | Shared CueMol/PyMOL interpreters, completion, native QAX logging/replay and cancellable execution implemented; focused shared, browser and OS-input checks passed; affected regression checks, CI and Pages passed at `99b7c16`; public review repairs and release delivery are in progress |
-| Actions | History rows, operation inspection, QAX export, bundled/user macros and reusable actions | History selection, operation inspection, QAX export and bundled/user macro libraries are implemented in native, WASM and Tauri; model and focused screen checks passed; final regression and public review are in progress |
+| Actions | History rows, operation inspection, QAX export, bundled/user macros and reusable actions | History selection, operation inspection, QAX export and bundled/user macro libraries are implemented in native, WASM and Tauri; CI, Pages and the macOS window check passed at `488ce9c`; public review repairs are being validated |
 | Scripts and services | JavaScript/Python helpers, retained state, callbacks, errors, file arguments and asynchronous readers | Previous compatibility checks exist; shared workload comparison pending |
 | File and scene I/O | Reader options, saved cameras, source metadata, selections, linked/embedded data and cancellation | Previous compatibility checks exist; paired performance comparison pending |
 | Navigation and cameras | Rotation, pan, zoom, fitting, clipping, bookmarks, visibility and screen coordinates | Previous numeric and interaction oracles exist; integrated comparison pending |
@@ -50,6 +50,29 @@ uses Umbreon. Any newly confirmed mismatch must have a reproducer, a repair or
 explicit unresolved status, and evidence after the repair. Publication requires
 the affected regression checks, public review, terminal CI, distribution and
 Pages verification. Unresolved required rows prevent a claim of full parity.
+
+## Shell control inventory
+
+The initial inventory uses the published reference's `shared/menuTemplate.ts`,
+`renderer/shell/ActivityBar.tsx`, `Toolbar.tsx` and keybinding dispatcher.
+The Rust entry points are the native `menu_bar` and `keyboard_shortcuts`, the
+browser `shell_menu` and toolbar, and Tauri's `index.html` and keydown handler.
+This is a source comparison; screen checks are recorded separately.
+
+| Reference control | Observed application coverage | Remaining difference |
+| --- | --- | --- |
+| Explorer, View, Selection, Crystal, Actions | All five built-in activities are present | Individual pane controls still require comparison |
+| New Tab, Open File, Save As, Open Scene, Reload Scene, Save Scene, Render, Undo, Redo | Toolbar buttons are present | Native egui and WASM lack the reference's Undo/Redo split-button history menu; the Actions pane provides history navigation |
+| Save current view, Close Tab, scene save variants | Native egui and Tauri have menu entries | WASM lacks several direct entries and a tab close button |
+| Cut, Copy, Paste, Select All | Text widgets and some tree context menus already support clipboard operations | Application Edit menus do not provide the reference's focus-aware routing |
+| Molecular editing and analysis dialogs | Native egui and Tauri have named menu entries; WASM exposes the command forms | WASM lacks the corresponding named Edit/Tools entries and specialized dialogs |
+| Scene background/proofing/properties and view projection/center marker/properties | Shared commands and property controls exist | WASM menu coverage is incomplete |
+| Command/Ctrl shortcuts | Native egui and Tauri implement the main file shortcuts | WASM lacks the main application shortcuts; native/Tauri miss Close Tab and macOS Shift-Command-Z, and native lacks Save Scene As |
+| Plain viewport letter shortcuts | All frontends implement viewport commands | WASM C/F and Tauri F/P do not yet exclude command modifiers |
+
+These confirmed differences remain open implementation work. The native menus
+also retain older UXP-specific entries that the published Tritium menu removed;
+their presence does not demonstrate that the current Tritium controls match.
 
 ## Sequence comparison and repairs
 
@@ -70,9 +93,14 @@ residues, insertion codes and molecule atom-order permutations.
 Sequence centering and the JavaScript residue `getPivotPos()` now use the
 topology pivot atom, or the residue centroid when that atom is absent, and apply
 the object's transform. Published-reference probes cover protein CA, nucleotide
-P, a missing pivot, an unknown ligand and a transformed object. Custom topology
-pivots require a separate persistence check; the current query uses the bundled
-topology dictionary.
+P, a missing pivot, an unknown ligand and a transformed object. A further
+published-application probe overrides the GLY pivot with N and confirms that it
+survives a residue-name change. The molecule now retains the pivot assigned by
+its applied topology, instead of consulting the bundled dictionary at query
+time. Copying, chain/residue edits, undo and worker transfers retain it. If the
+pivot atom is deleted, the remaining atoms define the centroid. Pivot names and
+undo snapshots share storage; the worker format version was advanced because
+its molecule payload changed.
 
 Three real-browser tests cover selection state, cross-molecule isolation,
 centering, copying, context menus and undo/redo. The dark and light cases also
@@ -123,9 +151,20 @@ source assertion still required the removed DOM-based range implementation;
 that assertion was removed because the browser test checks the actual range.
 
 The review also raised very large numbering spans as a potential coordinate
-limit. Spans beyond the tested 5,000-residue example remain unvalidated. Row
-ordering is guaranteed by the shared sequence builder, including its sorted
-fallback; atom-order permutation regressions cover that requirement.
+limit. For spans above 100,000, missing runs longer than eight residue numbers
+now occupy one column marked with an ellipsis. Existing residues and insertion
+codes retain separate columns, including both signed 32-bit limits. The layout
+and pointer tests cover these limits; Tauri's DTO and virtualized shell also
+exercise them. Ordinary numbering, including the 5,000-residue case, is
+unchanged. Row ordering is guaranteed by the shared sequence builder, including
+its sorted fallback; atom-order permutation regressions cover that requirement.
+The rebuilt WASM passed all thirteen affected Sequence, Actions and Console
+cases, including counting the atoms selected at both integer limits and across
+the compressed gaps. Tauri passed five sequence model cases, the Actions model
+case and all fifteen shell cases. The six worker-transfer cases passed as well.
+Captured images then exposed overlapping ruler labels beyond the signed-number
+limit. Labels now stay within that limit and avoid other labels and gap marks;
+all three affected browser cases passed after the correction.
 
 ### Measurements
 
@@ -144,6 +183,12 @@ applications use different runtimes. A repeated unchanged Rust cache lookup
 avoids construction, but its nanosecond timing does not measure painting. The
 reference UI also retains sequence data. Initial refreshes, repeated refreshes
 and process lifetime are recorded separately by the benchmark driver.
+
+After retaining custom topology pivots, the same macOS PDB workload was rerun
+in three fresh processes per condition. Uncached reads were 0.99–1.02 ms with
+24.45–26.47 MiB peak RSS; the published reference measured 2.27–2.34 ms with
+92.83–93.05 MiB. All samples retained the same sequence digest. This checks the
+additional topology metadata on parsed input; it does not measure GUI painting.
 
 The paired PDB can be regenerated by the driver. Its SHA-256 is
 `73d0fed018d213da6bd4ed6970babf02b29e62b1bba3aff50e8616d0065b4198`.
@@ -223,8 +268,8 @@ submission shares that submission's undo. The published application replayed
 an actual Rust GUI log containing rename, selection and a two-command rename,
 then restored all three actions through successive Undo operations. This also
 verified stable name paths when recorded UIDs differ. Macro definitions are
-validated and are not executed by file replay; the separate macro library and
-history browser remain confirmed gaps. Scene saves, QSC loads and history
+validated and are not executed by file replay; the Actions sidebar described
+below supplies the separate macro library and history browser. Scene saves, QSC loads and history
 resets must be submitted alone and cannot run inside a QAX action. The published
 application also clears Undo/Redo after a scene save. Console saves now follow
 that rule only after a successful write; failed saves preserve the history.
@@ -300,6 +345,22 @@ model tests with six ignored. The Linux screen check ran the cartoon preset
 and verified its scene state and displayed image before and after Undo/Redo.
 The rebuilt WASM passed eight Actions/Console cases, and the Tauri shell passed
 thirteen cases with mocked IPC. Public review and delivery remain separate gates.
+
+The published Actions batch subsequently passed complete CI, Pages and the
+macOS window test. That window test now enters a two-line CueMol command through
+OS input, verifies the changed label color and size in captured pixels, and
+checks that one Undo restores the original label.
+
+A further public review found a stale Tauri running flag and a dropped refresh
+request. The pane now refreshes on completion and replays a pending request.
+An executable shell regression covers cancellation and a refresh delayed across
+a library change. Native libraries now use the exact discovered filename for
+rename/delete, including uppercase extensions and spaces; ambiguous legacy
+names are refused, and a failed removal rolls back a newly created copy.
+Native asynchronous macros also receive the active GUI context for wakeups.
+Preset targets accept derived molecular types, and exported macros bind their
+shared molecular base type. The affected shared, native and shell cases cover
+these repairs; they do not replace the final release checks.
 
 Several review concerns match the published reference's explicit behavior:
 plain numeric references are UIDs, `#number` is a UID hint, and `/` separates

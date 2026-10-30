@@ -8,6 +8,8 @@ let actionLibrarySelection = null;
 let actionInspection = null;
 let actionRefreshKey = "";
 let actionRefreshing = false;
+let actionRefreshPending = false;
+let actionRefreshForced = false;
 
 function actionTargets() {
   const selected = workspaceSelectionKind === "multiple" ? workspaceMultipleSelection.map(item => item.objectUid)
@@ -26,8 +28,13 @@ async function actionsRequest(operation, args = {}) {
 }
 
 async function refreshActionsPane(force = false) {
-  if (cueMolActivity !== "actions" || !snapshot || actionRefreshing) return;
-  const key = JSON.stringify([snapshot.activeSceneUid, snapshot.actionHistoryKey, actionTargets().map(item => [item.uid, item.name])]);
+  if (cueMolActivity !== "actions" || !snapshot) return;
+  if (actionRefreshing) {
+    actionRefreshPending = true;
+    actionRefreshForced ||= force;
+    return;
+  }
+  const key = JSON.stringify([snapshot.activeSceneUid, snapshot.actionHistoryKey, !consoleStop.hidden, actionTargets().map(item => [item.uid, item.name])]);
   if (!force && key === actionRefreshKey) return;
   actionRefreshing = true;
   try {
@@ -41,7 +48,15 @@ async function refreshActionsPane(force = false) {
     if (actionInspection && !live.has(actionInspection.id)) actionInspection = null;
     renderActionsPane();
   } catch (error) { showError(error); }
-  finally { actionRefreshing = false; }
+  finally {
+    actionRefreshing = false;
+    if (actionRefreshPending) {
+      const forced = actionRefreshForced;
+      actionRefreshPending = false;
+      actionRefreshForced = false;
+      void refreshActionsPane(forced);
+    }
+  }
 }
 
 function actionButton(label, callback, enabled = true) {
@@ -188,7 +203,7 @@ function renderActionLibrary(busy) {
     for (const file of actionData.files.filter(item => item.bundled === bundled)) {
       const entries = [...(file.actionCount || file.error ? [{ name: null, label: file.name }] : []), ...file.macros];
       for (const macro of entries) {
-        const key = JSON.stringify([bundled, file.name, macro.name]);
+        const key = JSON.stringify([bundled, file.key || file.name, macro.name]);
         const row = actionButton(macro.label, () => { actionLibrarySelection = key; renderActionLibrary(busy); });
         row.classList.add("action-library-row"); row.setAttribute("role", "treeitem"); row.setAttribute("aria-selected", String(key === actionLibrarySelection));
         row.title = macro.error || macro.description || file.error || ""; group.append(row);
@@ -200,7 +215,7 @@ function renderActionLibrary(busy) {
   const targets = actionTargets();
   document.getElementById("action-targets").textContent = targets.length ? `Target: ${targets.map(item => item.name).join(", ")}` : "Target: select an object in the scene tree";
   document.getElementById("action-description").textContent = chosen?.macro.error || chosen?.file.error || chosen?.macro.description || "";
-  const args = chosen ? { file: chosen.file.name, bundled: chosen.file.bundled, macro: chosen.macro.name } : {};
+  const args = chosen ? { file: chosen.file.key || chosen.file.name, bundled: chosen.file.bundled, macro: chosen.macro.name } : {};
   const controls = document.getElementById("action-library-controls");
   controls.replaceChildren(
     actionButton("Run", async () => applyActionUpdate(await actionsRequest("run", { ...args, targetIds: targets.map(item => item.uid) })), Boolean(chosen && !busy && !chosen.file.error && !chosen.macro.error && (!chosen.macro.target_type || targets.length))),

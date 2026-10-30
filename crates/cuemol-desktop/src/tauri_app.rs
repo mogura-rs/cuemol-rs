@@ -22845,6 +22845,30 @@ mod tests {
     }
 
     #[test]
+    fn sequence_details_compact_full_integer_span() {
+        let mut model = model_without_gpu();
+        let data = b"data_sparse\nloop_\n_atom_site.group_PDB\n_atom_site.id\n_atom_site.type_symbol\n_atom_site.label_atom_id\n_atom_site.label_comp_id\n_atom_site.label_asym_id\n_atom_site.label_seq_id\n_atom_site.Cartn_x\n_atom_site.Cartn_y\n_atom_site.Cartn_z\n\
+            ATOM 1 C CA GLY A -2147483648 0 0 0\n\
+            ATOM 2 C CA GLY A 0 20 0 0\n\
+            ATOM 3 C CA GLY A 2147483647 40 0 0\n#\n";
+        model.desktop.open_bytes("sparse.cif", data).unwrap();
+        let details = model.molecule_details("", None, "", true, None);
+        let layout = details.sequence_layout.as_ref().unwrap();
+        assert!(layout.columns < 20);
+        let residues = &details.sequence.as_ref().unwrap()[0].residues;
+        assert_eq!(
+            residues
+                .iter()
+                .map(|residue| residue.column)
+                .collect::<Vec<_>>(),
+            [0, 2, 4]
+        );
+        let dto = serde_json::to_value(&details).unwrap();
+        assert_eq!(dto["sequenceLayout"]["gaps"][1]["column"], 3);
+        assert_eq!(residues[2].selection, "'A'.2147483647.*");
+    }
+
+    #[test]
     fn shared_core_populates_structure_sequence_and_coloring_panels() {
         let root = option_env!("CUEMOL2_REF_DIR")
             .map(PathBuf::from)

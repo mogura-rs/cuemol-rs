@@ -258,7 +258,7 @@ impl ActionsPanel {
         let chosen = self.entry.as_ref().and_then(|(bundled, file, mac)| {
             files
                 .iter()
-                .find(|value| value.bundled == *bundled && &value.name == file)
+                .find(|value| value.bundled == *bundled && &value.key == file)
                 .map(|value| (value, mac.clone()))
         });
         let macro_info = chosen.as_ref().and_then(|(file, mac)| {
@@ -310,7 +310,7 @@ impl ActionsPanel {
                 .show(ui, |ui| {
                     for file in files.iter().filter(|file| file.bundled == bundled) {
                         if file.action_count > 0 || file.error.is_some() {
-                            let key = (file.bundled, file.name.clone(), None);
+                            let key = (file.bundled, file.key.clone(), None);
                             let response =
                                 ui.selectable_label(self.entry.as_ref() == Some(&key), &file.name);
                             self.mark(&format!("Actions file {}", file.name), &response);
@@ -322,7 +322,7 @@ impl ActionsPanel {
                             }
                         }
                         for mac in &file.macros {
-                            let key = (file.bundled, file.name.clone(), Some(mac.name.clone()));
+                            let key = (file.bundled, file.key.clone(), Some(mac.name.clone()));
                             let response = ui
                                 .selectable_label(self.entry.as_ref() == Some(&key), &mac.label)
                                 .on_hover_text(mac.error.as_ref().unwrap_or(&mac.description));
@@ -368,11 +368,11 @@ impl ActionsPanel {
                     }
                 } else {
                     if ui.button("Rename…").clicked() {
-                        self.rename = Some((file.name.clone(), file.name.clone()));
+                        self.rename = Some((file.key.clone(), file.name.clone()));
                     }
                     ui.menu_button("Delete…", |ui| {
                         if ui.button("Delete this user action").clicked() {
-                            intent = Some(Intent::Delete(file.name.clone()));
+                            intent = Some(Intent::Delete(file.key.clone()));
                             self.entry = None;
                             ui.close();
                         }

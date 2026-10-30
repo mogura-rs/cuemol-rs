@@ -244,7 +244,8 @@ fn node_accepts(node: &Node, semantic: &str) -> bool {
         kind if kind.ends_with(" object") => {
             node.kind == "object"
                 && (node.class == kind.trim_end_matches(" object")
-                    || kind == "MolCoord object" && node.class == "AnimMol")
+                    || kind == "MolCoord object"
+                        && matches!(node.class.as_str(), "AnimMol" | "MorphMol" | "Trajectory"))
         }
         _ => false,
     }

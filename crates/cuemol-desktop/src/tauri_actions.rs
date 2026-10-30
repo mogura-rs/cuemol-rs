@@ -47,7 +47,7 @@ impl AppModel {
             let steps: Vec<_> = self.undo_stack.iter().map(|entry| (entry, false)).chain(self.redo_stack.iter().rev().map(|entry| (entry, true))).map(|(entry, undone)| {
                 json!({"id":entry.record.id(),"label":entry.record.label(),"entryCount":entry.record.entry_count(),"undone":undone})
             }).collect();
-            let files: Vec<_> = actions::read_library(&directory).into_iter().map(|file| json!({"name":file.name,"bundled":file.bundled,"macros":file.macros,"actionCount":file.action_count,"error":file.error})).collect();
+            let files: Vec<_> = actions::read_library(&directory).into_iter().map(|file| json!({"key":file.key,"name":file.name,"bundled":file.bundled,"macros":file.macros,"actionCount":file.action_count,"error":file.error})).collect();
             return Ok(
                 json!({"steps":steps,"files":files,"done":self.undo_stack.len(),"running":self.console_run.is_some()}),
             );
@@ -118,14 +118,11 @@ impl AppModel {
             actions::save_library(&directory, &name, &source)?;
             return Ok(json!({"ok":true}));
         }
-        let files = actions::read_library(&directory);
-        let file = files
-            .iter()
-            .find(|file| {
-                Some(file.name.as_str()) == args["file"].as_str()
-                    && file.bundled == args["bundled"].as_bool().unwrap_or(false)
-            })
-            .ok_or("Action file not found.")?;
+        let file = actions::resolve_library_file(
+            &directory,
+            args["file"].as_str().ok_or("Choose an action file.")?,
+            args["bundled"].as_bool().unwrap_or(false),
+        )?;
         match operation {
             "run" => {
                 let name = args["macro"].as_str();
@@ -175,15 +172,15 @@ impl AppModel {
                 if file.bundled {
                     return Err("Presets are read-only.".into());
                 }
-                let path = directory.join(actions::validate_file_name(&file.name)?);
                 if operation == "rename" {
-                    actions::save_library(
+                    actions::rename_library_file(
                         &directory,
+                        &file.key,
                         args["name"].as_str().ok_or("Enter an action name.")?,
-                        &file.source,
                     )?;
+                } else {
+                    actions::delete_library_file(&directory, &file.key)?;
                 }
-                fs::remove_file(path).map_err(|error| error.to_string())?;
                 Ok(json!({"ok":true}))
             }
             _ => Err(format!("Unknown action operation: {operation}")),

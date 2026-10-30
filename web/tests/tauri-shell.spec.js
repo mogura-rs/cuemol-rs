@@ -46,15 +46,17 @@ async function openShell(page, storage = {}, options = {}) {
       image: null, width: 320, height: 240, center: [0, 0, 0], zoom: 10, distance: 100, slab: 50,
       perspective: false, centerMark: options.centerMark || 'none', centerMarkEmbedded: true, lines: [], labels: [], status: 'Ready',
     };
-    const sequenceResidues = options.sequence ? [-2, -1, 0, 1, '1A', '1B', ...Array.from({length: 4999}, (_, index) => index + 2)].map((index, position) => ({
+    const sequenceIndices = options.sequenceExtremes ? [-2147483648, '-2147483648A', 0, 2147483647, '2147483647B'] : [-2, -1, 0, 1, '1A', '1B', ...Array.from({length: 4999}, (_, index) => index + 2)];
+    const sequenceResidues = options.sequence ? sequenceIndices.map((index, position) => ({
       letter: 'G', resId: Number.parseInt(index, 10), residueIndex: String(index), resName: 'GLY',
-      selection: `'A'.${index}.*`, selected: false, column: position,
+      selection: `'A'.${index}.*`, selected: false, column: options.sequenceExtremes ? [0,1,3,5,6][position] : position,
     })) : [];
     const sequence = Array.from({length: options.sequence ? 40 : 0}, (_, index) => ({
       objectUid: 3 + index, objectName: `Probe${index}`, chainId: 'A', residues: sequenceResidues,
     }));
-    const sequenceLayout = {minimum: -2, columns: 5014, insertions: [[1, 'A', 4], [1, 'B', 5]]};
+    const sequenceLayout = options.sequenceExtremes ? {minimum: -2147483648, columns:16, insertions:[[-2147483648,'A',1],[2147483647,'B',6]],gaps:[{first:-2147483647,last:-1,column:2,removed:2147483646},{first:1,last:2147483646,column:4,removed:4294967291}]} : {minimum: -2, columns: 5014, insertions: [[1, 'A', 4], [1, 'B', 5]]};
     window.__shellCalls = [];
+    window.__actionsRunning = false;
     window.__TAURI__ = {core: {invoke: async (command, args) => {
       window.__shellCalls.push({command, args});
       if (command === 'get_initial_state') return {snapshot, viewport, preferences: {}, startupPathsPending: false};
@@ -69,14 +71,28 @@ async function openShell(page, storage = {}, options = {}) {
       }
       if (command === 'get_pdb_history') return [];
       if (command === 'actions_request') {
-        if (args.operation === 'list') return {steps: options.actions ? [{id:7,label:'Cartoon + ligand',entryCount:3,undone:false},{id:8,label:'Hide',entryCount:1,undone:false}] : [],done:options.actions ? 2 : 0,running:false,
-          files:[{name:'Presets',bundled:true,actionCount:0,macros:[{name:'cartoon-ligand',label:'Cartoon + ligand',target_type:'MolCoord',description:'Show cartoon and ligand.'}]}]};
+        if (args.operation === 'list') {
+          const value = {steps: options.actions ? [{id:7,label:'Cartoon + ligand',entryCount:3,undone:false},{id:8,label:'Hide',entryCount:1,undone:false}] : [],done:options.actions ? 2 : 0,running:window.__actionsRunning,
+            files:[{name:'Presets',bundled:true,actionCount:0,macros:[{name:'cartoon-ligand',label:'Cartoon + ligand',target_type:'MolCoord',description:'Show cartoon and ligand.'}]}]};
+          if (window.__extraAction) value.files.push({key:'extra.qax',name:window.__extraAction,bundled:false,actionCount:1,macros:[]});
+          if (window.__delayActionList) {
+            window.__delayActionList = false;
+            return new Promise(resolve => { window.__releaseActionList = () => resolve(value); });
+          }
+          return value;
+        }
         if (args.operation === 'inspect') return {id:args.args.id,label:'Cartoon + ligand',source:'cmd',entries:[{command:'create_renderer',args:[['objId','Probe']],note:false}]};
-        if (args.operation === 'run' || args.operation === 'goto') return {snapshot:structuredClone(snapshot),running:false};
+        if (args.operation === 'run' || args.operation === 'goto') {
+          window.__actionsRunning = args.operation === 'run' && Boolean(options.actionsAsync);
+          return {snapshot:structuredClone(snapshot),running:window.__actionsRunning};
+        }
         if (args.operation === 'save_history') return {ok:true};
       }
       if (command === 'execute_script') return structuredClone(snapshot);
-      if (command === 'console_start' || command === 'console_stop' || command === 'console_poll') return {snapshot: structuredClone(snapshot), running: command !== 'console_stop' && Boolean(options.consoleRunning)};
+      if (command === 'console_start' || command === 'console_stop' || command === 'console_poll') {
+        if (command === 'console_stop') window.__actionsRunning = false;
+        return {snapshot: structuredClone(snapshot), running: window.__actionsRunning || command !== 'console_stop' && Boolean(options.consoleRunning)};
+      }
       if (command === 'console_complete') return [{display: 'Probe', replacement: 'select Probe'}];
       if (command === 'rename_workspace_node') {
         if (args.input.objectUid !== 3) throw new Error('wrong inspector object');
@@ -170,6 +186,28 @@ test('Tauri Actions selects ranges, inspects operations and runs on the selected
   await expect.poll(() => page.evaluate(() => window.__shellCalls.filter(call => call.command === 'actions_request' && call.args.operation === 'run').length)).toBe(1);
   const run = await page.evaluate(() => window.__shellCalls.find(call => call.command === 'actions_request' && call.args.operation === 'run').args.args);
   expect(run).toEqual({file:'Presets',bundled:true,macro:'cartoon-ligand',targetIds:[3]});
+  expect(errors).toEqual([]);
+});
+
+test('Tauri Actions unlocks after cancellation and retains a queued refresh', async ({page}) => {
+  const errors = await openShell(page, {}, {actions:true,actionsAsync:true});
+  await page.getByRole('button', {name:'Actions',exact:true}).click();
+  const controls = page.locator('#action-library-controls');
+  await page.locator('#action-library-list').getByRole('treeitem',{name:'Cartoon + ligand',exact:true}).click();
+  await controls.getByRole('button',{name:'Run',exact:true}).click();
+  await expect(page.locator('#console-stop')).toBeVisible();
+  await controls.getByRole('button',{name:'Refresh',exact:true}).click();
+  await expect.poll(() => page.evaluate(() => window.__shellCalls.filter(call => call.command === 'actions_request' && call.args.operation === 'list').length)).toBeGreaterThan(2);
+  await page.locator('#console-stop').click();
+  await expect(page.locator('#console-stop')).toBeHidden();
+  await expect(page.locator('#action-history-controls').getByRole('button',{name:'Undo',exact:true})).toBeEnabled();
+  await page.evaluate(() => { window.__delayActionList = true; });
+  await controls.getByRole('button',{name:'Refresh',exact:true}).click();
+  await expect.poll(() => page.evaluate(() => typeof window.__releaseActionList)).toBe('function');
+  await page.evaluate(() => { window.__extraAction = 'Added while refreshing'; });
+  await controls.getByRole('button',{name:'Refresh',exact:true}).click();
+  await page.evaluate(() => { window.__releaseActionList(); });
+  await expect(page.locator('#action-library-list')).toContainText('Added while refreshing');
   expect(errors).toEqual([]);
 });
 
@@ -293,6 +331,33 @@ test('Tauri cancelled drag schedules a settled frame without replaying movement'
   expect(errors).toEqual([]);
 });
 
+
+test('Tauri sequence selects signed integer limits through compact gaps', async ({page}, testInfo) => {
+  await page.addInitScript(() => {
+    window.__sequenceRulerLabels = [];
+    const original = CanvasRenderingContext2D.prototype.fillText;
+    CanvasRenderingContext2D.prototype.fillText = function (text, ...args) {
+      if (this.canvas.classList.contains('sequence-ruler-canvas')) window.__sequenceRulerLabels.push(String(text));
+      return original.call(this, text, ...args);
+    };
+  });
+  const errors = await openShell(page, {}, {sequence: true, sequenceExtremes: true});
+  await page.locator('[data-bottom-select="sequence"]').click();
+  const row = page.locator('.sequence-chain').first();
+  for (const index of ['-2147483648', '-2147483648A', '0', '2147483647', '2147483647B']) {
+    const cell = row.locator(`.sequence-cell[data-residue-index="${index}"]`);
+    await expect(cell).toBeInViewport();
+    await cell.click();
+    await expect.poll(() => page.evaluate(() => window.__shellCalls.filter(call => call.command === 'sequence_action').at(-1)?.args.input.targetSelection)).toBe(`'A'.${index}.*`);
+  }
+  const extent = await page.locator('.sequence-placeholder').evaluate(element => element.scrollWidth);
+  expect(extent).toBeLessThan(2000);
+  const labels = await page.evaluate(() => window.__sequenceRulerLabels);
+  expect(labels).toContain('…');
+  expect(labels.filter(label => /^-?\d+$/.test(label)).every(label => Number(label) >= -2147483648 && Number(label) <= 2147483647)).toBe(true);
+  await page.screenshot({path: testInfo.outputPath('sequence-integer-limits.png')});
+  expect(errors).toEqual([]);
+});
 
 test('Tauri sequence virtualizes both axes and ranges include offscreen residues', async ({page}, testInfo) => {
   const errors = await openShell(page, {}, {sequence: true});
