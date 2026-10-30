@@ -21,6 +21,30 @@ async function holdWorker(page) {
   return async () => { release(); await page.unroute('**/loader-worker.js', handler); };
 }
 
+async function holdRenderYield(page) {
+  await page.evaluate(() => {
+    const postMessage = MessagePort.prototype.postMessage;
+    let resume;
+    window.renderYield = {
+      held: false,
+      release() { MessagePort.prototype.postMessage = postMessage; resume?.(); },
+    };
+    MessagePort.prototype.postMessage = function(...args) {
+      if (args[0] === null && !window.renderYield.held) {
+        window.renderYield.held = true;
+        resume = () => postMessage.apply(this, args);
+      } else {
+        return postMessage.apply(this, args);
+      }
+    };
+  });
+  return async () => {
+    const id = await page.evaluate(() => window.cuemol.command('cancel_render'));
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().lastCommand)).toBe(id);
+    await page.evaluate(() => window.renderYield.release());
+  };
+}
+
 async function fetchPdb(page) {
   const button = await page.evaluate(() => window.cuemol.status().ui.rects['Get PDB']);
   await page.mouse.click(button[0] + button[2] / 2, button[1] + button[3] / 2);
@@ -245,9 +269,11 @@ test('cancelling queued input keeps an active render busy and cancellable', asyn
   await ready(page);
   await load(page, 'render.pdb', Buffer.from(pdb));
   await loaded(page, 'render.pdb');
-  await call(page, 'set_render_settings', {settings: 'backend=umbreon; supersample=4; useGI=true; giSamples=256; giBounces=4; denoise=None'});
-  await page.evaluate(() => window.cuemol.command('get_screenshot', {width: 384, height: 384}));
-  await expect.poll(() => page.evaluate(() => window.cuemol.status().busy)).toBe(true);
+  await call(page, 'set_render_settings', {settings: 'backend=umbreon; umbreon.supersample=1; umbreon.useGI=false; umbreon.denoise=None'});
+  const cancel = await holdRenderYield(page);
+  await page.evaluate(() => window.cuemol.command('get_screenshot', {width: 64, height: 48}));
+  await expect.poll(() => page.evaluate(() => window.renderYield.held)).toBe(true);
+  expect(await page.evaluate(() => window.cuemol.status().busy)).toBe(true);
   try {
     const id = await page.evaluate(source => {
       const transfer = new DataTransfer();
@@ -266,7 +292,7 @@ test('cancelling queued input keeps an active render busy and cancellable', asyn
     await expect.poll(() => page.evaluate(() => window.cuemol.status().lastCommand)).toBe(next);
     expect(await page.evaluate(() => window.cuemol.status().message)).toBe('Wait for the current operation to finish.');
   } finally {
-    await page.evaluate(() => window.cuemol.command('cancel_render'));
+    await cancel();
     await expect.poll(() => page.evaluate(() => window.cuemol.status().message)).toContain('Render cancelled');
   }
 });
@@ -313,19 +339,26 @@ test('PDB download failures do not unlock a concurrent render', async ({page}) =
   await ready(page);
   await load(page, 'render.pdb', Buffer.from(pdb));
   await loaded(page, 'render.pdb');
-  await page.route('https://files.rcsb.org/download/1CRN.cif', route => route.fulfill({status: 503, body: 'Unavailable'}));
-  await call(page, 'set_render_settings', {settings: 'backend=umbreon; supersample=4; useGI=true; giSamples=256; giBounces=4; denoise=None'});
-  await page.evaluate(() => window.cuemol.command('get_screenshot', {width: 384, height: 384}));
-  await expect.poll(() => page.evaluate(() => window.cuemol.status().busy)).toBe(true);
+  let requested = 0;
+  await page.route('https://files.rcsb.org/download/1CRN.cif', route => {
+    requested++; return route.fulfill({status: 503, body: 'Unavailable'});
+  });
+  await call(page, 'set_render_settings', {settings: 'backend=umbreon; umbreon.supersample=1; umbreon.useGI=false; umbreon.denoise=None'});
+  const cancel = await holdRenderYield(page);
+  await page.evaluate(() => window.cuemol.command('get_screenshot', {width: 64, height: 48}));
+  await expect.poll(() => page.evaluate(() => window.renderYield.held)).toBe(true);
+  expect(await page.evaluate(() => window.cuemol.status().busy)).toBe(true);
   try {
     await fetchPdb(page);
-    await expect.poll(() => page.evaluate(() => window.cuemol.status().message)).toMatch(/Queued|HTTP 503/);
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().message)).toBe('Queued download 1CRN.');
     expect(await page.evaluate(() => window.cuemol.status().busy)).toBe(true);
+    expect(requested).toBe(0);
   } finally {
-    await page.evaluate(() => window.cuemol.command('cancel_render'));
+    await cancel();
   }
   await expect.poll(() => page.evaluate(() => window.cuemol.status().message)).toContain('HTTP 503');
   await expect.poll(() => page.evaluate(() => window.cuemol.status().busy)).toBe(false);
+  expect(requested).toBe(1);
   await page.unroute('https://files.rcsb.org/download/1CRN.cif');
   await page.route('https://files.rcsb.org/download/1CRN.cif', route => route.fulfill({contentType: 'text/plain', body: downloadedCif}));
   await fetchPdb(page);
