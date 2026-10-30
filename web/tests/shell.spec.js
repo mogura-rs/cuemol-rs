@@ -54,6 +54,28 @@ test('browser shell shortcuts preserve undo, modifier keys, palette and IME',asy
   expect((await status(page)).ui.modal).toBe(false);
 });
 
+test('viewport shortcuts retain modifiers when keys are released within one frame',async({page})=>{
+  await setup(page);
+  await command(page,'set_view',{center:[25,30,0],zoom:50});
+  const before=(await status(page)).ui.navigation.tool;
+  await page.evaluate(()=>{
+    const emit=(type,key,code,ctrlKey)=>document.querySelector('canvas').dispatchEvent(new KeyboardEvent(type,{key,code,ctrlKey,bubbles:true}));
+    emit('keydown','Control','ControlLeft',true);
+    for(const key of ['c','f','d']) {
+      emit('keydown',key,`Key${key.toUpperCase()}`,true);
+      emit('keyup',key,`Key${key.toUpperCase()}`,true);
+    }
+    emit('keyup','Control','ControlLeft',false);
+  });
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  expect((await status(page)).view.center).toEqual([25,30,0]);
+  expect((await status(page)).ui.navigation.tool).toBe(before);
+  await page.evaluate(()=>{
+    for(const type of ['keydown','keyup']) document.querySelector('canvas').dispatchEvent(new KeyboardEvent(type,{key:'d',code:'KeyD',bubbles:true}));
+  });
+  await expect.poll(async()=>(await status(page)).ui.navigation.tool).toBe('Distance');
+});
+
 test('browser tabs cancel closing, save the scene and restore it through undo',async({page},testInfo)=>{
   await setup(page);
   const original=(await status(page)).scene.sceneId;

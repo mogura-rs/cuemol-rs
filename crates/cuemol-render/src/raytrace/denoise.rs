@@ -476,11 +476,16 @@ fn prepare_with_direct(
             return Err(CueMolError::invalid_argument("Render cancelled"));
         }
         render_seconds += frame.render_seconds;
-        let direct = rgba(&frame);
+        let mut direct = rgba(&frame);
         for i in 0..width * height {
             for c in 0..3 {
                 let o = i * 4 + c;
-                color[o] = (color[o] - direct[o]).max(0.) / albedo[o].max(0.01);
+                if preserve[i] {
+                    direct[o] = color[o];
+                    color[o] = 0.;
+                } else {
+                    color[o] = (color[o] - direct[o]).max(0.) / albedo[o].max(0.01);
+                }
             }
         }
         Some(direct)
@@ -586,6 +591,45 @@ impl DenoiseGuides {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+    #[test]
+    fn uncovered_samples_do_not_poison_indirect_denoise_input() {
+        let frame = |pixels| FloatFrame {
+            width: 2,
+            height: 1,
+            components: 4,
+            pixels,
+            render_seconds: 0.,
+        };
+        let prepared = prepare_with_direct(
+            &RenderSceneSnapshot::empty(),
+            &Camera::new(),
+            [0.; 4],
+            &UmbreonRenderParams {
+                use_gi: true,
+                ..Default::default()
+            },
+            frame(vec![0.2, 0.1, 0.05, 0.5, 0.6, 0.3, 0.1, 1.]),
+            None,
+            None,
+            Some(frame(vec![0.05, 0.02, 0.01, 0.5, 0.2, 0.1, 0., 1.])),
+            Some(DenoiseGuides {
+                width: 2,
+                height: 1,
+                albedo: vec![0., 0., 0., 1., 0.5, 0.5, 0.5, 1.],
+                normal: vec![0., 0., 0., 1., 0., 0., 1., 1.],
+                preserve: vec![true, false],
+            }),
+        )
+        .unwrap();
+        assert_eq!(&prepared.color[..3], &[0.; 3]);
+        assert_eq!(&prepared.direct.as_ref().unwrap()[..3], &[0.2, 0.1, 0.05]);
+        let frame = prepared
+            .finish(vec![200., 200., 200., 1., 0.8, 0.4, 0.2, 1.])
+            .unwrap();
+        assert_eq!(&frame.pixels[..4], &[51, 26, 13, 128]);
+        assert_eq!(&frame.pixels[4..], &[153, 77, 26, 255]);
+    }
+
     #[test]
     fn oidn_removes_noise_with_clean_guides_and_preserves_alpha() {
         let width = 64;

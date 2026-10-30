@@ -41,7 +41,7 @@ speedup from a single optimized stage or compare timings from different hosts.
 | Molecular editing | Merge/delete, chain/residue changes, secondary structure, transformations and undo/redo | Command coverage exists; dialog and edge-case comparison pending |
 | Analysis and surfaces | Alignment, interactions, surface creation/regeneration/cutting and electrostatics | Numerical/tool checks exist; dialog and performance comparison pending |
 | Viewport rendering | Molecular/map/surface representations, transparency, lighting, edges, fog, AA and AO | Ribbon widths, topology links, applied pivots and secondary-structure junctions repaired; remaining viewport effects and scene comparisons are pending |
-| Render and export | Umbreon settings, preview, cancel/save, physical units, alpha and still/movie output | Six opaque native export conditions compared below; physical lighting and geometry repaired, traversal optimized; transparent scenes, denoising and broader export controls remain under comparison |
+| Render and export | Umbreon settings, preview, cancel/save, physical units, alpha and still/movie output | Six opaque native export conditions compared below; physical lighting, section transparency, transparent-background fog and denoiser inputs repaired; residual GI/denoising differences and broader export controls remain under comparison |
 | Animation and MD | Morphing, camera/property motions, seek/pause/stop, indexed trajectories and bounded memory | Previous state/interaction checks exist; complete playback comparison pending |
 | Native integration | Windows, dialogs, settings, recent files, installer/update and OS credential stores | Five-platform published checks exist; local OS-input prerequisites remain documented |
 | External prerequisites | Real AI providers and hardware quad-buffer presentation | Credentials/target hardware remain required; quad-buffer backend is unimplemented |
@@ -169,6 +169,45 @@ A regression now checks initial suppression, later generation and reuse after
 setting the flag, changing coordinates and transferring the molecule. It passed
 without changing runtime behavior. CI and delivery checks are in progress.
 
+## Transparency and denoiser repairs
+
+The reference blends section RGB in the sRGB domain while coverage remains
+linear. The Rust implementation had blended linear RGB directly, making
+translucent renderers too bright. It now follows the reference encoding,
+weighting and decoding order. Layer-weight mode also averages the supersamples
+of each pass before compositing; per-pixel mode composites before averaging.
+
+For transparent backgrounds, fog now reduces final coverage without changing
+the RGB sum or exposing hidden geometry. Previously, fog reduced each surface's
+opacity during front-to-back compositing, so an opaque front face could admit
+color and coverage from surfaces behind it. A two-plane regression reproduces
+the unwanted green contribution behind an opaque red face and checks that only
+the front face contributes after the repair.
+
+These checks used the same 1CRN ribbon scene and saved camera in the published
+reference and Rust: 320 x 240 pixels, 3 x 3 supersampling, renderer opacity 0.5
+and no denoising. With GI disabled, both the black and transparent backgrounds
+differ in only three of 307,200 RGBA channels, by one level each. The black
+background in layer-weight mode matches every channel. The corresponding GI
+checks with a black background retain mean errors of 0.0517/0.0524 and a maximum
+of 6. These are correctness probes, not repeated performance measurements.
+
+OIDN also received invalid illumination estimates from antialiased pixels whose
+center ray missed geometry. Dividing those pixels by the fallback albedo
+amplified the input and produced white outlines. Background, edge and unlit
+samples now keep their original display values outside the GI filter and send
+zero illumination to it. A regression supplies deliberately large filtered
+values and verifies that those preserved pixels and their alpha are unchanged.
+The native 1CRN OIDN probe reduced whole-image mean error from 1.981 to 0.222;
+the translucent-renderer probe fell from 1.708 to 0.073. The transparent-background
+probe, including the fog repair, has mean error 0.193 and maximum error 30.
+Denoising still operates on a different intermediate grid, so these results do
+not establish exact OIDN or GI equivalence. All 96 render tests passed after the
+repairs, including the C++ hatch oracle and the stereo integration case. Nine
+browser checks then passed with the rebuilt WASM, covering transparent PNG
+downloads, OIDN and its alpha preservation, cancellation, lighting controls and
+both stereo viewport backends.
+
 ## Shell control inventory
 
 The initial inventory uses the published reference's `shared/menuTemplate.ts`,
@@ -198,6 +237,14 @@ also passed the existing rotation, zoom, slab, centering, font, Python helper an
 console checks, plus Shift-Ctrl-Z redo and persisted palette folding. A captured
 history menu exposed a missing caret glyph; using the existing icon font fixed
 it, and the affected browser case passed again.
+
+Later CI exposed a frame-batching error: pressing Ctrl+C/F/D and releasing Ctrl
+before the next frame could invoke an unmodified viewport command. Both the
+shared tool selector and browser view shortcuts now inspect each key event's
+modifiers. The regression failed before the repair in both egui input and the
+real browser; seven shared UI tests and all nineteen navigation/shell browser
+cases passed afterward. The backbone hover fixture now includes polymer-link
+atoms so its transform checks operate on a visible ribbon in a clean checkout.
 
 The Crystal pane also referenced a nonexistent command for symmetry mates.
 Its controls now open the actual symmetry settings and display commands.

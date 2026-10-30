@@ -1209,16 +1209,16 @@ impl App {
                     .map(|hit| (position, hit));
             }
         }
-        if ui.ctx().wants_keyboard_input() || !ui.input(|input| input.modifiers.is_none()) {
+        if ui.ctx().wants_keyboard_input() {
             return;
         }
-        if ui.input(|i| i.key_pressed(egui::Key::Home)) {
+        if cuemol_ui::navigation::unmodified_key_pressed(ui.ctx(), egui::Key::Home) {
             self.fit(false);
         }
-        if ui.input(|i| i.key_pressed(egui::Key::F)) {
+        if cuemol_ui::navigation::unmodified_key_pressed(ui.ctx(), egui::Key::F) {
             self.fit(true);
         }
-        if ui.input(|i| i.key_pressed(egui::Key::C)) {
+        if cuemol_ui::navigation::unmodified_key_pressed(ui.ctx(), egui::Key::C) {
             if let Some(id) = self.selected {
                 self.call("center_view",json!({"objId":id.get(),"selection":if self.selection.is_empty(){"*"}else{&self.selection},"zoom":false}));
             }

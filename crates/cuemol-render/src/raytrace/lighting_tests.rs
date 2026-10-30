@@ -26,6 +26,72 @@ fn ray() -> Ray {
         direction: Vector4::new3(0., 0., -1.),
     }
 }
+
+#[test]
+fn transparent_background_fog_changes_coverage_without_revealing_hidden_geometry() {
+    let mut snapshot = RenderSceneSnapshot::empty();
+    for (z, color) in [(-2.5, [1., 0., 0., 1.]), (-4., [0., 1., 0., 1.])] {
+        snapshot.meshes.push(RenderMesh {
+            vertices: [(-2., -2.), (2., -2.), (0., 2.)]
+                .into_iter()
+                .map(|(x, y)| MeshVertex {
+                    pick_atom_index: None,
+                    position: Vector4::new3(x, y, z),
+                    normal: Vector4::new3(0., 0., 1.),
+                    color,
+                })
+                .collect(),
+            indices: vec![0, 1, 2],
+        });
+    }
+    snapshot.mark_renderer_section(1., "nolighting");
+    let mut camera = camera();
+    camera.set_slab_depth(10.);
+    let params = UmbreonRenderParams {
+        use_gi: false,
+        transparent_background: true,
+        show_edge_lines: false,
+        ..Default::default()
+    };
+    let sample = trace_sample_pass(
+        &snapshot,
+        &RayIndex::new(&snapshot),
+        ray(),
+        &camera,
+        [0., 0., 0., 1.],
+        &params,
+        None,
+        None,
+    )
+    .0;
+    assert_eq!(sample, [1., 0., 0., 0.5]);
+    let hatch = npr::ResolvedHatch::new(
+        &npr::HatchRenderParams {
+            coloring: "flat color".into(),
+            tone_strength: 0.,
+            default_edges: false,
+            ..Default::default()
+        },
+        1,
+    )
+    .unwrap();
+    let hatch_sample = npr::trace_npr_pass(
+        &snapshot,
+        &RayIndex::new(&snapshot),
+        ray(),
+        &camera,
+        [0., 0., 0., 1.],
+        &params,
+        &hatch,
+        0.,
+        0.,
+        None,
+        None,
+    )
+    .0;
+    assert_eq!(hatch_sample, sample);
+}
+
 #[test]
 fn direct_light_energy_and_shadowless_headlight_follow_the_settings() {
     let s = RenderSceneSnapshot::empty();
@@ -147,11 +213,32 @@ fn per_pixel_veil_weights_stay_nonnegative_and_equal_alphas_share_a_pass() {
         Some(0) => ([1., 0., 0., 1.], 5.),
         Some(_) => ([0., 0., 1., 1.], 6.),
     });
-    for (a, b) in composite.into_iter().zip([0.6, 0.1, 0.5, 1.]) {
+    for (a, b) in composite
+        .into_iter()
+        .zip([0.318_546_778, 0.010_022_826, 0.214_041_14, 1.])
+    {
         assert!((a - b).abs() < 1e-6);
     }
     let no_coverage = blend_sample(&index, &p, |_| ([0.3, 0.4, 0.5, 1.], 10.));
     assert_eq!(no_coverage, [0.3, 0.4, 0.5, 1.]);
+    let layers = blend_sample(
+        &index,
+        &UmbreonRenderParams {
+            per_pixel_blend: false,
+            ..p
+        },
+        |group| match group {
+            None => ([1.; 4], 10.),
+            Some(0) => ([1., 0., 0., 1.], 5.),
+            Some(_) => ([0., 0., 1., 1.], 6.),
+        },
+    );
+    for (a, b) in layers
+        .into_iter()
+        .zip([0.132_868_322, 0., 0.050_876_088, 1.])
+    {
+        assert!((a - b).abs() < 1e-6);
+    }
 }
 #[test]
 fn nearest_bvh_hit_respects_distance_and_filter_without_allocating_hits() {

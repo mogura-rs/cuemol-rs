@@ -218,6 +218,12 @@ ATOM      3  CA  ALA A   2       0.000   0.000   0.000  1.00 10.00           C
 ATOM      4  CB  ALA A   2       0.000   3.000   0.000  1.00 10.00           C
 ATOM      5  CA  ALA A   3       4.000   0.000   0.000  1.00 10.00           C
 ATOM      6  CB  ALA A   3       4.000   3.000   0.000  1.00 10.00           C
+ATOM      7  N   ALA A   1      -5.200   0.000   0.000  1.00 10.00           N
+ATOM      8  C   ALA A   1      -2.500   0.000   0.000  1.00 10.00           C
+ATOM      9  N   ALA A   2      -1.200   0.000   0.000  1.00 10.00           N
+ATOM     10  C   ALA A   2       1.500   0.000   0.000  1.00 10.00           C
+ATOM     11  N   ALA A   3       2.800   0.000   0.000  1.00 10.00           N
+ATOM     12  C   ALA A   3       5.500   0.000   0.000  1.00 10.00           C
 END
 `;
   await page.locator('#files').setInputFiles({name:'backbone.pdb',mimeType:'application/octet-stream',buffer:Buffer.from(protein)});

@@ -318,25 +318,7 @@ fn hit_tone(
     }
     t as f32
 }
-pub(super) fn trace_npr(
-    snapshot: &RenderSceneSnapshot,
-    index: &RayIndex<'_>,
-    ray: Ray,
-    camera: &Camera,
-    background: [f32; 4],
-    p: &UmbreonRenderParams,
-    h: &ResolvedHatch,
-    x: f32,
-    y: f32,
-    cache: Option<&std::cell::RefCell<lighting::PixelCache>>,
-) -> [f64; 4] {
-    super::blend_sample(index, p, |group| {
-        trace_npr_pass(
-            snapshot, index, ray, camera, background, p, h, x, y, group, cache,
-        )
-    })
-}
-fn trace_npr_pass(
+pub(super) fn trace_npr_pass(
     snapshot: &RenderSceneSnapshot,
     index: &RayIndex<'_>,
     ray: Ray,
@@ -391,8 +373,7 @@ fn trace_npr_pass(
                 composed
             }
         };
-        let alpha =
-            super::section_alpha(snapshot, hit) * if p.transparent_background { fog } else { 1. };
+        let alpha = super::section_alpha(snapshot, hit);
         let weight = alpha * (1. - output[3]);
         for c in 0..3 {
             let color = if p.transparent_background {
@@ -407,7 +388,9 @@ fn trace_npr_pass(
             break;
         }
     }
-    if !p.transparent_background {
+    if p.transparent_background {
+        output[3] *= hits.first().map_or(1., |hit| super::fog_at(*hit, camera));
+    } else {
         for c in 0..3 {
             output[c] += background[c] as f64 * (1. - output[3]);
         }

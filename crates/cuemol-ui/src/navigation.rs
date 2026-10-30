@@ -140,8 +140,21 @@ pub fn cursor(ctx: &egui::Context, tool: Tool, pressed: bool) {
     });
 }
 
+pub fn unmodified_key_pressed(ctx: &egui::Context, key: egui::Key) -> bool {
+    ctx.input(|input| {
+        input.events.iter().any(|event| {
+            matches!(event, egui::Event::Key {
+                key: event_key,
+                pressed: true,
+                modifiers,
+                ..
+            } if *event_key == key && modifiers.is_none())
+        })
+    })
+}
+
 pub fn tool_shortcut(ctx: &egui::Context) -> Option<Tool> {
-    if ctx.wants_keyboard_input() || !ctx.input(|i| i.modifiers.is_none()) {
+    if ctx.wants_keyboard_input() {
         return None;
     }
     [
@@ -154,7 +167,41 @@ pub fn tool_shortcut(ctx: &egui::Context) -> Option<Tool> {
         (egui::Key::E, Tool::Bond),
     ]
     .into_iter()
-    .find_map(|(key, tool)| ctx.input(|i| i.key_pressed(key)).then_some(tool))
+    .find_map(|(key, tool)| unmodified_key_pressed(ctx, key).then_some(tool))
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::*;
+
+    #[test]
+    fn shortcut_uses_key_event_modifiers_after_batched_release() {
+        let ctx = egui::Context::default();
+        for (key_modifiers, final_modifiers, expected) in [
+            (egui::Modifiers::CTRL, egui::Modifiers::NONE, None),
+            (egui::Modifiers::COMMAND, egui::Modifiers::NONE, None),
+            (egui::Modifiers::SHIFT, egui::Modifiers::NONE, None),
+            (
+                egui::Modifiers::NONE,
+                egui::Modifiers::CTRL,
+                Some(Tool::Distance),
+            ),
+        ] {
+            let key = |pressed| egui::Event::Key {
+                key: egui::Key::D,
+                physical_key: Some(egui::Key::D),
+                pressed,
+                repeat: false,
+                modifiers: key_modifiers,
+            };
+            let input = egui::RawInput {
+                modifiers: final_modifiers,
+                events: vec![key(true), key(false)],
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| assert_eq!(tool_shortcut(ctx), expected));
+        }
+    }
 }
 
 pub fn palette(

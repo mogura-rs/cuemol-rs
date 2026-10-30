@@ -938,35 +938,41 @@ fn render_float_region(
         region.clone(),
         cancel,
     )?;
-    let shade = |x: f64, y: f64, cache: &std::cell::RefCell<lighting::PixelCache>| {
-        cache
-            .borrow_mut()
-            .set_position([x / width as f64, y / height as f64]);
-        let ray = rays.at(x, y);
-        if let Some(hatch) = hatch {
-            npr::trace_npr(
-                snapshot,
-                index,
-                ray,
-                camera,
-                background,
-                params,
-                hatch,
-                (x * samples as f64) as f32,
-                (y * samples as f64) as f32,
-                Some(cache),
-            )
-        } else {
-            trace_sample(
-                snapshot,
-                index,
-                ray,
-                camera,
-                background,
-                params,
-                Some(cache),
-            )
-        }
+    let shade_pass =
+        |x: f64, y: f64, cache: &std::cell::RefCell<lighting::PixelCache>, group: Option<usize>| {
+            cache
+                .borrow_mut()
+                .set_position([x / width as f64, y / height as f64]);
+            let ray = rays.at(x, y);
+            if let Some(hatch) = hatch {
+                npr::trace_npr_pass(
+                    snapshot,
+                    index,
+                    ray,
+                    camera,
+                    background,
+                    params,
+                    hatch,
+                    (x * samples as f64) as f32,
+                    (y * samples as f64) as f32,
+                    group,
+                    Some(cache),
+                )
+            } else {
+                trace_sample_pass(
+                    snapshot,
+                    index,
+                    ray,
+                    camera,
+                    background,
+                    params,
+                    group,
+                    Some(cache),
+                )
+            }
+        };
+    let shade = |x, y, cache: &std::cell::RefCell<lighting::PixelCache>| {
+        blend_sample(index, params, |group| shade_pass(x, y, cache, group))
     };
     let adaptive = sampling::AdaptiveGrid::build(
         index,
@@ -1001,6 +1007,30 @@ fn render_float_region(
             let center = adaptive.as_ref().and_then(|grid| grid.center(x, y));
             let (accumulated, divisor) = if let Some(center) = center {
                 (center, 1.)
+            } else if !params.per_pixel_blend && !index.translucent_groups.is_empty() {
+                let samples = adaptive.as_ref().map_or(samples, |grid| grid.samples);
+                let composite = blend_sample(index, params, |group| {
+                    cache.borrow_mut().reset();
+                    let mut accumulated = [0.; 4];
+                    for sy in 0..samples {
+                        for sx in 0..samples {
+                            let (sample, _) = shade_pass(
+                                x as f64 + (sx as f64 + 0.5) / samples as f64,
+                                y as f64 + (sy as f64 + 0.5) / samples as f64,
+                                &cache,
+                                group,
+                            );
+                            for i in 0..4 {
+                                accumulated[i] += sample[i];
+                            }
+                        }
+                    }
+                    (
+                        accumulated.map(|value| value / (samples * samples) as f64),
+                        0.,
+                    )
+                });
+                (composite, 1.)
             } else {
                 let samples = adaptive.as_ref().map_or(samples, |grid| grid.samples);
                 let mut accumulated = [0.; 4];
@@ -1225,6 +1255,7 @@ fn named_material(name: &str) -> MaterialPreset {
     }
 }
 
+#[cfg(test)]
 fn trace_sample(
     snapshot: &RenderSceneSnapshot,
     index: &RayIndex<'_>,
@@ -1241,6 +1272,7 @@ fn trace_sample(
     })
 }
 
+// Group weights operate on display-encoded RGB; coverage remains linear.
 fn blend_sample(
     index: &RayIndex<'_>,
     params: &UmbreonRenderParams,
@@ -1264,18 +1296,46 @@ fn blend_sample(
         alpha_sum += alpha;
         transmittance *= 1. - alpha;
         for c in 0..4 {
-            weighted[c] += layer[c] * alpha;
+            weighted[c] += if c < 3 {
+                srgb_encode(layer[c])
+            } else {
+                layer[c]
+            } * alpha;
         }
     }
     if alpha_sum <= 0. {
         return bg;
     }
-    if params.per_pixel_blend {
-        std::array::from_fn(|c| {
-            bg[c] * transmittance + weighted[c] * (1. - transmittance) / alpha_sum
-        })
+    std::array::from_fn(|c| {
+        let background = if c < 3 { srgb_encode(bg[c]) } else { bg[c] };
+        let value = if params.per_pixel_blend {
+            background * transmittance + weighted[c] * (1. - transmittance) / alpha_sum
+        } else {
+            background * (1. - alpha_sum) + weighted[c]
+        };
+        if c < 3 {
+            srgb_decode(value)
+        } else {
+            value.clamp(0., 1.)
+        }
+    })
+}
+
+fn srgb_encode(value: f64) -> f64 {
+    let value = value.clamp(0., 1.);
+    if value <= 0.003_130_8 {
+        value * 12.92
     } else {
-        std::array::from_fn(|c| bg[c] * (1. - alpha_sum) + weighted[c])
+        1.055 * value.powf(1. / 2.4) - 0.055
+    }
+}
+
+fn srgb_decode(value: f64) -> f64 {
+    let value = value.clamp(0., 1.);
+    if value <= 0.040_45 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
     }
 }
 
@@ -1403,12 +1463,7 @@ fn trace_sample_pass(
                 .unwrap_or([0.; 3]);
         }
         let fog = fog_at(hit, camera);
-        let alpha = section_alpha(snapshot, hit)
-            * if params.transparent_background {
-                fog
-            } else {
-                1.
-            };
+        let alpha = section_alpha(snapshot, hit);
         let weight = alpha * (1. - out[3]);
         for c in 0..3 {
             let color = if params.transparent_background {
@@ -1423,7 +1478,9 @@ fn trace_sample_pass(
             break;
         }
     }
-    if !params.transparent_background {
+    if params.transparent_background {
+        out[3] *= hits.first().map_or(1., |hit| fog_at(*hit, camera));
+    } else {
         for c in 0..3 {
             out[c] += background[c] as f64 * (1. - out[3]);
         }
@@ -2394,6 +2451,41 @@ mod tests {
         let grouped_once = render_with(1, true);
         assert_eq!(render_with(2, true), grouped_once);
         assert_ne!(render_with(2, false), grouped_once);
+    }
+
+    #[test]
+    fn section_opacity_blends_encoded_rgb_and_linear_coverage() {
+        let mut snapshot = RenderSceneSnapshot::empty();
+        snapshot.atoms.push(RenderAtom::new(
+            Vector4::ZERO,
+            1.,
+            color(255, 255, 255, 128),
+        ));
+        snapshot.mark_renderer_section(0.5, "nolighting");
+        for per_pixel_blend in [false, true] {
+            for transparent_background in [false, true] {
+                let params = UmbreonRenderParams {
+                    width: 32,
+                    height: 32,
+                    perspective: false,
+                    supersample: 1,
+                    use_gi: false,
+                    show_edge_lines: false,
+                    per_pixel_blend,
+                    transparent_background,
+                    ..UmbreonRenderParams::default()
+                };
+                let frame =
+                    render_umbreon_snapshot(&snapshot, &test_camera(), [0., 0., 0., 1.], &params)
+                        .unwrap();
+                let offset = (16 * 32 + 16) * frame.components as usize;
+                let expected = if transparent_background { 109 } else { 55 };
+                assert_eq!(&frame.pixels[offset..offset + 3], &[expected; 3]);
+                if transparent_background {
+                    assert_eq!(frame.pixels[offset + 3], 128);
+                }
+            }
+        }
     }
 
     #[test]
