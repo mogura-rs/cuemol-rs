@@ -60,6 +60,38 @@ fn cross_molecule_distance_matches_published_reference() {
 }
 
 #[test]
+fn missing_renderer_selection_does_not_disable_other_molecules() {
+    for kind in ["cpk", "dsurface"] {
+        let (mut state, probe, target) = fixture();
+        let object = state.scene_manager_mut().object_mut(probe).unwrap();
+        let renderer = object.add_renderer(kind, "missing");
+        object
+            .renderer_mut(renderer)
+            .unwrap()
+            .set_qsc_attr("sel", "removed_name");
+        state
+            .scene_manager_mut()
+            .object_mut(target)
+            .unwrap()
+            .add_renderer("cpk", "valid");
+        let picks = state.active_pick_atoms("").unwrap();
+        assert_eq!(picks.len(), 3);
+        assert!(picks
+            .iter()
+            .all(|atom| atom.object_uid == Some(target.get())));
+        let snapshot = state
+            .render_snapshot(state.active_scene().unwrap(), "")
+            .unwrap();
+        assert_eq!(snapshot.atoms.len(), 3);
+        assert!(snapshot
+            .atoms
+            .iter()
+            .all(|atom| atom.object_uid == Some(target.get())));
+        assert!(snapshot.meshes.iter().all(|mesh| mesh.vertices.is_empty()));
+    }
+}
+
+#[test]
 fn bound_selections_restrict_contacts_within_and_between_molecules() {
     let (mut state, probe, target) = fixture();
     for id in [probe, target] {

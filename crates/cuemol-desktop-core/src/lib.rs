@@ -15263,7 +15263,8 @@ impl DesktopAppState {
                     )
             }) {
                 let selection =
-                    selection_support::renderer_selector(object, renderer, &styles, scene)?;
+                    selection_support::renderer_selector(object, renderer, &styles, scene)
+                        .unwrap_or(Selector::None);
                 let indices = if matches!(
                     renderer.renderer_type(),
                     "trace" | "tracestick" | "ribbon" | "cartoon" | "tube" | "spline" | "nucl"
@@ -51840,11 +51841,10 @@ fn append_object_renderer_snapshot(
         style_scope_id,
     );
     if let Some(renderer) = renderer {
-        if let Ok(selector) = selection_support::renderer_selector(object, renderer, styles, scene)
-        {
-            if !matches!(selector, Selector::All) {
-                options.draw_indices = Some(object.mol().select_indices(&selector));
-            }
+        let selector = selection_support::renderer_selector(object, renderer, styles, scene)
+            .unwrap_or(Selector::None);
+        if !matches!(selector, Selector::All) {
+            options.draw_indices = Some(object.mol().select_indices(&selector));
         }
     }
     let renderer_coloring_type = renderer
@@ -52522,7 +52522,9 @@ fn direct_surface_snapshot(
     };
     let selector = resolved("sel")
         .filter(|value| !value.is_empty() && value != "*")
-        .and_then(|value| parse_selector_with_styles(&value, styles, style_scope_id).ok())
+        .map(|value| {
+            parse_selector_with_styles(&value, styles, style_scope_id).unwrap_or(Selector::None)
+        })
         .unwrap_or(Selector::All);
     let selector = selector.bind_to_scene(source_object, scene).into_owned();
     let mut surface_renderer = cuemol_surface::DirectSurfRenderer::new();

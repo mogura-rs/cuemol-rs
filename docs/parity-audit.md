@@ -31,7 +31,7 @@ speedup from a single optimized stage or compare timings from different hosts.
 | --- | --- | --- |
 | Shell | Activities, menus, toolbar, tab order, docks, compact windows, themes and keyboard access | Application shortcuts, browser tab closing and menu access, shared history dropdowns, Tauri palette folding and tree/text clipboard routing repaired and checked; browser recent files and remaining pane controls are still under comparison |
 | Explorer and Inspector | Object/renderer/group hierarchy, selection, visibility, locking, drag/drop, context menus and property editors | Typed fields, nested properties, defaults/resets, group writes, Scene/View targets, quality presets, renderer pages, font choices and selection pickers repaired and checked below; remaining targets and live previews are under comparison |
-| Color and styles | Coloring modes, paint entries, palettes, property inheritance, style creation/apply/edit/save | Previous focused checks exist; complete editor comparison pending |
+| Color and styles | Coloring modes, paint entries, palettes, property inheritance, style creation/apply/edit/save | Script-created styles remain separate from GUI selection and drawing state; reconciliation and complete editor comparison are pending |
 | Console | CueMol/PyMOL dialects, command arguments, completion, history, multiline input, IME and transaction behavior | Shared CueMol/PyMOL interpreters, completion, native QAX logging/replay and cancellable execution implemented; focused shared, browser and OS-input checks passed; affected regression checks, CI and Pages passed at `99b7c16`; public review repairs and release delivery are in progress |
 | Actions | History rows, operation inspection, QAX export, bundled/user macros and reusable actions | History selection, operation inspection, QAX export and bundled/user macro libraries are implemented in native, WASM and Tauri; CI, Pages and the macOS window check passed at `488ce9c`; review repairs passed affected checks and were published at `53100c5` |
 | Scripts and services | JavaScript/Python helpers, retained state, callbacks, errors, file arguments and asynchronous readers | Previous compatibility checks exist; shared workload comparison pending |
@@ -788,6 +788,23 @@ surfaces and saved molecular-surface regeneration. Public-review and delivery
 results are recorded after their terminal checks.
 Live measurement-definition operands remain part of the annotation audit;
 these results do not establish their scene-aware selection behavior.
+
+Public review of `9b9e0ae` raised a missing-name hypothesis that reproduced in
+the picking path: one unresolved renderer selection aborted picking for the
+whole scene. Picking now excludes that renderer, and molecular geometry and
+direct surfaces use an empty selection instead of drawing every atom. The
+regression failed separately for picking and direct-surface geometry before
+their repairs. All nine command integration cases passed afterward. The two
+browser backends also passed definition removal, continued picking of another
+molecule and an empty viewport after hiding that molecule. The affected
+analytic-density and saved-surface browser checks passed as well.
+
+The other review hypotheses were checked against their callees. The new object
+paint fallback only runs without a renderer, map generators consume map-local
+coordinates, and direct-surface selection consumers accept the prepared mask.
+During the browser check, a separate script-created style failed to appear in
+ordinary selection queries. Its failing shared reproducer is retained for the
+style audit; the definition-removal check above uses the GUI command path.
 
 The measurements below used the same ARM64 macOS host and two separately loaded
 copies of each input. Each condition ran in three sequential fresh processes
