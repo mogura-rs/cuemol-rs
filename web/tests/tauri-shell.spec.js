@@ -70,6 +70,11 @@ async function openShell(page, storage = {}, options = {}) {
         return {snapshot: structuredClone(snapshot), viewport};
       }
       if (command === 'get_pdb_history') return [];
+      if (command === 'clipboard_kind') return window.__clipboardKind || '';
+      if (command === 'clipboard_text') return window.__clipboardText || '';
+      if (command === 'set_clipboard_text') { window.__clipboardText = args.text; window.__clipboardKind = ''; return 'Copied text'; }
+      if (options.clipboard && command === 'copy_workspace_object') {window.__clipboardKind='object';return 'Copied object';}
+      if (options.clipboard && command === 'paste_workspace_object') {snapshot.objects.push({...molecule,uid:5,name:'Probe_1'});return structuredClone(snapshot);}
       if (command === 'actions_request') {
         if (args.operation === 'list') {
           const value = {steps: options.actions ? [{id:7,label:'Cartoon + ligand',entryCount:3,undone:false},{id:8,label:'Hide',entryCount:1,undone:false}] : [],done:options.actions ? 2 : 0,running:window.__actionsRunning,
@@ -117,6 +122,41 @@ async function openShell(page, storage = {}, options = {}) {
   await expect(page.locator('#error-alert-dialog')).not.toBeVisible();
   return errors;
 }
+
+test('Tauri Edit clipboard routes tree, text and modal focus separately', async ({page}) => {
+  const errors = await openShell(page, {}, {clipboard:true});
+  const edit = page.locator('.menu').filter({has:page.locator('summary', {hasText:/^Edit$/})});
+  async function menu(action) {await edit.locator('summary').click();await edit.locator(`[data-action="${action}"]`).click();}
+  await page.evaluate(() => {window.__clipboardKind='renderer';});
+  await page.locator('#scene-tree button').filter({hasText:'Probe'}).first().click({button:'right'});
+  await expect(page.getByRole('menuitem',{name:'Paste Renderer',exact:true})).toBeEnabled();
+  await page.keyboard.press('Escape');
+  await page.evaluate(() => {window.__clipboardKind='';});
+  await page.locator('#scene-tree button').filter({hasText:'Probe'}).first().click({button:'right'});
+  await expect(page.getByRole('menuitem',{name:'Paste Renderer',exact:true})).toBeDisabled();
+  await page.keyboard.press('Escape');
+  await page.locator('#scene-tree button').filter({hasText:'Probe'}).first().click();
+  await menu('copy');
+  await expect.poll(() => page.evaluate(() => window.__clipboardKind)).toBe('object');
+  await menu('paste');
+  await expect(page.locator('#scene-tree')).toContainText('Probe_1');
+  const text = page.locator('#output-command');
+  await text.fill('selected text');
+  await text.click();
+  await text.selectText();
+  await menu('copy');
+  await expect.poll(() => page.evaluate(() => window.__clipboardText)).toBe('selected text');
+  await menu('cut');
+  await expect(text).toHaveValue('');
+  await menu('paste');
+  await expect(text).toHaveValue('selected text');
+  await page.evaluate(() => {
+    const dialog=document.createElement('dialog');dialog.id='clipboard-probe-dialog';dialog.textContent='Modal';document.body.append(dialog);dialog.showModal();
+  });
+  await page.keyboard.press('Control+v');
+  expect(await page.evaluate(() => window.__shellCalls.filter(call=>call.command==='paste_workspace_object').length)).toBe(1);
+  expect(errors).toEqual([]);
+});
 
 test('Tauri shortcuts distinguish redo, close, text editing and modified viewport letters', async ({page}) => {
   const errors = await openShell(page, {}, {shortcuts: true});

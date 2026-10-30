@@ -10,6 +10,8 @@
 //! `crate::GuiObjectSummary`, `crate::offscreen::…` unchanged.
 
 pub use cuemol_desktop_core::*;
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+mod native_clipboard;
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 mod animation_files;

@@ -9,6 +9,7 @@
     <link rel="stylesheet" href="./actions.css">
     <script src="./shell.js" defer></script>
     <script src="./actions.js" defer></script>
+    <script src="./clipboard.js" defer></script>
     <script src="./app.js" defer></script>
   </head>
   <body>
@@ -50,6 +51,11 @@
             <button type="button" data-action="undo">Undo</button>
             <button type="button" data-action="redo">Redo</button>
             <button type="button" data-action="clear-undo">Clear undo data</button>
+            <span class="menu-separator"></span>
+            <button type="button" data-action="cut">Cut</button>
+            <button type="button" data-action="copy">Copy</button>
+            <button type="button" data-action="paste">Paste</button>
+            <button type="button" data-action="select-all">Select All</button>
             <span class="menu-separator"></span>
             <button type="button" data-dialog="Merge molecule">Merge molecule…</button>
             <button type="button" data-dialog="Delete mol atoms">Delete mol atoms…</button>

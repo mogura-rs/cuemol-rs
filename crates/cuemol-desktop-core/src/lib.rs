@@ -1,4 +1,6 @@
 mod animation;
+mod clipboard;
+pub use clipboard::GuiClipboardPayload;
 mod sequence;
 pub use sequence::{sequence_residue_number, GuiSequenceLayout};
 mod command_support;
@@ -1037,6 +1039,7 @@ impl WorkspaceObjectClipboard {
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkspaceCameraClipboard {
     camera: cuemol_qsys::Camera,
+    xml: Option<String>,
 }
 
 impl WorkspaceCameraClipboard {
@@ -4199,7 +4202,10 @@ impl DesktopAppState {
             .camera_by_name(name)
             .cloned()
             .ok_or_else(|| CueMolError::NotFound(format!("camera {name}")))?;
-        Ok(WorkspaceCameraClipboard { camera })
+        Ok(WorkspaceCameraClipboard {
+            camera,
+            xml: Some(self.scene_camera_xml(scene_uid, name)?),
+        })
     }
 
     pub fn paste_workspace_camera(
@@ -10074,30 +10080,78 @@ impl DesktopAppState {
                 "at least one renderer is required",
             ));
         }
-        let clipboards = targets
-            .iter()
-            .map(|(object_uid, renderer_uid)| {
-                let mut clipboard = self.copy_workspace_renderer(*object_uid, *renderer_uid)?;
-                match &mut clipboard.renderer {
-                    WorkspaceRendererClipboardData::Molecule {
-                        group_name: Some(_),
-                        renderers,
-                    } => {
-                        renderers.clear();
+        let mut expanded = Vec::new();
+        let mut seen = BTreeSet::new();
+        for &(object, renderer) in targets {
+            let clipboard = self.copy_workspace_renderer(object, renderer)?;
+            let ids = if clipboard.is_group() {
+                let name = match &clipboard.renderer {
+                    WorkspaceRendererClipboardData::Molecule { group_name, .. } => {
+                        group_name.clone().unwrap()
                     }
-                    WorkspaceRendererClipboardData::DensityMapGroup { renderers, .. } => {
-                        renderers.clear();
+                    WorkspaceRendererClipboardData::DensityMapGroup { group, .. }
+                    | WorkspaceRendererClipboardData::SurfaceGroup { group, .. }
+                    | WorkspaceRendererClipboardData::LightweightGroup { group, .. } => {
+                        group.str_attr("name").to_string()
                     }
-                    WorkspaceRendererClipboardData::SurfaceGroup { renderers, .. } => {
-                        renderers.clear();
-                    }
-                    WorkspaceRendererClipboardData::LightweightGroup { renderers, .. } => {
-                        renderers.clear();
-                    }
-                    _ => {}
+                    _ => unreachable!(),
+                };
+                let mut rows = match clipboard.kind() {
+                    GuiWorkspaceObjectKind::Molecule => self
+                        .renderer_summaries(object)
+                        .into_iter()
+                        .map(|row| (row.ui_order, row.uid))
+                        .collect::<Vec<_>>(),
+                    GuiWorkspaceObjectKind::DensityMap => self
+                        .density_map_summary(object)
+                        .unwrap()
+                        .renderers
+                        .into_iter()
+                        .map(|row| (row.ui_order, row.uid))
+                        .collect(),
+                    GuiWorkspaceObjectKind::Surface => self
+                        .surface_summary(object)
+                        .unwrap()
+                        .renderers
+                        .into_iter()
+                        .map(|row| (row.ui_order, row.uid))
+                        .collect(),
+                    GuiWorkspaceObjectKind::Lightweight => self
+                        .lw_object_summary(object)
+                        .unwrap()
+                        .renderers
+                        .into_iter()
+                        .map(|row| (row.ui_order, row.uid))
+                        .collect(),
+                };
+                rows.sort_by_key(|row| *row);
+                rows.into_iter()
+                    .filter_map(|(_, id)| {
+                        (self
+                            .workspace_renderer_parent_group(object, id)
+                            .ok()
+                            .flatten()
+                            == Some(name.clone()))
+                        .then_some(id)
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                vec![renderer]
+            };
+            for id in ids {
+                if seen.insert((object, id)) {
+                    expanded.push((object, id));
                 }
-                Ok(clipboard)
-            })
+            }
+        }
+        if expanded.is_empty() {
+            return Err(CueMolError::invalid_argument(
+                "no renderer members selected",
+            ));
+        }
+        let clipboards = expanded
+            .iter()
+            .map(|(object, renderer)| self.copy_workspace_renderer(*object, *renderer))
             .collect::<Result<Vec<_>>>()?;
         let kind = clipboards[0].kind();
         if clipboards.iter().any(|clipboard| clipboard.kind() != kind)
@@ -10679,7 +10733,7 @@ impl DesktopAppState {
                     renderer.renderer_type() == "*group" && renderer.name() == group
                 }) {
                     for index in 1_u64.. {
-                        let candidate = format!("{source_group}({index})");
+                        let candidate = format!("{source_group}_{index}");
                         if object.renderers().iter().all(|renderer| {
                             renderer.renderer_type() != "*group" || renderer.name() != candidate
                         }) {
@@ -10758,7 +10812,7 @@ impl DesktopAppState {
             source_name.to_string()
         } else {
             (1_u64..)
-                .map(|index| format!("copy{index}_{source_name}"))
+                .map(|index| format!("{source_name}_{index}"))
                 .find(|candidate| !self.workspace_object_name_exists(scene_uid, candidate))
                 .expect("the object name suffix space is inexhaustible")
         };
@@ -54718,7 +54772,7 @@ fn unique_workspace_renderer_name<'a>(
         return base_name.to_string();
     }
     (1_u64..)
-        .map(|index| format!("{base_name}({index})"))
+        .map(|index| format!("{base_name}_{index}"))
         .find(|candidate| !existing_names.contains(candidate.as_str()))
         .expect("the renderer name suffix space is inexhaustible")
 }
@@ -65144,21 +65198,22 @@ end_header
         let group_multi_clipboard = app
             .copy_workspace_renderers(&[(source_uid, group_uid), (source_uid, free_uid)])
             .unwrap();
-        assert_eq!(group_multi_clipboard.renderer_count(), 2);
+        assert_eq!(group_multi_clipboard.renderer_count(), 3);
         assert!(!group_multi_clipboard.is_group());
         let group_multi_paste = app
             .paste_workspace_renderers(group_multi_target_uid, None, &group_multi_clipboard)
             .unwrap();
-        assert_eq!(group_multi_paste.renderer_uids.len(), 1);
-        let pasted_group_uid = group_multi_paste.group_uid.unwrap();
+        assert_eq!(group_multi_paste.renderer_uids.len(), 3);
+        assert!(group_multi_paste.group_uid.is_none());
         let group_multi_target = app.scene_manager().object(group_multi_target_uid).unwrap();
-        let pasted_group = group_multi_target.renderer(pasted_group_uid).unwrap();
-        assert_eq!(pasted_group.renderer_type(), "*group");
-        assert_eq!(pasted_group.name(), "representations");
-        assert!(group_multi_target
-            .renderers()
-            .iter()
-            .all(|renderer| !matches!(renderer.name(), "main" | "atoms")));
+        assert_eq!(
+            group_multi_target
+                .renderers()
+                .iter()
+                .map(|renderer| renderer.name())
+                .collect::<Vec<_>>(),
+            ["main", "atoms", "free"]
+        );
         assert_eq!(
             group_multi_target
                 .renderers()
@@ -65176,7 +65231,7 @@ end_header
         let group_child_paste = app
             .paste_workspace_renderers(group_child_target_uid, None, &group_child_clipboard)
             .unwrap();
-        assert_eq!(group_child_paste.renderer_uids.len(), 1);
+        assert_eq!(group_child_paste.renderer_uids.len(), 2);
         let group_child_target = app.scene_manager().object(group_child_target_uid).unwrap();
         assert_eq!(group_child_target.renderers().len(), 2);
         assert_eq!(
@@ -65236,7 +65291,7 @@ end_header
                 .renderer(second_paste.renderer_uids[0])
                 .unwrap()
                 .name(),
-            "main(1)"
+            "main_1"
         );
         assert_eq!(
             target
@@ -65283,7 +65338,7 @@ end_header
             .iter()
             .find(|group| Some(group.uid) == pasted.group_uid)
             .unwrap();
-        assert_eq!(pasted_group.name, "maps(1)");
+        assert_eq!(pasted_group.name, "maps_1");
         assert_eq!(pasted_group.material, "glass");
         assert_eq!(pasted_group.alpha, 0.5);
         assert_eq!(
@@ -65293,7 +65348,7 @@ end_header
                 .unwrap()
                 .group
                 .as_deref(),
-            Some("maps(1)")
+            Some("maps_1")
         );
         let destination_group_uid = app.create_renderer_group(map_uid, "destination").unwrap();
         let pasted = app
@@ -65345,7 +65400,7 @@ end_header
                 .find(|group| Some(group.uid) == pasted.group_uid)
                 .unwrap()
                 .name,
-            "surfaces(1)"
+            "surfaces_1"
         );
         assert_eq!(
             surface
@@ -65355,7 +65410,7 @@ end_header
                 .unwrap()
                 .group
                 .as_deref(),
-            Some("surfaces(1)")
+            Some("surfaces_1")
         );
 
         let lw_uid = app
@@ -65388,7 +65443,7 @@ end_header
                 .find(|group| Some(group.uid) == pasted.group_uid)
                 .unwrap()
                 .name,
-            "overlays(1)"
+            "overlays_1"
         );
         assert_eq!(
             lw.renderers
@@ -65397,7 +65452,7 @@ end_header
                 .unwrap()
                 .group
                 .as_deref(),
-            Some("overlays(1)")
+            Some("overlays_1")
         );
     }
 
@@ -65506,18 +65561,13 @@ end_header
             .paste_workspace_renderers(surface_uid, None, &mixed_group_clipboard)
             .unwrap();
         assert_eq!(pasted.renderer_uids.len(), 1);
-        let pasted_group_uid = pasted.group_uid.unwrap();
+        assert!(pasted.group_uid.is_none());
         let surface = app.surface_summary(surface_uid).unwrap();
         assert_eq!(surface.renderers.len(), 6);
-        assert_eq!(
-            surface
-                .renderer_groups
-                .iter()
-                .find(|group| group.uid == pasted_group_uid)
-                .unwrap()
-                .name,
-            "mixed group"
-        );
+        assert!(!surface
+            .renderer_groups
+            .iter()
+            .any(|group| group.name == "mixed group"));
     }
 
     #[test]
@@ -65545,7 +65595,7 @@ end_header
         let pasted_uid = app.paste_workspace_object(scene_uid, &clipboard).unwrap();
         let pasted = app.scene_manager().object(pasted_uid).unwrap();
         assert_ne!(pasted_uid, object_uid);
-        assert_eq!(pasted.name(), "copy1_molecule");
+        assert_eq!(pasted.name(), "molecule_1");
         assert_eq!(pasted.source(), "source.pdb");
         assert!(pasted.is_ui_locked());
         assert_eq!(pasted.renderers().len(), 1);
@@ -65630,7 +65680,7 @@ end_header
                 .find(|renderer| renderer.uid == pasted_map_renderer_uid)
                 .unwrap()
                 .name,
-            "contour 1(1)"
+            "contour 1_1"
         );
 
         let surface_renderer_uid = app.surface_summary(surface_uid).unwrap().renderers[0].uid;
@@ -65645,7 +65695,7 @@ end_header
             .unwrap();
         let surface = app.surface_summary(surface_uid).unwrap();
         assert_eq!(surface.renderers.len(), 2);
-        assert_eq!(surface.renderers[1].name, "molsurf 1(1)");
+        assert_eq!(surface.renderers[1].name, "molsurf 1_1");
 
         let lw_renderer_clipboard = app
             .copy_workspace_renderer(lw_uid, lw_renderer_uid)
@@ -65665,7 +65715,7 @@ end_header
             .iter()
             .find(|renderer| renderer.uid == pasted_lw_renderer_uid)
             .unwrap();
-        assert_eq!(pasted_lw_renderer.name, "draw(1)");
+        assert_eq!(pasted_lw_renderer.name, "draw_1");
         assert_eq!(pasted_lw_renderer.data_id, 1);
         assert!(pasted_lw_renderer.locked);
 
@@ -65675,7 +65725,7 @@ end_header
             .paste_workspace_object(scene_uid, &map_clipboard)
             .unwrap();
         let pasted_map = app.density_map_summary(pasted_map_uid).unwrap();
-        assert_eq!(pasted_map.name, "copy1_shared");
+        assert_eq!(pasted_map.name, "shared_1");
         assert_ne!(pasted_map.renderers[0].uid, map_renderer_uid);
 
         let surface_clipboard = app.copy_workspace_object(surface_uid).unwrap();
@@ -65684,7 +65734,7 @@ end_header
             .paste_workspace_object(scene_uid, &surface_clipboard)
             .unwrap();
         let pasted_surface = app.surface_summary(pasted_surface_uid).unwrap();
-        assert_eq!(pasted_surface.name, "copy1_surface");
+        assert_eq!(pasted_surface.name, "surface_1");
         assert_eq!(pasted_surface.source, "datachunk:");
 
         let lw_clipboard = app.copy_workspace_object(lw_uid).unwrap();
@@ -65693,7 +65743,7 @@ end_header
             .paste_workspace_object(scene_uid, &lw_clipboard)
             .unwrap();
         let pasted_lw = app.lw_object_summary(pasted_lw_uid).unwrap();
-        assert_eq!(pasted_lw.name, "copy1_lightweight");
+        assert_eq!(pasted_lw.name, "lightweight_1");
         assert_ne!(pasted_lw.renderers[0].uid, lw_renderer_uid);
         assert_eq!(pasted_lw.renderers[0].name, "draw");
 
@@ -65723,7 +65773,7 @@ end_header
         assert!(reloaded
             .active_density_map_summaries()
             .iter()
-            .any(|map| map.name == "copy1_shared"));
+            .any(|map| map.name == "shared_1"));
         let reloaded_surface = reloaded
             .active_surface_summaries()
             .into_iter()
@@ -65733,7 +65783,7 @@ end_header
         assert!(reloaded
             .active_surface_summaries()
             .iter()
-            .any(|surface| surface.name == "copy1_surface"));
+            .any(|surface| surface.name == "surface_1"));
         let reloaded_lw = reloaded
             .active_lw_object_summaries()
             .into_iter()
@@ -65744,7 +65794,7 @@ end_header
         assert!(reloaded
             .active_lw_object_summaries()
             .iter()
-            .any(|object| object.name == "copy1_lightweight"));
+            .any(|object| object.name == "lightweight_1"));
         let _ = std::fs::remove_file(path);
     }
 

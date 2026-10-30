@@ -29,7 +29,7 @@ speedup from a single optimized stage or compare timings from different hosts.
 
 | Feature family | Required comparison | Current audit status |
 | --- | --- | --- |
-| Shell | Activities, menus, toolbar, tab order, docks, compact windows, themes and keyboard access | Application shortcuts, browser tab closing and menu access, shared history dropdowns and Tauri palette folding repaired and checked; clipboard routing, browser recent files and remaining pane controls are still under comparison |
+| Shell | Activities, menus, toolbar, tab order, docks, compact windows, themes and keyboard access | Application shortcuts, browser tab closing and menu access, shared history dropdowns, Tauri palette folding and tree/text clipboard routing repaired and checked; browser recent files and remaining pane controls are still under comparison |
 | Explorer and Inspector | Object/renderer/group hierarchy, selection, visibility, locking, drag/drop, context menus and property editors | Previous focused checks exist; dialog comparison pending |
 | Color and styles | Coloring modes, paint entries, palettes, property inheritance, style creation/apply/edit/save | Previous focused checks exist; complete editor comparison pending |
 | Console | CueMol/PyMOL dialects, command arguments, completion, history, multiline input, IME and transaction behavior | Shared CueMol/PyMOL interpreters, completion, native QAX logging/replay and cancellable execution implemented; focused shared, browser and OS-input checks passed; affected regression checks, CI and Pages passed at `99b7c16`; public review repairs and release delivery are in progress |
@@ -65,7 +65,7 @@ This is a source comparison; screen checks are recorded separately.
 | Explorer, View, Selection, Crystal, Actions | All five built-in activities are present | Individual pane controls still require comparison |
 | New Tab, Open File, Save As, Open Scene, Reload Scene, Save Scene, Render, Undo, Redo | Toolbar buttons and history dropdowns are present in all three frontends | Native/WASM dropdowns now support jumping several steps; broader history limits still need comparison |
 | Save current view, Close Tab, scene save variants | Menu access is present in all three frontends; WASM tabs now have close buttons and a save/discard/cancel dialog | Browser downloads cannot confirm that a user saved the file to disk; unmodified-scene tracking still differs |
-| Cut, Copy, Paste, Select All | Text widgets and some tree context menus already support clipboard operations | Application Edit menus do not provide the reference's focus-aware routing |
+| Cut, Copy, Paste, Select All | Edit menus route tree, camera and text operations; native clipboard payloads are shared across processes, and browser clipboard access is asynchronous | Paint and Actions routing still needs complete native/WASM comparison; browser tree multi-selection remains under comparison |
 | Molecular editing and analysis dialogs | All frontends have named menu entries; WASM opens the corresponding shared command form | Specialized form layout still needs comparison |
 | Scene background/proofing/properties and view projection/center marker/properties | Shared commands, property controls and browser menu entries exist | Integrated screen comparison remains |
 | Command/Ctrl shortcuts | Main file operations, Close Tab, alternate Redo, Save Scene As and palette folding are wired | Browsers reserve New/Close Tab keys, so Ctrl/Cmd+Alt+T/W is also supported |
@@ -88,10 +88,39 @@ Tauri's C/F shortcuts now center or fit the current molecule selection without
 changing that selection; Home fits the scene. The affected model and shell
 cases check selection preservation and modifier isolation.
 
-Focus-aware clipboard routing and cross-process clipboard payloads remain open.
 The native menus also retain older UXP-specific entries that the published
 Tritium menu removed; their presence does not demonstrate that the current
 Tritium controls match.
+
+## Clipboard comparison and repairs
+
+The reference uses typed XML/QDF payloads for objects, renderers, cameras and
+styles. Native frontends now read the OS clipboard instead of retaining separate
+application-only copies. They also exchange the reference's plain-text envelope
+and platform-specific clipboard formats. Browser clipboard operations use the
+same envelope. Pasting creates a new object identity and retains embedded data,
+renderer properties, group targets and collision naming. The reference's current
+multi-selection behavior expands renderer groups and removes repeated members.
+Shared tests cover these cases, including an empty molecule and deletion of the
+source before pasting. An installed reference application read the Rust object,
+renderer and camera payloads after a reference-to-Rust-to-reference round trip.
+
+Edit-menu actions preserve text focus while the menu is open. An overlapping
+popup previously selected the tree behind it; popup hit testing now takes
+precedence. Native egui's disabled clipboard backend also swallowed paste keys
+and kept copied text in an internal buffer. Native key events and text output
+now use the same OS clipboard adapter as the tree. An actual Linux window
+passed molecule cut/paste, two-step undo and text copy read by a separate process,
+followed by text cut/paste and command execution. The OS check script exercises
+these operations on its supported platforms; Linux requires `xclip`.
+
+Browser writes must succeed before cutting, and a changed scene invalidates a
+pending cut or paste. Text, tree and modal focus have browser and Tauri shell
+checks. Tauri context menus re-read the OS clipboard kind instead of relying on
+stale per-window flags. Tauri paint routing currently handles one selected row;
+complete paint multi-selection and native/WASM Paint/Actions routing remain
+part of the editor comparison. Cross-platform OS checks, release delivery and
+the broader shell comparison must still be completed for the final revision.
 
 ## Sequence comparison and repairs
 

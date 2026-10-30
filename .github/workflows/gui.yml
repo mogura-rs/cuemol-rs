@@ -33,7 +33,7 @@ jobs:
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
       - name: Install Linux window dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 libegl1 libgl1-mesa-dri libvulkan1 mesa-vulkan-drivers xvfb xauth xdotool gnome-keyring dbus-x11
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 libegl1 libgl1-mesa-dri libvulkan1 mesa-vulkan-drivers xvfb xauth xdotool xclip gnome-keyring dbus-x11
       - name: Download and verify published application
         id: distribution
         shell: bash

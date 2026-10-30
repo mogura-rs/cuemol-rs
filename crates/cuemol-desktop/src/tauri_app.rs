@@ -28,8 +28,7 @@ use crate::{
     pick_atom_screen, run_apbs_process, run_pov_process, run_pov_process_with_poll, AnimKind,
     ApbsProcessOutput, ApbsProcessTask, DesktopAppState, GuiApbsChargeMethod, GuiApbsOptions,
     GuiApbsPaths, GuiAtomLabel, GuiPovSceneOptions, PovProcessOptions, PovProcessOutput,
-    PovProcessTask, WorkspaceCameraClipboard, WorkspaceObjectClipboard, WorkspaceRendererClipboard,
-    WorkspaceStyleClipboard, MOLECULE_RENDERER_TYPES,
+    PovProcessTask, MOLECULE_RENDERER_TYPES,
 };
 use cuemol_desktop_core::effects::ViewportOptions;
 
@@ -1549,6 +1548,7 @@ struct AnimationObjectPropertiesInput {
 }
 
 struct AppModel {
+    system_clipboard: crate::native_clipboard::Clipboard,
     desktop: DesktopAppState,
     config_path: Option<PathBuf>,
     camera: Camera,
@@ -1578,10 +1578,6 @@ struct AppModel {
     opened_paths: Vec<String>,
     structure_revision: u64,
     modified_scenes: BTreeSet<Uid>,
-    workspace_camera_clipboard: Option<WorkspaceCameraClipboard>,
-    workspace_object_clipboard: Option<WorkspaceObjectClipboard>,
-    workspace_renderer_clipboard: Option<WorkspaceRendererClipboard>,
-    workspace_style_clipboard: Option<WorkspaceStyleClipboard>,
     undo_stack: Vec<AppModelUndoEntry>,
     redo_stack: Vec<AppModelUndoEntry>,
     apbs_job: Option<TauriApbsJob>,
@@ -1780,10 +1776,7 @@ impl AppModel {
             opened_paths: Vec::new(),
             structure_revision: 1,
             modified_scenes: BTreeSet::new(),
-            workspace_camera_clipboard: None,
-            workspace_object_clipboard: None,
-            workspace_renderer_clipboard: None,
-            workspace_style_clipboard: None,
+            system_clipboard: Default::default(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             apbs_job: None,
@@ -4090,7 +4083,8 @@ impl AppModel {
             .copy_workspace_renderer(Uid::new(input.object_uid), Uid::new(input.renderer_uid))
             .map_err(|error| error.to_string())?;
         let count = clipboard.renderer_count();
-        self.workspace_renderer_clipboard = Some(clipboard);
+        self.system_clipboard
+            .write_payload(&clipboard.to_payload().map_err(|error| error.to_string())?)?;
         self.status = format!("Copied {count} renderer(s)");
         Ok(self.status.clone())
     }
@@ -4108,7 +4102,8 @@ impl AppModel {
             .copy_workspace_renderers(&targets)
             .map_err(|error| error.to_string())?;
         let count = clipboard.renderer_count();
-        self.workspace_renderer_clipboard = Some(clipboard);
+        self.system_clipboard
+            .write_payload(&clipboard.to_payload().map_err(|error| error.to_string())?)?;
         self.status = format!("Copied {count} renderer(s)");
         Ok(self.status.clone())
     }
@@ -4119,24 +4114,15 @@ impl AppModel {
             .copy_workspace_object(Uid::new(input.object_uid))
             .map_err(|error| error.to_string())?;
         let name = clipboard.name().to_string();
-        self.workspace_object_clipboard = Some(clipboard);
+        self.system_clipboard
+            .write_payload(&clipboard.to_payload().map_err(|error| error.to_string())?)?;
         self.status = format!("Copied object {name}");
         Ok(self.status.clone())
     }
 
     fn paste_workspace_object(&mut self, input: WorkspaceObjectPasteInput) -> Result<(), String> {
-        let clipboard = self
-            .workspace_object_clipboard
-            .clone()
-            .ok_or_else(|| "No copied object".to_string())?;
-        let scene_uid = Uid::new(input.scene_uid);
-        self.desktop
-            .paste_workspace_object(scene_uid, &clipboard)
-            .map_err(|error| error.to_string())?;
-        self.modified_scenes.insert(scene_uid);
-        self.status = "Paste object".to_string();
+        self.paste_clipboard(Uid::new(input.scene_uid), "object", None, None)?;
         self.touch_structure_details();
-        self.invalidate_snapshot(false);
         Ok(())
     }
 
@@ -4146,23 +4132,14 @@ impl AppModel {
             .copy_workspace_camera(Uid::new(input.scene_uid), &input.name)
             .map_err(|error| error.to_string())?;
         let name = clipboard.name().to_string();
-        self.workspace_camera_clipboard = Some(clipboard);
+        self.system_clipboard
+            .write_payload(&clipboard.to_payload().map_err(|error| error.to_string())?)?;
         self.status = format!("Copied camera {name}");
         Ok(self.status.clone())
     }
 
     fn paste_workspace_camera(&mut self, input: WorkspaceCameraPasteInput) -> Result<(), String> {
-        let clipboard = self
-            .workspace_camera_clipboard
-            .clone()
-            .ok_or_else(|| "No copied camera".to_string())?;
-        let scene_uid = Uid::new(input.scene_uid);
-        let name = self
-            .desktop
-            .paste_workspace_camera(scene_uid, &clipboard)
-            .map_err(|error| error.to_string())?;
-        self.modified_scenes.insert(scene_uid);
-        self.status = format!("Pasted camera {name}");
+        self.paste_clipboard(Uid::new(input.scene_uid), "camera", None, None)?;
         Ok(())
     }
 
@@ -4172,23 +4149,14 @@ impl AppModel {
             .copy_workspace_style(Uid::new(input.scene_uid), input.local_index)
             .map_err(|error| error.to_string())?;
         let name = clipboard.name();
-        self.workspace_style_clipboard = Some(clipboard);
+        self.system_clipboard
+            .write_payload(&clipboard.to_payload().map_err(|error| error.to_string())?)?;
         self.status = format!("Copied style {name}");
         Ok(self.status.clone())
     }
 
     fn paste_workspace_style(&mut self, input: WorkspaceStylePasteInput) -> Result<(), String> {
-        let clipboard = self
-            .workspace_style_clipboard
-            .clone()
-            .ok_or_else(|| "No copied style".to_string())?;
-        let scene_uid = Uid::new(input.scene_uid);
-        self.desktop
-            .paste_workspace_style(scene_uid, &clipboard, input.replace)
-            .map_err(|error| error.to_string())?;
-        self.modified_scenes.insert(scene_uid);
-        self.status = format!("Pasted style {}", clipboard.name());
-        self.invalidate_snapshot(false);
+        self.paste_clipboard(Uid::new(input.scene_uid), "style", None, None)?;
         Ok(())
     }
 
@@ -4196,47 +4164,78 @@ impl AppModel {
         &mut self,
         input: WorkspaceRendererPasteInput,
     ) -> Result<bool, String> {
-        let clipboard = self
-            .workspace_renderer_clipboard
-            .clone()
-            .ok_or_else(|| "No copied renderer".to_string())?;
-        let object_uid = Uid::new(input.object_uid);
-        let scene_uid = self
+        let object = Uid::new(input.object_uid);
+        let scene = self
             .desktop
             .scene_manager()
-            .scene_uid_for_object(object_uid)
+            .scene_uid_for_object(object)
             .or_else(|| {
                 self.desktop
-                    .density_map_summary(object_uid)
-                    .map(|map| map.scene_uid)
+                    .density_map_summary(object)
+                    .map(|item| item.scene_uid)
             })
             .or_else(|| {
                 self.desktop
-                    .surface_summary(object_uid)
-                    .map(|surface| surface.scene_uid)
+                    .surface_summary(object)
+                    .map(|item| item.scene_uid)
             })
             .or_else(|| {
                 self.desktop
-                    .lw_object_summary(object_uid)
-                    .map(|object| object.scene_uid)
-            });
-        let result = self
-            .desktop
-            .paste_workspace_renderers(
-                object_uid,
-                input.destination_group_uid.map(Uid::new),
-                &clipboard,
-            )
-            .map_err(|error| error.to_string())?;
-        let changed = !result.renderer_uids.is_empty() || result.group_uid.is_some();
-        if changed {
-            if let Some(scene_uid) = scene_uid {
-                self.modified_scenes.insert(scene_uid);
-            }
+                    .lw_object_summary(object)
+                    .map(|item| item.scene_uid)
+            })
+            .ok_or("Clipboard target no longer exists")?;
+        let target = input.destination_group_uid.map(Uid::new).unwrap_or(object);
+        let result = self.paste_clipboard(
+            scene,
+            "renderer",
+            Some(target),
+            Some(if input.destination_group_uid.is_some() {
+                "rendGroup"
+            } else {
+                "object"
+            }),
+        )?;
+        Ok(
+            matches!(result, crate::GuiPastedNode::Renderers { ref uids, group } if !uids.is_empty() || group.is_some()),
+        )
+    }
+
+    fn paste_clipboard(
+        &mut self,
+        scene: Uid,
+        expected: &str,
+        target: Option<Uid>,
+        target_type: Option<&str>,
+    ) -> Result<crate::GuiPastedNode, String> {
+        let payload = self.system_clipboard.payload()?;
+        if payload.kind != expected {
+            return Err("Clipboard data is incompatible with this target".into());
         }
-        self.status = format!("Pasted {} renderer(s)", result.renderer_uids.len());
+        let active = self.desktop.active_scene();
+        if !self.desktop.set_active_scene(Some(scene)) {
+            return Err("Clipboard target scene no longer exists".into());
+        }
+        let result = self.desktop.paste_clipboard_bytes(
+            &payload.kind,
+            &payload.form,
+            &payload.bytes,
+            target,
+            target_type,
+        );
+        self.desktop.set_active_scene(active);
+        let result = result.map_err(|error| error.to_string())?;
+        self.modified_scenes.insert(scene);
+        self.status = match &result {
+            crate::GuiPastedNode::Camera(name) => format!("Pasted camera {name}"),
+            crate::GuiPastedNode::Style { name, .. } => format!("Pasted style {name}"),
+            crate::GuiPastedNode::Renderers { uids, .. } => {
+                format!("Pasted {} renderer(s)", uids.len())
+            }
+            crate::GuiPastedNode::Object(_) => "Paste object".into(),
+        };
         self.invalidate_snapshot(false);
-        Ok(changed)
+        Ok(result)
     }
 
     fn create_workspace_renderer_group(
@@ -7912,6 +7911,9 @@ impl AppModel {
 }
 
 enum ModelRequest {
+    ClipboardKind,
+    ClipboardText,
+    SetClipboardText(String),
     Actions {
         operation: String,
         args: serde_json::Value,
@@ -10587,6 +10589,9 @@ fn handle_model_request(
             }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
+        ModelRequest::ClipboardKind => Ok(ModelResponse::Message(model.system_clipboard.kind().unwrap_or("").to_string())),
+        ModelRequest::ClipboardText => Ok(ModelResponse::Message(model.system_clipboard.text_or_payload()?)),
+        ModelRequest::SetClipboardText(text) => { model.system_clipboard.write_text_or_payload(text)?; Ok(ModelResponse::Message("Copied text".into())) },
         ModelRequest::CopyWorkspaceRenderer(input) => Ok(ModelResponse::Message(
             model.copy_workspace_renderer(input)?,
         )),
@@ -14599,6 +14604,19 @@ fn paste_workspace_renderers(
 }
 
 #[tauri::command]
+fn clipboard_kind(state: State<'_, ManagedState>) -> Result<String, String> {
+    message_response(request_model(&state, ModelRequest::ClipboardKind)?)
+}
+#[tauri::command]
+fn clipboard_text(state: State<'_, ManagedState>) -> Result<String, String> {
+    message_response(request_model(&state, ModelRequest::ClipboardText)?)
+}
+#[tauri::command]
+fn set_clipboard_text(text: String, state: State<'_, ManagedState>) -> Result<String, String> {
+    message_response(request_model(&state, ModelRequest::SetClipboardText(text))?)
+}
+
+#[tauri::command]
 fn copy_workspace_object(
     input: WorkspaceObjectCopyInput,
     state: State<'_, ManagedState>,
@@ -16645,6 +16663,9 @@ pub fn run() -> Result<(), tauri::Error> {
             copy_workspace_renderer,
             copy_workspace_renderers,
             paste_workspace_renderers,
+            clipboard_kind,
+            clipboard_text,
+            set_clipboard_text,
             copy_workspace_object,
             paste_workspace_object,
             copy_workspace_camera,
@@ -16875,10 +16896,7 @@ mod tests {
             opened_paths: Vec::new(),
             structure_revision: 1,
             modified_scenes: BTreeSet::new(),
-            workspace_camera_clipboard: None,
-            workspace_object_clipboard: None,
-            workspace_renderer_clipboard: None,
-            workspace_style_clipboard: None,
+            system_clipboard: Default::default(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             apbs_job: None,
@@ -19490,7 +19508,7 @@ mod tests {
 
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert!(model.snapshot().objects[0].renderers.is_empty());
-        assert!(model.workspace_renderer_clipboard.is_some());
+        assert_eq!(model.system_clipboard.kind(), Some("renderer"));
     }
 
     #[test]
@@ -19875,7 +19893,7 @@ mod tests {
             .unwrap()
             .renderers
             .is_empty());
-        assert!(model.workspace_renderer_clipboard.is_some());
+        assert_eq!(model.system_clipboard.kind(), Some("renderer"));
     }
 
     #[test]
@@ -20105,7 +20123,7 @@ mod tests {
             .iter()
             .find(|object| object.uid != object_uid.get())
             .unwrap();
-        assert_eq!(pasted.name, "copy1_molecule");
+        assert_eq!(pasted.name, "molecule_1");
         assert_eq!(pasted.renderers.len(), 1);
         assert_ne!(pasted.renderers[0].uid, renderer_uid.get());
         assert_eq!(snapshot.undo_descriptions[0], "Paste object");
@@ -20113,7 +20131,7 @@ mod tests {
 
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert_eq!(model.snapshot().objects.len(), 1);
-        assert!(model.workspace_object_clipboard.is_some());
+        assert_eq!(model.system_clipboard.kind(), Some("object"));
     }
 
     #[test]
@@ -21446,7 +21464,7 @@ mod tests {
         let pasted_group_uid = model.snapshot().density_maps[0]
             .renderers
             .iter()
-            .find(|renderer| renderer.name == "renamed maps(1)")
+            .find(|renderer| renderer.name == "renamed maps_1")
             .unwrap()
             .uid;
         handle_model_request(
@@ -21912,7 +21930,7 @@ mod tests {
         );
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert_eq!(model.snapshot().cameras.len(), 1);
-        assert!(model.workspace_camera_clipboard.is_some());
+        assert_eq!(model.system_clipboard.kind(), Some("camera"));
 
         handle_model_request(
             &mut model,
@@ -22134,33 +22152,35 @@ mod tests {
                 "<styles><style id=\"Narrow\" width=\"1\"/></styles>",
             )
             .unwrap();
-        assert!(handle_model_request(
+        handle_model_request(
             &mut model,
             ModelRequest::PasteWorkspaceStyle(WorkspaceStylePasteInput {
                 scene_uid: scene_uid.get(),
                 replace: false,
             }),
         )
-        .is_err());
-        handle_model_request(
-            &mut model,
-            ModelRequest::PasteWorkspaceStyle(WorkspaceStylePasteInput {
-                scene_uid: scene_uid.get(),
-                replace: true,
-            }),
-        )
         .unwrap();
+        assert_eq!(
+            model
+                .desktop
+                .scene_manager()
+                .scene(scene_uid)
+                .unwrap()
+                .loaded_styles()
+                .len(),
+            2
+        );
         assert!(model
             .desktop
             .scene_manager()
             .scene(scene_uid)
             .unwrap()
-            .loaded_styles()[local_index]
+            .loaded_styles()[local_index + 1]
             .data
             .contains("Wide"));
         assert_eq!(
             model.undo_stack.last().unwrap().description,
-            "Pasted style custom"
+            "Pasted style custom_1"
         );
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert!(model
@@ -22171,7 +22191,7 @@ mod tests {
             .loaded_styles()[local_index]
             .data
             .contains("Narrow"));
-        assert!(model.workspace_style_clipboard.is_some());
+        assert_eq!(model.system_clipboard.kind(), Some("style"));
 
         handle_model_request(
             &mut model,

@@ -1,5 +1,6 @@
 #![cfg(target_arch = "wasm32")]
 mod actions;
+mod clipboard;
 mod console;
 mod input;
 mod loading;
@@ -41,6 +42,7 @@ thread_local! {
     static STATUS: RefCell<String> = RefCell::new(r#"{"busy":true,"scene":{"sceneId":0,"objects":[]}}"#.to_string());
 }
 enum Event {
+    Clipboard(clipboard::Completion),
     Input(Value),
     AgentStart(String, cuemol_agent::Settings, String),
     AgentCancel,
@@ -219,6 +221,8 @@ struct HistoryEntry {
     selected: Option<Uid>,
 }
 struct App {
+    clipboard_focus: cuemol_ui::clipboard::Focus,
+    clipboard_camera: Option<String>,
     input: cuemol_qsys::view_input::ViewInputController,
     input_device: cuemol_qsys::view_input::InputDeviceDetector,
     input_events: VecDeque<Value>,
@@ -375,6 +379,8 @@ impl App {
             agent.load_settings(&text);
         }
         Ok(Self {
+            clipboard_focus: Default::default(),
+            clipboard_camera: None,
             agent,
             activity: storage
                 .as_ref()
@@ -627,6 +633,7 @@ impl App {
         for event in events {
             self.validate_source_scene();
             match event {
+                Event::Clipboard(completion) => self.clipboard_complete(ctx, completion),
                 Event::ImportActions(name, source) => {
                     self.apply_action_intent(cuemol_ui::actions::Intent::Save {
                         name: name.trim_end_matches(".qax").to_string(),
@@ -1220,6 +1227,7 @@ impl App {
 }
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.clipboard_focus.begin_frame(ctx);
         self.events(ctx);
         self.poll_console(ctx);
         if let Some(tool) = cuemol_ui::navigation::tool_shortcut(ctx) {
@@ -1280,6 +1288,8 @@ impl eframe::App for App {
                 enqueue(Event::Data(file.name, bytes.to_vec()));
             }
         }
+        self.clipboard_focus.end_frame(ctx);
+        self.clipboard_keyboard(ctx);
         let state = cuemol_command::call_tool(
             &mut self.state,
             &mut self.camera,
@@ -1298,6 +1308,6 @@ impl eframe::App for App {
                 [rect.min.x, rect.min.y, rect.width(), rect.height()]
             })
             .collect();
-        STATUS.with(|status|*status.borrow_mut()=json!({"scene":state,"geometryRevision":self.renderer.revision(),"selection":self.selection,"view":cuemol_command::view_json(&self.camera),"message":self.message,"frame":self.trajectory_info().map_or(self.frame,|(_,_,frame)|frame),"busy":self.busy,"loading":self.source_active,"lastCommand":self.last_command,"agent":self.agent.status(),"ui":{"keyboardInput":ctx.wants_keyboard_input(),"modal":self.pending_close.is_some(),"overlays":overlays,"rects":self.ui_rects,"activity":self.activity.map(cuemol_ui::shell::Activity::key),"bottom":self.bottom_tab,"inspector":self.inspector.rects,"navigation":{"tool":self.navigation.tool.label(),"picks":self.navigation.picks.len(),"hover":self.hover_hit.map(|hit|json!({"object":hit.object.get(),"index":hit.index})),"measurementLabels":self.state.active_atom_intr_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).into_iter().map(|label|label.text).collect::<Vec<_>>(),"labels":self.state.active_name_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).len()}}}).to_string());
+        STATUS.with(|status|*status.borrow_mut()=json!({"scene":state,"geometryRevision":self.renderer.revision(),"selection":self.selection,"view":cuemol_command::view_json(&self.camera),"message":self.message,"frame":self.trajectory_info().map_or(self.frame,|(_,_,frame)|frame),"busy":self.busy,"loading":self.source_active,"lastCommand":self.last_command,"agent":self.agent.status(),"ui":{"keyboardInput":ctx.wants_keyboard_input(),"clipboardScope":format!("{:?}",self.clipboard_focus.scope),"modal":self.pending_close.is_some(),"overlays":overlays,"rects":self.ui_rects,"activity":self.activity.map(cuemol_ui::shell::Activity::key),"bottom":self.bottom_tab,"inspector":self.inspector.rects,"navigation":{"tool":self.navigation.tool.label(),"picks":self.navigation.picks.len(),"hover":self.hover_hit.map(|hit|json!({"object":hit.object.get(),"index":hit.index})),"measurementLabels":self.state.active_atom_intr_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).into_iter().map(|label|label.text).collect::<Vec<_>>(),"labels":self.state.active_name_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).len()}}}).to_string());
     }
 }

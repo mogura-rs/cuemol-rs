@@ -1,5 +1,7 @@
 #[path = "gui_actions.rs"]
 mod actions;
+#[path = "gui_clipboard.rs"]
+mod clipboard;
 #[path = "navigation.rs"]
 mod navigation;
 #[path = "tritium.rs"]
@@ -17,8 +19,7 @@ use crate::{
     overlay_pov_labels, run_apbs_process, run_pov_process, run_pov_process_with_poll, AnimKind,
     ApbsProcessOutput, ApbsProcessTask, DesktopAppState, GuiApbsChargeMethod, GuiApbsOptions,
     GuiApbsPaths, GuiAtomLabel, GuiLoadedPath, GuiPovSceneOptions, GuiSequenceSummary,
-    GuiStructObject, PovProcessOptions, PovProcessOutput, PovProcessTask, WorkspaceCameraClipboard,
-    WorkspaceObjectClipboard, WorkspaceRendererClipboard, WorkspaceStyleClipboard,
+    GuiStructObject, PovProcessOptions, PovProcessOutput, PovProcessTask,
 };
 use cuemol_anim::{
     AnimMgr, AnimMotion, CamMotion, MolAnim, NoopAnimObj, ShowHideAnim, SimpleSpin, SlideInOutAnim,
@@ -574,7 +575,40 @@ impl NativeRunner {
         let Some(egui_state) = self.egui_state.as_mut() else {
             return;
         };
+        let modifiers = egui_state.egui_input().modifiers;
+        let paste = matches!(&event, WindowEvent::KeyboardInput { event, .. }
+            if event.state == winit::event::ElementState::Pressed
+                && (event.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Paste)
+                    || (modifiers.command && !modifiers.alt
+                        && (event.logical_key.as_ref() == winit::keyboard::Key::Character("v")
+                            || event.physical_key == winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyV)))
+                    || (modifiers.shift && event.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Insert))));
+        let queued_events = egui_state.egui_input().events.len();
         let response = egui_state.on_window_event(window.as_ref(), &event);
+        if paste {
+            if let Some(app) = self.app.as_mut() {
+                let result = if app.clipboard_focus.text.is_none()
+                    && !self.egui_ctx.wants_keyboard_input()
+                {
+                    Ok(String::new())
+                } else {
+                    app.system_clipboard.read()
+                };
+                let mut index = 0;
+                egui_state.egui_input_mut().events.retain(|event| {
+                    let keep = index < queued_events || !matches!(event, egui::Event::Paste(_));
+                    index += 1;
+                    keep
+                });
+                match result {
+                    Ok(text) => egui_state
+                        .egui_input_mut()
+                        .events
+                        .push(egui::Event::Paste(text)),
+                    Err(error) => app.set_status(format!("Clipboard error: {error}")),
+                }
+            }
+        }
         let mut needs_redraw = response.repaint;
         let Some(gpu) = self.gpu.as_mut() else {
             return;
@@ -599,7 +633,7 @@ impl NativeRunner {
             }
             WindowEvent::RedrawRequested => {
                 let raw_input = egui_state.take_egui_input(window.as_ref());
-                let full_output = self.egui_ctx.run(raw_input, |ctx| {
+                let mut full_output = self.egui_ctx.run(raw_input, |ctx| {
                     app.ui(ctx, &mut gpu.camera);
                 });
                 if app.exit_ready {
@@ -609,6 +643,16 @@ impl NativeRunner {
                     event_loop.exit();
                     return;
                 }
+                full_output.platform_output.commands.retain(|command| {
+                    if let egui::OutputCommand::CopyText(text) = command {
+                        if let Err(error) = app.system_clipboard.write(text.clone()) {
+                            app.set_status(format!("Clipboard error: {error}"));
+                        }
+                        false
+                    } else {
+                        true
+                    }
+                });
                 egui_state.handle_platform_output(window.as_ref(), full_output.platform_output);
                 let paint_jobs = self
                     .egui_ctx
@@ -1381,11 +1425,8 @@ struct GuiApplication {
     style_properties_draft: Option<NativeStyleProperties>,
     renderer_style_create_draft: Option<NativeRendererStyleCreate>,
     renderer_style_edit_draft: Option<NativeRendererStyleEdit>,
-    workspace_camera_clipboard: Option<WorkspaceCameraClipboard>,
-    workspace_object_clipboard: Option<WorkspaceObjectClipboard>,
-    workspace_renderer_clipboard: Option<WorkspaceRendererClipboard>,
-    workspace_style_clipboard: Option<WorkspaceStyleClipboard>,
-    pending_style_paste_scene: Option<cuemol_core::Uid>,
+    system_clipboard: crate::native_clipboard::Clipboard,
+    clipboard_focus: cuemol_ui::clipboard::Focus,
     /// Molecule chosen in the MolStruct panel's molecule selector (CueMol2
     /// `molstruct-panel.xul`); independent of the Workspace tree selection.
     molstruct_object: Option<cuemol_core::Uid>,
@@ -5026,11 +5067,8 @@ impl GuiApplication {
             style_properties_draft: None,
             renderer_style_create_draft: None,
             renderer_style_edit_draft: None,
-            workspace_camera_clipboard: None,
-            workspace_object_clipboard: None,
-            workspace_renderer_clipboard: None,
-            workspace_style_clipboard: None,
-            pending_style_paste_scene: None,
+            system_clipboard: Default::default(),
+            clipboard_focus: Default::default(),
             molstruct_object: None,
             molstruct_selection: Vec::new(),
             molstruct_selection_anchor: None,
@@ -5571,9 +5609,11 @@ impl GuiApplication {
             }
             self.rebuild_snapshot();
         }
+        self.clipboard_focus.begin_frame(ctx);
         self.tritium_layout(ctx, camera);
         self.updates.show(ctx);
         self.dialogs(ctx, camera);
+        self.clipboard_focus.end_frame(ctx);
         self.apply_script_view(camera);
         self.keyboard_shortcuts(ctx, camera);
         let layers = ctx.memory(|memory| memory.areas().visible_layer_ids());
@@ -5816,7 +5856,7 @@ impl GuiApplication {
     }
 
     fn menu_bar(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
-        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+        let response = egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("New Window").clicked() {
@@ -5908,12 +5948,32 @@ impl GuiApplication {
                 });
                 ui.menu_button("Edit", |ui| {
                     if ui.button("Undo").clicked() {
-                        self.undo(camera);
+                        if self.clipboard_focus.text.is_some() {
+                            self.clipboard_action(ctx, "undo");
+                        } else {
+                            self.undo(camera);
+                        }
                         ui.close();
                     }
                     if ui.button("Redo").clicked() {
-                        self.redo(camera);
+                        if self.clipboard_focus.text.is_some() {
+                            self.clipboard_action(ctx, "redo");
+                        } else {
+                            self.redo(camera);
+                        }
                         ui.close();
+                    }
+                    ui.separator();
+                    for (label, action) in [
+                        ("Cut", "cut"),
+                        ("Copy", "copy"),
+                        ("Paste", "paste"),
+                        ("Select All", "select-all"),
+                    ] {
+                        if ui.button(label).clicked() {
+                            self.clipboard_action(ctx, action);
+                            ui.close();
+                        }
                     }
                     ui.separator();
                     if ui.button("Clear undo data").clicked() {
@@ -6171,6 +6231,7 @@ impl GuiApplication {
                 });
             });
         });
+        self.clipboard_focus.menu(response.response.rect);
     }
 
     fn animation_playback_controls(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
@@ -6470,6 +6531,15 @@ impl GuiApplication {
             LeftPanel::DensityMap => self.densitymap_section(ui, camera),
             LeftPanel::View => self.view_section(ui, camera),
             LeftPanel::Animation => self.animation_section(ui, camera),
+        }
+        match panel {
+            LeftPanel::Workspace => self
+                .clipboard_focus
+                .region(cuemol_ui::clipboard::Scope::Tree, ui),
+            LeftPanel::Coloring => self
+                .clipboard_focus
+                .region(cuemol_ui::clipboard::Scope::Paint, ui),
+            _ => {}
         }
     }
 
@@ -7012,7 +7082,7 @@ impl GuiApplication {
                 }
                 if ui
                     .add_enabled(
-                        self.workspace_object_clipboard.is_some(),
+                        self.clipboard_has_kind("object"),
                         egui::Button::new("Paste"),
                     )
                     .clicked()
@@ -7557,7 +7627,7 @@ impl GuiApplication {
                     ui.add_enabled(false, egui::Button::new("Copy"));
                     if ui
                         .add_enabled(
-                            self.workspace_camera_clipboard.is_some(),
+                            self.clipboard_has_kind("camera"),
                             egui::Button::new("Paste"),
                         )
                         .clicked()
@@ -7653,7 +7723,7 @@ impl GuiApplication {
                             }
                             if ui
                                 .add_enabled(
-                                    self.workspace_camera_clipboard.is_some(),
+                                    self.clipboard_has_kind("camera"),
                                     egui::Button::new("Paste"),
                                 )
                                 .clicked()
@@ -7758,10 +7828,7 @@ impl GuiApplication {
                     }
                     ui.add_enabled(false, egui::Button::new("Copy"));
                     if ui
-                        .add_enabled(
-                            self.workspace_style_clipboard.is_some(),
-                            egui::Button::new("Paste"),
-                        )
+                        .add_enabled(self.clipboard_has_kind("style"), egui::Button::new("Paste"))
                         .clicked()
                     {
                         self.request_paste_workspace_style(scene.uid);
@@ -7861,7 +7928,7 @@ impl GuiApplication {
                             }
                             if ui
                                 .add_enabled(
-                                    self.workspace_style_clipboard.is_some(),
+                                    self.clipboard_has_kind("style"),
                                     egui::Button::new("Paste"),
                                 )
                                 .clicked()
@@ -8261,7 +8328,7 @@ impl GuiApplication {
         }
         if ui
             .add_enabled(
-                self.workspace_renderer_clipboard.is_some(),
+                self.clipboard_has_kind("renderer"),
                 egui::Button::new("Paste Renderer"),
             )
             .clicked()
@@ -8357,7 +8424,7 @@ impl GuiApplication {
         }
         if ui
             .add_enabled(
-                self.workspace_renderer_clipboard.is_some(),
+                self.clipboard_has_kind("renderer"),
                 egui::Button::new("Paste Renderer"),
             )
             .clicked()
@@ -8407,7 +8474,7 @@ impl GuiApplication {
             }
             if ui
                 .add_enabled(
-                    self.workspace_renderer_clipboard.is_some(),
+                    self.clipboard_has_kind("renderer"),
                     egui::Button::new("Paste Renderer"),
                 )
                 .clicked()
@@ -9069,7 +9136,7 @@ impl GuiApplication {
                             }
                             if ui
                                 .add_enabled(
-                                    self.workspace_renderer_clipboard.is_some(),
+                                    self.clipboard_has_kind("renderer"),
                                     egui::Button::new("Paste Renderer"),
                                 )
                                 .clicked()
@@ -9504,8 +9571,10 @@ impl GuiApplication {
     ) {
         match self.state.copy_workspace_renderer(object_uid, renderer_uid) {
             Ok(clipboard) => {
+                if !self.write_clipboard_payload(clipboard.to_payload()) {
+                    return;
+                }
                 let count = clipboard.renderer_count();
-                self.workspace_renderer_clipboard = Some(clipboard);
                 self.set_status(format!("Copied {count} renderer(s)"));
             }
             Err(error) => self.set_status(format!("Copy renderer error: {error}")),
@@ -9531,8 +9600,10 @@ impl GuiApplication {
         }
         match self.state.copy_workspace_renderers(&targets) {
             Ok(clipboard) => {
+                if !self.write_clipboard_payload(clipboard.to_payload()) {
+                    return;
+                }
                 let count = clipboard.renderer_count();
-                self.workspace_renderer_clipboard = Some(clipboard);
                 self.set_status(format!("Copied {count} renderer(s)"));
             }
             Err(error) => self.set_status(format!("Copy renderer error: {error}")),
@@ -9829,8 +9900,10 @@ impl GuiApplication {
     fn copy_workspace_object_to_clipboard(&mut self, object_uid: cuemol_core::Uid) {
         match self.state.copy_workspace_object(object_uid) {
             Ok(clipboard) => {
+                if !self.write_clipboard_payload(clipboard.to_payload()) {
+                    return;
+                }
                 let name = clipboard.name().to_string();
-                self.workspace_object_clipboard = Some(clipboard);
                 self.set_status(format!("Copied object {name}"));
             }
             Err(error) => self.set_status(format!("Copy object error: {error}")),
@@ -9838,50 +9911,7 @@ impl GuiApplication {
     }
 
     fn paste_workspace_object_clipboard(&mut self, scene_uid: cuemol_core::Uid) {
-        let Some(clipboard) = self.workspace_object_clipboard.clone() else {
-            self.set_status("No copied object");
-            return;
-        };
-        let kind = clipboard.kind();
-        let undo = self.capture_undo();
-        match self.state.paste_workspace_object(scene_uid, &clipboard) {
-            Ok(object_uid) => {
-                self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(scene_uid);
-                self.selected_object = None;
-                self.selected_renderer = None;
-                self.workspace_aux_selection = match kind {
-                    crate::GuiWorkspaceObjectKind::Molecule => {
-                        self.selected_object = Some(object_uid);
-                        None
-                    }
-                    crate::GuiWorkspaceObjectKind::DensityMap => {
-                        Some(WorkspaceAuxSelection::DensityMap {
-                            scene_uid,
-                            map_uid: object_uid,
-                            renderer_uid: None,
-                        })
-                    }
-                    crate::GuiWorkspaceObjectKind::Surface => {
-                        Some(WorkspaceAuxSelection::Surface {
-                            scene_uid,
-                            surface_uid: object_uid,
-                            renderer_uid: None,
-                        })
-                    }
-                    crate::GuiWorkspaceObjectKind::Lightweight => {
-                        Some(WorkspaceAuxSelection::Lightweight {
-                            scene_uid,
-                            object_uid,
-                            renderer_uid: None,
-                        })
-                    }
-                };
-                self.rebuild_snapshot();
-                self.set_status("Paste object");
-            }
-            Err(error) => self.set_status(format!("Paste object error: {error}")),
-        }
+        self.paste_system_clipboard(scene_uid, Some("object"), None, None);
     }
 
     fn paste_workspace_renderer_clipboard(
@@ -9890,73 +9920,16 @@ impl GuiApplication {
         object_uid: cuemol_core::Uid,
         destination_group_uid: Option<cuemol_core::Uid>,
     ) {
-        let Some(clipboard) = self.workspace_renderer_clipboard.clone() else {
-            self.set_status("No copied renderer");
-            return;
-        };
-        let kind = if self.state.scene_manager().object(object_uid).is_some() {
-            crate::GuiWorkspaceObjectKind::Molecule
-        } else if self.state.density_map_summary(object_uid).is_some() {
-            crate::GuiWorkspaceObjectKind::DensityMap
-        } else if self.state.surface_summary(object_uid).is_some() {
-            crate::GuiWorkspaceObjectKind::Surface
-        } else if self.state.lw_object_summary(object_uid).is_some() {
-            crate::GuiWorkspaceObjectKind::Lightweight
-        } else {
-            self.set_status("Paste renderer error: object not found");
-            return;
-        };
-        let undo = self.capture_undo();
-        match self
-            .state
-            .paste_workspace_renderers(object_uid, destination_group_uid, &clipboard)
-        {
-            Ok(result) => {
-                let count = result.renderer_uids.len();
-                if count == 0 && result.group_uid.is_none() {
-                    self.set_status("Pasted 0 renderer(s)");
-                    return;
-                }
-                self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(scene_uid);
-                let renderer_uid = result
-                    .group_uid
-                    .or_else(|| result.renderer_uids.first().copied());
-                self.selected_object = None;
-                self.selected_renderer = None;
-                self.workspace_aux_selection = match kind {
-                    crate::GuiWorkspaceObjectKind::Molecule => {
-                        self.selected_object = Some(object_uid);
-                        self.selected_renderer = renderer_uid;
-                        None
-                    }
-                    crate::GuiWorkspaceObjectKind::DensityMap => {
-                        Some(WorkspaceAuxSelection::DensityMap {
-                            scene_uid,
-                            map_uid: object_uid,
-                            renderer_uid,
-                        })
-                    }
-                    crate::GuiWorkspaceObjectKind::Surface => {
-                        Some(WorkspaceAuxSelection::Surface {
-                            scene_uid,
-                            surface_uid: object_uid,
-                            renderer_uid,
-                        })
-                    }
-                    crate::GuiWorkspaceObjectKind::Lightweight => {
-                        Some(WorkspaceAuxSelection::Lightweight {
-                            scene_uid,
-                            object_uid,
-                            renderer_uid,
-                        })
-                    }
-                };
-                self.rebuild_snapshot();
-                self.set_status(format!("Pasted {count} renderer(s)"));
-            }
-            Err(error) => self.set_status(format!("Paste renderer error: {error}")),
-        }
+        self.paste_system_clipboard(
+            scene_uid,
+            Some("renderer"),
+            Some(destination_group_uid.unwrap_or(object_uid)),
+            Some(if destination_group_uid.is_some() {
+                "rendGroup"
+            } else {
+                "object"
+            }),
+        );
     }
 
     fn change_workspace_renderer_type(
@@ -17652,6 +17625,42 @@ impl GuiApplication {
         if ctx.wants_keyboard_input() {
             return;
         }
+        if self.clipboard_focus.scope.is_some() {
+            let action = ctx
+                .input(|input| {
+                    input.events.iter().find_map(|event| match event {
+                        egui::Event::Copy => Some("copy"),
+                        egui::Event::Cut => Some("cut"),
+                        egui::Event::Paste(_) => Some("paste"),
+                        _ => None,
+                    })
+                })
+                .or_else(|| {
+                    [
+                        (egui::Key::C, "copy"),
+                        (egui::Key::X, "cut"),
+                        (egui::Key::V, "paste"),
+                        (egui::Key::A, "select-all"),
+                    ]
+                    .into_iter()
+                    .find_map(|(key, action)| {
+                        ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, key))
+                            .then_some(action)
+                    })
+                });
+            if let Some(action) = action {
+                ctx.input_mut(|input| {
+                    input.events.retain(|event| {
+                        !matches!(
+                            event,
+                            egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_)
+                        )
+                    })
+                });
+                self.clipboard_action(ctx, action);
+                return;
+            }
+        }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.navigation.cancel();
             self.rect_select_start = None;
@@ -19920,7 +19929,6 @@ impl GuiApplication {
         self.style_props_dialog(ctx);
         self.renderer_style_create_dialog(ctx);
         self.renderer_style_edit_dialog(ctx);
-        self.style_paste_confirmation_dialog(ctx);
         self.crystal_create_confirmation_dialog(ctx);
         self.delete_atoms_dialog(ctx);
         self.chain_dialog(ctx);
@@ -20492,41 +20500,6 @@ impl GuiApplication {
             }
         } else if !cancel && open {
             self.camera_visibility_draft = Some(draft);
-        }
-    }
-
-    fn style_paste_confirmation_dialog(&mut self, ctx: &egui::Context) {
-        let Some(scene_uid) = self.pending_style_paste_scene else {
-            return;
-        };
-        let name = self
-            .workspace_style_clipboard
-            .as_ref()
-            .map(WorkspaceStyleClipboard::name)
-            .unwrap_or_default();
-        let mut open = true;
-        let mut replace = false;
-        let mut cancel = false;
-        egui::Window::new("Replace Style?")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .show(ctx, |ui| {
-                ui.label(format!("Style \"{name}\" already exists. Replace?"));
-                ui.horizontal(|ui| {
-                    if ui.button("Replace").clicked() {
-                        replace = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        cancel = true;
-                    }
-                });
-            });
-        if replace {
-            self.pending_style_paste_scene = None;
-            self.paste_workspace_style_clipboard(scene_uid, true);
-        } else if cancel || !open {
-            self.pending_style_paste_scene = None;
         }
     }
 
@@ -24329,8 +24302,10 @@ impl GuiApplication {
     fn copy_workspace_camera_to_clipboard(&mut self, scene_uid: cuemol_core::Uid, name: &str) {
         match self.state.copy_workspace_camera(scene_uid, name) {
             Ok(clipboard) => {
+                if !self.write_clipboard_payload(clipboard.to_payload()) {
+                    return;
+                }
                 let name = clipboard.name().to_string();
-                self.workspace_camera_clipboard = Some(clipboard);
                 self.set_status(format!("Copied camera {name}"));
             }
             Err(error) => self.set_status(format!("Copy camera error: {error}")),
@@ -24338,33 +24313,7 @@ impl GuiApplication {
     }
 
     fn paste_workspace_camera_clipboard(&mut self, scene_uid: cuemol_core::Uid) {
-        let Some(clipboard) = self.workspace_camera_clipboard.clone() else {
-            self.set_status("No copied camera");
-            return;
-        };
-        let undo = self.capture_undo();
-        match self.state.paste_workspace_camera(scene_uid, &clipboard) {
-            Ok(name) => {
-                self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(scene_uid);
-                if self.state.active_scene() == Some(scene_uid) {
-                    let camera_index = self
-                        .state
-                        .camera_summaries(scene_uid)
-                        .iter()
-                        .position(|camera| camera.name == name)
-                        .expect("the pasted camera was just inserted");
-                    self.selected_object = None;
-                    self.selected_renderer = None;
-                    self.workspace_aux_selection = Some(WorkspaceAuxSelection::Camera {
-                        scene_uid,
-                        camera_index,
-                    });
-                }
-                self.set_status(format!("Pasted camera {name}"));
-            }
-            Err(error) => self.set_status(format!("Paste camera error: {error}")),
-        }
+        self.paste_system_clipboard(scene_uid, Some("camera"), None, None);
     }
 
     fn style_summary_for_selection(
@@ -24391,8 +24340,10 @@ impl GuiApplication {
     ) {
         match self.state.copy_workspace_style(scene_uid, local_index) {
             Ok(clipboard) => {
+                if !self.write_clipboard_payload(clipboard.to_payload()) {
+                    return;
+                }
                 let name = clipboard.name();
-                self.workspace_style_clipboard = Some(clipboard);
                 self.set_status(format!("Copied style {name}"));
             }
             Err(error) => self.set_status(format!("Copy style error: {error}")),
@@ -24400,18 +24351,7 @@ impl GuiApplication {
     }
 
     fn request_paste_workspace_style(&mut self, scene_uid: cuemol_core::Uid) {
-        let Some(clipboard) = self.workspace_style_clipboard.as_ref() else {
-            self.set_status("No copied style");
-            return;
-        };
-        if self
-            .state
-            .workspace_style_exists(scene_uid, &clipboard.name())
-        {
-            self.pending_style_paste_scene = Some(scene_uid);
-        } else {
-            self.paste_workspace_style_clipboard(scene_uid, false);
-        }
+        self.paste_workspace_style_clipboard(scene_uid, false);
     }
 
     fn choose_load_workspace_style_file(
@@ -24514,36 +24454,8 @@ impl GuiApplication {
         }
     }
 
-    fn paste_workspace_style_clipboard(&mut self, scene_uid: cuemol_core::Uid, replace: bool) {
-        let Some(clipboard) = self.workspace_style_clipboard.clone() else {
-            self.set_status("No copied style");
-            return;
-        };
-        let undo = self.capture_undo();
-        match self
-            .state
-            .paste_workspace_style(scene_uid, &clipboard, replace)
-        {
-            Ok(local_index) => {
-                self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(scene_uid);
-                let style_index = self
-                    .state
-                    .style_summaries(scene_uid)
-                    .iter()
-                    .position(|style| style.local_index == Some(local_index))
-                    .expect("the pasted style was just inserted");
-                self.selected_object = None;
-                self.selected_renderer = None;
-                self.workspace_aux_selection = Some(WorkspaceAuxSelection::Style {
-                    scene_uid,
-                    style_index,
-                });
-                self.rebuild_snapshot();
-                self.set_status(format!("Pasted style {}", clipboard.name()));
-            }
-            Err(error) => self.set_status(format!("Paste style error: {error}")),
-        }
+    fn paste_workspace_style_clipboard(&mut self, scene_uid: cuemol_core::Uid, _replace: bool) {
+        self.paste_system_clipboard(scene_uid, Some("style"), None, None);
     }
 
     fn open_new_style_properties(&mut self, scene_uid: cuemol_core::Uid) {
@@ -36718,7 +36630,7 @@ mod tests {
         assert!((camera.to_qsys_camera("loaded").zoom() - 80.0).abs() < 1.0e-5);
 
         app.copy_workspace_camera_to_clipboard(scene_uid, "camera_0");
-        assert!(app.workspace_camera_clipboard.is_some());
+        assert!(app.clipboard_has_kind("camera"));
         app.paste_workspace_camera_clipboard(scene_uid);
         assert_eq!(app.state.camera_summaries(scene_uid).len(), 2);
         assert_eq!(
@@ -36727,7 +36639,7 @@ mod tests {
         );
         app.undo(&mut camera);
         assert_eq!(app.state.camera_summaries(scene_uid).len(), 1);
-        assert!(app.workspace_camera_clipboard.is_some());
+        assert!(app.clipboard_has_kind("camera"));
 
         app.open_camera_rename_dialog(selection);
         let mut rename = app.camera_rename_draft.take().unwrap();
@@ -37048,13 +36960,7 @@ mod tests {
         assert_eq!(app.workspace_multiple_selection, [first, second]);
 
         app.copy_workspace_target_renderers();
-        assert_eq!(
-            app.workspace_renderer_clipboard
-                .as_ref()
-                .unwrap()
-                .renderer_count(),
-            2
-        );
+        assert_eq!(native_clipboard_renderer_types(&mut app), ["simple", "cpk"]);
         assert!(app.undo_stack.is_empty());
 
         app.set_workspace_targets_visible(false);
@@ -37117,9 +37023,10 @@ mod tests {
             },
         ];
         app.copy_workspace_target_renderers();
-        let clipboard = app.workspace_renderer_clipboard.as_ref().unwrap();
-        assert_eq!(clipboard.kind(), crate::GuiWorkspaceObjectKind::DensityMap);
-        assert_eq!(clipboard.renderer_count(), 2);
+        assert_eq!(
+            native_clipboard_renderer_types(&mut app),
+            ["contour", "isosurf"]
+        );
 
         app.workspace_multiple_selection = vec![
             first,
@@ -37132,9 +37039,10 @@ mod tests {
         ];
         assert!(app.workspace_multiple_copy_enabled());
         app.copy_workspace_target_renderers();
-        let clipboard = app.workspace_renderer_clipboard.as_ref().unwrap();
-        assert!(clipboard.is_mixed_kind());
-        assert_eq!(clipboard.renderer_count(), 2);
+        assert_eq!(
+            native_clipboard_renderer_types(&mut app),
+            ["simple", "contour"]
+        );
 
         let grouped_object_uid = app
             .state
@@ -37166,9 +37074,10 @@ mod tests {
             },
         ];
         app.copy_workspace_target_renderers();
-        let clipboard = app.workspace_renderer_clipboard.as_ref().unwrap();
-        assert_eq!(clipboard.kind(), crate::GuiWorkspaceObjectKind::Molecule);
-        assert_eq!(clipboard.renderer_count(), 2);
+        assert_eq!(
+            native_clipboard_renderer_types(&mut app),
+            ["simple", "simple"]
+        );
         assert!(app
             .state
             .scene_manager()
@@ -37521,7 +37430,7 @@ mod tests {
             .any(|style| style.name == "style_0" && !style.read_only));
 
         app.copy_workspace_style_to_clipboard(scene_uid, local_index);
-        assert!(app.workspace_style_clipboard.is_some());
+        assert!(app.clipboard_has_kind("style"));
         assert!(app.undo_stack.is_empty());
         app.state
             .update_scene_style(
@@ -37533,10 +37442,16 @@ mod tests {
             )
             .unwrap();
         app.request_paste_workspace_style(scene_uid);
-        assert_eq!(app.pending_style_paste_scene, Some(scene_uid));
-        app.pending_style_paste_scene = None;
-        app.paste_workspace_style_clipboard(scene_uid, true);
-        assert!(!app
+        let pasted = app
+            .state
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_styles();
+        assert_eq!(pasted.len(), 2);
+        assert_eq!(pasted[1].node.str_attr("id").as_str(), "style_0_1");
+        assert!(!pasted[1].data.contains("Narrow"));
+        assert!(app
             .state
             .scene_manager()
             .scene(scene_uid)
@@ -37545,6 +37460,15 @@ mod tests {
             .data
             .contains("Narrow"));
         app.undo(&mut camera);
+        assert_eq!(
+            app.state
+                .scene_manager()
+                .scene(scene_uid)
+                .unwrap()
+                .loaded_styles()
+                .len(),
+            1
+        );
         assert!(app
             .state
             .scene_manager()
@@ -37952,10 +37876,7 @@ mod tests {
         assert_eq!(renderer.edge_color, "#123456");
 
         app.copy_workspace_renderer_to_clipboard(object_uid, renderer_uid);
-        assert_eq!(
-            app.workspace_renderer_clipboard.as_ref().unwrap().kind(),
-            crate::GuiWorkspaceObjectKind::Lightweight
-        );
+        assert_eq!(native_clipboard_renderer_types(&mut app), ["lwrend"]);
         app.paste_workspace_renderer_clipboard(scene_uid, object_uid, None);
         let pasted_renderer_uid = match app.workspace_aux_selection.unwrap() {
             WorkspaceAuxSelection::Lightweight {
@@ -37967,7 +37888,7 @@ mod tests {
         assert_ne!(pasted_renderer_uid, renderer_uid);
         let renderers = app.state.lw_object_summary(object_uid).unwrap().renderers;
         assert_eq!(renderers.len(), 2);
-        assert_eq!(renderers[1].name, "overlay(1)");
+        assert_eq!(renderers[1].name, "overlay_1");
         assert_eq!(renderers[1].data_id, 17);
         app.undo(&mut CameraController::default());
         assert_eq!(
@@ -39130,7 +39051,7 @@ mod tests {
             .add_renderer("simple", "lines");
 
         app.copy_workspace_renderer_to_clipboard(source_uid, renderer_uid);
-        assert!(app.workspace_renderer_clipboard.is_some());
+        assert!(app.clipboard_has_kind("renderer"));
         assert!(app.undo_stack.is_empty());
         app.state
             .destroy_renderer_in_object(source_uid, renderer_uid)
@@ -39157,7 +39078,22 @@ mod tests {
             .unwrap()
             .renderer(pasted_uid)
             .is_none());
-        assert!(app.workspace_renderer_clipboard.is_some());
+        assert!(app.clipboard_has_kind("renderer"));
+    }
+
+    fn native_clipboard_renderer_types(app: &mut GuiApplication) -> Vec<String> {
+        let payload = app.system_clipboard.payload().unwrap();
+        let xml = std::str::from_utf8(&payload.bytes).unwrap();
+        let tree = cuemol_core::parse_ldom2_xml(xml).unwrap();
+        if tree.top().tag_name() == "renderer" {
+            return vec![tree.top().type_name().to_string()];
+        }
+        tree.top()
+            .children()
+            .iter()
+            .filter(|node| !node.is_attr() && node.tag_name() == "renderer")
+            .map(|node| node.type_name().to_string())
+            .collect()
     }
 
     #[test]
@@ -39177,20 +39113,20 @@ mod tests {
             .add_renderer("simple", "lines");
 
         app.copy_workspace_object_to_clipboard(object_uid);
-        assert!(app.workspace_object_clipboard.is_some());
+        assert!(app.clipboard_has_kind("object"));
         assert!(app.undo_stack.is_empty());
         app.paste_workspace_object_clipboard(scene_uid);
         let pasted_uid = app.selected_object.unwrap();
         assert_ne!(pasted_uid, object_uid);
         assert_eq!(
             app.state.scene_manager().object(pasted_uid).unwrap().name(),
-            "copy1_molecule"
+            "molecule_1"
         );
         assert_eq!(app.undo_stack.len(), 1);
 
         app.undo(&mut CameraController::default());
         assert!(app.state.scene_manager().object(pasted_uid).is_none());
-        assert!(app.workspace_object_clipboard.is_some());
+        assert!(app.clipboard_has_kind("object"));
     }
 
     #[test]

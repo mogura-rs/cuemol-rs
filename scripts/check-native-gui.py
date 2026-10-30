@@ -105,6 +105,16 @@ def wait_for(operation, timeout=30):
     raise RuntimeError(f'Timed out waiting for the native GUI: {error}')
 
 
+def clipboard_text():
+    if sys.platform == 'darwin':
+        command = ['pbpaste']
+    elif sys.platform == 'win32':
+        command = ['powershell', '-NoProfile', '-Command', 'Get-Clipboard -Raw']
+    else:
+        command = ['xclip', '-selection', 'clipboard', '-o']
+    return subprocess.check_output(command, text=True, timeout=5).rstrip('\r\n')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, required=True)
@@ -302,6 +312,36 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             pyautogui.hotkey(primary, 'z')
             wait_for(lambda: call('get_scene_state')['objects'][0]['name'] == 'console-probe')
 
+            original = call('get_scene_state')['objects'][0]
+            pyautogui.click(x + 145, y + 164)
+            pyautogui.hotkey(primary, 'c')
+            pyautogui.hotkey(primary, 'x')
+            wait_for(lambda: not call('get_scene_state')['objects'])
+            pyautogui.hotkey(primary, 'v')
+            pasted = wait_for(lambda: call('get_scene_state')['objects'])
+            if len(pasted) != 1 or pasted[0]['id'] == original['id'] or pasted[0]['atoms'] != original['atoms']:
+                raise RuntimeError('The OS clipboard did not restore the copied molecule')
+            capture('clipboard-pasted.png')
+            pyautogui.hotkey(primary, 'z')
+            wait_for(lambda: not call('get_scene_state')['objects'])
+            pyautogui.hotkey(primary, 'z')
+            wait_for(lambda: call('get_scene_state')['objects'][0]['id'] == original['id'])
+
+            pyautogui.click(x + width * 0.52, y + height - 36)
+            command = 'rename console-probe, clipboard-probe'
+            pyautogui.write(command, interval=0.015)
+            pyautogui.hotkey(primary, 'a')
+            pyautogui.hotkey(primary, 'c')
+            wait_for(lambda: clipboard_text() == command)
+            pyautogui.hotkey(primary, 'x')
+            pyautogui.hotkey(primary, 'v')
+            pyautogui.press('enter')
+            wait_for(lambda: call('get_scene_state')['objects'][0]['name'] == 'clipboard-probe')
+            pyautogui.write('undo', interval=0.015)
+            pyautogui.press('enter')
+            wait_for(lambda: call('get_scene_state')['objects'][0]['name'] == 'console-probe')
+            pyautogui.click(x + width * 0.7, y + height * 0.4)
+
             def palette_collapsed():
                 settings = dict(line.split('\t', 1) for line in (config / 'config.tsv').read_text().splitlines() if '\t' in line)
                 return settings.get('layout:tool-palette-collapsed') == 'true'
@@ -324,11 +364,17 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                           font_line_endings_equal=True,
                           python_helpers=True, console_input=True, console_completion=True,
                           console_multiline_undo=True, console_qax=True,
+                          clipboard_cut_paste_undo=True,
+                          clipboard_text_external=True,
                           shell_shortcuts=True,
                           font_pixels=styled.histogram()[255])
             print(json.dumps(report), flush=True)
         except BaseException as error:
             report.update(ok=False, error=str(error))
+            try:
+                capture('failure.png')
+            except Exception:
+                pass
             raise
         finally:
             (work / 'result.json').write_text(json.dumps(report, indent=2) + '\n')

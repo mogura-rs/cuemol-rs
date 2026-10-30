@@ -2098,7 +2098,6 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     }
     assert!(!tauri_scene_menu.contains("label: currentScene.name"));
     assert!(!tauri_scene_menu.contains("label: \"Paste Object\""));
-    assert!(tauri_scene_menu.contains("disabled: !workspaceObjectClipboardAvailable"));
     assert!(NATIVE_GUI_RS.contains("egui::Button::new(\"Paste\")"));
     assert!(NATIVE_GUI_RS.contains("ui.label(\"Name for new group:\")"));
     assert!(NATIVE_GUI_RS.contains("ui.label(\"Change rend group name:\")"));
@@ -2149,7 +2148,6 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("currentScene.useColorProof && currentScene.iccFilename"));
     assert!(JS.contains("showReferenceDialog(\"Scene Properties\")"));
     assert!(JS.contains("role\", \"menuitemcheckbox"));
-    assert!(JS.contains("workspaceRendererClipboardAvailable"));
     assert!(JS.contains("Paste Renderer"));
     assert!(JS.contains("label: \"Save As ...\""));
     assert!(JS.contains("label: \"Delete\""));
@@ -2260,7 +2258,6 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
         );
     }
     assert!(!tauri_object_menu.contains("Selection ·"));
-    assert!(tauri_object_menu.contains("disabled: !workspaceRendererClipboardAvailable"));
     assert!(NATIVE_GUI_RS.contains("workspace_paint_menu(ui, true"));
     let tauri_aux_object_menu = JS
         .split("function workspaceAuxObjectContextItems(scene, kind, object)")
@@ -2292,7 +2289,6 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(tauri_aux_object_menu.contains("label: \"Regenerate surface...\""));
     assert!(!tauri_aux_object_menu.contains("label: object.name"));
     assert!(!tauri_aux_object_menu.contains("label: \"Rename…\""));
-    assert!(tauri_aux_object_menu.contains("disabled: !workspaceRendererClipboardAvailable"));
     let tauri_renderer_group_menu = JS
         .split("async function workspaceRendererContextItems(scene, object, renderer)")
         .nth(1)
@@ -2448,7 +2444,7 @@ fn tauri_workspace_exposes_reference_camera_nodes_and_actions() {
     let native_editor = NATIVE_GUI_RS
         .split("fn camera_visibility_dialog(&mut self, ctx: &egui::Context)")
         .nth(1)
-        .and_then(|source| source.split("fn style_paste_confirmation_dialog").next())
+        .and_then(|source| source.split("\n    fn ").next())
         .expect("native camera visibility editor");
     assert!(native_editor.contains("Edit visibility flags: {}"));
     assert!(native_editor.contains("Object / Renderer"));
@@ -2497,7 +2493,6 @@ fn tauri_workspace_exposes_reference_camera_nodes_and_actions() {
     assert!(!tauri_camera_menu.contains("camera?.name || \"Cameras\""));
     assert!(!tauri_camera_menu.contains("label: \"Paste Camera\""));
     assert!(tauri_camera_menu.contains("disabled: !camera"));
-    assert!(tauri_camera_menu.contains("disabled: !workspaceCameraClipboardAvailable"));
     let clear_action = tauri_camera_menu
         .split("label: \"Clear vis flags\"")
         .nth(1)
@@ -2632,7 +2627,6 @@ fn tauri_workspace_exposes_reference_style_nodes_and_actions() {
     assert!(!tauri_style_menu.contains("label: \"Paste Style\""));
     assert!(!tauri_style_menu.contains("label: \"Properties…\""));
     assert!(tauri_style_menu.contains("disabled: !style || style.localIndex === null"));
-    assert!(tauri_style_menu.contains("disabled: !workspaceStyleClipboardName"));
     assert!(!tauri_style_menu.contains("globalThis.prompt"));
     assert!(NATIVE_GUI_RS.contains("fn style_delete_dialog("));
     assert!(NATIVE_GUI_RS.contains("Delete style: {}"));

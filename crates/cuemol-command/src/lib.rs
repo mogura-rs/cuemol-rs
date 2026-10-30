@@ -1,6 +1,7 @@
 //! Shared native, browser, and MCP command dispatch.
 mod advanced;
 mod animation;
+pub mod clipboard;
 mod commands;
 mod downloads;
 mod electrostatics;

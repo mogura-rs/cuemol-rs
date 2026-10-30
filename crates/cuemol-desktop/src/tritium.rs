@@ -218,9 +218,13 @@ impl GuiApplication {
         let Some(scene) = self.state.active_scene() else {
             return;
         };
-        for saved in self.state.camera_summaries(scene) {
+        for (camera_index, saved) in self.state.camera_summaries(scene).into_iter().enumerate() {
             ui.horizontal(|ui| {
-                if ui.selectable_label(false, &saved.name).double_clicked() {
+                let response = ui.selectable_label(matches!(self.workspace_aux_selection, Some(WorkspaceAuxSelection::Camera { scene_uid, camera_index: index }) if scene_uid == scene && index == camera_index), &saved.name);
+                if response.clicked() {
+                    self.apply_workspace_target(NativeWorkspaceTarget::Camera { scene_uid: scene, camera_index });
+                }
+                if response.double_clicked() {
                     self.tritium_command("apply_camera", json!({"name":saved.name}), camera);
                 }
                 if ui.small_button("Apply").clicked() {
@@ -238,6 +242,8 @@ impl GuiApplication {
         if ui.button("Save current camera…").clicked() {
             self.open_new_camera_dialog(scene, camera);
         }
+        self.clipboard_focus
+            .region(cuemol_ui::clipboard::Scope::Cameras, ui);
     }
     fn action_sidebar(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
         let done: Vec<_> = self

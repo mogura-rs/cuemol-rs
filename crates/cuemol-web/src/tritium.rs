@@ -238,7 +238,7 @@ impl App {
         self.show_get_pdb = open;
     }
     fn shell_menu(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("menubar")
+        let response = egui::TopBottomPanel::top("menubar")
             .exact_height(26.)
             .show(ctx, |ui| {
                 egui::MenuBar::new().ui(ui, |ui| {
@@ -292,18 +292,23 @@ impl App {
                     });
                     let edit_menu = ui.menu_button("Edit", |ui| {
                         if ui
-                            .add_enabled(!self.history.is_empty(), egui::Button::new("Undo"))
+                            .add_enabled(self.clipboard_focus.text.is_some() || !self.history.is_empty(), egui::Button::new("Undo"))
                             .clicked()
                         {
-                            self.call("undo", json!({}));
+                            if self.clipboard_focus.text.is_some() { self.clipboard_action(ctx, "undo"); } else { self.call("undo", json!({})); }
                             ui.close();
                         }
                         if ui
-                            .add_enabled(!self.future.is_empty(), egui::Button::new("Redo"))
+                            .add_enabled(self.clipboard_focus.text.is_some() || !self.future.is_empty(), egui::Button::new("Redo"))
                             .clicked()
                         {
-                            self.call("redo", json!({}));
+                            if self.clipboard_focus.text.is_some() { self.clipboard_action(ctx, "redo"); } else { self.call("redo", json!({})); }
                             ui.close();
+                        }
+                        for (label, action) in [("Cut", "cut"), ("Copy", "copy"), ("Paste", "paste"), ("Select All", "select-all")] {
+                            let response = ui.button(label);
+                            self.record_ui_rect(&format!("Edit {label}"), &response);
+                            if response.clicked() { self.clipboard_action(ctx, action); ui.close(); }
                         }
                         if ui.button("Clear undo data").clicked() {
                             self.call("clear_undo", json!({}));
@@ -475,6 +480,7 @@ impl App {
                     });
                 });
             });
+        self.clipboard_focus.menu(response.response.rect);
     }
     fn shell_toolbar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("toolbar")
@@ -880,6 +886,16 @@ impl App {
                     self.paint_selected = 0;
                 }
                 response.context_menu(|ui| {
+                    for (label, action) in [("Copy", "copy"), ("Cut", "cut"), ("Paste", "paste")] {
+                        if ui.button(label).clicked() {
+                            self.selected = Some(Uid::new(id));
+                            self.open_properties("object", Some(id));
+                            self.clipboard_focus.scope = Some(cuemol_ui::clipboard::Scope::Tree);
+                            self.clipboard_focus.text = None;
+                            self.clipboard_action(ui.ctx(), action);
+                            ui.close();
+                        }
+                    }
                     if ui.button("Center").clicked() {
                         self.call("focus_node", json!({"nodeType":"object","nodeId":id}));
                         ui.close();
@@ -938,6 +954,19 @@ impl App {
                                 self.paint_selected = 0;
                             }
                             response.context_menu(|ui| {
+                                for (label, action) in
+                                    [("Copy", "copy"), ("Cut", "cut"), ("Paste", "paste")]
+                                {
+                                    if ui.button(label).clicked() {
+                                        self.selected = Some(Uid::new(id));
+                                        self.open_properties("renderer", Some(rid));
+                                        self.clipboard_focus.scope =
+                                            Some(cuemol_ui::clipboard::Scope::Tree);
+                                        self.clipboard_focus.text = None;
+                                        self.clipboard_action(ui.ctx(), action);
+                                        ui.close();
+                                    }
+                                }
                                 if ui.button("Delete").clicked() {
                                     self.call(
                                         "delete_node",
@@ -960,6 +989,8 @@ impl App {
                 if let Some(id)=self.selected {self.call("create_renderer",json!({"objId":id.get(),"rendererType":self.representation,"selection":if self.selection.is_empty(){"*"}else{&self.selection}}));}
             }
         });
+        self.clipboard_focus
+            .region(cuemol_ui::clipboard::Scope::Tree, ui);
     }
     fn object_picker(&mut self, ui: &mut egui::Ui) {
         let objects = self.state.active_object_summaries();
@@ -1225,14 +1256,32 @@ impl App {
             .flatten()
         {
             if let Some(name) = camera["name"].as_str() {
-                if ui.button(name).clicked() {
+                let row = ui.selectable_label(self.clipboard_camera.as_deref() == Some(name), name);
+                self.record_ui_rect(&format!("camera:{name}"), &row);
+                if row.clicked() {
+                    self.clipboard_camera = Some(name.into());
+                }
+                if row.double_clicked() {
                     self.call("apply_camera", json!({"name":name}));
                 }
+                row.context_menu(|ui| {
+                    for (label, action) in [("Copy", "copy"), ("Cut", "cut"), ("Paste", "paste")] {
+                        if ui.button(label).clicked() {
+                            self.clipboard_camera = Some(name.into());
+                            self.clipboard_focus.scope = Some(cuemol_ui::clipboard::Scope::Cameras);
+                            self.clipboard_focus.text = None;
+                            self.clipboard_action(ui.ctx(), action);
+                            ui.close();
+                        }
+                    }
+                });
             }
         }
         if ui.button("Save current camera…").clicked() {
             self.select_tool("save_camera");
         }
+        self.clipboard_focus
+            .region(cuemol_ui::clipboard::Scope::Cameras, ui);
     }
     fn view_controls(&mut self, ui: &mut egui::Ui) {
         let mut perspective = self.camera.is_perspective();

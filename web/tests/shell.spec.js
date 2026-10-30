@@ -115,3 +115,16 @@ test('browser Crystal action creates symmetry mates through its command form',as
   await command(page,'undo');
   await expect.poll(async()=>(await status(page)).scene.objects[0].renderers.some(r=>r.type==='*symm')).toBe(false);
 });
+
+test('browser alternate tab shortcuts use physical keys under an Option layout',async({page})=>{
+  await setup(page);
+  const original=(await status(page)).scene.sceneId;
+  await page.evaluate(()=>window.dispatchEvent(new KeyboardEvent('keydown',{
+    key:'†',code:'KeyT',ctrlKey:true,metaKey:true,altKey:true,bubbles:true,cancelable:true,
+  })));
+  await expect.poll(async()=>(await status(page)).scene.sceneId).not.toBe(original);
+  await page.evaluate(()=>window.dispatchEvent(new KeyboardEvent('keydown',{
+    key:'∑',code:'KeyW',ctrlKey:true,metaKey:true,altKey:true,bubbles:true,cancelable:true,
+  })));
+  await expect.poll(async()=>(await status(page)).scene.sceneId).toBe(original);
+});

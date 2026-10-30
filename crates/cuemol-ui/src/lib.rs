@@ -14,6 +14,8 @@ mod agent;
 pub use agent::{AgentCall, AgentPanel};
 
 #[cfg(feature = "egui")]
+pub mod clipboard;
+#[cfg(feature = "egui")]
 pub mod shell;
 
 #[cfg(feature = "egui")]

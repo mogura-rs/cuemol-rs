@@ -1302,7 +1302,7 @@ impl MolObject {
             .any(|existing| existing.name == base_name)
         {
             for index in 1_u64.. {
-                let candidate = format!("{base_name}({index})");
+                let candidate = format!("{base_name}_{index}");
                 if self
                     .renderers
                     .iter()

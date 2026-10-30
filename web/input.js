@@ -4,7 +4,8 @@ export function installShellInput(send, status, openFiles) {
     if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
     const primary = isMac ? event.metaKey : event.ctrlKey;
     if (!primary) return;
-    const key = event.key.toLowerCase();
+    const key = event.altKey && ['KeyT', 'KeyW'].includes(event.code)
+      ? event.code.slice(3).toLowerCase() : event.key.toLowerCase();
     if (event.altKey && !['t', 'w'].includes(key)) return;
     const ui = status()?.ui;
     if (!ui || ui.modal) return;
