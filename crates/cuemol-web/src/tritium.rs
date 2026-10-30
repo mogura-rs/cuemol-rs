@@ -785,10 +785,9 @@ impl App {
                         "Sequence",
                         "MD Trajectory",
                     ] {
-                        if ui
-                            .selectable_value(&mut self.bottom_tab, tab.into(), tab)
-                            .clicked()
-                        {
+                        let response = ui.selectable_value(&mut self.bottom_tab, tab.into(), tab);
+                        self.record_ui_rect(tab, &response);
+                        if response.clicked() {
                             self.bottom_open = true;
                         }
                     }
@@ -823,7 +822,10 @@ impl App {
                                 egui::TextEdit::singleline(&mut self.console_source)
                                     .desired_width(ui.available_width() - 50.),
                             );
-                            if ui.button("Run").clicked()
+                            self.record_ui_rect("Console input", &response);
+                            let run = ui.button("Run");
+                            self.record_ui_rect("Console Run", &run);
+                            if run.clicked()
                                 || (response.lost_focus()
                                     && ui.input(|i| i.key_pressed(egui::Key::Enter)))
                             {

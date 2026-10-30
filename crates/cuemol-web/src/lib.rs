@@ -109,7 +109,11 @@ pub fn status() -> String {
     STATUS.with(|status| status.borrow().clone())
 }
 #[wasm_bindgen]
-pub async fn start(canvas: web_sys::HtmlCanvasElement, force_webgl: bool) -> Result<(), JsValue> {
+pub async fn start(
+    canvas: web_sys::HtmlCanvasElement,
+    force_webgl: bool,
+    ui_font: Vec<u8>,
+) -> Result<(), JsValue> {
     let runner = eframe::WebRunner::new();
     let mut options = eframe::WebOptions::default();
     if force_webgl {
@@ -118,7 +122,26 @@ pub async fn start(canvas: web_sys::HtmlCanvasElement, force_webgl: bool) -> Res
         }
     }
     runner
-        .start(canvas, options, Box::new(|cc| Ok(Box::new(App::new(cc)?))))
+        .start(
+            canvas,
+            options,
+            Box::new(move |cc| {
+                let mut fonts = egui::FontDefinitions::default();
+                fonts.font_data.insert(
+                    "Noto Sans JP".into(),
+                    egui::FontData::from_owned(ui_font).into(),
+                );
+                for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+                    fonts
+                        .families
+                        .entry(family)
+                        .or_default()
+                        .push("Noto Sans JP".into());
+                }
+                cc.egui_ctx.set_fonts(fonts);
+                Ok(Box::new(App::new(cc)?))
+            }),
+        )
         .await?;
     // The browser owns the event loop for the lifetime of the document.
     std::mem::forget(runner);

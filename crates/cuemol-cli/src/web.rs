@@ -166,6 +166,17 @@ fn build(args: &[String]) -> Result<()> {
             ])
             .arg(out.join("pkg/oidn")),
     )?;
+    run_command(
+        Command::new("uv")
+            .current_dir(&root)
+            .args([
+                "run",
+                "--no-project",
+                "scripts/bundle-ui-fonts.py",
+                "--out-dir",
+            ])
+            .arg(out.join("pkg/fonts")),
+    )?;
     if out != root.join("web") {
         for name in [
             "index.html",
@@ -201,6 +212,7 @@ fn mime(name: &str) -> &'static str {
         "wasm" => "application/wasm",
         "css" => "text/css; charset=utf-8",
         "png" => "image/png",
+        "ttf" => "font/ttf",
         _ => "application/octet-stream",
     }
 }

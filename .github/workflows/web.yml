@@ -30,6 +30,10 @@ jobs:
             .cache/web-kernels
             .cache/oidn-packages
           key: web-tools-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'scripts/prepare-web-tools.py', 'scripts/build-web-kernels.py', 'scripts/bundle-oidn.py', 'crates/cuemol-molanl/vendor/**', 'crates/cuemol-gfx/vendor/**', 'crates/cuemol-surface/vendor/**') }}
+      - uses: actions/cache@v6
+        with:
+          path: .cache/ui-fonts
+          key: ui-fonts-${{ runner.os }}-${{ hashFiles('scripts/bundle-ui-fonts.py') }}
       - name: Prepare wasm-bindgen
         run: uv run --no-project python scripts/prepare-web-tools.py
       - name: Build browser application

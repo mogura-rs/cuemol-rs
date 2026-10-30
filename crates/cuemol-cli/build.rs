@@ -32,6 +32,7 @@ fn mime(name: &str) -> &'static str {
         Some("json") => "application/json",
         Some("css") => "text/css; charset=utf-8",
         Some("png") => "image/png",
+        Some("ttf") => "font/ttf",
         Some("svg") => "image/svg+xml",
         Some("tza") => "application/octet-stream",
         _ => "text/plain; charset=utf-8",
@@ -88,6 +89,9 @@ fn main() {
         "pkg/cuemol_web_bg.wasm",
         "pkg/cuemol_web_loader.js",
         "pkg/cuemol_web_loader_bg.wasm",
+        "pkg/fonts/NotoSansJP-Regular.ttf",
+        "pkg/fonts/OFL.txt",
+        "pkg/fonts/SOURCE.json",
     ] {
         assert!(
             assets.contains(required),

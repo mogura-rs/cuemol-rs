@@ -72,13 +72,12 @@
 
   <!-- ribbon styles -->
   <style id="DefaultRibbon" type="renderer" axialdetail="8" desc="Default">
-    <helix type="rectangle" tuber="6.5" width="0.18"/>
+    <helix type="rectangle" tuber="6.0" width="0.2"/>
     <helixhead type="smooth"/>
     <helixtail type="smooth"/>
-    <sheet type="rectangle" tuber="6.5" width="0.18"/>
+    <sheet type="rectangle" tuber="7.0" width="0.2"/>
     <sheethead type="arrow"/>
     <sheettail type="smooth"/>
-    <coil width="0.2"/>
   </style>
 
   <style id="RoundRibbon" type="renderer" axialdetail="8" desc="Round">
@@ -105,10 +104,9 @@
   </style>
 
   <style id="DefaultNucl" type="renderer"
-    axialdetail="8" pivotatom="P" defaultcolor="$molcol"
-    base_size="0.3" base_thick="0.3">
+    axialdetail="8" pivotatom="P" defaultcolor="$molcol">
     <coloring type="SolidColoring"/>
-    <section type="roundsquare" width="0.4" tuber="2.5"/>
+    <section width="0.5" tuber="2.5"/>
   </style>
 
   <style id="DefaultLabel" type="renderer"
@@ -487,9 +485,9 @@ texture {
        scene's own style set on load, so a saved scene carries it. Values
        only (a named color cannot refer to another one). -->
 
-  <!-- The theme new molecules are painted with. Override it in a user style
-       file, or in a scene's style set, with the same tag. -->
-  <palette id="default_paint" value="okabe_ito"/>
+  <!-- Classic CueMol secondary-structure colors are the default. A named theme
+       opts into molecule-order colors; saved scenes retain their paint entries. -->
+  <palette id="default_paint" value="classic"/>
 
   <!-- Okabe-Ito (Color Universal Design), without its black -->
   <color id="okabe_ito_1" value="#E69F00"/>

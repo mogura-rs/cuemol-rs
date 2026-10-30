@@ -1063,7 +1063,7 @@ impl StyleManager {
     }
 
     /// Like [`StyleManager::style_attr`] but for an attribute on a nested child
-    /// element of the preset (e.g. `DefaultRibbon` → `<helix tuber="6.5">`).
+    /// element of the preset (e.g. `DefaultRibbon` → `<helix tuber="6.0">`).
     /// Used for the ribbon cross-section sub-elements `<helix>/<sheet>/<coil>`.
     pub fn style_child_attr(
         &self,
@@ -2169,25 +2169,25 @@ mod tests {
         let mut manager = StyleManager::new();
         manager.load_builtin_default_styles(0);
 
-        for section in ["helix", "sheet"] {
+        for (section, tuber) in [("helix", "6.0"), ("sheet", "7.0")] {
             assert_eq!(
                 manager
                     .style_child_attr(0, "DefaultRibbon", section, "tuber")
                     .as_deref(),
-                Some("6.5")
+                Some(tuber)
             );
             assert_eq!(
                 manager
                     .style_child_attr(0, "DefaultRibbon", section, "width")
                     .as_deref(),
-                Some("0.18")
+                Some("0.2")
             );
         }
         assert_eq!(
             manager
                 .style_child_attr(0, "DefaultRibbon", "coil", "width")
                 .as_deref(),
-            Some("0.2")
+            None
         );
         // Resolve across a style list (later style wins): RoundRibbon's helix is
         // elliptical with tuber=6.0.

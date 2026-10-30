@@ -33,12 +33,19 @@ A failed load keeps existing edits and redo history. Changing the active scene
 while an input is queued, downloading or being parsed prevents its late result
 from entering the new scene. Loading waits for an active image render, and
 cancelling queued inputs leaves that render running and cancellable.
-The initial representation uses a protein ribbon, a nucleic-acid cartoon, and
+The initial representation uses a protein ribbon, the nucleic-acid (`nucl`) renderer, and
 ball-and-stick geometry for other atoms. The renderer controls remain available
 for adding or changing representations, selections, coloring, and materials.
-New molecules use Tritium's ordered palette, with their named colors embedded
-in saved scenes. Renderer `$molcol` colors inherit the object's coloring scheme,
+New molecules use CueMol's secondary-structure colors: SteelBlue for sheets,
+khaki for helices, yellow for nucleic acids and FloralWhite otherwise.
+A scene style can opt into molecule-order colors with
+`<palette id="default_paint" value="okabe_ito"/>`; `classic` restores the default
+for subsequently loaded molecules. Explicit palettes retain their named color
+definitions in saved scenes. Renderer `$molcol` colors inherit the object's coloring scheme,
 including hue, saturation, brightness and alpha modifiers.
+The browser accepts Unicode text and IME composition in its text fields.
+Its UI includes a Japanese fallback font; Console input and object names use
+the same text-input path.
 Saved and direct molecular surfaces use their renderer's coloring scheme,
 including paint rules and imported atom colors.
 Spline selections retain the whole chain's interpolation coefficients, so a

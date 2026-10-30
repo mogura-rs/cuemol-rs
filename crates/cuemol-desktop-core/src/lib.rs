@@ -133,6 +133,7 @@ pub const MOLECULE_RENDERER_TYPES: &[&str] = &[
 /// molecular renderer through the GUI.
 pub fn default_molecule_renderer_style(renderer_type: &str) -> Option<&'static str> {
     match renderer_type {
+        "tracestick" => Some("DefaultTraceStick,DefaultHSCPaint"),
         "tube" | "spline" => Some("DefaultHSCPaint"),
         "ribbon" => Some("DefaultRibbon,DefaultHSCPaint"),
         "cartoon" => Some("DefaultCartoon,DefaultHSCPaint"),
@@ -140,9 +141,7 @@ pub fn default_molecule_renderer_style(renderer_type: &str) -> Option<&'static s
         "anisou" => Some("DefaultAnIsoU,DefaultCPKColoring"),
         "ballstick" => Some("DefaultBallStick,DefaultCPKColoring"),
         "cpk" => Some("DefaultCPK,DefaultCPKColoring"),
-        "simple" | "trace" | "tracestick" | "disorder" | "dsurf2" | "dsurface" => {
-            Some("DefaultCPKColoring")
-        }
+        "simple" | "trace" | "disorder" | "dsurf2" | "dsurface" => Some("DefaultCPKColoring"),
         _ => None,
     }
 }
@@ -12715,9 +12714,30 @@ impl DesktopAppState {
             .scene(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
         let styles = scene_style_manager(scene);
+        let theme = styles.get_str_data("palette", "default_paint", scene_uid.get());
+        if !scene
+            .objects()
+            .iter()
+            .any(|object| object.uid() == object_uid)
+        {
+            return Err(CueMolError::NotFound(format!(
+                "object {}",
+                object_uid.get()
+            )));
+        }
+        if theme.trim().is_empty() || theme.trim().eq_ignore_ascii_case("classic") {
+            return Ok([
+                ("sheet", "SteelBlue"),
+                ("helix", "khaki"),
+                ("nucleic", "yellow"),
+                ("*", "FloralWhite"),
+            ]
+            .into_iter()
+            .map(|(selection, color)| (selection.to_string(), color.to_string()))
+            .collect());
+        }
         let global = cuemol_molvis::default_style_manager();
         let names = global.color_names(0);
-        let theme = styles.get_str_data("palette", "default_paint", scene_uid.get());
         let colors = |theme: &str| {
             let prefix = format!("{theme}_");
             let mut values = names
@@ -12799,7 +12819,7 @@ impl DesktopAppState {
         }
         let styles = [
             ("ribbon", "protein", "rprop type=prot"),
-            ("cartoon", "nucleic", "rprop type=nucl"),
+            ("nucl", "nucleic", "rprop type=nucl"),
             (
                 "ballstick",
                 "other",
@@ -67366,6 +67386,7 @@ end_header
             ("simple", Some("DefaultCPKColoring")),
             ("spline", Some("DefaultHSCPaint")),
             ("trace", Some("DefaultCPKColoring")),
+            ("tracestick", Some("DefaultTraceStick,DefaultHSCPaint")),
         ];
 
         let mut app = DesktopAppState::new();
@@ -67771,7 +67792,7 @@ end_header
         };
         for (file, expected) in [
             ("1CRN.pdb", "ribbon"),
-            ("1ehz_rna.pdb", "cartoon"),
+            ("1ehz_rna.pdb", "nucl"),
             ("test1.sdf", "ballstick"),
         ] {
             let mut app = DesktopAppState::new();
@@ -68874,9 +68895,19 @@ end_header
     }
 
     #[test]
-    fn default_molecule_palette_cycles_and_survives_embedded_scene_reload() {
+    fn explicit_molecule_palette_cycles_and_survives_embedded_scene_reload() {
         let pdb = b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n";
         let mut app = DesktopAppState::new();
+        let scene_uid = app.new_scene("palette", false).result_scene;
+        let index = app.create_scene_style(scene_uid, "palette").unwrap();
+        app.update_scene_style(
+            scene_uid,
+            index,
+            "palette",
+            false,
+            r#"<styles id="palette"><palette id="default_paint" value="okabe_ito"/></styles>"#,
+        )
+        .unwrap();
         app.open_bytes("first.pdb", pdb).unwrap();
         app.open_bytes("second.pdb", pdb).unwrap();
         let scene = app
@@ -68900,6 +68931,90 @@ end_header
         let mut restored = DesktopAppState::new();
         restored.open_bytes("colors.qsc", &bytes).unwrap();
         assert_eq!(colors(&restored), before);
+    }
+
+    #[test]
+    fn default_molecule_paint_matches_cuemol_and_survives_scene_reload() {
+        let pdb = b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n";
+        let mut app = DesktopAppState::new();
+        app.open_bytes("first.pdb", pdb).unwrap();
+        app.open_bytes("second.pdb", pdb).unwrap();
+        let check = |app: &DesktopAppState| {
+            let scene = app
+                .scene_manager()
+                .scene(app.active_scene().unwrap())
+                .unwrap();
+            for object in scene.objects() {
+                assert_eq!(
+                    object.paint_coloring(),
+                    [
+                        ("sheet".into(), "SteelBlue".into()),
+                        ("helix".into(), "khaki".into()),
+                        ("nucleic".into(), "yellow".into()),
+                        ("*".into(), "FloralWhite".into()),
+                    ]
+                );
+            }
+            let snapshot = app.active_render_snapshot("").unwrap();
+            assert_eq!(snapshot.atoms.len(), 2);
+            for atom in snapshot.atoms {
+                assert_eq!(
+                    atom.color.and_then(|color| color.rgba8()),
+                    Some(cuemol_gfx::Rgba8 {
+                        r: 255,
+                        g: 250,
+                        b: 240,
+                        a: 255
+                    })
+                );
+            }
+        };
+        check(&app);
+        let bytes = app.active_scene_bytes().unwrap();
+        let mut restored = DesktopAppState::new();
+        restored.open_bytes("colors.qsc", &bytes).unwrap();
+        check(&restored);
+    }
+
+    #[test]
+    fn new_tracestick_uses_cuemol_style_dimensions_and_molecule_color() {
+        let pdb = b"ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C\nATOM      2  CA  ALA A   2       3.800   0.000   0.000  1.00 10.00           N\nATOM      3  CA  ALA A   3       7.600   0.000   0.000  1.00 10.00           C\nEND\n";
+        let mut app = DesktopAppState::new();
+        app.open_bytes("trace.pdb", pdb).unwrap();
+        let scene_uid = app.active_scene().unwrap();
+        let object_uid = app.scene_manager().scene(scene_uid).unwrap().objects()[0].uid();
+        let object = app.scene_manager_mut().object_mut(object_uid).unwrap();
+        for renderer in object
+            .renderers()
+            .iter()
+            .map(MolRenderer::uid)
+            .collect::<Vec<_>>()
+        {
+            object.destroy_renderer(renderer);
+        }
+        app.new_renderer(scene_uid, object_uid, "tracestick", "trace")
+            .unwrap();
+        let snapshot = app.active_render_snapshot("").unwrap();
+        assert_eq!(snapshot.atoms.len(), 3);
+        assert_eq!(snapshot.bonds.len(), 2);
+        assert!(snapshot
+            .atoms
+            .iter()
+            .all(|atom| (atom.radius - 0.25).abs() < 1.0e-6));
+        assert!(snapshot
+            .bonds
+            .iter()
+            .all(|bond| (bond.radius - 0.25).abs() < 1.0e-6));
+        assert!(snapshot.atoms.iter().all(|atom| atom
+            .color
+            .as_ref()
+            .and_then(cuemol_gfx::ColorSpec::rgba8)
+            == Some(cuemol_gfx::Rgba8 {
+                r: 255,
+                g: 250,
+                b: 240,
+                a: 255
+            })));
     }
 
     #[test]
@@ -70305,13 +70420,10 @@ attribute \"dep\" string \"positions\"
         assert_eq!(
             object.paint_coloring(),
             [
-                ("sheet".to_string(), "okabe_ito_1".to_string()),
-                ("helix".to_string(), "okabe_ito_1".to_string()),
-                ("nucleic".to_string(), "okabe_ito_1{mod_h:15}".to_string()),
-                (
-                    "*".to_string(),
-                    "okabe_ito_1{mod_s:-0.6;mod_b:0.1}".to_string()
-                ),
+                ("sheet".to_string(), "SteelBlue".to_string()),
+                ("helix".to_string(), "khaki".to_string()),
+                ("nucleic".to_string(), "yellow".to_string()),
+                ("*".to_string(), "FloralWhite".to_string()),
             ]
         );
         let atoms = object

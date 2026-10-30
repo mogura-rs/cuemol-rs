@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>cuemol-rs</title><link rel="icon" type="image/png" href="./pkg/logo.png">
-<style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#080d17;color:#e7edf7;font:16px system-ui}canvas{width:100%;height:100%;display:block}#loading{position:fixed;inset:0;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:1rem;white-space:pre-wrap;padding:2rem}input{display:none}</style></head>
+<style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#080d17;color:#e7edf7;font:16px system-ui}canvas{width:100%;height:100%;display:block}#loading{position:fixed;inset:0;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:1rem;white-space:pre-wrap;padding:2rem}#files{display:none}</style></head>
 <body><canvas id="viewport" aria-label="cuemol-rs molecular viewer"></canvas><div id="loading"><img src="./pkg/logo.png" width="128" height="128" alt=""><span>Loading cuemol-rs…</span></div><input id="files" type="file" multiple>
 <script type="module">
 import init, {start, open_file, command, status, agent_turn, agent_cancel, view_input} from './pkg/cuemol_web.js';
@@ -11,10 +11,14 @@ import {initLoader} from './loader.js';
 const loading=document.getElementById('loading');
 performance.mark('cuemol-startup');
 try {
-  await Promise.all([
+  const [,,, uiFont] = await Promise.all([
     init().then(()=>performance.mark('cuemol-runtime-ready')),
     initLoader(),
     initKernels().then(()=>performance.mark('cuemol-kernels-ready')),
+    fetch('./pkg/fonts/NotoSansJP-Regular.ttf').then(async response => {
+      if(!response.ok) throw new Error(`Could not load UI font: HTTP ${response.status}`);
+      return new Uint8Array(await response.arrayBuffer());
+    }),
   ]);
   loading.querySelector('span').textContent='Starting graphics…';
   document.addEventListener('dragover',e=>{e.preventDefault();e.stopImmediatePropagation();},true);
@@ -26,7 +30,7 @@ try {
     catch(error) { console.warn('WebGPU is unavailable; using WebGL2.',error); }
   }
   performance.mark('cuemol-adapter-ready');
-  await start(document.getElementById('viewport'),!webgpu); loading.remove();
+  await start(document.getElementById('viewport'),!webgpu,uiFont); loading.remove();
   performance.mark('cuemol-graphics-ready');
   window.cuemol={backend:webgpu?'webgpu':'webgl',command:(name,args={})=>command(name,JSON.stringify(args)),status:()=>JSON.parse(status()),agent:{start:(prompt,settings,apiKey)=>agent_turn(prompt,JSON.stringify(settings),apiKey),cancel:()=>agent_cancel()}};
   installViewInput(document.getElementById('viewport'), view_input, () => window.cuemol.status());

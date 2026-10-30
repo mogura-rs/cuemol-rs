@@ -5,6 +5,38 @@ results are historical. Generated inputs and logs stay in the ignored checkout
 cache. The current repairs and their limits appear in the completion audit;
 passing tests do not establish equivalence for every parameter combination.
 
+## Browser text input and default appearance
+
+The post-v0.1.6 browser repair follows the reported input and appearance defects.
+The page's `input { display:none }` rule also hid eframe's text-input element,
+preventing focus and Unicode/IME events. It now hides only the file chooser.
+After that repair, actual screenshots exposed missing Japanese UI glyphs.
+The browser now loads Noto Sans JP as a fallback for proportional and monospace
+UI text. The build pins the upstream revision and checksums, instantiates regular
+weight with a pinned fontTools version, and packages the font, SIL OFL license
+and source record together. Generated fonts and downloads stay ignored.
+
+The appearance baseline is the distributed CueMol 2.4.1 configuration. The
+reference source checkout had newer Tritium defaults, which differed from that
+application. Newly loaded molecules now use SteelBlue sheets, khaki helices,
+yellow nucleic acids and FloralWhite coils/other atoms. Explicit molecule-order
+palettes and saved paint entries remain supported. `tracestick` now receives
+`DefaultTraceStick,DefaultHSCPaint`, and nucleic acids initially use `nucl`.
+`DefaultRibbon` uses helix/sheet aspect ratios 6/7 with width 0.2 and coil width
+0.35; `DefaultNucl` uses an elliptical section of width 0.5 and base size/thickness
+0.5. These values were also read from the distributed C++ runtime after applying
+the same styles.
+These match the distributed style sheet, rather than the later source changes.
+
+Local source validation passed 492 affected shared tests and 171 native GUI tests
+with one explicit POV-Ray exclusion. Chrome passed seven focused browser cases,
+including real Unicode input events, IME preedit replacement, Console execution,
+Undo, visible Japanese glyphs, and default colors/styles on WebGL and WebGPU.
+Firefox and WebKit each passed the five applicable text, glyph, Inspector and
+WebGL-appearance cases. The Japanese glyph comparison failed before the font
+repair. Regular-font builds on macOS and Linux produced identical SHA-256 hashes,
+and staging verified all 36 browser assets with their licenses and provenance.
+
 ## Public release and installation
 
 ### Current release: v0.1.6
@@ -871,12 +903,13 @@ QIF default is six; the named ribbon styles and cartoon use eight.
 The color cascade follows the renderer's scheme and resolves `$molcol` through
 the object's scheme for every element. Named colors use the scene's definition
 before the global one, including hue, saturation, brightness and alpha modifiers.
-The default load palette follows Tritium's molecule order and persists its color
-definitions in embedded scenes. Tests cover noncarbon pivots, paint fallbacks,
-two distinct molecule colors and an embedded save/reload. Older synthetic coloring
+At this checkpoint the default load palette followed the newer Tritium source's
+molecule order and persisted its color definitions in embedded scenes. Tests
+covered noncarbon pivots, paint fallbacks, two distinct molecule colors and an
+embedded save/reload. The later browser-input repair above restores the distributed
+CueMol colors by default while retaining explicit palettes. Older synthetic coloring
 fixtures omitted the explicit `$molcol` styles required by the C++ implementation;
-those inputs now include the styles. The old load-palette expectation was also
-updated from the legacy SteelBlue/khaki colors to the current Tritium palette.
+those inputs now include the styles.
 
 A native Linux window in a private virtual display was inspected and controlled
 with real input events. Wheel zoom, Shift-wheel slab thickness, trackball rotation,
@@ -2171,3 +2204,6 @@ during this work are collected here; the read-only reference itself was not edit
 | Label documentation described only bundled fonts. | Native labels resolve installed families, and browser labels use the reference OffscreenCanvas path. |
 | Native key-storage instructions omitted the Linux session service. | Saved Linux keys require Secret Service; environment and session-only keys work without it. |
 | The release-cache description did not distinguish cache scopes. | Tags can reuse default-branch caches, but cannot read another tag's cache. A manual default-branch build prepares reusable caches. |
+| Usage and an earlier validation entry described molecule-order colors as the CueMol default. | Distributed CueMol secondary-structure colors are the default; the newer source palette remains an explicit scene-style option. |
+| Usage described the initial nucleic representation as cartoon. | It now uses the reference `nucl` renderer, including its base representation. |
+| DefaultRibbon comments and checks used the newer source's section dimensions. | The bundled default styles now match the distributed CueMol 2.4.1 dimensions; explicit renderer properties still override styles. |
