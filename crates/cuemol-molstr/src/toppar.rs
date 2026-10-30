@@ -2281,6 +2281,7 @@ pub fn build_topology_bonds_with_db_options(mol: &mut MolCoord, db: &TopoDB, aut
                 std::sync::Arc::new(bonds.into_iter().collect()),
             );
         }
+        // The reference checks noautogen only while creating a missing template.
         let generated_bonds = (!has_topology && auto_generate)
             .then(|| generated.get(&summary.res_name))
             .flatten();
@@ -2579,7 +2580,7 @@ mod tests {
     }
 
     #[test]
-    fn topology_application_honors_noautogen_for_unknown_residues() {
+    fn noautogen_blocks_creation_but_reuses_existing_topology() {
         let mut molecule = MolCoord::new();
         for (serial, name, x) in [(1, "C1", 0.0), (2, "C2", 1.4)] {
             let mut atom = sg_atom(serial, 1, x);
@@ -2593,6 +2594,18 @@ mod tests {
             .unwrap();
         molecule.apply_topology_with_db(&TopoDB::new());
         assert_eq!(molecule.bond_count(), 0);
+        molecule
+            .set_residue_prop_str("A", "1", "noautogen", "false")
+            .unwrap();
+        molecule.apply_topology_with_db(&TopoDB::new());
+        assert_eq!(molecule.bond_count(), 1);
+        molecule
+            .set_residue_prop_str("A", "1", "noautogen", "true")
+            .unwrap();
+        molecule.atoms_mut()[1].position.x = 10.;
+        let mut transferred = molecule.transfer_data().into_molecule().unwrap();
+        transferred.apply_topology_with_db(&TopoDB::new());
+        assert_eq!(transferred.bond_count(), 1);
     }
 
     #[test]

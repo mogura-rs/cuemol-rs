@@ -159,7 +159,15 @@ both WASM modules rebuilt. The browser run passed 139 cases and exposed one
 invalid spline fixture: its CA-only PDB has no polymer links, and both the
 published reference and Rust export an empty image for that input. The fixture
 now includes the linking N/C atoms; its full-chain and partial-selection pixel
-assertions passed unchanged. Public review and delivery checks are in progress.
+assertions passed unchanged. The Linux window check also passed rotation, zoom,
+slab, centering, label fonts, console input, clipboard routing and undo.
+
+The public Claude Code review raised one concern about `noautogen` and cached
+templates. The reference's `TopoBuilder::applyTopology` checks that flag only
+when the named template is missing; applying an existing template is intentional.
+A regression now checks initial suppression, later generation and reuse after
+setting the flag, changing coordinates and transferring the molecule. It passed
+without changing runtime behavior. CI and delivery checks are in progress.
 
 ## Shell control inventory
 
