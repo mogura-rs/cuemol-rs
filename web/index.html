@@ -6,7 +6,7 @@
 import init, {start, open_file, command, status, agent_turn, agent_cancel, view_input} from './pkg/cuemol_web.js';
 import {initKernels} from './kernels.js';
 import './oidn.js';
-import {installViewInput} from './input.js';
+import {installViewInput, installShellInput} from './input.js';
 import {initLoader} from './loader.js';
 const loading=document.getElementById('loading');
 performance.mark('cuemol-startup');
@@ -30,6 +30,7 @@ try {
     catch(error) { console.warn('WebGPU is unavailable; using WebGL2.',error); }
   }
   performance.mark('cuemol-adapter-ready');
+  installShellInput(view_input, () => window.cuemol?.status(), () => document.getElementById('files').click());
   await start(document.getElementById('viewport'),!webgpu,uiFont); loading.remove();
   performance.mark('cuemol-graphics-ready');
   window.cuemol={backend:webgpu?'webgpu':'webgl',command:(name,args={})=>command(name,JSON.stringify(args)),status:()=>JSON.parse(status()),agent:{start:(prompt,settings,apiKey)=>agent_turn(prompt,JSON.stringify(settings),apiKey),cancel:()=>agent_cancel()}};

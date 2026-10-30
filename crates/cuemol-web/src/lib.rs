@@ -245,6 +245,7 @@ struct App {
     last_log: String,
     last_scene: Option<(String, Arc<Vec<u8>>)>,
     show_get_pdb: bool,
+    pending_close: Option<Uid>,
     ui_rects: std::collections::BTreeMap<String, [f32; 4]>,
     revision: u64,
     state: DesktopAppState,
@@ -448,6 +449,7 @@ impl App {
             fps: 24.0,
             next_frame: 0.0,
             show_console: false,
+            pending_close: None,
             show_help: false,
             dark,
             show_settings: false,
@@ -630,6 +632,11 @@ impl App {
                         name: name.trim_end_matches(".qax").to_string(),
                         source,
                     })
+                }
+                Event::Input(event) if event["kind"] == "shortcut" => {
+                    if let Some(action) = event["action"].as_str() {
+                        self.shell_shortcut(action);
+                    }
                 }
                 Event::Input(event) => self.input_events.push_back(event),
                 Event::AgentCancel => self.agent.cancel("Cancelled; completed edits are kept."),
@@ -1195,7 +1202,7 @@ impl App {
                     .map(|hit| (position, hit));
             }
         }
-        if ui.ctx().wants_keyboard_input() {
+        if ui.ctx().wants_keyboard_input() || !ui.input(|input| input.modifiers.is_none()) {
             return;
         }
         if ui.input(|i| i.key_pressed(egui::Key::Home)) {
@@ -1291,6 +1298,6 @@ impl eframe::App for App {
                 [rect.min.x, rect.min.y, rect.width(), rect.height()]
             })
             .collect();
-        STATUS.with(|status|*status.borrow_mut()=json!({"scene":state,"geometryRevision":self.renderer.revision(),"selection":self.selection,"view":cuemol_command::view_json(&self.camera),"message":self.message,"frame":self.trajectory_info().map_or(self.frame,|(_,_,frame)|frame),"busy":self.busy,"loading":self.source_active,"lastCommand":self.last_command,"agent":self.agent.status(),"ui":{"overlays":overlays,"rects":self.ui_rects,"activity":self.activity.map(cuemol_ui::shell::Activity::key),"bottom":self.bottom_tab,"inspector":self.inspector.rects,"navigation":{"tool":self.navigation.tool.label(),"picks":self.navigation.picks.len(),"hover":self.hover_hit.map(|hit|json!({"object":hit.object.get(),"index":hit.index})),"measurementLabels":self.state.active_atom_intr_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).into_iter().map(|label|label.text).collect::<Vec<_>>(),"labels":self.state.active_name_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).len()}}}).to_string());
+        STATUS.with(|status|*status.borrow_mut()=json!({"scene":state,"geometryRevision":self.renderer.revision(),"selection":self.selection,"view":cuemol_command::view_json(&self.camera),"message":self.message,"frame":self.trajectory_info().map_or(self.frame,|(_,_,frame)|frame),"busy":self.busy,"loading":self.source_active,"lastCommand":self.last_command,"agent":self.agent.status(),"ui":{"keyboardInput":ctx.wants_keyboard_input(),"modal":self.pending_close.is_some(),"overlays":overlays,"rects":self.ui_rects,"activity":self.activity.map(cuemol_ui::shell::Activity::key),"bottom":self.bottom_tab,"inspector":self.inspector.rects,"navigation":{"tool":self.navigation.tool.label(),"picks":self.navigation.picks.len(),"hover":self.hover_hit.map(|hit|json!({"object":hit.object.get(),"index":hit.index})),"measurementLabels":self.state.active_atom_intr_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).into_iter().map(|label|label.text).collect::<Vec<_>>(),"labels":self.state.active_name_labels(cuemol_desktop_core::offscreen::camera_mvp(&self.camera,1.),100.,100.,1000).len()}}}).to_string());
     }
 }

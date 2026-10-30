@@ -89,6 +89,8 @@ async function openShell(page, storage = {}, options = {}) {
         if (args.operation === 'save_history') return {ok:true};
       }
       if (command === 'execute_script') return structuredClone(snapshot);
+      if (options.shortcuts && ['undo', 'redo', 'close_active_scene'].includes(command)) return structuredClone(snapshot);
+      if (options.shortcuts && command === 'molecule_selection_action') return {snapshot:structuredClone(snapshot),viewport};
       if (command === 'console_start' || command === 'console_stop' || command === 'console_poll') {
         if (command === 'console_stop') window.__actionsRunning = false;
         return {snapshot: structuredClone(snapshot), running: window.__actionsRunning || command !== 'console_stop' && Boolean(options.consoleRunning)};
@@ -115,6 +117,34 @@ async function openShell(page, storage = {}, options = {}) {
   await expect(page.locator('#error-alert-dialog')).not.toBeVisible();
   return errors;
 }
+
+test('Tauri shortcuts distinguish redo, close, text editing and modified viewport letters', async ({page}) => {
+  const errors = await openShell(page, {}, {shortcuts: true});
+  await page.locator('#viewport').focus();
+  await page.keyboard.press('Control+Shift+z');
+  await expect.poll(() => page.evaluate(() => window.__shellCalls.filter(call => call.command === 'redo').length)).toBe(1);
+  await page.keyboard.press('Control+w');
+  await expect.poll(() => page.evaluate(() => window.__shellCalls.filter(call => call.command === 'close_active_scene').length)).toBe(1);
+  const cameraCalls = await page.evaluate(() => window.__shellCalls.filter(call => call.command === 'camera_command').length);
+  await page.keyboard.press('Control+f');
+  await page.keyboard.press('Control+p');
+  await page.keyboard.press('Alt+f');
+  expect(await page.evaluate(() => window.__shellCalls.filter(call => call.command === 'camera_command').length)).toBe(cameraCalls);
+  await page.keyboard.press('c');
+  await expect.poll(() => page.evaluate(() => window.__shellCalls.filter(call => call.command === 'molecule_selection_action').map(call => call.args.mode))).toEqual(['center-view']);
+  await page.keyboard.press('f');
+  await expect.poll(() => page.evaluate(() => window.__shellCalls.filter(call => call.command === 'molecule_selection_action').map(call => call.args.mode))).toEqual(['center-view','fit-view']);
+  await page.keyboard.press('Control+Shift+p');
+  await expect(page.getByRole('button', {name:'Rect select', exact:true})).toBeHidden();
+  await page.getByRole('button', {name:'Show tool palette', exact:true}).click();
+  await expect(page.getByRole('button', {name:'Rect select', exact:true})).toBeVisible();
+  await page.locator('#output-command').focus();
+  await page.keyboard.press('Control+Shift+z');
+  await page.evaluate(() => window.dispatchEvent(new KeyboardEvent('keydown', {key:'w',ctrlKey:true,isComposing:true,bubbles:true})));
+  expect(await page.evaluate(() => window.__shellCalls.filter(call => call.command === 'redo').length)).toBe(1);
+  expect(await page.evaluate(() => window.__shellCalls.filter(call => call.command === 'close_active_scene').length)).toBe(1);
+  expect(errors).toEqual([]);
+});
 
 test('Tauri empty scenes render their center axes and settle after camera motion', async ({page}) => {
   const errors = await openShell(page, {}, {empty: true, centerMark: 'axis'});

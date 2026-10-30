@@ -108,16 +108,29 @@ impl GuiApplication {
                         self.open_native_render();
                     }
                     ui.separator();
-                    ui.add_enabled_ui(!self.undo_stack.is_empty(), |ui| {
-                        if shell::toolbar_button(ui, Icon::Undo, "Undo", compact).clicked() {
-                            self.undo(camera);
+                    for (label, icon, undo) in
+                        [("Undo", Icon::Undo, true), ("Redo", Icon::Redo, false)]
+                    {
+                        let stack = if undo {
+                            &self.undo_stack
+                        } else {
+                            &self.redo_stack
+                        };
+                        let descriptions: Vec<_> = stack
+                            .iter()
+                            .rev()
+                            .map(|entry| entry.record.label())
+                            .collect();
+                        let (steps, _) =
+                            shell::toolbar_history(ui, icon, label, compact, &descriptions);
+                        for _ in 0..steps.unwrap_or(0) {
+                            if undo {
+                                self.undo(camera);
+                            } else {
+                                self.redo(camera);
+                            }
                         }
-                    });
-                    ui.add_enabled_ui(!self.redo_stack.is_empty(), |ui| {
-                        if shell::toolbar_button(ui, Icon::Redo, "Redo", compact).clicked() {
-                            self.redo(camera);
-                        }
-                    });
+                    }
                 });
             });
     }

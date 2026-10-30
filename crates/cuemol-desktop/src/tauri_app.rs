@@ -4519,6 +4519,21 @@ impl AppModel {
         width: u32,
         height: u32,
     ) -> Result<(), String> {
+        if matches!(mode, "center-view" | "fit-view") {
+            cuemol_command::call_tool(
+                &mut self.desktop,
+                &mut self.camera,
+                "center_view",
+                &serde_json::json!({"objId":object_uid,"selection":selection,"zoom":mode == "fit-view"}),
+            ).map_err(|error| error.to_string())?;
+            self.status = if mode == "fit-view" {
+                "Selection fitted"
+            } else {
+                "Selection centered"
+            }
+            .into();
+            return Ok(());
+        }
         if !matches!(mode, "select" | "center" | "zoom") {
             return Err(format!("unsupported MolStruct action: {mode}"));
         }
@@ -11165,9 +11180,9 @@ fn handle_model_request(
             width,
             height,
         } => {
-            let undo = model.capture_undo();
+            let undo = (!matches!(mode.as_str(), "center-view" | "fit-view")).then(|| model.capture_undo());
             model.apply_molecule_selection_action(object_uid, &selection, &mode, width, height)?;
-            model.push_undo(undo);
+            if let Some(undo) = undo { model.push_undo(undo); }
             let viewport = model.render(width, height);
             Ok(ModelResponse::MolStructUpdate(Box::new(
                 MolStructUpdateDto {
@@ -22623,6 +22638,24 @@ mod tests {
             .unwrap();
         assert!((model.camera.center().x - 5.0).abs() < 1.0e-6);
         assert!((model.camera.zoom() - 7.0).abs() < 1.0e-6);
+        model
+            .apply_molecule_selection_action(object_uid.get(), "'A'.1.*", "center-view", 800, 400)
+            .unwrap();
+        assert!((model.camera.center().x).abs() < 1.0e-6);
+        assert!((model.camera.zoom() - 7.0).abs() < 1.0e-6);
+        assert_eq!(
+            model.desktop.molecule_selection_text(object_uid).unwrap(),
+            selection
+        );
+        assert_eq!(model.selection, selection);
+        model
+            .apply_molecule_selection_action(object_uid.get(), selection, "fit-view", 800, 400)
+            .unwrap();
+        assert!((model.camera.center().x - 5.0).abs() < 1.0e-6);
+        assert_eq!(
+            model.desktop.molecule_selection_text(object_uid).unwrap(),
+            selection
+        );
         assert!(
             model
                 .apply_molecule_selection_action(

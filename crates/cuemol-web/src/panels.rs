@@ -435,7 +435,9 @@ impl App {
                                 }
                             });
                     });
-                if ui.button("Run").clicked() {
+                let run = ui.button("Run");
+                self.record_ui_rect("Command Run", &run);
+                if run.clicked() {
                     let mut args = serde_json::Map::new();
                     let mut error = None;
                     for (key, spec) in props {

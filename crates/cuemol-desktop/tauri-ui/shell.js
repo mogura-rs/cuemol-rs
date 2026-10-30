@@ -3,6 +3,7 @@
 let cueMolActivity = "explorer";
 let cueMolInspectorTarget = "";
 let cueMolInspectorClosed = false;
+let cueMolPaletteCollapsed = false;
 const CUE_MOL_SHELL_KEY = "cuemol3.shell.v1";
 const cueMolIcons = {
   explorer: '<path d="M3 6h7l2 3h9v11H3z"/><path d="M3 6V3h7l2 3h8v3"/>',
@@ -38,10 +39,22 @@ function saveCueMolShell() {
       activity: cueMolActivity,
       theme: document.documentElement.dataset.theme,
       inspectorWidth: contentHolder.style.getPropertyValue("--inspector-width"),
+      paletteCollapsed: cueMolPaletteCollapsed,
     }));
   } catch {
     // Storage can be unavailable in restricted webviews.
   }
+}
+
+function setCueMolPaletteCollapsed(collapsed, save = true) {
+  cueMolPaletteCollapsed = Boolean(collapsed);
+  document.querySelector('.viewport-palette').classList.toggle('collapsed', cueMolPaletteCollapsed);
+  const cap = document.querySelector('.viewport-palette [data-toggle-palette]');
+  cap.textContent = cueMolPaletteCollapsed ? '›' : '⌄';
+  cap.setAttribute('aria-label', cueMolPaletteCollapsed ? 'Show tool palette' : 'Hide tool palette');
+  cap.setAttribute('aria-expanded', String(!cueMolPaletteCollapsed));
+  document.querySelector('.menu [data-toggle-palette]').classList.toggle('checked', !cueMolPaletteCollapsed);
+  if (save) saveCueMolShell();
 }
 
 function selectCueMolActivity(name, toggle = true) {
@@ -150,6 +163,14 @@ function setupTritiumShell() {
   try { stored = JSON.parse(localStorage.getItem(CUE_MOL_SHELL_KEY) || "{}"); } catch { /* Use defaults. */ }
   if (!stored || typeof stored !== "object" || Array.isArray(stored)) stored = {};
   document.documentElement.dataset.theme = stored.theme === "light" ? "light" : "dark";
+  setCueMolPaletteCollapsed(stored.paletteCollapsed === true, false);
+  for (const item of document.querySelectorAll('[data-toggle-palette]')) {
+    item.addEventListener('click', event => {
+      event.stopPropagation();
+      setCueMolPaletteCollapsed(!cueMolPaletteCollapsed);
+      item.closest('details')?.removeAttribute('open');
+    });
+  }
   if (Number.isFinite(parseFloat(stored.inspectorWidth))) setCueMolInspectorWidth(parseFloat(stored.inspectorWidth));
   for (const item of document.querySelectorAll("[data-icon]")) item.innerHTML = cueMolIcon(item.dataset.icon);
   const iconActions = { "new-scene": "new", open: "open", save: "save", "open-scene": "open", undo: "undo", redo: "redo" };

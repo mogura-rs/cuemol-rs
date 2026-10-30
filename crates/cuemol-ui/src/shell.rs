@@ -319,6 +319,47 @@ pub fn toolbar_button(ui: &mut Ui, icon: Icon, label: &str, collapsed: bool) -> 
     response
 }
 
+pub fn toolbar_history(
+    ui: &mut Ui,
+    icon: Icon,
+    label: &str,
+    collapsed: bool,
+    descriptions: &[String],
+) -> (Option<usize>, Vec<(String, Rect)>) {
+    let mut steps = None;
+    let mut rects = Vec::new();
+    ui.push_id(label, |ui| {
+        ui.add_enabled_ui(!descriptions.is_empty(), |ui| {
+            ui.spacing_mut().item_spacing.x = 1.;
+            let button = toolbar_button(ui, icon, label, collapsed);
+            rects.push((label.to_string(), button.rect));
+            if button.clicked() {
+                steps = Some(1);
+            }
+            let menu = ui.menu_button(
+                egui::RichText::new(egui_phosphor::regular::CARET_DOWN).size(12.),
+                |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(280.)
+                        .show(ui, |ui| {
+                            for (index, description) in descriptions.iter().enumerate() {
+                                let entry = ui.button(description);
+                                rects.push((format!("{label} step {}", index + 1), entry.rect));
+                                if entry.clicked() {
+                                    steps = Some(index + 1);
+                                    ui.close();
+                                }
+                            }
+                        });
+                },
+            );
+            rects.push((format!("{label} history"), menu.response.rect));
+            menu.response.on_hover_text(format!("{label} history"));
+        });
+    });
+    (steps, rects)
+}
+
 pub fn configure_fonts(fonts: &mut egui::FontDefinitions) {
     egui_phosphor::add_to_fonts(fonts, egui_phosphor::Variant::Regular);
 }

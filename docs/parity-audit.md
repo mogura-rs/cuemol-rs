@@ -2,8 +2,9 @@
 
 This audit compares the published CueMol 2.4.1.547 application and its
 `v2.4.1.547` source tag (`ef06137084421a1d0296d55a46b8b1463f6723f2`) with
-cuemol-rs application revision `f4ed01c` (v0.1.8). The later `d21afd1` revision
-only adds validation documentation. The upstream checkout is read-only.
+the cuemol-rs baseline revision `f4ed01c` (v0.1.8). The later `d21afd1` revision
+only adds validation documentation. Repairs and their subsequent checks are
+recorded below. The upstream checkout is read-only.
 
 The checklist below distinguishes a confirmed difference from an unmeasured
 area. Earlier evidence in [validation.md](validation.md) remains useful for its
@@ -28,11 +29,11 @@ speedup from a single optimized stage or compare timings from different hosts.
 
 | Feature family | Required comparison | Current audit status |
 | --- | --- | --- |
-| Shell | Activities, menus, toolbar, tab order, docks, compact windows, themes and keyboard access | Built-in activities and toolbar compared with the published source; browser menu entries and application shortcuts have confirmed gaps; full control inventory in progress |
+| Shell | Activities, menus, toolbar, tab order, docks, compact windows, themes and keyboard access | Application shortcuts, browser tab closing and menu access, shared history dropdowns and Tauri palette folding repaired and checked; clipboard routing, browser recent files and remaining pane controls are still under comparison |
 | Explorer and Inspector | Object/renderer/group hierarchy, selection, visibility, locking, drag/drop, context menus and property editors | Previous focused checks exist; dialog comparison pending |
 | Color and styles | Coloring modes, paint entries, palettes, property inheritance, style creation/apply/edit/save | Previous focused checks exist; complete editor comparison pending |
 | Console | CueMol/PyMOL dialects, command arguments, completion, history, multiline input, IME and transaction behavior | Shared CueMol/PyMOL interpreters, completion, native QAX logging/replay and cancellable execution implemented; focused shared, browser and OS-input checks passed; affected regression checks, CI and Pages passed at `99b7c16`; public review repairs and release delivery are in progress |
-| Actions | History rows, operation inspection, QAX export, bundled/user macros and reusable actions | History selection, operation inspection, QAX export and bundled/user macro libraries are implemented in native, WASM and Tauri; CI, Pages and the macOS window check passed at `488ce9c`; public review repairs are being validated |
+| Actions | History rows, operation inspection, QAX export, bundled/user macros and reusable actions | History selection, operation inspection, QAX export and bundled/user macro libraries are implemented in native, WASM and Tauri; CI, Pages and the macOS window check passed at `488ce9c`; review repairs passed affected checks and were published at `53100c5` |
 | Scripts and services | JavaScript/Python helpers, retained state, callbacks, errors, file arguments and asynchronous readers | Previous compatibility checks exist; shared workload comparison pending |
 | File and scene I/O | Reader options, saved cameras, source metadata, selections, linked/embedded data and cancellation | Previous compatibility checks exist; paired performance comparison pending |
 | Navigation and cameras | Rotation, pan, zoom, fitting, clipping, bookmarks, visibility and screen coordinates | Previous numeric and interaction oracles exist; integrated comparison pending |
@@ -62,17 +63,35 @@ This is a source comparison; screen checks are recorded separately.
 | Reference control | Observed application coverage | Remaining difference |
 | --- | --- | --- |
 | Explorer, View, Selection, Crystal, Actions | All five built-in activities are present | Individual pane controls still require comparison |
-| New Tab, Open File, Save As, Open Scene, Reload Scene, Save Scene, Render, Undo, Redo | Toolbar buttons are present | Native egui and WASM lack the reference's Undo/Redo split-button history menu; the Actions pane provides history navigation |
-| Save current view, Close Tab, scene save variants | Native egui and Tauri have menu entries | WASM lacks several direct entries and a tab close button |
+| New Tab, Open File, Save As, Open Scene, Reload Scene, Save Scene, Render, Undo, Redo | Toolbar buttons and history dropdowns are present in all three frontends | Native/WASM dropdowns now support jumping several steps; broader history limits still need comparison |
+| Save current view, Close Tab, scene save variants | Menu access is present in all three frontends; WASM tabs now have close buttons and a save/discard/cancel dialog | Browser downloads cannot confirm that a user saved the file to disk; unmodified-scene tracking still differs |
 | Cut, Copy, Paste, Select All | Text widgets and some tree context menus already support clipboard operations | Application Edit menus do not provide the reference's focus-aware routing |
-| Molecular editing and analysis dialogs | Native egui and Tauri have named menu entries; WASM exposes the command forms | WASM lacks the corresponding named Edit/Tools entries and specialized dialogs |
-| Scene background/proofing/properties and view projection/center marker/properties | Shared commands and property controls exist | WASM menu coverage is incomplete |
-| Command/Ctrl shortcuts | Native egui and Tauri implement the main file shortcuts | WASM lacks the main application shortcuts; native/Tauri miss Close Tab and macOS Shift-Command-Z, and native lacks Save Scene As |
-| Plain viewport letter shortcuts | All frontends implement viewport commands | WASM C/F and Tauri F/P do not yet exclude command modifiers |
+| Molecular editing and analysis dialogs | All frontends have named menu entries; WASM opens the corresponding shared command form | Specialized form layout still needs comparison |
+| Scene background/proofing/properties and view projection/center marker/properties | Shared commands, property controls and browser menu entries exist | Integrated screen comparison remains |
+| Command/Ctrl shortcuts | Main file operations, Close Tab, alternate Redo, Save Scene As and palette folding are wired | Browsers reserve New/Close Tab keys, so Ctrl/Cmd+Alt+T/W is also supported |
+| Plain viewport letter shortcuts | Viewport commands exclude command modifiers and text editing | Remaining navigation modes still need comparison, especially the Tauri palette |
 
-These confirmed differences remain open implementation work. The native menus
-also retain older UXP-specific entries that the published Tritium menu removed;
-their presence does not demonstrate that the current Tritium controls match.
+The browser checks exercise actual WASM: undo/redo shortcuts, modifier isolation,
+centering, palette folding, IME, tab close cancellation, saved QSC downloads,
+undo after closing, the molecular edit form and two-step history navigation.
+The four shell cases and four text-input cases passed. All sixteen Tauri shell
+cases passed with mocked IPC. The five shared UI tests and 177 native GUI tests
+passed, with one native test ignored. A Linux window driven through OS input
+also passed the existing rotation, zoom, slab, centering, font, Python helper and
+console checks, plus Shift-Ctrl-Z redo and persisted palette folding. A captured
+history menu exposed a missing caret glyph; using the existing icon font fixed
+it, and the affected browser case passed again.
+
+The Crystal pane also referenced a nonexistent command for symmetry mates.
+Its controls now open the actual symmetry settings and display commands.
+Tauri's C/F shortcuts now center or fit the current molecule selection without
+changing that selection; Home fits the scene. The affected model and shell
+cases check selection preservation and modifier isolation.
+
+Focus-aware clipboard routing and cross-process clipboard payloads remain open.
+The native menus also retain older UXP-specific entries that the published
+Tritium menu removed; their presence does not demonstrate that the current
+Tritium controls match.
 
 ## Sequence comparison and repairs
 

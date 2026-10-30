@@ -102,6 +102,7 @@
             </div>
             <span class="menu-separator"></span>
             <button type="button" disabled>Hardware stereo</button>
+            <button type="button" data-toggle-palette>Tool palette</button>
             <button type="button" data-dialog="View Property">View property…</button>
           </div>
         </details>
@@ -432,7 +433,9 @@
           </div>
 
           <div id="viewport" class="viewport" tabindex="0" aria-label="Molecular viewport">
-            <div class="viewport-palette" aria-label="Viewport tools"><div class="toolbar-group mode-tools" role="radiogroup" aria-label="Navigation mode">
+            <div class="viewport-palette" aria-label="Viewport tools">
+              <button type="button" data-toggle-palette aria-label="Hide tool palette" aria-expanded="true">⌄</button>
+              <div class="toolbar-group mode-tools" role="radiogroup" aria-label="Navigation mode">
               <button class="tool-button selected" type="button" data-interaction="rotate">
                 <span class="tool-icon pointer-icon">➤</span><span>Rotate</span>
               </button>

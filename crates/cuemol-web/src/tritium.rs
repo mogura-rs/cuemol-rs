@@ -2,6 +2,110 @@ use super::*;
 use cuemol_ui::shell::{self, Activity, Icon};
 
 impl App {
+    pub(super) fn shell_shortcut(&mut self, action: &str) {
+        if self.pending_close.is_some() {
+            return;
+        }
+        match action {
+            "new-tab" => self.call("create_scene", json!({})),
+            "close-tab" => {
+                if let Some(scene) = self.state.active_scene() {
+                    self.request_close_tab(scene);
+                }
+            }
+            "save-scene" | "save-scene-as" => {
+                self.save_scene_download();
+            }
+            "reload-scene" => self.reload_scene(),
+            "undo" | "redo" => self.call(action, json!({})),
+            "settings" => {
+                self.settings_text = self.state.config_text();
+                self.show_settings = true;
+            }
+            "toggle-palette" => {
+                let collapsed = self.state.config_value("layout:tool-palette-collapsed") != "true";
+                self.state
+                    .put_config_value("layout:tool-palette-collapsed", collapsed.to_string());
+                self.settings_text = self.state.config_text();
+                if let Some(storage) =
+                    web_sys::window().and_then(|w| w.local_storage().ok().flatten())
+                {
+                    let _ = storage.set_item("cuemol.config", &self.settings_text);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn request_close_tab(&mut self, id: Uid) {
+        if !self.state.scene_is_just_created(id) {
+            self.pending_close = Some(id);
+        } else {
+            self.close_tab(id);
+        }
+    }
+
+    fn close_tab(&mut self, id: Uid) {
+        let active = self.state.active_scene() == Some(id);
+        self.call(
+            "close_scene",
+            json!({"sceneId":id.get(),"discardChanges":true}),
+        );
+        if self.state.scene_manager().scene(id).is_none() {
+            self.trajectories
+                .retain(|uid, _| self.state.scene_manager().object(*uid).is_some());
+            if active {
+                self.selected = None;
+                self.selection.clear();
+                self.camera = self.state.active_view_camera().unwrap_or_default();
+            }
+            self.playing = false;
+            self.dirty = true;
+        }
+    }
+
+    fn close_tab_dialog(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.pending_close else {
+            return;
+        };
+        let Some(scene) = self.state.scene_manager().scene(id) else {
+            self.pending_close = None;
+            return;
+        };
+        let name = scene.name().to_string();
+        let response = egui::Modal::new(egui::Id::new("close-scene-dialog")).show(ctx, |ui| {
+            ui.heading(format!("Close {name}?"));
+            ui.label("Save a scene download to keep its objects, renderers and cameras.");
+            ui.horizontal(|ui| {
+                let save = ui.button("Save and close");
+                self.record_ui_rect("Save and close tab", &save);
+                if save.clicked() {
+                    if self.state.active_scene() != Some(id) {
+                        self.call("switch_scene", json!({"sceneId":id.get()}));
+                    }
+                    if self.save_scene_download() {
+                        self.pending_close = None;
+                        self.close_tab(id);
+                    }
+                }
+                let discard = ui.button("Close without saving");
+                self.record_ui_rect("Close without saving", &discard);
+                if discard.clicked() {
+                    self.pending_close = None;
+                    self.close_tab(id);
+                }
+                let cancel = ui.button("Cancel");
+                self.record_ui_rect("Cancel closing tab", &cancel);
+                if cancel.clicked() {
+                    self.pending_close = None;
+                }
+            });
+        });
+        if response.should_close() {
+            self.pending_close = None;
+        }
+    }
+
     pub(super) fn record_ui_rect(&mut self, name: &str, response: &egui::Response) {
         let rect = response.rect;
         self.ui_rects.insert(
@@ -101,9 +205,15 @@ impl App {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     for scene in self.state.scene_summaries() {
-                        let label = scene.name;
-                        if ui.selectable_label(scene.active, label).clicked() {
+                        let selected = ui.selectable_label(scene.active, &scene.name);
+                        self.record_ui_rect(&format!("Tab {}", scene.uid.get()), &selected);
+                        if selected.clicked() {
                             self.call("switch_scene", json!({"sceneId":scene.uid.get()}));
+                        }
+                        let close = ui.small_button("×").on_hover_text("Close Tab");
+                        self.record_ui_rect(&format!("Close tab {}", scene.uid.get()), &close);
+                        if close.clicked() {
+                            self.request_close_tab(scene.uid);
                         }
                     }
                     if ui.small_button("+").on_hover_text("New Tab").clicked() {
@@ -111,6 +221,7 @@ impl App {
                     }
                 });
             });
+        self.close_tab_dialog(ctx);
         let mut open = self.show_get_pdb;
         egui::Window::new("Get PDB")
             .open(&mut open)
@@ -153,12 +264,33 @@ impl App {
                             self.save_scene_download();
                             ui.close();
                         }
-                        if ui.button("Save As…").clicked() {
+                        if ui.button("Save File As…").clicked() {
                             self.save_object_download();
                             ui.close();
                         }
+                        let save_view = ui.button("Save current view…");
+                        self.record_ui_rect("Save current view", &save_view);
+                        if save_view.clicked() {
+                            let size = self.target.as_ref().map_or(self.render_size, |target| target.size);
+                            self.render_async("get_screenshot", &json!({"width":size[0],"height":size[1]}), Some("view.png".into()), false);
+                            ui.close();
+                        }
+                        if ui.button("Save Scene As…").clicked() {
+                            self.save_scene_download();
+                            ui.close();
+                        }
+                        if ui.button("Reload Scene").clicked() {
+                            self.reload_scene();
+                            ui.close();
+                        }
+                        let close = ui.button("Close Tab").on_hover_text("Ctrl/Cmd+Alt+W in browsers");
+                        self.record_ui_rect("Close Tab menu", &close);
+                        if close.clicked() {
+                            self.shell_shortcut("close-tab");
+                            ui.close();
+                        }
                     });
-                    ui.menu_button("Edit", |ui| {
+                    let edit_menu = ui.menu_button("Edit", |ui| {
                         if ui
                             .add_enabled(!self.history.is_empty(), egui::Button::new("Undo"))
                             .clicked()
@@ -173,8 +305,59 @@ impl App {
                             self.call("redo", json!({}));
                             ui.close();
                         }
+                        if ui.button("Clear undo data").clicked() {
+                            self.call("clear_undo", json!({}));
+                            ui.close();
+                        }
+                        ui.separator();
+                        for (label, command) in [
+                            ("Merge molecule…", "merge_molecules"),
+                            ("Delete mol atoms…", "delete_atoms"),
+                            ("Change chain ID…", "rename_chain"),
+                            ("Change residue number…", "renumber_residues"),
+                        ] {
+                            let button = ui.button(label);
+                            self.record_ui_rect(label, &button);
+                            if button.clicked() { self.select_tool(command); ui.close(); }
+                        }
                     });
+                    self.record_ui_rect("Edit menu", &edit_menu.response);
+                    let scene_menu = ui.menu_button("Scene", |ui| {
+                        ui.menu_button("Background", |ui| {
+                            for (label, value) in [("White", "white"), ("Black", "black")] {
+                                let button = ui.button(label);
+                                self.record_ui_rect(&format!("Scene background {label}"), &button);
+                                if button.clicked() {
+                                    self.call("set_node_prop", json!({"nodeType":"scene","prop":"bgcolor","value":value}));
+                                    ui.close();
+                                }
+                            }
+                        });
+                        let mut proof = self.state.active_scene().and_then(|id| self.state.scene_manager().scene(id))
+                            .and_then(|scene| scene.scene_attribute("use_colproof")).is_some_and(|value| value == "true");
+                        if ui.checkbox(&mut proof, "Use color proofing").changed() {
+                            self.call("set_node_prop", json!({"nodeType":"scene","prop":"use_colproof","value":proof.to_string()}));
+                        }
+                        if ui.button("Properties…").clicked() { self.open_properties("scene", None); ui.close(); }
+                    });
+                    self.record_ui_rect("Scene menu", &scene_menu.response);
                     ui.menu_button("View", |ui| {
+                        for (value, label) in [(true,"Perspective"),(false,"Orthographic")] {
+                            if ui.selectable_label(self.camera.is_perspective() == value, label).clicked() {
+                                self.call("set_projection", json!({"perspective":value}));
+                                ui.close();
+                            }
+                        }
+                        ui.menu_button("Center mark", |ui| {
+                            for (value,label) in [("crosshair","Cross"),("axis","Axis"),("none","None")] {
+                                if ui.button(label).clicked() {
+                                    self.call("set_node_prop", json!({"nodeType":"view","prop":"centerMark","value":value}));
+                                    ui.close();
+                                }
+                            }
+                        });
+                        if ui.button("View property…").clicked() { self.open_properties("view", None); ui.close(); }
+                        ui.separator();
                         if cuemol_ui::navigation::palette_menu(ui, &mut self.state) {
                             self.settings_text = self.state.config_text();
                             if let Some(storage) =
@@ -237,6 +420,20 @@ impl App {
                         }
                     });
                     let tools_menu = ui.menu_button("Tools", |ui| {
+                        for (label, command) in [
+                            ("Molecular superposition…", "superpose"),
+                            ("Interaction…", "analyze_interactions"),
+                            ("Reassign secondary str…", "set_secondary_structure"),
+                            ("Mol morphing animation…", "convert_to_morph"),
+                            ("Mol surface generation…", "create_surface"),
+                            ("Mol surface cutter…", "cut_surface"),
+                            ("APBS elepot calculation…", "calc_elepot"),
+                        ] {
+                            let button = ui.button(label);
+                            self.record_ui_rect(label, &button);
+                            if button.clicked() { self.select_tool(command); ui.close(); }
+                        }
+                        ui.separator();
                         if ui.button("Commands…").clicked() {
                             self.show_console = true;
                             ui.close();
@@ -312,9 +509,34 @@ impl App {
                         ) {
                             ui.separator();
                         }
+                        if matches!(label, "Undo" | "Redo") {
+                            let stack = if label == "Undo" {
+                                &self.history
+                            } else {
+                                &self.future
+                            };
+                            let descriptions: Vec<_> = stack
+                                .iter()
+                                .rev()
+                                .map(|entry| entry.record.label())
+                                .collect();
+                            let (steps, rects) =
+                                shell::toolbar_history(ui, icon, label, compact, &descriptions);
+                            for (name, rect) in rects {
+                                self.ui_rects.insert(
+                                    name,
+                                    [rect.min.x, rect.min.y, rect.width(), rect.height()],
+                                );
+                            }
+                            for _ in 0..steps.unwrap_or(0) {
+                                self.call(if label == "Undo" { "undo" } else { "redo" }, json!({}));
+                            }
+                            continue;
+                        }
                         let enabled = match label {
-                            "Undo" => !self.history.is_empty(),
-                            "Redo" => !self.future.is_empty(),
+                            "Save As" | "Reload Scene" | "Save Scene" | "Render" => {
+                                self.state.active_scene().is_some()
+                            }
                             _ => true,
                         };
                         let response = ui
@@ -336,7 +558,9 @@ impl App {
                                 "New Tab" => self.call("create_scene", json!({})),
                                 "Open File" | "Open Scene" => choose_file(),
                                 "Save As" => self.save_object_download(),
-                                "Save Scene" => self.save_scene_download(),
+                                "Save Scene" => {
+                                    self.save_scene_download();
+                                }
                                 "Reload Scene" => self.reload_scene(),
                                 "Get PDB" => self.show_get_pdb = true,
                                 "Render" => self.open_render(),
@@ -349,16 +573,16 @@ impl App {
                 });
             });
     }
-    fn save_scene_download(&mut self) {
+    fn save_scene_download(&mut self) -> bool {
         if let Err(error) = self.state.set_active_view_camera(&self.camera) {
             self.message = error.to_string();
-            return;
+            return false;
         }
         let mut saved_camera = self.camera.clone();
         saved_camera.set_name("__current");
         if let Err(error) = self.state.set_active_scene_camera(saved_camera) {
             self.message = error.to_string();
-            return;
+            return false;
         }
         let external = self
             .trajectories
@@ -388,7 +612,12 @@ impl App {
             });
         if let Err(error) = result {
             self.message = error;
+            return false;
         }
+        self.history.clear();
+        self.future.clear();
+        self.message = "Scene download started.".into();
+        true
     }
     fn save_object_download(&mut self) {
         let Some(id) = self.selected else {
@@ -483,10 +712,12 @@ impl App {
                                         Activity::Crystal => {
                                             self.object_picker(ui);
                                             for (label, tool) in [
-                                                ("Symmetry settings", "list_node_props"),
-                                                ("Generate mates…", "symmetry"),
+                                                ("Symmetry settings…", "set_symmetry"),
+                                                ("Show symmetry mates…", "show_symmetry"),
                                             ] {
-                                                if ui.button(label).clicked() {
+                                                let button = ui.button(label);
+                                                self.record_ui_rect(label, &button);
+                                                if button.clicked() {
                                                     self.select_tool(tool);
                                                 }
                                             }

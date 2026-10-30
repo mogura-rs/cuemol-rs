@@ -96,6 +96,15 @@ vary with the fonts installed on each platform.
 | `F` | Fit the selection |
 | `Home` | Fit the scene |
 
+Use Ctrl on Windows/Linux or Command on macOS for application shortcuts:
+`O` opens files, `Shift+O` opens a scene, `S` saves the scene, `Shift+S` saves it
+under another name, `R` reloads, `T` creates a tab and `W` closes it. Undo uses
+`Z`; Redo accepts `Y` or `Shift+Z`. The toolbar arrows list available steps.
+`Shift+P` folds the viewport palette. In a browser, use `Alt+T` or `Alt+W` with
+the same primary modifier when the browser reserves its own tab shortcuts.
+Browser scene saves create downloads, and closing a scene with content or
+settings offers save, discard and cancel choices.
+
 The table describes the Default mouse preset. Settings also provide Coot, PyMOL,
 iPhone and Trackpad presets, automatic device detection, trackball sensitivity
 and optional momentum. Trackpad mode uses two-finger scrolling to pan and pinching
@@ -110,7 +119,7 @@ To select the PyMOL preset before launching the application, run:
 cuemol config set cuemol2.ui.viewinconf PymolViewInConf
 ```
 
-The viewport palette and `N`, `B`, `L`, `D`, `A`, `T`, `E` keys select navigation,
+The native egui and browser palettes and `N`, `B`, `L`, `D`, `A`, `T`, `E` keys select navigation,
 rectangle selection, lasso selection, distance, angle, torsion, and bond editing.
 Rectangle and lasso drags replace the selection; hold Shift to add atoms. A click
 without a drag retains the atom-label behavior. Measurement tools collect two,

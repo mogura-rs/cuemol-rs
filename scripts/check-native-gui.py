@@ -295,6 +295,23 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             pyautogui.press('enter')
             wait_for(lambda: call('get_scene_state')['objects'][0]['name'] == 'console-probe')
             capture('console-multiline.png')
+            pyautogui.click(x + width * 0.7, y + height * 0.4)
+            primary = 'command' if sys.platform == 'darwin' else 'ctrl'
+            pyautogui.hotkey(primary, 'shift', 'z')
+            wait_for(lambda: call('get_scene_state')['objects'][0]['name'] == 'final')
+            pyautogui.hotkey(primary, 'z')
+            wait_for(lambda: call('get_scene_state')['objects'][0]['name'] == 'console-probe')
+
+            def palette_collapsed():
+                settings = dict(line.split('\t', 1) for line in (config / 'config.tsv').read_text().splitlines() if '\t' in line)
+                return settings.get('layout:tool-palette-collapsed') == 'true'
+
+            initial_palette = palette_collapsed()
+            pyautogui.hotkey(primary, 'shift', 'p')
+            wait_for(lambda: palette_collapsed() != initial_palette)
+            capture('palette-shortcut.png')
+            pyautogui.hotkey(primary, 'shift', 'p')
+            wait_for(lambda: palette_collapsed() == initial_palette)
             report.update(ok=True, window=bounds,
                           work_area=[available_x, available_y, available_width, available_height],
                           window_contained=True, atoms=state['objects'][0]['atoms'],
@@ -307,6 +324,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                           font_line_endings_equal=True,
                           python_helpers=True, console_input=True, console_completion=True,
                           console_multiline_undo=True, console_qax=True,
+                          shell_shortcuts=True,
                           font_pixels=styled.histogram()[255])
             print(json.dumps(report), flush=True)
         except BaseException as error:

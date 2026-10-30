@@ -1,3 +1,32 @@
+export function installShellInput(send, status, openFiles) {
+  const isMac = /Mac/.test(navigator.platform);
+  window.addEventListener('keydown', event => {
+    if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
+    const primary = isMac ? event.metaKey : event.ctrlKey;
+    if (!primary) return;
+    const key = event.key.toLowerCase();
+    if (event.altKey && !['t', 'w'].includes(key)) return;
+    const ui = status()?.ui;
+    if (!ui || ui.modal) return;
+    const editing = ui.keyboardInput;
+    let action;
+    if (key === 't' && !event.shiftKey) action = 'new-tab';
+    else if (key === 'w' && !event.shiftKey) action = 'close-tab';
+    else if (key === 'o') action = event.shiftKey ? 'open-scene' : 'open-file';
+    else if (key === 's') action = event.shiftKey ? 'save-scene-as' : 'save-scene';
+    else if (key === 'r' && !event.shiftKey) action = 'reload-scene';
+    else if (key === 'p' && event.shiftKey) action = 'toggle-palette';
+    else if (!event.shiftKey && (key === 'k' || (isMac && key === ','))) action = 'settings';
+    else if (!editing && key === 'z') action = event.shiftKey ? 'redo' : 'undo';
+    else if (!editing && key === 'y' && !event.shiftKey) action = 'redo';
+    if (!action) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (action === 'open-file' || action === 'open-scene') openFiles();
+    else send(JSON.stringify({kind:'shortcut', action}));
+  }, true);
+}
+
 export function installViewInput(canvas, send, status) {
   const isMac = /Mac/.test(navigator.platform);
   let pressed = false;

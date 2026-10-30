@@ -14068,7 +14068,7 @@ async function runMoleculeSelectionAction(objectUid, selection, mode = "select")
     syncEmptyMoleculeDetails();
     applyViewport(update.viewport, sequence);
     renderShell();
-    rememberSelection(selection);
+    if (mode === "select" || mode === "center" || mode === "zoom") rememberSelection(selection);
     scheduleMoleculeDetailsRefresh();
     return true;
   } catch (error) {
@@ -18985,6 +18985,7 @@ viewport.addEventListener(
 );
 
 window.addEventListener("keydown", (event) => {
+  if (event.isComposing || event.keyCode === 229) return;
   if (event.key === "Escape") closeWorkspaceContextMenu();
   const editing = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
   const primary = event.metaKey || event.ctrlKey;
@@ -19005,6 +19006,9 @@ window.addEventListener("keydown", (event) => {
   } else if (primary && !event.altKey && !event.shiftKey && key === "t") {
     event.preventDefault();
     handleAction("new-scene");
+  } else if (primary && !event.altKey && !event.shiftKey && key === "w") {
+    event.preventDefault();
+    handleAction("close-scene");
   } else if (primary && !event.altKey && event.shiftKey && key === "o") {
     event.preventDefault();
     openScene();
@@ -19017,10 +19021,13 @@ window.addEventListener("keydown", (event) => {
   } else if (primary && !event.altKey && key === "s") {
     event.preventDefault();
     saveScene(event.shiftKey);
+  } else if (primary && !event.altKey && event.shiftKey && key === "p") {
+    event.preventDefault();
+    setCueMolPaletteCollapsed(!cueMolPaletteCollapsed);
   } else if (!editing && primary && !event.altKey && !event.shiftKey && key === "z") {
     event.preventDefault();
     handleAction("undo");
-  } else if (!editing && primary && !event.altKey && !event.shiftKey && key === "y") {
+  } else if (!editing && primary && !event.altKey && ((!event.shiftKey && key === "y") || (event.shiftKey && key === "z"))) {
     event.preventDefault();
     handleAction("redo");
   } else if (
@@ -19034,9 +19041,16 @@ window.addEventListener("keydown", (event) => {
   } else if (!editing && !primary && !event.altKey && !event.shiftKey && event.key === "F2") {
     event.preventDefault();
     handleLocalAction("performance-measure");
-  } else if (!editing && key === "f") {
+  } else if (!editing && !primary && !event.altKey && !event.shiftKey && key === "f") {
+    const object = selectedObject() || activeMoleculeObjects()[0];
+    if (object) void runMoleculeSelectionAction(object.uid, object.selection || "*", "fit-view");
+    else cameraCommand("fit");
+  } else if (!editing && !primary && !event.altKey && !event.shiftKey && key === "c") {
+    const object = selectedObject() || activeMoleculeObjects()[0];
+    if (object) void runMoleculeSelectionAction(object.uid, object.selection || "*", "center-view");
+  } else if (!editing && !primary && !event.altKey && !event.shiftKey && key === "home") {
     cameraCommand("fit");
-  } else if (!editing && key === "p") {
+  } else if (!editing && !primary && !event.altKey && !event.shiftKey && key === "p") {
     cameraCommand("projection");
   }
 });

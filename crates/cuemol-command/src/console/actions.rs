@@ -137,7 +137,24 @@ impl Record {
     }
 
     pub fn operation(state: &DesktopAppState, name: &str, args: &serde_json::Value) -> Self {
-        let record = Self::new(name, "gui");
+        let label = match name {
+            "rename_node" => format!("Rename to {}", args["name"].as_str().unwrap_or("")),
+            "set_node_prop" => format!("Change {}", args["prop"].as_str().unwrap_or("property")),
+            "set_visible" => if args["visible"] == false {
+                "Hide selection"
+            } else {
+                "Show selection"
+            }
+            .into(),
+            _ => {
+                let mut label = name.replace('_', " ");
+                if let Some(first) = label.get_mut(..1) {
+                    first.make_ascii_uppercase();
+                }
+                label
+            }
+        };
+        let record = Self::new(&label, "gui");
         if let Some(op) = Session::record_operation(state, name, args) {
             record.append(op);
         }

@@ -2661,6 +2661,8 @@ enum NativeFileDialog {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MainShortcutCommand {
     OpenScene,
+    SaveSceneAs,
+    CloseTab,
     NewTab,
     NewWindow,
     OpenFile,
@@ -2668,13 +2670,19 @@ enum MainShortcutCommand {
     SaveScene,
     Undo,
     Redo,
+    RedoShift,
+    TogglePalette,
     Config,
     Performance,
 }
 
 impl MainShortcutCommand {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 14] = [
         Self::OpenScene,
+        Self::SaveSceneAs,
+        Self::RedoShift,
+        Self::TogglePalette,
+        Self::CloseTab,
         Self::NewTab,
         Self::NewWindow,
         Self::OpenFile,
@@ -2689,6 +2697,8 @@ impl MainShortcutCommand {
     fn shortcut(self) -> egui::KeyboardShortcut {
         let (mut modifiers, key) = match self {
             Self::OpenScene => (egui::Modifiers::COMMAND, egui::Key::O),
+            Self::SaveSceneAs => (egui::Modifiers::COMMAND, egui::Key::S),
+            Self::CloseTab => (egui::Modifiers::COMMAND, egui::Key::W),
             Self::NewTab => (egui::Modifiers::COMMAND, egui::Key::T),
             Self::NewWindow => (egui::Modifiers::COMMAND, egui::Key::N),
             Self::OpenFile => (egui::Modifiers::COMMAND, egui::Key::O),
@@ -2696,10 +2706,22 @@ impl MainShortcutCommand {
             Self::SaveScene => (egui::Modifiers::COMMAND, egui::Key::S),
             Self::Undo => (egui::Modifiers::COMMAND, egui::Key::Z),
             Self::Redo => (egui::Modifiers::COMMAND, egui::Key::Y),
-            Self::Config => (egui::Modifiers::COMMAND, egui::Key::K),
+            Self::RedoShift => (egui::Modifiers::COMMAND, egui::Key::Z),
+            Self::TogglePalette => (egui::Modifiers::COMMAND, egui::Key::P),
+            Self::Config => (
+                egui::Modifiers::COMMAND,
+                if cfg!(target_os = "macos") {
+                    egui::Key::Comma
+                } else {
+                    egui::Key::K
+                },
+            ),
             Self::Performance => (egui::Modifiers::NONE, egui::Key::F2),
         };
-        if self == Self::OpenScene {
+        if matches!(
+            self,
+            Self::OpenScene | Self::SaveSceneAs | Self::RedoShift | Self::TogglePalette
+        ) {
             modifiers.shift = true;
         }
         egui::KeyboardShortcut::new(modifiers, key)
@@ -17663,13 +17685,23 @@ impl GuiApplication {
             .find(|command| ctx.input_mut(|input| input.consume_shortcut(&command.shortcut())));
         match command {
             Some(MainShortcutCommand::OpenScene) => self.choose_open_scene(camera),
+            Some(MainShortcutCommand::SaveSceneAs) => self.choose_save_scene(),
+            Some(MainShortcutCommand::CloseTab) => self.close_current_scene(camera),
             Some(MainShortcutCommand::NewTab) => self.open_new_tab_dialog(),
             Some(MainShortcutCommand::NewWindow) => self.new_window(),
             Some(MainShortcutCommand::OpenFile) => self.choose_open_file(camera),
             Some(MainShortcutCommand::ReloadScene) => self.reload_current_path(camera),
             Some(MainShortcutCommand::SaveScene) => self.save_current_scene(camera),
             Some(MainShortcutCommand::Undo) => self.undo(camera),
-            Some(MainShortcutCommand::Redo) => self.redo(camera),
+            Some(MainShortcutCommand::Redo | MainShortcutCommand::RedoShift) => self.redo(camera),
+            Some(MainShortcutCommand::TogglePalette) => {
+                let collapsed = self.state.config_value("layout:tool-palette-collapsed") != "true";
+                self.state
+                    .put_config_value("layout:tool-palette-collapsed", collapsed.to_string());
+                if let Err(error) = self.persist_config_state() {
+                    self.set_status(error);
+                }
+            }
             Some(MainShortcutCommand::Config) => self.open_options_dialog(),
             Some(MainShortcutCommand::Performance) => self.perf_measure = !self.perf_measure,
             None => {}
