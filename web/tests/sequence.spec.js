@@ -22,11 +22,11 @@ async function cell(page,column,row=0) {
   const [x,y,w,h]=(await status(page)).ui.rects['Sequence origin'];
   return [x+(column+0.5)*w,y+(row+0.5)*h];
 }
-async function setup(page,theme='dark') {
+async function setup(page,theme='dark',source=pdb) {
   await page.addInitScript(theme=>localStorage.setItem('cuemol.theme',theme),theme);
   await page.goto('./?renderer=webgl');
   await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId),{timeout:60000}).toBeGreaterThan(0);
-  await page.locator('#files').setInputFiles({name:'sequence.pdb',mimeType:'application/octet-stream',buffer:Buffer.from(pdb)});
+  await page.locator('#files').setInputFiles({name:'sequence.pdb',mimeType:'application/octet-stream',buffer:Buffer.from(source)});
   await expect.poll(async()=>(await status(page)).scene.objects.length).toBe(1);
   await choose(page,'Sequence');
   await expect.poll(async()=>(await status(page)).ui.rects['Sequence origin']?.length).toBe(4);
@@ -99,4 +99,31 @@ test('sequence refreshes after another molecule is loaded and selects the clicke
   await command(page,'undo');
   await expect.poll(async()=>(await status(page)).selection).toBe("'A'.2.*");
   await page.screenshot({path:testInfo.outputPath('sequence-two-molecules.png')});
+});
+
+
+test('sequence reaches negative, inserted and distant residues without overlapping columns',async({page},testInfo)=>{
+  const indices=[[-2,' '],[-1,' '],[0,' '],[1,' '],[1,'A'],[1,'B'],[2,' '],[5000,' ']];
+  const source=indices.map(([number,insertion],offset)=>
+    `ATOM  ${String(offset+1).padStart(5)}  CA  ALA A${String(number).padStart(4)}${insertion}      0.000   0.000   0.000  1.00 10.00           C`
+  ).join('\n')+'\nEND\n';
+  const id=await setup(page,'dark',source);
+  for(const [column,index] of [[0,'-2'],[1,'-1'],[2,'0'],[3,'1'],[4,'1A'],[5,'1B'],[6,'2']]){
+    await command(page,'set_mol_selection',{objId:id,selection:''});
+    await page.mouse.click(...await cell(page,column));
+    await expect.poll(async()=>(await status(page)).selection).toBe(`'A'.${index}.*`);
+    expect(await selectionCount(page,id)).toBe(1);
+  }
+  const [x,y,width,height]=(await status(page)).ui.rects['Sequence grid'];
+  await page.mouse.move(x+width/2,y+height/2);
+  await page.mouse.wheel(60000,0);
+  await expect.poll(async()=>(await status(page)).ui.rects['Sequence origin'][0]).toBeLessThan(-30000);
+  await command(page,'set_mol_selection',{objId:id,selection:''});
+  const distant=await cell(page,5004);
+  expect(distant[0]).toBeGreaterThan(x);
+  expect(distant[0]).toBeLessThan(x+width);
+  await page.mouse.click(...distant);
+  await expect.poll(async()=>(await status(page)).selection).toBe("'A'.5000.*");
+  expect(await selectionCount(page,id)).toBe(1);
+  await page.screenshot({path:testInfo.outputPath('sequence-distant.png')});
 });

@@ -13848,6 +13848,8 @@ async function refreshMoleculeDetails() {
           includeSequence && details.sequence && sequenceMatches
             ? details.sequence
             : moleculeDetails.sequence,
+        sequenceLayout: includeSequence && details.sequence && sequenceMatches
+          ? details.sequenceLayout : moleculeDetails.sequenceLayout,
       };
       renderMolStruct();
       renderSelectionPanel();
@@ -15999,17 +16001,19 @@ function renderView() {
   syncViewPanelControls();
 }
 
-const SEQUENCE_CELL_WIDTH = 10;
 const SEQUENCE_ROW_HEIGHT = 19;
 const SEQUENCE_RULER_HEIGHT = 16;
-const SEQUENCE_MAX_CANVAS_WIDTH = 30_000;
 const SEQUENCE_NAME_WIDTH_STORAGE_KEY = "cuemol.sequenceNameWidth";
+const sequenceScroller = sequenceView.closest(".sequence-placeholder");
 let sequenceNameWidth = 140;
+let sequenceCellWidth = 10;
+let sequenceViewportFrame = null;
+let sequenceRuler = null;
 
 try {
-  const storedSequenceNameWidth = Number(localStorage.getItem(SEQUENCE_NAME_WIDTH_STORAGE_KEY));
-  if (Number.isFinite(storedSequenceNameWidth)) {
-    sequenceNameWidth = Math.min(400, Math.max(50, storedSequenceNameWidth));
+  const stored = localStorage.getItem(SEQUENCE_NAME_WIDTH_STORAGE_KEY);
+  if (stored !== null && Number.isFinite(Number(stored))) {
+    sequenceNameWidth = Math.min(400, Math.max(50, Number(stored)));
   }
 } catch {
   // Storage can be unavailable in restricted webviews.
@@ -16018,6 +16022,7 @@ try {
 function setSequenceNameWidth(width, persist = false) {
   sequenceNameWidth = Math.min(400, Math.max(50, width));
   sequenceView.style.setProperty("--sequence-name-width", `${sequenceNameWidth}px`);
+  scheduleSequenceViewport();
   if (!persist) return;
   try {
     localStorage.setItem(SEQUENCE_NAME_WIDTH_STORAGE_KEY, String(sequenceNameWidth));
@@ -16026,26 +16031,19 @@ function setSequenceNameWidth(width, persist = false) {
   }
 }
 
-function sequenceResidueColumn(value) {
-  const column = Number.parseInt(String(value), 10);
-  return Number.isFinite(column) && column >= 0 ? column : null;
+function sequenceFont() {
+  return getComputedStyle(document.documentElement).getPropertyValue("--font-mono") || "monospace";
 }
 
-function sequenceColumnCount(chains) {
-  let maximum = 0;
-  for (const chain of chains) {
-    for (const residue of chain.residues) {
-      const column = sequenceResidueColumn(residue.residueIndex);
-      if (column !== null && column > maximum) maximum = column;
-    }
-  }
-  return Math.min(
-    maximum + 10,
-    Math.floor(SEQUENCE_MAX_CANVAS_WIDTH / SEQUENCE_CELL_WIDTH),
-  );
+function measureSequenceCell() {
+  const context = document.createElement("canvas").getContext("2d");
+  if (!context) return;
+  context.font = `13px ${sequenceFont()}`;
+  sequenceCellWidth = context.measureText("M").width + 2;
+  sequenceView.style.setProperty("--sequence-cell-width", `${sequenceCellWidth}px`);
 }
 
-function createSequenceRuler(columnCount) {
+function createSequenceRuler() {
   const row = document.createElement("div");
   row.className = "sequence-ruler";
   const corner = document.createElement("div");
@@ -16078,84 +16076,228 @@ function createSequenceRuler(columnCount) {
   corner.append(splitter);
   const canvas = document.createElement("canvas");
   canvas.className = "sequence-ruler-canvas";
-  const width = Math.min(
-    (columnCount + 1) * SEQUENCE_CELL_WIDTH,
-    SEQUENCE_MAX_CANVAS_WIDTH,
-  );
-  const pixelRatio = window.devicePixelRatio || 1;
-  canvas.width = Math.floor(width * pixelRatio);
-  canvas.height = Math.floor(SEQUENCE_RULER_HEIGHT * pixelRatio);
-  canvas.style.width = `${width}px`;
-  canvas.style.height = `${SEQUENCE_RULER_HEIGHT}px`;
-  const context = canvas.getContext("2d");
-  if (context) {
-    context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-    context.strokeStyle = "#555";
-    context.beginPath();
-    for (let index = 0; index < columnCount; index += 1) {
-      const x = (index + 0.5) * SEQUENCE_CELL_WIDTH;
-      context.moveTo(x, 12);
-      context.lineTo(x, 16);
-    }
-    context.stroke();
-    context.fillStyle = "#555";
-    context.font = `10px ${getComputedStyle(document.documentElement).getPropertyValue("--font-mono") || "monospace"}`;
-    context.textBaseline = "alphabetic";
-    for (let index = 5; index < columnCount; index += 5) {
-      const label = String(index);
-      const x = (index + 0.5) * SEQUENCE_CELL_WIDTH;
-      context.fillText(label, x - context.measureText(label).width / 2, 10);
-    }
-  }
   row.append(corner, canvas);
+  sequenceRuler = canvas;
   return row;
 }
 
-function sameSequenceRow(lhs, rhs) {
-  return (
-    lhs &&
-    rhs &&
-    lhs.dataset.objectUid === rhs.dataset.objectUid &&
-    lhs.dataset.chainId === rhs.dataset.chainId
-  );
+function lowerSequenceBound(values, column, key = (value) => value.column) {
+  let first = 0, last = values.length;
+  while (first < last) {
+    const middle = Math.floor((first + last) / 2);
+    if (key(values[middle]) < column) first = middle + 1;
+    else last = middle;
+  }
+  return first;
 }
 
-function setSequenceMarker(cell) {
-  sequenceMarker = cell
-    ? {
-        objectUid: cell.dataset.objectUid,
-        chainId: cell.dataset.chainId,
-        position: Number(cell.dataset.residuePosition),
-      }
-    : null;
-  for (const item of sequenceView.querySelectorAll(".sequence-cell.marked")) {
-    item.classList.remove("marked");
+function drawSequenceRuler(firstColumn, lastColumn) {
+  if (!sequenceRuler) return;
+  const width = Math.max(1, sequenceScroller.clientWidth - sequenceNameWidth);
+  const ratio = window.devicePixelRatio || 1;
+  sequenceRuler.width = Math.ceil(width * ratio);
+  sequenceRuler.height = Math.ceil(SEQUENCE_RULER_HEIGHT * ratio);
+  sequenceRuler.style.width = `${width}px`;
+  sequenceRuler.style.height = `${SEQUENCE_RULER_HEIGHT}px`;
+  const context = sequenceRuler.getContext("2d");
+  if (!context) return;
+  context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  context.strokeStyle = context.fillStyle = getComputedStyle(sequenceRuler).color;
+  context.font = `10px ${sequenceFont()}`;
+  context.textBaseline = "alphabetic";
+  const layout = moleculeDetails.sequenceLayout;
+  const insertions = layout?.insertions || [];
+  let inserted = lowerSequenceBound(insertions, firstColumn, (value) => value[2]);
+  context.beginPath();
+  for (let column = firstColumn; column < lastColumn; column += 1) {
+    const x = (column + 0.5) * sequenceCellWidth - sequenceScroller.scrollLeft;
+    if (insertions[inserted]?.[2] === column) {
+      inserted += 1;
+      continue;
+    }
+    const number = (layout?.minimum || 0) + column - inserted;
+    context.moveTo(x, 12);
+    context.lineTo(x, 16);
+    if (number % 5 === 0) {
+      const label = String(number);
+      context.fillText(label, x - context.measureText(label).width / 2, 10);
+    }
   }
-  cell?.classList.add("marked");
+  context.stroke();
+}
+
+function sequencePoint(cell) {
+  return cell ? {
+    objectUid: Number(cell.dataset.objectUid),
+    chainId: cell.dataset.chainId,
+    position: Number(cell.dataset.residuePosition),
+  } : null;
+}
+
+function sequenceChain(point) {
+  return point && moleculeDetails.sequence.find((chain) =>
+    chain.objectUid === point.objectUid && chain.chainId === point.chainId);
+}
+
+function sameSequenceRow(lhs, rhs) {
+  return Boolean(lhs && rhs && lhs.objectUid === rhs.objectUid && lhs.chainId === rhs.chainId);
+}
+
+function sameSequencePoint(lhs, rhs) {
+  return sameSequenceRow(lhs, rhs) && lhs.position === rhs.position;
+}
+
+function sequenceRange(start, end) {
+  if (!sameSequenceRow(start, end)) return [];
+  const chain = sequenceChain(start);
+  if (!chain) return [];
+  return chain.residues.slice(Math.min(start.position, end.position), Math.max(start.position, end.position) + 1);
+}
+
+function paintSequenceMarkers() {
+  for (const cell of sequenceView.querySelectorAll(".sequence-cell")) {
+    const point = sequencePoint(cell);
+    cell.classList.toggle("marked", sameSequencePoint(point, sequenceMarker));
+    cell.classList.toggle("range-preview", Boolean(sequenceDrag &&
+      sameSequenceRow(point, sequenceDrag.start) &&
+      point.position >= Math.min(sequenceDrag.start.position, sequenceDrag.end.position) &&
+      point.position <= Math.max(sequenceDrag.start.position, sequenceDrag.end.position)));
+  }
+}
+
+function setSequenceMarker(point) {
+  sequenceMarker = point;
+  paintSequenceMarkers();
 }
 
 function clearSequenceDragPreview() {
-  for (const item of sequenceView.querySelectorAll(".sequence-cell.range-preview")) {
-    item.classList.remove("range-preview");
-  }
+  paintSequenceMarkers();
 }
 
-function sequenceRangeCells(start, end) {
-  if (!sameSequenceRow(start, end)) return [];
-  const cells = [...start.closest(".sequence-residues").querySelectorAll(".sequence-cell")];
-  const startPosition = Number(start.dataset.residuePosition);
-  const endPosition = Number(end.dataset.residuePosition);
-  const [first, last] = [startPosition, endPosition].sort((lhs, rhs) => lhs - rhs);
-  return cells.filter((cell) => {
-    const position = Number(cell.dataset.residuePosition);
-    return position >= first && position <= last;
+function sequencePointAtX(point, clientX) {
+  const chain = sequenceChain(point);
+  if (!chain) return null;
+  const bounds = sequenceScroller.getBoundingClientRect();
+  if (clientX < bounds.left + sequenceNameWidth || clientX >= bounds.right) return null;
+  const column = Math.floor((clientX - bounds.left + sequenceScroller.scrollLeft - sequenceNameWidth) / sequenceCellWidth);
+  const position = lowerSequenceBound(chain.residues, column);
+  return chain.residues[position]?.column === column ? {...point, position} : null;
+}
+
+function scheduleSequenceViewport() {
+  if (sequenceViewportFrame !== null) return;
+  sequenceViewportFrame = requestAnimationFrame(() => {
+    sequenceViewportFrame = null;
+    renderSequenceViewport();
   });
 }
 
-function previewSequenceRange(start, end) {
-  clearSequenceDragPreview();
-  for (const cell of sequenceRangeCells(start, end)) cell.classList.add("range-preview");
+function renderSequenceViewport(offset = null) {
+  if (!sequencePanelIsActive() || !moleculeSequenceIsCurrent() || !sequenceRuler) return;
+  const chains = moleculeDetails.sequence;
+  sequenceView.style.setProperty("--sequence-viewport-height", `${sequenceScroller.clientHeight}px`);
+  const columns = moleculeDetails.sequenceLayout?.columns || 0;
+  const sequenceWidth = (columns + 1) * sequenceCellWidth;
+  sequenceView.style.width = `${sequenceNameWidth + sequenceWidth}px`;
+  sequenceView.style.height = `${SEQUENCE_RULER_HEIGHT + chains.length * SEQUENCE_ROW_HEIGHT}px`;
+  if (offset) {
+    sequenceScroller.scrollLeft = offset.left;
+    sequenceScroller.scrollTop = offset.top;
+  }
+  const firstColumn = Math.max(0, Math.floor(sequenceScroller.scrollLeft / sequenceCellWidth) - 1);
+  const lastColumn = Math.min(columns, Math.ceil((sequenceScroller.scrollLeft + sequenceScroller.clientWidth - sequenceNameWidth) / sequenceCellWidth) + 1);
+  const firstRow = Math.max(0, Math.floor((sequenceScroller.scrollTop - SEQUENCE_RULER_HEIGHT) / SEQUENCE_ROW_HEIGHT) - 1);
+  const lastRow = Math.min(chains.length, Math.ceil((sequenceScroller.scrollTop + sequenceScroller.clientHeight) / SEQUENCE_ROW_HEIGHT) + 1);
+  for (const row of sequenceView.querySelectorAll(".sequence-chain")) row.remove();
+  const fragment = document.createDocumentFragment();
+  for (let rowIndex = firstRow; rowIndex < lastRow; rowIndex += 1) {
+    const chain = chains[rowIndex];
+    const row = document.createElement("section");
+    row.className = `sequence-chain${rowIndex % 2 === 1 ? " odd" : ""}`;
+    row.style.top = `${SEQUENCE_RULER_HEIGHT + rowIndex * SEQUENCE_ROW_HEIGHT}px`;
+    const title = document.createElement("strong");
+    title.textContent = `${chain.chainId || "_"}:${chain.objectName}`;
+    title.title = title.textContent;
+    const residues = document.createElement("div");
+    residues.className = "sequence-residues";
+    residues.style.width = `${sequenceWidth}px`;
+    residues.style.height = `${SEQUENCE_ROW_HEIGHT}px`;
+    const first = lowerSequenceBound(chain.residues, firstColumn);
+    for (let position = first; position < chain.residues.length; position += 1) {
+      const residue = chain.residues[position];
+      if (residue.column >= lastColumn) break;
+      const cell = document.createElement("button");
+      cell.type = "button";
+      cell.textContent = residue.letter === "X" ? "*" : residue.letter;
+      cell.className = `sequence-cell${residue.selected ? " selected" : ""}`;
+      cell.dataset.objectUid = String(chain.objectUid);
+      cell.dataset.chainId = chain.chainId;
+      cell.dataset.residuePosition = String(position);
+      cell.dataset.residueIndex = residue.residueIndex;
+      cell.style.left = `${residue.column * sequenceCellWidth}px`;
+      cell.title = `${residue.resName} ${residue.residueIndex}`;
+      residues.append(cell);
+    }
+    row.append(title, residues);
+    fragment.append(row);
+  }
+  sequenceView.append(fragment);
+  drawSequenceRuler(firstColumn, lastColumn);
+  paintSequenceMarkers();
 }
+
+sequenceScroller.addEventListener("scroll", scheduleSequenceViewport, {passive: true});
+new ResizeObserver(scheduleSequenceViewport).observe(sequenceScroller);
+new MutationObserver(scheduleSequenceViewport).observe(document.documentElement, {attributes: true, attributeFilter: ["data-theme"]});
+document.fonts.ready.then(() => { measureSequenceCell(); scheduleSequenceViewport(); });
+sequenceView.addEventListener("mousedown", (event) => {
+  const point = sequencePoint(event.target.closest(".sequence-cell"));
+  if (event.button !== 0 || !point) return;
+  event.preventDefault();
+  sequenceDrag = {start: point, end: point, moved: false, shiftAtDown: event.shiftKey};
+  if (!event.shiftKey) setSequenceMarker(point);
+  paintSequenceMarkers();
+});
+document.addEventListener("mousemove", (event) => {
+  if (!sequenceDrag || !(event.buttons & 1)) return;
+  const point = sequencePointAtX(sequenceDrag.start, event.clientX);
+  if (!point) return;
+  sequenceDrag.end = point;
+  sequenceDrag.moved = !sameSequencePoint(sequenceDrag.start, point);
+  paintSequenceMarkers();
+});
+document.addEventListener("mouseup", (event) => {
+  if (event.button !== 0 || !sequenceDrag) return;
+  const drag = sequenceDrag;
+  sequenceDrag = null;
+  const point = sequencePointAtX(drag.start, event.clientX);
+  clearSequenceDragPreview();
+  if (!point) return;
+  const chain = sequenceChain(point);
+  const start = !drag.moved && drag.shiftAtDown ? sequenceMarker : drag.start;
+  if (!sameSequenceRow(start, point)) return;
+  const anchor = chain.residues[start.position]?.selection;
+  if (!anchor) return;
+  const range = sequenceRange(start, point).map((residue) => residue.selection).join("|");
+  setSequenceMarker(point);
+  void runSequenceAction(chain, drag.moved ? "range-toggle" : drag.shiftAtDown ? "range-select" : "toggle-center", anchor, range);
+});
+function cancelSequenceDrag() {
+  sequenceDrag = null;
+  clearSequenceDragPreview();
+}
+window.addEventListener("blur", cancelSequenceDrag);
+document.addEventListener("pointercancel", cancelSequenceDrag);
+document.addEventListener("keydown", (event) => { if (event.key === "Escape") cancelSequenceDrag(); });
+sequenceView.addEventListener("dragstart", (event) => event.preventDefault());
+sequenceView.addEventListener("contextmenu", (event) => {
+  const point = sequencePoint(event.target.closest(".sequence-cell"));
+  const chain = sequenceChain(point);
+  if (!chain) return;
+  setSequenceMarker(point);
+  showSequenceContextMenu(event, chain, chain.residues[point.position]);
+});
+
 
 async function runSequenceAction(chain, action, targetSelection = "", rangeSelection = "", radius = null) {
   setBusy(true);
@@ -16235,11 +16377,10 @@ function showSequenceContextMenu(event, chain, residue) {
 }
 
 function renderSequence() {
-  if (!document.querySelector('[data-bottom-panel="sequence"]')?.classList.contains("active")) {
-    return;
-  }
+  if (!sequencePanelIsActive()) return;
   if (!moleculeSequenceIsCurrent()) {
     renderedSequenceKey = "";
+    sequenceRuler = null;
     sequenceView.replaceChildren();
     const loading = document.createElement("p");
     loading.textContent = "Loading sequence…";
@@ -16247,120 +16388,23 @@ function renderSequence() {
     return;
   }
   if (renderedSequenceKey === moleculeDetails.sequenceKey) return;
-  setSequenceNameWidth(sequenceNameWidth);
   renderedSequenceKey = moleculeDetails.sequenceKey;
+  const offset = {left: sequenceScroller.scrollLeft, top: sequenceScroller.scrollTop};
   sequenceView.replaceChildren();
+  sequenceRuler = null;
+  sequenceView.style.width = "";
+  sequenceView.style.height = "";
+  cancelSequenceDrag();
   if (moleculeDetails.sequence.length === 0) {
     const empty = document.createElement("p");
     empty.textContent = "No molecule loaded.";
     sequenceView.append(empty);
     return;
   }
-  const columnCount = sequenceColumnCount(moleculeDetails.sequence);
-  const sequenceWidth = Math.min(
-    (columnCount + 1) * SEQUENCE_CELL_WIDTH,
-    SEQUENCE_MAX_CANVAS_WIDTH,
-  );
-  sequenceView.append(createSequenceRuler(columnCount));
-  for (const [rowIndex, chain] of moleculeDetails.sequence.entries()) {
-    const row = document.createElement("section");
-    row.className = `sequence-chain${rowIndex % 2 === 1 ? " odd" : ""}`;
-    const title = document.createElement("strong");
-    title.textContent = `${chain.chainId || "_"}:${chain.objectName}`;
-    title.title = title.textContent;
-    const residues = document.createElement("div");
-    residues.className = "sequence-residues";
-    residues.style.width = `${sequenceWidth}px`;
-    residues.style.height = `${SEQUENCE_ROW_HEIGHT}px`;
-    for (const [position, residue] of chain.residues.entries()) {
-      const column = sequenceResidueColumn(residue.residueIndex);
-      if (column === null || column >= columnCount) continue;
-      const cell = document.createElement("button");
-      cell.type = "button";
-      cell.textContent = residue.letter;
-      cell.className = `sequence-cell${residue.selected ? " selected" : ""}`;
-      cell.dataset.objectUid = String(chain.objectUid);
-      cell.dataset.chainId = chain.chainId;
-      cell.dataset.residuePosition = String(position);
-      cell.dataset.selection = residue.selection;
-      cell.style.left = `${column * SEQUENCE_CELL_WIDTH}px`;
-      cell.style.zIndex = String(chain.residues.length - position);
-      cell.title = `${residue.resName} ${residue.residueIndex}`;
-      if (
-        sequenceMarker?.objectUid === cell.dataset.objectUid &&
-        sequenceMarker.chainId === cell.dataset.chainId &&
-        sequenceMarker.position === position
-      ) {
-        cell.classList.add("marked");
-      }
-      cell.addEventListener("mousedown", (event) => {
-        if (event.button !== 0) return;
-        event.preventDefault();
-        sequenceDrag = { start: cell, end: cell, moved: false };
-        if (!event.shiftKey) setSequenceMarker(cell);
-        previewSequenceRange(cell, cell);
-      });
-      cell.addEventListener("mouseenter", (event) => {
-        if (!sequenceDrag || !(event.buttons & 1) || !sameSequenceRow(sequenceDrag.start, cell)) {
-          return;
-        }
-        sequenceDrag.end = cell;
-        sequenceDrag.moved = sequenceDrag.start !== cell;
-        previewSequenceRange(sequenceDrag.start, cell);
-      });
-      cell.addEventListener("mouseup", (event) => {
-        if (event.button !== 0 || !sequenceDrag) return;
-        event.preventDefault();
-        const dragState = sequenceDrag;
-        sequenceDrag = null;
-        clearSequenceDragPreview();
-        if (!sameSequenceRow(dragState.start, cell)) return;
-        if (dragState.moved) {
-          const rangeSelection = sequenceRangeCells(dragState.start, cell)
-            .map((item) => item.dataset.selection)
-            .join("|");
-          setSequenceMarker(cell);
-          void runSequenceAction(
-            chain,
-            "range-toggle",
-            dragState.start.dataset.selection,
-            rangeSelection,
-          );
-          return;
-        }
-        if (event.shiftKey && sequenceMarker) {
-          const markerCell = [...residues.querySelectorAll(".sequence-cell")].find(
-            (item) =>
-              item.dataset.objectUid === sequenceMarker.objectUid &&
-              item.dataset.chainId === sequenceMarker.chainId &&
-              Number(item.dataset.residuePosition) === sequenceMarker.position,
-          );
-          if (!markerCell) return;
-          const rangeSelection = sequenceRangeCells(markerCell, cell)
-            .map((item) => item.dataset.selection)
-            .join("|");
-          setSequenceMarker(cell);
-          void runSequenceAction(
-            chain,
-            "range-select",
-            markerCell.dataset.selection,
-            rangeSelection,
-          );
-          return;
-        }
-        setSequenceMarker(cell);
-        void runSequenceAction(chain, "toggle-center", residue.selection);
-      });
-      cell.addEventListener("dragstart", (event) => event.preventDefault());
-      cell.addEventListener("contextmenu", (event) => {
-        setSequenceMarker(cell);
-        showSequenceContextMenu(event, chain, residue);
-      });
-      residues.append(cell);
-    }
-    row.append(title, residues);
-    sequenceView.append(row);
-  }
+  measureSequenceCell();
+  setSequenceNameWidth(sequenceNameWidth);
+  sequenceView.append(createSequenceRuler());
+  renderSequenceViewport(offset);
 }
 
 function formatAnimationTime(seconds) {
@@ -18539,11 +18583,6 @@ document.addEventListener("pointerdown", (event) => {
   if (!event.target.closest(".workspace-context-menu")) closeWorkspaceContextMenu();
 });
 
-document.addEventListener("mouseup", (event) => {
-  if (!sequenceDrag || event.target.closest(".sequence-cell")) return;
-  sequenceDrag = null;
-  clearSequenceDragPreview();
-});
 
 referenceDialog.addEventListener("close", () => {
   closeWorkspaceContextMenu();

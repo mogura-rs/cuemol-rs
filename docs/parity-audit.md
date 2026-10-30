@@ -90,6 +90,29 @@ model suite as well as the displayed-window check. Obsolete source-location
 assertions were removed from the Tauri shell test, and its nucleotide-default
 expectation was updated to the already verified 0.5-width elliptical section.
 
+A subsequent public review exposed a Tauri cache key that ignored individual
+molecule selections. Changing one molecule to the same expression already
+selected elsewhere could therefore leave the sequence highlight stale. The
+key now includes each molecule's selection, with a reproducer that fails before
+the repair and passes afterward.
+
+The reference also clips negative residue numbers, overlaps insertion-code
+cells and caps the sequence canvas at 30,000 pixels. These inherited limits are
+intentionally removed. All three frontends now use one layout that gives signed
+residue numbers and insertion codes distinct columns, while retaining ordinary
+positive numbering. The Tauri shell creates only visible chain rows and residue
+buttons, and its ruler bitmap is limited to the viewport width. Range selection
+uses the full sequence model, so offscreen residues remain included.
+
+The new tests click negative, inserted and distant residues, preserve markers
+while scrolling, and select across 5,002 residues. The Tauri DOM test supplies
+40 chains of 5,005 residues and checks that fewer than 1,000 residue buttons and
+20 chain rows exist, then verifies the last row is fully displayed after vertical
+scrolling. This is a shell test with mocked IPC; separate Rust tests verify the
+actual sequence DTO and shared layout. All four real-WASM sequence tests and
+four Tauri model tests passed. The Tauri shell suite passed 11 tests; the affected
+virtualization case passed again after correcting the splitter's scroll extent.
+
 ### Measurements
 
 The following measurements were taken on 2026-10-30 after the selection and

@@ -2418,7 +2418,7 @@ impl BottomTab {
 #[cfg(test)]
 use cuemol_ui::sequence::{
     sequence_column_count as native_sequence_column_count, sequence_position_in_drag_range,
-    sequence_range_action as native_sequence_range_action, sequence_residue_column,
+    sequence_range_action as native_sequence_range_action, sequence_residue_number,
     SequencePosition as NativeSequencePosition,
 };
 use cuemol_ui::sequence::{SequenceAction as NativeSequenceAction, SequencePanel};
@@ -39163,10 +39163,10 @@ mod tests {
 
     #[test]
     fn native_sequence_range_and_context_actions_match_reference() {
-        assert_eq!(sequence_residue_column("12A"), Some(12));
-        assert_eq!(sequence_residue_column(" +7"), Some(7));
-        assert_eq!(sequence_residue_column("-1"), None);
-        assert_eq!(sequence_residue_column("A"), None);
+        assert_eq!(sequence_residue_number("12A"), Some(12));
+        assert_eq!(sequence_residue_number(" +7"), Some(7));
+        assert_eq!(sequence_residue_number("-1"), Some(-1));
+        assert_eq!(sequence_residue_number("A"), None);
 
         let mut app = GuiApplication::new();
         let scene_uid = app.state.active_scene().unwrap();

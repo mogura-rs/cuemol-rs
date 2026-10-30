@@ -46,6 +46,14 @@ async function openShell(page, storage = {}, options = {}) {
       image: null, width: 320, height: 240, center: [0, 0, 0], zoom: 10, distance: 100, slab: 50,
       perspective: false, centerMark: options.centerMark || 'none', centerMarkEmbedded: true, lines: [], labels: [], status: 'Ready',
     };
+    const sequenceResidues = options.sequence ? [-2, -1, 0, 1, '1A', '1B', ...Array.from({length: 4999}, (_, index) => index + 2)].map((index, position) => ({
+      letter: 'G', resId: Number.parseInt(index, 10), residueIndex: String(index), resName: 'GLY',
+      selection: `'A'.${index}.*`, selected: false, column: position,
+    })) : [];
+    const sequence = Array.from({length: options.sequence ? 40 : 0}, (_, index) => ({
+      objectUid: 3 + index, objectName: `Probe${index}`, chainId: 'A', residues: sequenceResidues,
+    }));
+    const sequenceLayout = {minimum: -2, columns: 5014, insertions: [[1, 'A', 4], [1, 'B', 5]]};
     window.__shellCalls = [];
     window.__TAURI__ = {core: {invoke: async (command, args) => {
       window.__shellCalls.push({command, args});
@@ -54,7 +62,11 @@ async function openShell(page, storage = {}, options = {}) {
       if (command === 'update_camera') return {...viewport, width: args.width, height: args.height};
       if (command === 'pick_atom' || command === 'select_screen_rect') return {snapshot, viewport};
       if (command === 'hover_at_screen') return {...viewport, image: null};
-      if (command === 'get_molecule_details') return {structureKey: 'initial', sequenceKey: 'initial', structureObjectUid: 3, structure: [], sequence: []};
+      if (command === 'get_molecule_details') return {structureKey: 'initial', sequenceKey: snapshot.sequenceKey, structureObjectUid: 3, structure: [], sequence, sequenceLayout};
+      if (command === 'sequence_action') {
+        snapshot.sequenceKey = `sequence-${window.__shellCalls.length}`;
+        return {snapshot: structuredClone(snapshot), viewport};
+      }
       if (command === 'get_pdb_history') return [];
       if (command === 'execute_script') return structuredClone(snapshot);
       if (command === 'rename_workspace_node') {
@@ -244,5 +256,44 @@ test('Tauri cancelled drag schedules a settled frame without replaying movement'
   await expect(viewport).not.toHaveClass(/dragging/);
   await expect.poll(() => page.evaluate(() => window.__shellCalls.filter(call => call.command === 'render_viewport').length)).toBeGreaterThan(0);
   expect(await page.evaluate(() => window.__shellCalls.filter(call => call.command === 'update_camera'))).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri sequence virtualizes both axes and ranges include offscreen residues', async ({page}, testInfo) => {
+  const errors = await openShell(page, {}, {sequence: true});
+  await page.locator('[data-bottom-select="sequence"]').click();
+  const firstRow = page.locator('.sequence-chain').first();
+  const cell = index => firstRow.locator(`.sequence-cell[data-residue-index="${index}"]`);
+  for (const index of [-2, -1, 0, 1, '1A', '1B']) {
+    await cell(index).click();
+    await expect.poll(() => page.evaluate(() => window.__shellCalls.filter(call => call.command === 'sequence_action').at(-1)?.args.input.targetSelection)).toBe(`'A'.${index}.*`);
+  }
+  const insertionA = await cell('1A').boundingBox(), insertionB = await cell('1B').boundingBox();
+  expect(insertionB.x).toBeGreaterThanOrEqual(insertionA.x + insertionA.width - 0.1);
+  await cell(1).click();
+  await page.locator('.sequence-placeholder').evaluate(element => { element.scrollLeft = 50000; });
+  await expect(cell(5000)).toBeVisible();
+  await page.keyboard.down('Shift');
+  await cell(5000).click();
+  await page.keyboard.up('Shift');
+  const range = await page.evaluate(() => window.__shellCalls.filter(call => call.command === 'sequence_action').at(-1).args.input);
+  expect(range.action).toBe('range-select');
+  expect(range.targetSelection).toBe("'A'.1.*");
+  expect(range.rangeSelection.split('|')).toHaveLength(5002);
+  expect(range.rangeSelection).toContain("'A'.1A.*");
+  expect(range.rangeSelection.endsWith("'A'.5000.*")).toBe(true);
+  await expect(page.locator('.sequence-cell.marked')).toHaveAttribute('data-residue-index', '5000');
+  await page.locator('.sequence-placeholder').evaluate(element => { element.scrollTop = element.scrollHeight; });
+  await expect(page.locator('.sequence-chain strong').last()).toHaveText('A:Probe39');
+  expect(await page.locator('.sequence-cell').count()).toBeLessThan(1000);
+  expect(await page.locator('.sequence-chain').count()).toBeLessThan(20);
+  const bottom = await page.locator('.sequence-chain').last().boundingBox();
+  const viewport = await page.locator('.sequence-placeholder').boundingBox();
+  expect(bottom.y + bottom.height).toBeLessThanOrEqual(viewport.y + viewport.height + 1);
+  expect(bottom.y + bottom.height).toBeGreaterThan(viewport.y + viewport.height - 20);
+  const canvasWidth = await page.locator('.sequence-ruler-canvas').evaluate(element => element.width);
+  expect(canvasWidth).toBeLessThanOrEqual(page.viewportSize().width * 2);
+  await page.screenshot({path: testInfo.outputPath('sequence-virtual.png')});
   expect(errors).toEqual([]);
 });

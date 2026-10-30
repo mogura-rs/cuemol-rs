@@ -1,4 +1,6 @@
 mod animation;
+mod sequence;
+pub use sequence::{sequence_residue_number, GuiSequenceLayout};
 mod command_support;
 mod property_access;
 #[cfg(feature = "scripting")]

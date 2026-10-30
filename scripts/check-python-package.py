@@ -37,7 +37,7 @@ def main():
         tools = json.loads(run("mcp", "tools"))["tools"]
         if "get_scene_state" not in {tool["name"] for tool in tools}:
             raise RuntimeError("The installed MCP catalog lacks scene access")
-        if Path(run("config", "path").strip()) != config:
+        if Path(run("config", "path").strip()).resolve() != config.resolve():
             raise RuntimeError("The installed command did not use the configured directory")
         print(json.dumps({"ok": True, "version": version, "tools": len(tools),
                           "skill_bytes": len(skill.encode()), "startup": True}))

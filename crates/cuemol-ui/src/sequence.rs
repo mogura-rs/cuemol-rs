@@ -1,4 +1,5 @@
-use cuemol_desktop_core::{DesktopAppState, GuiSeqChain, GuiSequenceCache};
+pub use cuemol_desktop_core::sequence_residue_number;
+use cuemol_desktop_core::{DesktopAppState, GuiSeqChain, GuiSequenceCache, GuiSequenceLayout};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,7 +32,6 @@ pub enum SequenceAction {
 
 const SEQUENCE_ROW_HEIGHT: f32 = 19.0;
 const SEQUENCE_RULER_HEIGHT: f32 = 16.0;
-const SEQUENCE_MAX_WIDTH: f32 = 30_000.0;
 
 struct SequenceColors {
     header: egui::Color32,
@@ -67,26 +67,8 @@ impl SequenceColors {
     }
 }
 
-pub fn sequence_residue_column(index: &str) -> Option<usize> {
-    let index = index.trim_start();
-    let index = index.strip_prefix('+').unwrap_or(index);
-    let digit_count = index.bytes().take_while(u8::is_ascii_digit).count();
-    if digit_count == 0 {
-        return None;
-    }
-    index[..digit_count].parse().ok()
-}
-
-pub fn sequence_column_count(chains: &[GuiSeqChain], cell_width: f32) -> usize {
-    let maximum = chains
-        .iter()
-        .flat_map(|chain| &chain.residues)
-        .filter_map(|residue| sequence_residue_column(&residue.residue_index))
-        .max()
-        .unwrap_or(0);
-    maximum
-        .saturating_add(10)
-        .min((SEQUENCE_MAX_WIDTH / cell_width) as usize)
+pub fn sequence_column_count(chains: &[GuiSeqChain], _cell_width: f32) -> usize {
+    GuiSequenceLayout::new(chains).columns
 }
 
 fn sequence_positions_share_row(lhs: &SequencePosition, rhs: &SequencePosition) -> bool {
@@ -153,7 +135,7 @@ pub fn sequence_range_action(
 #[derive(Debug)]
 pub struct SequencePanel {
     cache: GuiSequenceCache,
-    columns: usize,
+    layout: GuiSequenceLayout,
     cell_width: f32,
     marker: Option<SequencePosition>,
     drag_start: Option<SequencePosition>,
@@ -170,7 +152,7 @@ impl Default for SequencePanel {
     fn default() -> Self {
         Self {
             cache: GuiSequenceCache::default(),
-            columns: 0,
+            layout: GuiSequenceLayout::default(),
             cell_width: 0.,
             marker: None,
             drag_start: None,
@@ -202,11 +184,12 @@ impl SequencePanel {
         self.rects.clear();
         let cell_width =
             ui.fonts_mut(|fonts| fonts.glyph_width(&egui::FontId::monospace(13.), 'M')) + 2.;
-        if self.cache.refresh(state, "", generation) || self.cell_width != cell_width {
-            self.columns = sequence_column_count(self.cache.rows(), cell_width);
-            self.cell_width = cell_width;
+        if self.cache.refresh(state, "", generation) {
+            self.layout = GuiSequenceLayout::new(self.cache.rows());
         }
+        self.cell_width = cell_width;
         let chains = self.cache.rows();
+        let layout = &self.layout;
         if chains.is_empty() {
             self.marker = None;
             self.drag_start = None;
@@ -265,7 +248,7 @@ impl SequencePanel {
         );
         record_rect(&mut self.rects, "Sequence grid", grid_rect);
         record_rect(&mut self.rects, "Sequence splitter", splitter_rect);
-        let content_width = ((self.columns + 1) as f32 * cell_width).min(SEQUENCE_MAX_WIDTH);
+        let content_width = (layout.columns + 1) as f32 * cell_width;
         let content_height = chains.len() as f32 * SEQUENCE_ROW_HEIGHT;
         let mut origin = grid_rect.min - self.scroll_offset;
         ui.scope_builder(egui::UiBuilder::new().max_rect(grid_rect), |ui| {
@@ -292,8 +275,8 @@ impl SequencePanel {
                         as usize)
                         .min(chains.len());
                     let first_column = (viewport.left() / cell_width).floor().max(0.) as usize;
-                    let last_column =
-                        ((viewport.right() / cell_width).ceil().max(0.) as usize).min(self.columns);
+                    let last_column = ((viewport.right() / cell_width).ceil().max(0.) as usize)
+                        .min(layout.columns);
                     for (row_index, chain) in
                         chains.iter().enumerate().take(last_row).skip(first_row)
                     {
@@ -308,15 +291,11 @@ impl SequencePanel {
                                 colors.row,
                             );
                         }
-                        let first_residue = chain.residues.partition_point(|residue| {
-                            sequence_residue_column(&residue.residue_index)
-                                .is_none_or(|column| column < first_column)
-                        });
+                        let first_residue = chain
+                            .residues
+                            .partition_point(|residue| layout.column(residue) < first_column);
                         for residue in chain.residues.iter().skip(first_residue) {
-                            let Some(column) = sequence_residue_column(&residue.residue_index)
-                            else {
-                                continue;
-                            };
+                            let column = layout.column(residue);
                             if column >= last_column {
                                 break;
                             }
@@ -341,9 +320,12 @@ impl SequencePanel {
                         }
                     }
                     let pointer = ui.input(|input| input.pointer.hover_pos());
-                    let hover = pointer
-                        .filter(|point| visible.contains(*point))
-                        .and_then(|point| sequence_hit(chains, origin, cell_width, point, None));
+                    let hover =
+                        pointer
+                            .filter(|point| visible.contains(*point))
+                            .and_then(|point| {
+                                sequence_hit(chains, layout, origin, cell_width, point, None)
+                            });
                     if let Some(hit) = &hover {
                         let chain = sequence_chain(chains, hit).unwrap();
                         let residue = &chain.residues[hit.position];
@@ -353,7 +335,7 @@ impl SequencePanel {
                             residue.residue_index
                         ));
                     }
-                    if ui.input(|input| input.pointer.primary_pressed()) {
+                    if response.hovered() && ui.input(|input| input.pointer.primary_pressed()) {
                         if let Some(hit) = hover.clone() {
                             self.shift_at_down = ui.input(|input| input.modifiers.shift);
                             self.drag_start = Some(hit.clone());
@@ -368,25 +350,27 @@ impl SequencePanel {
                             input.pointer.primary_down() || input.pointer.primary_released()
                         })
                     {
-                        self.drag_end = pointer.and_then(|point| {
+                        let hit = pointer.and_then(|point| {
                             sequence_hit(
                                 chains,
+                                layout,
                                 origin,
                                 cell_width,
                                 point,
                                 self.drag_start.as_ref(),
                             )
                         });
+                        if hit.is_some() || ui.input(|input| input.pointer.primary_released()) {
+                            self.drag_end = hit;
+                        }
                     }
                     if response.secondary_clicked() {
                         self.context_hit = hover;
                         self.marker = self.context_hit.clone();
                     }
-                    if let Some(marker) = self
-                        .marker
-                        .as_ref()
-                        .and_then(|marker| sequence_cell_rect(chains, origin, cell_width, marker))
-                    {
+                    if let Some(marker) = self.marker.as_ref().and_then(|marker| {
+                        sequence_cell_rect(chains, layout, origin, cell_width, marker)
+                    }) {
                         ui.painter().rect_stroke(
                             marker,
                             0.,
@@ -395,12 +379,12 @@ impl SequencePanel {
                         );
                     }
                     if let (Some(start), Some(end)) = (
-                        self.drag_start
-                            .as_ref()
-                            .and_then(|hit| sequence_cell_rect(chains, origin, cell_width, hit)),
-                        self.drag_end
-                            .as_ref()
-                            .and_then(|hit| sequence_cell_rect(chains, origin, cell_width, hit)),
+                        self.drag_start.as_ref().and_then(|hit| {
+                            sequence_cell_rect(chains, layout, origin, cell_width, hit)
+                        }),
+                        self.drag_end.as_ref().and_then(|hit| {
+                            sequence_cell_rect(chains, layout, origin, cell_width, hit)
+                        }),
                     ) {
                         ui.painter().rect_stroke(
                             start.union(end),
@@ -499,10 +483,9 @@ impl SequencePanel {
                 });
             self.scroll_offset = output.state.offset;
         });
-        record_rect(
-            &mut self.rects,
-            "Sequence origin",
-            egui::Rect::from_min_size(origin, egui::vec2(cell_width, SEQUENCE_ROW_HEIGHT)),
+        self.rects.insert(
+            "Sequence origin".into(),
+            [origin.x, origin.y, cell_width, SEQUENCE_ROW_HEIGHT],
         );
         let names = egui::Rect::from_min_max(
             full.min + egui::vec2(0., SEQUENCE_RULER_HEIGHT),
@@ -543,7 +526,7 @@ impl SequencePanel {
         let last_column = (((self.scroll_offset.x + ruler.width()) / cell_width)
             .ceil()
             .max(0.) as usize)
-            .min(self.columns);
+            .min(layout.columns);
         for column in first_column..last_column {
             let x = origin.x + (column as f32 + 0.5) * cell_width;
             painter.line_segment(
@@ -553,11 +536,14 @@ impl SequencePanel {
                 ],
                 egui::Stroke::new(1., colors.ruler),
             );
-            if column >= 5 && column % 5 == 0 {
+            if let Some(number) = layout
+                .ruler_number(column)
+                .filter(|number| *number != 0 && number % 5 == 0)
+            {
                 painter.text(
                     egui::pos2(x, ruler.top()),
                     egui::Align2::CENTER_TOP,
-                    column,
+                    number,
                     egui::FontId::monospace(10.),
                     colors.ruler,
                 );
@@ -600,6 +586,7 @@ fn sequence_chain<'a>(
 
 fn sequence_hit(
     chains: &[GuiSeqChain],
+    layout: &GuiSequenceLayout,
     origin: egui::Pos2,
     cell_width: f32,
     point: egui::Pos2,
@@ -620,13 +607,13 @@ fn sequence_hit(
     };
     let chain = chains.get(row)?;
     let column = ((point.x - origin.x) / cell_width).floor() as usize;
-    let position = chain.residues.partition_point(|residue| {
-        sequence_residue_column(&residue.residue_index).is_none_or(|value| value < column)
-    });
+    let position = chain
+        .residues
+        .partition_point(|residue| layout.column(residue) < column);
     (chain
         .residues
         .get(position)
-        .and_then(|residue| sequence_residue_column(&residue.residue_index))
+        .map(|residue| layout.column(residue))
         == Some(column))
     .then(|| SequencePosition {
         object_uid: chain.object_uid,
@@ -637,6 +624,7 @@ fn sequence_hit(
 
 fn sequence_cell_rect(
     chains: &[GuiSeqChain],
+    layout: &GuiSequenceLayout,
     origin: egui::Pos2,
     cell_width: f32,
     hit: &SequencePosition,
@@ -644,7 +632,7 @@ fn sequence_cell_rect(
     let row = chains
         .iter()
         .position(|chain| chain.object_uid == hit.object_uid && chain.chain_id == hit.chain_id)?;
-    let column = sequence_residue_column(&chains[row].residues.get(hit.position)?.residue_index)?;
+    let column = layout.column(chains[row].residues.get(hit.position)?);
     Some(egui::Rect::from_min_size(
         origin + egui::vec2(column as f32 * cell_width, row as f32 * SEQUENCE_ROW_HEIGHT),
         egui::vec2(cell_width, SEQUENCE_ROW_HEIGHT),
@@ -899,6 +887,110 @@ mod tests {
         assert!(
             matches!(action, SequenceAction::Selection { ref expression, .. } if expression.is_empty())
         );
+    }
+
+    #[test]
+    fn sequence_cells_reach_signed_inserted_and_distant_residues() {
+        let mut state = DesktopAppState::new();
+        state.ensure_active_scene();
+        let mut text = String::new();
+        for (serial, (number, insertion)) in [
+            (-2, None),
+            (-1, None),
+            (0, None),
+            (1, None),
+            (1, Some('A')),
+            (1, Some('B')),
+            (2, None),
+            (5000, None),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            text.push_str(&format!("ATOM  {:5}  CA  ALA A{number:4}{}      0.000   0.000   0.000  1.00 10.00           C\n", serial + 1, insertion.unwrap_or(' ')));
+        }
+        state
+            .open_prepared(PreparedFile::parse("indices.pdb", text.as_bytes()).unwrap())
+            .unwrap();
+        let ctx = egui::Context::default();
+        let mut panel = SequencePanel::default();
+        let modifiers = egui::Modifiers::default();
+        frame(&ctx, &mut panel, &mut state, Vec::new(), modifiers, 0);
+        frame(&ctx, &mut panel, &mut state, Vec::new(), modifiers, 0);
+        for (column, index) in [
+            (0, "-2"),
+            (1, "-1"),
+            (2, "0"),
+            (3, "1"),
+            (4, "1A"),
+            (5, "1B"),
+            (6, "2"),
+        ] {
+            let point = cell(&panel, column);
+            frame(
+                &ctx,
+                &mut panel,
+                &mut state,
+                pointer(point, egui::PointerButton::Primary, true, modifiers),
+                modifiers,
+                0,
+            );
+            let action = frame(
+                &ctx,
+                &mut panel,
+                &mut state,
+                pointer(point, egui::PointerButton::Primary, false, modifiers),
+                modifiers,
+                0,
+            )
+            .unwrap();
+            assert!(
+                matches!(action, SequenceAction::Range { center_selection: Some(ref selection), .. } if selection == &format!("'A'.{index}.*"))
+            );
+        }
+        panel.scroll_offset.x = 5004. * panel.cell_width - 100.;
+        frame(&ctx, &mut panel, &mut state, Vec::new(), modifiers, 0);
+        frame(&ctx, &mut panel, &mut state, Vec::new(), modifiers, 0);
+        let point = cell(&panel, 5004);
+        assert!((0.0..800.0).contains(&point.x));
+        assert_eq!(
+            panel.cache.rows()[0].residues.last().unwrap().residue_index,
+            "5000"
+        );
+        assert_eq!(
+            panel
+                .layout
+                .column(panel.cache.rows()[0].residues.last().unwrap()),
+            5004
+        );
+        frame(
+            &ctx,
+            &mut panel,
+            &mut state,
+            pointer(point, egui::PointerButton::Primary, true, modifiers),
+            modifiers,
+            0,
+        );
+        assert!(
+            panel.drag_start.is_some(),
+            "point={point:?}, rects={:?}, offset={:?}",
+            panel.rects,
+            panel.scroll_offset
+        );
+        let action = frame(
+            &ctx,
+            &mut panel,
+            &mut state,
+            pointer(point, egui::PointerButton::Primary, false, modifiers),
+            modifiers,
+            0,
+        )
+        .expect("distant residue click");
+        assert!(
+            matches!(action, SequenceAction::Range { center_selection: Some(ref selection), .. } if selection == "'A'.5000.*")
+        );
+        assert_eq!(panel.layout.ruler_number(5004), Some(5000));
+        assert_eq!(panel.layout.ruler_number(4), None);
     }
 
     #[test]

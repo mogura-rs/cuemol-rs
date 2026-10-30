@@ -684,6 +684,7 @@ fn struct_object_dto(object: crate::GuiStructObject) -> StructObjectDto {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SequenceResidueDto {
+    column: usize,
     letter: String,
     res_id: i32,
     residue_index: String,
@@ -930,6 +931,8 @@ struct MoleculeDetailsDto {
     structure: Option<Vec<StructObjectDto>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     sequence: Option<Vec<SequenceChainDto>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sequence_layout: Option<cuemol_desktop_core::GuiSequenceLayout>,
 }
 
 #[derive(Serialize)]
@@ -2413,7 +2416,7 @@ impl AppModel {
             .collect();
         let active_scene_uid = self.desktop.active_scene().map(Uid::get);
         let structure_key = self.molecule_structure_key_from_objects(active_scene_uid, &objects);
-        let sequence_key = format!("{structure_key}|{}", self.selection);
+        let sequence_key = self.molecule_sequence_key(&structure_key);
         AppSnapshot {
             scenes,
             views,
@@ -2522,6 +2525,28 @@ impl AppModel {
         self.structure_revision = self.structure_revision.wrapping_add(1).max(1);
     }
 
+    fn molecule_sequence_key(&self, structure_key: &str) -> String {
+        let selections = self
+            .desktop
+            .active_scene()
+            .and_then(|uid| self.desktop.scene_manager().scene(uid))
+            .into_iter()
+            .flat_map(|scene| scene.objects())
+            .map(|object| {
+                (
+                    object.uid().get(),
+                    self.desktop
+                        .molecule_selection_text(object.uid())
+                        .unwrap_or(""),
+                )
+            })
+            .collect::<Vec<_>>();
+        format!(
+            "{structure_key}|{}",
+            serde_json::to_string(&(&self.selection, selections)).unwrap()
+        )
+    }
+
     fn molecule_details(
         &self,
         known_structure_key: &str,
@@ -2548,10 +2573,12 @@ impl AppModel {
                     .collect()
             }
         });
-        let sequence_key = format!("{structure_key}|{}", self.selection);
+        let sequence_key = self.molecule_sequence_key(&structure_key);
+        let mut sequence_layout = None;
         let sequence = (include_sequence && known_sequence_key != sequence_key).then(|| {
-            self.desktop
-                .active_sequence_view("")
+            let chains = self.desktop.active_sequence_view("");
+            let layout = cuemol_desktop_core::GuiSequenceLayout::new(&chains);
+            let result = chains
                 .into_iter()
                 .map(|chain| SequenceChainDto {
                     object_uid: chain.object_uid.get(),
@@ -2561,6 +2588,7 @@ impl AppModel {
                         .residues
                         .into_iter()
                         .map(|residue| SequenceResidueDto {
+                            column: layout.column(&residue),
                             letter: residue.letter,
                             res_id: residue.res_id,
                             residue_index: residue.residue_index,
@@ -2570,7 +2598,9 @@ impl AppModel {
                         })
                         .collect(),
                 })
-                .collect()
+                .collect();
+            sequence_layout = Some(layout);
+            result
         });
         MoleculeDetailsDto {
             sequence_key,
@@ -2578,6 +2608,7 @@ impl AppModel {
             structure_object_uid: object_uid,
             structure,
             sequence,
+            sequence_layout,
         }
     }
 
@@ -22586,6 +22617,80 @@ mod tests {
             "'A'.1.*"
         );
         assert_eq!(model.camera.center().x, 15.);
+        let before = model.snapshot();
+        model
+            .set_sequence_selection(first, "'A'.2.*".into())
+            .unwrap();
+        let after = model.snapshot();
+        assert_eq!(before.selection, after.selection);
+        assert_eq!(before.structure_key, after.structure_key);
+        assert_ne!(before.sequence_key, after.sequence_key);
+        let details = model.molecule_details(
+            &before.structure_key,
+            None,
+            &before.sequence_key,
+            true,
+            None,
+        );
+        assert!(
+            details
+                .sequence
+                .unwrap()
+                .iter()
+                .filter(|row| row.object_uid == first.get())
+                .flat_map(|row| &row.residues)
+                .find(|residue| residue.residue_index == "2")
+                .unwrap()
+                .selected
+        );
+    }
+
+    #[test]
+    fn sequence_details_preserve_signed_inserted_and_distant_columns() {
+        let mut model = model_without_gpu();
+        let mut pdb = String::new();
+        for (offset, (number, insertion)) in [
+            (-2, ' '),
+            (-1, ' '),
+            (0, ' '),
+            (1, ' '),
+            (1, 'A'),
+            (1, 'B'),
+            (2, ' '),
+            (5000, ' '),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            pdb.push_str(&format!("ATOM  {:5}  CA  ALA A{number:4}{insertion}      0.000   0.000   0.000  1.00 10.00           C\n", offset + 1));
+        }
+        model
+            .desktop
+            .open_bytes("indices.pdb", pdb.as_bytes())
+            .unwrap();
+        let details = model.molecule_details("", None, "", true, None);
+        let layout = details.sequence_layout.as_ref().unwrap();
+        assert_eq!(layout.minimum, -2);
+        assert_eq!(layout.ruler_number(4), None);
+        assert_eq!(layout.ruler_number(5004), Some(5000));
+        let residues = &details.sequence.as_ref().unwrap()[0].residues;
+        assert_eq!(
+            residues
+                .iter()
+                .map(|residue| residue.column)
+                .collect::<Vec<_>>(),
+            [0, 1, 2, 3, 4, 5, 6, 5004]
+        );
+        assert_eq!(residues[4].selection, "'A'.1A.*");
+        let cached = model.molecule_details(
+            &details.structure_key,
+            None,
+            &details.sequence_key,
+            true,
+            None,
+        );
+        assert!(cached.sequence.is_none());
+        assert!(cached.sequence_layout.is_none());
     }
 
     #[test]
