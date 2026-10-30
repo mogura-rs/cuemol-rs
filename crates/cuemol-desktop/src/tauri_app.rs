@@ -2551,7 +2551,7 @@ impl AppModel {
         let sequence_key = format!("{structure_key}|{}", self.selection);
         let sequence = (include_sequence && known_sequence_key != sequence_key).then(|| {
             self.desktop
-                .active_sequence_view(&self.selection)
+                .active_sequence_view("")
                 .into_iter()
                 .map(|chain| SequenceChainDto {
                     object_uid: chain.object_uid.get(),
@@ -4515,11 +4515,7 @@ impl AppModel {
             .desktop
             .molecule_selection_text(object_uid)
             .map_err(|error| error.to_string())?;
-        Ok(if selection.trim().is_empty() {
-            self.selection.trim().to_string()
-        } else {
-            selection.to_string()
-        })
+        Ok(selection.to_string())
     }
 
     fn sequence_range_selection(
@@ -4532,7 +4528,7 @@ impl AppModel {
         self.desktop
             .molecule_residue_range_selection_text(
                 object_uid,
-                &self.selection,
+                "",
                 anchor_selection,
                 range_selection,
                 toggle,
@@ -4547,7 +4543,7 @@ impl AppModel {
     ) -> Result<bool, String> {
         let center = self
             .desktop
-            .molecule_selection_center_for_text(object_uid, target_selection)
+            .molecule_residue_pivot_for_text(object_uid, target_selection)
             .map_err(|error| error.to_string())?;
         if let Some(center) = center {
             self.camera.set_center(center);
@@ -20245,8 +20241,8 @@ mod tests {
             .iter()
             .find(|renderer| renderer.uid == nucl_uid.get())
             .unwrap();
-        assert_eq!(nucl.specific["section.width"], "0.4");
-        assert_eq!(nucl.specific["section.type"], "roundsquare");
+        assert_eq!(nucl.specific["section.width"], "0.5");
+        assert_eq!(nucl.specific["section.type"], "elliptical");
         assert_eq!(nucl.specific["section.tuber"], "2.5");
         assert_eq!(nucl.specific["axialdetail"], "8");
         assert_eq!(nucl.specific["pivotatom"], "P");
@@ -22533,6 +22529,63 @@ mod tests {
             .apply_sequence_action(&input("toggle", "'A'.1.*", "", None))
             .unwrap();
         assert!((model.camera.center().x - 20.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn sequence_selection_is_per_molecule_and_center_uses_transformed_pivot() {
+        let mut model = model_without_gpu();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let molecule = cuemol_molstr::read_pdb_str(
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C  \n\
+             ATOM      2  CA  GLY A   2      10.000   0.000   0.000  1.00 10.00           C  \n\
+             ATOM      3  N   GLY A   2      50.000   0.000   0.000  1.00 10.00           N  \nEND\n",
+        )
+        .unwrap();
+        let scene = model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap();
+        let first = scene.add_molecule_with_source_type("first", molecule.clone(), "pdb");
+        let other = scene.add_molecule_with_source_type("other", molecule, "pdb");
+        model
+            .set_sequence_selection(first, "'A'.1.*".into())
+            .unwrap();
+        assert!(model
+            .molecule_selection_for_sequence(other)
+            .unwrap()
+            .is_empty());
+        let details = model.molecule_details("", None, "", true, None);
+        assert!(details
+            .sequence
+            .unwrap()
+            .iter()
+            .filter(|row| row.object_uid == other.get())
+            .flat_map(|row| &row.residues)
+            .all(|residue| !residue.selected));
+        model
+            .desktop
+            .scene_manager_mut()
+            .object_mut(other)
+            .unwrap()
+            .set_xform_matrix(cuemol_core::Matrix4::make_trans_mat(
+                cuemol_core::Vector4::new3(5., 0., 0.),
+            ));
+        model
+            .apply_sequence_action(&SequenceActionInput {
+                object_uid: other.get(),
+                action: "toggle-center".into(),
+                target_selection: "'A'.2.*".into(),
+                range_selection: String::new(),
+                radius: None,
+            })
+            .unwrap();
+        assert_eq!(model.selection, "'A'.2.*");
+        assert_eq!(
+            model.molecule_selection_for_sequence(first).unwrap(),
+            "'A'.1.*"
+        );
+        assert_eq!(model.camera.center().x, 15.);
     }
 
     #[test]

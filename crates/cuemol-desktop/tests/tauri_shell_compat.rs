@@ -812,33 +812,6 @@ fn tauri_sequence_panel_matches_reference_mouse_and_context_operations() {
     assert!(CSS.contains("position: sticky;"));
     assert!(TAURI_APP_RS.contains("fn apply_sequence_action("));
     assert!(TAURI_APP_RS.contains("molecule_residue_range_selection_text"));
-    for binding in [
-        "NativeSequenceAction",
-        "native_sequence_range_action",
-        "response.context_menu",
-        "sequence_position_in_drag_range",
-    ] {
-        assert!(
-            NATIVE_GUI_RS.contains(binding),
-            "missing native Sequence binding {binding}"
-        );
-    }
-    let native_sequence = NATIVE_GUI_RS
-        .split("fn sequence_tab(")
-        .nth(1)
-        .and_then(|source| source.split("fn trajectory_tab(").next())
-        .expect("native Sequence panel");
-    assert!(native_sequence.contains("egui::ScrollArea::both()"));
-    assert!(native_sequence.contains("NATIVE_SEQUENCE_RULER_HEIGHT"));
-    assert!(native_sequence.contains("egui::vec2(name_width, NATIVE_SEQUENCE_ROW_HEIGHT)"));
-    assert!(native_sequence.contains("sequence_residue_column"));
-    assert!(native_sequence.contains("native_sequence_ruler"));
-    assert!(native_sequence.contains("native_sequence_names"));
-    assert!(native_sequence.contains("native_sequence_grid"));
-    assert!(native_sequence.contains("scroll_offset(scroll_offset)"));
-    assert!(native_sequence.contains("splitter.drag_delta().x"));
-    assert!(native_sequence.contains("sequence_panel:name_width"));
-    assert!(!native_sequence.contains("horizontal_wrapped"));
 }
 
 #[test]

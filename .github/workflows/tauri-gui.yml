@@ -31,6 +31,9 @@ jobs:
       - name: Build the tagged Tauri source and fixture CLI
         working-directory: .cache/tauri-source
         run: cargo build --locked --release -p cuemol-desktop -p cuemol-cli --features cuemol-desktop/tauri-gui,cuemol-cli/scripting
+      - name: Test the tagged Tauri model
+        working-directory: .cache/tauri-source
+        run: cargo test --locked -p cuemol-desktop --features tauri-gui --lib
       - name: Check presented pixels and OS input
         run: |
           mkdir -p .cache/tauri-gui-check

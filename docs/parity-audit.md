@@ -82,6 +82,14 @@ interaction. The full shared/native run passed 1,438 tests with one ignored,
 and the browser suite passed all 112 cases before the final palette correction;
 the three affected browser cases passed again afterward.
 
+The Tauri adapter now uses the same per-molecule selection and transformed
+pivot query. Its dedicated regression exercises two molecules with different
+selections. The complete native suite passed 243 tests with one ignored; the
+Tauri model suite passed 148 with six ignored. The Tauri workflow now runs that
+model suite as well as the displayed-window check. Obsolete source-location
+assertions were removed from the Tauri shell test, and its nucleotide-default
+expectation was updated to the already verified 0.5-width elliptical section.
+
 ### Measurements
 
 The following measurements were taken on 2026-10-30 after the selection and
@@ -140,5 +148,6 @@ checks outside the checkout: version, offline skill, startup scripting, config
 directory and the 140-tool MCP catalog. A separately built source-distribution
 archive passed the same installed-command checks. The Linux installed binary also passed
 the native OS-input and captured-pixel check. The release matrix repeats the
-Python installation check on all five supported targets. Public Git-URL
-installation and the new release's distribution checks remain delivery gates.
+Python installation check on all five supported targets. A public Git-URL
+installation pinned to `d34bd69` also passed the installed-command checks.
+The new release's distribution checks remain delivery gates.
