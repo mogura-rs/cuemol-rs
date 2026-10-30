@@ -35,13 +35,13 @@ speedup from a single optimized stage or compare timings from different hosts.
 | Console | CueMol/PyMOL dialects, command arguments, completion, history, multiline input, IME and transaction behavior | Shared CueMol/PyMOL interpreters, completion, native QAX logging/replay and cancellable execution implemented; focused shared, browser and OS-input checks passed; affected regression checks, CI and Pages passed at `99b7c16`; public review repairs and release delivery are in progress |
 | Actions | History rows, operation inspection, QAX export, bundled/user macros and reusable actions | History selection, operation inspection, QAX export and bundled/user macro libraries are implemented in native, WASM and Tauri; CI, Pages and the macOS window check passed at `488ce9c`; review repairs passed affected checks and were published at `53100c5` |
 | Scripts and services | JavaScript/Python helpers, retained state, callbacks, errors, file arguments and asynchronous readers | Previous compatibility checks exist; shared workload comparison pending |
-| File and scene I/O | Reader options, saved cameras, source metadata, selections, linked/embedded data and cancellation | Previous compatibility checks exist; paired performance comparison pending |
+| File and scene I/O | Reader options, saved cameras, source metadata, selections, linked/embedded data and cancellation | Embedded QDF/PDB secondary-structure defaults and topology transfers repaired; paired scene loading measured below; broader I/O comparison pending |
 | Navigation and cameras | Rotation, pan, zoom, fitting, clipping, bookmarks, visibility and screen coordinates | Previous numeric and interaction oracles exist; integrated comparison pending |
 | Selection and annotation | Expressions, residue ranges, lasso, named selections, labels and measurement modes | Sequence toggle/range/context actions now share a virtualized native/browser panel; insertion-code selection and pivot centering repaired; broader annotation comparison pending |
 | Molecular editing | Merge/delete, chain/residue changes, secondary structure, transformations and undo/redo | Command coverage exists; dialog and edge-case comparison pending |
 | Analysis and surfaces | Alignment, interactions, surface creation/regeneration/cutting and electrostatics | Numerical/tool checks exist; dialog and performance comparison pending |
-| Viewport rendering | Molecular/map/surface representations, transparency, lighting, edges, fog, AA and AO | Previous primitive/oracle checks exist; paired scene comparison pending |
-| Render and export | Umbreon settings, preview, cancel/save, physical units, alpha and still/movie output | Previous focused checks exist; reference timing and memory comparison pending |
+| Viewport rendering | Molecular/map/surface representations, transparency, lighting, edges, fog, AA and AO | Ribbon widths, topology links, applied pivots and secondary-structure junctions repaired; remaining viewport effects and scene comparisons are pending |
+| Render and export | Umbreon settings, preview, cancel/save, physical units, alpha and still/movie output | Six opaque native export conditions compared below; physical lighting and geometry repaired, traversal optimized; transparent scenes, denoising and broader export controls remain under comparison |
 | Animation and MD | Morphing, camera/property motions, seek/pause/stop, indexed trajectories and bounded memory | Previous state/interaction checks exist; complete playback comparison pending |
 | Native integration | Windows, dialogs, settings, recent files, installer/update and OS credential stores | Five-platform published checks exist; local OS-input prerequisites remain documented |
 | External prerequisites | Real AI providers and hardware quad-buffer presentation | Credentials/target hardware remain required; quad-buffer backend is unimplemented |
@@ -51,6 +51,112 @@ uses Umbreon. Any newly confirmed mismatch must have a reproducer, a repair or
 explicit unresolved status, and evidence after the repair. Publication requires
 the affected regression checks, public review, terminal CI, distribution and
 Pages verification. Unresolved required rows prevent a claim of full parity.
+
+## Saved-scene and backbone repairs
+
+The scene reader had used the PDB reader's secondary-structure reconstruction
+default for embedded `qdfpdb` data. The published reference preserves deposited
+secondary structure for this format. Dispatch now retains that default while
+honoring an explicit reader override; ordinary PDB imports retain their existing
+reconstruction default. Tests pass a scene through parsing, the worker payload
+and application to verify all four format/override combinations.
+
+Loaded backbone renderers now use the directed polymer links and pivot names
+assigned by topology. Distance-based connectivity remains a fallback for raw
+coordinates that have not had topology applied. Previously, nearby pivots could
+join a chain break or miss a custom pivot. Links survive coordinate updates,
+copying, residue edits, undo and worker transfers. Unknown residue topologies are
+generated from the first occurrence of a residue name in each molecule and
+reused, matching published-reference probes. A new molecule copy rebuilds its
+topology. This corrected the 4HHB bond count from 4,627 to the reference's 4,638.
+
+An unstyled ribbon now uses the factory section width. A plain `secondary2=H`
+also remains a helix body at a chain break; it no longer acquires an inferred
+head junction that extends beyond the last residue. Tests that require connected
+protein or nucleotide backbones now include the actual linking atoms. The
+picking fixture reapplies topology after changing residue identities. Their
+selection, transform, dimension and color assertions remain in place.
+
+## Physical lighting and export measurements
+
+The reference's default GI path length is one bounce. The previous Rust default
+of four changed both the image and the workload. The repaired renderer also
+uses GGX highlights and dielectric glossy reflection, the reference's Sobol
+sample sequence, and geometric-face orientation for grazing primary normals.
+Previously, dielectric reflections were missing and grazing ribbon ends could
+become too dark. The reduced GI grid uses normal/depth-guided interpolation and
+recomputes uncovered or low-confidence samples. Its storage covers the current
+render tile plus a one-row halo; tests check thin geometry, cancellation and
+identical output across tile boundaries.
+
+The CPU acceleration structure now uses binned surface-area splits, adjacent
+child nodes and direction-aware bounds tests. It retains the previous tie rules
+for coincident surfaces. Opaque primary rays avoid collecting and sorting every
+intersection, cylinder axes are prepared once, and workers take short row blocks
+to distribute uneven work. These optimizations preserve the tested image hashes.
+An isolated 4HHB ribbon check alternated three fresh processes of each Rust
+build, retaining the same repaired geometry and lighting. Median first/repeated
+export times fell from 1,339/1,353 ms to 1,114/1,120 ms, about 17%, with identical
+RGBA hashes in every export. This compares the traversal optimization with its
+immediate predecessor; it is not a comparison with the original appearance.
+
+The following measurements used the same ARM64 macOS host, CueMol 2.4.1.547,
+embedded PDB data, saved camera, factory renderer, 640 x 480 output, 3 x 3
+supersampling and no denoising. Each condition ran in three fresh processes with
+two exports per process. Times are medians of the first and repeated exports,
+including scene preparation, CPU rendering and PNG writing. RSS is the range of
+whole-process peaks, including loading and each application's runtime. The two
+engines use their default worker allocation; the generic `numThreads` setting
+does not control the reference Umbreon exporter.
+
+| Scene | GI | Reference first / repeat (ms) | Rust first / repeat (ms) | Reference / Rust peak RSS (MiB) | Whole-image RGBA mean / maximum error |
+| --- | --- | ---: | ---: | --- | ---: |
+| 1CRN ribbon | Off | 41.4 / 41.0 | 43.1 / 40.9 | 137.9 / 16.0-16.2 | 0.000056 / 20 |
+| 1CRN ribbon | On | 214.2 / 212.2 | 271.1 / 266.7 | 486.1 / 22.3-22.4 | 0.00436 / 24 |
+| 4HHB ribbon | Off | 77.5 / 75.6 | 106.0 / 103.1 | 178.2-179.8 / 55.7-55.8 | 0.000039 / 1 |
+| 4HHB ribbon | On | 627.0 / 623.2 | 1104.5 / 1108.2 | 531.1 / 55.8-55.9 | 0.03594 / 7 |
+| 1CRN CPK | On | 563.3 / 568.0 | 774.8 / 765.5 | 481.5 / 20.1-20.4 | 0.00628 / 17 |
+| 4HHB ball-and-stick | On | 3321.3 / 3319.3 | 5746.3 / 5835.4 | 489.5 / 28.9-29.0 | 0.21596 / 31 |
+
+Errors use channel values from 0 to 255 and include the background. Every
+condition produced one repeated RGBA hash across all six exports. Both readers
+reported 327 atoms / 337 bonds for 1CRN and 4,779 atoms / 4,638 bonds for 4HHB.
+Residual image differences remain, especially in GI ball-and-stick rendering and
+isolated edge pixels. A separate ball-and-stick check with GI disabled reduced
+the mean error to 0.00024, so the dominant remaining difference is in lighting.
+These results do not establish parity for transparent, denoised or animated
+scenes.
+
+The Rust process uses less memory in these cases, but GI exports remain slower
+than the reference. Loading is also workload-dependent: median 1CRN load times
+were approximately 2.3-2.4 ms in Rust and 7.2-7.6 ms in the reference, while 4HHB
+took 63-71 ms and 18 ms respectively. Export timings exclude those load times.
+No whole-application speedup is inferred from these measurements.
+
+To reproduce an export comparison with an installed reference application:
+
+```sh
+uv run --no-project python scripts/make-render-benchmark-scene.py \
+  input.pdb .cache/render-audit/scene.qsc --renderer ribbon
+cargo build --locked --release -p cuemol-command --example render_bench
+uv run scripts/benchmark-render.py \
+  --binary target/release/examples/render_bench \
+  --fixture .cache/render-audit/scene.qsc \
+  --reference-binary "$REFERENCE_BINARY" --reference-app "$REFERENCE_APP" \
+  --reference-version 2.4.1.547 --revision "$(git rev-parse HEAD)" \
+  --output .cache/render-audit/comparison.json
+```
+
+Use `--no-gi` when creating the direct-lighting fixture. The benchmark records
+the platform, binary and fixture hashes, per-process RSS, stage timings, atom
+and bond counts, and decoded image hashes. It rejects mismatched molecule
+identities/counts and image dimensions. Generated fixtures and results belong
+in the ignored cache.
+
+The complete shared/native run passed 1,729 tests with one ignored. After
+cylinder-axis reuse was added, all 93 render unit/integration tests passed and
+both WASM modules rebuilt. Browser, public review and delivery checks for this
+batch are in progress.
 
 ## Shell control inventory
 

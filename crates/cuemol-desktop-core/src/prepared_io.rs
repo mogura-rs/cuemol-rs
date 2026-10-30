@@ -48,13 +48,13 @@ impl PreparedFile {
 
     /// The transfer protocol is private to matching application builds.
     pub fn encode(&self) -> Result<Vec<u8>> {
-        postcard::to_extend(self, b"CMPL\x02".to_vec())
+        postcard::to_extend(self, b"CMPL\x03".to_vec())
             .map_err(|error| CueMolError::parse(error.to_string()))
     }
 
     pub fn decode(data: &[u8]) -> Result<Self> {
         let data = data
-            .strip_prefix(b"CMPL\x02")
+            .strip_prefix(b"CMPL\x03")
             .ok_or_else(|| CueMolError::parse("unsupported prepared-file version"))?;
         let (value, remaining) = postcard::take_from_bytes(data)
             .map_err(|error| CueMolError::parse(error.to_string()))?;
@@ -375,8 +375,10 @@ mod tests {
     const PDB: &[u8] = b"ATOM     17  CA  GLY A   1       1.000   2.000   3.000  0.75 12.00           C  \nATOM     93  C   GLY A   1       2.400   2.000   3.000  1.00 10.00           C  \nEND\n";
 
     #[test]
-    fn transfer_keeps_applied_custom_topology_pivots() {
-        let mut molecule = read_pdb_str(std::str::from_utf8(PDB).unwrap()).unwrap();
+    fn transfer_keeps_applied_custom_topology_pivots_and_links() {
+        let mut source = std::str::from_utf8(PDB).unwrap().replace("END\n", "");
+        source.push_str("ATOM     94  N   GLY A   2       3.700   2.000   3.000  1.00 10.00           N\nATOM     95  CA  GLY A   2       5.100   2.000   3.000  1.00 10.00           C\nEND\n");
+        let mut molecule = read_pdb_str(&source).unwrap();
         let mut topology = cuemol_molstr::TopoDB::global().clone();
         let mut residue = topology.residue("GLY").unwrap().clone();
         residue.pivot_atom = "C".into();
@@ -396,8 +398,12 @@ mod tests {
             molecule.residue_pivot_pos("A", "1").unwrap().unwrap().x,
             2.4
         );
+        assert_eq!(
+            molecule.topology_linked(&molecule.atoms()[0], &molecule.atoms()[2]),
+            Some(true)
+        );
         let mut incompatible = encoded;
-        incompatible[4] = 1;
+        incompatible[4] = 2;
         assert!(PreparedFile::decode(&incompatible).is_err());
     }
 
@@ -522,6 +528,60 @@ mod tests {
         assert_eq!(object.mol().atoms()[1].serial, 93);
         assert_eq!(object.mol().bond_count(), 0);
         assert_eq!(state.active_view_camera().unwrap().zoom(), 23.);
+    }
+
+    #[test]
+    fn transfer_keeps_generated_ligand_topology_for_reapplication() {
+        let mut source = std::str::from_utf8(PDB)
+            .unwrap()
+            .replace("GLY", "XYZ")
+            .replace("END\n", "");
+        source.push_str("HETATM   94  CA  XYZ A   2      10.000   2.000   3.000  1.00 10.00           C\nHETATM   95  C   XYZ A   2      14.000   2.000   3.000  1.00 10.00           C\nEND\n");
+        let prepared = PreparedFile::parse("ligand.pdb", source.as_bytes()).unwrap();
+        let PreparedContents::Molecule(data) = PreparedFile::decode(&prepared.encode().unwrap())
+            .unwrap()
+            .contents
+        else {
+            panic!("molecule expected")
+        };
+        let mut molecule = data.into_molecule().unwrap();
+        assert_eq!(molecule.bond_count(), 2);
+        molecule.atoms_mut()[1].position.x = 6.;
+        molecule.apply_topology();
+        assert_eq!(molecule.bond_count(), 2);
+    }
+
+    #[test]
+    fn prepared_qdfpdb_keeps_deposited_secondary_structure_unless_overridden() {
+        let pdb = "HELIX    1  AA SER A    1  GLY A    2  1                                   2    \nATOM      1  CA  SER A   1       0.000   0.000   0.000  1.00 10.00           C\nATOM      2  C   SER A   1       1.500   0.000   0.000  1.00 10.00           C\nATOM      3  N   GLY A   2       2.800   0.000   0.000  1.00 10.00           N\nATOM      4  CA  GLY A   2       3.800   0.000   0.000  1.00 10.00           C\nEND\n";
+        for (format, options, expected) in [
+            ("qdfpdb", "", Some("helix")),
+            ("qdfpdb", "<ropts build2ndry=\"true\"/>", None),
+            ("pdb", "", None),
+            ("pdb", "<ropts build2ndry=\"false\"/>", Some("helix")),
+        ] {
+            let source = format!("<scene><object type=\"MolCoord\" name=\"molecule\" src=\"datachunk:00000\" srctype=\"{format}\">{options}</object></scene>\n========== End of XML ==========\n\n==========START datachunk:00000==========\n{pdb}\n==========END datachunk:00000==========\n");
+            let prepared = PreparedFile::parse("secondary.qsc", source.as_bytes()).unwrap();
+            let mut state = DesktopAppState::new();
+            let prepared = PreparedFile::decode(&prepared.encode().unwrap()).unwrap();
+            state.open_prepared(prepared).unwrap();
+            let object = state
+                .scene_manager()
+                .scene(state.active_scene().unwrap())
+                .unwrap()
+                .objects()
+                .first()
+                .unwrap();
+            assert_eq!(
+                object
+                    .mol()
+                    .get_residue_prop_str("A", "1", "secondary")
+                    .unwrap()
+                    .as_deref(),
+                expected,
+                "{format} {options}"
+            );
+        }
     }
 
     #[test]

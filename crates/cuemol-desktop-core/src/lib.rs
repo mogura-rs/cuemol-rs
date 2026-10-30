@@ -69197,7 +69197,7 @@ end_header
         }
         let mut pdb = String::new();
         for (resid, base_x) in [(1, 0.0), (2, 5.0), (3, 10.0)] {
-            let serial = (resid - 1) * 4;
+            let serial = (resid - 1) * 5;
             pdb.push_str(&pdb_atom(serial + 4, "P", "G", resid, base_x, 0.0, 1.0));
             pdb.push('\n');
             pdb.push_str(&pdb_atom(serial + 1, "C1'", "G", resid, base_x, 0.0, 0.0));
@@ -69220,6 +69220,16 @@ end_header
                 base_x + 2.0,
                 0.0,
                 0.0,
+            ));
+            pdb.push('\n');
+            pdb.push_str(&pdb_atom(
+                serial + 5,
+                "O3'",
+                "G",
+                resid,
+                base_x + 3.4,
+                0.0,
+                1.0,
             ));
             pdb.push('\n');
         }
@@ -69391,7 +69401,17 @@ end_header
 
     #[test]
     fn new_tracestick_uses_cuemol_style_dimensions_and_molecule_color() {
-        let pdb = b"ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C\nATOM      2  CA  ALA A   2       3.800   0.000   0.000  1.00 10.00           N\nATOM      3  CA  ALA A   3       7.600   0.000   0.000  1.00 10.00           C\nEND\n";
+        let pdb = concat!(
+            "ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C\n",
+            "ATOM      2  CA  ALA A   2       3.800   0.000   0.000  1.00 10.00           N\n",
+            "ATOM      3  CA  ALA A   3       7.600   0.000   0.000  1.00 10.00           C\n",
+            "ATOM      4  C   ALA A   1       1.200   0.000   0.000  1.00 10.00           C\n",
+            "ATOM      5  N   ALA A   2       2.500   0.000   0.000  1.00 10.00           N\n",
+            "ATOM      6  C   ALA A   2       5.000   0.000   0.000  1.00 10.00           C\n",
+            "ATOM      7  N   ALA A   3       6.300   0.000   0.000  1.00 10.00           N\n",
+            "END\n",
+        )
+        .as_bytes();
         let mut app = DesktopAppState::new();
         app.open_bytes("trace.pdb", pdb).unwrap();
         let scene_uid = app.active_scene().unwrap();

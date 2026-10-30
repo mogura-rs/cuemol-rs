@@ -241,6 +241,32 @@ fn material(snapshot: &RenderSceneSnapshot, hit: Hit) -> MaterialPreset {
             .unwrap_or("default"),
     )
 }
+
+pub(super) fn background_specular(
+    snapshot: &RenderSceneSnapshot,
+    hit: Hit,
+    background: [f32; 4],
+    params: &UmbreonRenderParams,
+) -> [f64; 3] {
+    if hit.unlit || params.use_gi {
+        return [0.; 3];
+    }
+    let MaterialPreset::Physical {
+        metallic,
+        specular,
+        reflection,
+        ..
+    } = material(snapshot, hit)
+    else {
+        return [0.; 3];
+    };
+    let amount = if reflection > 0. {
+        [reflection; 3]
+    } else {
+        bsdf::fresnel_base(hit.color, metallic, specular)
+    };
+    std::array::from_fn(|i| amount[i] * f64::from(background[i]))
+}
 fn diffuse_weight(m: MaterialPreset) -> f64 {
     match m {
         MaterialPreset::Physical {
@@ -248,6 +274,41 @@ fn diffuse_weight(m: MaterialPreset) -> f64 {
         } => diffuse * (1. - metallic),
         MaterialPreset::Toon { diffuse, .. } => diffuse,
     }
+}
+
+pub(super) fn reflected_radiance(
+    snapshot: &RenderSceneSnapshot,
+    index: &RayIndex<'_>,
+    hit: Hit,
+    direction: Vector4,
+    camera: &Camera,
+    params: &UmbreonRenderParams,
+    group: Option<usize>,
+) -> [f64; 3] {
+    let sky = environment(direction, camera, params);
+    let ray = Ray {
+        origin: hit.position + hit.normal * epsilon(hit),
+        direction,
+    };
+    let Some(mut reflected) = index.nearest(ray, f64::INFINITY, group) else {
+        return sky;
+    };
+    if reflected.unlit {
+        return [0.; 3];
+    }
+    if reflected.normal.dot3d(direction) > 0. {
+        reflected.normal = reflected.normal * -1.;
+    }
+    let kd = diffuse_weight(material(snapshot, reflected));
+    let direct: f64 = lights(camera, params)
+        .into_iter()
+        .map(|light| {
+            light.energy
+                * reflected.normal.dot3d(light.direction).max(0.)
+                * shadow(index, reflected, light, params, group)
+        })
+        .sum();
+    std::array::from_fn(|i| kd * reflected.color[i] * (direct + sky[i]))
 }
 
 pub(super) fn indirect(
@@ -259,12 +320,58 @@ pub(super) fn indirect(
     group: Option<usize>,
 ) -> [f64; 3] {
     let count = p.gi_samples.clamp(1, 256) as usize;
+    indirect_samples(snapshot, index, hit, camera, p, group, count, None, false)
+}
+
+pub(super) fn indirect_at(
+    snapshot: &RenderSceneSnapshot,
+    index: &RayIndex<'_>,
+    hit: Hit,
+    camera: &Camera,
+    p: &UmbreonRenderParams,
+    group: Option<usize>,
+    count: usize,
+    pixel: [u32; 2],
+    geometric_horizon: bool,
+) -> [f64; 3] {
+    indirect_samples(
+        snapshot,
+        index,
+        hit,
+        camera,
+        p,
+        group,
+        count,
+        Some(sobol::Sampler::new(pixel, count)),
+        geometric_horizon,
+    )
+}
+
+fn indirect_samples(
+    snapshot: &RenderSceneSnapshot,
+    index: &RayIndex<'_>,
+    hit: Hit,
+    camera: &Camera,
+    p: &UmbreonRenderParams,
+    group: Option<usize>,
+    count: usize,
+    sampler: Option<sobol::Sampler>,
+    geometric_horizon: bool,
+) -> [f64; 3] {
     let mut result = [0.; 3];
     let rng = seed(hit);
+    let geometric_normal = geometric_horizon.then(|| index.geometric_normal(hit));
     for i in 0..count {
+        let direction = sampler.as_ref().map_or_else(
+            || sample(hit.normal, i, count, rng, true),
+            |sampler| sampler.direction(hit.normal, i),
+        );
+        if geometric_normal.is_some_and(|normal| direction.dot3d(normal) <= 0.) {
+            continue;
+        }
         let mut ray = Ray {
             origin: hit.position + hit.normal * epsilon(hit),
-            direction: sample(hit.normal, i, count, rng, true),
+            direction,
         };
         let mut throughput = [1.; 3];
         for bounce in 0..p.gi_bounces.clamp(1, 8) {
@@ -333,6 +440,7 @@ pub(super) fn shade(
             metallic,
             roughness,
             specular,
+            ..
         } => (
             ambient,
             diffuse * (1. - metallic),
@@ -378,24 +486,24 @@ pub(super) fn shade(
         }
         let vis = shadow(index, hit, light, p, group);
         let ndl = hit.normal.dot3d(light.direction).max(0.);
-        let highlight = if !light.shadow {
-            0.
+        let highlight = if !light.shadow || ndl <= 0. {
+            [0.; 3]
         } else if toon {
             let reflected =
                 normalize(hit.normal * (2. * hit.normal.dot3d(light.direction)) - light.direction);
-            specular * reflected.dot3d(view).max(0.).powf(phong_size)
+            [specular * reflected.dot3d(view).max(0.).powf(phong_size); 3]
         } else {
-            let half = normalize(light.direction + view);
-            let exponent = (2. / roughness.max(0.02).powi(2) - 2.).clamp(1., 5000.);
-            specular * hit.normal.dot3d(half).max(0.).powf(exponent)
+            bsdf::direct(
+                bsdf::fresnel_base(hit.color, metallic, specular),
+                roughness,
+                hit.normal,
+                view,
+                light.direction,
+            )
         };
+        let ndl = if toon && ndl > 0. { 1. } else { ndl };
         for c in 0..3 {
-            let spec = if toon {
-                highlight
-            } else {
-                highlight * (0.04 * (1. - metallic) + metallic * hit.color[c])
-            };
-            color[c] += light.energy * vis * (hit.color[c] * kd * ndl * diffuse_ao + spec);
+            color[c] += light.energy * vis * (hit.color[c] * kd * ndl * diffuse_ao + highlight[c]);
         }
     }
     if p.use_gi && p.gi_intensity > 0. && !toon {
@@ -403,36 +511,27 @@ pub(super) fn shade(
         for c in 0..3 {
             color[c] += hit.color[c] * kd * e[c];
         }
-        if metallic > 0. {
-            let reflected =
-                normalize(ray.direction - hit.normal * (2. * ray.direction.dot3d(hit.normal)));
-            let count = p.gi_samples.clamp(1, 32) as usize;
-            let mut settings = p.clone();
-            settings.use_gi = false;
-            settings.ao_samples = 0;
-            settings.show_edge_lines = false;
-            for i in 0..count {
-                let direction = cone_sample(reflected, roughness * roughness, i, count);
-                if direction.dot3d(hit.normal) <= 0. {
-                    continue;
-                }
-                let r = Ray {
-                    origin: hit.position + hit.normal * epsilon(hit),
-                    direction,
-                };
-                let reflected_color = index
-                    .nearest(r, f64::INFINITY, group)
-                    .map(|h| shade(snapshot, index, h, r, camera, &settings, group, None))
-                    .unwrap_or_else(|| environment(direction, camera, p));
-                let fresnel = (1. - view.dot3d(hit.normal).max(0.)).powi(5);
-                for c in 0..3 {
-                    color[c] += p.gi_intensity
-                        * metallic
-                        * (hit.color[c] + (1. - hit.color[c]) * fresnel)
-                        * reflected_color[c]
-                        / count as f64;
-                }
-            }
+        let pixel = cache.map_or(0, |cache| {
+            let uv = cache.borrow().uv;
+            let ss = p.supersample.clamp(1, 8) as f64;
+            let width = p.width as f64 * ss;
+            (uv[1] * p.height as f64 * ss).floor() as u32 * width as u32
+                + (uv[0] * width).floor() as u32
+        });
+        let reflected = bsdf::reflection(
+            snapshot,
+            index,
+            hit,
+            ray,
+            camera,
+            p,
+            group,
+            bsdf::fresnel_base(hit.color, metallic, specular),
+            roughness,
+            pixel,
+        );
+        for c in 0..3 {
+            color[c] += reflected[c];
         }
     }
     color
@@ -446,6 +545,7 @@ struct CachedSample {
 }
 pub(super) struct PixelCache<'a> {
     grid: Option<&'a super::sampling::AoGrid>,
+    indirect_grid: Option<&'a super::gi::GiGrid>,
     uv: [f64; 2],
     radius: f64,
     values: Vec<CachedSample>,
@@ -454,18 +554,27 @@ impl<'a> PixelCache<'a> {
     pub fn new(radius: f64) -> RefCell<Self> {
         RefCell::new(Self {
             grid: None,
+            indirect_grid: None,
             uv: [0.; 2],
             radius,
-            values: Vec::with_capacity(4),
+            values: Vec::new(),
         })
     }
-    pub fn with_grid(radius: f64, grid: Option<&'a super::sampling::AoGrid>) -> RefCell<Self> {
+    pub fn with_grids(
+        radius: f64,
+        grid: Option<&'a super::sampling::AoGrid>,
+        indirect: Option<&'a super::gi::GiGrid>,
+    ) -> RefCell<Self> {
         let cache = Self::new(radius);
         cache.borrow_mut().grid = grid;
+        cache.borrow_mut().indirect_grid = indirect;
         cache
     }
     pub fn set_position(&mut self, uv: [f64; 2]) {
         self.uv = uv;
+    }
+    pub fn reset(&mut self) {
+        self.values.clear();
     }
     fn matching(&self, hit: Hit, group: Option<usize>) -> Option<CachedSample> {
         self.values.iter().copied().find(|v| {
@@ -503,6 +612,35 @@ fn cached_indirect(
     group: Option<usize>,
     cache: Option<&RefCell<PixelCache>>,
 ) -> [f64; 3] {
+    let reduced_grid = cache.is_some_and(|cache| cache.borrow().indirect_grid.is_some());
+    if group.is_none() {
+        if let Some(value) = cache.and_then(|cache| {
+            let cache = cache.borrow();
+            cache
+                .indirect_grid
+                .and_then(|grid| grid.sample(cache.uv, hit))
+        }) {
+            return value;
+        }
+    }
+    if reduced_grid {
+        let uv = cache.unwrap().borrow().uv;
+        let ss = p.supersample.clamp(1, 8) as f64;
+        return indirect_at(
+            snapshot,
+            index,
+            hit,
+            camera,
+            p,
+            group,
+            p.gi_samples.clamp(1, 256) as usize * 4,
+            [
+                (uv[0] * p.width as f64 * ss) as u32,
+                (uv[1] * p.height as f64 * ss) as u32,
+            ],
+            false,
+        );
+    }
     if let Some(v) = cache
         .and_then(|c| c.borrow().matching(hit, group))
         .and_then(|v| v.indirect)

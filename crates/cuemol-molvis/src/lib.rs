@@ -4750,8 +4750,8 @@ fn resolve_section_shape(
 
 /// Resolve one ribbon cross-section sub-element (`<helix>`/`<sheet>`/`<coil>`)
 /// into absolute semi-axes `(base_width, thick) = (width·tuber, width)`, the C++
-/// `TubeSection` geometry. `width` is required (the element must declare a size);
-/// a missing `tuber` defaults to 1.0 (a round section).
+/// `TubeSection` geometry. Ribbon renderers retain the factory width when the
+/// section omits it; a missing `tuber` defaults to 1.0.
 fn resolve_ribbon_section(
     renderer: &MolRenderer,
     styles: &StyleManager,
@@ -4759,10 +4759,9 @@ fn resolve_ribbon_section(
     tag: &str,
 ) -> Option<(f64, f64)> {
     let width = renderer
-        .resolved_child_attr(tag, "width", styles, scope_id)?
-        .trim()
-        .parse::<f64>()
-        .ok()?;
+        .resolved_child_attr(tag, "width", styles, scope_id)
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .or_else(|| matches!(renderer.renderer_type(), "ribbon" | "cartoon").then_some(0.35))?;
     let tuber = renderer
         .resolved_child_attr(tag, "tuber", styles, scope_id)
         .and_then(|value| value.trim().parse::<f64>().ok())
@@ -6478,9 +6477,15 @@ struct MainchainPoint {
     pivot_selected: bool,
 }
 
-/// Read a residue's `secondary` property (set by the PDB reader's HELIX/SHEET
-/// parsing) via one of its atoms.
+/// Read `secondary2` when present, otherwise the legacy `secondary` property.
 fn residue_secondary(molecule: &MolCoord, atom: &Atom) -> Secondary {
+    if let Some(value) = molecule.residue_prop_for_atom(atom, "secondary2") {
+        return match value.as_bytes().first() {
+            Some(b'H' | b'G' | b'I') => Secondary::Helix,
+            Some(b'E') => Secondary::Sheet,
+            _ => Secondary::Coil,
+        };
+    }
     match molecule.residue_prop_for_atom(atom, "secondary") {
         Some(value) if value.eq_ignore_ascii_case("helix") => Secondary::Helix,
         Some(value) if value.eq_ignore_ascii_case("sheet") => Secondary::Sheet,
@@ -6521,12 +6526,8 @@ pub fn mainchain_links(
 /// Collect each chain's backbone pivots (position + secondary structure) in
 /// residue order, split into contiguous runs to be splined/traced.
 ///
-/// A run breaks on a chain-name boundary OR a backbone GAP — consecutive pivots
-/// farther apart than the link cutoff (a missing/unmodelled stretch, an
-/// alternate fragment, or a residue with no pivot). This mirrors C++
-/// `MainChainRenderer::isNewSegment` (chain change + `!isLinkedTo` + absent
-/// pivot, MainChainRenderer.cpp:37/88), so a chain with an internal break draws
-/// disjoint strips instead of one spline bridging the gap with a spurious bar.
+/// Applied topology supplies the directed polymer links used by the reference's
+/// `MainChainRenderer::isNewSegment`. Raw coordinates retain the distance fallback.
 fn collect_mainchain_pivots(
     molecule: &MolCoord,
     draw: Option<&std::collections::BTreeSet<usize>>,
@@ -6569,7 +6570,20 @@ fn collect_mainchain_pivots_with_context(
                         Some((prev_chain, prev_pos, prev_cutoff, prev_index)) => {
                             *prev_chain != chain
                                 || links.map_or_else(
-                                    || pivot_distance(*prev_pos, pos) > prev_cutoff.max(cutoff),
+                                    || {
+                                        molecule
+                                            .topology_linked(
+                                                &molecule.atoms()[*prev_index],
+                                                &molecule.atoms()[point.atom_index],
+                                            )
+                                            .map_or_else(
+                                                || {
+                                                    pivot_distance(*prev_pos, pos)
+                                                        > prev_cutoff.max(cutoff)
+                                                },
+                                                |linked| !linked,
+                                            )
+                                    },
                                     |links| !links.contains(&(*prev_index, point.atom_index)),
                                 )
                         }
@@ -6596,19 +6610,13 @@ fn pivot_distance(a: Vector4, b: Vector4) -> f64 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2) + (a.z - b.z).powi(2)).sqrt()
 }
 
-/// Max distance between consecutive pivots for them to count as one backbone run.
-/// Protein Cα–Cα is ~3.8 Å (so 5.0 keeps a contiguous chain joined but splits a
-/// missing-residue gap, where the virtual Cα–Cα blows past ~7 Å); nucleic P–P is
-/// ~6–7 Å (so 8.0). This is the distance analogue of C++'s link test
-/// (`TopoBuilder.cpp:365` measures the polymer bond), the only signal available
-/// for a Cα-only backbone where no peptide bond exists.
+/// Link-distance fallbacks for raw coordinates without applied topology.
+/// Loaded molecules use their topology links even when no peptide bond exists.
 const PROTEIN_PIVOT_LINK_DIST: f64 = 5.0;
 const NUCLEIC_PIVOT_LINK_DIST: f64 = 8.0;
 
-/// Pick the residue's configured backbone pivot atom, or the residue-type
-/// defaults when no explicit name is configured.
-/// Returns the pivot point and its link-distance cutoff (protein vs nucleic),
-/// used to break the backbone run at chain gaps.
+/// Use an explicit atom name or the pivot assigned by topology.
+/// Raw coordinates fall back to residue defaults and a link-distance cutoff.
 fn mainchain_pivot_point(
     molecule: &MolCoord,
     residue: &ResidueView,
@@ -6658,8 +6666,7 @@ fn mainchain_pivot_point(
                     },
                     secondary_marker: molecule
                         .residue_prop_for_atom(atom, "secondary2")
-                        .and_then(|value| value.as_bytes().get(1))
-                        .copied()
+                        .map(|value| value.as_bytes().get(1).copied().unwrap_or(b'-'))
                         .unwrap_or(0),
                 };
                 return Some((point, cutoff));
@@ -6670,7 +6677,14 @@ fn mainchain_pivot_point(
     if let Some(point) = custom_name.and_then(find_named) {
         return Some(point);
     }
-    let pivot = cuemol_molstr::toppar::TopoDB::global().pivot_atom(residue.name())?;
+    let first = molecule.atoms().get(*indices.first()?)?;
+    let pivot = molecule.topology_pivot_name(first).or_else(|| {
+        molecule
+            .topology_linked(first, first)
+            .is_none()
+            .then(|| cuemol_molstr::toppar::TopoDB::global().pivot_atom(residue.name()))
+            .flatten()
+    })?;
     find_named(pivot)
 }
 
@@ -9557,6 +9571,73 @@ mod tests {
     }
 
     #[test]
+    fn unstyled_ribbon_matches_explicit_reference_factory_sections() {
+        let mut molecule = MolCoord::with_atoms(
+            (1..=6)
+                .map(|i| ca_atom(i, f64::from(i) * 3., 0., 0.))
+                .collect(),
+        );
+        for i in 1..=6 {
+            molecule
+                .set_residue_prop_str("A", &i.to_string(), "secondary", "helix")
+                .unwrap();
+        }
+        let mut manager = cuemol_molstr::MolSceneManager::new();
+        let scene = manager.new_scene("ribbon");
+        let object = manager
+            .scene_mut(scene)
+            .unwrap()
+            .add_molecule("molecule", molecule);
+        let object = manager
+            .scene_mut(scene)
+            .unwrap()
+            .object_mut(object)
+            .unwrap();
+        let renderer = object.add_renderer("ribbon", "ribbon");
+        let styles = default_style_manager();
+        let snapshot = |object: &cuemol_molstr::MolObject| {
+            let mut options = molecule_render_options_for_renderer("ribbon");
+            apply_renderer_styles(&mut options, object.renderer(renderer).unwrap(), &styles, 0);
+            ribbon_mesh_snapshot(object.mol(), &options)
+        };
+        let implicit = snapshot(object);
+        for section in ["helix", "sheet", "coil"] {
+            let renderer = object.renderer_mut(renderer).unwrap();
+            renderer.set_qsc_child_attr(section, "width", "0.35");
+            renderer.set_qsc_child_attr(section, "tuber", "1");
+        }
+        let explicit = snapshot(object);
+        let positions = |snapshot: &RenderSceneSnapshot| {
+            snapshot
+                .meshes
+                .iter()
+                .flat_map(|mesh| mesh.vertices.iter().map(|vertex| vertex.position))
+                .collect::<Vec<_>>()
+        };
+        let positions = (positions(&implicit), positions(&explicit));
+        assert!(!positions.0.is_empty());
+        assert_eq!(positions.0, positions.1);
+        assert!(positions
+            .0
+            .iter()
+            .all(|position| position.y.hypot(position.z) <= 0.350001));
+
+        let partial = object.add_renderer("ribbon", "partial");
+        object
+            .renderer_mut(partial)
+            .unwrap()
+            .set_qsc_child_attr("helix", "tuber", "4");
+        let mut options = molecule_render_options_for_renderer("ribbon");
+        apply_renderer_styles(&mut options, object.renderer(partial).unwrap(), &styles, 0);
+        let partial = ribbon_mesh_snapshot(object.mol(), &options);
+        assert!(partial
+            .meshes
+            .iter()
+            .flat_map(|mesh| &mesh.vertices)
+            .any(|vertex| vertex.position.y.hypot(vertex.position.z) > 1.3));
+    }
+
+    #[test]
     fn ribbon_renderer_properties_resolve_sections_junctions_and_face_colors() {
         let mut manager = cuemol_molstr::MolSceneManager::new();
         let scene_uid = manager.new_scene("ribbon");
@@ -11778,6 +11859,42 @@ return cuemol.makeColor("#0000ff");
     }
 
     #[test]
+    fn backbone_uses_applied_polymer_links_and_custom_pivots() {
+        let mut atoms = Vec::new();
+        for (resid, ca, n, c) in [(1, 0., -1.5, 1.5), (2, 3.8, 2.8, 5.), (3, 7.6, 9., 9.1)] {
+            for (name, x) in [("CA", ca), ("N", n), ("C", c)] {
+                let mut atom = ca_atom(resid, x, 0., 0.);
+                atom.name = name.into();
+                atom.serial = atoms.len() as i32 + 1;
+                atoms.push(atom);
+            }
+        }
+        let mut molecule = MolCoord::with_atoms(atoms);
+        assert_eq!(collect_mainchain_pivots(&molecule, None, None).len(), 1);
+        let mut topology = cuemol_molstr::TopoDB::global().clone();
+        let mut residue = topology
+            .residue(&molecule.atoms()[0].res_name)
+            .unwrap()
+            .clone();
+        residue.pivot_atom = "N".into();
+        topology.put(residue);
+        molecule.apply_topology_with_db(&topology);
+        let runs = collect_mainchain_pivots(&molecule, None, None);
+        assert_eq!(runs.iter().map(Vec::len).collect::<Vec<_>>(), [2, 1]);
+        assert_eq!(
+            runs[0].iter().map(|point| point.pos.x).collect::<Vec<_>>(),
+            [-1.5, 2.8]
+        );
+        molecule.atoms_mut()[4].position.x = 100.;
+        let runs = collect_mainchain_pivots(&molecule, None, Some("CA"));
+        assert_eq!(runs.iter().map(Vec::len).collect::<Vec<_>>(), [2, 1]);
+        assert_eq!(
+            runs[0].iter().map(|point| point.pos.x).collect::<Vec<_>>(),
+            [0., 3.8]
+        );
+    }
+
+    #[test]
     fn backbone_runs_break_at_chain_gaps_but_not_contiguous_ca() {
         // C++ MainChainRenderer::isNewSegment breaks a backbone segment at chain
         // boundaries AND chemical-link gaps. The Rust path used to break ONLY on
@@ -11913,6 +12030,32 @@ return cuemol.makeColor("#0000ff");
             smoothed < sharp - 0.3,
             "anchor smoothing should flatten the zigzag: {sharp} vs {smoothed}"
         );
+    }
+
+    #[test]
+    fn deposited_helix_does_not_grow_a_junction_beyond_a_chain_break() {
+        let mut molecule = MolCoord::with_atoms(vec![
+            ca_atom(1, 0., 0., 0.),
+            ca_atom(2, 3., 0., 0.),
+            ca_atom(3, 6., 0., 0.),
+        ]);
+        for index in 1..=3 {
+            molecule
+                .set_residue_prop_str("A", &index.to_string(), "secondary", "helix")
+                .unwrap();
+            molecule
+                .set_residue_prop_str("A", &index.to_string(), "secondary2", "H")
+                .unwrap();
+        }
+        let snapshot = ribbon_mesh_snapshot(&molecule, &MoleculeRenderOptions::default());
+        let positions: Vec<_> = snapshot
+            .meshes
+            .iter()
+            .flat_map(|mesh| &mesh.vertices)
+            .map(|vertex| vertex.position.x)
+            .collect();
+        assert!(!positions.is_empty());
+        assert!(positions.iter().all(|x| (-1e-6..=6. + 1e-6).contains(x)));
     }
 
     #[test]
@@ -12558,7 +12701,7 @@ mod tracestick_tests {
     #[test]
     fn trace_sticks_split_colors_at_midpoints_and_follow_selected_pivots() {
         let molecule = cuemol_molstr::read_pdb_str(
-            "ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00           C\nATOM      2  CA  GLY A   2       3.800   0.000   0.000  1.00 10.00           O\nATOM      3  CA  GLY A   3      14.000   0.000   0.000  1.00 10.00           C\n",
+            "ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00           C\nATOM      2  CA  GLY A   2       3.800   0.000   0.000  1.00 10.00           O\nATOM      3  CA  GLY A   3      14.000   0.000   0.000  1.00 10.00           C\nATOM      4  C   GLY A   1       1.500   0.000   0.000  1.00 10.00           C\nATOM      5  N   GLY A   2       2.800   0.000   0.000  1.00 10.00           N\n",
         ).unwrap();
         let mut options = MoleculeRenderOptions {
             object_uid: Some(7),

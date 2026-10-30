@@ -200,6 +200,7 @@ pub struct ChainSummary {
 }
 
 type ResiduePivots = BTreeMap<String, BTreeMap<(i32, Option<char>), Arc<str>>>;
+pub(crate) type GeneratedTopology = BTreeMap<String, Arc<Vec<(String, String)>>>;
 
 fn remove_residue_pivot(pivots: &mut ResiduePivots, key: &ResidueKey) -> Option<Arc<str>> {
     let chain = pivots.get_mut(&key.chain_id)?;
@@ -224,6 +225,8 @@ pub struct MolCoord {
     bonds: Arc<Vec<Bond>>,
     residue_props: Arc<BTreeMap<ResidueKey, BTreeMap<String, String>>>,
     residue_pivots: Arc<ResiduePivots>,
+    residue_links: Option<Arc<BTreeMap<ResidueKey, ResidueKey>>>,
+    generated_topology: Arc<GeneratedTopology>,
     selection: Selector,
     selection_text: String,
     coloring: SolidColoring,
@@ -240,6 +243,9 @@ pub struct MoleculeData {
     residue_props: Arc<BTreeMap<ResidueKey, BTreeMap<String, String>>>,
     #[serde(default)]
     residue_pivots: Arc<ResiduePivots>,
+    #[serde(default)]
+    residue_links: Option<Arc<BTreeMap<ResidueKey, ResidueKey>>>,
+    generated_topology: Arc<GeneratedTopology>,
     selection_text: String,
     default_color: SolidColor,
     atoms_moved_generation: usize,
@@ -262,6 +268,8 @@ impl MoleculeData {
             bonds: self.bonds,
             residue_props: self.residue_props,
             residue_pivots: self.residue_pivots,
+            residue_links: self.residue_links,
+            generated_topology: self.generated_topology,
             default_color: self.default_color,
             atoms_moved_generation: self.atoms_moved_generation,
             cell_params: self.cell_params,
@@ -280,6 +288,8 @@ impl PartialEq for MolCoord {
                 || self.residue_props == other.residue_props)
             && (Arc::ptr_eq(&self.residue_pivots, &other.residue_pivots)
                 || self.residue_pivots == other.residue_pivots)
+            && self.residue_links == other.residue_links
+            && self.generated_topology == other.generated_topology
             && self.selection == other.selection
             && self.selection_text == other.selection_text
             && self.coloring == other.coloring
@@ -302,6 +312,8 @@ impl MolCoord {
             bonds: self.bonds.clone(),
             residue_props: self.residue_props.clone(),
             residue_pivots: self.residue_pivots.clone(),
+            residue_links: self.residue_links.clone(),
+            generated_topology: self.generated_topology.clone(),
             selection_text: self.selection_text.clone(),
             default_color: self.default_color.clone(),
             atoms_moved_generation: self.atoms_moved_generation,
@@ -325,6 +337,15 @@ impl MolCoord {
             &to.default_color,
         );
         apply_value_change(&mut self.cell_params, &from.cell_params, &to.cell_params);
+        if !Arc::ptr_eq(&from.generated_topology, &to.generated_topology)
+            && from.generated_topology != to.generated_topology
+        {
+            cuemol_core::snapshot::apply_map_changes(
+                Arc::make_mut(&mut self.generated_topology),
+                &from.generated_topology,
+                &to.generated_topology,
+            );
+        }
         if !Arc::ptr_eq(&from.atoms, &to.atoms) && from.atoms != to.atoms {
             self.residue_count.take();
             cuemol_core::snapshot::apply_sequence_changes(
@@ -358,6 +379,20 @@ impl MolCoord {
         if !Arc::ptr_eq(&from.atoms, &to.atoms) && from.atoms != to.atoms {
             self.atoms_moved_generation = self.atoms_moved_generation.wrapping_add(1);
         }
+        match (
+            &from.residue_links,
+            &to.residue_links,
+            &mut self.residue_links,
+        ) {
+            (Some(from), Some(to), Some(current)) if !Arc::ptr_eq(from, to) && from != to => {
+                cuemol_core::snapshot::apply_map_changes(Arc::make_mut(current), from, to);
+            }
+            _ => apply_value_change(
+                &mut self.residue_links,
+                &from.residue_links,
+                &to.residue_links,
+            ),
+        }
     }
 
     pub fn new() -> Self {
@@ -367,6 +402,8 @@ impl MolCoord {
             bonds: Arc::default(),
             residue_props: Arc::default(),
             residue_pivots: Arc::default(),
+            residue_links: None,
+            generated_topology: Arc::default(),
             selection: Selector::All,
             selection_text: String::new(),
             coloring: SolidColoring::new(),
@@ -383,6 +420,8 @@ impl MolCoord {
             bonds: Arc::default(),
             residue_props: Arc::default(),
             residue_pivots: Arc::default(),
+            residue_links: None,
+            generated_topology: Arc::default(),
             selection: Selector::All,
             selection_text: String::new(),
             coloring: SolidColoring::new(),
@@ -394,6 +433,14 @@ impl MolCoord {
 
     pub fn selection(&self) -> &Selector {
         &self.selection
+    }
+
+    pub(crate) fn generated_topology(&self) -> Arc<GeneratedTopology> {
+        self.generated_topology.clone()
+    }
+
+    pub(crate) fn set_generated_topology(&mut self, value: Arc<GeneratedTopology>) {
+        self.generated_topology = value;
     }
 
     pub fn get_selection(&self) -> &Selector {
@@ -612,6 +659,47 @@ impl MolCoord {
 
     pub(crate) fn set_topology_pivot(&mut self, key: &ResidueKey, name: Arc<str>) {
         insert_residue_pivot(Arc::make_mut(&mut self.residue_pivots), key, name);
+    }
+
+    pub fn topology_pivot_name(&self, atom: &Atom) -> Option<&str> {
+        self.residue_pivots
+            .get(&atom.chain_id)
+            .and_then(|pivots| pivots.get(&(atom.res_id, atom.ins_code)))
+            .map(AsRef::as_ref)
+    }
+
+    /// Returns None for raw coordinates that have not had topology applied.
+    pub fn topology_linked(&self, previous: &Atom, next: &Atom) -> Option<bool> {
+        self.residue_links.as_ref().map(|links| {
+            links.get(&residue_key(previous)).is_some_and(|key| {
+                key.chain_id == next.chain_id
+                    && key.res_id == next.res_id
+                    && key.ins_code == next.ins_code
+            })
+        })
+    }
+
+    pub(crate) fn extend_topology_links(
+        &mut self,
+        links: impl IntoIterator<Item = (ResidueKey, ResidueKey)>,
+    ) {
+        Arc::make_mut(self.residue_links.get_or_insert_with(Arc::default)).extend(links);
+    }
+
+    fn remap_topology_links(&mut self, moves: &[(ResidueKey, ResidueKey)]) {
+        if moves.is_empty() {
+            return;
+        }
+        if let Some(links) = &mut self.residue_links {
+            let moves: BTreeMap<_, _> = moves.iter().map(|(old, new)| (old, new)).collect();
+            let mapped = |key: &ResidueKey| moves.get(key).copied().unwrap_or(key).clone();
+            *links = Arc::new(
+                links
+                    .iter()
+                    .map(|(first, second)| (mapped(first), mapped(second)))
+                    .collect(),
+            );
+        }
     }
 
     pub fn get_residue(&self, chain: &str, sindex: &str) -> Result<Option<ResidueSummary>> {
@@ -1092,6 +1180,7 @@ impl MolCoord {
         for (key, name) in moved {
             insert_residue_pivot(pivots, key, name);
         }
+        self.remap_topology_links(&prop_moves);
         true
     }
 
@@ -1539,6 +1628,11 @@ impl MolCoord {
             });
             !pivots.is_empty()
         });
+        if let Some(links) = &mut self.residue_links {
+            Arc::make_mut(links).retain(|first, second| {
+                live_residues.contains(first) && live_residues.contains(second)
+            });
+        }
         selected.len()
     }
 
@@ -1591,6 +1685,7 @@ impl MolCoord {
         if let Some(name) = remove_residue_pivot(pivots, &old_key) {
             insert_residue_pivot(pivots, &new_key, name);
         }
+        self.remap_topology_links(&[(old_key, new_key)]);
         Ok(true)
     }
 
@@ -1624,6 +1719,7 @@ impl MolCoord {
         if let Some(name) = remove_residue_pivot(pivots, &old_key) {
             insert_residue_pivot(pivots, &new_key, name);
         }
+        self.remap_topology_links(&[(old_key, new_key)]);
         Ok(true)
     }
 
@@ -1695,11 +1791,28 @@ impl MolCoord {
             }
         }
 
+        if let Some(links) = &source.residue_links {
+            let copied: BTreeSet<_> = selected
+                .iter()
+                .map(|&index| residue_key(&source.atoms[index]))
+                .collect();
+            self.extend_topology_links(
+                links
+                    .iter()
+                    .filter(|(first, second)| copied.contains(first) && copied.contains(second))
+                    .map(|(first, second)| (first.clone(), second.clone())),
+            );
+        }
+
         Ok(selected.len())
     }
 
     pub fn copy_atoms(&mut self, source: &MolCoord, selector: &Selector) -> bool {
-        self.copy_selected_atoms_from(source, selector).is_ok()
+        if self.copy_selected_atoms_from(source, selector).is_err() {
+            return false;
+        }
+        self.apply_topology();
+        true
     }
 
     pub fn crd_array(&self) -> ByteArray {
@@ -2051,6 +2164,51 @@ mod tests {
             int_props: BTreeMap::new(),
             real_props: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn topology_links_survive_coordinate_residue_and_snapshot_changes() {
+        let mut molecule = MolCoord::with_atoms(vec![
+            atom(1, "A", 1, "CA", 0.0),
+            atom(2, "A", 1, "C", 1.5),
+            atom(3, "A", 2, "N", 2.8),
+            atom(4, "A", 2, "CA", 3.8),
+            atom(5, "A", 2, "C", 5.0),
+            atom(6, "A", 3, "N", 9.0),
+            atom(7, "A", 3, "CA", 7.6),
+        ]);
+        assert_eq!(
+            molecule.topology_linked(&molecule.atoms()[0], &molecule.atoms()[3]),
+            None
+        );
+        molecule.apply_topology();
+        let linked = |molecule: &MolCoord, from: usize, to: usize| {
+            molecule.topology_linked(&molecule.atoms()[from], &molecule.atoms()[to])
+        };
+        assert_eq!(linked(&molecule, 0, 3), Some(true));
+        assert_eq!(linked(&molecule, 3, 6), Some(false));
+        assert_eq!(linked(&molecule, 3, 0), Some(false));
+        let original = molecule.clone();
+        molecule.atoms_mut()[2].position.x = 100.0;
+        assert_eq!(linked(&molecule, 0, 3), Some(true));
+        molecule.change_res_index("A", "2", "20A").unwrap();
+        molecule.change_chain_name("A", "20A", "B").unwrap();
+        assert_eq!(linked(&molecule, 0, 3), Some(true));
+        let transferred = molecule.transfer_data().into_molecule().unwrap();
+        assert_eq!(linked(&transferred, 0, 3), Some(true));
+        let mut copied = MolCoord::new();
+        copied
+            .copy_selected_atoms_from(&molecule, &Selector::All)
+            .unwrap();
+        assert_eq!(linked(&copied, 0, 3), Some(true));
+        let modified = molecule.clone();
+        molecule.apply_undo_changes(&modified, &original);
+        assert_eq!(molecule.atoms(), original.atoms());
+        assert_eq!(molecule.residue_links, original.residue_links);
+        assert_eq!(molecule.residue_pivots, original.residue_pivots);
+        molecule.delete_selected_atoms(&parse_selector("resid 2").unwrap());
+        assert_eq!(linked(&molecule, 0, 3), Some(false));
+        assert!(molecule.residue_links.as_ref().unwrap().is_empty());
     }
 
     #[test]

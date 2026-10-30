@@ -722,6 +722,8 @@ fn render_commands_share_typed_scene_data_and_migrate_legacy_aliases() {
 
 #[test]
 fn lighting_settings_roundtrip_and_ground_color_validation_are_atomic() {
+    let defaults = cuemol_command::rendering_params(&serde_json::Map::new(), "umbreon").unwrap();
+    assert_eq!(defaults.gi_bounces, 1);
     let mut state = DesktopAppState::new();
     let mut camera = Camera::new();
     molecule(&mut state, &mut camera, "lighting", 0.);

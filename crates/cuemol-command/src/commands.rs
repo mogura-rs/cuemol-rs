@@ -617,7 +617,7 @@ pub fn rendering_params(
     params.aa_depth = number("aaDepth", 0.) as i32;
     params.ao_res_div = number("aoResDiv", params.ao_res_div as f64) as i32;
     params.ao_falloff_power = number("aoFalloffPower", 0.);
-    params.gi_bounces = number("giBounces", 4.).clamp(1., 8.) as i32;
+    params.gi_bounces = number("giBounces", params.gi_bounces as f64).clamp(1., 8.) as i32;
     params.gi_intensity = number("giIntensity", 1.);
     params.gi_env_intensity = number("giEnvIntensity", 1.);
     if get("denoise").is_none() {

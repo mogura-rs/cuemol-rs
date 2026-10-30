@@ -1,10 +1,13 @@
+mod bsdf;
 mod bvh;
 mod denoise;
 mod edges;
 mod exporter_settings;
 pub use exporter_settings::UmbreonExportOptions;
+mod gi;
 mod lighting;
 mod sampling;
+mod sobol;
 #[cfg(target_arch = "wasm32")]
 pub use denoise::render_umbreon_snapshot_async;
 pub use denoise::{prepare_oidn_render, OidnRender};
@@ -159,7 +162,7 @@ impl Default for UmbreonRenderParams {
             gi_env_intensity: 1.0,
             gi_sky_gradient: true,
             gi_ground_color: [0.4; 3],
-            gi_bounces: 4,
+            gi_bounces: 1,
             per_pixel_blend: true,
             contact_edges: true,
             outline_far_depth: 0.2,
@@ -810,10 +813,12 @@ fn render_float(
     async_state: Option<(&AtomicU32, &AtomicBool)>,
     hatch: Option<&npr::ResolvedHatch>,
 ) -> Result<FloatFrame> {
-    let spatial_sampling = !params.use_gi
-        && ((params.aa_mode > 0 && (params.supersample > 1 || params.aa_depth > 1))
-            || (params.ao_samples > 0
-                && (params.ao_res_div > 1 || (params.ao_res_div < 0 && params.supersample > 1))));
+    let spatial_sampling = (params.use_gi && params.gi_intensity > 0. && params.supersample > 1)
+        || (!params.use_gi
+            && ((params.aa_mode > 0 && (params.supersample > 1 || params.aa_depth > 1))
+                || (params.ao_samples > 0
+                    && (params.ao_res_div > 1
+                        || (params.ao_res_div < 0 && params.supersample > 1)))));
     if params.height > 128 && spatial_sampling {
         let started = Instant::now();
         let components = if params.transparent_background { 4 } else { 3 };
@@ -924,6 +929,15 @@ fn render_float_region(
     let ao_region = region.start.saturating_sub(margin)..(region.end + margin).min(height);
     let ao_grid =
         sampling::AoGrid::build(snapshot, index, camera, params, &rays, ao_region, cancel)?;
+    let gi_grid = gi::GiGrid::build(
+        snapshot,
+        index,
+        camera,
+        params,
+        &rays,
+        region.clone(),
+        cancel,
+    )?;
     let shade = |x: f64, y: f64, cache: &std::cell::RefCell<lighting::PixelCache>| {
         cache
             .borrow_mut()
@@ -964,18 +978,26 @@ fn render_float_region(
             shade(
                 x,
                 y,
-                &lighting::PixelCache::with_grid(camera.zoom() / height as f64, ao_grid.as_ref()),
+                &lighting::PixelCache::with_grids(
+                    camera.zoom() / height as f64,
+                    ao_grid.as_ref(),
+                    gi_grid.as_ref(),
+                ),
             )
         },
         cancel,
     )?;
     let render_row = |y: usize, row: &mut [f32]| {
+        let cache = lighting::PixelCache::with_grids(
+            camera.zoom() / height as f64,
+            ao_grid.as_ref(),
+            gi_grid.as_ref(),
+        );
         for x in 0..width {
             if cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed)) {
                 return;
             }
-            let cache =
-                lighting::PixelCache::with_grid(camera.zoom() / height as f64, ao_grid.as_ref());
+            cache.borrow_mut().reset();
             let center = adaptive.as_ref().and_then(|grid| grid.center(x, y));
             let (accumulated, divisor) = if let Some(center) = center {
                 (center, 1.)
@@ -1038,11 +1060,17 @@ fn render_float_region(
         if workers == 1 {
             render_rows(0, &mut pixels);
         } else {
-            let rows = row_count.div_ceil(workers);
+            let rows = 4.min(row_count.div_ceil(workers));
+            let tasks = std::sync::Mutex::new(pixels.chunks_mut(rows * row_bytes).enumerate());
             std::thread::scope(|scope| {
-                for (i, chunk) in pixels.chunks_mut(rows * row_bytes).enumerate() {
+                for _ in 0..workers {
                     let render = &render_rows;
-                    scope.spawn(move || render(i * rows, chunk));
+                    let tasks = &tasks;
+                    scope.spawn(move || loop {
+                        let task = tasks.lock().unwrap().next();
+                        let Some((index, chunk)) = task else { break };
+                        render(index * rows, chunk);
+                    });
                 }
             });
         }
@@ -1094,6 +1122,7 @@ enum MaterialPreset {
         metallic: f64,
         roughness: f64,
         specular: f64,
+        reflection: f64,
     },
     Toon {
         ambient: f64,
@@ -1111,6 +1140,7 @@ fn named_material(name: &str) -> MaterialPreset {
             metallic: 0.0,
             roughness: 0.50,
             specular: 0.0,
+            reflection: 0.0,
         },
         "diff_metal" => MaterialPreset::Physical {
             ambient: 0.35,
@@ -1118,6 +1148,7 @@ fn named_material(name: &str) -> MaterialPreset {
             metallic: 1.0,
             roughness: 0.549_100_5,
             specular: 0.80,
+            reflection: 0.10,
         },
         "spec_metal" => MaterialPreset::Physical {
             ambient: 0.15,
@@ -1125,6 +1156,7 @@ fn named_material(name: &str) -> MaterialPreset {
             metallic: 1.0,
             roughness: 0.374_203_2,
             specular: 0.80,
+            reflection: 0.65,
         },
         "metallic_chrome" => MaterialPreset::Physical {
             ambient: 0.20,
@@ -1132,6 +1164,7 @@ fn named_material(name: &str) -> MaterialPreset {
             metallic: 1.0,
             roughness: 0.05,
             specular: 0.50,
+            reflection: 0.0,
         },
         "metallic_copper" => MaterialPreset::Physical {
             ambient: 0.20,
@@ -1139,6 +1172,7 @@ fn named_material(name: &str) -> MaterialPreset {
             metallic: 1.0,
             roughness: 0.15,
             specular: 0.50,
+            reflection: 0.0,
         },
         "stone35" => MaterialPreset::Physical {
             ambient: 0.20,
@@ -1146,6 +1180,7 @@ fn named_material(name: &str) -> MaterialPreset {
             metallic: 0.0,
             roughness: 0.85,
             specular: 0.25,
+            reflection: 0.0,
         },
         "wood31" | "wood14scl2" => MaterialPreset::Physical {
             ambient: 0.20,
@@ -1153,6 +1188,7 @@ fn named_material(name: &str) -> MaterialPreset {
             metallic: 0.0,
             roughness: 0.45,
             specular: 0.50,
+            reflection: 0.0,
         },
         "shadow" => MaterialPreset::Toon {
             ambient: 0.75,
@@ -1184,6 +1220,7 @@ fn named_material(name: &str) -> MaterialPreset {
             metallic: 0.0,
             roughness: 0.374_203_2,
             specular: 0.40,
+            reflection: 0.0,
         },
     }
 }
@@ -1266,6 +1303,7 @@ fn visible_hits(
         .min_by(|a, b| a.distance.total_cmp(&b.distance))
         .copied();
     for h in &mut hits {
+        *h = index.primary_hit(*h, ray);
         if h.unlit && h.distance == f64::MAX {
             let own_distance = (h.position - ray.origin).length3d();
             if front.is_some_and(|f| {
@@ -1323,10 +1361,26 @@ fn trace_sample_pass(
     visible_group: Option<usize>,
     cache: Option<&std::cell::RefCell<lighting::PixelCache>>,
 ) -> ([f64; 4], f64) {
-    let hits = visible_hits(index, ray, camera, params, visible_group);
+    let nearest;
+    let all_hits;
+    let hits = if index.opaque_without_edges && !params.transparent_background {
+        let clip = params
+            .use_clip_z
+            .then(|| (camera.rotation().to_matrix(), camera.slab_depth() * 0.5));
+        nearest = index.nearest_visible(ray, |hit| {
+            clip.is_none_or(|(rotation, half)| {
+                (-half..=half)
+                    .contains(&transform_direction(rotation, hit.position - camera.center()).z)
+            })
+        });
+        nearest.as_slice()
+    } else {
+        all_hits = visible_hits(index, ray, camera, params, visible_group);
+        all_hits.as_slice()
+    };
     let depth = hits.first().map(|h| h.distance).unwrap_or(f64::INFINITY);
     let mut out = [0.; 4];
-    for &hit in &hits {
+    for &hit in hits {
         let mut shaded = lighting::shade(
             snapshot,
             index,
@@ -1337,6 +1391,10 @@ fn trace_sample_pass(
             visible_group,
             cache,
         );
+        let environment = lighting::background_specular(snapshot, hit, background, params);
+        for i in 0..3 {
+            shaded[i] += environment[i];
+        }
         if !hit.unlit && edge_at(index, hit, ray, camera, params, visible_group, false) {
             shaded = index
                 .edges
@@ -1793,50 +1851,81 @@ fn ray_sphere(ray: Ray, center: Vector4, radius: f64) -> Option<(f64, Vector4)> 
     Some((distance, normal))
 }
 
-fn ray_cylinder(ray: Ray, start: Vector4, end: Vector4, radius: f64) -> Option<(f64, Vector4)> {
-    let axis_vector = end - start;
-    let length = axis_vector.length3d();
-    if length <= 1.0e-9 {
-        return ray_sphere(ray, start, radius);
+#[derive(Clone, Copy)]
+struct CylinderAxis {
+    direction: Vector4,
+    length: f64,
+}
+
+impl CylinderAxis {
+    fn new(start: Vector4, end: Vector4) -> Self {
+        let vector = end - start;
+        let length = vector.length3d();
+        Self {
+            direction: if length <= 1.0e-9 {
+                Vector4::ZERO
+            } else {
+                vector * length.recip()
+            },
+            length,
+        }
     }
-    let axis = axis_vector * length.recip();
-    let oc = ray.origin - start;
-    let direction_perp = ray.direction - axis * ray.direction.dot3d(axis);
-    let origin_perp = oc - axis * oc.dot3d(axis);
-    let a = direction_perp.dot3d(direction_perp);
-    let b = 2.0 * direction_perp.dot3d(origin_perp);
-    let c = origin_perp.dot3d(origin_perp) - radius * radius;
-    let mut candidates = [None; 4];
-    let mut count = 0;
-    let discriminant = b * b - 4.0 * a * c;
-    if a > 1.0e-12 && discriminant >= 0.0 {
-        let root = discriminant.sqrt();
-        for distance in [(-b - root) / (2.0 * a), (-b + root) / (2.0 * a)] {
-            let along = oc.dot3d(axis) + distance * ray.direction.dot3d(axis);
-            if distance > 1.0e-6 && (0.0..=length).contains(&along) {
+
+    fn intersect(
+        self,
+        ray: Ray,
+        start: Vector4,
+        end: Vector4,
+        radius: f64,
+    ) -> Option<(f64, Vector4)> {
+        let length = self.length;
+        if length <= 1.0e-9 {
+            return ray_sphere(ray, start, radius);
+        }
+        let axis = self.direction;
+        let oc = ray.origin - start;
+        let direction_perp = ray.direction - axis * ray.direction.dot3d(axis);
+        let origin_perp = oc - axis * oc.dot3d(axis);
+        let a = direction_perp.dot3d(direction_perp);
+        let b = 2.0 * direction_perp.dot3d(origin_perp);
+        let c = origin_perp.dot3d(origin_perp) - radius * radius;
+        let mut candidates = [None; 4];
+        let mut count = 0;
+        let discriminant = b * b - 4.0 * a * c;
+        if a > 1.0e-12 && discriminant >= 0.0 {
+            let root = discriminant.sqrt();
+            for distance in [(-b - root) / (2.0 * a), (-b + root) / (2.0 * a)] {
+                let along = oc.dot3d(axis) + distance * ray.direction.dot3d(axis);
+                if distance > 1.0e-6 && (0.0..=length).contains(&along) {
+                    let point = ray.origin + ray.direction * distance;
+                    let closest = start + axis * along;
+                    candidates[count] = Some((distance, normalize(point - closest)));
+                    count += 1;
+                }
+            }
+        }
+        let denominator = ray.direction.dot3d(axis);
+        if denominator.abs() > 1.0e-12 {
+            for (center, normal) in [(start, axis * -1.0), (end, axis)] {
+                let distance = (center - ray.origin).dot3d(axis) / denominator;
                 let point = ray.origin + ray.direction * distance;
-                let closest = start + axis * along;
-                candidates[count] = Some((distance, normalize(point - closest)));
-                count += 1;
+                if distance > 1.0e-6 && (point - center).length3d() <= radius {
+                    candidates[count] = Some((distance, normal));
+                    count += 1;
+                }
             }
         }
+        candidates[..count]
+            .iter()
+            .flatten()
+            .copied()
+            .min_by(|left, right| left.0.total_cmp(&right.0))
     }
-    let denominator = ray.direction.dot3d(axis);
-    if denominator.abs() > 1.0e-12 {
-        for (center, normal) in [(start, axis * -1.0), (end, axis)] {
-            let distance = (center - ray.origin).dot3d(axis) / denominator;
-            let point = ray.origin + ray.direction * distance;
-            if distance > 1.0e-6 && (point - center).length3d() <= radius {
-                candidates[count] = Some((distance, normal));
-                count += 1;
-            }
-        }
-    }
-    candidates[..count]
-        .iter()
-        .flatten()
-        .copied()
-        .min_by(|left, right| left.0.total_cmp(&right.0))
+}
+
+#[cfg(test)]
+fn ray_cylinder(ray: Ray, start: Vector4, end: Vector4, radius: f64) -> Option<(f64, Vector4)> {
+    CylinderAxis::new(start, end).intersect(ray, start, end, radius)
 }
 
 fn ray_triangle(
@@ -2443,6 +2532,112 @@ mod tests {
                     None,
                     None,
                     start..(start + 7).min(31),
+                    Some(&index),
+                )
+                .unwrap()
+                .pixels,
+            );
+        }
+        assert_eq!(actual, expected.pixels);
+    }
+
+    #[test]
+    fn opaque_primary_path_matches_all_hits_with_clip_and_coincident_surfaces() {
+        let mut snapshot = RenderSceneSnapshot::empty();
+        for (center, radius, rgba) in [
+            ([0., 0., 2.], 0.7, [220, 20, 30, 255]),
+            ([0., 0., 2.], 0.7, [20, 220, 30, 255]),
+            ([0., 0., -0.7], 1.5, [10, 30, 220, 255]),
+            ([1.5, -1., 0.], 0.5, [220, 220, 10, 255]),
+        ] {
+            snapshot.atoms.push(RenderAtom::new(
+                Vector4::new3(center[0], center[1], center[2]),
+                radius,
+                color(rgba[0], rgba[1], rgba[2], rgba[3]),
+            ));
+        }
+        let mut camera = test_camera();
+        camera.set_zoom(5.);
+        camera.set_slab_depth(3.);
+        for clip in [false, true] {
+            let params = UmbreonRenderParams {
+                width: 23,
+                height: 29,
+                supersample: 2,
+                use_clip_z: clip,
+                show_edge_lines: false,
+                ..Default::default()
+            };
+            let mut index = RayIndex::new(&snapshot);
+            assert!(index.opaque_without_edges);
+            let actual = render_float_region(
+                &snapshot,
+                &camera,
+                [0.1, 0.2, 0.3, 1.],
+                &params,
+                None,
+                None,
+                0..29,
+                Some(&index),
+            )
+            .unwrap();
+            index.opaque_without_edges = false;
+            let expected = render_float_region(
+                &snapshot,
+                &camera,
+                [0.1, 0.2, 0.3, 1.],
+                &params,
+                None,
+                None,
+                0..29,
+                Some(&index),
+            )
+            .unwrap();
+            assert_eq!(actual.pixels, expected.pixels);
+        }
+    }
+
+    #[test]
+    fn parallel_rows_match_serial_pixels_with_uneven_work_and_partial_blocks() {
+        let mut snapshot = RenderSceneSnapshot::empty();
+        snapshot.atoms.push(RenderAtom::new(
+            Vector4::new3(0.6, -0.8, 0.),
+            1.,
+            color(220, 40, 10, 210),
+        ));
+        let mut camera = test_camera();
+        camera.set_zoom(5.);
+        let params = UmbreonRenderParams {
+            width: 257,
+            height: 259,
+            supersample: 1,
+            transparent_background: true,
+            show_edge_lines: false,
+            ..Default::default()
+        };
+        let index = RayIndex::with_pixel_scale(&snapshot, (camera.zoom() / 259.) as f32);
+        let expected = render_float_region(
+            &snapshot,
+            &camera,
+            [0.; 4],
+            &params,
+            None,
+            None,
+            0..259,
+            Some(&index),
+        )
+        .unwrap();
+        let mut actual = Vec::new();
+        for row in 0..259 {
+            actual.extend(
+                render_float_region(
+                    &snapshot,
+                    &camera,
+                    [0.; 4],
+                    &params,
+                    None,
+                    None,
+                    row..row + 1,
                     Some(&index),
                 )
                 .unwrap()

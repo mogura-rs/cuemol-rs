@@ -430,6 +430,7 @@ fn backbone_picking_uses_visible_residue_pivots_and_renderer_transforms() {
         atom.name = name.into();
         atom.res_name = "ALA".into();
     }
+    object.mol_mut().apply_topology();
     for renderer in object
         .renderers()
         .iter()

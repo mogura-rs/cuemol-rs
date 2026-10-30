@@ -2235,9 +2235,10 @@ pub fn build_topology_bonds_with_db_options(mol: &mut MolCoord, db: &TopoDB, aut
     // Phase 1 — intra-residue bonds: apply the residue template (correct bond
     // orders), then distance-bond any atoms the template did not cover (terminal
     // OXT, unknown ligand atoms, …). A residue with no template falls through to a
-    // full per-residue distance autogeneration.
+    // topology generated from the first occurrence in this molecule.
     let mut contexts: Vec<ResidueCtx> = Vec::with_capacity(summaries.len());
     let mut pivot_names: HashMap<&str, std::sync::Arc<str>> = HashMap::new();
+    let mut generated = mol.generated_topology();
     for summary in &summaries {
         let map = build_name_map(mol, &summary.atom_indices);
         let mut templated = std::collections::HashSet::new();
@@ -2253,6 +2254,44 @@ pub fn build_topology_bonds_with_db_options(mol: &mut MolCoord, db: &TopoDB, aut
             .flatten()
             .is_some_and(|value| value.eq_ignore_ascii_case("true"));
         let allow_autogen = auto_generate && !no_autogen;
+        if !has_topology
+            && allow_autogen
+            && summary.atom_indices.len() > 1
+            && !generated.contains_key(&summary.res_name)
+        {
+            let mut bonds = std::collections::BTreeSet::new();
+            for (offset, &i) in summary.atom_indices.iter().enumerate() {
+                for &j in &summary.atom_indices[offset + 1..] {
+                    let first = &mol.atoms()[i];
+                    let second = &mol.atoms()[j];
+                    if alt_compatible(first.alt_loc, second.alt_loc) && chk_bond_dist(mol, i, j) {
+                        let (a, b) = if first.name <= second.name {
+                            (&first.name, &second.name)
+                        } else {
+                            (&second.name, &first.name)
+                        };
+                        if a != b {
+                            bonds.insert((a.clone(), b.clone()));
+                        }
+                    }
+                }
+            }
+            std::sync::Arc::make_mut(&mut generated).insert(
+                summary.res_name.clone(),
+                std::sync::Arc::new(bonds.into_iter().collect()),
+            );
+        }
+        let generated_bonds = (!has_topology && auto_generate)
+            .then(|| generated.get(&summary.res_name))
+            .flatten();
+        if let Some(bonds) = generated_bonds {
+            for (a, b) in bonds.iter() {
+                for (i, j) in bond_named(mol, &map, a, &map, b, BondOrder::Single, None) {
+                    templated.insert(i);
+                    templated.insert(j);
+                }
+            }
+        }
         let group = match top {
             Some(top) if top.atom_count() > 0 => {
                 if !top.pivot_atom.is_empty() {
@@ -2283,7 +2322,7 @@ pub fn build_topology_bonds_with_db_options(mol: &mut MolCoord, db: &TopoDB, aut
             Some(_) => String::new(),
             None => String::new(),
         };
-        if has_topology || allow_autogen {
+        if has_topology || generated_bonds.is_some() {
             bond_unbonded_atoms(mol, &summary.atom_indices, &templated);
         }
         contexts.push(ResidueCtx {
@@ -2293,19 +2332,22 @@ pub fn build_topology_bonds_with_db_options(mol: &mut MolCoord, db: &TopoDB, aut
             map,
         });
     }
+    mol.set_generated_topology(generated);
 
     // Phase 2 — polymer links between consecutive same-chain residues
     // (peptide C-N, phosphodiester O3'-P, …). `summaries` is sorted by
     // (chain, res_id, ins_code), so adjacency here is sequence adjacency.
+    let mut polymer_links = Vec::new();
     for w in 1..contexts.len() {
         let (prev, cur) = (&contexts[w - 1], &contexts[w]);
         if prev.chain_id != cur.chain_id {
             continue;
         }
-        if prev.group.is_empty() || matches!(prev.group.as_str(), "water" | "ion" | "non-polymer") {
+        if cur.group.is_empty() || matches!(cur.group.as_str(), "water" | "ion" | "non-polymer") {
             continue;
         }
         if let Some(link) = best_link(db, mol, prev, cur, true) {
+            polymer_links.push((summaries[w - 1].key.clone(), summaries[w].key.clone()));
             for bond in &link.bonds {
                 let (m1, m2) = (prev.map.clone(), cur.map.clone());
                 bond_named(
@@ -2320,6 +2362,7 @@ pub fn build_topology_bonds_with_db_options(mol: &mut MolCoord, db: &TopoDB, aut
             }
         }
     }
+    mol.extend_topology_links(polymer_links);
 
     // Phase 3 — explicit non-polymer links over matching residue pairs. Restrict
     // each side to residues accepted by at least one target before forming the
@@ -2502,6 +2545,37 @@ mod tests {
         assert!(!db.contains("TST"));
         db.clear();
         assert_eq!(db.residue_count(), 0);
+    }
+
+    #[test]
+    fn generated_topology_is_reused_per_molecule_and_rebuilt_for_a_new_copy() {
+        let mut molecule = MolCoord::new();
+        for (serial, name, residue, x) in [
+            (1, "C1", 1, 0.),
+            (2, "C2", 1, 1.2),
+            (3, "C1", 2, 10.),
+            (4, "C2", 2, 13.),
+        ] {
+            let mut atom = sg_atom(serial, residue, x);
+            atom.name = name.into();
+            atom.res_name = "XYZ".into();
+            atom.element = "C".into();
+            molecule.push_atom(atom);
+        }
+        molecule.apply_topology();
+        assert_eq!(molecule.bond_count(), 2);
+        assert!(molecule
+            .bonds()
+            .iter()
+            .any(|bond| (bond.atom1, bond.atom2) == (2, 3)));
+        molecule.atom_mut_by_serial(2).unwrap().position.x = 5.;
+        let mut transferred = molecule.transfer_data().into_molecule().unwrap();
+        transferred.apply_topology();
+        assert_eq!(transferred.bond_count(), 2);
+        let mut copied = MolCoord::new();
+        assert!(copied.copy_atoms(&transferred, &crate::parse_selector("resid 2").unwrap()));
+        assert_eq!(copied.atom_count(), 2);
+        assert_eq!(copied.bond_count(), 0);
     }
 
     #[test]

@@ -5692,7 +5692,10 @@ pub fn read_molecule_bytes_with_options(
             read_qdf_mol_bytes(qdf_data)?
         }
         "qdfpdb" | "pdb" | "" => {
-            let mut options = crate::PdbReadOptions::default();
+            let mut options = crate::PdbReadOptions {
+                build_secondary: srctype == "pdb",
+                ..Default::default()
+            };
             if let Some(node) = reader_options {
                 options.load_model = qsc_reader_bool(node, "loadmodel", options.load_model);
                 options.load_anisou = qsc_reader_bool(node, "loadanisou", options.load_anisou);
