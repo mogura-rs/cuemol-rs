@@ -130,7 +130,54 @@ and staging verified all 36 browser assets with their licenses and provenance.
 
 ## Public release and installation
 
-### Current release: v0.1.6
+### Current release: v0.1.8
+
+The [v0.1.8 release](https://github.com/mogura-rs/cuemol-rs/releases/tag/v0.1.8)
+was published on 2026-10-30 UTC from application revision `f4ed01c`.
+Its [release workflow](https://github.com/mogura-rs/cuemol-rs/actions/runs/41014610981)
+passed shared and browser tests and all five native builds. The distribution
+includes the Render interface, image-export optimization, Japanese input and
+font repairs, reference default appearance, and compact-panel fixes above.
+Each native build exercised Python helpers before packaging.
+
+The [application CI](https://github.com/mogura-rs/cuemol-rs/actions/runs/41014327091)
+passed 1,658 Rust tests with one explicit POV-Ray exclusion and 109
+browser cases with one optional ICC-fixture exclusion. Ten browser cases use
+a mock Tauri bridge. Separate public Pages checks passed 100
+application cases in Chrome and 76 applicable cases across
+Firefox and WebKit; the Chromium-only IME protocol case was skipped once in
+each of the latter browsers. The [Pages deployment](https://github.com/mogura-rs/cuemol-rs/actions/runs/41015938022)
+published all 37 assets at the expected source revision; each file matched its
+manifest hash. The public checks include the real OIDN cancellation
+path, all five compact bottom tabs, restored panel height, text entry, file
+loading, rendering, picking, trajectories and stereo display.
+
+All eight public archives matched `SHA256SUMS`, source/target/version metadata
+and required license/provenance files, including the new Phosphor notice.
+Fresh isolated Linux x86-64 and macOS Apple Silicon installations passed release
+discovery, installation and self-update. Both passed APBS calculations, PDB2PQR
+conversion of 1CRN to 642 atoms, FFmpeg encoding/decoding of four distinct frames,
+native OIDN, MCP and PNG checks. All 37 embedded browser assets matched their
+manifest, and the installed Linux server passed 17 application cases. The macOS
+app bundle also restored deliberately removed resources and stale metadata
+through self-update from a path containing spaces, retaining the published
+binary hash.
+
+The [published GUI matrix](https://github.com/mogura-rs/cuemol-rs/actions/runs/41016980111) passed on Windows x86-64,
+Linux x86-64/ARM64 and macOS Intel/Apple Silicon. The macOS checks launched the
+executable inside the published app bundle. Each target passed OS drag and
+wheel input, displayed-pixel checks, font styles and multiline text, and Python
+output. Captures were inspected for the revised icons and compact panel tabs.
+The published Linux window separately passed visibility input and the 84 x 45
+Render preview/PNG check at 1.3 by 0.7 inches and 64.5 DPI. Credential-store
+checks used loopback providers; the real-cloud and hardware-stereo boundaries
+below remain open.
+
+The published browser renderer also retained the baseline decoded RGBA hashes
+for 1CRN at 640 x 480 and 1200 x 1200 and for 4HHB at 640 x 480. The three-sample
+performance comparison and its memory limits are recorded above.
+
+### Historical release: v0.1.6
 
 The [v0.1.6 release](https://github.com/mogura-rs/cuemol-rs/releases/tag/v0.1.6)
 was published on 2026-10-29 UTC from application revision `8797617`.
