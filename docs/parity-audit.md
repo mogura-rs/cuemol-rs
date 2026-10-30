@@ -208,6 +208,13 @@ browser checks then passed with the rebuilt WASM, covering transparent PNG
 downloads, OIDN and its alpha preservation, cancellation, lighting controls and
 both stereo viewport backends.
 
+The public Claude Code review found no high-confidence defect in this batch.
+Its suggested transparent-background/layer-weight edge case was then compared
+with the installed reference at 3 x 3 supersampling: it again differed in only
+three channels by one level. The layer-weight branch does not use the dummy
+depth value; depth gating is specific to per-pixel mode. Possible differences
+near OIDN boundaries remain covered by the measured denoising limitation above.
+
 ## Shell control inventory
 
 The initial inventory uses the published reference's `shared/menuTemplate.ts`,
