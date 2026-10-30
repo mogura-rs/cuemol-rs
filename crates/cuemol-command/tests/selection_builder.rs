@@ -183,6 +183,17 @@ fn superposition_resolves_each_molecules_named_selection_in_its_own_scene() {
 #[test]
 fn applied_named_selections_follow_definitions_in_sequences_and_overlays() {
     let (mut state, id) = fixture();
+    for empty in ["", "  \t "] {
+        assert!(state.active_measure(empty).is_none());
+        assert!(state
+            .active_sequence_view(empty)
+            .iter()
+            .all(|chain| chain.residues.iter().all(|residue| !residue.selected)));
+    }
+    assert_eq!(
+        selection::evaluate(&state, Some(id), "protein").count,
+        Some(3)
+    );
     let mut camera = Camera::new();
     call_tool(
         &mut state,

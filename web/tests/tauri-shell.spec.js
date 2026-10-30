@@ -43,6 +43,7 @@ async function openShell(page, storage = {}, options = {}) {
       canUndo: false, canRedo: false, undoDescriptions: [], redoDescriptions: [], openedPaths: [],
       materialNames: [], logLines: [], status: 'Ready',
     };
+    if(options.selectionSecond)snapshot.objects.push({...molecule,uid:8,name:'Other',selection:''});
     const viewport = {
       image: null, width: 320, height: 240, center: [0, 0, 0], zoom: 10, distance: 100, slab: 50,
       perspective: false, centerMark: options.centerMark || 'none', centerMarkEmbedded: true, lines: [], labels: [], status: 'Ready',
@@ -70,6 +71,7 @@ async function openShell(page, storage = {}, options = {}) {
     window.__TAURI__ = {core: {invoke: async (command, args) => {
       window.__shellCalls.push({command, args});
       if (command === 'get_initial_state') return {snapshot, viewport, preferences: {}, startupPathsPending: false};
+      if (command === 'get_snapshot') return snapshot;
       if (command === 'render_viewport') return viewport;
       if (command === 'update_camera') {
         if (args.action === 'zoom') viewport.zoom *= args.x;
@@ -263,6 +265,8 @@ async function openShell(page, storage = {}, options = {}) {
       }
       throw new Error(`Unexpected IPC: ${command}`);
     }}};
+    const backendInvoke=window.__TAURI__.core.invoke;
+    window.__TAURI__.core.invoke=async(command,args)=>structuredClone(await backendInvoke(command,structuredClone(args)));
   }, {storage, options});
   await page.goto('http://tauri.test/');
   await expect(page.locator('#status-text')).toHaveText('Ready');
@@ -967,6 +971,26 @@ test('Tauri selection pane retains text typed while an applied edit response is 
   await input.press('Enter');
   await expect(panel.getByRole('button',{name:'Apply selection',exact:true})).toBeDisabled();
   expect(await page.evaluate(()=>snapshot.objects[0].selection)).toBe('name O1');
+  expect(errors).toEqual([]);
+});
+
+test('Tauri selection pane refreshes a completed edit after switching molecules', async ({page}) => {
+  const errors=await openShell(page,{}, {selectionPane:true,selectionSecond:true});
+  await page.getByRole('button',{name:'Selection',exact:true}).click();
+  const panel=page.locator('[data-panel-name="Selection"]');
+  const input=panel.getByLabel('Selection expression');
+  await input.fill('name C1');
+  await page.evaluate(()=>{window.__delaySelectionEdit=true;});
+  await input.press('Enter');
+  await expect.poll(()=>page.evaluate(()=>typeof window.__releaseSelectionEdit)).toBe('function');
+  await panel.locator('#selection-object').selectOption('8');
+  await input.fill('name O1');
+  await page.evaluate(()=>window.__releaseSelectionEdit());
+  await expect.poll(()=>page.evaluate(()=>snapshot.objects.find(object=>object.uid===3).selection)).toBe('name C1');
+  await expect(panel.locator('#selection-object')).toHaveValue('8');
+  await expect(input).toHaveValue('name O1');
+  await panel.locator('#selection-object').selectOption('3');
+  await expect(input).toHaveValue('name C1');
   expect(errors).toEqual([]);
 });
 

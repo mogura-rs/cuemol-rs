@@ -288,6 +288,17 @@ function updateCueMolSelectionHistory(expression) {
   return cueMolSelectionHistoryTail;
 }
 
+async function refreshCueMolSelectionSnapshot() {
+  const previous = snapshot;
+  try {
+    const current = await invoke('get_snapshot');
+    if (snapshot !== previous || current.activeSceneUid !== previous?.activeSceneUid) return;
+    snapshot = current;
+    renderShell();
+    void renderViewport();
+  } catch (error) { showError(String(error)); }
+}
+
 function renderCueMolSelectionPane() {
   const scene = snapshot?.activeSceneUid;
   const objects = activeMoleculeObjects();
@@ -311,6 +322,7 @@ function createCueMolSelectionPane(scene, object, identity) {
   const validation=byId('validation'), error=byId('error'), container=byId('builder');
   let current=object?.selection || '';
   let pendingExpression=null;
+  let draftGeneration=0, pendingDraftGeneration=null;
   let disposed=false, timer=null, refreshTimer=null, validationGeneration=0;
   let editTail=Promise.resolve();
   let validationKey='', refreshKey='';
@@ -343,15 +355,18 @@ function createCueMolSelectionPane(scene, object, identity) {
     },250);
   };
   const edit=(action,expression,remember=false,selectionName)=>{
+    const requestedDraftGeneration=draftGeneration;
     editTail=editTail.then(async()=>{
       if(!live())return false;
       pendingExpression=action==='apply' ? expression : null;
+      pendingDraftGeneration=requestedDraftGeneration;
       try {
         const result=await invoke('inspector_request',{tool:'selection_edit',args:{sceneId:scene,moleculeId:molecule,action,expression,remember,name:selectionName}});
-        if(!live())return false;
-        error.textContent='';
         syncCueMolSelectionHistory(result);
+        if(!live()){await refreshCueMolSelectionSnapshot();return false;}
+        error.textContent='';
         snapshot=result.snapshot;
+        sync(snapshot.objects.find(object=>object.uid===molecule));
         renderShell();
         void renderViewport();
         if(action==='define'){
@@ -360,7 +375,7 @@ function createCueMolSelectionPane(scene, object, identity) {
         void builder.refresh();
         return true;
       } catch(error){showError(String(error));return false;}
-      finally {pendingExpression=null;if(live())controls();}
+      finally {pendingExpression=null;pendingDraftGeneration=null;if(live())controls();}
     });
     return editTail;
   };
@@ -368,13 +383,13 @@ function createCueMolSelectionPane(scene, object, identity) {
     container,draft:{keyword:'hierarchical',fields:{},picked:'',distance:'5'},isLive:live,onError:showError,
   });
   container.hidden=!molecule;
-  selectionInput.oninput=()=>{builder.invalidate();error.textContent='';controls();validate();};
+  selectionInput.oninput=()=>{draftGeneration++;builder.invalidate();error.textContent='';controls();validate();};
   selectionInput.onkeydown=event=>{
     if(event.key==='Enter'&&!event.isComposing){event.preventDefault();if(!applyButton.disabled)void edit('apply',selectionInput.value,true);}
   };
   applyButton.onclick=()=>{builder.invalidate();void edit('apply',selectionInput.value,true);};
   center.onclick=()=>{void edit('center',current);};
-  clear.onclick=()=>{builder.invalidate();selectionInput.value='';controls();validate();void edit('apply','');};
+  clear.onclick=()=>{draftGeneration++;builder.invalidate();selectionInput.value='';controls();validate();void edit('apply','');};
   define.onclick=()=>{
     definition.hidden=!definition.hidden; name.value='';
     define.setAttribute('aria-expanded',String(!definition.hidden)); controls();
@@ -390,22 +405,25 @@ function createCueMolSelectionPane(scene, object, identity) {
     if(name.value.trim()&&selectionInput.value.trim())void edit('define',selectionInput.value,false,name.value.trim());
   };
   controls();
-  return {identity,scene,builder,
-    sync:object=>{
-      const applied=object?.selection || '';
-      if(current!==applied){
-        current=applied; selectionInput.value=applied; error.textContent='';
-        builder.syncValue(applied,applied!==pendingExpression);
-      }
-      const key=JSON.stringify([selectionInput.value,snapshot?.structureKey,snapshot?.actionHistoryKey]);
-      if(validationKey!==key){validationKey=key;validate();}
-      const next=JSON.stringify([snapshot?.structureKey,snapshot?.actionHistoryKey,snapshot?.styles,selectionHistoryEntries]);
-      if(refreshKey!==next){
-        refreshKey=next;clearTimeout(refreshTimer);
-        refreshTimer=setTimeout(()=>{if(visible())void builder.refresh();},30);
-      }
-      controls();
-    },
+  function sync(object) {
+    const applied=object?.selection || '';
+    if(current!==applied){
+      const keepDraft=applied===pendingExpression && draftGeneration!==pendingDraftGeneration;
+      current=applied;
+      if(!keepDraft)selectionInput.value=applied;
+      error.textContent='';
+      builder.syncValue(applied,applied!==pendingExpression);
+    }
+    const key=JSON.stringify([selectionInput.value,snapshot?.structureKey,snapshot?.actionHistoryKey]);
+    if(validationKey!==key){validationKey=key;validate();}
+    const next=JSON.stringify([snapshot?.structureKey,snapshot?.actionHistoryKey,snapshot?.styles,selectionHistoryEntries]);
+    if(refreshKey!==next){
+      refreshKey=next;clearTimeout(refreshTimer);
+      refreshTimer=setTimeout(()=>{if(visible())void builder.refresh();},30);
+    }
+    controls();
+  }
+  return {identity,scene,builder,sync,
     dispose:()=>{disposed=true;clearTimeout(timer);clearTimeout(refreshTimer);validationGeneration++;builder.cancel();},
   };
 }

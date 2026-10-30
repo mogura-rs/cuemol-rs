@@ -703,6 +703,25 @@ builder screenshots were inspected and contained no error dialog. The complete
 that use selection history. Public review
 and delivery results are recorded after their terminal checks.
 
+Public review of `2682b75` reported no high-confidence defect, but identified
+unverified empty-selection, global-definition and delayed-response paths.
+The first two checks passed: empty fallback text selects nothing, and global
+protein definitions resolve inside scene scopes. The enum contains no other
+recursive selector variants requiring name resolution.
+
+The delayed-response follow-up exposed a weakness in the Tauri test double:
+it shared snapshot objects between the frontend and backend, whereas real IPC
+copies them. After copying request and response data, two tests reproduced
+lost text typed during an apply request and stale selection state after changing
+the target molecule. The pane now preserves a newer typed draft when its own
+apply response arrives. If its target changed, it refreshes current backend
+state without returning to the old target or replacing a newer snapshot.
+Successful operations also update shared history after a target change.
+The final ten affected Tauri cases passed with copied IPC data; the other
+twenty cases had passed in the full run with the same corrected test double.
+The core follow-up also passed empty/whitespace fallback and global-definition
+checks without a runtime change.
+
 ## Clipboard comparison and repairs
 
 The reference uses typed XML/QDF payloads for objects, renderers, cameras and
