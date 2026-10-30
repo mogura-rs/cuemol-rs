@@ -37,7 +37,10 @@ cargo run -p cuemol-desktop --bin cuemol-rs --features tauri-gui
 ```
 
 To run compat tests against a reference tree in a non-default location, set
-`CUEMOL2_REF_DIR=../cuemol2`.
+`CUEMOL2_REF_DIR` to its resolved directory, for example
+`CUEMOL2_REF_DIR="$(cd ../cuemol2 && pwd)" cargo test -p cuemol-molstr`.
+Cargo runs each test from its package directory, so a workspace-relative
+environment value can silently miss the fixtures.
 
 ## Architecture
 

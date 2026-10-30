@@ -371,14 +371,7 @@ pub fn evaluate(state: &DesktopAppState, molecule: Option<Uid>, expression: &str
             valid: true,
             count: molecule
                 .and_then(|id| state.scene_manager().object(id))
-                .map(|object| {
-                    let molecule = object.mol();
-                    molecule
-                        .atoms()
-                        .iter()
-                        .filter(|atom| selector.matches_in_molecule(atom, molecule))
-                        .count()
-                }),
+                .map(|object| object.mol().atom_sel_count(&selector)),
             error: None,
         },
         Err(error) => Evaluation {

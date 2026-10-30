@@ -2,6 +2,8 @@ use crate::molecule::{Atom, MolCoord};
 use cuemol_core::{Box3, CueMolError, IntRange, RangeSet, Result, Vector4};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
+mod batch;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Selector {
     All,

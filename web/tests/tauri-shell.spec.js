@@ -126,7 +126,12 @@ async function openShell(page, storage = {}, options = {}) {
             {key:'name',label:'name',kind:'nameList',candidates:'aname'},
           ]};
           if(request.action==='values') return ['C1','O1'];
-          if(request.action==='compose') return {expression:request.draft.fields.value ? `name ${request.draft.fields.value}` : null};
+          if(request.action==='compose') {
+            const term=request.draft.fields.value ? `name ${request.draft.fields.value}` : null;
+            const result={expression:term===null ? null : request.operation==='add' ? `(${request.current}) or (${term})` : term};
+            if(window.__delayCompose) {window.__delayCompose=false;return new Promise(resolve=>{window.__releaseCompose=()=>resolve(result);});}
+            return result;
+          }
           if(request.action==='evaluate') {
             const result={valid:request.expression!=='chain (',count:1,error:request.expression==='chain ('?'Invalid selection':null};
             if(window.__delaySelection) {window.__delaySelection=false;return new Promise(resolve=>{window.__releaseSelection=()=>resolve(result);});}
@@ -709,6 +714,58 @@ test('Tauri selection picker commits on close, cancels drafts, and ignores late 
   await page.evaluate(()=>window.__releaseSelection());
   await expect(popup).not.toBeVisible();
   expect(await writes()).toHaveLength(1);
+  expect(errors).toEqual([]);
+});
+
+test('Tauri selection builder preserves queued operations before committing on close', async ({page}) => {
+  const errors=await openShell(page,{}, {selectionPicker:true});
+  await page.locator('.tree-renderer').filter({hasText:'Atoms'}).click();
+  const input=page.getByLabel('Inspected sel',{exact:true});
+  const popup=page.getByRole('dialog',{name:'Build selection',exact:true});
+  const writes=()=>page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='inspector_request'&&call.args.tool==='set_node_prop'&&call.args.args.prop==='sel'));
+  await page.getByRole('button',{name:'Build sel',exact:true}).click();
+  await page.getByRole('button',{name:'Selection tab Term',exact:true}).click();
+  await page.getByLabel('Selection keyword',{exact:true}).selectOption('name');
+  await page.getByLabel('Selection value',{exact:true}).fill('C1');
+  await page.evaluate(()=>{
+    window.__delayCompose=true;
+    document.querySelector('[aria-label="Selection Set"]').click();
+  });
+  await expect.poll(()=>page.evaluate(()=>typeof window.__releaseCompose)).toBe('function');
+  await page.getByLabel('Selection value',{exact:true}).fill('O1');
+  await page.getByRole('button',{name:'Selection Add',exact:true}).click();
+  await page.mouse.click(600,130);
+  await expect(popup).toBeVisible();
+  expect(await writes()).toHaveLength(0);
+  await page.evaluate(()=>window.__releaseCompose());
+  await expect(input).toHaveValue('(name C1) or (name O1)');
+  await expect(popup).not.toBeVisible();
+  expect((await writes()).map(call=>call.args.args.value)).toEqual(['(name C1) or (name O1)']);
+  await page.getByRole('button',{name:'Build sel',exact:true}).click();
+  await page.getByRole('button',{name:'Selection tab Term',exact:true}).click();
+  await page.evaluate(()=>{
+    window.__releaseCompose=undefined;window.__delayCompose=true;
+    document.querySelector('[aria-label="Selection Set"]').click();
+  });
+  await expect.poll(()=>page.evaluate(()=>typeof window.__releaseCompose)).toBe('function');
+  await input.fill('name O1');
+  await page.mouse.click(600,130);
+  await page.evaluate(()=>window.__releaseCompose());
+  await expect(input).toHaveValue('name O1');
+  await expect(popup).not.toBeVisible();
+  expect((await writes()).at(-1).args.args.value).toBe('name O1');
+  await page.getByRole('button',{name:'Build sel',exact:true}).click();
+  await page.getByRole('button',{name:'Selection tab Term',exact:true}).click();
+  await page.evaluate(()=>{
+    window.__releaseCompose=undefined;window.__delayCompose=true;
+    document.querySelector('[aria-label="Selection Set"]').click();
+  });
+  await expect.poll(()=>page.evaluate(()=>typeof window.__releaseCompose)).toBe('function');
+  await page.keyboard.press('Escape');
+  await page.evaluate(()=>window.__releaseCompose());
+  await expect(popup).not.toBeVisible();
+  await expect(input).toHaveValue('name O1');
+  expect(await writes()).toHaveLength(2);
   expect(errors).toEqual([]);
 });
 

@@ -30,7 +30,8 @@ function createCueMolSelectionPicker(input, target, identity, commit) {
   cueMolPropertyInspector.selectionDrafts.set(input.id, draft);
   const candidates = new Map();
   let disposed = false;
-  let composing = false;
+  let composeTail = Promise.resolve();
+  let valueGeneration = 0;
   let countGeneration = 0;
   let timer = null;
   let closing = false;
@@ -65,8 +66,10 @@ function createCueMolSelectionPicker(input, target, identity, commit) {
     if (cancel || !live()) { close(true); return; }
     if (closing) return;
     closing = true;
-    const chosen = value;
     try {
+      await composeTail;
+      if (!live()) { close(true); return; }
+      const chosen = value;
       const result = await request({action:'evaluate',expression:chosen});
       if (!live()) { close(true); return; }
       if (chosen !== value) { closing = false; return; }
@@ -86,7 +89,10 @@ function createCueMolSelectionPicker(input, target, identity, commit) {
   const button = (label, action, aria=label) => {
     const element=document.createElement('button'); element.type='button'; element.textContent=label; element.setAttribute('aria-label',aria); element.addEventListener('click',action); return element;
   };
-  const setValue = next => { value=next; input.value=next; scheduleCounts(); };
+  const setValue = (next, external=true) => {
+    if (external) valueGeneration++;
+    value=next; input.value=next; scheduleCounts();
+  };
   const quick = expression => { setValue(expression); void finish(false); };
   const field = (key, placeholder) => {
     const element=document.createElement('input'); element.type='text'; element.placeholder=placeholder; element.value=draft.fields[key] || '';
@@ -95,16 +101,17 @@ function createCueMolSelectionPicker(input, target, identity, commit) {
     element.addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.isComposing&&!value.trim()){event.preventDefault();void compose('set',true);}});
     return element;
   };
-  const compose = async (operation, immediate=false) => {
-    if (!live() || composing) return;
-    composing=true;
-    const before=value;
-    try {
-      const result=await request({action:'compose',current:before,draft:currentDraft(),operation});
-      if (!live() || before!==value) return;
-      if(result.expression!==null) {setValue(result.expression); if(immediate) await finish(false);}
-    } catch(error) {if(live())showError(String(error));}
-    finally {composing=false;}
+  const compose = (operation, immediate=false) => {
+    if (!live() || closing) return;
+    const generation=valueGeneration, term=currentDraft();
+    composeTail=composeTail.then(async()=>{
+      if(!live()||generation!==valueGeneration)return;
+      const result=await request({action:'compose',current:value,draft:term,operation});
+      if(!live()||generation!==valueGeneration)return;
+      if(result.expression!==null)setValue(result.expression,false);
+    }).catch(error=>{if(live()&&generation===valueGeneration)showError(String(error));});
+    if(immediate)void composeTail.then(()=>finish(false));
+    return composeTail;
   };
   const scheduleCounts = () => {
     clearTimeout(timer); const generation=++countGeneration;

@@ -584,6 +584,63 @@ OS-input check built and committed an expression with mouse/keyboard input and
 restored both values with Undo/Redo. Selection panes, Paint-table cells and other
 dialogs remain part of the broader editor comparison.
 
+Public review of `42aa731` reported no high-confidence defect. Independent
+checks confirmed that selection schemas do not use derived display fields,
+that candidate sampling follows the reference's sorted chain/residue queries,
+and that term quoting follows the reference builder. A delayed-IPC regression
+then reproduced a Tauri race: closing the picker before composition returned
+lost the pending operation, and a second operation was dropped. Compositions
+now run in order, capture their operand at each click and finish before a close
+commits the value. Manual text edits and cancellation invalidate late results.
+Both Tauri selection tests pass, including queued operations, immediate close,
+manual replacement and cancellation while a request is pending.
+
+Bulk molecule queries now evaluate each nested selection once. Residue
+expansion groups selected residue keys, distance expansion uses sparse spatial
+cells, and bond expansion traverses an adjacency list once. Simple per-atom
+expressions retain their direct counting path. Results are temporary and are
+rebuilt from current coordinates and properties, so edits cannot reuse stale
+selection data. The scalar API remains available for individual-atom queries.
+
+The following comparison used the same ARM64 macOS host and generated
+20,000-atom PDB as the sequence benchmark. Each condition ran in three fresh
+processes with one cold query and three repeated queries. Timings include
+expression compilation and counting; atom-order digests are checked outside
+the timed region. Every count and digest matched both CueMol 2.4.1.547 and
+the pre-optimization Rust build (`42aa731`).
+
+| Expression | Reference cold / repeat (ms) | Rust before cold / repeat (ms) | Rust after cold / repeat (ms) |
+| --- | ---: | ---: | ---: |
+| `name C0` | 1.151 / 1.050 | 0.261 / 0.255 | 0.210 / 0.207 |
+| `byres (name C0)` | 10.582 / 7.381 | 445.309 / 446.839 | 0.736 / 0.731 |
+| `(name C0) around 3` | 9.778 / 8.202 | 1204.365 / 1202.125 | 4.816 / 4.807 |
+| `(name C0) expand 3` | 9.882 / 8.292 | 1196.353 / 1201.033 | 4.734 / 4.775 |
+
+Peak process RSS was 24.5-25.9 MiB for the repaired Rust build, 24.7-26.2 MiB
+before, and 81.0-83.6 MiB for the reference. These are whole-process peaks,
+including loading and runtime, not just selection storage. Six additional
+1CRN expressions checked nested distance/residue expansion, boolean operators
+and main/side-chain filters against the published reference in three fresh
+processes each; all atom-order digests matched. Small-molecule timings remain
+workload-dependent: some Rust queries are slower than the reference, so this
+does not establish a whole-application speedup.
+
+`scripts/benchmark-selection.py` runs this comparison with the
+`cuemol-command` example `selection_bench`; `--baseline` also verifies a saved
+result's fixture hash and atom-order digests. Four new regressions cover
+strict distance boundaries, nested operators, insertion codes, coordinate
+edits, extreme/nonfinite coordinates, graph cycles and duplicate identities.
+They compare bulk results with the independent scalar evaluator. Stale
+source-text assertions for the former ten-entry native history and its private
+storage helpers were removed; the behavioral history test checks the shared
+100-entry limit and persistence.
+
+Cross-molecule distance expressions still require scene-aware evaluation and
+remain unresolved. The Rust bond-distance `neighbor`/`extend` extension is
+retained; the reference source parses these operators but returns no matches.
+An installed-reference probe also returned zero atoms for both operators on
+1CRN with `name CA` as the operand.
+
 ## Clipboard comparison and repairs
 
 The reference uses typed XML/QDF payloads for objects, renderers, cameras and

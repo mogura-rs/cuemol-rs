@@ -919,7 +919,7 @@ impl MolCoord {
     }
 
     pub fn atom_sel_count(&self, selector: &Selector) -> usize {
-        self.select_indices(selector).len()
+        selector.count_in_molecule(self)
     }
 
     pub fn get_atom_sel_size(&self, selector: &Selector) -> usize {
@@ -1019,11 +1019,7 @@ impl MolCoord {
     }
 
     pub fn select_indices(&self, selector: &Selector) -> Vec<usize> {
-        self.atoms
-            .iter()
-            .enumerate()
-            .filter_map(|(index, atom)| selector.matches_in_molecule(atom, self).then_some(index))
-            .collect()
+        selector.indices_in_molecule(self)
     }
 
     pub fn set_residue_prop_str(

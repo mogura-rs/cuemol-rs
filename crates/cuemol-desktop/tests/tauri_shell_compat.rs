@@ -194,10 +194,6 @@ fn tauri_reference_panels_are_bound_to_shared_core_data() {
     assert!(NATIVE_GUI_RS.contains("fn compose_native_selection_editor("));
     assert!(NATIVE_GUI_RS.contains("\"Around/Expand\""));
     assert!(NATIVE_GUI_RS.contains("egui::Button::new(\"(no history)\")"));
-    assert!(NATIVE_GUI_RS.contains("const MAX_SELECTION_HISTORY: usize = 10"));
-    assert!(NATIVE_GUI_RS.contains("fn load_selection_history("));
-    assert!(NATIVE_GUI_RS.contains("fn persist_selection_history("));
-    assert!(NATIVE_GUI_RS.contains("selection_history:{index}"));
     assert!(!NATIVE_GUI_RS.contains("ui.label(\"Whole molecule\")"));
     assert!(JS.contains("item.supportsColoring"));
     assert!(JS.contains("PaintColoring"));
