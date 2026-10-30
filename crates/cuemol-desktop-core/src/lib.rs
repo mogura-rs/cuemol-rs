@@ -3,6 +3,7 @@ mod clipboard;
 pub use clipboard::GuiClipboardPayload;
 mod selection_support;
 mod sequence;
+mod style_state;
 pub use selection_support::MAX_SELECTION_HISTORY;
 pub use sequence::{sequence_residue_number, GuiSequenceLayout};
 mod command_support;
@@ -65,13 +66,13 @@ use cuemol_molvis::{
     apply_tube_renderer_styles, atom_intr_render_options, disorder_lines_snapshot_with_style,
     mainchain_line_snapshot, molecule_render_options_for_renderer, molecule_render_snapshot,
     na_renderer_snapshot, resolve_atom_colors, ribbon_mesh_snapshot,
-    ring_meshes_snapshot_with_coloring, scene_style_manager, selection_overlay_snapshot,
-    simple_line_snapshot, AnIsoURenderOptions, DisorderRenderOptions, MainchainLineMode,
-    MoleculeRenderOptions, NARenderOptions, NARenderer, SelectionOverlayMode,
-    SelectionOverlayOptions, ValenceBondMode, DEFAULT_STYLE_SCOPE,
+    ring_meshes_snapshot_with_coloring, selection_overlay_snapshot, simple_line_snapshot,
+    AnIsoURenderOptions, DisorderRenderOptions, MainchainLineMode, MoleculeRenderOptions,
+    NARenderOptions, NARenderer, SelectionOverlayMode, SelectionOverlayOptions, ValenceBondMode,
+    DEFAULT_STYLE_SCOPE,
 };
 #[cfg(test)]
-use cuemol_molvis::{default_style_manager, disorder_lines_snapshot};
+use cuemol_molvis::{default_style_manager, disorder_lines_snapshot, scene_style_manager};
 use cuemol_qsys::{Camera, MultiGradient, ScalarHistogram, ScalarObject, StyleManager, View};
 #[cfg(any(feature = "offscreen", feature = "scripting"))]
 use cuemol_render::PngSceneExporter;
@@ -705,6 +706,8 @@ pub struct DesktopAppState {
     potential_scale: Option<f64>,
     #[cfg(feature = "scripting")]
     script_styles: StyleManager,
+    #[cfg(feature = "scripting")]
+    script_style_bindings: BTreeMap<u64, BTreeMap<u64, u64>>,
     #[cfg(feature = "scripting")]
     script_services: script_services::Identity,
     #[cfg(feature = "scripting")]
@@ -1974,6 +1977,8 @@ impl Default for DesktopAppState {
             #[cfg(feature = "scripting")]
             script_styles: default_desktop_style_manager(),
             #[cfg(feature = "scripting")]
+            script_style_bindings: BTreeMap::new(),
+            #[cfg(feature = "scripting")]
             script_services: script_services::Identity::default(),
             #[cfg(feature = "scripting")]
             script_view_input_config: cuemol_qsys::ViewInputConfig::new(),
@@ -2002,7 +2007,7 @@ impl DesktopAppState {
             && self.potential_scale == other.potential_scale;
         #[cfg(feature = "scripting")]
         let same = same
-            && self.script_styles == other.script_styles
+            && self.build_script_styles() == other.build_script_styles()
             && self.script_view_input_config == other.script_view_input_config
             && self.script_scene_undo == other.script_scene_undo;
         same
@@ -2094,7 +2099,7 @@ impl DesktopAppState {
         let object_uids: Vec<_> = objects.iter().map(MolObject::uid).collect();
         let surface_uids: Vec<_> = surfaces.iter().map(|object| object.uid).collect();
         let lw_object_uids: Vec<_> = lw_objects.iter().map(|object| object.uid).collect();
-        let styles = scene_style_manager(source_scene);
+        let styles = self.scene_styles(source_scene);
         let density_maps = self
             .density_maps
             .values()
@@ -2774,7 +2779,7 @@ impl DesktopAppState {
         let Some(scene) = self.scene_manager().scene(scene_uid) else {
             return;
         };
-        let styles = scene_style_manager(scene);
+        let styles = self.scene_styles(scene);
         for surface in scene.loaded_surfaces() {
             let meshes = self.loaded_surface_meshes(scene, std::slice::from_ref(surface), false);
             let renderer_nodes = surface
@@ -2855,7 +2860,7 @@ impl DesktopAppState {
         surfaces: &[LoadedSurface],
         include_hidden: bool,
     ) -> Vec<cuemol_render::RenderMesh> {
-        let styles = scene_style_manager(scene);
+        let styles = self.scene_styles(scene);
         surfaces
             .iter()
             .flat_map(|surface| {
@@ -4242,35 +4247,31 @@ impl DesktopAppState {
     }
 
     pub fn style_summaries(&self, scene_uid: Uid) -> Vec<GuiStyleSummary> {
-        static GLOBAL_STYLES: OnceLock<Vec<(String, String, bool)>> = OnceLock::new();
-        let global = GLOBAL_STYLES.get_or_init(|| {
-            let mut styles = cuemol_molvis::default_style_manager();
-            styles.load_style_set_from_xml(DEFAULT_STYLE_SCOPE, "user", "<styles/>", false);
-            styles
-                .style_sets(DEFAULT_STYLE_SCOPE)
-                .iter()
-                .map(|set| {
-                    (
-                        if set.name().is_empty() {
-                            "(anonymous)".to_string()
-                        } else {
-                            set.name().to_string()
-                        },
-                        set.source().to_string(),
-                        set.modified(),
-                    )
-                })
-                .collect()
-        });
+        #[cfg(feature = "scripting")]
+        let global = &self.script_styles;
+        #[cfg(not(feature = "scripting"))]
+        let global = {
+            static GLOBAL_STYLES: OnceLock<StyleManager> = OnceLock::new();
+            GLOBAL_STYLES.get_or_init(|| {
+                let mut styles = cuemol_molvis::default_style_manager();
+                styles.load_style_set_from_xml(DEFAULT_STYLE_SCOPE, "user", "<styles/>", false);
+                styles
+            })
+        };
         let mut summaries = global
+            .style_sets(DEFAULT_STYLE_SCOPE)
             .iter()
-            .map(|(name, source, modified)| GuiStyleSummary {
+            .map(|set| GuiStyleSummary {
                 scene_uid: Uid::new(0),
                 local_index: None,
-                name: name.clone(),
-                source: source.clone(),
+                name: if set.name().is_empty() {
+                    "(anonymous)".into()
+                } else {
+                    set.name().into()
+                },
+                source: set.source().into(),
                 read_only: true,
-                modified: *modified,
+                modified: set.modified(),
             })
             .collect::<Vec<_>>();
         if let Some(scene) = self.scene_manager().scene(scene_uid) {
@@ -4298,7 +4299,7 @@ impl DesktopAppState {
     pub fn scene_material_names(&self, scene_uid: Uid) -> Vec<String> {
         self.scene_manager()
             .scene(scene_uid)
-            .map(|scene| scene_style_manager(scene).material_names(scene_uid.get()))
+            .map(|scene| self.scene_styles(scene).material_names(scene_uid.get()))
             .unwrap_or_default()
     }
 
@@ -4310,7 +4311,7 @@ impl DesktopAppState {
         let Some(scene) = self.scene_manager().scene(scene_uid) else {
             return Vec::new();
         };
-        let manager = scene_style_manager(scene);
+        let manager = self.scene_styles(scene);
         let mut styles = manager.style_infos(DEFAULT_STYLE_SCOPE);
         if scene_uid.get() != DEFAULT_STYLE_SCOPE {
             styles.extend(manager.style_infos(scene_uid.get()));
@@ -4362,7 +4363,10 @@ impl DesktopAppState {
         node.set_tag_name("styles");
         node.set_str_attr("id", name);
         let data = write_ldom2_xml(&LDom2Tree::from(node.clone()));
-        Ok(scene.add_loaded_style(LoadedStyle { node, data }))
+        scene
+            .loaded_styles_mut()
+            .insert(0, LoadedStyle::new(node, data));
+        Ok(0)
     }
 
     pub fn load_scene_style_file(
@@ -4405,7 +4409,7 @@ impl DesktopAppState {
         if read_only {
             node.set_str_attr("readonly", "true");
         }
-        Ok(scene.add_loaded_style(LoadedStyle { node, data }))
+        Ok(scene.add_loaded_style(LoadedStyle::new(node, data)))
     }
 
     pub fn save_scene_style_file(
@@ -4508,7 +4512,7 @@ impl DesktopAppState {
         }
         let mut node = LDom2Node::new();
         node.set_tag_name("styles");
-        node.set_str_attr("id", name);
+        node.set_str_attr("id", &name);
         node.set_str_attr("src", source);
         if style.node.str_attr("readonly").equals_ignore_case("true") {
             node.set_str_attr("readonly", "true");
@@ -4758,10 +4762,11 @@ impl DesktopAppState {
         }
         let style = clipboard.style.clone();
         if let Some(index) = existing {
-            scene.loaded_styles_mut()[index] = style;
+            scene.loaded_styles_mut()[index].node = style.node;
+            scene.loaded_styles_mut()[index].data = style.data;
             Ok(index)
         } else {
-            Ok(scene.add_loaded_style(style))
+            Ok(scene.add_loaded_style(LoadedStyle::new(style.node, style.data)))
         }
     }
 
@@ -4794,7 +4799,7 @@ impl DesktopAppState {
         let styles = self
             .scene_manager()
             .scene(object.scene_uid)
-            .map(scene_style_manager)
+            .map(|scene| self.scene_styles(scene))
             .unwrap_or_else(cuemol_molvis::default_style_manager);
         Some(density_map_summary(object, &styles))
     }
@@ -4803,7 +4808,7 @@ impl DesktopAppState {
         let styles = self
             .scene_manager()
             .scene(scene_uid)
-            .map(scene_style_manager)
+            .map(|scene| self.scene_styles(scene))
             .unwrap_or_else(cuemol_molvis::default_style_manager);
         self.density_maps
             .values()
@@ -4877,7 +4882,7 @@ impl DesktopAppState {
                 selection_support::renderer_selector(
                     object,
                     renderer,
-                    &scene_style_manager(scene),
+                    &self.scene_styles(scene),
                     scene,
                 )
             })
@@ -5028,7 +5033,7 @@ impl DesktopAppState {
     pub fn surface_summary(&self, surface_uid: Uid) -> Option<GuiLoadedSurfaceSummary> {
         let scene_uid = self.scene_manager().scene_uid_for_surface(surface_uid)?;
         let scene = self.scene_manager().scene(scene_uid)?;
-        let styles = scene_style_manager(scene);
+        let styles = self.scene_styles(scene);
         scene
             .loaded_surface(surface_uid)
             .map(|surface| surface_summary(scene_uid, surface, &styles))
@@ -5038,7 +5043,7 @@ impl DesktopAppState {
         self.scene_manager()
             .scene(scene_uid)
             .map(|scene| {
-                let styles = scene_style_manager(scene);
+                let styles = self.scene_styles(scene);
                 scene
                     .loaded_surfaces()
                     .iter()
@@ -5057,7 +5062,7 @@ impl DesktopAppState {
     pub fn lw_object_summary(&self, object_uid: Uid) -> Option<GuiLoadedLwObjectSummary> {
         let scene_uid = self.scene_manager().scene_uid_for_lw_object(object_uid)?;
         let scene = self.scene_manager().scene(scene_uid)?;
-        let styles = scene_style_manager(scene);
+        let styles = self.scene_styles(scene);
         scene
             .loaded_lw_object(object_uid)
             .map(|object| lw_object_summary(scene_uid, object, &styles))
@@ -5067,7 +5072,7 @@ impl DesktopAppState {
         self.scene_manager()
             .scene(scene_uid)
             .map(|scene| {
-                let styles = scene_style_manager(scene);
+                let styles = self.scene_styles(scene);
                 scene
                     .loaded_lw_objects()
                     .iter()
@@ -5522,7 +5527,7 @@ impl DesktopAppState {
         let styles = self
             .scene_manager()
             .scene(scene_uid)
-            .map(scene_style_manager)
+            .map(|scene| self.scene_styles(scene))
             .unwrap_or_else(cuemol_molvis::default_style_manager);
         for (key, value) in specific {
             match key.as_str() {
@@ -5641,7 +5646,7 @@ impl DesktopAppState {
         let styles = self
             .scene_manager()
             .scene(scene_uid)
-            .map(scene_style_manager)
+            .map(|scene| self.scene_styles(scene))
             .unwrap_or_else(cuemol_molvis::default_style_manager);
         let gradient = parse_multi_gradient_entries(gradient_entries, &styles)?;
         let summary = self
@@ -5904,7 +5909,7 @@ impl DesktopAppState {
         let styles = self
             .scene_manager()
             .scene(Uid::new(style_scope_id))
-            .map(scene_style_manager)
+            .map(|scene| self.scene_styles(scene))
             .unwrap_or_else(cuemol_molvis::default_style_manager);
         let map = self
             .density_maps
@@ -6065,7 +6070,7 @@ impl DesktopAppState {
         let styles = self
             .scene_manager()
             .scene(Uid::new(style_scope_id))
-            .map(scene_style_manager)
+            .map(|scene| self.scene_styles(scene))
             .unwrap_or_else(cuemol_molvis::default_style_manager);
         let summary = self
             .density_maps
@@ -7257,7 +7262,7 @@ impl DesktopAppState {
         let styles = self
             .scene_manager()
             .scene(scene_uid)
-            .map(scene_style_manager)
+            .map(|scene| self.scene_styles(scene))
             .unwrap_or_else(cuemol_molvis::default_style_manager);
         for map_object in self.density_maps.values().filter(|object| {
             object.scene_uid == scene_uid
@@ -8362,6 +8367,7 @@ impl DesktopAppState {
         #[cfg(feature = "scripting")]
         {
             self.script_styles.clear_scope(scene_uid.get());
+            self.script_style_bindings.remove(&scene_uid.get());
             self.script_scene_undo.remove(&scene_uid.get());
         }
         if self.active_scene == Some(scene_uid) {
@@ -8382,6 +8388,7 @@ impl DesktopAppState {
         #[cfg(feature = "scripting")]
         {
             self.script_styles = default_desktop_style_manager();
+            self.script_style_bindings.clear();
             self.script_scene_undo.clear();
         }
     }
@@ -8448,7 +8455,7 @@ impl DesktopAppState {
             .scene_manager()
             .scene(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
-        let styles = scene_style_manager(scene);
+        let styles = self.scene_styles(scene);
         let mut style_infos = styles.style_infos(DEFAULT_STYLE_SCOPE);
         if scene_uid.get() != DEFAULT_STYLE_SCOPE {
             style_infos.extend(styles.style_infos(scene_uid.get()));
@@ -8625,7 +8632,7 @@ impl DesktopAppState {
                     .scene_manager()
                     .scene(scene_uid)
                     .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
-                scene_style_manager(scene)
+                self.scene_styles(scene)
             };
             let object = self
                 .scene_manager_mut()
@@ -9243,7 +9250,7 @@ impl DesktopAppState {
                 return None;
             }
             let scene = self.scene_manager().scene(map.scene_uid)?;
-            let styles = scene_style_manager(scene);
+            let styles = self.scene_styles(scene);
             let node = renderer
                 .children
                 .iter()
@@ -9259,7 +9266,7 @@ impl DesktopAppState {
         }
         if let Some(scene_uid) = self.scene_manager().scene_uid_for_object(object_uid) {
             let scene = self.scene_manager().scene(scene_uid)?;
-            let styles = scene_style_manager(scene);
+            let styles = self.scene_styles(scene);
             let renderer = scene.object(object_uid)?.renderer(renderer_uid)?;
             let node = renderer
                 .qsc_children()
@@ -9279,7 +9286,7 @@ impl DesktopAppState {
 
         let scene_uid = self.scene_manager().scene_uid_for_surface(object_uid)?;
         let scene = self.scene_manager().scene(scene_uid)?;
-        let styles = scene_style_manager(scene);
+        let styles = self.scene_styles(scene);
         let surface = scene.loaded_surface(object_uid)?;
         let renderer_exists = self
             .surface_summary(object_uid)?
@@ -9354,7 +9361,7 @@ impl DesktopAppState {
                 .scene_manager()
                 .scene(scene_uid)
                 .expect("scene was found above");
-            let styles = scene_style_manager(scene);
+            let styles = self.scene_styles(scene);
             let object = scene.object(object_uid).expect("object was found above");
             let selection = object.mol().selection_text().trim().to_string();
             let renderer = object
@@ -11378,7 +11385,7 @@ impl DesktopAppState {
             let styles = self
                 .scene_manager()
                 .scene(scene_uid)
-                .map(scene_style_manager)
+                .map(|scene| self.scene_styles(scene))
                 .unwrap_or_else(cuemol_molvis::default_style_manager);
             for (selection, color) in &paint_entries {
                 parse_selector_with_styles(selection, &styles, scene_uid.get())?;
@@ -11508,7 +11515,7 @@ impl DesktopAppState {
         let styles = self
             .scene_manager()
             .scene(scene_uid)
-            .map(scene_style_manager)
+            .map(|scene| self.scene_styles(scene))
             .unwrap_or_else(cuemol_molvis::default_style_manager);
         for name in ["lowpar", "midpar", "highpar", "ramp_value"] {
             if let Some(value) = attrs.get(name) {
@@ -12737,7 +12744,7 @@ impl DesktopAppState {
         let styles = self
             .scene_manager()
             .scene(scene_uid)
-            .map(scene_style_manager)
+            .map(|scene| self.scene_styles(scene))
             .unwrap_or_default();
         let maps = self
             .scene_manager()
@@ -12956,7 +12963,7 @@ impl DesktopAppState {
             .scene_manager()
             .scene(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
-        let styles = scene_style_manager(scene);
+        let styles = self.scene_styles(scene);
         let theme = styles.get_str_data("palette", "default_paint", scene_uid.get());
         if !scene
             .objects()
@@ -13032,7 +13039,7 @@ impl DesktopAppState {
             self.scene_manager_mut()
                 .scene_mut(scene_uid)
                 .unwrap()
-                .add_loaded_style(LoadedStyle { node, data });
+                .add_loaded_style(LoadedStyle::new(node, data));
         }
         Ok([
             ("sheet", ""),
@@ -14601,7 +14608,7 @@ impl DesktopAppState {
             .scene_manager()
             .scene(scene_uid)
             .map(|scene| {
-                let styles = scene_style_manager(scene);
+                let styles = self.scene_styles(scene);
                 let color = scene
                     .scene_attribute("bgcolor")
                     .and_then(|value| resolve_qsc_color(value, &styles))
@@ -14624,7 +14631,7 @@ impl DesktopAppState {
         }
         let mut exporter = PovSceneExporter::new();
         if let Some(scene) = self.scene_manager().scene(scene_uid) {
-            let styles = scene_style_manager(scene);
+            let styles = self.scene_styles(scene);
             exporter.set_preamble(styles.get_config("pov", "preamble", scene_uid.get()));
             let material_names = std::iter::once("default")
                 .chain(
@@ -14650,7 +14657,7 @@ impl DesktopAppState {
                 .scene_manager()
                 .scene(scene_uid)
                 .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
-            let styles = scene_style_manager(scene);
+            let styles = self.scene_styles(scene);
             exporter.set_pixel_images(pov_lw_pixel_images(scene, &styles)?);
         }
         let path = path.as_ref();
@@ -14680,7 +14687,7 @@ impl DesktopAppState {
             .active_scene
             .and_then(|id| self.scene_manager().scene(id));
         let styles = scene
-            .map(scene_style_manager)
+            .map(|scene| self.scene_styles(scene))
             .unwrap_or_else(cuemol_molvis::default_style_manager);
         let scope = self.active_scene.map_or(0, Uid::get);
         if category == "color" {
@@ -14722,7 +14729,7 @@ impl DesktopAppState {
             .resolve(
                 |name| {
                     styles
-                        .get_or_init(|| scene_style_manager(scene))
+                        .get_or_init(|| self.scene_styles(scene))
                         .get_color(name, scene.uid().get())
                         .cloned()
                 },
@@ -14736,7 +14743,7 @@ impl DesktopAppState {
             .active_scene
             .and_then(|id| self.scene_manager().scene(id))
             .ok_or_else(|| CueMolError::not_found("scene"))?;
-        scene_background_color(scene)
+        scene_background_color(scene, &self.scene_styles(scene))
     }
 
     pub fn active_sequence_summaries(&self) -> Vec<GuiSequenceSummary> {
@@ -14818,7 +14825,7 @@ impl DesktopAppState {
             let selected = selection_support::indices(
                 object,
                 fallback_selector.as_ref(),
-                || styles.get_or_init(|| scene_style_manager(scene)),
+                || styles.get_or_init(|| self.scene_styles(scene)),
                 scene,
             );
             let mut selected = selected.into_iter().peekable();
@@ -14969,7 +14976,7 @@ impl DesktopAppState {
         let Some(scene) = self.scene_manager().scene(scene_uid) else {
             return Vec::new();
         };
-        let styles = scene_style_manager(scene);
+        let styles = self.scene_styles(scene);
         let mut out = Vec::new();
         for object in scene.objects().iter().filter(|object| object.is_visible()) {
             for renderer in object
@@ -15026,7 +15033,7 @@ impl DesktopAppState {
         let Some(scene) = self.scene_manager().scene(scene_uid) else {
             return Vec::new();
         };
-        let styles = scene_style_manager(scene);
+        let styles = self.scene_styles(scene);
         let mut out = Vec::new();
         for object in scene.objects().iter().filter(|object| object.is_visible()) {
             for renderer in object
@@ -15111,7 +15118,7 @@ impl DesktopAppState {
         let Some(scene) = self.scene_manager().scene(scene_uid) else {
             return Vec::new();
         };
-        let styles = scene_style_manager(scene);
+        let styles = self.scene_styles(scene);
         let mut out = Vec::new();
         for object in scene.objects().iter().filter(|object| object.is_visible()) {
             for renderer in object.renderers().iter().filter(|renderer| {
@@ -15172,7 +15179,7 @@ impl DesktopAppState {
             let selected_indices = selection_support::indices(
                 object,
                 selector.as_ref(),
-                || styles.get_or_init(|| scene_style_manager(scene)),
+                || styles.get_or_init(|| self.scene_styles(scene)),
                 scene,
             );
             for index in selected_indices {
@@ -15211,7 +15218,7 @@ impl DesktopAppState {
         } else {
             Some(parse_selector(selection_text)?)
         };
-        let styles = scene_style_manager(scene);
+        let styles = self.scene_styles(scene);
         let mut atoms = Vec::new();
         for object in scene
             .objects()
@@ -15358,7 +15365,11 @@ impl DesktopAppState {
             &camera,
             self.active_scene == Some(scene_uid) && self.active_view_options().swap_stereo_eyes,
         );
-        exporter.write_snapshot(&snapshot, &camera, scene_background_color(scene)?)
+        exporter.write_snapshot(
+            &snapshot,
+            &camera,
+            scene_background_color(scene, &self.scene_styles(scene))?,
+        )
     }
 
     /// Render the active scene to a PNG file via the offscreen wgpu renderer.
@@ -15464,7 +15475,7 @@ impl DesktopAppState {
             )
         }
         .unwrap_or_else(|| auto_frame_camera(&snapshot));
-        let background = scene_background_color(scene)?;
+        let background = scene_background_color(scene, &self.scene_styles(scene))?;
         let camera = cuemol_qsys::stereo::with_eye_order(
             &camera,
             self.active_scene == Some(scene_uid) && self.active_view_options().swap_stereo_eyes,
@@ -15509,7 +15520,7 @@ impl DesktopAppState {
             .scene_manager()
             .scene(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
-        let styles = scene_style_manager(scene);
+        let styles = self.scene_styles(scene);
         let selector = if selection_text.trim().is_empty() {
             None
         } else {
@@ -15569,7 +15580,7 @@ impl DesktopAppState {
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", source_uid.get())))?;
         let cameras = source.cameras().to_vec();
         let animation = source.animation_node().cloned();
-        let styles = scene_style_manager(source);
+        let styles = self.scene_styles(source);
         let mut render_objects = source
             .objects()
             .iter()
@@ -45362,7 +45373,7 @@ impl DesktopAppState {
             let scope = color_arg(args, 0, 0.0, ctx)? as u64;
             let uid = color_arg(args, 1, 0.0, ctx)? as u64;
             let path = argn(args, 2, ctx);
-            Ok(JsValue::new(script_env::with(|env| {
+            Ok(JsValue::new(script_env::with_mut(|env| {
                 env.styles.save_style_set_to_file(scope, uid, path)
             })))
         }
@@ -45374,9 +45385,12 @@ impl DesktopAppState {
             let scope = color_arg(args, 0, 0.0, ctx)? as u64;
             let path = argn(args, 1, ctx);
             let read_only = args.get(2).is_some_and(JsValue::to_boolean);
-            Ok(JsValue::new(script_env::with_mut(|env| {
-                env.styles.load_style_set_from_file(scope, path, read_only)
-            }) as f64))
+            script_env::with_mut(|env| {
+                env.styles
+                    .try_load_style_set_from_file(scope, path, read_only)
+            })
+            .map(|uid| JsValue::new(uid as f64))
+            .map_err(|error| script_error(error.to_string()))
         }
         fn js_style_get_color(
             _this: &JsValue,
@@ -47920,7 +47934,7 @@ impl DesktopAppState {
             view_input_config,
             scene_states,
         ) = updated_runtime;
-        let styles_changed = styles != self.build_script_styles();
+        let previous_styles = self.build_script_styles();
         {
             self.script_next_runtime_uid = self.script_next_runtime_uid.max(next_runtime_uid);
             updated_scene_states = scene_states;
@@ -48058,11 +48072,10 @@ impl DesktopAppState {
                 .into_iter()
                 .map(|(uid, morph)| (Uid::new(uid), morph))
                 .collect();
-            if styles_changed {
-                self.script_styles = styles;
-            }
+            self.script_styles = styles;
             self.script_view_input_config = view_input_config;
         }
+        self.sync_script_styles(&previous_styles)?;
 
         let mut log = String::new();
         let mut selection = None;
@@ -49300,6 +49313,7 @@ impl DesktopAppState {
                     .insert(Uid::new(state.uid), state.animation);
             }
         }
+        self.sync_script_styles(&previous_styles)?;
         Ok((log, selection))
     }
 
@@ -49366,6 +49380,7 @@ impl DesktopAppState {
         apply_map_changes(&mut self.trajectories, &from.trajectories, &to.trajectories);
         self.script_styles
             .apply_scope_undo_changes(scene_uid.get(), &from.styles, &to.styles);
+        self.remember_script_style_bindings();
     }
 
     #[cfg(feature = "scripting")]
@@ -49498,32 +49513,10 @@ impl DesktopAppState {
     }
 
     #[cfg(feature = "scripting")]
-    fn build_script_styles(&self) -> StyleManager {
-        let mut styles = self.script_styles.clone();
-        for scene in self.scene_manager().scenes() {
-            let scope_id = scene.uid().get();
-            for (index, loaded) in scene.loaded_styles().iter().enumerate() {
-                let id = loaded.node.str_attr("id");
-                let name = if id.is_empty() {
-                    format!("scene-style-{index}")
-                } else {
-                    id.to_string()
-                };
-                if styles.has_style_set(&name, scope_id) != 0 {
-                    continue;
-                }
-                let read_only = loaded.node.str_attr("readonly").equals_ignore_case("true");
-                styles.load_style_set_from_xml(scope_id, name, &loaded.data, read_only);
-            }
-        }
-        styles
-    }
-
-    #[cfg(feature = "scripting")]
     fn build_script_env(&self) -> ScriptEnv {
         let mut objects = Vec::new();
         for scene in self.scene_manager().scenes() {
-            let styles = scene_style_manager(scene);
+            let styles = self.scene_styles(scene);
             for object in scene.objects() {
                 let renderers = object
                     .renderers()
@@ -56315,9 +56308,8 @@ pub fn atoms_in_screen_rect(
     selected
 }
 
-fn scene_background_color(scene: &MolScene) -> Result<[f32; 4]> {
+fn scene_background_color(scene: &MolScene, styles: &StyleManager) -> Result<[f32; 4]> {
     let value = scene.scene_attribute("bgcolor").unwrap_or("black");
-    let styles = scene_style_manager(scene);
     let color = styles
         .get_color(value, scene.uid().get())
         .map(|c| c.rgba8())
@@ -72585,6 +72577,12 @@ attribute \"dep\" string \"positions\"
             .contains("Narrow"));
 
         app.create_scene_style(scene_uid, "duplicate").unwrap();
+        let local_index = app
+            .style_summaries(scene_uid)
+            .into_iter()
+            .find(|style| style.name == "renamed")
+            .and_then(|style| style.local_index)
+            .unwrap();
         std::fs::write(
             &style_path,
             "<styles id=\"duplicate\"><style id=\"Conflict\"/></styles>",

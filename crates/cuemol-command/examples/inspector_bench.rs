@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .scene_manager_mut()
         .scene_mut(sid)
         .unwrap()
-        .add_loaded_style(LoadedStyle { node: styles, data });
+        .add_loaded_style(LoadedStyle::new(styles, data));
     let renderer = state
         .scene_manager_mut()
         .object_mut(object)

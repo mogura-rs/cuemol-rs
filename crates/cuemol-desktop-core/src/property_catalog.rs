@@ -739,7 +739,7 @@ impl crate::DesktopAppState {
         let styles = std::cell::OnceCell::new();
         match crate::selection_support::resolve(
             &selector,
-            || styles.get_or_init(|| crate::scene_style_manager(scene)),
+            || styles.get_or_init(|| self.scene_styles(scene)),
             scene_uid.get(),
         )? {
             std::borrow::Cow::Borrowed(_) => Ok(selector),
@@ -775,7 +775,7 @@ impl crate::DesktopAppState {
             .scene_uid_for_object(object_uid)
             .ok_or_else(|| cuemol_core::CueMolError::not_found("molecule"))?;
         let scene = self.scene_manager().scene(scene_uid).unwrap();
-        let styles = crate::scene_style_manager(scene);
+        let styles = self.scene_styles(scene);
         let renderer = self
             .scene_manager()
             .object(object_uid)
@@ -840,7 +840,7 @@ impl crate::DesktopAppState {
             .active_scene()
             .ok_or_else(|| cuemol_core::CueMolError::not_found("scene"))?;
         let scene = self.scene_manager().scene(sid).unwrap();
-        let styles = crate::scene_style_manager(scene);
+        let styles = self.scene_styles(scene);
         let mut snapshot = cuemol_render::RenderSceneSnapshot::empty();
         if let Some(object) = scene.object(object_uid) {
             crate::append_object_snapshot(

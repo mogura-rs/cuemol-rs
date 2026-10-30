@@ -1804,11 +1804,35 @@ pub struct LoadedQscObject {
 
 /// A scene-local CueMol style sheet captured from a QSC `<styles>` element.
 /// `node` preserves source metadata while `data` contains the resolved XML.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct LoadedStyle {
     pub node: LDom2Node,
     pub data: String,
+    runtime_id: u64,
 }
+
+impl LoadedStyle {
+    pub fn new(node: LDom2Node, data: String) -> Self {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            node,
+            data,
+            runtime_id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
+    pub fn runtime_id(&self) -> u64 {
+        self.runtime_id
+    }
+}
+
+impl PartialEq for LoadedStyle {
+    fn eq(&self, other: &Self) -> bool {
+        self.node == other.node && self.data == other.data
+    }
+}
+
+impl Eq for LoadedStyle {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MolScene {
@@ -1939,7 +1963,7 @@ impl MolScene {
             &mut self.loaded_styles,
             &from.loaded_styles,
             &to.loaded_styles,
-            |style| style.node.str_attr("id").to_string(),
+            LoadedStyle::runtime_id,
             apply_value_change,
         );
         self.app_data
@@ -2079,7 +2103,14 @@ impl MolScene {
         &mut self.loaded_styles
     }
 
-    pub fn add_loaded_style(&mut self, style: LoadedStyle) -> usize {
+    pub fn add_loaded_style(&mut self, mut style: LoadedStyle) -> usize {
+        if self
+            .loaded_styles
+            .iter()
+            .any(|loaded| loaded.runtime_id() == style.runtime_id())
+        {
+            style = LoadedStyle::new(style.node, style.data);
+        }
         self.loaded_styles.push(style);
         self.loaded_styles.len() - 1
     }
@@ -2554,10 +2585,7 @@ impl MolScene {
                     )?)
                     .into_owned()
                 };
-                Ok(LoadedStyle {
-                    node: node.clone(),
-                    data,
-                })
+                Ok(LoadedStyle::new(node.clone(), data))
             })
             .collect::<Result<Vec<_>>>()?;
         let scene_attributes = stream

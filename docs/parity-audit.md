@@ -31,7 +31,7 @@ speedup from a single optimized stage or compare timings from different hosts.
 | --- | --- | --- |
 | Shell | Activities, menus, toolbar, tab order, docks, compact windows, themes and keyboard access | Application shortcuts, browser tab closing and menu access, shared history dropdowns, Tauri palette folding and tree/text clipboard routing repaired and checked; browser recent files and remaining pane controls are still under comparison |
 | Explorer and Inspector | Object/renderer/group hierarchy, selection, visibility, locking, drag/drop, context menus and property editors | Typed fields, nested properties, defaults/resets, group writes, Scene/View targets, quality presets, renderer pages, font choices and selection pickers repaired and checked below; remaining targets and live previews are under comparison |
-| Color and styles | Coloring modes, paint entries, palettes, property inheritance, style creation/apply/edit/save | Script-created styles remain separate from GUI selection and drawing state; reconciliation and complete editor comparison are pending |
+| Color and styles | Coloring modes, paint entries, palettes, property inheritance, style creation/apply/edit/save | Script/GUI style state, scoped selection/color precedence, file loading/saving and retained handles reconciled below; complete editor comparison remains pending |
 | Console | CueMol/PyMOL dialects, command arguments, completion, history, multiline input, IME and transaction behavior | Shared CueMol/PyMOL interpreters, completion, native QAX logging/replay and cancellable execution implemented; focused shared, browser and OS-input checks passed; affected regression checks, CI and Pages passed at `99b7c16`; public review repairs and release delivery are in progress |
 | Actions | History rows, operation inspection, QAX export, bundled/user macros and reusable actions | History selection, operation inspection, QAX export and bundled/user macro libraries are implemented in native, WASM and Tauri; CI, Pages and the macOS window check passed at `488ce9c`; review repairs passed affected checks and were published at `53100c5` |
 | Scripts and services | JavaScript/Python helpers, retained state, callbacks, errors, file arguments and asynchronous readers | Previous compatibility checks exist; shared workload comparison pending |
@@ -803,14 +803,16 @@ The other review hypotheses were checked against their callees. The new object
 paint fallback only runs without a renderer, map generators consume map-local
 coordinates, and direct-surface selection consumers accept the prepared mask.
 During the browser check, a separate script-created style failed to appear in
-ordinary selection queries. Its failing shared reproducer is retained for the
-style audit; the definition-removal check above uses the GUI command path.
+ordinary selection queries. The repair is recorded in [Script and GUI style
+state](#script-and-gui-style-state); the definition-removal check above uses
+the GUI command path.
 
 The follow-up public review of `98a39c3` found no high-confidence introduced
 defect. Its empty-mask hypotheses were checked against the molecular, backbone
 and direct-surface consumers; an empty selection remains empty. Complete shared
-and browser CI passed for `9b9e0ae`. The follow-up retains the affected checks
-above; the integrated main-branch delivery is checked separately.
+and browser CI passed for `9b9e0ae`. The integrated main revision `09f35c0` also
+passed CI and Pages deployment. All 38 live asset hashes matched that CI
+artifact, and the public WebGL/WebGPU target-movement and picking checks passed.
 
 The measurements below used the same ARM64 macOS host and two separately loaded
 copies of each input. Each condition ran in three sequential fresh processes
@@ -1224,3 +1226,102 @@ done
 The example also accepts a PDB path instead of the atom count. Keep captured
 reports under the ignored cache. Retain the previous executable before a source
 change when comparing two revisions.
+
+## Script and GUI style state
+
+Script-created styles previously remained in the scripting runtime while GUI
+selection, drawing and scene saving rebuilt a separate manager. Scene-local
+changes now synchronize with the loaded style records, and application queries
+include the current global definitions. GUI edits, renames, file reloads and
+deletions are reflected in the next script submission. Stable runtime identities
+keep retained JavaScript and Python handles attached to their original style,
+including anonymous styles when another set is inserted or removed. Deleting
+and recreating a set does not revive the deleted handle. These identities do not
+appear in QSC output or affect content equality.
+
+The installed CueMol 2.4.1.547 application confirmed local-over-global lookup,
+global fallback after deletion, first-created precedence among explicitly
+created sets and duplicate-create rejection. GUI creation now uses that same
+precedence. Imported files retain higher priority, and equally named local and
+global sets remain separate. Removing a named selection makes its renderer empty
+without deleting the stored expression. Undo/redo restores the definitions and
+their drawing effects. A read-only script query does not create a GUI undo entry.
+
+The file API had ignored the requested save scope, retained an obsolete source
+link after saving and appended imported sets below existing definitions. It now
+checks the scope before writing, synchronizes the source link, and puts imports
+first. Relative imports use the configured default directory. Duplicate IDs,
+anonymous external styles and invalid XML are rejected before registry mutation,
+and script callers receive an exception. Linked-style reconciliation preserves
+additional source attributes such as `alt_src`. Failed reads and writes leave
+the registered data and metadata unchanged. The reference clears `modified`
+when a save changes the source link, but retains it when overwriting the same
+source; the script API preserves this observed behavior.
+
+Focused regressions cover drawing and picking, QSC round trips, global palette
+and background changes, renderer presets, anonymous and retained Python handles,
+file metadata, failed operations and undo/redo. The browser fixture uses a local
+`user` style alongside the global `user` set. It checks actual blue/green pixels,
+GUI-to-script edits, atom hover and an exact empty-viewport crop after removing
+the definition in both WebGL and WebGPU. Full style-editor layout, global GUI
+editing and the remaining coloring workflows still require comparison.
+
+The final affected shared run passed 568 tests, including all fourteen style
+integration cases. Native GUI tests passed 178 cases with the unrelated
+real-POV-Ray case ignored. All seventeen rebuilt browser cases passed, covering
+the two style backends, cross-molecule selections and Inspector regressions.
+Public review and terminal CI/delivery are recorded after completion.
+
+### Style-copy and property-query cost
+
+Style snapshots now share immutable color, string, preset and material maps.
+Writing detaches only the changed map, including when undo merges a change into
+the current state. Loading style XML also reuses the parsed tree instead of
+parsing the same document twice. These changes avoid a persistent scene-result
+cache and retain fresh GUI/script queries.
+
+Three sequential fresh processes per condition used optimized builds on the
+same Linux x86_64 host. The baseline already included style reconciliation;
+these figures isolate the subsequent copy and XML-parsing changes. The snapshot
+workload registered 20,000 colors, changed one selection per step and retained
+64 snapshots plus the original. Every snapshot's serialized content matched
+between builds, including earlier selections after later edits.
+
+| Measured stage | Before | After |
+| --- | ---: | ---: |
+| Median first style-manager clone | 2.651 ms | 0.000958 ms |
+| Median selection edit and retained snapshot | 2.362 ms | 0.001539 ms |
+| Whole-process peak RSS | 182.80-183.03 MiB | 17.72 MiB |
+
+The sub-microsecond first clone is near timer overhead and should not be used
+as a stable ratio. This workload measures style snapshots, not complete scene
+history, application startup or GUI frame rate. Its process RSS includes style
+initialization and the subsequent content checks.
+
+The property workload used 20,000 generated PDB atoms, four color fields and
+300 repeated full `list_node_props` calls. Canonical results and resolved colors
+matched in every sample.
+
+| Custom colors | Median first query before / after (ms) | Median repeated query before / after (ms) | Process peak RSS before / after (MiB) |
+| --- | ---: | ---: | --- |
+| 0 | 1.764 / 1.389 | 1.096 / 0.733 | 31.12 / 30.50-30.73 |
+| 1,000 | 8.617 / 5.654 | 7.384 / 4.810 | 31.12 / 30.72-30.73 |
+
+Repeated property calls improved by about 1.50x and 1.54x. This is a comparison
+between Rust builds on one host; it is separate from the earlier macOS property
+measurement and does not establish a whole-application advantage over CueMol.
+
+To measure style snapshots and require unchanged content against a saved report:
+
+```sh
+cargo build --locked --release -p cuemol-qsys --example style_bench
+uv run --no-project python scripts/benchmark-styles.py \
+  --binary target/release/examples/style_bench \
+  --revision "$(git rev-parse HEAD)" \
+  --output .cache/style-benchmark/current.json \
+  --baseline .cache/style-benchmark/before.json
+```
+
+Omit `--baseline` when capturing the first build. The report records platform,
+binary hash, operation counts, per-process RSS, timings and a content digest.
+Use the existing `benchmark-inspector.py` command for the property measurement.

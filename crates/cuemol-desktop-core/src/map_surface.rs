@@ -119,7 +119,7 @@ impl DesktopAppState {
         let styles = self
             .scene_manager()
             .scene(map.scene_uid)
-            .map(scene_style_manager)
+            .map(|scene| self.scene_styles(scene))
             .unwrap_or_else(cuemol_molvis::default_style_manager);
         for (selection, color) in &paint_entries {
             parse_selector_with_styles(selection, &styles, map.scene_uid.get())?;

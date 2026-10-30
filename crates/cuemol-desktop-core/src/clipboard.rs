@@ -233,7 +233,7 @@ impl DesktopAppState {
             let index = self.paste_workspace_style(
                 sid,
                 &WorkspaceStyleClipboard {
-                    style: LoadedStyle { node, data },
+                    style: LoadedStyle::new(node, data),
                 },
                 false,
             )?;
@@ -386,7 +386,7 @@ impl DesktopAppState {
                 .scene_manager()
                 .scene(self.density_maps[&object].scene_uid)
                 .unwrap();
-            let renderers = density_renderer_configs(Some(&root), &scene_style_manager(scene));
+            let renderers = density_renderer_configs(Some(&root), &self.scene_styles(scene));
             if let Some(name) = group_name {
                 Data::DensityMapGroup {
                     group: renderer_group_qsc_node(&name),

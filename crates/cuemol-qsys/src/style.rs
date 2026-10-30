@@ -83,10 +83,10 @@ pub struct StyleSet {
     name: String,
     read_only: bool,
     modified: bool,
-    colors: BTreeMap<String, SolidColor>,
-    strings: BTreeMap<String, String>,
-    styles: BTreeMap<String, LDom2Node>,
-    materials: BTreeMap<String, StyleMaterial>,
+    colors: Arc<BTreeMap<String, SolidColor>>,
+    strings: Arc<BTreeMap<String, String>>,
+    styles: Arc<BTreeMap<String, LDom2Node>>,
+    materials: Arc<BTreeMap<String, StyleMaterial>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,16 +97,47 @@ pub struct StyleInfo {
 }
 
 impl StyleSet {
+    pub fn from_xml(uid: u64, name: impl Into<String>, xml: &str) -> cuemol_core::Result<Self> {
+        let tree = parse_ldom2_xml(xml)?;
+        if tree.top().tag_name() != "styles" {
+            return Err(cuemol_core::CueMolError::invalid_argument(
+                "style XML root must be <styles>",
+            ));
+        }
+        let name = name.into();
+        let mut set = Self::new(uid, &name);
+        populate_style_set_from_node(&mut set, tree.top());
+        set.set_name(name);
+        set.set_modified(false);
+        Ok(set)
+    }
+
+    pub fn to_xml(&self) -> String {
+        style_set_to_xml(self)
+    }
+
     pub fn apply_undo_changes(&mut self, from: &Self, to: &Self) {
         use cuemol_core::snapshot::{apply_map_changes, apply_value_change};
         apply_value_change(&mut self.source, &from.source, &to.source);
         apply_value_change(&mut self.name, &from.name, &to.name);
         apply_value_change(&mut self.read_only, &from.read_only, &to.read_only);
         apply_value_change(&mut self.modified, &from.modified, &to.modified);
-        apply_map_changes(&mut self.colors, &from.colors, &to.colors);
-        apply_map_changes(&mut self.strings, &from.strings, &to.strings);
-        apply_map_changes(&mut self.styles, &from.styles, &to.styles);
-        apply_map_changes(&mut self.materials, &from.materials, &to.materials);
+        if from.colors != to.colors {
+            apply_map_changes(Arc::make_mut(&mut self.colors), &from.colors, &to.colors);
+        }
+        if from.strings != to.strings {
+            apply_map_changes(Arc::make_mut(&mut self.strings), &from.strings, &to.strings);
+        }
+        if from.styles != to.styles {
+            apply_map_changes(Arc::make_mut(&mut self.styles), &from.styles, &to.styles);
+        }
+        if from.materials != to.materials {
+            apply_map_changes(
+                Arc::make_mut(&mut self.materials),
+                &from.materials,
+                &to.materials,
+            );
+        }
     }
 
     pub fn new(uid: u64, name: impl Into<String>) -> Self {
@@ -116,10 +147,10 @@ impl StyleSet {
             name: name.into(),
             read_only: false,
             modified: false,
-            colors: BTreeMap::new(),
-            strings: BTreeMap::new(),
-            styles: BTreeMap::new(),
-            materials: BTreeMap::new(),
+            colors: Arc::default(),
+            strings: Arc::default(),
+            styles: Arc::default(),
+            materials: Arc::default(),
         }
     }
 
@@ -208,8 +239,7 @@ impl StyleSet {
         if self.read_only {
             return false;
         }
-        let inserted = self
-            .colors
+        let inserted = Arc::make_mut(&mut self.colors)
             .insert(canonical_key(name.as_ref()), color)
             .is_none();
         self.modified = true;
@@ -220,7 +250,9 @@ impl StyleSet {
         if self.read_only {
             return false;
         }
-        let removed = self.colors.remove(&canonical_key(name)).is_some();
+        let removed = Arc::make_mut(&mut self.colors)
+            .remove(&canonical_key(name))
+            .is_some();
         if removed {
             self.modified = true;
         }
@@ -268,8 +300,7 @@ impl StyleSet {
         if self.read_only {
             return false;
         }
-        let inserted = self
-            .strings
+        let inserted = Arc::make_mut(&mut self.strings)
             .insert(
                 str_data_key("string", category.as_ref(), key.as_ref()),
                 value.into(),
@@ -283,8 +314,7 @@ impl StyleSet {
         if self.read_only {
             return false;
         }
-        let removed = self
-            .strings
+        let removed = Arc::make_mut(&mut self.strings)
             .remove(&str_data_key("string", category, key))
             .is_some();
         if removed {
@@ -333,7 +363,7 @@ impl StyleSet {
         if self.styles.contains_key(&key) {
             return false;
         }
-        self.styles.insert(key, node);
+        Arc::make_mut(&mut self.styles).insert(key, node);
         self.modified = true;
         true
     }
@@ -342,7 +372,9 @@ impl StyleSet {
         if self.read_only {
             return false;
         }
-        let removed = self.styles.remove(&style_key(name)).is_some();
+        let removed = Arc::make_mut(&mut self.styles)
+            .remove(&style_key(name))
+            .is_some();
         if removed {
             self.modified = true;
         }
@@ -385,7 +417,7 @@ impl StyleSet {
         if self.read_only {
             return false;
         }
-        self.materials
+        Arc::make_mut(&mut self.materials)
             .entry(id.into())
             .or_default()
             .set_dependent_value(renderer_type, value);
@@ -402,8 +434,7 @@ impl StyleSet {
         if self.read_only {
             return false;
         }
-        let changed = self
-            .materials
+        let changed = Arc::make_mut(&mut self.materials)
             .entry(id.into())
             .or_default()
             .set_system_value(parameter, value);
@@ -481,6 +512,10 @@ impl StyleManager {
     }
 
     pub fn create_style_set(&mut self, name: impl Into<String>, scope_id: u64) -> u64 {
+        let name = name.into();
+        if self.has_style_set(&name, scope_id) != INVALID_UID {
+            return INVALID_UID;
+        }
         let uid = self.alloc_uid();
         let set = StyleSet::new(uid, name);
         self.scopes.entry(scope_id).or_default().push(set);
@@ -558,6 +593,24 @@ impl StyleManager {
 
     pub fn style_sets(&self, scope_id: u64) -> &[StyleSet] {
         self.scopes.get(&scope_id).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    pub fn global_scope(&self) -> Self {
+        Self {
+            default_dir: self.default_dir.clone(),
+            next_uid: self.next_uid,
+            scopes: self
+                .scopes
+                .get(&0)
+                .map(|sets| BTreeMap::from([(0, sets.clone())]))
+                .unwrap_or_default(),
+            pending_events: self
+                .pending_events
+                .iter()
+                .filter(|(scope, _)| *scope == 0)
+                .cloned()
+                .collect(),
+        }
     }
 
     pub fn style_set_source(&self, style_set_id: u64) -> String {
@@ -964,15 +1017,28 @@ impl StyleManager {
     }
 
     pub fn save_style_set_to_file(
-        &self,
-        _scope_id: u64,
+        &mut self,
+        scope_id: u64,
         style_set_id: u64,
         path_name: impl AsRef<std::path::Path>,
     ) -> bool {
-        let Some(set) = self.get_style_set(style_set_id) else {
+        let Some(set) = self
+            .scopes
+            .get_mut(&scope_id)
+            .and_then(|sets| sets.iter_mut().find(|set| set.uid() == style_set_id))
+        else {
             return false;
         };
-        std::fs::write(path_name, style_set_to_xml(set)).is_ok()
+        let path_name = path_name.as_ref();
+        if std::fs::write(path_name, style_set_to_xml(set)).is_err() {
+            return false;
+        }
+        let source = path_name.to_string_lossy();
+        if set.source() != source {
+            set.set_source(source);
+            set.set_modified(false);
+        }
+        true
     }
 
     pub fn load_style_set_from_file(
@@ -981,23 +1047,50 @@ impl StyleManager {
         path_name: impl AsRef<std::path::Path>,
         read_only: bool,
     ) -> u64 {
-        let Ok(content) = std::fs::read_to_string(&path_name) else {
-            return INVALID_UID;
+        self.try_load_style_set_from_file(scope_id, path_name, read_only)
+            .unwrap_or(INVALID_UID)
+    }
+
+    pub fn try_load_style_set_from_file(
+        &mut self,
+        scope_id: u64,
+        path_name: impl AsRef<std::path::Path>,
+        read_only: bool,
+    ) -> cuemol_core::Result<u64> {
+        let path_name = path_name.as_ref();
+        let path = if path_name.is_absolute() {
+            path_name.to_path_buf()
+        } else {
+            std::env::current_dir()?
+                .join(&self.default_dir)
+                .join(path_name)
         };
-        let name = path_name
-            .as_ref()
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or("style")
-            .to_string();
-        let uid = self.create_style_set(name, scope_id);
-        if let Some(set) = self.get_style_set_mut(uid) {
-            populate_style_set_from_xml(set, &content);
-            set.set_source(path_name.as_ref().to_string_lossy());
-            set.set_read_only(read_only);
-            set.set_modified(false);
+        let tree = parse_ldom2_xml(&std::fs::read_to_string(&path)?)?;
+        if tree.top().tag_name() != "styles" {
+            return Err(cuemol_core::CueMolError::invalid_argument(
+                "style XML root must be <styles>",
+            ));
         }
-        uid
+        let name = tree.top().str_attr("id").to_string();
+        if name.is_empty() {
+            return Err(cuemol_core::CueMolError::invalid_argument(
+                "external style file must have an id",
+            ));
+        }
+        if self.has_style_set(&name, scope_id) != INVALID_UID {
+            return Err(cuemol_core::CueMolError::invalid_argument(format!(
+                "style already exists: {name}"
+            )));
+        }
+        let uid = self.alloc_uid();
+        let mut set = StyleSet::new(uid, name);
+        populate_style_set_from_node(&mut set, tree.top());
+        set.set_source(path.to_string_lossy());
+        set.set_read_only(read_only);
+        set.set_modified(false);
+        self.scopes.entry(scope_id).or_default().insert(0, set);
+        self.pending_events.push((scope_id, String::new()));
+        Ok(uid)
     }
 
     pub fn load_style_set_from_xml(
@@ -1007,12 +1100,15 @@ impl StyleManager {
         xml: &str,
         read_only: bool,
     ) -> u64 {
-        if !parse_ldom2_xml(xml).is_ok_and(|tree| tree.top().tag_name() == "styles") {
+        let Ok(tree) = parse_ldom2_xml(xml) else {
+            return INVALID_UID;
+        };
+        if tree.top().tag_name() != "styles" {
             return INVALID_UID;
         }
         let uid = self.alloc_uid();
         let mut set = StyleSet::new(uid, name);
-        populate_style_set_from_xml(&mut set, xml);
+        populate_style_set_from_node(&mut set, tree.top());
         set.set_read_only(read_only);
         set.set_modified(false);
         self.scopes.entry(scope_id).or_default().insert(0, set);
@@ -1223,11 +1319,13 @@ impl StyleManager {
         };
 
         let style_key = style_key(&style_name);
-        let node = set.styles.entry(style_key).or_insert_with(|| {
-            let mut node = LDom2Node::new();
-            node.set_tag_name("style");
-            node
-        });
+        let node = Arc::make_mut(&mut set.styles)
+            .entry(style_key)
+            .or_insert_with(|| {
+                let mut node = LDom2Node::new();
+                node.set_tag_name("style");
+                node
+            });
         set_style_value_node(node, &prop_name, value);
         set.modified = true;
         self.pending_events.push((scope_id, style_name));
@@ -1436,7 +1534,7 @@ fn style_set_to_xml(set: &StyleSet) -> String {
     output.push_str(&escape_xml_attr(set.name()));
     output.push_str("\">\n");
 
-    for (id, material) in &set.materials {
+    for (id, material) in set.materials.iter() {
         output.push_str("  <material id=\"");
         output.push_str(&escape_xml_attr(id));
         output.push_str("\">\n");
@@ -1468,7 +1566,7 @@ fn style_set_to_xml(set: &StyleSet) -> String {
         output.push_str("  </material>\n");
     }
 
-    for (name, color) in &set.colors {
+    for (name, color) in set.colors.iter() {
         output.push_str("  <color id=\"");
         output.push_str(&escape_xml_attr(name));
         output.push_str("\" value=\"");
@@ -1482,7 +1580,7 @@ fn style_set_to_xml(set: &StyleSet) -> String {
         }
     }
 
-    for (key, value) in &set.strings {
+    for (key, value) in set.strings.iter() {
         let Some((database, category, id)) = decode_str_data_key(key) else {
             continue;
         };
@@ -1507,7 +1605,7 @@ fn style_set_to_xml(set: &StyleSet) -> String {
         }
     }
 
-    for (key, node) in &set.styles {
+    for (key, node) in set.styles.iter() {
         let Some(id) = key.strip_suffix("\tstyle") else {
             continue;
         };
@@ -1610,12 +1708,16 @@ fn populate_style_set_from_xml(set: &mut StyleSet, xml: &str) -> usize {
     let Ok(tree) = parse_ldom2_xml(xml) else {
         return 0;
     };
-    let root_id = tree.top().str_attr("id").to_string();
+    populate_style_set_from_node(set, tree.top())
+}
+
+fn populate_style_set_from_node(set: &mut StyleSet, root: &LDom2Node) -> usize {
+    let root_id = root.str_attr("id").to_string();
     if !root_id.is_empty() {
         set.set_name(root_id);
     }
     let mut style_count = 0;
-    for child in tree.top().children() {
+    for child in root.children() {
         if child.is_attr() {
             continue;
         }
@@ -1687,7 +1789,7 @@ fn load_setting_node(set: &mut StyleSet, node: &LDom2Node) {
         return;
     }
     for child in node.children().iter().filter(|child| !child.is_attr()) {
-        set.strings.insert(
+        Arc::make_mut(&mut set.strings).insert(
             str_data_key("cfg", child.tag_name(), renderer_type),
             node_text(child),
         );
@@ -1700,7 +1802,7 @@ fn load_string_node(set: &mut StyleSet, node: &LDom2Node) {
     if id.is_empty() {
         return;
     }
-    set.strings.insert(
+    Arc::make_mut(&mut set.strings).insert(
         str_data_key("string", node.tag_name(), &id),
         node_text(node),
     );
@@ -1977,6 +2079,57 @@ mod tests {
     }
 
     #[test]
+    fn style_snapshots_keep_all_sections_isolated_and_merge_undo() {
+        let mut original = StyleManager::new();
+        let uid = original.load_style_set_from_xml(
+            42,
+            "local",
+            r##"<styles id="local"><color id="accent" value="#123456"/>
+              <sel id="focus" value="name C1"/>
+              <style id="Custom"><sphr value="0.4"/></style>
+              <material id="mat"><def shininess="8"/></material></styles>"##,
+            false,
+        );
+        let original_xml = original.get_style_set(uid).unwrap().to_xml();
+        let mut changed = original.clone();
+        changed.set_color("accent", SolidColor::from_rgb_u8(0, 255, 0), 42, uid);
+        changed.set_str_data("sel", "focus", "name O1", 42, uid);
+        changed.set_style_value(42, "local", "Custom.sphr", "0.8");
+        changed
+            .get_style_set_mut(uid)
+            .unwrap()
+            .put_material_number("mat", MATERIAL_SHININESS, 16.);
+        assert_eq!(original.get_style_set(uid).unwrap().to_xml(), original_xml);
+        let mut current = changed.clone();
+        current.set_color("independent", SolidColor::from_rgb_u8(255, 0, 0), 42, uid);
+        current.apply_scope_undo_changes(42, changed.style_sets(42), original.style_sets(42));
+        assert!(current.get_color("independent", 42).is_some());
+        assert_eq!(current.get_str_data("sel", "focus", 42), "name C1");
+        assert_eq!(current.get_style_value(42, "local", "Custom.sphr"), "0.4");
+        assert_eq!(
+            current.get_color("accent", 42),
+            original.get_color("accent", 42)
+        );
+        assert_eq!(
+            current.get_style_set(uid).unwrap().get_material("mat"),
+            original.get_style_set(uid).unwrap().get_material("mat")
+        );
+        current.apply_scope_undo_changes(42, original.style_sets(42), changed.style_sets(42));
+        assert!(current.get_color("independent", 42).is_some());
+        assert_eq!(current.get_str_data("sel", "focus", 42), "name O1");
+        assert_eq!(current.get_style_value(42, "local", "Custom.sphr"), "0.8");
+        assert_eq!(
+            current.get_color("accent", 42),
+            changed.get_color("accent", 42)
+        );
+        assert_eq!(
+            current.get_style_set(uid).unwrap().get_material("mat"),
+            changed.get_style_set(uid).unwrap().get_material("mat")
+        );
+        assert_eq!(original.get_style_set(uid).unwrap().to_xml(), original_xml);
+    }
+
+    #[test]
     fn style_manager_extracts_and_replaces_renderer_styles() {
         let mut manager = StyleManager::new();
         let uid = manager.create_style_set("Default", 10);
@@ -2135,6 +2288,35 @@ mod tests {
 
         std::fs::remove_file(&source).ok();
         std::fs::remove_file(&saved).ok();
+    }
+
+    #[test]
+    fn relative_style_files_use_default_dir_and_failures_preserve_state() {
+        let dir =
+            std::env::temp_dir().join(format!("cuemol-style-default-dir-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("source.xml");
+        std::fs::write(
+            &path,
+            "<styles id=\"actual-id\"><sel id=\"focus\" value=\"*\"/></styles>",
+        )
+        .unwrap();
+        let mut manager = StyleManager::new();
+        manager.set_default_dir(dir.to_string_lossy());
+        let uid = manager
+            .try_load_style_set_from_file(42, "source.xml", false)
+            .unwrap();
+        assert_eq!(manager.has_style_set("actual-id", 42), uid);
+        assert_eq!(manager.get_style_set_source(uid), path.to_string_lossy());
+        manager.set_str_data("sel", "focus", "name C1", 42, uid);
+        let before = manager.clone();
+        assert!(manager
+            .try_load_style_set_from_file(42, "source.xml", true)
+            .is_err());
+        assert_eq!(manager, before);
+        assert!(!manager.save_style_set_to_file(42, uid, dir.join("missing/output.xml")));
+        assert_eq!(manager, before);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

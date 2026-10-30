@@ -195,7 +195,7 @@ impl DesktopAppState {
         uid: Uid,
     ) -> Result<BTreeMap<String, String>> {
         let (scene_uid, node) = self.auxiliary_renderer_node(owner, uid)?;
-        let styles = scene_style_manager(self.scene_manager().scene(scene_uid).unwrap());
+        let styles = self.scene_styles(self.scene_manager().scene(scene_uid).unwrap());
         let style_list = node.str_attr("style").to_string();
         let mut values = node_attributes(&node);
         if let Some(object) = self.density_maps.get(&owner) {
@@ -287,7 +287,7 @@ impl DesktopAppState {
                 self.set_renderer_group_visible(owner, uid, visible(&node))?;
             }
         }
-        let styles = scene_style_manager(self.scene_manager().scene(scene_uid).unwrap());
+        let styles = self.scene_styles(self.scene_manager().scene(scene_uid).unwrap());
         if let Some(object) = self.density_maps.get_mut(&owner) {
             if let Some(renderer) = object
                 .renderers

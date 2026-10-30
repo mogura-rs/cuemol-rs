@@ -81,17 +81,10 @@ impl DesktopAppState {
         let scene = self
             .active_scene()
             .and_then(|id| self.scene_manager().scene(id));
-        let mut styles = cuemol_molvis::default_style_manager();
-        if let Some(scene) = scene {
-            for (index, loaded) in scene.loaded_styles().iter().enumerate() {
-                styles.load_style_set_from_xml(
-                    scene.uid().get(),
-                    format!("selection-{index}"),
-                    &loaded.data,
-                    true,
-                );
-            }
-        }
+        let styles = scene.map_or_else(
+            || self.global_styles(),
+            |scene| self.scene_styles_in_scope(scene, scene.uid().get()),
+        );
         let names = |scope| styles.str_data_names_in_scope("sel", scope);
         (
             self.active_scene()
