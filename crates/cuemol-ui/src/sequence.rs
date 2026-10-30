@@ -556,11 +556,11 @@ impl SequencePanel {
                 if start != end {
                     self.marker = Some(end.clone());
                     action = sequence_range_action(chains, &start, &end, true, false);
-                } else if self.shift_at_down {
-                    if let Some(marker) = &self.marker {
-                        action = sequence_range_action(chains, marker, &end, false, false);
+                } else if let Some(marker) = self.marker.as_ref().filter(|_| self.shift_at_down) {
+                    action = sequence_range_action(chains, marker, &end, false, false);
+                    if action.is_some() {
+                        self.marker = Some(end);
                     }
-                    self.marker = Some(end);
                 } else {
                     self.marker = Some(end.clone());
                     action = sequence_range_action(chains, &start, &end, true, true);
@@ -991,6 +991,44 @@ mod tests {
         );
         assert_eq!(panel.layout.ruler_number(5004), Some(5000));
         assert_eq!(panel.layout.ruler_number(4), None);
+    }
+
+    #[test]
+    fn sequence_initial_shift_click_toggles_and_centers() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        let mut panel = SequencePanel::default();
+        let modifiers = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        frame(&ctx, &mut panel, &mut state, Vec::new(), modifiers, 0);
+        frame(&ctx, &mut panel, &mut state, Vec::new(), modifiers, 0);
+        let point = cell(&panel, 1);
+        frame(
+            &ctx,
+            &mut panel,
+            &mut state,
+            pointer(point, egui::PointerButton::Primary, true, modifiers),
+            modifiers,
+            0,
+        );
+        let action = frame(
+            &ctx,
+            &mut panel,
+            &mut state,
+            pointer(point, egui::PointerButton::Primary, false, modifiers),
+            modifiers,
+            0,
+        );
+        assert!(matches!(
+            action,
+            Some(SequenceAction::Range {
+                toggle: true,
+                center_selection: Some(_),
+                ..
+            })
+        ));
     }
 
     #[test]

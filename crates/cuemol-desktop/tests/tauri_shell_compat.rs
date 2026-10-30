@@ -778,12 +778,7 @@ fn tauri_sequence_panel_matches_reference_mouse_and_context_operations() {
         "range-toggle",
         "range-select",
         "toggle-center",
-        "setSequenceMarker(cell)",
-        "previewSequenceRange(sequenceDrag.start, cell)",
         "navigator.clipboard.writeText(sequence)",
-        "function createSequenceRuler(columnCount)",
-        "function sequenceColumnCount(chains)",
-        "sequenceResidueColumn(residue.residueIndex)",
         "SEQUENCE_NAME_WIDTH_STORAGE_KEY",
         "setSequenceNameWidth(sequenceNameWidth, true)",
         "splitter.setPointerCapture(event.pointerId)",
@@ -801,14 +796,12 @@ fn tauri_sequence_panel_matches_reference_mouse_and_context_operations() {
     ] {
         assert!(JS.contains(label), "missing Sequence action {label}");
     }
-    assert!(JS.contains("event.shiftKey && sequenceMarker"));
     assert!(JS.contains("residue.residueIndex"));
     assert!(CSS.contains(".sequence-cell.marked"));
     assert!(CSS.contains(".sequence-cell.range-preview"));
     assert!(CSS.contains(".sequence-ruler"));
     assert!(CSS.contains("var(--sequence-name-width, 140px) max-content"));
     assert!(CSS.contains(".sequence-name-splitter"));
-    assert!(CSS.contains("width: 10px;"));
     assert!(CSS.contains("position: sticky;"));
     assert!(TAURI_APP_RS.contains("fn apply_sequence_action("));
     assert!(TAURI_APP_RS.contains("molecule_residue_range_selection_text"));

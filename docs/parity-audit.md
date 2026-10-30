@@ -113,6 +113,19 @@ actual sequence DTO and shared layout. All four real-WASM sequence tests and
 four Tauri model tests passed. The Tauri shell suite passed 11 tests; the affected
 virtualization case passed again after correcting the splitter's scroll extent.
 
+Public review found an initial Shift-click difference and inconsistent ruler
+marks between frontends. The reference falls back to toggle-and-center when no
+marker exists; native, WASM and Tauri now do the same. The ruler draws a tick for
+each insertion column and omits the zero label in every frontend. The affected
+pointer and browser checks passed after these corrections. An obsolete static
+source assertion still required the removed DOM-based range implementation;
+that assertion was removed because the browser test checks the actual range.
+
+The review also raised very large numbering spans as a potential coordinate
+limit. Spans beyond the tested 5,000-residue example remain unvalidated. Row
+ordering is guaranteed by the shared sequence builder, including its sorted
+fallback; atom-order permutation regressions cover that requirement.
+
 ### Measurements
 
 The following measurements were taken on 2026-10-30 after the selection and

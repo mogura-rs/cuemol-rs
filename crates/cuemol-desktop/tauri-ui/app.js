@@ -16111,14 +16111,14 @@ function drawSequenceRuler(firstColumn, lastColumn) {
   context.beginPath();
   for (let column = firstColumn; column < lastColumn; column += 1) {
     const x = (column + 0.5) * sequenceCellWidth - sequenceScroller.scrollLeft;
+    context.moveTo(x, 12);
+    context.lineTo(x, 16);
     if (insertions[inserted]?.[2] === column) {
       inserted += 1;
       continue;
     }
     const number = (layout?.minimum || 0) + column - inserted;
-    context.moveTo(x, 12);
-    context.lineTo(x, 16);
-    if (number % 5 === 0) {
+    if (number !== 0 && number % 5 === 0) {
       const label = String(number);
       context.fillText(label, x - context.measureText(label).width / 2, 10);
     }
@@ -16274,13 +16274,14 @@ document.addEventListener("mouseup", (event) => {
   clearSequenceDragPreview();
   if (!point) return;
   const chain = sequenceChain(point);
-  const start = !drag.moved && drag.shiftAtDown ? sequenceMarker : drag.start;
+  const extend = !drag.moved && drag.shiftAtDown && sequenceMarker !== null;
+  const start = extend ? sequenceMarker : drag.start;
   if (!sameSequenceRow(start, point)) return;
   const anchor = chain.residues[start.position]?.selection;
   if (!anchor) return;
   const range = sequenceRange(start, point).map((residue) => residue.selection).join("|");
   setSequenceMarker(point);
-  void runSequenceAction(chain, drag.moved ? "range-toggle" : drag.shiftAtDown ? "range-select" : "toggle-center", anchor, range);
+  void runSequenceAction(chain, drag.moved ? "range-toggle" : extend ? "range-select" : "toggle-center", anchor, range);
 });
 function cancelSequenceDrag() {
   sequenceDrag = null;

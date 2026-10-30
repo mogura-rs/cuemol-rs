@@ -108,6 +108,8 @@ test('sequence reaches negative, inserted and distant residues without overlappi
     `ATOM  ${String(offset+1).padStart(5)}  CA  ALA A${String(number).padStart(4)}${insertion}      0.000   0.000   0.000  1.00 10.00           C`
   ).join('\n')+'\nEND\n';
   const id=await setup(page,'dark',source);
+  await page.keyboard.down('Shift');await page.mouse.click(...await cell(page,0));await page.keyboard.up('Shift');
+  await expect.poll(async()=>(await status(page)).selection).toBe("'A'.-2.*");
   for(const [column,index] of [[0,'-2'],[1,'-1'],[2,'0'],[3,'1'],[4,'1A'],[5,'1B'],[6,'2']]){
     await command(page,'set_mol_selection',{objId:id,selection:''});
     await page.mouse.click(...await cell(page,column));

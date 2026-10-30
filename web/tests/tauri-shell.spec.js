@@ -265,6 +265,10 @@ test('Tauri sequence virtualizes both axes and ranges include offscreen residues
   await page.locator('[data-bottom-select="sequence"]').click();
   const firstRow = page.locator('.sequence-chain').first();
   const cell = index => firstRow.locator(`.sequence-cell[data-residue-index="${index}"]`);
+  await page.keyboard.down('Shift');
+  await cell(-2).click();
+  await page.keyboard.up('Shift');
+  await expect.poll(() => page.evaluate(() => window.__shellCalls.filter(call => call.command === 'sequence_action').at(-1)?.args.input.action)).toBe('toggle-center');
   for (const index of [-2, -1, 0, 1, '1A', '1B']) {
     await cell(index).click();
     await expect.poll(() => page.evaluate(() => window.__shellCalls.filter(call => call.command === 'sequence_action').at(-1)?.args.input.targetSelection)).toBe(`'A'.${index}.*`);
