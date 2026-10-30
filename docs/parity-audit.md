@@ -806,6 +806,12 @@ During the browser check, a separate script-created style failed to appear in
 ordinary selection queries. Its failing shared reproducer is retained for the
 style audit; the definition-removal check above uses the GUI command path.
 
+The follow-up public review of `98a39c3` found no high-confidence introduced
+defect. Its empty-mask hypotheses were checked against the molecular, backbone
+and direct-surface consumers; an empty selection remains empty. Complete shared
+and browser CI passed for `9b9e0ae`. The follow-up retains the affected checks
+above; the integrated main-branch delivery is checked separately.
+
 The measurements below used the same ARM64 macOS host and two separately loaded
 copies of each input. Each condition ran in three sequential fresh processes
 with one cold and ten repeated compile/count operations. Every selected-atom
