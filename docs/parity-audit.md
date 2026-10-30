@@ -155,8 +155,11 @@ in the ignored cache.
 
 The complete shared/native run passed 1,729 tests with one ignored. After
 cylinder-axis reuse was added, all 93 render unit/integration tests passed and
-both WASM modules rebuilt. Browser, public review and delivery checks for this
-batch are in progress.
+both WASM modules rebuilt. The browser run passed 139 cases and exposed one
+invalid spline fixture: its CA-only PDB has no polymer links, and both the
+published reference and Rust export an empty image for that input. The fixture
+now includes the linking N/C atoms; its full-chain and partial-selection pixel
+assertions passed unchanged. Public review and delivery checks are in progress.
 
 ## Shell control inventory
 

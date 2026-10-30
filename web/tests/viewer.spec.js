@@ -1100,8 +1100,13 @@ test('scripted SES backends regenerate through saved scene objects',async({page}
 
 test('partial spline selection keeps the full-chain curve and draws two residues',async({page},testInfo)=>{
   await ready(page);
-  const protein=[[0,0,0],[3,2,0],[6,0,1],[9,1,0],[12,0,0]].map((p,i)=>
-    `ATOM  ${String(i+1).padStart(5)}  CA  ALA A${String(i+1).padStart(4)}    ${p.map(v=>v.toFixed(3).padStart(8)).join('')}  1.00 10.00           C`).join('\n')+'\nEND\n';
+  const pivots=[[0,0,0],[3,2,0],[6,0,1],[9,1,0],[12,0,0]];
+  const protein=pivots.flatMap((p,i)=>{
+    const previous=pivots[i-1]||[p[0]-3,p[1],p[2]],next=pivots[i+1]||[p[0]+3,p[1],p[2]];
+    const toward=neighbor=>p.map((value,axis)=>value+0.35*(neighbor[axis]-value));
+    return [['N',toward(previous)],['CA',p],['C',toward(next)]].map(([name,position],atom)=>
+      `ATOM  ${String(3*i+atom+1).padStart(5)}  ${name.padEnd(3)} ALA A${String(i+1).padStart(4)}    ${position.map(v=>v.toFixed(3).padStart(8)).join('')}  1.00 10.00           ${name[0]}`);
+  }).join('\n')+'\nEND\n';
   await load(page,'spline.pdb',Buffer.from(protein));
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
   const id=(await page.evaluate(()=>window.cuemol.status())).scene.objects[0].id;
