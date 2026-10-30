@@ -268,9 +268,22 @@ impl Properties<'_> {
     fn font(&self) -> Vec<Value> {
         let mut size = number("font_size", "Font size", 1., 72., 1., "pt");
         size["decimals"] = json!(0);
+        let mut families = cuemol_desktop_core::font_catalog::families();
+        if !families
+            .iter()
+            .any(|family| family == self.value("font_name"))
+        {
+            families.insert(0, self.value("font_name").into());
+        }
+        let mut font = self.choices(
+            "font_name",
+            "Font name",
+            &families.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        font["font"] = json!(true);
         vec![
             size,
-            row("font_name", "Font name"),
+            font,
             self.mapped(
                 "font_style",
                 "Font style",

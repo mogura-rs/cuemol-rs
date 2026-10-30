@@ -17,6 +17,7 @@ mod script_reader;
 mod script_services;
 pub use property_access::auxiliary_property_readonly;
 mod density_view;
+pub mod font_catalog;
 mod map_surface;
 pub mod picking;
 pub mod projection;
@@ -35553,7 +35554,7 @@ impl DesktopAppState {
             EdgeColor,
         }
         use crate::property_catalog::{
-            renderer_attr_properties, RendererAttrKind, RendererAttrProperty,
+            renderer_attr_properties, MapRendererProperty, RendererAttrKind, RendererAttrProperty,
         };
         fn pending_renderer_attr_key(property: RendererAttrProperty) -> JsString {
             JsString::from(format!("_pending_{}", property.key))
@@ -38340,47 +38341,6 @@ impl DesktopAppState {
             });
             Ok(JsValue::undefined())
         }
-        #[derive(Clone, Copy)]
-        enum MapRendererProperty {
-            UiAbsMin,
-            UiAbsMax,
-            UiMin,
-            UiMax,
-            EffectiveSigLevel,
-            MapTypeResolved,
-            RegionMode,
-            RegionModeResolved,
-            Lod,
-            LodBudget,
-            ZoomRefine,
-            MaxLevel,
-            MinLevel,
-            ColorMode,
-            Color,
-            SigLevel,
-            Extent,
-            Center,
-            Level,
-            UsePbc,
-            UseAbsLevel,
-            BoundaryRange,
-            BoundaryMolecule,
-            BoundarySelection,
-            MultiGradient,
-            ColorMapName,
-            MaxExtent,
-            Width,
-            BufferSize,
-            AutoUpdate,
-            DragUpdate,
-            CullFace,
-            DrawMode,
-            Binning,
-            MaxGrids,
-            GlRenderMode,
-            OmpThreads,
-            XferFunctionType,
-        }
         fn map_renderer_properties(
             renderer_type: &str,
         ) -> Vec<(&'static str, MapRendererProperty, bool)> {
@@ -38460,13 +38420,10 @@ impl DesktopAppState {
         fn map_renderer_fallback_property(
             renderer_type: &str,
             name: &'static str,
-            _property: MapRendererProperty,
+            property: MapRendererProperty,
             writable: bool,
         ) -> RendererAttrProperty {
-            let mut spec = property_catalog::map_renderer_attr_property(renderer_type, name)
-                .expect("map renderer property metadata");
-            spec.writable = writable;
-            spec
+            property.property(renderer_type, name, writable)
         }
         fn renderer_type_for_runtime_class(class_name: &str) -> Option<&'static str> {
             match class_name {

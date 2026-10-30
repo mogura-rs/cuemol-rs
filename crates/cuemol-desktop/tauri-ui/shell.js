@@ -224,6 +224,11 @@ function paintCueMolProperties() {
   }
 }
 
+function inspectorDashValue(value) {
+  const number=Number(value);
+  return value.trim()==='' || !Number.isFinite(number) || number<0 ? '-1' : String(number);
+}
+
 function paintCueMolPropertyRows() {
   const inspector = cueMolPropertyInspector;
   const host = document.querySelector('.inspector-property-rows');
@@ -243,8 +248,8 @@ function paintCueMolPropertyRows() {
           const current = inspector.rows.find(row => row.key === key)?.value;
           return current === value || current !== '' && value !== '' && Math.abs(Number(current) - Number(value)) < 1e-6;
         }));
-        const reset = inspector.rows.find(row=>row.key===definition.reset?.[0]);
-        return {key:definition.key, value:definition.display ?? matches?.label ?? 'Custom', type:'preset', allowed:definition.options.map(option=>option.label), category:section.title, schema:definition, hasdefault:reset?.hasdefault, isdefault:reset?.isdefault};
+        const reset = (definition.reset || []).map(key=>inspector.rows.find(row=>row.key===key)).filter(Boolean);
+        return {key:definition.key, value:definition.display ?? matches?.label ?? 'Custom', type:'preset', allowed:definition.options.map(option=>option.label), category:section.title, schema:definition, hasdefault:reset.some(row=>row.hasdefault), isdefault:reset.every(row=>row.isdefault)};
       }
       return property ? {...property, value:definition.display ?? property.value, category:section.title, schema:definition, readonly:definition.editable ? false : property.readonly} : null;
     }).filter(Boolean));
@@ -279,7 +284,8 @@ function paintCueMolPropertyRows() {
       input.setAttribute('aria-label', row.key === 'name' ? 'Inspected name' : `Inspected ${row.key}`);
       if (choices?.length) {
         if (row.type === 'preset' && row.value === 'Custom') { const option = document.createElement('option'); option.value='Custom'; option.textContent='Custom'; option.disabled=true; input.append(option); }
-        for (const value of choices) { const option = document.createElement('option'); option.value=value; option.textContent=row.schema?.labels?.[value] || value; input.append(option); }
+        for (const value of choices) { const option = document.createElement('option'); option.value=value; option.textContent=row.schema?.labels?.[value] || value; if (row.schema?.font) option.style.fontFamily=value; input.append(option); }
+        if (row.schema?.font) input.style.fontFamily=row.value;
       } else if (row.type === 'boolean' || row.type === 'toggle') { input.type='checkbox'; input.checked=row.value === 'true'; }
       else if (row.type === 'integer' || row.type === 'real') {
         input.type='number'; input.step=row.type === 'integer' ? '1' : row.schema?.fineStep ?? (row.schema?.step ? row.schema.step/10 : 'any');
@@ -291,6 +297,10 @@ function paintCueMolPropertyRows() {
       if (row.schema?.blankNegative && Number(row.value)<0) input.value='';
       input.dataset.initialValue = row.value;
       const commit = value => {
+        if (row.schema?.blankNegative) {
+          value=inspectorDashValue(value);
+          if (value===inspectorDashValue(row.value)) return;
+        }
         if (value === row.value) return;
         let updates;
         if (row.type === 'toggle') {
@@ -303,7 +313,7 @@ function paintCueMolPropertyRows() {
           if (row.schema?.writes) {
             updates=row.schema.writes.map(write=>({prop:write.prop,value:String((write.inverse === undefined ? Number(value)*(write.scale ?? 1) : write.inverse/Number(value))+(write.offset ?? 0))}));
             if (updates.some(update=>!Number.isFinite(Number(update.value)))) return;
-          } else updates=(row.schema?.targets || [row.key]).map(prop=>({prop,value:row.schema?.blankNegative && (value.trim()==='' || !Number.isFinite(Number(value)) || Number(value)<0) ? '-1' : value}));
+          } else updates=(row.schema?.targets || [row.key]).map(prop=>({prop,value}));
           if (value === 'true') {
             for (const [prop, value] of Object.entries(row.schema?.seedWhenEnabled || {})) {
               if (!inspector.rows.find(property=>property.key===prop)?.value) updates.push({prop,value});
@@ -336,7 +346,7 @@ function paintCueMolPropertyRows() {
       });
       input.addEventListener('keydown', event => {
         if (event.isComposing) return;
-        if (event.key === 'Escape') { event.preventDefault(); input.value=row.value; input.blur(); }
+        if (event.key === 'Escape') { event.preventDefault(); input.value=row.schema?.blankNegative && Number(row.value)<0 ? '' : row.value; input.blur(); }
         else if (event.key === 'Enter') { event.preventDefault(); input.blur(); }
       });
       if (row.type === 'color' && row.rgba) {

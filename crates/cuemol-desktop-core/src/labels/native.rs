@@ -10,6 +10,28 @@ struct NativeFonts {
     cache: SwashCache,
 }
 
+static FONTS: OnceLock<Mutex<NativeFonts>> = OnceLock::new();
+
+pub(super) fn font_families() -> Vec<String> {
+    static FAMILIES: OnceLock<Vec<String>> = OnceLock::new();
+    FAMILIES
+        .get_or_init(|| {
+            FONTS
+                .get_or_init(|| Mutex::new(NativeFonts::new()))
+                .lock()
+                .map(|fonts| {
+                    fonts
+                        .system
+                        .db()
+                        .faces()
+                        .flat_map(|face| face.families.iter().map(|(name, _)| name.clone()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .clone()
+}
+
 impl NativeFonts {
     fn new() -> Self {
         let mut system = FontSystem::new_with_fonts(
@@ -70,7 +92,6 @@ impl NativeFonts {
 }
 
 pub(super) fn rasterize(label: &GuiAtomLabel, scale: f32, limit: u32) -> Option<LabelImage> {
-    static FONTS: OnceLock<Mutex<NativeFonts>> = OnceLock::new();
     let mut fonts = FONTS
         .get_or_init(|| Mutex::new(NativeFonts::new()))
         .lock()

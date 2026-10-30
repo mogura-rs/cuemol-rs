@@ -30,7 +30,7 @@ speedup from a single optimized stage or compare timings from different hosts.
 | Feature family | Required comparison | Current audit status |
 | --- | --- | --- |
 | Shell | Activities, menus, toolbar, tab order, docks, compact windows, themes and keyboard access | Application shortcuts, browser tab closing and menu access, shared history dropdowns, Tauri palette folding and tree/text clipboard routing repaired and checked; browser recent files and remaining pane controls are still under comparison |
-| Explorer and Inspector | Object/renderer/group hierarchy, selection, visibility, locking, drag/drop, context menus and property editors | Typed fields, nested properties, defaults/resets, group writes, Scene/View targets, quality presets and renderer pages repaired and checked below; selection/font pickers, remaining targets and live previews are under comparison |
+| Explorer and Inspector | Object/renderer/group hierarchy, selection, visibility, locking, drag/drop, context menus and property editors | Typed fields, nested properties, defaults/resets, group writes, Scene/View targets, quality presets, renderer pages and font choices repaired and checked below; selection pickers, remaining targets and live previews are under comparison |
 | Color and styles | Coloring modes, paint entries, palettes, property inheritance, style creation/apply/edit/save | Previous focused checks exist; complete editor comparison pending |
 | Console | CueMol/PyMOL dialects, command arguments, completion, history, multiline input, IME and transaction behavior | Shared CueMol/PyMOL interpreters, completion, native QAX logging/replay and cancellable execution implemented; focused shared, browser and OS-input checks passed; affected regression checks, CI and Pages passed at `99b7c16`; public review repairs and release delivery are in progress |
 | Actions | History rows, operation inspection, QAX export, bundled/user macros and reusable actions | History selection, operation inspection, QAX export and bundled/user macro libraries are implemented in native, WASM and Tauri; CI, Pages and the macOS window check passed at `488ce9c`; review repairs passed affected checks and were published at `53100c5` |
@@ -397,7 +397,9 @@ editing the major axis preserves the minor one. Nucleic-base dimensions preserve
 the thickness percentage. Ribbon/cartoon junction controls apply their percent
 conversion and paired writes in one undo entry. Reset follows the reference's
 primary-property rule for these combined controls; center-update resets both
-stored map flags. Inactive ring, tube, arrow and label controls reject edits.
+stored map flags. The Properties tab disables dependent ring, tube, arrow and
+label controls while their parent setting is inactive. Generic and scripts
+continue to expose the underlying stored properties.
 
 Density-map kind now reaches the shared editor API, changes the effective
 region policy, and survives scene export/reload. Electrostatic maps do not gain
@@ -430,10 +432,62 @@ the empty property list retained old row indices. Missing targets now clear the
 rows, ordering and drafts together, and the regression paints both tabs after
 deletion. The Linux OS-input check passed deletion, derived-axis undo/redo and
 optional-value off/on restoration in addition to the existing navigation,
-Console, clipboard, label and Scene/View checks. Font and selection popovers,
+Console, clipboard, label and Scene/View checks. Selection popovers,
 live drag preview and the remaining camera/style dock targets are still open
-audit items; these results
-do not establish complete Inspector parity.
+audit items; these results do not establish complete Inspector parity.
+
+Public Claude Code review of `fa8e7cd` identified three reproducible control
+defects. An empty map display limit could be enabled locally but could not be
+disabled again. Focusing an unused dash field could explicitly write its `-1`
+sentinel and add an undo entry. Center-update reset inspected only the first
+of its two stored flags. The repairs compare local toggles with their displayed
+state, normalize blank dash values before deciding whether to write, and derive
+reset state from both flags. Browser regressions failed before these repairs
+and passed afterward. Tauri also preserves a blank dash field on Escape and
+checks that focus/escape does not send an edit. Its compound-control test checks
+the local off state after another edit and resets a changed drag flag while the
+automatic flag is already at its default.
+
+An additional browser regression reproduced the same unwanted write with a
+stored dash value of `-2.5`. No-op detection now compares the displayed meaning
+of both values, retaining any existing negative sentinel until an actual edit.
+The added failing case passed after the repair, together with both font-list
+cases and the Tauri compound-control regression.
+
+Map scripting and Inspector metadata now use the same exhaustive property
+definition. The script fallback no longer looks up a string and panics if a
+catalog entry is missing. All 16 affected map tests passed after this change.
+
+### Font choices
+
+Label and measurement pages offer installed font families, the reference's
+generic families and a fallback list when enumeration is unavailable. A saved
+family absent from the local system remains selectable. Native enumeration
+shares the label rasterizer's existing font database. Browser enumeration runs
+once asynchronously; completion invalidates the cached list and requests a
+frame even when the application is idle. A denied request retains the fallback
+choices. Only visible options are rasterized, and the preview cache holds at
+most 64 textures. Changing a font uses the ordinary property transaction and
+undo path. Generic retains its text field.
+
+The native font test resolves embedded and installed families through the same
+database and verifies different glyph pixels for two known faces. Browser
+tests cover delayed and denied enumeration, a saved unknown family, selection
+and undo, and bounded preview work with 500 returned families. These tests mock
+the operating system's enumeration result while using the real WASM Inspector
+and canvas text rasterizer; they do not establish a browser permission grant.
+The complete affected run passed nine browser cases and 22 Tauri DOM cases.
+The Tauri checks also verify option faces and the Generic text field. All six
+shared Inspector regressions passed with the GUI feature enabled, alongside
+12 command property checks.
+
+The Linux OS-input probe opened the real font list, cancelled without changing
+the family, selected `monospace`, and restored both states with Undo/Redo.
+Screenshots show the option faces and the selected property. The existing
+navigation, label rendering, Console, clipboard and other Inspector checks
+passed in the same window run.
+
+### Property-query cost
 
 Property queries previously rebuilt the scene style manager separately for
 each color. Literal colors now bypass that work, and named colors in one query

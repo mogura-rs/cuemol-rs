@@ -51,6 +51,60 @@ async function number(page,key,value) {
   await page.keyboard.press('Enter');
 }
 
+for (const fontAccess of ['resolved', 'denied']) {
+  test(`Font picker preserves scene fonts and handles ${fontAccess} local enumeration`, async ({page}, testInfo) => {
+    await page.addInitScript(access => {
+      window.fontQueries = 0;
+      window.fontPreviewReads = 0;
+      window.queryLocalFonts = () => {
+        window.fontQueries++;
+        if (access === 'denied') return Promise.reject(new DOMException('Not allowed', 'NotAllowedError'));
+        return new Promise(resolve => { window.resolveFonts = resolve; });
+      };
+      const previews = new WeakSet();
+      const prototype = Object.getPrototypeOf(new OffscreenCanvas(1, 1).getContext('2d'));
+      const fill = prototype.fillText, read = prototype.getImageData;
+      prototype.fillText = function(text, ...args) {
+        if (text.startsWith('Test font ')) previews.add(this);
+        return fill.call(this,text,...args);
+      };
+      prototype.getImageData = function(...args) {
+        if (previews.has(this)) window.fontPreviewReads++;
+        return read.apply(this,args);
+      };
+    }, fontAccess);
+    const {object} = await setup(page);
+    await command(page,'execute_script',{source:`var labels=cuemol.getObject(${object.id}).createRenderer('*namelabel');labels.name='Fonts';`});
+    const id = (await status(page)).scene.objects.find(item=>item.id===object.id).renderers.find(renderer=>renderer.name==='Fonts').id;
+    await command(page,'set_node_prop',{nodeType:'renderer',nodeId:id,prop:'font_name',value:'Scene-only family'});
+    await click(page,`renderer:${id}`,false);
+    await click(page,'Properties tab');
+    await filter(page,'font_name');
+    await expect.poll(()=>page.evaluate(()=>window.fontQueries)).toBe(1);
+    await click(page,'font_name');
+    await expect.poll(async()=>(await status(page)).ui.inspector['font_name option Scene-only family']?.length).toBe(4);
+    await expect.poll(async()=>(await status(page)).ui.inspector['font_name option Arial']?.length).toBe(4);
+    if (fontAccess === 'resolved') {
+      await page.evaluate(()=>window.resolveFonts(Array.from({length:500},(_,index)=>({family:`Test font ${String(index).padStart(3,'0')}`}))));
+      await expect.poll(async()=>(await status(page)).ui.inspector['font_name option Test font 000']?.length).toBe(4);
+      expect(await prop(page,id,'font_name')).toBe('Scene-only family');
+      const reads = await page.evaluate(()=>window.fontPreviewReads);
+      expect(reads).toBeGreaterThan(0);
+      expect(reads).toBeLessThan(20);
+      const visible = Object.keys((await status(page)).ui.inspector).filter(key=>key.startsWith('font_name option '));
+      expect(visible.length).toBeLessThan(20);
+      await page.evaluate(()=>new Promise(resolve=>{let frames=12;const next=()=>--frames?requestAnimationFrame(next):resolve();requestAnimationFrame(next);}));
+      expect(await page.evaluate(()=>window.fontPreviewReads)).toBe(reads);
+      await page.screenshot({path:testInfo.outputPath('inspector-font-faces.png')});
+    }
+    await click(page,'font_name option monospace');
+    await expect.poll(async()=>prop(page,id,'font_name')).toBe('monospace');
+    await command(page,'undo');
+    expect(await prop(page,id,'font_name')).toBe('Scene-only family');
+    expect(await page.evaluate(()=>window.fontQueries)).toBe(1);
+  });
+}
+
 test('Optional loop sizes remember values and dash toggles undo the complete pattern', async ({page},testInfo) => {
   const {object}=await setup(page);
   const overlay=await command(page,'create_renderer',{objId:object.id,rendererType:'disorder',name:'Loops'});
@@ -72,6 +126,18 @@ test('Optional loop sizes remember values and dash toggles undo the complete pat
   await expect.poll(async()=>prop(page,id,'loopsize2')).toBe('2');
   const interaction=await command(page,'create_renderer',{objId:object.id,rendererType:'atomintr',name:'Measurements'});
   const rid=interaction.rendererId;
+  await command(page,'set_node_prop',{nodeType:'renderer',nodeId:rid,prop:'stipple0',value:'1'});
+  await click(page,`renderer:${rid}`,false);
+  const defaultBefore=(await command(page,'list_node_props',{nodeType:'renderer',nodeId:rid})).properties.find(row=>row.key==='stipple2').isdefault;
+  expect(defaultBefore).toBe(true);
+  await filter(page,'stipple2'); await click(page,'stipple2');
+  await page.keyboard.press('Tab');
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  expect((await command(page,'list_node_props',{nodeType:'renderer',nodeId:rid})).properties.find(row=>row.key==='stipple2').isdefault).toBe(true);
+  await command(page,'set_node_prop',{nodeType:'renderer',nodeId:rid,prop:'stipple2',value:'-2.5'});
+  await click(page,'stipple2'); await page.keyboard.press('Tab');
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  expect(await prop(page,rid,'stipple2')).toBe('-2.5');
   await command(page,'set_node_props',{nodeType:'renderer',nodeId:rid,updates:Array.from({length:6},(_,i)=>({prop:`stipple${i}`,value:'-1'}))});
   await click(page,`renderer:${rid}`,false);
   await filter(page,'dash-pattern');
@@ -150,6 +216,10 @@ test('Map pages follow map kind, retain an empty display limit and batch center 
   await filter(page,'bndry_molname'); await click(page,'bndry_molname');
   await expect.poll(async()=>(await status(page)).ui.inspector['bndry_molname option ']?.length).toBe(4);
   await page.keyboard.press('Escape');
+  await filter(page,'limit-display'); await click(page,'limit-display');
+  await command(page,'set_node_prop',{nodeType:'renderer',nodeId:rid,prop:'width',value:'0.9'});
+  await filter(page,'bndry_molname'); await click(page,'bndry_molname');
+  expect((await status(page)).ui.inspector['bndry_molname option ']).toBeUndefined();
   await page.screenshot({path:testInfo.outputPath('inspector-map-controls.png')});
 });
 

@@ -3,6 +3,9 @@ use cuemol_qsys::Camera;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
+#[path = "inspector_fonts.rs"]
+mod fonts;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InspectorTarget {
     pub kind: String,
@@ -69,6 +72,9 @@ pub struct Inspector {
     color_draft: Option<ColorDraft>,
     numeric_edits: BTreeMap<String, NumericEdit>,
     local_toggles: BTreeMap<String, bool>,
+    font_generation: u32,
+    font_listener: bool,
+    font_previews: fonts::FontPreviews,
 }
 
 impl Inspector {
@@ -91,6 +97,7 @@ impl Inspector {
         revision: u64,
     ) {
         let view = target.as_ref().is_some_and(|target| target.kind == "view");
+        let font_generation = cuemol_desktop_core::font_catalog::generation();
         let active_view = state
             .active_scene()
             .and_then(|id| state.scene_manager().scene(id))
@@ -110,6 +117,7 @@ impl Inspector {
             && revision == self.revision
             && context == self.context
             && view_size == self.view_size
+            && font_generation == self.font_generation
             && (!view || self.camera.as_ref() == Some(camera))
         {
             return;
@@ -147,6 +155,10 @@ impl Inspector {
         self.context = context;
         self.view_size = view_size;
         self.camera = view.then(|| camera.clone());
+        if font_generation != self.font_generation {
+            self.font_generation = font_generation;
+            self.font_previews.clear();
+        }
         let Some(target) = &self.target else {
             self.clear_properties();
             self.error.clear();
@@ -235,13 +247,15 @@ impl Inspector {
                                 })
                             });
                             let toggle = definition["kind"] == "toggle";
-                            let reset = definition["reset"]
+                            let reset: Vec<_> = definition["reset"]
                                 .as_array()
-                                .and_then(|keys| keys.first())
-                                .and_then(Value::as_str)
-                                .and_then(|key| self.rows.iter().find(|row| row.key == key));
-                            let has_default = reset.is_some_and(|row| row.has_default);
-                            let is_default = reset.is_some_and(|row| row.is_default);
+                                .into_iter()
+                                .flatten()
+                                .filter_map(Value::as_str)
+                                .filter_map(|key| self.rows.iter().find(|row| row.key == key))
+                                .collect();
+                            let has_default = reset.iter().any(|row| row.has_default);
+                            let is_default = reset.iter().all(|row| row.is_default);
                             let display = if definition["local"] == true
                                 && self.local_toggles.get(key) == Some(&true)
                             {
@@ -320,6 +334,17 @@ impl Inspector {
         if !self.visible || self.target.is_none() {
             return changes;
         }
+        if !self.font_listener
+            && self.rows.iter().any(|row| {
+                row.schema
+                    .as_ref()
+                    .is_some_and(|schema| schema["font"] == true)
+            })
+        {
+            self.font_listener = true;
+            let ctx = ctx.clone();
+            cuemol_desktop_core::font_catalog::on_change(move || ctx.request_repaint());
+        }
         let target = self.target.clone().unwrap();
         egui::SidePanel::right("inspector").default_width(300.).width_range(240.0..=600.).resizable(true).show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -377,7 +402,7 @@ impl Inspector {
                                     ui.add_enabled_ui(editable && enabled, |ui| {
                                         ui.allocate_ui_with_layout(egui::vec2(field_width, 24.), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                                             ui.set_width(field_width);
-                                            changed = edit_field(ui, row, &mut self.rects, &mut self.color_draft, &mut self.numeric_edits, structured);
+                                            changed = edit_field(ui, row, &mut self.rects, &mut self.color_draft, &mut self.numeric_edits, &mut self.font_previews, structured);
                                         });
                                     });
                                     if row.has_default && !row.readonly {
@@ -391,8 +416,7 @@ impl Inspector {
                                         }
                                     } else { ui.add_space(22.); }
                                 });
-                                let original = row.schema.as_ref().filter(|_| structured).and_then(|schema|schema["display"].as_str()).or_else(||self.committed.get(&row.key).map(String::as_str));
-                                if changed && original != Some(row.displayed_value(structured)) {
+                                if changed && display_changed(row, &self.committed, structured) {
                                     if structured && row.kind == "toggle" && row.schema.as_ref().is_some_and(|schema| schema["local"] == true) {
                                         self.local_toggles.insert(row.key.clone(), row.value == "true");
                                         self.committed.insert(row.key.clone(), row.value.clone());
@@ -453,6 +477,31 @@ fn equivalent(left: &str, right: &str) -> bool {
             .is_some_and(|(left, right)| (left - right).abs() < 1e-6)
 }
 
+fn blank_negative_value(value: &str) -> String {
+    value
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value >= 0.)
+        .unwrap_or(-1.)
+        .to_string()
+}
+
+fn display_changed(row: &Property, committed: &BTreeMap<String, String>, structured: bool) -> bool {
+    let schema = row.schema.as_ref().filter(|_| structured);
+    if schema.is_some_and(|schema| schema["blankNegative"] == true) {
+        return committed
+            .get(&row.key)
+            .map(|value| blank_negative_value(value))
+            != Some(blank_negative_value(row.displayed_value(structured)));
+    }
+    let original = schema
+        .filter(|schema| schema["local"] != true)
+        .and_then(|schema| schema["display"].as_str())
+        .or_else(|| committed.get(&row.key).map(String::as_str));
+    original != Some(row.displayed_value(structured))
+}
+
 fn property_change(
     target: &InspectorTarget,
     row: &Property,
@@ -492,23 +541,18 @@ fn property_change(
                     ) + write["offset"].as_f64().unwrap_or(0.);
                     if result.is_finite() {
                         updates.push(json!({"prop":write["prop"],"value":result.to_string()}));
+                    } else {
+                        updates.clear();
+                        break;
                     }
                 }
             }
         } else if let Some(targets) = schema.and_then(|schema| schema["targets"].as_array()) {
             updates.extend(targets.iter().map(|key| json!({"prop":key,"value":value})));
+        } else if schema.is_some_and(|schema| schema["blankNegative"] == true) {
+            updates.push(json!({"prop":row.key,"value":blank_negative_value(value)}));
         } else {
-            if schema.is_some_and(|schema| schema["blankNegative"] == true) {
-                let number = value
-                    .trim()
-                    .parse::<f64>()
-                    .ok()
-                    .filter(|value| value.is_finite() && *value >= 0.)
-                    .unwrap_or(-1.);
-                updates.push(json!({"prop":row.key,"value":number.to_string()}));
-            } else {
-                updates.push(json!({"prop":row.key,"value":value}));
-            }
+            updates.push(json!({"prop":row.key,"value":value}));
         }
         if value == "true" {
             if let Some(seeds) = schema.and_then(|schema| schema["seedWhenEnabled"].as_object()) {
@@ -547,6 +591,7 @@ fn edit_field(
     rects: &mut BTreeMap<String, [f32; 4]>,
     color: &mut Option<ColorDraft>,
     numeric_edits: &mut BTreeMap<String, NumericEdit>,
+    font_previews: &mut fonts::FontPreviews,
     structured: bool,
 ) -> bool {
     let schema = row.schema.as_ref().filter(|_| structured);
@@ -575,8 +620,19 @@ fn edit_field(
             .selected_text(label(value_text))
             .show_ui(ui, |ui| {
                 for value in choices {
-                    let option = ui.selectable_value(value_text, value.clone(), label(value));
-                    record(rects, &format!("{} option {value}", row.key), option.rect);
+                    let option = if schema.is_some_and(|schema| schema["font"] == true) {
+                        let mut option = font_previews.option(ui, value, value_text == value);
+                        if option.clicked() && value_text != value {
+                            value_text.clone_from(value);
+                            option.mark_changed();
+                        }
+                        option
+                    } else {
+                        ui.selectable_value(value_text, value.clone(), label(value))
+                    };
+                    if ui.is_rect_visible(option.rect) {
+                        record(rects, &format!("{} option {value}", row.key), option.rect);
+                    }
                     changed |= option.changed();
                 }
             })
@@ -735,6 +791,47 @@ fn edit_field(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn map_center_reset_tracks_both_explicit_flags() {
+        let mut state = DesktopAppState::new();
+        state.open_bytes("map.dx", b"object 1 class gridpositions counts 2 2 2\norigin 0 0 0\ndelta 1 0 0\ndelta 0 1 0\ndelta 0 0 1\nobject 2 class gridconnections counts 2 2 2\nobject 3 class array type double rank 0 items 8 data follows\n0 1 2 3 4 5 6 7\n").unwrap();
+        let map = state.density_map_summaries(state.active_scene().unwrap())[0].uid;
+        let renderer = state.add_density_renderer(map, "contour").unwrap();
+        cuemol_command::call_tool(&mut state, &mut Camera::new(), "reset_node_props", &json!({"nodeType":"renderer","nodeId":renderer.get(),"props":["autoupdate","dragupdate"]})).unwrap();
+        state
+            .set_auxiliary_renderer_property(map, renderer, "dragupdate", "true")
+            .unwrap();
+        let target = Some(InspectorTarget {
+            kind: "renderer".into(),
+            id: Some(renderer.get()),
+        });
+        let mut inspector = Inspector::default();
+        inspector.inspect(&mut state, &mut Camera::new(), target, 1);
+        assert!(
+            inspector
+                .rows
+                .iter()
+                .find(|row| row.key == "autoupdate")
+                .unwrap()
+                .is_default
+        );
+        assert!(
+            !inspector
+                .rows
+                .iter()
+                .find(|row| row.key == "dragupdate")
+                .unwrap()
+                .is_default
+        );
+        let center = inspector
+            .rows
+            .iter()
+            .find(|row| row.key == "center-update")
+            .unwrap();
+        assert!(center.has_default);
+        assert!(!center.is_default);
+    }
 
     #[test]
     fn deleted_renderer_clears_cached_fields_before_painting() {

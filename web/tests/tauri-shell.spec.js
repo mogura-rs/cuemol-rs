@@ -48,7 +48,7 @@ async function openShell(page, storage = {}, options = {}) {
       perspective: false, centerMark: options.centerMark || 'none', centerMarkEmbedded: true, lines: [], labels: [], status: 'Ready',
     };
     const sceneValues = {name:scene.name,uid:'1',aoEnabled:'false',aoRadius:'4',aoSteps:'3',aoIntensity:'2.2',aoHalfRes:'false'};
-    const inspectorValues = options.inspectorPages ? {ring:'false',thickness:'0.2',material:'','section.width':'1','section.tuber':'0.5',helix_ribbon:'false',loopsize2:'-1',stipple0:'-1',stipple1:'-1',stipple2:'-1',stipple3:'-1',stipple4:'-1',stipple5:'-1',bndry_molname:'',bndry_sel:''} : {};
+    const inspectorValues = options.inspectorPages ? {ring:'false',thickness:'0.2',material:'',font_name:'Portable face','section.width':'1','section.tuber':'0.5',helix_ribbon:'false',loopsize2:'-1',stipple0:'-1',stipple1:'-1',stipple2:'-1',stipple3:'-1',stipple4:'-1',stipple5:'-1',bndry_molname:'',bndry_sel:'',autoupdate:'true',dragupdate:'true'} : {};
     if (options.inspectorPages) renderer.detail=24;
     const sequenceIndices = options.sequenceExtremes ? [-2147483648, '-2147483648A', 0, 2147483647, '2147483647B'] : [-2, -1, 0, 1, '1A', '1B', ...Array.from({length: 4999}, (_, index) => index + 2)];
     const sequenceResidues = options.sequence ? sequenceIndices.map((index, position) => ({
@@ -140,11 +140,11 @@ async function openShell(page, storage = {}, options = {}) {
           return {snapshot:structuredClone(snapshot),result:{properties:rows()}};
         }
         const target = args.args.nodeId === 4 ? renderer : molecule;
-        const defaults = {alpha:'1', visible:'true', detail:'4', egtype:'none',...(options.inspectorPages ? {ring:'false',thickness:'0.2','section.width':'1','section.tuber':'0.5',helix_ribbon:'false',loopsize2:'-1'} : {})};
+        const defaults = {alpha:'1', visible:'true', detail:'4', egtype:'none',...(options.inspectorPages ? {ring:'false',thickness:'0.2','section.width':'1','section.tuber':'0.5',helix_ribbon:'false',loopsize2:'-1',autoupdate:'true',dragupdate:'false'} : {})};
         const values = {name:target.name, visible:String(target.visible), uid:String(target.uid),
           ...(target === renderer ? {...inspectorValues,alpha:String(renderer.alpha), detail:String(renderer.detail), egtype:renderer.edgeType, style:renderer.style} : {})};
         const rows = () => Object.entries(values).map(([key,value]) => ({key,value,
-          type: ['visible','ring','helix_ribbon'].includes(key) ? 'boolean' : ['alpha','thickness','section.width','section.tuber','loopsize2'].includes(key) || key.startsWith('stipple') ? 'real' : key === 'detail' || key === 'uid' ? 'integer' : key === 'egtype' ? 'enum' : 'string',
+          type: ['visible','ring','helix_ribbon','autoupdate','dragupdate'].includes(key) ? 'boolean' : ['alpha','thickness','section.width','section.tuber','loopsize2'].includes(key) || key.startsWith('stipple') ? 'real' : key === 'detail' || key === 'uid' ? 'integer' : key === 'egtype' ? 'enum' : 'string',
           category: ['name','visible'].includes(key) ? 'Common' : key === 'uid' ? 'Identity' : 'Appearance',
           readonly: ['uid','style'].includes(key), hasdefault:Object.hasOwn(defaults,key),
           isdefault:value === defaults[key], defaultValue:defaults[key], allowed:key === 'egtype' ? ['none','edges','silhouette'] : undefined,
@@ -156,6 +156,7 @@ async function openShell(page, storage = {}, options = {}) {
             {key:'name',label:'Name'},{key:'alpha',label:'Opacity',min:0,max:1,step:0.1},
             {key:'detail',label:'Detail',choices:['2','4','8','16','24','32']},
             {key:'material',label:'Material',choices:['','Matte'],labels:{'':'(none)'}},
+            {key:'font_name',label:'Font name',font:true,choices:['Portable face','serif','monospace']},
           ]},{title:'Geometry',expanded:true,rows:[
             {key:'ring',label:'Show ring'},{key:'thickness',label:'Thickness',min:0,max:3,step:0.01,unit:'Å',disabled:values.ring!=='true'},
             {key:'section.width',label:'Width1',min:0.01,max:3,step:0.01,writes:[{prop:'section.width'},{prop:'section.tuber',inverse:Number(values['section.width'])*Number(values['section.tuber'])}]},
@@ -167,6 +168,11 @@ async function openShell(page, storage = {}, options = {}) {
             {key:'stipple2',label:'Dash 2',blankNegative:true,enabledWhen:'dash-pattern'},
             {key:'limit-display',kind:'toggle',label:'Limit display by',display:String(Boolean(values.bndry_molname)),local:true,patches:{true:{},false:{bndry_molname:'',bndry_sel:''}}},
             {key:'bndry_molname',label:'Target',choices:[''],enabledWhen:'limit-display'},
+            {key:'center-update',label:'Center update',reset:['autoupdate','dragupdate'],options:[
+              {label:'None',patch:{autoupdate:'false',dragupdate:'false'}},
+              {label:'Automatic',patch:{autoupdate:'true',dragupdate:'false'}},
+              {label:'Automatic (drag)',patch:{autoupdate:'true',dragupdate:'true'}},
+            ]},
           ]}] : [];
           return {properties,sections};
         }
@@ -661,6 +667,10 @@ test('Tauri renderer schema applies ranges, gates, choices and derived atomic wr
   await expect(input('alpha')).toHaveValue('1');
   await input('material').selectOption('Matte');
   await expect(input('material')).toHaveValue('Matte');
+  await expect(input('font_name')).toHaveValue('Portable face');
+  await expect(input('font_name').locator('option[value="serif"]')).toHaveCSS('font-family','serif');
+  await input('font_name').selectOption('serif');
+  await expect(input('font_name')).toHaveCSS('font-family','serif');
   await input('section.width').fill('2'); await input('section.width').press('Tab');
   await expect(input('section.width')).toHaveValue('2');
   await expect(input('section.tuber')).toHaveValue('0.5');
@@ -672,6 +682,8 @@ test('Tauri renderer schema applies ranges, gates, choices and derived atomic wr
   expect(flag).toBe('true');
   await page.getByRole('tab',{name:'Generic',exact:true}).click();
   await expect(input('section.tuber')).toHaveValue('0.25');
+  await expect(input('font_name')).toHaveAttribute('type','text');
+  await expect(input('font_name')).toHaveValue('serif');
   expect(errors).toEqual([]);
 });
 
@@ -697,6 +709,20 @@ test('Tauri optional and compound controls retain local state and submit complet
   expect(writes).toEqual(Array.from({length:6},(_,i)=>({prop:`stipple${i}`,value:i<2?'1':'-1'})));
   await expect(input('stipple2')).toBeEnabled();
   await expect(input('stipple2')).toHaveValue('');
+  const writesBefore=await page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='inspector_request' && call.args.tool!=='list_node_props').length);
+  await input('stipple2').focus(); await input('stipple2').press('Tab');
+  await input('stipple2').fill('8'); await input('stipple2').press('Escape');
+  await expect(input('stipple2')).toHaveValue('');
+  expect(await page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='inspector_request' && call.args.tool!=='list_node_props').length)).toBe(writesBefore);
+  await page.getByRole('tab',{name:'Generic',exact:true}).click();
+  await input('stipple2').fill('-2.5'); await input('stipple2').press('Tab');
+  await expect(input('stipple2')).toHaveValue('-2.5');
+  await page.getByRole('tab',{name:'Properties',exact:true}).click();
+  await input('stipple2').fill('8'); await input('stipple2').press('Escape');
+  await expect(input('stipple2')).toHaveValue('');
+  await page.getByRole('tab',{name:'Generic',exact:true}).click();
+  await expect(input('stipple2')).toHaveValue('-2.5');
+  await page.getByRole('tab',{name:'Properties',exact:true}).click();
   await input('stipple2').fill('2.75'); await input('stipple2').press('Tab');
   await expect(input('stipple2')).toHaveValue('2.75');
   await input('stipple2').fill(''); await input('stipple2').press('Tab');
@@ -705,6 +731,19 @@ test('Tauri optional and compound controls retain local state and submit complet
   await expect(input('bndry_molname')).toBeDisabled();
   await input('limit-display').check();
   await expect(input('bndry_molname')).toBeEnabled();
+  await input('limit-display').uncheck();
+  await expect(input('bndry_molname')).toBeDisabled();
+  await input('alpha').fill('0.7'); await input('alpha').press('Tab');
+  await expect(input('alpha')).toHaveValue('0.7');
+  await expect(input('bndry_molname')).toBeDisabled();
+  await expect(input('center-update')).toHaveValue('Automatic (drag)');
+  const resetCenter=page.getByRole('button',{name:'Reset center-update',exact:true});
+  await expect(resetCenter).toBeEnabled();
+  await resetCenter.click();
+  await expect(input('center-update')).toHaveValue('Automatic');
+  await expect(resetCenter).toBeDisabled();
+  const reset=await page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='inspector_request' && call.args.tool==='reset_node_props').at(-1).args.args.props);
+  expect(reset).toEqual(['autoupdate','dragupdate']);
   await page.getByRole('tab',{name:'Generic',exact:true}).click();
   await expect(input('dash-pattern')).toHaveCount(0);
   expect(errors).toEqual([]);

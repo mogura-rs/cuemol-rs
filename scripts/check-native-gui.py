@@ -507,6 +507,34 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             pyautogui.hotkey(primary, 'shift', 'z')
             wait_for(lambda: loop_size() == '3.4')
             capture('inspector-optional.png')
+            script(f'var obj=cuemol.getObject(JSON.parse(scene.getObjectTreeJSON())[0].ID);'
+                   f'obj.destroyRenderer({loops_id});'
+                   'var labels=obj.createRenderer("*namelabel");labels.name="Font choices";'
+                   'labels.font_name="Ubuntu";labels.font_size=32;'
+                   'labels.setLabel(2,"iiiiWW");labels.label_on_top=true;')
+            labels_id = next(renderer['id'] for renderer in call('get_scene_state')['objects'][0]['renderers']
+                             if renderer['name'] == 'Font choices')
+            pyautogui.click(x + 175, y + 188)
+            time.sleep(0.2)
+            inspector_filter('font_name')
+            pyautogui.click(x + width - 100, y + 225)
+            time.sleep(0.2)
+            capture('inspector-font-options.png')
+            pyautogui.press('escape')
+            def label_font():
+                return call('get_prop', {'path': f'#{labels_id}.font_name'})['value']
+            if label_font() != 'Ubuntu':
+                raise RuntimeError('Closing the font picker changed its value')
+            pyautogui.click(x + width - 100, y + 225)
+            time.sleep(0.2)
+            pyautogui.click(x + width - 100, y + 304)
+            wait_for(lambda: label_font() == 'monospace')
+            capture('inspector-font-selected.png')
+            pyautogui.click(x + width * 0.6, y + height * 0.4)
+            pyautogui.hotkey(primary, 'z')
+            wait_for(lambda: label_font() == 'Ubuntu')
+            pyautogui.hotkey(primary, 'shift', 'z')
+            wait_for(lambda: label_font() == 'monospace')
             report.update(ok=True, window=bounds,
                           work_area=[available_x, available_y, available_width, available_height],
                           window_contained=True, atoms=state['objects'][0]['atoms'],
@@ -528,6 +556,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                           inspector_text_draft=True,
                           inspector_derived_axes=True,
                           inspector_optional_value=True,
+                          inspector_font_choices=True,
                           font_pixels=styled.histogram()[255])
             print(json.dumps(report), flush=True)
         except BaseException as error:

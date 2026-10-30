@@ -8,6 +8,27 @@ mod browser;
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 
+pub(crate) fn font_families() -> Vec<String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        browser::font_families()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        native::font_families()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn font_catalog_generation() -> u32 {
+    browser::font_catalog_generation()
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn on_font_catalog_change(callback: impl Fn() + 'static) {
+    browser::on_font_catalog_change(callback);
+}
+
 pub struct LabelImage {
     pub width: u32,
     pub height: u32,

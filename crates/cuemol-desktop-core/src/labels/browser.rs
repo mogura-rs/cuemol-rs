@@ -1,6 +1,53 @@
 use super::*;
 use wasm_bindgen::JsCast;
 
+#[wasm_bindgen::prelude::wasm_bindgen(inline_js = r#"
+let fontFamilies = '';
+let fontGeneration = 0;
+let fontsRequested = false;
+let fontChange;
+export function cuemolFontFamilies() {
+  if (!fontsRequested) {
+    fontsRequested = true;
+    if (typeof globalThis.queryLocalFonts === 'function') {
+      Promise.resolve().then(() => globalThis.queryLocalFonts()).then(fonts => {
+        fontFamilies = [...new Set(fonts.map(font => font.family).filter(name => typeof name === 'string' && name.trim()))].join('\n');
+        fontGeneration += 1;
+        fontChange?.();
+      }).catch(() => {});
+    }
+  }
+  return fontFamilies;
+}
+export function cuemolFontCatalogGeneration() { return fontGeneration; }
+export function cuemolFontCatalogListener(callback) { fontChange = callback; }
+"#)]
+extern "C" {
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = cuemolFontFamilies)]
+    fn browser_font_families() -> String;
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = cuemolFontCatalogGeneration)]
+    pub(super) fn font_catalog_generation() -> u32;
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = cuemolFontCatalogListener)]
+    fn font_catalog_listener(callback: &wasm_bindgen::JsValue);
+}
+
+pub(super) fn on_font_catalog_change(callback: impl Fn() + 'static) {
+    use wasm_bindgen::closure::Closure;
+    thread_local! {
+        static LISTENER: std::cell::RefCell<Option<Closure<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
+    }
+    let callback = Closure::wrap(Box::new(callback) as Box<dyn Fn()>);
+    font_catalog_listener(callback.as_ref());
+    LISTENER.with(|listener| *listener.borrow_mut() = Some(callback));
+}
+
+pub(super) fn font_families() -> Vec<String> {
+    browser_font_families()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
 fn text_lines(text: &str) -> impl Iterator<Item = &str> {
     let mut remaining = Some(text);
     std::iter::from_fn(move || {
