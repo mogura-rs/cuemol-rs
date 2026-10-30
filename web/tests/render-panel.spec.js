@@ -147,14 +147,52 @@ test('DPI edits preserve physical image dimensions', async ({page}) => {
   await page.goto('./?renderer=webgl');
   await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId),{timeout:60000}).toBeGreaterThan(0);
   await load(page,'physical.pdb',Buffer.from(molecule));
-  await call(page,'set_render_settings',{settings:'backend=umbreon; width=1.3; height=0.7; unit=in; dpi=64; umbreon.useGI=false; umbreon.aoEnabled=false; umbreon.supersample=1; umbreon.denoise=None'});
+  await call(page,'set_render_settings',{settings:'backend=umbreon; width=1.3; height=0.7; unit=in; dpi=64.5; umbreon.useGI=false; umbreon.aoEnabled=false; umbreon.supersample=1; umbreon.denoise=None'});
   await click(page,'Render');
-  await field(page,'Render DPI',128);
   await click(page,'Start Render');
-  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toContain('Rendered 166 × 90');
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toContain('Rendered 84 × 45');
+  await field(page,'Render DPI',128.5);
+  await click(page,'Start Render');
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toContain('Rendered 167 × 90');
   const bytes=await save(page), image=PNG.sync.read(bytes);
-  expect([image.width,image.height]).toEqual([166,90]);
-  expect(resolution(bytes)).toEqual([5039,5039,1]);
-  const settings=JSON.parse((await call(page,'set_render_settings',{settings:'dpi=128'})).message).settings;
-  expect([settings.width,settings.height,settings.unit,settings.dpi]).toEqual([1.3,0.7,'in',128]);
+  expect([image.width,image.height]).toEqual([167,90]);
+  expect(resolution(bytes)).toEqual([5059,5059,1]);
+  const settings=JSON.parse((await call(page,'set_render_settings',{settings:'dpi=128.5'})).message).settings;
+  expect([settings.width,settings.height,settings.unit,settings.dpi]).toEqual([1.3,0.7,'in',128.5]);
+});
+
+test('webgpu Stop during OIDN loading preserves the preview and suppresses late downloads', async ({page, browserName}) => {
+  test.skip(browserName !== 'chromium', 'OIDN requires WebGPU.');
+  await open(page);
+  await click(page,'Start Render');
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().message)).toContain('Rendered 64 × 48');
+  const previous=await save(page);
+  let release;
+  const gate=new Promise(resolve=>{release=resolve;});
+  let entered=false;
+  await page.route('**/pkg/oidn/rt_hdr_calb_cnrm.tza', async route=>{
+    entered=true;
+    await gate;
+    await route.continue();
+  });
+  const downloads=[];
+  const record=download=>downloads.push(download.suggestedFilename());
+  page.on('download',record);
+  try {
+    await call(page,'set_render_settings',{settings:'backend=umbreon; umbreon.useGI=true; umbreon.giSamples=2; umbreon.giBounces=1; umbreon.supersample=1; umbreon.denoise=OIDN'});
+    await page.evaluate(()=>window.cuemol.command('render_image',{width:32,height:32,fileName:'cancelled.png'}));
+    await expect.poll(()=>entered,{timeout:60000}).toBe(true);
+    await click(page,'Stop render');
+    await expect.poll(()=>page.evaluate(()=>window.cuemol.status().busy)).toBe(false);
+    expect((await page.evaluate(()=>window.cuemol.status())).message).toMatch(/cancelled/i);
+    release();
+    await expect.poll(()=>page.evaluate(()=>performance.getEntriesByType('resource').some(e=>e.name.includes('rt_hdr_calb_cnrm.tza'))),{timeout:60000}).toBe(true);
+    await present(page);
+    expect((await page.evaluate(()=>window.cuemol.status())).message).toMatch(/cancelled/i);
+    expect(downloads).toEqual([]);
+    page.off('download',record);
+    expect((await save(page)).equals(previous)).toBe(true);
+  } finally {
+    release();
+  }
 });

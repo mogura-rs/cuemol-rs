@@ -556,8 +556,7 @@ pub fn prepare_render(
             .get("dpi")
             .and_then(Value::as_f64)
             .unwrap_or(600.)
-            .round()
-            .clamp(1., 4800.) as u32,
+            .clamp(1., 4800.),
     })
 }
 
@@ -722,7 +721,7 @@ pub struct PreparedRender {
     params: cuemol_render::UmbreonRenderParams,
     hatch: Option<cuemol_render::HatchRenderParams>,
     output: Option<String>,
-    dpi: u32,
+    dpi: f64,
 }
 impl PreparedRender {
     pub fn run_with_cancel(self, cancel: &std::sync::atomic::AtomicBool) -> Result<Value> {
@@ -791,7 +790,7 @@ impl PreparedRender {
                 png::ColorType::Rgb
             });
             encoder.set_depth(png::BitDepth::Eight);
-            let pixels_per_meter = (self.dpi as f64 / 0.0254).round() as u32;
+            let pixels_per_meter = (self.dpi / 0.0254).round() as u32;
             encoder.set_pixel_dims(Some(png::PixelDimensions {
                 xppu: pixels_per_meter,
                 yppu: pixels_per_meter,

@@ -23,7 +23,7 @@ pub struct RenderControls<'a> {
 
 pub struct RenderPanel {
     tab: usize,
-    dpi: u32,
+    dpi: f64,
     unit: String,
     dimensions: [f64; 2],
     preview: Option<TextureHandle>,
@@ -47,7 +47,7 @@ impl Default for RenderPanel {
     fn default() -> Self {
         Self {
             tab: 0,
-            dpi: 600,
+            dpi: 600.,
             unit: "px".into(),
             dimensions: [1200.; 2],
             preview: None,
@@ -63,9 +63,9 @@ impl RenderPanel {
     pub fn read_settings(&mut self, settings: &Map<String, Value>, size: &mut [u32; 2]) {
         self.dpi = settings
             .get("dpi")
-            .and_then(Value::as_u64)
-            .unwrap_or(600)
-            .clamp(1, 4800) as u32;
+            .and_then(Value::as_f64)
+            .unwrap_or(600.)
+            .clamp(1., 4800.);
         self.unit = settings
             .get("unit")
             .and_then(Value::as_str)
@@ -84,9 +84,9 @@ impl RenderPanel {
 
     fn scale(&self) -> f64 {
         match self.unit.as_str() {
-            "in" => self.dpi as f64,
-            "cm" => self.dpi as f64 / 2.54,
-            "mm" => self.dpi as f64 / 25.4,
+            "in" => self.dpi,
+            "cm" => self.dpi / 2.54,
+            "mm" => self.dpi / 25.4,
             _ => 1.,
         }
     }
@@ -311,10 +311,10 @@ impl RenderPanel {
                             ))
                             .show_ui(ui, |ui| {
                                 for (label, size, dpi) in [
-                                    ("640 × 480 (72 dpi)", [640, 480], 72),
-                                    ("1200 × 1200 (600 dpi)", [1200, 1200], 600),
-                                    ("1920 × 1080 (300 dpi)", [1920, 1080], 300),
-                                    ("2400 × 2400 (600 dpi)", [2400, 2400], 600),
+                                    ("640 × 480 (72 dpi)", [640, 480], 72.),
+                                    ("1200 × 1200 (600 dpi)", [1200, 1200], 600.),
+                                    ("1920 × 1080 (300 dpi)", [1920, 1080], 300.),
+                                    ("2400 × 2400 (600 dpi)", [2400, 2400], 600.),
                                 ] {
                                     if ui
                                         .selectable_label(
@@ -374,8 +374,11 @@ impl RenderPanel {
                         }
                         ui.horizontal(|ui| {
                             ui.label("DPI");
-                            let response =
-                                ui.add(egui::DragValue::new(&mut self.dpi).range(1..=4800));
+                            let response = ui.add(
+                                egui::DragValue::new(&mut self.dpi)
+                                    .range(1.0..=4800.0)
+                                    .max_decimals(3),
+                            );
                             if response.changed() && self.unit != "px" {
                                 for (i, dimension) in controls.size.iter_mut().enumerate() {
                                     *dimension = (self.dimensions[i] * self.scale())

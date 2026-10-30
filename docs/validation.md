@@ -23,6 +23,9 @@ Physical size fields retain their unrounded values when DPI changes. A browser
 regression reproduced a 1-inch image staying 64 pixels after changing 64 DPI to
 128 DPI; the repair now changes the pixel dimensions while preserving inches.
 The regression also checks fractional inch dimensions and saved PNG metadata.
+The review follow-up reproduced a second DPI defect: a stored 64.5 DPI was read
+as an integer, fell back to 600, and rendered a 1.3 by 0.7 inch image at 780 x 420
+instead of 84 x 45. The panel and PNG encoder now preserve fractional DPI.
 
 `web/benchmarks/render.mjs` compared the public browser build at `5d0d695` with
 the repair on the same macOS host using Chrome 156. Each row is the median of
@@ -63,6 +66,10 @@ unsupported argument, and selection was clamped against the old entry list befor
 the new entry could be moved. Named-color swatches are checked against the active
 style definitions. Cross-browser input checks keep the Chromium-only IME
 protocol case explicitly skipped on Firefox and WebKit.
+An additional Chromium check delays the real OIDN model request, presses Stop,
+then releases the request. Cancellation rejects the OIDN promise through the
+JavaScript bridge; the earlier preview remains unchanged and no late download
+occurs. This check did not reproduce the review's suspected cancellation leak.
 
 ## Browser text input and default appearance
 
