@@ -302,12 +302,19 @@ impl SelectionPane {
                         .request_repaint_after(Duration::from_secs_f64(self.deadline - now));
                 }
             }
-            if let Some(evaluation) = &self.evaluation {
-                if let Some(error) = &evaluation.error {
-                    ui.colored_label(egui::Color32::LIGHT_RED, error);
-                } else if let Some(count) = evaluation.count {
-                    ui.weak(format!("{count} atoms"));
-                }
+            if let Some(error) = self
+                .evaluation
+                .as_ref()
+                .and_then(|value| value.error.as_ref())
+            {
+                ui.colored_label(egui::Color32::LIGHT_RED, error);
+            } else {
+                let text = self
+                    .evaluation
+                    .as_ref()
+                    .and_then(|value| value.count)
+                    .map_or_else(|| " ".to_string(), |count| format!("{count} atoms"));
+                ui.weak(text);
             }
             if let Some(error) = &self.error {
                 ui.colored_label(egui::Color32::LIGHT_RED, error);
@@ -370,6 +377,40 @@ fn record(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delayed_counts_keep_builder_controls_in_place() {
+        let mut state = DesktopAppState::new();
+        state.new_scene("selection", true);
+        state.open_bytes("selection.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let object = state.active_object_summaries()[0].uid;
+        state
+            .set_molecule_selection_text(object, "name C1")
+            .unwrap();
+        let mut pane = SelectionPane::default();
+        let context = egui::Context::default();
+        let mut positions = Vec::new();
+        for (time, revision) in [(0., 0), (0.1, 0), (0.11, 1), (0.5, 1)] {
+            let _ = context.run(
+                egui::RawInput {
+                    time: Some(time),
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(320., 900.),
+                    )),
+                    ..Default::default()
+                },
+                |context| {
+                    egui::CentralPanel::default().show(context, |ui| {
+                        pane.show(ui, &state, revision);
+                    });
+                },
+            );
+            positions.push(pane.rects["Selection tab History"]);
+        }
+        assert_eq!(positions[1], positions[2]);
+        assert_eq!(positions[1], positions[3]);
+    }
 
     #[test]
     fn pane_preserves_drafts_until_applied_selection_or_context_changes() {

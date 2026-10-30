@@ -12,10 +12,20 @@ async function command(page, name, args = {}) {
   try { return JSON.parse(message); } catch { return message; }
 }
 async function click(page, name, inspector = true, double = false) {
-  await expect.poll(async () => (await status(page)).ui[inspector ? 'inspector' : 'rects'][name]?.length).toBe(4);
+  await settleRect(page, name, inspector);
   const [x,y,w,h] = (await status(page)).ui[inspector ? 'inspector' : 'rects'][name];
   if (double) await page.mouse.dblclick(x+w/2,y+h/2); else await page.mouse.click(x+w/2,y+h/2);
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+}
+async function settleRect(page, name, inspector = true) {
+  let previous, stable = 0;
+  await expect.poll(async () => {
+    const rect = (await status(page)).ui[inspector ? 'inspector' : 'rects'][name];
+    const key = JSON.stringify(rect);
+    stable = rect?.length === 4 && key === previous ? stable + 1 : 0;
+    previous = key;
+    return stable;
+  }, {intervals:[50]}).toBeGreaterThanOrEqual(3);
 }
 async function filter(page, text) {
   await click(page, 'Filter properties');
@@ -86,7 +96,7 @@ test('Selection picker composes drafts without mutating the molecule and keeps h
   const [kx,ky,kw,kh]=(await status(page)).ui.inspector['Selection keyword'];
   await page.mouse.move(kx+kw/2,ky+kh+80);
   await page.mouse.wheel(0,160);
-  await expect.poll(async()=>(await status(page)).ui.inspector['Selection keyword name']?.length).toBe(4);
+  await settleRect(page,'Selection keyword name');
   await page.screenshot({path:testInfo.outputPath('selection-keywords.png')});
   await click(page,'Selection keyword name');
   await click(page,'Selection value');
@@ -190,9 +200,11 @@ test('Selection pane applies live builder choices and preserves hand edits acros
   await choose('Selection keyword');
   const [x,y,w,h]=(await status(page)).ui.rects['Selection keyword hierarchical'];
   await page.mouse.move(x+w/2,y+h/2);await page.mouse.wheel(0,160);
+  await settleRect(page,'Selection keyword name',false);
   await choose('Selection keyword name');
   await type('Selection value','O1');
   await choose('Selection Add');
+  await expect.poll(()=>prop(page,object.id,'sel')).toBe('(pane_carbon) or (name O1)');
   await expect.poll(async()=>(await command(page,'count_selection',{objId:object.id,selection:await prop(page,object.id,'sel')})).count).toBe(2);
   const composed=await prop(page,object.id,'sel');
   await choose('Selection tab History');

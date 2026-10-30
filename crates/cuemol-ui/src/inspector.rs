@@ -759,6 +759,7 @@ fn edit_field(
         .unwrap_or(&row.allowed);
     let (response, changed) = if structured && row.kind == "selection" {
         let width = (ui.available_width() - 26.).max(24.);
+        let escape = ui.input(|input| input.key_pressed(egui::Key::Escape));
         let response = ui.add_sized(
             [width, 22.],
             egui::TextEdit::singleline(value_text).hint_text("* (all atoms)"),
@@ -798,7 +799,7 @@ fn edit_field(
         let mut changed = (response.lost_focus()
             || response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)))
             && selection.as_ref().is_none_or(|draft| draft.key != row.key);
-        if response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+        if escape && (response.has_focus() || response.lost_focus()) {
             if let Some(original) = committed.get(&row.key) {
                 value_text.clone_from(original);
             }
@@ -1423,5 +1424,112 @@ mod tests {
         .unwrap();
         inspector.inspect(&mut state, &mut camera, Some(target), 2);
         assert_eq!(inspector.committed["ao-preset"], "Custom");
+    }
+
+    #[test]
+    fn escape_cancels_selection_text_after_text_edit_releases_focus() {
+        let mut state = DesktopAppState::new();
+        state.open_bytes("selection.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let object = state.active_object_summaries()[0].uid;
+        let mut inspector = Inspector::default();
+        inspector.inspect(
+            &mut state,
+            &mut Camera::new(),
+            Some(InspectorTarget {
+                kind: "object".into(),
+                id: Some(object.get()),
+            }),
+            0,
+        );
+        inspector.filter = "sel".into();
+        let original = inspector.committed["sel"].clone();
+        let context = egui::Context::default();
+        let mut time = 0.;
+        let mut step = |inspector: &mut Inspector, events| {
+            time += 0.02;
+            let mut changes = Vec::new();
+            let _ = context.run(
+                egui::RawInput {
+                    time: Some(time),
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1280., 900.),
+                    )),
+                    events,
+                    focused: true,
+                    ..Default::default()
+                },
+                |context| {
+                    changes = inspector.panel(context, &state);
+                },
+            );
+            changes
+        };
+        for _ in 0..2 {
+            assert!(step(&mut inspector, vec![]).is_empty());
+        }
+        let [x, y, w, h] = inspector.rects["sel"];
+        let pos = egui::pos2(x + w / 2., y + h / 2.);
+        for pressed in [true, false] {
+            assert!(step(
+                &mut inspector,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        pressed,
+                        button: egui::PointerButton::Primary,
+                        modifiers: Default::default()
+                    }
+                ]
+            )
+            .is_empty());
+        }
+        let key = |key, modifiers| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        assert!(step(
+            &mut inspector,
+            vec![
+                key(
+                    egui::Key::A,
+                    egui::Modifiers {
+                        command: true,
+                        ctrl: true,
+                        ..Default::default()
+                    }
+                ),
+                egui::Event::Text("name C1".into())
+            ]
+        )
+        .is_empty());
+        assert_eq!(
+            inspector
+                .rows
+                .iter()
+                .find(|row| row.key == "sel")
+                .unwrap()
+                .value,
+            "name C1"
+        );
+        assert!(step(
+            &mut inspector,
+            vec![key(egui::Key::Escape, Default::default())]
+        )
+        .is_empty());
+        assert_eq!(
+            inspector
+                .rows
+                .iter()
+                .find(|row| row.key == "sel")
+                .unwrap()
+                .value,
+            original
+        );
+        assert!(step(&mut inspector, vec![]).is_empty());
     }
 }
