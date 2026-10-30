@@ -4,7 +4,7 @@ use cuemol_core::{ByteArray, CueMolError, Matrix3, Matrix4, Quat, Result, Vector
 use cuemol_gfx::SolidColor;
 use cuemol_qsys::View;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Atom {
@@ -202,6 +202,7 @@ pub struct ChainSummary {
 #[derive(Debug, Clone)]
 pub struct MolCoord {
     atoms: Arc<Vec<Atom>>,
+    residue_count: OnceLock<usize>,
     bonds: Arc<Vec<Bond>>,
     residue_props: Arc<BTreeMap<ResidueKey, BTreeMap<String, String>>>,
     selection: Selector,
@@ -300,6 +301,7 @@ impl MolCoord {
         );
         apply_value_change(&mut self.cell_params, &from.cell_params, &to.cell_params);
         if !Arc::ptr_eq(&from.atoms, &to.atoms) && from.atoms != to.atoms {
+            self.residue_count.take();
             cuemol_core::snapshot::apply_sequence_changes(
                 Arc::make_mut(&mut self.atoms),
                 &from.atoms,
@@ -326,6 +328,7 @@ impl MolCoord {
     pub fn new() -> Self {
         Self {
             atoms: Arc::default(),
+            residue_count: OnceLock::new(),
             bonds: Arc::default(),
             residue_props: Arc::default(),
             selection: Selector::All,
@@ -340,6 +343,7 @@ impl MolCoord {
     pub fn with_atoms(atoms: Vec<Atom>) -> Self {
         Self {
             atoms: Arc::new(atoms),
+            residue_count: OnceLock::new(),
             bonds: Arc::default(),
             residue_props: Arc::default(),
             selection: Selector::All,
@@ -443,6 +447,7 @@ impl MolCoord {
     }
 
     pub fn atom_mut_by_serial(&mut self, serial: i32) -> Option<&mut Atom> {
+        self.residue_count.take();
         Arc::make_mut(&mut self.atoms)
             .iter_mut()
             .find(|atom| atom.serial == serial)
@@ -600,6 +605,7 @@ impl MolCoord {
     }
 
     pub fn push_atom(&mut self, atom: Atom) {
+        self.residue_count.take();
         Arc::make_mut(&mut self.atoms).push(atom);
     }
 
@@ -660,6 +666,7 @@ impl MolCoord {
     }
 
     pub fn atoms_mut(&mut self) -> &mut [Atom] {
+        self.residue_count.take();
         Arc::make_mut(&mut self.atoms).as_mut_slice()
     }
 
@@ -804,11 +811,32 @@ impl MolCoord {
     }
 
     pub fn residue_count(&self) -> usize {
-        self.atoms
-            .iter()
-            .map(|atom| (atom.chain_id.clone(), atom.res_id, atom.ins_code))
-            .collect::<BTreeSet<_>>()
-            .len()
+        *self.residue_count.get_or_init(|| {
+            let key = |atom: &Atom| (atom.res_id, atom.ins_code);
+            let mut previous: Option<&Atom> = None;
+            let mut count = 0;
+            for atom in self.atoms.iter() {
+                if let Some(last) = previous {
+                    let order = atom
+                        .chain_id
+                        .cmp(&last.chain_id)
+                        .then_with(|| key(atom).cmp(&key(last)));
+                    if order.is_lt() {
+                        return self
+                            .atoms
+                            .iter()
+                            .map(|a| (a.chain_id.as_str(), a.res_id, a.ins_code))
+                            .collect::<HashSet<_>>()
+                            .len();
+                    }
+                    count += usize::from(!order.is_eq());
+                } else {
+                    count = 1;
+                }
+                previous = Some(atom);
+            }
+            count
+        })
     }
 
     /// Returns residue summaries ordered by [`ResidueKey`].
@@ -994,6 +1022,7 @@ impl MolCoord {
             })
             .collect();
         // Apply atom mutations.
+        self.residue_count.take();
         for (atom, new_key) in Arc::make_mut(&mut self.atoms).iter_mut().zip(&dests) {
             atom.chain_id = new_key.chain_id.clone();
             atom.res_id = new_key.res_id;
@@ -1077,6 +1106,23 @@ impl MolCoord {
     pub fn get_bound_box_max(&self, selected: bool) -> Option<Vector4> {
         let selector = selected.then_some(&self.selection);
         self.bound_box_max(selector)
+    }
+
+    pub fn set_positions<I>(&mut self, positions: I) -> Result<()>
+    where
+        I: IntoIterator<Item = Vector4>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let positions = positions.into_iter();
+        if positions.len() != self.atoms.len() {
+            return Err(CueMolError::invalid_argument(
+                "coordinate count does not match topology",
+            ));
+        }
+        for (atom, position) in Arc::make_mut(&mut self.atoms).iter_mut().zip(positions) {
+            atom.position = position;
+        }
+        Ok(())
     }
 
     pub fn xform_by_mat(&mut self, matrix: Matrix4, selector: Option<&Selector>) -> usize {
@@ -1429,6 +1475,7 @@ impl MolCoord {
             })
             .collect();
 
+        self.residue_count.take();
         self.atoms = Arc::new(atoms);
         self.bonds = Arc::new(bonds);
         let live_residues = self.atoms.iter().map(residue_key).collect::<BTreeSet<_>>();
@@ -1472,6 +1519,7 @@ impl MolCoord {
         if old_key != new_key && self.atoms.iter().any(|atom| residue_key(atom) == new_key) {
             return Ok(false);
         }
+        self.residue_count.take();
         for atom in Arc::make_mut(&mut self.atoms) {
             if residue_key(atom) == old_key {
                 atom.chain_id = new_chain.to_string();
@@ -1499,6 +1547,7 @@ impl MolCoord {
         if old_key != new_key && self.atoms.iter().any(|atom| residue_key(atom) == new_key) {
             return Ok(false);
         }
+        self.residue_count.take();
         for atom in Arc::make_mut(&mut self.atoms) {
             if residue_key(atom) == old_key {
                 atom.res_id = new_res_id;
@@ -1547,6 +1596,7 @@ impl MolCoord {
             }
         }
 
+        self.residue_count.take();
         let mut remap = BTreeMap::new();
         for index in &selected {
             let new_index = self.atoms.len();
@@ -1935,6 +1985,51 @@ mod tests {
         atom.ins_code = Some('B');
         atom.alt_loc = Some('C');
         assert_eq!(atom.format_msg(), "A ALA 10B CA:C");
+    }
+
+    #[test]
+    fn residue_metadata_survives_coordinates_clones_edits_and_undo() {
+        let mut molecule = MolCoord::with_atoms(vec![
+            atom(1, "A", -1, "N", 0.),
+            atom(2, "A", -1, "CA", 1.),
+            atom(3, "A", 2, "CA", 2.),
+            atom(4, "B", 1, "CA", 3.),
+        ]);
+        assert_eq!(molecule.residue_count(), 3);
+        let original = molecule.clone();
+        molecule.set_positions([Vector4::ZERO; 4]).unwrap();
+        assert_eq!(molecule.residue_count.get(), Some(&3));
+        let moved = molecule.clone();
+        assert!(molecule.set_positions([Vector4::ZERO; 3]).is_err());
+        assert_eq!(molecule, moved);
+        molecule.atoms_mut()[1].ins_code = Some('A');
+        assert_eq!(molecule.residue_count(), 4);
+        assert_eq!(original.residue_count(), 3);
+        let edited = molecule.clone();
+        molecule.apply_undo_changes(&edited, &original);
+        assert_eq!(molecule.residue_count(), 3);
+        molecule.atom_mut_by_serial(1).unwrap().chain_id = "B".into();
+        assert_eq!(molecule.residue_count(), 4);
+        molecule.remove_atom(1);
+        assert_eq!(molecule.residue_count(), 3);
+        molecule.push_atom(atom(5, "C", 1, "CA", 4.));
+        assert_eq!(molecule.residue_count(), 4);
+        molecule.atoms_mut().reverse();
+        assert_eq!(molecule.residue_count(), 4);
+        let uncached = molecule.transfer_data().into_molecule().unwrap();
+        assert!(uncached.residue_count.get().is_none());
+        assert_eq!(molecule, uncached);
+        assert_eq!(uncached.residue_count(), 4);
+        assert!(molecule.change_res_index("C", "1", "1A").unwrap());
+        assert_eq!(molecule.residue_count(), 4);
+        assert!(molecule.change_chain_name("C", "1A", "D").unwrap());
+        assert_eq!(molecule.residue_count(), 4);
+        let source =
+            MolCoord::with_atoms(vec![atom(8, "E", 1, "N", 5.), atom(9, "E", 1, "CA", 6.)]);
+        molecule
+            .copy_selected_atoms_from(&source, &Selector::All)
+            .unwrap();
+        assert_eq!(molecule.residue_count(), 5);
     }
 
     #[test]

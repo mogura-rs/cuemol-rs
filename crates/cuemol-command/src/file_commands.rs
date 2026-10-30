@@ -41,6 +41,22 @@ pub fn load_file(
     args: &Value,
 ) -> Result<Value> {
     let path = text(args, "path")?;
+    if let Some(reader) = args["reader"].as_str() {
+        let mut options = args.clone();
+        options.as_object_mut().unwrap().remove("path");
+        options["url"] = json!("https://localhost/local-file");
+        options["reader"] = json!(reader);
+        let mut plan = crate::prepare_fetch("fetch_url", &options)?;
+        if args["name"].is_null() {
+            plan.name = std::path::Path::new(path)
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or("molecule")
+                .into();
+        }
+        let bytes = std::fs::read(path)?;
+        return crate::load_fetched(state, camera, &plan, &bytes);
+    }
     let Some(mut options) = state.file_renderer_setup_for_path(path)? else {
         let loaded = state.open_path(path)?;
         if let Some(saved) = state.active_view_camera() {

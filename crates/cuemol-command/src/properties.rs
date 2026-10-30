@@ -183,7 +183,7 @@ pub fn call_tool(
         "export_image" | "export_scene" => export(state, camera, name, args),
         "superpose" => {
             let algorithm = args["algo"].as_str().unwrap_or("USalign");
-            let matrix = state.superpose_objects_with_pivot(
+            let result = state.prepare_superposition(
                 uid(args, "refId")?,
                 args["refSel"]
                     .as_str()
@@ -193,10 +193,19 @@ pub fn call_tool(
                     .as_str()
                     .unwrap_or(if algorithm == "LSQ" { "name CA" } else { "*" }),
                 algorithm,
-                args["keepAsProperty"] == true,
                 args["pivot"].as_str().unwrap_or("auto"),
             )?;
-            Ok(json!({"matrix":matrix,"algorithm":algorithm}))
+            let transform = args["transform"] != false;
+            if transform {
+                state.apply_superposition(
+                    uid(args, "movId")?,
+                    result.matrix,
+                    args["keepAsProperty"] == true,
+                )?;
+            }
+            Ok(
+                json!({"matrix":result.matrix.to_script_string(),"algorithm":algorithm,"rmsd":result.rmsd,"alignedCount":result.aligned_count,"tmReference":result.tm_reference,"transformed":transform}),
+            )
         }
         _ => crate::animation::call_tool(state, camera, name, args),
     }
@@ -437,6 +446,66 @@ fn validate_view_effect_property(key: &str, value: &str) -> Result<()> {
     }
 }
 
+fn resolve_property_path(
+    state: &DesktopAppState,
+    path: &str,
+) -> Result<(String, Option<Uid>, String)> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err(CueMolError::invalid_argument("no property given"));
+    }
+    let slash = path.find('/');
+    if slash.is_some() || path.starts_with('#') {
+        let start = slash.unwrap_or(0);
+        let dot = path[start..]
+            .find('.')
+            .map(|i| start + i)
+            .ok_or_else(|| CueMolError::invalid_argument("a node reference needs a property"))?;
+        let (id, object) = resolve_node(state, &path[..dot])?;
+        return Ok((
+            if object { "object" } else { "renderer" }.into(),
+            Some(id),
+            path[dot + 1..].into(),
+        ));
+    }
+    let scene = state.scene_manager().scene(scene(state)?).unwrap();
+    let mut objects = scene
+        .objects()
+        .iter()
+        .map(|object| (object.uid(), object.name().to_string()))
+        .collect::<Vec<_>>();
+    objects.extend(
+        nodes::extra_scene_objects(state)?
+            .iter()
+            .filter_map(|object| {
+                Some((
+                    Uid::new(object["id"].as_u64()?),
+                    object["name"].as_str()?.to_string(),
+                ))
+            }),
+    );
+    for (dot, _) in path.match_indices('.') {
+        let found = objects
+            .iter()
+            .filter(|(_, name)| name == &path[..dot])
+            .collect::<Vec<_>>();
+        match found.as_slice() {
+            [(id, _)] => return Ok(("object".into(), Some(*id), path[dot + 1..].into())),
+            [] => {}
+            _ => {
+                return Err(CueMolError::invalid_argument(format!(
+                    "ambiguous object name: {}; use #uid",
+                    &path[..dot]
+                )))
+            }
+        }
+    }
+    if let Some(property) = path.strip_prefix("view.") {
+        return Ok(("view".into(), None, property.into()));
+    }
+    Ok(("scene".into(), None, path.into()))
+}
+
 fn properties(
     state: &mut DesktopAppState,
     camera: &mut Camera,
@@ -444,21 +513,7 @@ fn properties(
     args: &Value,
 ) -> Result<Value> {
     let (kind, id, prop) = if matches!(name, "get_prop" | "set_prop" | "reset_prop") {
-        let path = text(args, "path")?;
-        if let Some((node, prop)) = path.split_once('.') {
-            if node == "view" {
-                ("view".to_string(), None, prop.to_string())
-            } else {
-                let (id, object) = resolve_node(state, node)?;
-                (
-                    (if object { "object" } else { "renderer" }).into(),
-                    Some(id),
-                    prop.into(),
-                )
-            }
-        } else {
-            ("scene".into(), None, path.into())
-        }
+        resolve_property_path(state, text(args, "path")?)?
     } else {
         (
             text(args, "nodeType")?.into(),
@@ -548,7 +603,35 @@ fn properties(
             }
         }
     }
-    let mut values = match kind.as_str() {
+    let mut values = node_property_values(state, camera, &kind, id)?;
+    if name == "list_node_props" {
+        Ok(json!({"properties":values.iter().map(|(key,value)| {
+                let readonly = property_readonly(state, &kind, id, key);
+                let allowed = property_allowed(key);
+                let mut row = json!({"key":key,"value":value,"readonly":readonly});
+                if !allowed.is_empty() { row["allowed"] = json!(allowed); }
+                row
+            }).collect::<Vec<_>>()}))
+    } else {
+        let value = if prop == "*" {
+            Value::Null
+        } else {
+            json!(values
+                .remove(&prop)
+                .ok_or_else(|| CueMolError::not_found(format!("{kind} property {prop}")))?)
+        };
+        Ok(json!({"prop":prop,"value":value}))
+    }
+}
+
+pub(crate) fn node_property_values(
+    state: &DesktopAppState,
+    camera: &Camera,
+    kind: &str,
+    id: Option<Uid>,
+) -> Result<BTreeMap<String, String>> {
+    let sid = scene(state)?;
+    Ok(match kind {
         "renderer" | "rendGroup" => nodes::renderer_properties(
             state,
             id.ok_or_else(|| CueMolError::invalid_argument("nodeId is required"))?,
@@ -569,25 +652,7 @@ fn properties(
         }
         "view" => view_properties(state, camera),
         _ => return Err(CueMolError::invalid_argument("unknown node type")),
-    };
-    if name == "list_node_props" {
-        Ok(json!({"properties":values.iter().map(|(key,value)| {
-                let readonly = property_readonly(state, &kind, id, key);
-                let allowed = property_allowed(key);
-                let mut row = json!({"key":key,"value":value,"readonly":readonly});
-                if !allowed.is_empty() { row["allowed"] = json!(allowed); }
-                row
-            }).collect::<Vec<_>>()}))
-    } else {
-        let value = if prop == "*" {
-            Value::Null
-        } else {
-            json!(values
-                .remove(&prop)
-                .ok_or_else(|| CueMolError::not_found(format!("{kind} property {prop}")))?)
-        };
-        Ok(json!({"prop":prop,"value":value}))
-    }
+    })
 }
 
 fn object_properties(state: &DesktopAppState, id: Uid) -> Result<BTreeMap<String, String>> {
@@ -646,7 +711,7 @@ fn reset_object_property(state: &mut DesktopAppState, id: Uid, prop: &str) -> Re
     Ok(())
 }
 
-fn property_allowed(key: &str) -> &'static [&'static str] {
+pub(crate) fn property_allowed(key: &str) -> &'static [&'static str] {
     match key {
         "stereoMode" => &["none", "para", "cross", "hardware"],
         "centerMark" => &["none", "crosshair", "axis"],
@@ -660,7 +725,12 @@ fn property_allowed(key: &str) -> &'static [&'static str] {
     }
 }
 
-fn property_readonly(state: &DesktopAppState, kind: &str, id: Option<Uid>, key: &str) -> bool {
+pub(crate) fn property_readonly(
+    state: &DesktopAppState,
+    kind: &str,
+    id: Option<Uid>,
+    key: &str,
+) -> bool {
     if matches!(
         key,
         "uid" | "scene_uid" | "type_name" | "src" | "alt_src" | "srctype" | "modified"

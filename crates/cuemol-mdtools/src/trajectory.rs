@@ -487,14 +487,11 @@ impl Trajectory {
 
     pub fn set_frame(&mut self, index: usize) -> Result<()> {
         let coordinates = self.coordinates_for_frame(index)?;
-        for (atom, xyz) in self
-            .molecule
-            .atoms_mut()
-            .iter_mut()
-            .zip(coordinates.chunks_exact(3))
-        {
-            atom.position = Vector4::new3(xyz[0] as f64, xyz[1] as f64, xyz[2] as f64);
-        }
+        self.molecule.set_positions(
+            coordinates
+                .chunks_exact(3)
+                .map(|xyz| Vector4::new3(xyz[0] as f64, xyz[1] as f64, xyz[2] as f64)),
+        )?;
         self.current_frame = index;
         self.molecule.fire_atoms_moved();
         Ok(())

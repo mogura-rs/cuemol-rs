@@ -33,6 +33,9 @@ use crate::{
 };
 use cuemol_desktop_core::effects::ViewportOptions;
 
+#[path = "tauri_console.rs"]
+mod console;
+
 const MAX_VIEW_DIM: u32 = 4_096;
 const MIN_INTERACTIVE_RENDER_SCALE: f64 = 0.5;
 
@@ -1584,6 +1587,8 @@ struct AppModel {
     animation_render_job: Option<TauriAnimationRenderJob>,
     log_lines: Vec<String>,
     status: String,
+    console_session: cuemol_command::console::Session,
+    console_run: Option<console::Execution>,
 }
 
 struct TauriApbsJob {
@@ -1781,6 +1786,8 @@ impl AppModel {
             pov_render_job: None,
             pov_render_result: None,
             animation_render_job: None,
+            console_session: cuemol_command::console::Session::default(),
+            console_run: None,
             log_lines: startup_log.lines().map(str::to_string).collect(),
             status,
         };
@@ -8398,6 +8405,17 @@ enum ModelRequest {
         height: u32,
     },
     ClearLog,
+    ConsoleStart {
+        source: String,
+        dialect: String,
+    },
+    ConsolePoll,
+    ConsoleHelp(String),
+    ConsoleStop,
+    ConsoleComplete {
+        source: String,
+        dialect: String,
+    },
     ExecuteScript(String),
     ExecuteScriptFile(String),
     ExportPov {
@@ -8457,6 +8475,8 @@ enum ModelRequest {
 }
 
 enum ModelResponse {
+    Console(console::Update),
+    ConsoleCompletions(Vec<serde_json::Value>),
     Snapshot(Box<AppSnapshot>),
     MoleculeDetails(Box<MoleculeDetailsDto>),
     InitialState(Box<InitialStateDto>),
@@ -12498,6 +12518,14 @@ fn handle_model_request(
             model.status = "Output log cleared".to_string();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
+        ModelRequest::ConsoleStart { source, dialect } => Ok(ModelResponse::Console(model.start_console(&source, console::dialect(&dialect)?)?)),
+        ModelRequest::ConsoleHelp(dialect) => {
+            model.log_lines.extend(model.console_session.help_dialect(console::dialect(&dialect)?, "")?.lines().map(str::to_owned));
+            Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::ConsolePoll => Ok(ModelResponse::Console(model.poll_console()?)),
+        ModelRequest::ConsoleStop => Ok(ModelResponse::Console(model.stop_console())),
+        ModelRequest::ConsoleComplete { source, dialect } => Ok(ModelResponse::ConsoleCompletions(model.console_session.complete_dialect(&model.desktop, console::dialect(&dialect)?, &source).into_iter().map(|item| serde_json::json!({"display":item.display,"replacement":item.replacement})).collect())),
         ModelRequest::ExecuteScript(script) => {
             let script = script.trim();
             if script.is_empty() {
@@ -13310,6 +13338,8 @@ fn snapshot_response(response: ModelResponse) -> Result<AppSnapshot, String> {
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
+        | ModelResponse::Console(_)
+        | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => Err("unexpected non-snapshot response".to_string()),
     }
 }
@@ -13335,6 +13365,8 @@ fn molecule_details_response(response: ModelResponse) -> Result<MoleculeDetailsD
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
+        | ModelResponse::Console(_)
+        | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => Err("unexpected non-molecule-details response".to_string()),
     }
 }
@@ -13360,6 +13392,8 @@ fn viewport_response(response: ModelResponse) -> Result<ViewportDto, String> {
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
+        | ModelResponse::Console(_)
+        | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => Err("unexpected non-viewport response".to_string()),
     }
 }
@@ -13385,6 +13419,8 @@ fn animation_frame_response(response: ModelResponse) -> Result<AnimationFrameDto
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
+        | ModelResponse::Console(_)
+        | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => Err("unexpected animation frame response".to_string()),
     }
 }
@@ -13410,6 +13446,8 @@ fn trajectory_frame_response(response: ModelResponse) -> Result<TrajectoryFrameD
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
+        | ModelResponse::Console(_)
+        | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => Err("unexpected trajectory frame response".to_string()),
     }
 }
@@ -13435,6 +13473,8 @@ fn application_info_response(response: ModelResponse) -> Result<ApplicationInfoD
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
+        | ModelResponse::Console(_)
+        | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => Err("unexpected application info response".to_string()),
     }
 }
@@ -13460,6 +13500,8 @@ fn preferences_response(response: ModelResponse) -> Result<PreferencesDto, Strin
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
+        | ModelResponse::Console(_)
+        | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => Err("unexpected non-preferences response".to_string()),
     }
 }
@@ -13485,6 +13527,8 @@ fn preferences_update_response(response: ModelResponse) -> Result<PreferencesUpd
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
+        | ModelResponse::Console(_)
+        | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => {
             Err("unexpected non-preferences-update response".to_string())
         }
@@ -13512,6 +13556,8 @@ fn initial_state_response(response: ModelResponse) -> Result<InitialStateDto, St
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
+        | ModelResponse::Console(_)
+        | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => Err("unexpected non-initial-state response".to_string()),
     }
 }
@@ -13546,6 +13592,8 @@ fn view_properties_response(response: ModelResponse) -> Result<ViewPropertiesDto
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
+        | ModelResponse::Console(_)
+        | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => Err("unexpected non-view-properties response".to_string()),
     }
 }
@@ -13612,6 +13660,8 @@ fn view_properties_update_response(
         | ModelResponse::PdbRendererSetup(_)
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
+        | ModelResponse::Console(_)
+        | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => {
             Err("unexpected non-view-properties-update response".to_string())
         }
@@ -15985,6 +16035,52 @@ fn clear_log(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(&state, ModelRequest::ClearLog)?)
 }
 
+fn console_response(response: ModelResponse) -> Result<console::Update, String> {
+    match response {
+        ModelResponse::Console(update) => Ok(update),
+        _ => Err("Unexpected console response".into()),
+    }
+}
+
+#[tauri::command]
+fn console_start(
+    source: String,
+    dialect: String,
+    state: State<'_, ManagedState>,
+) -> Result<console::Update, String> {
+    console_response(request_model(
+        &state,
+        ModelRequest::ConsoleStart { source, dialect },
+    )?)
+}
+
+#[tauri::command]
+fn console_poll(state: State<'_, ManagedState>) -> Result<console::Update, String> {
+    console_response(request_model(&state, ModelRequest::ConsolePoll)?)
+}
+
+#[tauri::command]
+fn console_help(dialect: String, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
+    snapshot_response(request_model(&state, ModelRequest::ConsoleHelp(dialect))?)
+}
+
+#[tauri::command]
+fn console_stop(state: State<'_, ManagedState>) -> Result<console::Update, String> {
+    console_response(request_model(&state, ModelRequest::ConsoleStop)?)
+}
+
+#[tauri::command]
+fn console_complete(
+    source: String,
+    dialect: String,
+    state: State<'_, ManagedState>,
+) -> Result<Vec<serde_json::Value>, String> {
+    match request_model(&state, ModelRequest::ConsoleComplete { source, dialect })? {
+        ModelResponse::ConsoleCompletions(items) => Ok(items),
+        _ => Err("Unexpected completion response".into()),
+    }
+}
+
 #[tauri::command]
 fn execute_script(script: String, state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(&state, ModelRequest::ExecuteScript(script))?)
@@ -16584,6 +16680,11 @@ pub fn run() -> Result<(), tauri::Error> {
             tick_animation,
             tick_animation_frame,
             clear_log,
+            console_start,
+            console_poll,
+            console_stop,
+            console_complete,
+            console_help,
             execute_script,
             execute_script_file,
             export_pov,
@@ -16721,6 +16822,8 @@ mod tests {
             pov_render_job: None,
             pov_render_result: None,
             animation_render_job: None,
+            console_session: cuemol_command::console::Session::default(),
+            console_run: None,
             log_lines: Vec::new(),
             status: "Ready".to_string(),
         }
@@ -24577,6 +24680,175 @@ mod tests {
         );
         assert_eq!(snapshot.status, "Script executed");
         let _ = std::fs::remove_file(script_path);
+    }
+
+    #[test]
+    fn console_dialects_share_one_undo_and_cancel_after_manual_changes() {
+        let mut model = model_without_gpu();
+        model.desktop.open_bytes("probe.pdb", b"ATOM      1  CA  ALA A   1       1.000   0.000   0.000  1.00 10.00           C\nATOM      2  CA  GLY A   2       2.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let uid = model.desktop.active_object_summaries()[0].uid;
+        model
+            .desktop
+            .scene_manager_mut()
+            .object_mut(uid)
+            .unwrap()
+            .set_name("probe");
+        model
+            .start_console(
+                "show sticks, probe; set_name probe, changed; missing_command; disable changed",
+                cuemol_command::console::Dialect::PyMol,
+            )
+            .unwrap();
+        assert_eq!(model.status, "Console error");
+        assert_eq!(
+            model.desktop.scene_manager().object(uid).unwrap().name(),
+            "changed"
+        );
+        assert!(model
+            .desktop
+            .scene_manager()
+            .object(uid)
+            .unwrap()
+            .is_visible());
+        assert_eq!(model.undo_stack.len(), 1);
+        assert!(model
+            .desktop
+            .renderer_summaries(uid)
+            .iter()
+            .any(|renderer| renderer.name == "pym:sticks"));
+        model
+            .start_console("undo", cuemol_command::console::Dialect::CueMol)
+            .unwrap();
+        assert_eq!(
+            model.desktop.scene_manager().object(uid).unwrap().name(),
+            "probe"
+        );
+        model
+            .start_console("get_scene_state", cuemol_command::console::Dialect::CueMol)
+            .unwrap();
+        assert_eq!(model.redo_stack.len(), 1);
+        model
+            .start_console("redo", cuemol_command::console::Dialect::PyMol)
+            .unwrap();
+        assert_eq!(
+            model.desktop.scene_manager().object(uid).unwrap().name(),
+            "changed"
+        );
+        let repeated = (0..80)
+            .map(|_| "get_scene_state")
+            .collect::<Vec<_>>()
+            .join(";");
+        model
+            .start_console(&repeated, cuemol_command::console::Dialect::CueMol)
+            .unwrap();
+        assert!(model.console_run.is_some());
+        model.camera.set_zoom(37.);
+        model.poll_console().unwrap();
+        assert!(model.console_run.is_none());
+        assert!(model.status.contains("cancelled"));
+        assert_eq!(model.camera.zoom(), 37.);
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing").join("scene.qsc");
+        model
+            .start_console(
+                &format!("save {}", serde_json::json!(missing)),
+                cuemol_command::console::Dialect::CueMol,
+            )
+            .unwrap();
+        assert_eq!(model.status, "Console error");
+        assert_eq!(model.undo_stack.len(), 1);
+        let output = directory.path().join("scene.qsc");
+        model
+            .start_console(
+                &format!("save {}", serde_json::json!(output)),
+                cuemol_command::console::Dialect::PyMol,
+            )
+            .unwrap();
+        assert_eq!(model.status, "Console executed");
+        assert!(output.is_file());
+        assert!(model.undo_stack.is_empty() && model.redo_stack.is_empty());
+    }
+
+    #[test]
+    fn console_qax_replay_preserves_each_action_and_nested_files_share_the_submission() {
+        use cuemol_command::console::Dialect;
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("actions.qax");
+        fs::write(&file, r#"<cuemol-actions version="1"><action label="Hide"><op name="set_visible"><arg name="nodeId" path="probe" uid="987654321"/><arg name="nodeType">object</arg><arg name="visible">false</arg></op></action><action label="Rename"><cmd>rename probe, changed</cmd></action></cuemol-actions>"#).unwrap();
+        let mut model = model_without_gpu();
+        model.desktop.open_bytes("probe.pdb", b"ATOM      1  CA  ALA A   1       1.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let id = model.desktop.active_object_summaries()[0].uid;
+        model
+            .desktop
+            .scene_manager_mut()
+            .object_mut(id)
+            .unwrap()
+            .set_name("probe");
+        let source = format!("run {}", serde_json::json!(file.to_string_lossy()));
+        model.start_console(&source, Dialect::CueMol).unwrap();
+        assert_eq!(model.status, "Console executed", "{:?}", model.log_lines);
+        assert_eq!(model.undo_stack.len(), 2);
+        model.undo(0).unwrap();
+        assert_eq!(
+            model.desktop.scene_manager().object(id).unwrap().name(),
+            "probe"
+        );
+        assert!(!model
+            .desktop
+            .scene_manager()
+            .object(id)
+            .unwrap()
+            .is_visible());
+        model.undo(0).unwrap();
+        assert!(model
+            .desktop
+            .scene_manager()
+            .object(id)
+            .unwrap()
+            .is_visible());
+        model
+            .start_console(&format!("{source}; show changed"), Dialect::CueMol)
+            .unwrap();
+        assert_eq!(model.status, "Console executed", "{:?}", model.log_lines);
+        assert_eq!(model.undo_stack.len(), 1);
+        model.undo(0).unwrap();
+        assert_eq!(
+            model.desktop.scene_manager().object(id).unwrap().name(),
+            "probe"
+        );
+        model.start_console(&source, Dialect::PyMol).unwrap();
+        assert_eq!(model.status, "Console error");
+        assert!(model.undo_stack.is_empty());
+        let log = directory.path().join("logged.qax");
+        model
+            .start_console(
+                &format!("open_log {}", serde_json::json!(log.to_string_lossy())),
+                Dialect::CueMol,
+            )
+            .unwrap();
+        model
+            .start_console("hide probe; rename probe, changed", Dialect::CueMol)
+            .unwrap();
+        model
+            .start_console("get_scene_state", Dialect::CueMol)
+            .unwrap();
+        model.start_console("close_log", Dialect::CueMol).unwrap();
+        let document = cuemol_core::parse_ldom2_xml(&fs::read_to_string(log).unwrap()).unwrap();
+        let actions = document
+            .top()
+            .children()
+            .iter()
+            .filter(|node| !node.is_attr())
+            .collect::<Vec<_>>();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(
+            actions[0]
+                .children()
+                .iter()
+                .filter(|node| node.tag_name() == "op")
+                .count(),
+            2
+        );
     }
 
     #[test]

@@ -637,9 +637,7 @@ impl GuiTrajectoryData {
                 "trajectory atom count does not match topology",
             ));
         }
-        for (atom, position) in molecule.atoms_mut().iter_mut().zip(positions) {
-            atom.position = position;
-        }
+        molecule.set_positions(positions)?;
         if let Some([a, b, c, alpha, beta, gamma]) = cell {
             molecule.set_cell_params(cuemol_core::CellParams::new(a, b, c, alpha, beta, gamma));
         }
@@ -757,6 +755,14 @@ pub struct GuiSceneSummary {
     pub map_count: usize,
     pub camera_count: usize,
     pub active: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct GuiSuperpositionResult {
+    pub matrix: Matrix4,
+    pub rmsd: Option<f64>,
+    pub aligned_count: Option<usize>,
+    pub tm_reference: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7979,9 +7985,7 @@ impl DesktopAppState {
                 "trajectory frame atom count does not match its object",
             ));
         }
-        for (atom, position) in object.mol_mut().atoms_mut().iter_mut().zip(frame) {
-            atom.position = position;
-        }
+        object.mol_mut().set_positions(frame)?;
         if let Some([a, b, c, alpha, beta, gamma]) = cell {
             object
                 .mol_mut()
@@ -14197,6 +14201,50 @@ impl DesktopAppState {
         Ok(())
     }
 
+    pub fn molecule_export_bytes(
+        &self,
+        object_uid: Uid,
+        selection: &str,
+        format: &str,
+    ) -> Result<Vec<u8>> {
+        let object = self
+            .scene_manager()
+            .object(object_uid)
+            .ok_or_else(|| CueMolError::not_found("molecule"))?;
+        let selector = self.parse_scene_selector(
+            self.active_scene()
+                .ok_or_else(|| CueMolError::not_found("active scene"))?,
+            selection,
+        )?;
+        if object.mol().select_indices(&selector).is_empty() {
+            return Err(CueMolError::invalid_argument(
+                "selection matched no atoms; nothing written",
+            ));
+        }
+        let mut molecule = object.mol().clone();
+        if object.xform_matrix() != Matrix4::IDENTITY {
+            molecule.xform_by_mat(object.xform_matrix(), None);
+        }
+        Ok(match format {
+            "pdb" | "ent" => {
+                write_pdb_string_with_selection(&molecule, Some(&selector)).into_bytes()
+            }
+            "sdf" | "mol" => {
+                cuemol_molstr::write_sdf_string_with_selection(&molecule, &selector).into_bytes()
+            }
+            "pqr" => {
+                let mut writer = PqrFileWriter::new();
+                writer.set_selection(Some(selector));
+                writer.write_pqr_string(&molecule).into_bytes()
+            }
+            other => {
+                return Err(CueMolError::invalid_argument(format!(
+                    "unsupported molecule export format: {other}"
+                )))
+            }
+        })
+    }
+
     pub fn save_workspace_object_as(
         &mut self,
         kind: GuiWorkspaceObjectKind,
@@ -14455,6 +14503,25 @@ impl DesktopAppState {
             return Err(CueMolError::NotFound(format!("scene {}", scene_uid.get())));
         }
         Ok(self.active_scene)
+    }
+
+    pub fn active_style_names(&self, category: &str) -> Vec<String> {
+        let scene = self
+            .active_scene
+            .and_then(|id| self.scene_manager().scene(id));
+        let styles = scene
+            .map(scene_style_manager)
+            .unwrap_or_else(cuemol_molvis::default_style_manager);
+        let scope = self.active_scene.map_or(0, Uid::get);
+        if category == "color" {
+            let mut names = styles.color_names(0);
+            names.extend(styles.color_names(scope));
+            names.sort();
+            names.dedup();
+            names
+        } else {
+            styles.str_data_names(category, scope)
+        }
     }
 
     pub fn active_style_color(&self, value: &str) -> Option<cuemol_gfx::Rgba8> {
@@ -16095,6 +16162,27 @@ impl DesktopAppState {
         use_property: bool,
         pivot: &str,
     ) -> Result<String> {
+        let result = self.prepare_superposition(
+            reference_object,
+            reference_selection,
+            moving_object,
+            moving_selection,
+            algorithm,
+            pivot,
+        )?;
+        self.apply_superposition(moving_object, result.matrix, use_property)?;
+        Ok(result.matrix.to_script_string())
+    }
+
+    pub fn prepare_superposition(
+        &self,
+        reference_object: Uid,
+        reference_selection: &str,
+        moving_object: Uid,
+        moving_selection: &str,
+        algorithm: &str,
+        pivot: &str,
+    ) -> Result<GuiSuperpositionResult> {
         if reference_object == moving_object {
             return Err(CueMolError::invalid_argument(
                 "reference and moving objects must differ",
@@ -16103,8 +16191,15 @@ impl DesktopAppState {
         let reference_selection = nonempty_selection(reference_selection);
         let moving_selection = nonempty_selection(moving_selection);
         let manager = MolAnlManager::new();
-        let reference_selector = parse_gui_selector(reference_selection)?.unwrap_or(Selector::All);
-        let moving_selector = parse_gui_selector(moving_selection)?.unwrap_or(Selector::All);
+        let selector = |text: &str| -> Result<Selector> {
+            if let Some(scene) = self.active_scene() {
+                self.parse_scene_selector(scene, text)
+            } else {
+                Ok(parse_gui_selector(text)?.unwrap_or(Selector::All))
+            }
+        };
+        let reference_selector = selector(reference_selection)?;
+        let moving_selector = selector(moving_selection)?;
         let world_molecule = |uid: Uid| -> Result<MolCoord> {
             let object = self
                 .scene_manager()
@@ -16115,17 +16210,22 @@ impl DesktopAppState {
             Ok(molecule)
         };
         let reference = world_molecule(reference_object)?;
-        let moving = world_molecule(moving_object)?;
+        let mut moving = world_molecule(moving_object)?;
         let matrix = match algorithm.trim().to_ascii_lowercase().as_str() {
             "usalign" => {
-                cuemol_molanl::superpose_usalign(
+                let result = cuemol_molanl::superpose_usalign(
                     &reference,
                     &reference_selector,
                     &moving,
                     &moving_selector,
                     pivot,
-                )?
-                .matrix
+                )?;
+                return Ok(GuiSuperpositionResult {
+                    matrix: result.matrix,
+                    rmsd: Some(result.rmsd),
+                    aligned_count: Some(result.aligned_residues),
+                    tm_reference: Some(result.tm_reference),
+                });
             }
             "ssm" => manager.superpose_ssm_matrix(
                 &reference,
@@ -16145,6 +16245,34 @@ impl DesktopAppState {
                 )));
             }
         };
+        let (rmsd, aligned_count) = if algorithm.eq_ignore_ascii_case("lsq") {
+            moving.xform_by_mat(matrix, None);
+            (
+                Some(manager.calc_rmsd_without_report(
+                    &reference,
+                    &reference_selector,
+                    &moving,
+                    &moving_selector,
+                )?),
+                Some(reference.select_indices(&reference_selector).len()),
+            )
+        } else {
+            (None, None)
+        };
+        Ok(GuiSuperpositionResult {
+            matrix,
+            rmsd,
+            aligned_count,
+            tm_reference: None,
+        })
+    }
+
+    pub fn apply_superposition(
+        &mut self,
+        moving_object: Uid,
+        matrix: Matrix4,
+        use_property: bool,
+    ) -> Result<()> {
         let moving = self
             .scene_manager_mut()
             .object_mut(moving_object)
@@ -16163,7 +16291,7 @@ impl DesktopAppState {
             }
             moving_molecule.fire_atoms_moved();
         }
-        Ok(matrix.to_script_string())
+        Ok(())
     }
 
     pub fn write_superposition_rmsd_report(
@@ -16641,9 +16769,7 @@ impl DesktopAppState {
                 positions.len()
             )));
         }
-        for (atom, position) in object.mol_mut().atoms_mut().iter_mut().zip(positions) {
-            atom.position = position;
-        }
+        object.mol_mut().set_positions(positions)?;
         object.mol_mut().fire_atoms_moved();
         Ok(GuiMorphSummary {
             object_uid,

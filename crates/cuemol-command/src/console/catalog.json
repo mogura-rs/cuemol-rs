@@ -1,0 +1,1934 @@
+{
+  "close_scene": {
+    "tool": "close_scene",
+    "group": "tabs",
+    "params": [
+      "scene",
+      "discardChanges"
+    ],
+    "semantics": {
+      "scene": "scene"
+    },
+    "defaults": {
+      "discardChanges": false
+    }
+  },
+  "create_scene": {
+    "tool": "create_scene",
+    "group": "tabs",
+    "params": [
+      "name"
+    ]
+  },
+  "list_scenes": {
+    "tool": "list_scenes",
+    "group": "tabs",
+    "params": []
+  },
+  "scenes": {
+    "tool": "list_scenes",
+    "group": "tabs",
+    "params": []
+  },
+  "switch_scene": {
+    "tool": "switch_scene",
+    "group": "tabs",
+    "params": [
+      "scene"
+    ],
+    "semantics": {
+      "scene": "scene"
+    }
+  },
+  "delete": {
+    "tool": "delete_node",
+    "group": "nodes",
+    "params": [
+      "nodeId",
+      "nodeType"
+    ],
+    "semantics": {
+      "nodeId": "node",
+      "nodeType": "one of `object`, `renderer`, `rendGroup`"
+    }
+  },
+  "delete_node": {
+    "tool": "delete_node",
+    "group": "nodes",
+    "params": [
+      "nodeId",
+      "nodeType"
+    ],
+    "semantics": {
+      "nodeId": "node",
+      "nodeType": "one of `object`, `renderer`, `rendGroup`"
+    }
+  },
+  "focus": {
+    "tool": "focus_node",
+    "group": "nodes",
+    "params": [
+      "nodeId",
+      "nodeType"
+    ],
+    "semantics": {
+      "nodeId": "node",
+      "nodeType": "one of `object`, `renderer`, `rendGroup`"
+    }
+  },
+  "focus_node": {
+    "tool": "focus_node",
+    "group": "nodes",
+    "params": [
+      "nodeId",
+      "nodeType"
+    ],
+    "semantics": {
+      "nodeId": "node",
+      "nodeType": "one of `object`, `renderer`, `rendGroup`"
+    }
+  },
+  "get_scene_state": {
+    "tool": "get_scene_state",
+    "group": "nodes",
+    "params": []
+  },
+  "hide": {
+    "tool": "set_visible",
+    "group": "nodes",
+    "params": [
+      "nodeId",
+      "nodeType"
+    ],
+    "semantics": {
+      "nodeId": "node",
+      "nodeType": "one of `object`, `renderer`, `rendGroup`"
+    },
+    "fixed": {
+      "visible": false
+    }
+  },
+  "move_node": {
+    "tool": "move_node",
+    "group": "nodes",
+    "params": [
+      "nodeId",
+      "by",
+      "to",
+      "end",
+      "nodeType"
+    ],
+    "semantics": {
+      "nodeId": "node",
+      "nodeType": "one of `object`, `renderer`"
+    }
+  },
+  "paste_node": {
+    "tool": "paste_node",
+    "group": "nodes",
+    "params": [
+      "kind",
+      "form",
+      "xml",
+      "target",
+      "targetType"
+    ],
+    "semantics": {
+      "kind": "one of `object`, `renderer`, `style`, `camera`",
+      "target": "node",
+      "targetType": "one of `object`, `rendGroup`"
+    }
+  },
+  "rename": {
+    "tool": "rename_node",
+    "group": "nodes",
+    "params": [
+      "nodeId",
+      "name",
+      "nodeType"
+    ],
+    "semantics": {
+      "nodeId": "node",
+      "nodeType": "one of `object`, `renderer`, `rendGroup`"
+    }
+  },
+  "rename_node": {
+    "tool": "rename_node",
+    "group": "nodes",
+    "params": [
+      "nodeId",
+      "name",
+      "nodeType"
+    ],
+    "semantics": {
+      "nodeId": "node",
+      "nodeType": "one of `object`, `renderer`, `rendGroup`"
+    }
+  },
+  "scene": {
+    "tool": "get_scene_state",
+    "group": "nodes",
+    "params": []
+  },
+  "set_visible": {
+    "tool": "set_visible",
+    "group": "nodes",
+    "params": [
+      "nodeId",
+      "visible",
+      "nodeType"
+    ],
+    "semantics": {
+      "nodeId": "node",
+      "nodeType": "one of `object`, `renderer`, `rendGroup`"
+    }
+  },
+  "show": {
+    "tool": "set_visible",
+    "group": "nodes",
+    "params": [
+      "nodeId",
+      "nodeType"
+    ],
+    "semantics": {
+      "nodeId": "node",
+      "nodeType": "one of `object`, `renderer`, `rendGroup`"
+    },
+    "fixed": {
+      "visible": true
+    }
+  },
+  "clear_undo": {
+    "tool": "clear_undo",
+    "group": "edit",
+    "params": []
+  },
+  "redo": {
+    "tool": "redo",
+    "group": "edit",
+    "params": []
+  },
+  "undo": {
+    "tool": "undo",
+    "group": "edit",
+    "params": []
+  },
+  "apply_renderer_style": {
+    "tool": "apply_renderer_style",
+    "group": "renderers",
+    "params": [
+      "rendId",
+      "style"
+    ],
+    "semantics": {
+      "rendId": "renderer"
+    }
+  },
+  "create_group": {
+    "tool": "create_group",
+    "group": "renderers",
+    "params": [
+      "objId",
+      "name"
+    ],
+    "semantics": {
+      "objId": "object"
+    }
+  },
+  "create_preset_renderer": {
+    "tool": "create_preset_renderer",
+    "group": "renderers",
+    "params": [
+      "objId",
+      "preset",
+      "name",
+      "centerView"
+    ],
+    "semantics": {
+      "objId": "object"
+    }
+  },
+  "create_renderer": {
+    "tool": "create_renderer",
+    "group": "renderers",
+    "params": [
+      "objId",
+      "rendererType",
+      "name",
+      "selection",
+      "centerView"
+    ],
+    "semantics": {
+      "objId": "object"
+    }
+  },
+  "list_renderer_styles": {
+    "tool": "list_renderer_styles",
+    "group": "renderers",
+    "params": [
+      "rendId"
+    ],
+    "semantics": {
+      "rendId": "renderer"
+    }
+  },
+  "list_renderer_types": {
+    "tool": "list_renderer_types",
+    "group": "renderers",
+    "params": [
+      "objId"
+    ],
+    "semantics": {
+      "objId": "object"
+    }
+  },
+  "retype": {
+    "tool": "set_renderer_type",
+    "group": "renderers",
+    "params": [
+      "rendId",
+      "rendererType"
+    ],
+    "semantics": {
+      "rendId": "renderer"
+    }
+  },
+  "set_renderer_selection": {
+    "tool": "set_renderer_selection",
+    "group": "renderers",
+    "params": [
+      "rendId",
+      "selection"
+    ],
+    "semantics": {
+      "rendId": "renderer"
+    }
+  },
+  "set_renderer_styles": {
+    "tool": "set_renderer_styles",
+    "group": "renderers",
+    "params": [
+      "rendId",
+      "styles"
+    ],
+    "semantics": {
+      "rendId": "renderer"
+    }
+  },
+  "set_renderer_type": {
+    "tool": "set_renderer_type",
+    "group": "renderers",
+    "params": [
+      "rendId",
+      "rendererType"
+    ],
+    "semantics": {
+      "rendId": "renderer"
+    }
+  },
+  "style": {
+    "tool": "apply_renderer_style",
+    "group": "renderers",
+    "params": [
+      "rendId",
+      "style"
+    ],
+    "semantics": {
+      "rendId": "renderer"
+    }
+  },
+  "add_paint": {
+    "tool": "add_paint",
+    "group": "coloring",
+    "params": [
+      "nodeId",
+      "selection",
+      "color",
+      "nodeType"
+    ],
+    "semantics": {
+      "nodeId": "node",
+      "nodeType": "one of `renderer`, `object`"
+    }
+  },
+  "add_paint_at": {
+    "tool": "add_paint_at",
+    "group": "coloring",
+    "params": [
+      "nodeId",
+      "selection",
+      "color",
+      "at",
+      "nodeType"
+    ],
+    "semantics": {
+      "nodeId": "node",
+      "nodeType": "one of `renderer`, `object`"
+    }
+  },
+  "clear_paint": {
+    "tool": "clear_paint",
+    "group": "coloring",
+    "params": [
+      "nodeId",
+      "nodeType"
+    ],
+    "semantics": {
+      "nodeId": "node",
+      "nodeType": "one of `renderer`, `object`"
+    }
+  },
+  "list_coloring_styles": {
+    "tool": "list_coloring_styles",
+    "group": "coloring",
+    "params": []
+  },
+  "list_paint": {
+    "tool": "list_paint",
+    "group": "coloring",
+    "params": [
+      "nodeId",
+      "nodeType"
+    ],
+    "semantics": {
+      "nodeId": "node",
+      "nodeType": "one of `renderer`, `object`"
+    }
+  },
+  "move_paint": {
+    "tool": "move_paint",
+    "group": "coloring",
+    "params": [
+      "nodeId",
+      "number",
+      "by",
+      "to",
+      "end",
+      "nodeType"
+    ],
+    "semantics": {
+      "nodeId": "node",
+      "nodeType": "one of `renderer`, `object`"
+    }
+  },
+  "remove_paint": {
+    "tool": "remove_paint",
+    "group": "coloring",
+    "params": [
+      "nodeId",
+      "number",
+      "nodeType"
+    ],
+    "semantics": {
+      "nodeId": "node",
+      "nodeType": "one of `renderer`, `object`"
+    }
+  },
+  "set_coloring_prop": {
+    "tool": "set_coloring_prop",
+    "group": "coloring",
+    "params": [
+      "nodeId",
+      "prop",
+      "value",
+      "nodeType"
+    ],
+    "semantics": {
+      "nodeId": "node",
+      "nodeType": "one of `renderer`, `object`"
+    }
+  },
+  "set_default_color": {
+    "tool": "set_default_color",
+    "group": "coloring",
+    "params": [
+      "nodeId",
+      "color",
+      "nodeType"
+    ],
+    "semantics": {
+      "nodeId": "node",
+      "nodeType": "one of `renderer`, `object`"
+    }
+  },
+  "set_elepot_coloring": {
+    "tool": "set_elepot_coloring",
+    "group": "coloring",
+    "params": [
+      "rendId",
+      "map",
+      "low",
+      "high"
+    ],
+    "semantics": {
+      "rendId": "renderer"
+    }
+  },
+  "set_multigrad_nodes": {
+    "tool": "set_multigrad_nodes",
+    "group": "coloring",
+    "params": [
+      "rendId",
+      "nodes"
+    ],
+    "semantics": {
+      "rendId": "renderer"
+    }
+  },
+  "set_paint": {
+    "tool": "set_paint",
+    "group": "coloring",
+    "params": [
+      "nodeId",
+      "number",
+      "selection",
+      "color",
+      "nodeType"
+    ],
+    "semantics": {
+      "nodeId": "node",
+      "nodeType": "one of `renderer`, `object`"
+    }
+  },
+  "set_renderer_coloring": {
+    "tool": "set_renderer_coloring",
+    "group": "coloring",
+    "params": [
+      "nodeId",
+      "mode",
+      "styleName",
+      "nodeType"
+    ],
+    "semantics": {
+      "nodeId": "node",
+      "nodeType": "one of `renderer`, `object`"
+    }
+  },
+  "create_style_set": {
+    "tool": "create_style_set",
+    "group": "styles",
+    "params": [
+      "name"
+    ]
+  },
+  "define_color": {
+    "tool": "define_color",
+    "group": "styles",
+    "params": [
+      "name",
+      "color",
+      "styleSet"
+    ]
+  },
+  "delete_style_set": {
+    "tool": "delete_style_set",
+    "group": "styles",
+    "params": [
+      "styleSet"
+    ]
+  },
+  "load_style_file": {
+    "tool": "load_style_file",
+    "group": "styles",
+    "params": [
+      "path"
+    ],
+    "semantics": {
+      "path": "path"
+    }
+  },
+  "remove_color": {
+    "tool": "remove_color",
+    "group": "styles",
+    "params": [
+      "styleSet",
+      "name"
+    ]
+  },
+  "remove_selection": {
+    "tool": "remove_selection",
+    "group": "styles",
+    "params": [
+      "styleSet",
+      "name"
+    ]
+  },
+  "remove_style": {
+    "tool": "remove_style",
+    "group": "styles",
+    "params": [
+      "styleSet",
+      "name"
+    ]
+  },
+  "save_style_file": {
+    "tool": "save_style_file",
+    "group": "styles",
+    "params": [
+      "styleSet",
+      "path"
+    ],
+    "semantics": {
+      "path": "path"
+    }
+  },
+  "set_style_readonly": {
+    "tool": "set_style_readonly",
+    "group": "styles",
+    "params": [
+      "styleSet",
+      "readonly"
+    ]
+  },
+  "count": {
+    "tool": "count_selection",
+    "group": "selections",
+    "params": [
+      "objId",
+      "selection"
+    ],
+    "semantics": {
+      "objId": "MolCoord object"
+    }
+  },
+  "count_selection": {
+    "tool": "count_selection",
+    "group": "selections",
+    "params": [
+      "objId",
+      "selection"
+    ],
+    "semantics": {
+      "objId": "MolCoord object"
+    }
+  },
+  "define": {
+    "tool": "define_selection",
+    "group": "selections",
+    "params": [
+      "name",
+      "selection",
+      "styleSet"
+    ]
+  },
+  "define_selection": {
+    "tool": "define_selection",
+    "group": "selections",
+    "params": [
+      "name",
+      "selection",
+      "styleSet"
+    ]
+  },
+  "list_chains": {
+    "tool": "list_chains",
+    "group": "selections",
+    "params": [
+      "objId"
+    ],
+    "semantics": {
+      "objId": "MolCoord object"
+    }
+  },
+  "list_residues": {
+    "tool": "list_residues",
+    "group": "selections",
+    "params": [
+      "objId",
+      "chain",
+      "offset"
+    ],
+    "semantics": {
+      "objId": "MolCoord object"
+    }
+  },
+  "select": {
+    "tool": "set_mol_selection",
+    "group": "selections",
+    "params": [
+      "objId",
+      "selection"
+    ],
+    "semantics": {
+      "objId": "MolCoord object"
+    }
+  },
+  "set_mol_selection": {
+    "tool": "set_mol_selection",
+    "group": "selections",
+    "params": [
+      "objId",
+      "selection"
+    ],
+    "semantics": {
+      "objId": "MolCoord object"
+    }
+  },
+  "apply_camera": {
+    "tool": "apply_camera",
+    "group": "viewing",
+    "params": [
+      "name",
+      "withVisibility"
+    ]
+  },
+  "cameras": {
+    "tool": "list_cameras",
+    "group": "viewing",
+    "params": []
+  },
+  "center": {
+    "tool": "center_view",
+    "group": "viewing",
+    "params": [
+      "objId",
+      "selection"
+    ],
+    "semantics": {
+      "objId": "MolCoord object"
+    },
+    "fixed": {
+      "zoom": false
+    }
+  },
+  "center_view": {
+    "tool": "center_view",
+    "group": "viewing",
+    "params": [
+      "objId",
+      "selection",
+      "zoom"
+    ],
+    "semantics": {
+      "objId": "MolCoord object"
+    }
+  },
+  "clear_camera_visibility": {
+    "tool": "clear_camera_visibility",
+    "group": "viewing",
+    "params": [
+      "name"
+    ]
+  },
+  "delete_camera": {
+    "tool": "delete_camera",
+    "group": "viewing",
+    "params": [
+      "name"
+    ]
+  },
+  "fit_slab": {
+    "tool": "set_view",
+    "group": "viewing",
+    "params": [
+      "objId",
+      "zoom",
+      "slab",
+      "distance",
+      "center"
+    ],
+    "semantics": {
+      "objId": "object",
+      "center": "x, y, z"
+    },
+    "fixed": {
+      "fitSlab": true
+    }
+  },
+  "list_cameras": {
+    "tool": "list_cameras",
+    "group": "viewing",
+    "params": []
+  },
+  "load_camera_file": {
+    "tool": "load_camera_file",
+    "group": "viewing",
+    "params": [
+      "path"
+    ],
+    "semantics": {
+      "path": "path"
+    }
+  },
+  "move_camera": {
+    "tool": "move_camera",
+    "group": "viewing",
+    "params": [
+      "name",
+      "by",
+      "to",
+      "end"
+    ]
+  },
+  "pan": {
+    "tool": "pan_view",
+    "group": "viewing",
+    "params": [
+      "dx",
+      "dy",
+      "dz"
+    ]
+  },
+  "pan_view": {
+    "tool": "pan_view",
+    "group": "viewing",
+    "params": [
+      "dx",
+      "dy",
+      "dz"
+    ]
+  },
+  "projection": {
+    "tool": "set_projection",
+    "group": "viewing",
+    "params": [
+      "perspective"
+    ]
+  },
+  "reload_camera": {
+    "tool": "reload_camera",
+    "group": "viewing",
+    "params": [
+      "name"
+    ]
+  },
+  "rename_camera": {
+    "tool": "rename_camera",
+    "group": "viewing",
+    "params": [
+      "name",
+      "newName"
+    ]
+  },
+  "restore_view": {
+    "tool": "apply_camera",
+    "group": "viewing",
+    "params": [
+      "name",
+      "withVisibility"
+    ]
+  },
+  "rotate_view": {
+    "tool": "rotate_view",
+    "group": "viewing",
+    "params": [
+      "axis",
+      "angle"
+    ]
+  },
+  "save_camera": {
+    "tool": "save_camera",
+    "group": "viewing",
+    "params": [
+      "name",
+      "withVisibility"
+    ]
+  },
+  "save_camera_file": {
+    "tool": "save_camera_file",
+    "group": "viewing",
+    "params": [
+      "name",
+      "path"
+    ],
+    "semantics": {
+      "path": "path"
+    }
+  },
+  "save_view": {
+    "tool": "save_camera",
+    "group": "viewing",
+    "params": [
+      "name",
+      "withVisibility"
+    ]
+  },
+  "set_camera_visibility": {
+    "tool": "set_camera_visibility",
+    "group": "viewing",
+    "params": [
+      "name",
+      "entries"
+    ]
+  },
+  "set_projection": {
+    "tool": "set_projection",
+    "group": "viewing",
+    "params": [
+      "perspective"
+    ]
+  },
+  "set_view": {
+    "tool": "set_view",
+    "group": "viewing",
+    "params": [
+      "zoom",
+      "slab",
+      "distance",
+      "center",
+      "fitSlab",
+      "objId"
+    ],
+    "semantics": {
+      "center": "x, y, z",
+      "objId": "object"
+    }
+  },
+  "slab": {
+    "tool": "set_view",
+    "group": "viewing",
+    "params": [
+      "slab",
+      "zoom",
+      "distance",
+      "center",
+      "fitSlab",
+      "objId"
+    ],
+    "semantics": {
+      "center": "x, y, z",
+      "objId": "object"
+    }
+  },
+  "turn": {
+    "tool": "rotate_view",
+    "group": "viewing",
+    "params": [
+      "axis",
+      "angle"
+    ]
+  },
+  "view": {
+    "tool": "set_view",
+    "group": "viewing",
+    "params": [
+      "zoom",
+      "slab",
+      "distance",
+      "center",
+      "fitSlab",
+      "objId"
+    ],
+    "semantics": {
+      "center": "x, y, z",
+      "objId": "object"
+    }
+  },
+  "zoom": {
+    "tool": "center_view",
+    "group": "viewing",
+    "params": [
+      "objId",
+      "selection"
+    ],
+    "semantics": {
+      "objId": "MolCoord object"
+    },
+    "fixed": {
+      "zoom": true
+    }
+  },
+  "get": {
+    "tool": "get_prop",
+    "group": "properties",
+    "params": [
+      "path"
+    ],
+    "semantics": {
+      "path": "property path"
+    }
+  },
+  "get_prop": {
+    "tool": "get_prop",
+    "group": "properties",
+    "params": [
+      "path"
+    ],
+    "semantics": {
+      "path": "property path"
+    }
+  },
+  "list_node_props": {
+    "tool": "list_node_props",
+    "group": "properties",
+    "params": [
+      "nodeId",
+      "nodeType"
+    ],
+    "semantics": {
+      "nodeId": "node",
+      "nodeType": "one of `scene`, `view`, `object`, `renderer`"
+    }
+  },
+  "props": {
+    "tool": "list_node_props",
+    "group": "properties",
+    "params": [
+      "nodeId",
+      "nodeType"
+    ],
+    "semantics": {
+      "nodeId": "node",
+      "nodeType": "one of `scene`, `view`, `object`, `renderer`"
+    }
+  },
+  "reset_prop": {
+    "tool": "reset_prop",
+    "group": "properties",
+    "params": [
+      "path"
+    ],
+    "semantics": {
+      "path": "property path"
+    }
+  },
+  "set": {
+    "tool": "set_prop",
+    "group": "properties",
+    "params": [
+      "path",
+      "value"
+    ],
+    "semantics": {
+      "path": "property path"
+    }
+  },
+  "set_node_prop": {
+    "tool": "set_node_prop",
+    "group": "properties",
+    "params": [
+      "nodeId",
+      "prop",
+      "value",
+      "nodeType"
+    ],
+    "semantics": {
+      "nodeId": "node",
+      "nodeType": "one of `scene`, `view`, `object`, `renderer`"
+    }
+  },
+  "set_prop": {
+    "tool": "set_prop",
+    "group": "properties",
+    "params": [
+      "path",
+      "value"
+    ],
+    "semantics": {
+      "path": "property path"
+    }
+  },
+  "add_bond": {
+    "tool": "add_bond",
+    "group": "molecule",
+    "params": [
+      "objId",
+      "atoms"
+    ],
+    "semantics": {
+      "objId": "MolCoord object",
+      "atoms": "atoms"
+    }
+  },
+  "create_symmetry_copy": {
+    "tool": "create_symmetry_copy",
+    "group": "molecule",
+    "params": [
+      "objId",
+      "matrix",
+      "name",
+      "rendererType",
+      "selection",
+      "rendererName",
+      "preset",
+      "centerView"
+    ],
+    "semantics": {
+      "objId": "MolCoord object"
+    }
+  },
+  "delete_atoms": {
+    "tool": "delete_atoms",
+    "group": "molecule",
+    "params": [
+      "objId",
+      "selection"
+    ],
+    "semantics": {
+      "objId": "MolCoord object"
+    }
+  },
+  "merge_molecules": {
+    "tool": "merge_molecules",
+    "group": "molecule",
+    "params": [
+      "fromId",
+      "toId",
+      "selection",
+      "copy"
+    ],
+    "semantics": {
+      "fromId": "MolCoord object",
+      "toId": "MolCoord object"
+    }
+  },
+  "remove_bond": {
+    "tool": "remove_bond",
+    "group": "molecule",
+    "params": [
+      "objId",
+      "atoms"
+    ],
+    "semantics": {
+      "objId": "MolCoord object",
+      "atoms": "atoms"
+    }
+  },
+  "rename_chain": {
+    "tool": "rename_chain",
+    "group": "molecule",
+    "params": [
+      "objId",
+      "selection",
+      "chain"
+    ],
+    "semantics": {
+      "objId": "MolCoord object"
+    }
+  },
+  "renumber_residues": {
+    "tool": "renumber_residues",
+    "group": "molecule",
+    "params": [
+      "objId",
+      "mode",
+      "value",
+      "selection",
+      "renumber"
+    ],
+    "semantics": {
+      "objId": "MolCoord object"
+    }
+  },
+  "set_atom_label": {
+    "tool": "set_atom_label",
+    "group": "molecule",
+    "params": [
+      "objId",
+      "atoms",
+      "on"
+    ],
+    "semantics": {
+      "objId": "MolCoord object",
+      "atoms": "atoms"
+    }
+  },
+  "set_atom_labels": {
+    "tool": "set_atom_labels",
+    "group": "molecule",
+    "params": [
+      "objId",
+      "selection",
+      "format",
+      "rendererName"
+    ],
+    "semantics": {
+      "objId": "MolCoord object"
+    }
+  },
+  "set_secondary_structure": {
+    "tool": "set_secondary_structure",
+    "group": "molecule",
+    "params": [
+      "objId",
+      "selection",
+      "type",
+      "ignoreBulge",
+      "helixGapAngle"
+    ],
+    "semantics": {
+      "objId": "MolCoord object"
+    }
+  },
+  "set_symmetry": {
+    "tool": "set_symmetry",
+    "group": "molecule",
+    "params": [
+      "objId",
+      "a",
+      "b",
+      "c",
+      "alpha",
+      "beta",
+      "gamma",
+      "spaceGroup"
+    ],
+    "semantics": {
+      "objId": "MolCoord object"
+    }
+  },
+  "show_symmetry": {
+    "tool": "show_symmetry",
+    "group": "molecule",
+    "params": [
+      "objId",
+      "extent",
+      "unitCell"
+    ],
+    "semantics": {
+      "objId": "MolCoord object"
+    }
+  },
+  "show_unit_cell": {
+    "tool": "show_unit_cell",
+    "group": "molecule",
+    "params": [
+      "objId"
+    ],
+    "semantics": {
+      "objId": "object"
+    }
+  },
+  "superpose": {
+    "tool": "superpose",
+    "group": "molecule",
+    "params": [
+      "movId",
+      "refId",
+      "movSel",
+      "refSel",
+      "algo",
+      "pivot",
+      "keepAsProperty"
+    ],
+    "semantics": {
+      "movId": "MolCoord object",
+      "refId": "MolCoord object"
+    }
+  },
+  "calc_elepot": {
+    "tool": "calc_elepot",
+    "group": "surfaces",
+    "params": [
+      "objId",
+      "selection",
+      "name",
+      "method",
+      "forceField",
+      "gridSpacing",
+      "nonLinear",
+      "useHydrogen",
+      "temperature",
+      "waterDielec",
+      "protDielec"
+    ],
+    "semantics": {
+      "objId": "MolCoord object"
+    }
+  },
+  "create_surface": {
+    "tool": "create_surface",
+    "group": "surfaces",
+    "params": [
+      "objId",
+      "selection",
+      "name",
+      "probeRadius",
+      "density",
+      "backend"
+    ],
+    "semantics": {
+      "objId": "MolCoord object"
+    }
+  },
+  "cut_surface": {
+    "tool": "cut_surface",
+    "group": "surfaces",
+    "params": [
+      "surfId",
+      "mode",
+      "density"
+    ],
+    "semantics": {
+      "surfId": "object"
+    }
+  },
+  "recalc_surface": {
+    "tool": "recalc_surface",
+    "group": "surfaces",
+    "params": [
+      "surfId",
+      "density",
+      "backend"
+    ],
+    "semantics": {
+      "surfId": "object"
+    }
+  },
+  "analyze_interactions": {
+    "tool": "analyze_interactions",
+    "group": "analysis",
+    "params": [
+      "objId",
+      "selection",
+      "maxDist",
+      "includeCarbon",
+      "minDist",
+      "maxLabels",
+      "labelSet",
+      "obj2Id",
+      "selection2"
+    ],
+    "semantics": {
+      "objId": "MolCoord object",
+      "obj2Id": "MolCoord object"
+    }
+  },
+  "list_interactions": {
+    "tool": "list_interactions",
+    "group": "analysis",
+    "params": [
+      "rendId"
+    ],
+    "semantics": {
+      "rendId": "renderer"
+    }
+  },
+  "measure_geometry": {
+    "tool": "measure_geometry",
+    "group": "analysis",
+    "params": [
+      "objId",
+      "atoms",
+      "draw",
+      "label",
+      "atomObjects"
+    ],
+    "semantics": {
+      "objId": "MolCoord object",
+      "atoms": "atoms"
+    }
+  },
+  "measure_selections": {
+    "tool": "measure_selections",
+    "group": "analysis",
+    "params": [
+      "objId",
+      "selections",
+      "label"
+    ],
+    "semantics": {
+      "objId": "MolCoord object"
+    }
+  },
+  "remove_interaction": {
+    "tool": "remove_interaction",
+    "group": "analysis",
+    "params": [
+      "rendId",
+      "number"
+    ],
+    "semantics": {
+      "rendId": "renderer"
+    }
+  },
+  "contour": {
+    "tool": "set_map_contour",
+    "group": "maps",
+    "params": [
+      "rendId",
+      "level",
+      "extent",
+      "color",
+      "alpha"
+    ],
+    "semantics": {
+      "rendId": "renderer"
+    }
+  },
+  "create_surface_from_map": {
+    "tool": "create_surface_from_map",
+    "group": "maps",
+    "params": [
+      "rendId"
+    ],
+    "semantics": {
+      "rendId": "renderer"
+    }
+  },
+  "fetch_map": {
+    "tool": "fetch_map",
+    "group": "maps",
+    "params": [
+      "pdbId",
+      "mapType",
+      "name",
+      "source"
+    ]
+  },
+  "list_map_contours": {
+    "tool": "list_map_contours",
+    "group": "maps",
+    "params": []
+  },
+  "load_ccp4": {
+    "tool": "load_ccp4",
+    "group": "maps",
+    "params": [
+      "path",
+      "rendererType",
+      "selection",
+      "name",
+      "rendererName",
+      "preset",
+      "centerView",
+      "mapCenterPolicy",
+      "normalize",
+      "truncateMin",
+      "truncateMax",
+      "mapType",
+      "subsample"
+    ],
+    "semantics": {
+      "path": "path"
+    }
+  },
+  "load_mtz": {
+    "tool": "load_mtz",
+    "group": "maps",
+    "params": [
+      "path",
+      "rendererType",
+      "selection",
+      "name",
+      "rendererName",
+      "preset",
+      "centerView",
+      "mapCenterPolicy",
+      "columnF",
+      "columnPhi",
+      "columnWeight",
+      "resolutionLimit",
+      "gridSpacing"
+    ],
+    "semantics": {
+      "path": "path"
+    }
+  },
+  "recenter_map": {
+    "tool": "recenter_map",
+    "group": "maps",
+    "params": [
+      "rendId"
+    ],
+    "semantics": {
+      "rendId": "renderer"
+    }
+  },
+  "set_map_contour": {
+    "tool": "set_map_contour",
+    "group": "maps",
+    "params": [
+      "rendId",
+      "level",
+      "extent",
+      "color",
+      "alpha"
+    ],
+    "semantics": {
+      "rendId": "renderer"
+    }
+  },
+  "add_anim": {
+    "tool": "add_anim",
+    "group": "animation",
+    "params": [
+      "type",
+      "name",
+      "before"
+    ]
+  },
+  "add_morph_frame": {
+    "tool": "add_morph_frame",
+    "group": "animation",
+    "params": [
+      "objId",
+      "file",
+      "fromObjId",
+      "before"
+    ],
+    "semantics": {
+      "objId": "MolCoord object",
+      "file": "path",
+      "fromObjId": "MolCoord object"
+    }
+  },
+  "animate": {
+    "tool": "animate",
+    "group": "animation",
+    "params": [
+      "action",
+      "timeMs"
+    ]
+  },
+  "convert_to_morph": {
+    "tool": "convert_to_morph",
+    "group": "animation",
+    "params": [
+      "objId"
+    ],
+    "semantics": {
+      "objId": "MolCoord object"
+    }
+  },
+  "list_anims": {
+    "tool": "list_anims",
+    "group": "animation",
+    "params": []
+  },
+  "list_morph_frames": {
+    "tool": "list_morph_frames",
+    "group": "animation",
+    "params": [
+      "objId"
+    ],
+    "semantics": {
+      "objId": "MolCoord object"
+    }
+  },
+  "move_anim": {
+    "tool": "move_anim",
+    "group": "animation",
+    "params": [
+      "element",
+      "by",
+      "to",
+      "end"
+    ]
+  },
+  "remove_anim": {
+    "tool": "remove_anim",
+    "group": "animation",
+    "params": [
+      "element"
+    ]
+  },
+  "remove_morph_frame": {
+    "tool": "remove_morph_frame",
+    "group": "animation",
+    "params": [
+      "objId",
+      "frame"
+    ],
+    "semantics": {
+      "objId": "MolCoord object"
+    }
+  },
+  "reset_anim_prop": {
+    "tool": "reset_anim_prop",
+    "group": "animation",
+    "params": [
+      "element",
+      "props"
+    ]
+  },
+  "set_anim_generic_prop": {
+    "tool": "set_anim_generic_prop",
+    "group": "animation",
+    "params": [
+      "element",
+      "prop",
+      "value"
+    ]
+  },
+  "set_anim_options": {
+    "tool": "set_anim_options",
+    "group": "animation",
+    "params": [
+      "loop",
+      "startCamera"
+    ]
+  },
+  "set_anim_prop": {
+    "tool": "set_anim_prop",
+    "group": "animation",
+    "params": [
+      "element",
+      "prop",
+      "value"
+    ]
+  },
+  "set_anim_time": {
+    "tool": "set_anim_time",
+    "group": "animation",
+    "params": [
+      "element",
+      "startMs",
+      "endMs"
+    ]
+  },
+  "export_image": {
+    "tool": "export_image",
+    "group": "files",
+    "params": [
+      "path",
+      "width",
+      "height"
+    ],
+    "semantics": {
+      "path": "path"
+    }
+  },
+  "export_scene": {
+    "tool": "export_scene",
+    "group": "files",
+    "params": [
+      "path",
+      "format",
+      "width",
+      "height",
+      "transparent",
+      "dpi"
+    ],
+    "semantics": {
+      "path": "path"
+    }
+  },
+  "fetch": {
+    "tool": "fetch_pdb",
+    "group": "files",
+    "params": [
+      "pdbId",
+      "rendererType",
+      "selection",
+      "format",
+      "name",
+      "rendererName",
+      "preset",
+      "centerView"
+    ],
+    "defaults": {
+      "format": "mmcif"
+    }
+  },
+  "fetch_pdb": {
+    "tool": "fetch_pdb",
+    "group": "files",
+    "params": [
+      "pdbId",
+      "format",
+      "rendererType",
+      "selection",
+      "name",
+      "rendererName",
+      "preset",
+      "centerView"
+    ]
+  },
+  "fetch_url": {
+    "tool": "fetch_url",
+    "group": "files",
+    "params": [
+      "url",
+      "reader",
+      "name",
+      "rendererType",
+      "selection",
+      "rendererName",
+      "preset",
+      "centerView"
+    ]
+  },
+  "load": {
+    "tool": "load_file",
+    "group": "files",
+    "params": [
+      "path",
+      "rendererType",
+      "selection",
+      "name",
+      "rendererName",
+      "preset",
+      "centerView",
+      "mapCenterPolicy"
+    ],
+    "semantics": {
+      "path": "path"
+    }
+  },
+  "load_amber": {
+    "tool": "load_amber",
+    "group": "files",
+    "params": [
+      "path",
+      "rendererType",
+      "selection",
+      "name",
+      "rendererName",
+      "preset",
+      "centerView",
+      "mapCenterPolicy",
+      "coordFile"
+    ],
+    "semantics": {
+      "path": "path",
+      "coordFile": "path"
+    }
+  },
+  "load_file": {
+    "tool": "load_file",
+    "group": "files",
+    "params": [
+      "path",
+      "rendererType",
+      "selection",
+      "name",
+      "rendererName",
+      "preset",
+      "centerView",
+      "mapCenterPolicy"
+    ],
+    "semantics": {
+      "path": "path"
+    }
+  },
+  "load_msms": {
+    "tool": "load_msms",
+    "group": "files",
+    "params": [
+      "path",
+      "rendererType",
+      "selection",
+      "name",
+      "rendererName",
+      "preset",
+      "centerView",
+      "mapCenterPolicy",
+      "vertFile"
+    ],
+    "semantics": {
+      "path": "path",
+      "vertFile": "path"
+    }
+  },
+  "load_namd": {
+    "tool": "load_namd",
+    "group": "files",
+    "params": [
+      "path",
+      "rendererType",
+      "selection",
+      "name",
+      "rendererName",
+      "preset",
+      "centerView",
+      "mapCenterPolicy",
+      "psfFile"
+    ],
+    "semantics": {
+      "path": "path",
+      "psfFile": "path"
+    }
+  },
+  "load_pdb": {
+    "tool": "load_pdb",
+    "group": "files",
+    "params": [
+      "path",
+      "rendererType",
+      "selection",
+      "name",
+      "rendererName",
+      "preset",
+      "centerView",
+      "mapCenterPolicy",
+      "loadModel",
+      "loadAnisou",
+      "loadAltConf",
+      "loadSegid",
+      "build2ndry",
+      "autoTopology"
+    ],
+    "semantics": {
+      "path": "path"
+    }
+  },
+  "render": {
+    "tool": "render_image",
+    "group": "files",
+    "params": [
+      "fileName",
+      "width",
+      "height",
+      "style"
+    ],
+    "semantics": {
+      "fileName": "path"
+    }
+  },
+  "render_image": {
+    "tool": "render_image",
+    "group": "files",
+    "params": [
+      "fileName",
+      "width",
+      "height",
+      "style"
+    ],
+    "semantics": {
+      "fileName": "path"
+    }
+  },
+  "save": {
+    "tool": "save_scene",
+    "group": "files",
+    "params": [
+      "path"
+    ],
+    "semantics": {
+      "path": "path"
+    }
+  },
+  "save_object": {
+    "tool": "save_object",
+    "group": "files",
+    "params": [
+      "objId",
+      "fileName"
+    ],
+    "semantics": {
+      "objId": "object",
+      "fileName": "path"
+    }
+  },
+  "save_scene": {
+    "tool": "save_scene",
+    "group": "files",
+    "params": [
+      "path"
+    ],
+    "semantics": {
+      "path": "path"
+    }
+  },
+  "set_render_settings": {
+    "tool": "set_render_settings",
+    "group": "files",
+    "params": [
+      "settings"
+    ]
+  },
+  "write": {
+    "tool": "save_object",
+    "group": "files",
+    "params": [
+      "objId",
+      "fileName"
+    ],
+    "semantics": {
+      "objId": "object",
+      "fileName": "path"
+    }
+  },
+  "get_hatch_style": {
+    "tool": "get_hatch_style",
+    "group": "other",
+    "params": [
+      "style"
+    ]
+  },
+  "append_trajectory": {
+    "tool": "append_trajectory",
+    "group": "other",
+    "params": [
+      "objId",
+      "path",
+      "stride"
+    ]
+  },
+  "capture_view": {
+    "tool": "capture_view",
+    "group": "other",
+    "params": [
+      "longSide"
+    ]
+  },
+  "execute_script": {
+    "tool": "execute_script",
+    "group": "other",
+    "params": [
+      "source"
+    ]
+  },
+  "get_renderer_property": {
+    "tool": "get_renderer_property",
+    "group": "other",
+    "params": [
+      "rendId",
+      "prop"
+    ]
+  },
+  "get_screenshot": {
+    "tool": "get_screenshot",
+    "group": "other",
+    "params": [
+      "width",
+      "height"
+    ]
+  },
+  "get_view": {
+    "tool": "get_view",
+    "group": "other",
+    "params": []
+  },
+  "list_trajectories": {
+    "tool": "list_trajectories",
+    "group": "other",
+    "params": []
+  },
+  "load_trajectory": {
+    "tool": "load_trajectory",
+    "group": "other",
+    "params": [
+      "topology",
+      "paths",
+      "stride"
+    ]
+  },
+  "set_frame": {
+    "tool": "set_frame",
+    "group": "other",
+    "params": [
+      "objId",
+      "frame"
+    ]
+  },
+  "set_renderer_property": {
+    "tool": "set_renderer_property",
+    "group": "other",
+    "params": [
+      "rendId",
+      "prop",
+      "value"
+    ]
+  },
+  "load_mmcif": {
+    "tool": "load_mmcif",
+    "group": "other",
+    "params": [
+      "path",
+      "rendererType",
+      "selection",
+      "name",
+      "rendererName",
+      "preset",
+      "centerView",
+      "mapCenterPolicy",
+      "loadModel",
+      "loadAnisou",
+      "loadAltConf",
+      "build2ndry",
+      "autoTopology"
+    ]
+  }
+}

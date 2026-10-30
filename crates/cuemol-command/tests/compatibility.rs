@@ -113,6 +113,51 @@ fn viewport_effect_properties_are_discoverable_validated_and_saved() {
 }
 
 #[test]
+fn later_paint_overrides_earlier_regions_and_explicit_insert_preserves_selection() {
+    let mut state = DesktopAppState::new();
+    let mut camera = Camera::new();
+    let id = molecule(&mut state, &mut camera, "paint", 0.);
+    let renderer = call(
+        &mut state,
+        &mut camera,
+        "create_renderer",
+        json!({"objId":id,"rendererType":"ballstick","name":"atoms"}),
+    )["rendererId"]
+        .as_u64()
+        .unwrap();
+    for (selection, color) in [("*", "red"), ("resid 1", "blue")] {
+        call(
+            &mut state,
+            &mut camera,
+            "add_paint",
+            json!({"nodeId":renderer,"nodeType":"renderer","selection":selection,"color":color}),
+        );
+    }
+    let entries = call(
+        &mut state,
+        &mut camera,
+        "list_paint",
+        json!({"nodeId":renderer,"nodeType":"renderer"}),
+    );
+    assert_eq!(entries["entries"][0]["color"], "blue");
+    assert_eq!(entries["entries"][1]["color"], "red");
+    assert_eq!(
+        state.molecule_selection_text(Uid::new(id)).unwrap(),
+        "resid 1"
+    );
+    call(
+        &mut state,
+        &mut camera,
+        "add_paint_at",
+        json!({"nodeId":renderer,"nodeType":"renderer","selection":"resid 2","color":"green","at":1}),
+    );
+    assert_eq!(
+        state.molecule_selection_text(Uid::new(id)).unwrap(),
+        "resid 1"
+    );
+}
+
+#[test]
 fn named_styles_paint_properties_and_saved_scene_roundtrip() {
     let mut state = DesktopAppState::new();
     let mut camera = Camera::new();
@@ -373,6 +418,17 @@ fn usalign_restores_known_rigid_translation() {
     let mut camera = Camera::new();
     let reference = molecule(&mut state, &mut camera, "reference", 0.);
     let moving = molecule(&mut state, &mut camera, "moving", 12.);
+    let before = state.clone();
+    let preview = call(
+        &mut state,
+        &mut camera,
+        "superpose",
+        json!({"refId":reference,"movId":moving,"transform":false}),
+    );
+    assert_eq!(preview["transformed"], false);
+    assert!(preview["rmsd"].as_f64().unwrap() < 1e-5);
+    assert_eq!(preview["alignedCount"], 8);
+    assert!(before.same_undo_state(&state));
     call(
         &mut state,
         &mut camera,
@@ -787,4 +843,63 @@ fn centering_uses_selection_centroids_and_fitting_uses_transformed_view_bounds()
         (camera.zoom(), camera.slab_depth(), camera.cam_dist()),
         (4., 4., 111.)
     );
+}
+
+#[test]
+fn property_paths_match_dotted_names_object_precedence_and_uid_references() {
+    let mut state = DesktopAppState::new();
+    let mut camera = Camera::new();
+    let id = molecule(&mut state, &mut camera, "dotted", 0.);
+    call(
+        &mut state,
+        &mut camera,
+        "rename_node",
+        json!({"nodeType":"object","nodeId":id,"name":"1crn.pdb"}),
+    );
+    call(
+        &mut state,
+        &mut camera,
+        "set_prop",
+        json!({"path":"1crn.pdb.visible","value":"false"}),
+    );
+    assert!(!state
+        .scene_manager()
+        .object(Uid::new(id))
+        .unwrap()
+        .is_visible());
+    call(
+        &mut state,
+        &mut camera,
+        "set_prop",
+        json!({"path":format!("#{id}.visible"),"value":"true"}),
+    );
+    assert!(state
+        .scene_manager()
+        .object(Uid::new(id))
+        .unwrap()
+        .is_visible());
+    call(
+        &mut state,
+        &mut camera,
+        "rename_node",
+        json!({"nodeType":"object","nodeId":id,"name":"view"}),
+    );
+    call(
+        &mut state,
+        &mut camera,
+        "set_prop",
+        json!({"path":"view.visible","value":"false"}),
+    );
+    assert!(!state
+        .scene_manager()
+        .object(Uid::new(id))
+        .unwrap()
+        .is_visible());
+    call(
+        &mut state,
+        &mut camera,
+        "set_node_prop",
+        json!({"nodeType":"view","prop":"zoom","value":"25"}),
+    );
+    assert_eq!(camera.zoom(), 25.);
 }

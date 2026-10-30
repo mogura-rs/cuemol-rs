@@ -1,4 +1,5 @@
 #![cfg(target_arch = "wasm32")]
+mod console;
 mod input;
 mod loading;
 mod navigation;
@@ -42,6 +43,12 @@ enum Event {
     Input(Value),
     AgentStart(String, cuemol_agent::Settings, String),
     AgentCancel,
+    ConsoleFrame(
+        u64,
+        Uid,
+        usize,
+        Result<cuemol_mdtools::TrajectoryFrame, String>,
+    ),
     AgentFrame(
         Uid,
         usize,
@@ -208,7 +215,10 @@ struct App {
     bottom_tab: String,
     bottom_open: bool,
     sequence_panel: cuemol_ui::sequence::SequencePanel,
-    console_source: String,
+    console: cuemol_ui::console::ConsoleEditor,
+    console_session: cuemol_command::console::Session,
+    console_run: Option<console::ConsoleExecution>,
+    console_generation: u64,
     logs: Vec<String>,
     last_log: String,
     last_scene: Option<(String, Arc<Vec<u8>>)>,
@@ -360,7 +370,22 @@ impl App {
             bottom_tab: "Console".into(),
             bottom_open: true,
             sequence_panel: cuemol_ui::sequence::SequencePanel::default(),
-            console_source: String::new(),
+            console: {
+                let mut editor = cuemol_ui::console::ConsoleEditor::default();
+                if let Some(history) = storage
+                    .as_ref()
+                    .and_then(|storage| storage.get_item("cuemol.console.history").ok().flatten())
+                    .and_then(|text| serde_json::from_str::<Vec<String>>(&text).ok())
+                {
+                    editor.history = history.into_iter().rev().take(100).collect::<Vec<_>>();
+                    editor.history.reverse();
+                    editor.history_position = editor.history.len();
+                }
+                editor
+            },
+            console_session: cuemol_command::console::Session::default(),
+            console_run: None,
+            console_generation: 0,
             logs: Vec::new(),
             last_log: String::new(),
             last_scene: None,
@@ -455,6 +480,9 @@ impl App {
         self.future.clear();
     }
     fn call(&mut self, name: &str, args: Value) {
+        if cuemol_command::tool_changes_scene(name) {
+            self.cancel_console("Scene changed outside the console; remaining commands cancelled.");
+        }
         if name == "cancel_load" {
             self.cancel_load();
             return;
@@ -621,7 +649,15 @@ impl App {
                         }
                     });
                 }
-                Event::Source(file) => self.queue_source(file),
+                Event::ConsoleFrame(generation, id, index, result) => {
+                    self.console_frame(generation, id, index, result)
+                }
+                Event::Source(file) => {
+                    self.cancel_console(
+                        "File opened outside the console; remaining commands cancelled.",
+                    );
+                    self.queue_source(file);
+                }
                 Event::SourceFinished(generation) => {
                     if self.current_source(generation) {
                         self.source_active = false;
@@ -1142,6 +1178,7 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.events(ctx);
+        self.poll_console(ctx);
         if let Some(tool) = cuemol_ui::navigation::tool_shortcut(ctx) {
             self.navigation.set_tool(tool);
         }

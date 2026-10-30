@@ -82,6 +82,7 @@ test('browser IME composition replaces preedit text with the committed name', as
 test('Console accepts Unicode text and runs the entered script', async ({page}) => {
   const object = await editObjectName(page);
   await clickRect(page, 'Console');
+  await clickRect(page, 'Console JavaScript');
   await clickRect(page, 'Console input');
   await expect(page.locator('input[type="text"]')).toBeFocused();
   await page.keyboard.insertText(`cuemol.getObject(${object.id}).name = "実行した分子";`);

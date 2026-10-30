@@ -505,6 +505,17 @@ mod tests {
             let _ = ctx.run(input.clone(), |ctx| app.ui(ctx, &mut camera));
         }
         assert_eq!(app.viewport_rect.unwrap(), viewport);
+        for source in [
+            "hide probe",
+            "hide probe\nshow probe",
+            "help\n".repeat(8).as_str(),
+        ] {
+            app.console.source = source.into();
+            for _ in 0..4 {
+                let _ = ctx.run(input.clone(), |ctx| app.ui(ctx, &mut camera));
+            }
+            assert_eq!(app.viewport_rect.unwrap(), viewport);
+        }
     }
 
     #[test]

@@ -1363,10 +1363,10 @@ struct GuiApplication {
     pdb_download_canceling: bool,
     url_download_receiver: Option<mpsc::Receiver<std::result::Result<PathBuf, String>>>,
     script_path: String,
-    console_input: String,
+    console: cuemol_ui::console::ConsoleEditor,
+    console_session: cuemol_command::console::Session,
+    console_run: Option<GuiConsoleExecution>,
     pending_script_view: bool,
-    command_history: Vec<String>,
-    command_history_position: usize,
     selection_text: String,
     selected_object: Option<cuemol_core::Uid>,
     selected_renderer: Option<cuemol_core::Uid>,
@@ -1687,6 +1687,15 @@ struct GuiUndoSnapshot {
     selection_text: String,
     last_loaded_path: Option<PathBuf>,
     modified_scenes: std::collections::BTreeSet<cuemol_core::Uid>,
+}
+
+#[derive(Debug)]
+struct GuiConsoleExecution {
+    runner: cuemol_ui::console_runtime::ConsoleRunner,
+    undo: Option<GuiUndoSnapshot>,
+    camera: cuemol_qsys::Camera,
+    revision: u64,
+    changed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4971,10 +4980,10 @@ impl GuiApplication {
             pdb_download_canceling: false,
             url_download_receiver: None,
             script_path: "script.js".to_string(),
-            console_input: String::new(),
+            console: cuemol_ui::console::ConsoleEditor::default(),
+            console_session: cuemol_command::console::Session::default(),
+            console_run: None,
             pending_script_view: false,
-            command_history: Vec::new(),
-            command_history_position: 0,
             selection_text: String::new(),
             selected_object: None,
             workspace_aux_selection: None,
@@ -5419,6 +5428,8 @@ impl GuiApplication {
         let _ = self
             .state
             .set_active_view_camera(&camera.to_qsys_camera("__current"));
+        self.poll_console(ctx);
+        self.apply_script_view(camera);
         let mut input_camera = camera.to_qsys_camera("__current");
         let height = self.viewport_rect.map_or(600.0, |r| r.height()) as f64;
         if self.input.tick(
@@ -15013,53 +15024,35 @@ impl GuiApplication {
     }
 
     fn output_tab(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.weak("JavaScript");
-            if ui.small_button("Clear").clicked() { self.clear_log(); }
-            if ui.small_button("Help").clicked() {
-                self.log_lines.push("JavaScript console: use cuemol, scene and view to access the current scene. Press Enter to run; Up/Down recalls command history.".into());
+        let intent = self.console.show(
+            ui,
+            &self.state,
+            &self.console_session,
+            &self.log_lines,
+            self.console_run.is_some(),
+        );
+        self.apply_console_intent(intent);
+        if self.console_run.is_some() {
+            ui.ctx().request_repaint();
+        }
+    }
+
+    fn apply_console_intent(&mut self, intent: Option<cuemol_ui::console::ConsoleIntent>) {
+        use cuemol_ui::console::ConsoleIntent;
+        match intent {
+            Some(ConsoleIntent::Run) => self.execute_console_input(),
+            Some(ConsoleIntent::Clear) => self.clear_log(),
+            Some(ConsoleIntent::Stop) => {
+                self.cancel_console("Console stopped; completed edits are kept.")
             }
-        });
-        let log_height = (ui.available_height() - 26.0).max(20.0);
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .min_scrolled_height(0.0)
-            .stick_to_bottom(true)
-            .max_height(log_height)
-            .show(ui, |ui| {
-                for line in &self.log_lines {
-                    ui.monospace(line);
-                }
-            });
-        let mut execute = false;
-        ui.horizontal(|ui| {
-            ui.monospace("Js>");
-            let response = ui.add_sized(
-                [ui.available_width(), 20.0],
-                egui::TextEdit::singleline(&mut self.console_input)
-                    .font(egui::TextStyle::Monospace),
-            );
-            if response.has_focus()
-                && ui
-                    .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp))
-            {
-                self.recall_command_history(-1);
-            } else if response.has_focus()
-                && ui.input_mut(|input| {
-                    input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)
-                })
-            {
-                self.recall_command_history(1);
+            Some(ConsoleIntent::Help) => {
+                let help = self
+                    .console_session
+                    .help_dialect(self.console.dialect, "")
+                    .unwrap_or_else(|error| error);
+                self.log_lines.extend(help.lines().map(str::to_string));
             }
-            if (response.has_focus() || response.lost_focus())
-                && ui.input(|input| input.key_pressed(egui::Key::Enter))
-            {
-                execute = true;
-                response.request_focus();
-            }
-        });
-        if execute {
-            self.execute_console_input();
+            _ => {}
         }
     }
 
@@ -15070,7 +15063,7 @@ impl GuiApplication {
             .parse::<usize>()
             .unwrap_or(0)
             .min(100);
-        self.command_history = (0..length)
+        self.console.history = (0..length)
             .filter_map(|index| {
                 let command = self
                     .state
@@ -15078,20 +15071,16 @@ impl GuiApplication {
                 (!command.is_empty()).then_some(command)
             })
             .collect();
-        self.command_history_position = self.command_history.len();
+        self.console.history_position = self.console.history.len();
     }
 
     fn remember_command(&mut self, command: &str) {
-        self.command_history.push(command.to_string());
-        if self.command_history.len() > 100 {
-            self.command_history.remove(0);
-        }
-        self.command_history_position = self.command_history.len();
+        self.console.remember(command);
         self.state.put_config_value(
             "cmd_prompt_history:length",
-            self.command_history.len().to_string(),
+            self.console.history.len().to_string(),
         );
-        for (index, entry) in self.command_history.iter().enumerate() {
+        for (index, entry) in self.console.history.iter().enumerate() {
             self.state
                 .put_config_value(&format!("cmd_prompt_history:{index}"), entry.clone());
         }
@@ -15101,16 +15090,9 @@ impl GuiApplication {
         }
     }
 
+    #[cfg(test)]
     fn recall_command_history(&mut self, offset: isize) {
-        self.command_history_position = self
-            .command_history_position
-            .saturating_add_signed(offset)
-            .min(self.command_history.len());
-        self.console_input = self
-            .command_history
-            .get(self.command_history_position)
-            .cloned()
-            .unwrap_or_default();
+        self.console.recall(offset);
     }
 
     fn apply_script_view(&mut self, camera: &mut CameraController) {
@@ -15124,13 +15106,266 @@ impl GuiApplication {
     }
 
     fn execute_console_input(&mut self) {
-        let command = self.console_input.trim().to_string();
+        use cuemol_command::console::Dialect;
+        self.cancel_console("Console replaced by another submission.");
+        if self.console.dialect == Dialect::JavaScript {
+            self.execute_javascript_console();
+            return;
+        }
+        let source = std::mem::take(&mut self.console.source);
+        if source.trim().is_empty() {
+            return;
+        }
+        self.remember_command(&source);
+        let runner =
+            match cuemol_ui::console_runtime::ConsoleRunner::new(&source, self.console.dialect) {
+                Ok(runner) => runner,
+                Err(error) => {
+                    self.log_lines.push(error);
+                    self.set_status("Console error");
+                    return;
+                }
+            };
+        self.console_session
+            .begin_submission(&source, self.console.dialect);
+        self.console_session.sync_revision(self.snapshot_revision);
+        let camera = self.state.active_view_camera().unwrap_or_default();
+        let mut undo = self.capture_script_undo();
+        undo.camera = Some(camera.clone());
+        self.console_run = Some(GuiConsoleExecution {
+            runner,
+            undo: Some(undo),
+            camera,
+            revision: self.snapshot_revision,
+            changed: false,
+        });
+        self.poll_console(&egui::Context::default());
+    }
+
+    fn cancel_console(&mut self, reason: &str) {
+        if self.console_run.take().is_some() {
+            if let Err(error) = self.console_session.finish_submission() {
+                self.log_lines.push(error);
+            }
+            self.log_lines.push(reason.into());
+            self.set_status(reason);
+        }
+    }
+
+    fn console_result(
+        &mut self,
+        run: &mut GuiConsoleExecution,
+        name: &str,
+        args: &serde_json::Value,
+        value: &serde_json::Value,
+    ) -> bool {
+        self.log_lines.extend(
+            cuemol_command::console::format_output(value)
+                .lines()
+                .take(200)
+                .map(str::to_string),
+        );
+        if name == "set_mol_selection" && !value.is_null() {
+            self.selection_text = args["selection"].as_str().unwrap_or("").into();
+            self.selected_object = args["objId"].as_u64().map(cuemol_core::Uid::new);
+            self.molstruct_object = self.selected_object;
+            self.selected_renderer = None;
+            self.workspace_aux_selection = None;
+        }
+        let _ = self.state.set_active_view_camera(&run.camera);
+        let changed = run.undo.as_ref().is_none_or(|before| {
+            !before.state.same_undo_state(&self.state)
+                || before.selection_text != self.selection_text
+                || before.camera.as_ref() != Some(&run.camera)
+        });
+        self.console_session.complete_record(changed);
+        if name == "save_scene" && !value.is_null() {
+            if let Some(scene) = self.state.active_scene() {
+                self.modified_scenes.remove(&scene);
+            }
+            if let Some(path) = args["path"].as_str() {
+                self.last_loaded_path = Some(PathBuf::from(path));
+            }
+        }
+        if changed && cuemol_command::tool_records_history(name) {
+            if let Some(before) = run.undo.take() {
+                self.push_undo_snapshot(before);
+            }
+        }
+        let changed = changed && cuemol_command::tool_changes_scene(name);
+        if changed {
+            self.console_session.scene_changed();
+            run.changed = true;
+            self.pending_script_view = true;
+        }
+        changed
+    }
+
+    fn poll_console(&mut self, ctx: &egui::Context) {
+        use cuemol_command::console::Action;
+        use cuemol_ui::console_runtime::ConsoleStep;
+        let Some(mut run) = self.console_run.take() else {
+            return;
+        };
+        if run.revision != self.snapshot_revision
+            || self.state.active_view_camera().is_some_and(|camera| {
+                !cuemol_command::console::same_camera_view(&camera, &run.camera)
+            })
+        {
+            self.log_lines.push(
+                "Scene or camera changed outside the console; remaining commands cancelled.".into(),
+            );
+            self.set_status("Console cancelled");
+            if let Err(error) = self.console_session.finish_submission() {
+                self.log_lines.push(error);
+            }
+            return;
+        }
+        let mut keep = true;
+        let mut refresh = false;
+        let wake_context = ctx.clone();
+        let console_wake: Arc<dyn Fn() + Send + Sync> =
+            Arc::new(move || wake_context.request_repaint());
+        for _ in 0..64 {
+            let step = match run.runner.next(
+                &mut self.console_session,
+                &mut self.state,
+                &mut run.camera,
+                console_wake.clone(),
+            ) {
+                Ok(step) => step,
+                Err(error) => {
+                    self.log_lines.push(error);
+                    self.set_status("Console error");
+                    keep = false;
+                    break;
+                }
+            };
+            match step {
+                ConsoleStep::Pending => {
+                    self.set_status("Console running");
+                    break;
+                }
+                ConsoleStep::Done => {
+                    self.set_status("Console executed");
+                    keep = false;
+                    break;
+                }
+                ConsoleStep::Completed { name, args, result } => {
+                    refresh |= self.console_result(&mut run, &name, &args, &result);
+                }
+                ConsoleStep::Action(action) => match action {
+                    Action::Tool { name, args } => {
+                        if matches!(name.as_str(), "undo" | "redo") {
+                            if run.changed || !run.runner.allows_undo() {
+                                self.log_lines
+                                    .push("Undo and redo must be submitted alone".into());
+                                self.set_status("Console error");
+                                keep = false;
+                                break;
+                            }
+                            let mut controller = CameraController::default();
+                            controller.apply_qsys_camera(&run.camera);
+                            if name == "undo" {
+                                self.undo(&mut controller);
+                            } else {
+                                self.redo(&mut controller);
+                            }
+                            run.camera = controller.to_qsys_camera("__current");
+                            let _ = self.state.set_active_view_camera(&run.camera);
+                            self.pending_script_view = true;
+                            continue;
+                        }
+                        if name == "clear_undo" {
+                            self.clear_undo_data();
+                            continue;
+                        }
+                        match cuemol_command::call_tool(
+                            &mut self.state,
+                            &mut run.camera,
+                            &name,
+                            &args,
+                        ) {
+                            Ok(result) => {
+                                refresh |= self.console_result(&mut run, &name, &args, &result);
+                            }
+                            Err(error) => {
+                                refresh |= self.console_result(
+                                    &mut run,
+                                    &name,
+                                    &args,
+                                    &serde_json::Value::Null,
+                                );
+                                self.log_lines.push(error.to_string());
+                                self.set_status("Console error");
+                                keep = false;
+                                break;
+                            }
+                        }
+                    }
+                    Action::Transaction(label) => {
+                        if let Err(error) = self.console_session.begin_transaction(&label) {
+                            self.log_lines.push(error);
+                        }
+                        let mut undo = self.capture_script_undo();
+                        undo.camera = Some(run.camera.clone());
+                        run.undo = Some(undo);
+                        run.changed = false;
+                    }
+                    Action::WriteFile { path, bytes, .. } => {
+                        if let Err(error) = std::fs::write(&path, bytes.as_ref()) {
+                            self.log_lines.push(error.to_string());
+                            self.set_status("Console error");
+                            keep = false;
+                            break;
+                        }
+                        self.log_lines.push(format!("Saved {path}"));
+                    }
+                    Action::Output(text) | Action::Echo(text) => self
+                        .log_lines
+                        .extend(text.lines().take(200).map(str::to_string)),
+                    Action::Clear => self.log_lines.clear(),
+                    Action::Quit => {
+                        self.exit_confirmation = true;
+                        keep = false;
+                        break;
+                    }
+                    Action::Source(_)
+                    | Action::Native(_)
+                    | Action::Qax(_)
+                    | Action::QaxOp(_)
+                    | Action::RememberSetting { .. }
+                    | Action::KeepChain { .. }
+                    | Action::Render { .. } => unreachable!("console runner expands this action"),
+                },
+            }
+        }
+        if refresh {
+            self.sync_active_scene_properties();
+            self.invalidate_molecule_panel_caches();
+            self.rebuild_snapshot();
+        }
+        self.console_session.accept_revision(self.snapshot_revision);
+        if self.log_lines.len() > 1000 {
+            self.log_lines.drain(..self.log_lines.len() - 1000);
+        }
+        if keep {
+            run.revision = self.snapshot_revision;
+            self.console_run = Some(run);
+            ctx.request_repaint_after(std::time::Duration::from_millis(30));
+        } else if let Err(error) = self.console_session.finish_submission() {
+            self.log_lines.push(error);
+        }
+    }
+
+    fn execute_javascript_console(&mut self) {
+        let command = self.console.source.trim().to_string();
         if command.is_empty() {
             return;
         }
         self.log_lines.push(format!("> {command}"));
         self.remember_command(&command);
-        self.console_input.clear();
+        self.console.source.clear();
         let mut undo = self.capture_script_undo();
         undo.camera = self.state.active_view_camera();
         match self.state.run_script_js(&command) {
@@ -29033,13 +29268,16 @@ impl GuiApplication {
             .open(&mut open)
             .collapsible(false)
             .show(ctx, |ui| {
-                ui.add_sized(
-                    [ui.available_width(), 72.0],
-                    egui::TextEdit::multiline(&mut self.console_input)
-                        .font(egui::TextStyle::Monospace),
+                let intent = self.console.show(
+                    ui,
+                    &self.state,
+                    &self.console_session,
+                    &self.log_lines,
+                    self.console_run.is_some(),
                 );
-                if ui.button("Execute").clicked() {
-                    self.execute_console_input();
+                self.apply_console_intent(intent);
+                if self.console_run.is_some() {
+                    ui.ctx().request_repaint();
                 }
             });
         self.show_console = open;
@@ -40225,6 +40463,78 @@ mod tests {
     }
 
     #[test]
+    fn native_console_commands_share_one_undo_and_stop_after_failure() {
+        let mut app = GuiApplication::new();
+        app.config_path.clear();
+        app.state.open_bytes("probe.pdb", b"ATOM      1  CA  ALA A   1       1.000   0.000   0.000  1.00 10.00           C\nATOM      2  CA  GLY A   2       2.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let uid = app.state.active_object_summaries()[0].uid;
+        app.state
+            .scene_manager_mut()
+            .object_mut(uid)
+            .unwrap()
+            .set_name("probe");
+        app.console.source = "select probe, resid 2; hide probe; rename probe, changed; missing_command; show changed".into();
+        app.execute_console_input();
+        assert_eq!(app.status, "Console error");
+        assert_eq!(
+            app.state.scene_manager().object(uid).unwrap().name(),
+            "changed"
+        );
+        assert!(!app.state.scene_manager().object(uid).unwrap().is_visible());
+        assert_eq!(app.selection_text, "resid 2");
+        assert_eq!(app.undo_stack.len(), 1);
+        let mut camera = CameraController::default();
+        app.undo(&mut camera);
+        assert_eq!(
+            app.state.scene_manager().object(uid).unwrap().name(),
+            "probe"
+        );
+        assert!(app.state.scene_manager().object(uid).unwrap().is_visible());
+        app.console.source = "get_scene_state".into();
+        app.execute_console_input();
+        assert!(app.undo_stack.is_empty());
+        assert_eq!(app.redo_stack.len(), 1);
+        app.console.source = "redo".into();
+        app.execute_console_input();
+        assert_eq!(
+            app.state.scene_manager().object(uid).unwrap().name(),
+            "changed"
+        );
+    }
+
+    #[test]
+    fn native_console_save_and_clear_reset_history_only_after_success() {
+        let mut app = GuiApplication::new();
+        app.config_path.clear();
+        app.state.open_bytes("probe.pdb", b"ATOM      1  CA  GLY A   1       1.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let uid = app.state.active_object_summaries()[0].uid;
+        app.console.source = format!("rename #{}, changed", uid.get());
+        app.execute_console_input();
+        assert_eq!(app.undo_stack.len(), 1);
+        app.console.source = "clear_undo".into();
+        app.execute_console_input();
+        assert!(app.undo_stack.is_empty() && app.redo_stack.is_empty());
+        app.console.source = "rename changed, saved".into();
+        app.execute_console_input();
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing").join("scene.qsc");
+        app.console.source = format!("save {}", serde_json::json!(missing));
+        app.execute_console_input();
+        assert_eq!(app.status, "Console error");
+        assert_eq!(app.undo_stack.len(), 1);
+        let output = directory.path().join("scene.qsc");
+        app.console.dialect = cuemol_command::console::Dialect::PyMol;
+        app.console.source = format!("save {}", serde_json::json!(output));
+        app.execute_console_input();
+        assert_eq!(app.status, "Console executed");
+        assert!(output.is_file());
+        assert!(app.undo_stack.is_empty() && app.redo_stack.is_empty());
+        assert!(!app
+            .modified_scenes
+            .contains(&app.state.active_scene().unwrap()));
+    }
+
+    #[test]
     fn native_output_prompt_executes_javascript_and_recalls_history() {
         let Some(pdb) = reference_pdb_path() else {
             return;
@@ -40233,7 +40543,8 @@ mod tests {
         let mut camera = CameraController::default();
         app.open_path = pdb.to_string_lossy().to_string();
         app.open_current_path(&mut camera);
-        app.console_input = "cuemol.print('native-prompt'); cuemol.select('resid 2');".to_string();
+        app.console.dialect = cuemol_command::console::Dialect::JavaScript;
+        app.console.source = "cuemol.print('native-prompt'); cuemol.select('resid 2');".to_string();
         app.execute_console_input();
 
         assert!(app
@@ -40242,29 +40553,30 @@ mod tests {
             .any(|line| line.contains("> cuemol.print('native-prompt')")));
         assert!(app.log_lines.iter().any(|line| line == "native-prompt"));
         assert_eq!(app.selection_text, "resid 2");
-        assert_eq!(app.command_history.len(), 1);
-        assert_eq!(app.command_history_position, 1);
+        assert_eq!(app.console.history.len(), 1);
+        assert_eq!(app.console.history_position, 1);
         assert_eq!(app.status, "Script executed");
         assert!(!app.undo_stack.is_empty());
 
-        app.console_input = "function (".to_string();
+        app.console.dialect = cuemol_command::console::Dialect::JavaScript;
+        app.console.source = "function (".to_string();
         app.execute_console_input();
         assert_eq!(app.status, "Script error");
         assert!(app.log_lines.last().is_some_and(|line| !line.is_empty()));
-        assert_eq!(app.command_history.len(), 2);
+        assert_eq!(app.console.history.len(), 2);
         app.recall_command_history(-1);
-        assert_eq!(app.console_input, "function (");
+        assert_eq!(app.console.source, "function (");
         app.recall_command_history(-1);
-        assert!(app.console_input.contains("native-prompt"));
+        assert!(app.console.source.contains("native-prompt"));
         app.recall_command_history(1);
         app.recall_command_history(1);
-        assert!(app.console_input.is_empty());
+        assert!(app.console.source.is_empty());
 
         for index in 0..101 {
             app.remember_command(&format!("command {index}"));
         }
-        assert_eq!(app.command_history.len(), 100);
-        assert_eq!(app.command_history.first().unwrap(), "command 1");
+        assert_eq!(app.console.history.len(), 100);
+        assert_eq!(app.console.history.first().unwrap(), "command 1");
         assert_eq!(app.state.config_value("cmd_prompt_history:length"), "100");
     }
 
@@ -41202,7 +41514,8 @@ mod tests {
             .unwrap();
         app.begin_animation_playback(&camera).unwrap();
         app.advance_animation(0.1, &mut camera);
-        app.console_input = "scene.getAnimMgr().pause();".into();
+        app.console.dialect = cuemol_command::console::Dialect::JavaScript;
+        app.console.source = "scene.getAnimMgr().pause();".into();
         app.execute_console_input();
         app.apply_script_view(&mut camera);
         let scene = app.state.active_scene().unwrap();
@@ -41232,17 +41545,20 @@ mod tests {
         let modified = app.modified_scenes.clone();
         let revision = app.snapshot_revision;
         for source in ["print(1);", "throw new Error('probe');"] {
-            app.console_input = source.into();
+            app.console.dialect = cuemol_command::console::Dialect::JavaScript;
+            app.console.source = source.into();
             app.execute_console_input();
         }
         assert!(app.undo_stack.is_empty());
         assert_eq!(app.modified_scenes, modified);
         assert_eq!(app.snapshot_revision, revision);
-        app.console_input = "scene.setName('edited');".into();
+        app.console.dialect = cuemol_command::console::Dialect::JavaScript;
+        app.console.source = "scene.setName('edited');".into();
         app.execute_console_input();
         assert_eq!(app.undo_stack.len(), 1);
         app.undo(&mut camera);
-        app.console_input = "print(scene.name);".into();
+        app.console.dialect = cuemol_command::console::Dialect::JavaScript;
+        app.console.source = "print(scene.name);".into();
         app.execute_console_input();
         assert_eq!(app.redo_stack.len(), 1);
         app.redo(&mut camera);

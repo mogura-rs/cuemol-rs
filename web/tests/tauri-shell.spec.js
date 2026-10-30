@@ -69,6 +69,8 @@ async function openShell(page, storage = {}, options = {}) {
       }
       if (command === 'get_pdb_history') return [];
       if (command === 'execute_script') return structuredClone(snapshot);
+      if (command === 'console_start' || command === 'console_stop' || command === 'console_poll') return {snapshot: structuredClone(snapshot), running: command !== 'console_stop' && Boolean(options.consoleRunning)};
+      if (command === 'console_complete') return [{display: 'Probe', replacement: 'select Probe'}];
       if (command === 'rename_workspace_node') {
         if (args.input.objectUid !== 3) throw new Error('wrong inspector object');
         if (args.input.kind === 'renderer') renderer.name = args.input.name;
@@ -169,7 +171,7 @@ test('Tauri bottom docks expose animation, sequence and trajectory controls', as
   await page.locator('[data-bottom-select="trajectory"]').click();
   await expect(page.locator('#trajectory-slider')).toBeVisible();
   await page.locator('[data-bottom-select="output"]').click();
-  await expect(page.getByLabel('JavaScript command')).toBeVisible();
+  await expect(page.getByLabel('Console command')).toBeVisible();
   await expect(page.locator('#error-alert-dialog')).not.toBeVisible();
   expect(errors).toEqual([]);
 });
@@ -185,7 +187,7 @@ test('Tauri saved collapsed panels reopen and a damaged shell preference uses de
   await expect(page.locator('[data-panel-name="Workspace"]')).toBeVisible();
   await page.locator('summary').filter({hasText: /^Help$/}).click();
   await page.getByRole('button', {name: 'Console', exact: true}).click();
-  await expect(page.getByLabel('JavaScript command')).toBeVisible();
+  await expect(page.getByLabel('Console command')).toBeVisible();
   expect(errors).toEqual([]);
 });
 
@@ -230,7 +232,8 @@ test('Tauri HiDPI picking uses render pixels and the tool palette does not rotat
 
 test('Tauri console preserves literal quotes and submits through Enter', async ({page}) => {
   const errors = await openShell(page);
-  const input = page.getByRole('textbox', {name: 'JavaScript command'});
+  await page.getByRole('radio', {name:'JavaScript', exact:true}).click();
+  const input = page.getByRole('textbox', {name: 'Console command'});
   await expect(input).toHaveAttribute('spellcheck', 'false');
   await expect(input).toHaveAttribute('autocorrect', 'off');
   await expect(input).toHaveAttribute('autocapitalize', 'off');
@@ -238,7 +241,7 @@ test('Tauri console preserves literal quotes and submits through Enter', async (
   await input.fill(script);
   await input.press('Enter');
   await expect(input).toHaveValue('');
-  expect(await page.evaluate(() => window.__shellCalls.find(call => call.command === 'execute_script').args.script)).toBe(script);
+  expect(await page.evaluate(() => window.__shellCalls.find(call => call.command === 'console_start').args.source)).toBe(script);
   expect(errors).toEqual([]);
 });
 
@@ -299,5 +302,43 @@ test('Tauri sequence virtualizes both axes and ranges include offscreen residues
   const canvasWidth = await page.locator('.sequence-ruler-canvas').evaluate(element => element.width);
   expect(canvasWidth).toBeLessThanOrEqual(page.viewportSize().width * 2);
   await page.screenshot({path: testInfo.outputPath('sequence-virtual.png')});
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri console keeps multiline drafts, IME, completion, dialect and stop controls', async ({page}) => {
+  const errors = await openShell(page, {}, {consoleRunning: true});
+  await page.locator('[data-bottom-select="output"]').click();
+  const input = page.locator('#output-command');
+  await input.fill('select Pr');
+  await input.press('Tab');
+  await expect(input).toHaveValue('select Probe');
+  await input.press('Shift+Enter');
+  await input.pressSequentially('hide Probe');
+  let source = await input.inputValue();
+  expect(source).toBe('select Probe\nhide Probe');
+  await input.dispatchEvent('compositionstart');
+  await input.press('Enter');
+  expect(await page.evaluate(() => window.__shellCalls.filter(call => call.command === 'console_start'))).toEqual([]);
+  await input.dispatchEvent('compositionend');
+  source = await input.inputValue();
+  await page.waitForTimeout(60);
+  await input.press('Enter');
+  await expect(page.locator('#console-stop')).toBeVisible();
+  expect(await page.evaluate(() => window.__shellCalls.find(call => call.command === 'console_start').args)).toEqual({source, dialect: 'CueMol'});
+  await page.locator('#console-stop').click();
+  await expect(page.locator('#console-stop')).toBeHidden();
+  await input.fill('unfinished');
+  await input.press('ArrowUp');
+  await expect(input).toHaveValue(source);
+  await input.evaluate(element => element.setSelectionRange(element.value.length, element.value.length));
+  await input.press('ArrowDown');
+  await expect(input).toHaveValue('unfinished');
+  await page.locator('[data-console-dialect="PyMOL"]').click();
+  await page.reload();
+  await page.locator('[data-bottom-select="output"]').click();
+  await expect(page.locator('[data-console-dialect="PyMOL"]')).toHaveAttribute('aria-checked', 'true');
+  await input.press('ArrowUp');
+  await expect(input).toHaveValue(source);
   expect(errors).toEqual([]);
 });

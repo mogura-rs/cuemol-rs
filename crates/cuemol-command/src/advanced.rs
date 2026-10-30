@@ -771,7 +771,9 @@ fn coloring(state: &mut DesktopAppState, name: &str, args: &Value) -> Result<Val
     match name {
         "add_paint" | "add_paint_at" => {
             state.parse_scene_selector(scene(state)?, selection(args))?;
-            let i = if args["at"].is_null() {
+            let i = if name == "add_paint" {
+                0
+            } else if args["at"].is_null() {
                 paint.len()
             } else {
                 integer(args, "at", 1)?
@@ -821,6 +823,9 @@ fn coloring(state: &mut DesktopAppState, name: &str, args: &Value) -> Result<Val
         state.set_object_coloring_details(owner, Some(kind), attrs, paint, default)?;
     } else {
         state.set_renderer_coloring_details(owner, id, Some(kind), attrs, paint, default)?;
+    }
+    if name == "add_paint" && state.scene_manager().object(owner).is_some() {
+        state.set_molecule_selection_text(owner, selection(args))?;
     }
     Ok(json!({"nodeId":id.get()}))
 }

@@ -722,55 +722,6 @@ fn tauri_workspace_exposes_lightweight_objects_and_renderers() {
 }
 
 #[test]
-fn tauri_output_prompt_executes_javascript_with_reference_history() {
-    assert!(HTML.contains("id=\"output-command\""));
-    assert!(HTML.contains("Js&gt;"));
-    assert!(HTML.contains("aria-label=\"JavaScript command\""));
-    assert!(JS.contains("COMMAND_HISTORY_STORAGE_KEY"));
-    assert!(JS.contains("MAX_COMMAND_HISTORY = 100"));
-    assert!(JS.contains("function executeOutputCommand()"));
-    assert!(JS.contains("mutate(\"execute_script\", { script })"));
-    assert!(JS.contains("event.key === \"Enter\""));
-    assert!(JS.contains("event.key === \"ArrowUp\""));
-    assert!(JS.contains("event.key === \"ArrowDown\""));
-    assert!(TAURI_APP_RS.contains("ModelRequest::ExecuteScript(script)"));
-    assert!(TAURI_APP_RS.contains("model.log_lines.push(format!(\"> {script}\"))"));
-    assert!(CSS.contains("grid-template-columns: 24px 1fr"));
-    for binding in [
-        "ui.monospace(\"Js>\")",
-        "fn execute_console_input(",
-        "fn recall_command_history(",
-        "cmd_prompt_history:length",
-        "egui::Key::ArrowUp",
-        "egui::Key::ArrowDown",
-    ] {
-        assert!(
-            NATIVE_GUI_RS.contains(binding),
-            "missing native Output prompt binding {binding}"
-        );
-    }
-    let native_bottom = NATIVE_GUI_RS
-        .split("fn bottom_panel(")
-        .nth(1)
-        .and_then(|source| source.split("fn output_tab(").next())
-        .expect("native bottom dock");
-    assert!(
-        native_bottom.find("self.output_tab(ui)").unwrap()
-            < native_bottom.find("BottomTab::Output, \"Output\"").unwrap(),
-        "native bottom tabs must follow the content"
-    );
-    let native_output = NATIVE_GUI_RS
-        .split("fn output_tab(")
-        .nth(1)
-        .and_then(|source| source.split("fn load_command_history(").next())
-        .expect("native Output panel");
-    assert!(native_output.contains("small_button(\"Clear\")"));
-    assert!(native_output.contains("self.clear_log()"));
-    assert!(native_output.contains("small_button(\"Help\")"));
-    assert!(!native_output.contains("button(\"Save As\")"));
-}
-
-#[test]
 fn tauri_sequence_panel_matches_reference_mouse_and_context_operations() {
     for binding in [
         "function runSequenceAction(",

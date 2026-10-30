@@ -1169,42 +1169,20 @@ impl App {
             ui.separator();
             match self.bottom_tab.as_str() {
                 "Console" => {
-                    ui.horizontal(|ui| {
-                        ui.weak("JavaScript");
-                        if ui.small_button("Clear").clicked() {
-                            self.logs.clear();
-                        }
-                        if ui.small_button("Help").clicked() {
-                            self.show_help = true;
-                        }
-                    });
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .min_scrolled_height(0.)
-                        .max_height((ui.available_height() - 30.).max(20.))
-                        .stick_to_bottom(true)
-                        .show(ui, |ui| {
-                            for line in &self.logs {
-                                ui.monospace(line);
-                            }
-                        });
-                    ui.horizontal(|ui| {
-                        ui.monospace("Js>");
-                        let response = ui.add(
-                            egui::TextEdit::singleline(&mut self.console_source)
-                                .desired_width(ui.available_width() - 50.),
-                        );
-                        self.record_ui_rect("Console input", &response);
-                        let run = ui.button("Run");
-                        self.record_ui_rect("Console Run", &run);
-                        if run.clicked()
-                            || (response.lost_focus()
-                                && ui.input(|i| i.key_pressed(egui::Key::Enter)))
-                        {
-                            let source = std::mem::take(&mut self.console_source);
-                            self.call("execute_script", json!({"source":source}));
-                        }
-                    });
+                    let intent = self.console.show(
+                        ui,
+                        &self.state,
+                        &self.console_session,
+                        &self.logs,
+                        self.busy || self.console_run.is_some(),
+                    );
+                    self.ui_rects.extend(
+                        self.console
+                            .rects
+                            .iter()
+                            .map(|(name, rect)| (name.clone(), *rect)),
+                    );
+                    self.console_intent(intent);
                 }
                 "Output" => {
                     if ui.small_button("Clear").clicked() {

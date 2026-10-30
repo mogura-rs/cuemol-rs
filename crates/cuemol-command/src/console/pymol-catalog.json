@@ -1,0 +1,1294 @@
+{
+  "help": {
+    "params": [
+      {
+        "name": "command",
+        "default": "commands"
+      }
+    ],
+    "summary": "List the commands, or explain one."
+  },
+  "align": {
+    "params": [
+      {
+        "name": "mobile"
+      },
+      {
+        "name": "target"
+      },
+      {
+        "name": "cutoff",
+        "default": "2.0"
+      },
+      {
+        "name": "cycles",
+        "default": "5"
+      },
+      {
+        "name": "gap",
+        "default": "-10.0"
+      },
+      {
+        "name": "extend",
+        "default": "-0.5"
+      },
+      {
+        "name": "max_gap",
+        "default": "50"
+      },
+      {
+        "name": "object",
+        "default": ""
+      },
+      {
+        "name": "matrix",
+        "default": "BLOSUM62"
+      },
+      {
+        "name": "mobile_state",
+        "default": "0"
+      },
+      {
+        "name": "target_state",
+        "default": "0"
+      },
+      {
+        "name": "quiet",
+        "default": "1"
+      },
+      {
+        "name": "max_skip",
+        "default": "0"
+      },
+      {
+        "name": "transform",
+        "default": "1"
+      },
+      {
+        "name": "reset",
+        "default": "0"
+      }
+    ],
+    "summary": "Superpose mobile onto target (US-align; there is no sequence alignment here)."
+  },
+  "angle": {
+    "params": [
+      {
+        "name": "name",
+        "default": ""
+      },
+      {
+        "name": "selection1",
+        "default": ""
+      },
+      {
+        "name": "selection2",
+        "default": ""
+      },
+      {
+        "name": "selection3",
+        "default": ""
+      },
+      {
+        "name": "mode",
+        "default": ""
+      },
+      {
+        "name": "label",
+        "default": "1"
+      },
+      {
+        "name": "reset",
+        "default": "0"
+      },
+      {
+        "name": "zoom",
+        "default": "0"
+      },
+      {
+        "name": "state",
+        "default": "0"
+      },
+      {
+        "name": "quiet",
+        "default": "1"
+      },
+      {
+        "name": "state1",
+        "default": "-3"
+      },
+      {
+        "name": "state2",
+        "default": "-3"
+      },
+      {
+        "name": "state3",
+        "default": "-3"
+      }
+    ],
+    "summary": "Measure the angle between 3 selections, and label it."
+  },
+  "as": {
+    "params": [
+      {
+        "name": "representation",
+        "default": ""
+      },
+      {
+        "name": "selection",
+        "default": ""
+      }
+    ],
+    "summary": "Show one representation and hide the rest."
+  },
+  "bg_color": {
+    "params": [
+      {
+        "name": "color",
+        "default": "black"
+      }
+    ],
+    "summary": "Set the background colour."
+  },
+  "cd": {
+    "params": [
+      {
+        "name": "dir",
+        "default": "~"
+      },
+      {
+        "name": "complain",
+        "default": "1"
+      },
+      {
+        "name": "quiet",
+        "default": "1"
+      }
+    ],
+    "summary": "Change the working directory relative paths are read from."
+  },
+  "center": {
+    "params": [
+      {
+        "name": "selection",
+        "default": "all"
+      },
+      {
+        "name": "state",
+        "default": "0"
+      },
+      {
+        "name": "origin",
+        "default": "1"
+      },
+      {
+        "name": "animate",
+        "default": "0"
+      }
+    ],
+    "summary": "Centre the view on an object or a selection."
+  },
+  "color": {
+    "params": [
+      {
+        "name": "color"
+      },
+      {
+        "name": "selection",
+        "default": "all"
+      },
+      {
+        "name": "quiet",
+        "default": "1"
+      },
+      {
+        "name": "flags",
+        "default": "0"
+      }
+    ],
+    "summary": "Colour part of what the console draws."
+  },
+  "count_atoms": {
+    "params": [
+      {
+        "name": "selection",
+        "default": "(all)"
+      },
+      {
+        "name": "quiet",
+        "default": "1"
+      },
+      {
+        "name": "state",
+        "default": "0"
+      },
+      {
+        "name": "domain",
+        "default": ""
+      }
+    ],
+    "summary": "Count the atoms an expression matches, per molecule."
+  },
+  "count_states": {
+    "params": [
+      {
+        "name": "selection",
+        "default": "(all)"
+      },
+      {
+        "name": "quiet",
+        "default": "1"
+      }
+    ],
+    "summary": "Print the largest number of states among the named objects."
+  },
+  "delete": {
+    "params": [
+      {
+        "name": "name"
+      }
+    ],
+    "summary": "Remove objects or renderers from the scene. Wildcards and \"all\" are accepted."
+  },
+  "deselect": {
+    "params": [],
+    "summary": "Clear the selection on every molecule."
+  },
+  "dihedral": {
+    "params": [
+      {
+        "name": "name",
+        "default": ""
+      },
+      {
+        "name": "selection1",
+        "default": ""
+      },
+      {
+        "name": "selection2",
+        "default": ""
+      },
+      {
+        "name": "selection3",
+        "default": ""
+      },
+      {
+        "name": "selection4",
+        "default": ""
+      },
+      {
+        "name": "mode",
+        "default": ""
+      },
+      {
+        "name": "label",
+        "default": "1"
+      },
+      {
+        "name": "reset",
+        "default": "0"
+      },
+      {
+        "name": "zoom",
+        "default": "0"
+      },
+      {
+        "name": "state",
+        "default": "0"
+      },
+      {
+        "name": "quiet",
+        "default": "1"
+      }
+    ],
+    "summary": "Measure the torsion between 4 selections, and label it."
+  },
+  "disable": {
+    "params": [
+      {
+        "name": "name",
+        "default": "all"
+      }
+    ],
+    "summary": "Hide objects or renderers, or hide a named selection."
+  },
+  "distance": {
+    "params": [
+      {
+        "name": "name",
+        "default": ""
+      },
+      {
+        "name": "selection1",
+        "default": ""
+      },
+      {
+        "name": "selection2",
+        "default": ""
+      },
+      {
+        "name": "cutoff",
+        "default": ""
+      },
+      {
+        "name": "mode",
+        "default": ""
+      },
+      {
+        "name": "zoom",
+        "default": "0"
+      },
+      {
+        "name": "width",
+        "default": ""
+      },
+      {
+        "name": "length",
+        "default": ""
+      },
+      {
+        "name": "gap",
+        "default": ""
+      },
+      {
+        "name": "label",
+        "default": "1"
+      },
+      {
+        "name": "quiet",
+        "default": "1"
+      },
+      {
+        "name": "reset",
+        "default": "0"
+      },
+      {
+        "name": "state",
+        "default": "0"
+      },
+      {
+        "name": "state1",
+        "default": "-3"
+      },
+      {
+        "name": "state2",
+        "default": "-3"
+      }
+    ],
+    "summary": "Measure the distance between 2 selections, and label it."
+  },
+  "enable": {
+    "params": [
+      {
+        "name": "name",
+        "default": "all"
+      },
+      {
+        "name": "parents",
+        "default": "0"
+      }
+    ],
+    "summary": "Show objects or renderers, or show a named selection."
+  },
+  "exit": {
+    "params": [],
+    "summary": "Quit CueMol, asking to save changes (quit --force skips that)."
+  },
+  "fetch": {
+    "params": [
+      {
+        "name": "code"
+      },
+      {
+        "name": "name",
+        "default": ""
+      },
+      {
+        "name": "state",
+        "default": "0"
+      },
+      {
+        "name": "finish",
+        "default": "1"
+      },
+      {
+        "name": "discrete",
+        "default": "-1"
+      },
+      {
+        "name": "multiplex",
+        "default": "-2"
+      },
+      {
+        "name": "zoom",
+        "default": "-1"
+      },
+      {
+        "name": "type",
+        "default": ""
+      },
+      {
+        "name": "async",
+        "default": "0"
+      },
+      {
+        "name": "path",
+        "default": ""
+      },
+      {
+        "name": "file",
+        "default": ""
+      },
+      {
+        "name": "quiet",
+        "default": "1"
+      }
+    ],
+    "summary": "Download an entry from RCSB (coordinates, an assembly, or a density map) and load it."
+  },
+  "frame": {
+    "params": [
+      {
+        "name": "frame"
+      },
+      {
+        "name": "trigger",
+        "default": "-1"
+      },
+      {
+        "name": "scene",
+        "default": "0"
+      }
+    ],
+    "summary": "Show state N of every multi-state object (MorphMol, trajectory)."
+  },
+  "get": {
+    "params": [
+      {
+        "name": "name"
+      },
+      {
+        "name": "selection",
+        "default": ""
+      },
+      {
+        "name": "state",
+        "default": "0"
+      },
+      {
+        "name": "quiet",
+        "default": "1"
+      }
+    ],
+    "summary": "Print a property of the scene or an object."
+  },
+  "get_chains": {
+    "params": [
+      {
+        "name": "selection",
+        "default": "all"
+      },
+      {
+        "name": "state",
+        "default": "0"
+      }
+    ],
+    "summary": "List the chain names of an object."
+  },
+  "get_names": {
+    "params": [
+      {
+        "name": "type",
+        "default": "public_objects"
+      },
+      {
+        "name": "enabled_only",
+        "default": "0"
+      },
+      {
+        "name": "selection",
+        "default": ""
+      }
+    ],
+    "summary": "List object and selection names."
+  },
+  "get_view": {
+    "params": [
+      {
+        "name": "output",
+        "default": "1"
+      },
+      {
+        "name": "quiet",
+        "default": "1"
+      }
+    ],
+    "summary": "Print the camera as a set_view line that can be pasted back."
+  },
+  "hide": {
+    "params": [
+      {
+        "name": "representation",
+        "default": ""
+      },
+      {
+        "name": "selection",
+        "default": ""
+      },
+      {
+        "name": "state",
+        "default": "0"
+      }
+    ],
+    "summary": "Take representations off a selection (hide alone: everything)."
+  },
+  "indicate": {
+    "params": [
+      {
+        "name": "selection",
+        "default": "all"
+      }
+    ],
+    "summary": "Show what an expression matches, without naming it."
+  },
+  "isolevel": {
+    "params": [
+      {
+        "name": "name"
+      },
+      {
+        "name": "level",
+        "default": "1.0"
+      },
+      {
+        "name": "state",
+        "default": "1"
+      },
+      {
+        "name": "query",
+        "default": "0"
+      },
+      {
+        "name": "quiet",
+        "default": "1"
+      }
+    ],
+    "summary": "Change the contour level of a map renderer, or read it back."
+  },
+  "isomesh": {
+    "params": [
+      {
+        "name": "name"
+      },
+      {
+        "name": "map"
+      },
+      {
+        "name": "level",
+        "default": "1.0"
+      },
+      {
+        "name": "selection",
+        "default": ""
+      },
+      {
+        "name": "buffer",
+        "default": "0.0"
+      },
+      {
+        "name": "state",
+        "default": "1"
+      },
+      {
+        "name": "carve",
+        "default": ""
+      },
+      {
+        "name": "source_state",
+        "default": "0"
+      },
+      {
+        "name": "quiet",
+        "default": "1"
+      }
+    ],
+    "summary": "Contour a density map as a mesh."
+  },
+  "isosurface": {
+    "params": [
+      {
+        "name": "name"
+      },
+      {
+        "name": "map"
+      },
+      {
+        "name": "level",
+        "default": "1.0"
+      },
+      {
+        "name": "selection",
+        "default": ""
+      },
+      {
+        "name": "buffer",
+        "default": "0.0"
+      },
+      {
+        "name": "state",
+        "default": "1"
+      },
+      {
+        "name": "carve",
+        "default": ""
+      },
+      {
+        "name": "source_state",
+        "default": "0"
+      },
+      {
+        "name": "quiet",
+        "default": "1"
+      }
+    ],
+    "summary": "Contour a density map as a solid surface."
+  },
+  "label": {
+    "params": [
+      {
+        "name": "selection",
+        "default": "(all)"
+      },
+      {
+        "name": "expression",
+        "default": ""
+      },
+      {
+        "name": "quiet",
+        "default": "1"
+      }
+    ],
+    "summary": "Label atoms, e.g. label name CA, \"%s%s\" % (resn, resi); an empty expression removes labels."
+  },
+  "load": {
+    "params": [
+      {
+        "name": "filename"
+      },
+      {
+        "name": "object",
+        "default": ""
+      },
+      {
+        "name": "state",
+        "default": "0"
+      },
+      {
+        "name": "format",
+        "default": ""
+      },
+      {
+        "name": "finish",
+        "default": "1"
+      },
+      {
+        "name": "discrete",
+        "default": "-1"
+      },
+      {
+        "name": "quiet",
+        "default": "1"
+      },
+      {
+        "name": "multiplex",
+        "default": ""
+      },
+      {
+        "name": "zoom",
+        "default": "-1"
+      },
+      {
+        "name": "partial",
+        "default": "0"
+      },
+      {
+        "name": "mimic",
+        "default": "1"
+      },
+      {
+        "name": "object_props",
+        "default": ""
+      },
+      {
+        "name": "atom_props",
+        "default": ""
+      }
+    ],
+    "summary": "Read a structure or map (a file or a URL), open a .qsc / .pse scene, or run a .pml."
+  },
+  "log": {
+    "params": [
+      {
+        "name": "text",
+        "default": ""
+      },
+      {
+        "name": "alt_text",
+        "default": ""
+      }
+    ],
+    "summary": "Write a line to the open log file."
+  },
+  "log_close": {
+    "params": [],
+    "summary": "Stop recording commands to the log file."
+  },
+  "log_open": {
+    "params": [
+      {
+        "name": "filename",
+        "default": "log.pml"
+      },
+      {
+        "name": "mode",
+        "default": "w"
+      }
+    ],
+    "summary": "Record the commands typed from now on to a .pml file."
+  },
+  "ls": {
+    "params": [
+      {
+        "name": "pattern",
+        "default": ""
+      }
+    ],
+    "summary": "List the working directory."
+  },
+  "move": {
+    "params": [
+      {
+        "name": "axis"
+      },
+      {
+        "name": "distance"
+      }
+    ],
+    "summary": "Translate the camera along an axis."
+  },
+  "mplay": {
+    "params": [],
+    "summary": "Play the scene animation (the Animation panel timeline)."
+  },
+  "mstop": {
+    "params": [],
+    "summary": "Stop the scene animation where it is."
+  },
+  "orient": {
+    "params": [
+      {
+        "name": "selection",
+        "default": "(all)"
+      },
+      {
+        "name": "state",
+        "default": "0"
+      },
+      {
+        "name": "animate",
+        "default": "0"
+      }
+    ],
+    "summary": "Turn the view to the principal axes of a selection, then fit it."
+  },
+  "pair_fit": {
+    "params": [
+      {
+        "name": "mobile"
+      },
+      {
+        "name": "target"
+      },
+      {
+        "name": "quiet",
+        "default": "0"
+      }
+    ],
+    "summary": "Least-squares fit of mobile onto target, atoms paired in order."
+  },
+  "png": {
+    "params": [
+      {
+        "name": "filename"
+      },
+      {
+        "name": "width",
+        "default": "0"
+      },
+      {
+        "name": "height",
+        "default": "0"
+      },
+      {
+        "name": "dpi",
+        "default": "-1.0"
+      },
+      {
+        "name": "ray",
+        "default": "0"
+      },
+      {
+        "name": "quiet",
+        "default": "1"
+      },
+      {
+        "name": "prior",
+        "default": "0"
+      },
+      {
+        "name": "format",
+        "default": "0"
+      }
+    ],
+    "summary": "Write the view to a PNG file (the ray-traced one, after ray)."
+  },
+  "pwd": {
+    "params": [],
+    "summary": "Print the working directory."
+  },
+  "quit": {
+    "params": [
+      {
+        "name": "force",
+        "default": "false"
+      }
+    ],
+    "summary": "Quit CueMol, asking to save changes; force true (or --force) quits without asking."
+  },
+  "ray": {
+    "params": [
+      {
+        "name": "width",
+        "default": "0"
+      },
+      {
+        "name": "height",
+        "default": "0"
+      },
+      {
+        "name": "antialias",
+        "default": "-1"
+      },
+      {
+        "name": "angle",
+        "default": "0.0"
+      },
+      {
+        "name": "shift",
+        "default": "0.0"
+      },
+      {
+        "name": "renderer",
+        "default": "-1"
+      },
+      {
+        "name": "quiet",
+        "default": "1"
+      },
+      {
+        "name": "async",
+        "default": "0"
+      }
+    ],
+    "summary": "Ray-trace the view (global illumination); a following png saves it."
+  },
+  "redo": {
+    "params": [],
+    "summary": "Redo the last undone change."
+  },
+  "refresh": {
+    "params": [],
+    "summary": "Redraw the view."
+  },
+  "reset": {
+    "params": [
+      {
+        "name": "object",
+        "default": ""
+      }
+    ],
+    "summary": "Reset the camera rotation and fit the view."
+  },
+  "rewind": {
+    "params": [],
+    "summary": "Go back to the first state, and to the start of the animation."
+  },
+  "run": {
+    "params": [
+      {
+        "name": "filename"
+      },
+      {
+        "name": "namespace",
+        "default": "global"
+      }
+    ],
+    "summary": "Run the commands in a .pml script (the same as @file)."
+  },
+  "save": {
+    "params": [
+      {
+        "name": "filename"
+      },
+      {
+        "name": "selection",
+        "default": "(all)"
+      },
+      {
+        "name": "state",
+        "default": "-1"
+      },
+      {
+        "name": "format",
+        "default": ""
+      },
+      {
+        "name": "ref",
+        "default": ""
+      },
+      {
+        "name": "ref_state",
+        "default": "-1"
+      },
+      {
+        "name": "quiet",
+        "default": "1"
+      },
+      {
+        "name": "partial",
+        "default": "0"
+      }
+    ],
+    "summary": "Write a molecule (or part of one) to .pdb / .sdf / .pqr, the scene to .qsc, or the view to .png / .pov / .stl."
+  },
+  "select": {
+    "params": [
+      {
+        "name": "name"
+      },
+      {
+        "name": "selection",
+        "default": ""
+      },
+      {
+        "name": "enable",
+        "default": "-1"
+      },
+      {
+        "name": "quiet",
+        "default": "1"
+      },
+      {
+        "name": "merge",
+        "default": "0"
+      },
+      {
+        "name": "state",
+        "default": "0"
+      }
+    ],
+    "summary": "Name a selection expression, and show what it matches."
+  },
+  "set": {
+    "params": [
+      {
+        "name": "name"
+      },
+      {
+        "name": "value",
+        "default": "1"
+      },
+      {
+        "name": "selection",
+        "default": ""
+      },
+      {
+        "name": "state",
+        "default": "0"
+      },
+      {
+        "name": "updates",
+        "default": "1"
+      },
+      {
+        "name": "log",
+        "default": "0"
+      },
+      {
+        "name": "quiet",
+        "default": "1"
+      }
+    ],
+    "summary": "Set a property on the scene or an object."
+  },
+  "set_color": {
+    "params": [
+      {
+        "name": "name"
+      },
+      {
+        "name": "rgb"
+      },
+      {
+        "name": "mode",
+        "default": "0"
+      }
+    ],
+    "summary": "Define a named colour, e.g. set_color mycol, [1.0, 0.5, 0.0]."
+  },
+  "set_name": {
+    "params": [
+      {
+        "name": "old_name"
+      },
+      {
+        "name": "new_name"
+      }
+    ],
+    "summary": "Rename an object, a renderer (e.g. an isomesh), or a named selection."
+  },
+  "set_view": {
+    "params": [
+      {
+        "name": "view"
+      },
+      {
+        "name": "animate",
+        "default": "0"
+      },
+      {
+        "name": "quiet",
+        "default": "1"
+      },
+      {
+        "name": "hand",
+        "default": "1"
+      }
+    ],
+    "summary": "Set the camera from the 18 numbers get_view prints."
+  },
+  "show": {
+    "params": [
+      {
+        "name": "representation",
+        "default": ""
+      },
+      {
+        "name": "selection",
+        "default": ""
+      },
+      {
+        "name": "state",
+        "default": "0"
+      }
+    ],
+    "summary": "Add representations over a selection (show alone: lines)."
+  },
+  "show_as": {
+    "params": [
+      {
+        "name": "representation",
+        "default": ""
+      },
+      {
+        "name": "selection",
+        "default": ""
+      }
+    ],
+    "summary": "Show one representation and hide the rest."
+  },
+  "spectrum": {
+    "params": [
+      {
+        "name": "expression",
+        "default": "count"
+      },
+      {
+        "name": "palette",
+        "default": "rainbow"
+      },
+      {
+        "name": "selection",
+        "default": "(all)"
+      },
+      {
+        "name": "minimum",
+        "default": ""
+      },
+      {
+        "name": "maximum",
+        "default": ""
+      },
+      {
+        "name": "byres",
+        "default": "0"
+      },
+      {
+        "name": "quiet",
+        "default": "1"
+      },
+      {
+        "name": "interpolation",
+        "default": "rgb"
+      }
+    ],
+    "summary": "Colour what the console draws by B-factor, occupancy or residue number."
+  },
+  "super": {
+    "params": [
+      {
+        "name": "mobile"
+      },
+      {
+        "name": "target"
+      },
+      {
+        "name": "cutoff",
+        "default": "2.0"
+      },
+      {
+        "name": "cycles",
+        "default": "5"
+      },
+      {
+        "name": "gap",
+        "default": "-1.5"
+      },
+      {
+        "name": "extend",
+        "default": "-0.7"
+      },
+      {
+        "name": "max_gap",
+        "default": "50"
+      },
+      {
+        "name": "object",
+        "default": ""
+      },
+      {
+        "name": "matrix",
+        "default": "BLOSUM62"
+      },
+      {
+        "name": "mobile_state",
+        "default": "0"
+      },
+      {
+        "name": "target_state",
+        "default": "0"
+      },
+      {
+        "name": "quiet",
+        "default": "1"
+      },
+      {
+        "name": "max_skip",
+        "default": "0"
+      },
+      {
+        "name": "transform",
+        "default": "1"
+      },
+      {
+        "name": "reset",
+        "default": "0"
+      }
+    ],
+    "summary": "Superpose mobile onto target by structure (US-align)."
+  },
+  "turn": {
+    "params": [
+      {
+        "name": "axis"
+      },
+      {
+        "name": "angle"
+      }
+    ],
+    "summary": "Rotate the camera about an axis, in degrees."
+  },
+  "undo": {
+    "params": [],
+    "summary": "Undo the last change."
+  },
+  "unset": {
+    "params": [
+      {
+        "name": "name"
+      },
+      {
+        "name": "selection",
+        "default": ""
+      },
+      {
+        "name": "state",
+        "default": "0"
+      },
+      {
+        "name": "updates",
+        "default": "1"
+      },
+      {
+        "name": "log",
+        "default": "0"
+      },
+      {
+        "name": "quiet",
+        "default": "1"
+      }
+    ],
+    "summary": "Restore a property to its default."
+  },
+  "view": {
+    "params": [
+      {
+        "name": "key"
+      },
+      {
+        "name": "action",
+        "default": "recall"
+      },
+      {
+        "name": "animate",
+        "default": "-1"
+      }
+    ],
+    "summary": "Store, recall and clear named camera views."
+  },
+  "zoom": {
+    "params": [
+      {
+        "name": "selection",
+        "default": "all"
+      },
+      {
+        "name": "buffer",
+        "default": "0.0"
+      },
+      {
+        "name": "state",
+        "default": "0"
+      },
+      {
+        "name": "complete",
+        "default": "0"
+      },
+      {
+        "name": "animate",
+        "default": "0"
+      }
+    ],
+    "summary": "Fit the view to an object or a selection."
+  }
+}

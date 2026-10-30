@@ -31,7 +31,8 @@ speedup from a single optimized stage or compare timings from different hosts.
 | Shell | Activities, menus, toolbar, tab order, docks, compact windows, themes and keyboard access | Previous focused checks exist; full control inventory pending |
 | Explorer and Inspector | Object/renderer/group hierarchy, selection, visibility, locking, drag/drop, context menus and property editors | Previous focused checks exist; dialog comparison pending |
 | Color and styles | Coloring modes, paint entries, palettes, property inheritance, style creation/apply/edit/save | Previous focused checks exist; complete editor comparison pending |
-| Console | CueMol/PyMOL dialects, command arguments, completion, history, multiline input, IME and transaction behavior | Confirmed difference: native and browser consoles only execute JavaScript |
+| Console | CueMol/PyMOL dialects, command arguments, completion, history, multiline input, IME and transaction behavior | Shared CueMol/PyMOL interpreters, completion, native QAX logging/replay and cancellable execution implemented; focused shared, browser and OS-input checks passed; affected regression checks passed; public review and delivery pending |
+| Actions | History rows, operation inspection, QAX export, bundled/user macros and reusable actions | Confirmed difference: existing sidebar offers Undo/Redo and script launch; history selection and macro library remain to be implemented |
 | Scripts and services | JavaScript/Python helpers, retained state, callbacks, errors, file arguments and asynchronous readers | Previous compatibility checks exist; shared workload comparison pending |
 | File and scene I/O | Reader options, saved cameras, source metadata, selections, linked/embedded data and cancellation | Previous compatibility checks exist; paired performance comparison pending |
 | Navigation and cameras | Rotation, pan, zoom, fitting, clipping, bookmarks, visibility and screen coordinates | Previous numeric and interaction oracles exist; integrated comparison pending |
@@ -187,3 +188,117 @@ the native OS-input and captured-pixel check. The release matrix repeats the
 Python installation check on all five supported targets. A public Git-URL
 installation pinned to `d34bd69` also passed the installed-command checks.
 The new release's distribution checks remain delivery gates.
+
+
+## Console comparison and repairs
+
+The shared command layer now reads the published native command catalog and
+implements the 63 commands advertised by the reference PyMOL console. Both
+dialects are available in native egui, WASM and Tauri alongside the existing
+JavaScript console. The catalog and color-name tables were checked against the
+published `v2.4.1.547` console sources under
+`tritium/react-gui/src/plugins/console/worker/`. This matches the reference
+console's supported subset; it does not imply compatibility with arbitrary
+PyMOL Python programs.
+
+Native arguments support quoted names, explicit node types, UID hints,
+object/renderer paths, lists and wildcard expansion. Property paths now match
+the reference's shortest object-name prefix, including names containing dots.
+An object named `view` takes precedence over the view shorthand. Completion
+reads the current scene, argument role, property schema and native directory.
+Published-application probes confirmed property, renderer, parameter-name,
+boolean and filename replacements, including their separators.
+
+PyMOL commands cover selection expressions, representations, colors, settings,
+cameras, alignment, maps, measurements, labels, spectrum coloring and selected
+exports. Nondefault arguments that the reference ignores produce a message.
+The live reference probe confirmed distance, angle, selected atom count and
+saved scene output. Its torsion operation rejected the synthetic noncollinear
+case, so that case is recorded as a reference limitation rather than a passing
+cross-application measurement comparison.
+
+A native `open_log` writes completed operations as QAX actions. A standalone
+QAX replay keeps one undo entry per action; a replay nested in a command
+submission shares that submission's undo. The published application replayed
+an actual Rust GUI log containing rename, selection and a two-command rename,
+then restored all three actions through successive Undo operations. This also
+verified stable name paths when recorded UIDs differ. Macro definitions are
+validated and are not executed by file replay; the separate macro library and
+history browser remain confirmed gaps. Scene saves, QSC loads and history
+resets must be submitted alone and cannot run inside a QAX action. The published
+application also clears Undo/Redo after a scene save. Console saves now follow
+that rule only after a successful write; failed saves preserve the history.
+
+Downloads and image generation yield to the GUI. Stopping a submission keeps
+completed edits in its undo entry and rejects late results. Browser tests cover
+ordered downloads, cancellation, selected PDB and PNG output, live label and
+measurement state, multiline commands, completion, history, IME and Undo/Redo.
+The Tauri model suite passed 151 tests with six ignored. Its shell test also
+checks dialect persistence, completion, multiline input, IME suppression,
+restoring an unfinished history draft and Stop; the shell uses mocked IPC.
+
+The Linux OS-input check uses the actual native executable. It typed commands,
+completed a molecule name with Tab, entered a second line with Shift-Enter,
+undid both edits together and saved QAX. The same run passed rotation, zoom,
+slab, centering, font-pixel and Python-helper checks. During this check, the new
+console exposed an input-height error that shrank the viewport across frames.
+Reserving the button's minimum height repaired the drift. A subsequent
+multiline regression exposed expansion beyond six lines; the input now scrolls
+within that limit. The viewport stability regression and native screen test
+cover these cases.
+
+The shared regression run passed 1,464 tests. Native validation passed 175
+unit tests with one ignored, plus 68 Tauri shell structure checks; obsolete
+JavaScript-only source assertions were removed in favor of the executable
+console checks. All 116 browser cases outside the console passed. The final
+isolated WASM build passed all six console cases, including a twelve-line
+submission, scene downloads, history reset, cancellation and IME. The final
+transaction changes also passed the affected command, native and Tauri model
+tests. Public review, terminal CI and release delivery remain separate gates.
+
+One pre-existing documentation mismatch was also repaired: `add_paint` promised
+to insert the newest paint above earlier entries, while the implementation
+appended it. It now inserts first and updates the molecule selection as the
+reference does. `add_paint_at` retains explicit placement and selection.
+
+## Repeated object metadata
+
+`MolCoord::residue_count` previously allocated chain strings and a tree for
+every summary request, including unchanged GUI frames. It now retains the
+count, invalidates it when atom identity can change, and leaves it intact for
+coordinate-only trajectory and morph updates. The initial count uses a linear
+walk for ordered atoms and a borrowed-key set for unordered atoms. The cache is
+excluded from molecule equality and transfer data. Regression cases cover
+clones, insertions, reversed atom order, deletion, copying, chain/residue edits,
+coordinate-count errors and undo.
+
+Three sequential fresh processes per condition measured one molecule with
+100,000 generated atoms and 25,000 residues on the same Linux x86_64 host. Each
+process requested the complete object-summary list 5,000 times after the first
+request; the first and final summaries were checked against the expected counts.
+
+| Measured stage | Previous Rust | Current |
+| --- | --- | --- |
+| First summary | 11.05–12.24 ms | 1.82–2.00 ms |
+| Repeated unchanged summary | 6.54–7.46 ms/call | 0.000053–0.000054 ms/call |
+| Whole-process peak RSS | 44.34 MiB | 37.41 MiB |
+
+The repeated figure measures metadata enumeration for one object with a warm
+count. It excludes rendering, event handling and painting, so it is not a GUI
+frame-rate measurement. The 5,000-call interval is about 0.27 ms after caching;
+small differences within that interval should not be interpreted as separate
+performance effects. First-call timing and process RSS include their reported
+cold costs separately.
+
+To regenerate the workload on Linux:
+
+```sh
+cargo build --locked --release -p cuemol-desktop-core --example metadata_bench
+for sample in 1 2 3; do
+  env time -v target/release/examples/metadata_bench 100000 5000
+done
+```
+
+The example also accepts a PDB path instead of the atom count. Keep captured
+reports under the ignored cache. Retain the previous executable before a source
+change when comparing two revisions.

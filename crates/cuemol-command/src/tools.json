@@ -719,6 +719,10 @@
         "path": {
           "type": "string"
         },
+        "reader": {
+          "type": ["string", "null"],
+          "description": "Optional reader name; null detects the format from the file."
+        },
         "rendererType": {
           "type": [
             "string",
@@ -4625,6 +4629,10 @@
             "null"
           ],
           "description": "USalign only: the atom that represents each residue. Null or auto uses CA for amino acids and C3' for nucleotides."
+        },
+        "transform": {
+          "type": ["boolean", "null"],
+          "description": "False reports the fitted RMSD and transform without moving the molecule. Null or true applies the fit."
         },
         "keepAsProperty": {
           "type": [

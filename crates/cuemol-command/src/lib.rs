@@ -14,6 +14,7 @@ mod properties;
 pub use animation::advance_animation;
 pub use properties::render_settings;
 pub mod config;
+pub mod console;
 mod protocol;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod transport;

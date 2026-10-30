@@ -221,11 +221,11 @@ def main():
             capture('font-monospace.png')
             get_probe = 'var fontProbe=scene.getRendByName("Font probe");'
             script(get_probe + 'fontProbe.font_name="Ubuntu";')
+            mono_width = mono.getbbox()[2] - mono.getbbox()[0]
             proportional = wait_for(lambda: mask if (mask := label_pixels()) is not None
+                                    and mask.getbbox()[2] - mask.getbbox()[0] < mono_width
                                     and ImageChops.difference(mono, mask).getbbox() else None)
             capture('font-proportional.png')
-            if mono.getbbox()[2] - mono.getbbox()[0] <= proportional.getbbox()[2] - proportional.getbbox()[0]:
-                raise RuntimeError('The named monospaced and proportional fonts have indistinguishable advances')
             script(get_probe + 'fontProbe.font_name="serif";fontProbe.font_style="italic";fontProbe.font_weight="bold";')
             styled = wait_for(lambda: mask if (mask := label_pixels()) is not None
                              and ImageChops.difference(proportional, mask).getbbox() else None)
@@ -267,6 +267,34 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             atoms = [line for line in exported if line.startswith(('ATOM  ', 'HETATM'))]
             if len(atoms) != 1 or atoms[0][12:16].strip() != 'O1':
                 raise RuntimeError('Python helper selection did not export exactly the oxygen atom')
+            pyautogui.click(x + width * 0.52, y + height - 36)
+            qax = work / 'console-actions.qax'
+            qax.unlink(missing_ok=True)
+            pyautogui.write('open_log console-actions.qax', interval=0.015)
+            pyautogui.press('enter')
+            wait_for(qax.is_file)
+            pyautogui.write('rename "molecule with spaces", console-probe', interval=0.015)
+            pyautogui.press('enter')
+            wait_for(lambda: call('get_scene_state')['objects'][0]['name'] == 'console-probe')
+            pyautogui.write('select console-p', interval=0.02)
+            pyautogui.press('tab')
+            pyautogui.write(', name N1', interval=0.02)
+            pyautogui.press('enter')
+            wait_for(lambda: call('get_prop', {'path': f"#{state['objects'][0]['id']}.sel"})['value'] == 'name N1')
+            pyautogui.write('rename console-probe, first', interval=0.015)
+            pyautogui.hotkey('shift', 'enter')
+            if call('get_scene_state')['objects'][0]['name'] != 'console-probe':
+                raise RuntimeError('Shift-Enter submitted a partial console command')
+            pyautogui.write('rename first, final', interval=0.015)
+            pyautogui.press('enter')
+            wait_for(lambda: call('get_scene_state')['objects'][0]['name'] == 'final')
+            pyautogui.write('close_log', interval=0.02)
+            pyautogui.press('enter')
+            wait_for(lambda: 'final' in qax.read_text())
+            pyautogui.write('undo', interval=0.02)
+            pyautogui.press('enter')
+            wait_for(lambda: call('get_scene_state')['objects'][0]['name'] == 'console-probe')
+            capture('console-multiline.png')
             report.update(ok=True, window=bounds,
                           work_area=[available_x, available_y, available_width, available_height],
                           window_contained=True, atoms=state['objects'][0]['atoms'],
@@ -277,7 +305,8 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                           changed_pixels=changed, colored_pixels=colored,
                           font_family_pixels_changed=True, font_style_case_equal=True,
                           font_line_endings_equal=True,
-                          python_helpers=True,
+                          python_helpers=True, console_input=True, console_completion=True,
+                          console_multiline_undo=True, console_qax=True,
                           font_pixels=styled.histogram()[255])
             print(json.dumps(report), flush=True)
         except BaseException as error:

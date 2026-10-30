@@ -251,7 +251,8 @@ mod tests {
             .set_active_view_camera(&camera.to_qsys_camera("__current"))
             .unwrap();
         let view = app.state.active_view_summary().unwrap().uid;
-        app.console_input=format!("var v=cuemol.getView({});v.zoom=14;v.stereoMode='para';v.swapStereoEyes=false;v.trans_mms=true;",view.get());
+        app.console.dialect = cuemol_command::console::Dialect::JavaScript;
+        app.console.source=format!("var v=cuemol.getView({});v.zoom=14;v.stereoMode='para';v.swapStereoEyes=false;v.trans_mms=true;",view.get());
         app.execute_console_input();
         app.apply_script_view(&mut camera);
         assert_eq!(camera.ortho_scale, 7.);

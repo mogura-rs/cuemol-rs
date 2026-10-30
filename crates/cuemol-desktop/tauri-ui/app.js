@@ -34,6 +34,18 @@ const selectionElementCandidates = document.getElementById("selection-element-ca
 const statusText = document.getElementById("status-text");
 const statusHistory = document.getElementById("status-history");
 const outputCommand = document.getElementById("output-command");
+const consoleRun = document.getElementById("console-run");
+const consoleStop = document.getElementById("console-stop");
+const consoleCompletions = document.getElementById("console-completions");
+let consoleDialect = "CueMol";
+let consoleGeneration = 0;
+let consolePollTimer = null;
+let consoleComposition = false;
+let consoleCompositionCommit = 0;
+let consoleCandidates = [];
+let consoleCandidateIndex = 0;
+let consoleCompletionSuffix = "";
+
 const metrics = document.getElementById("scene-metrics");
 const projectionReadout = document.getElementById("projection-readout");
 const inspectorTitle = document.getElementById("inspector-title");
@@ -233,6 +245,7 @@ let coloringPaintSelectionColumnWidth = null;
 let selectionHistoryEntries = loadSelectionHistory();
 let commandHistoryEntries = loadCommandHistory();
 let commandHistoryPosition = commandHistoryEntries.length;
+let commandHistoryDraft = "";
 let pdbHistoryEntries = [];
 let pdbHistoryRequest = null;
 let pdbHistoryLoaded = false;
@@ -369,12 +382,14 @@ function rememberCommand(command) {
   commandHistoryEntries.push(command);
   commandHistoryEntries = commandHistoryEntries.slice(-MAX_COMMAND_HISTORY);
   commandHistoryPosition = commandHistoryEntries.length;
+  commandHistoryDraft = "";
   saveCommandHistory();
 }
 
 function recallCommand(position) {
+  if (commandHistoryPosition === commandHistoryEntries.length && position < commandHistoryPosition) commandHistoryDraft = outputCommand.value;
   commandHistoryPosition = Math.max(0, Math.min(commandHistoryEntries.length, position));
-  outputCommand.value = commandHistoryEntries[commandHistoryPosition] || "";
+  outputCommand.value = commandHistoryEntries[commandHistoryPosition] ?? commandHistoryDraft;
   requestAnimationFrame(() => {
     const end = outputCommand.value.length;
     outputCommand.setSelectionRange(end, end);
@@ -9163,12 +9178,101 @@ async function executeScriptPath(path) {
   return false;
 }
 
-async function executeOutputCommand() {
-  const script = outputCommand.value;
-  if (!script.trim()) return;
-  rememberCommand(script);
+function closeConsoleCompletions() {
+  consoleCandidates = [];
+  consoleCompletions.hidden = true;
+  consoleCompletions.replaceChildren();
+}
+
+function setConsoleDialect(value) {
+  consoleDialect = ["CueMol", "PyMOL", "JavaScript"].includes(value) ? value : "CueMol";
+  document.querySelectorAll("[data-console-dialect]").forEach(button => button.setAttribute("aria-checked", String(button.dataset.consoleDialect === consoleDialect)));
+  document.getElementById("console-prompt").textContent = consoleDialect === "JavaScript" ? "Js>" : consoleDialect === "PyMOL" ? "PyM>" : "CueMol>";
+  closeConsoleCompletions();
+  try { localStorage.setItem("cuemol.console.dialect", consoleDialect); } catch {}
+}
+
+function showConsoleUpdate(update) {
+  consoleRun.hidden = update.running;
+  consoleStop.hidden = !update.running;
+  if (update.snapshot) {
+    snapshot = update.snapshot;
+    syncEmptyMoleculeDetails();
+    renderShell();
+    void renderViewport();
+    scheduleMoleculeDetailsRefresh();
+  }
+}
+
+function scheduleConsolePoll(generation) {
+  clearTimeout(consolePollTimer);
+  consolePollTimer = setTimeout(async () => {
+    try {
+      const update = await invoke("console_poll");
+      if (generation !== consoleGeneration) return;
+      showConsoleUpdate(update);
+      if (update.running) scheduleConsolePoll(generation);
+    } catch (error) { if (generation === consoleGeneration) showError(error); }
+  }, 30);
+}
+
+async function executeOutputCommand(source = outputCommand.value) {
+  if (!source.trim()) return;
+  const generation = ++consoleGeneration;
+  clearTimeout(consolePollTimer);
+  closeConsoleCompletions();
+  rememberCommand(source);
   outputCommand.value = "";
-  await mutate("execute_script", { script });
+  try {
+    const update = await invoke("console_start", {source, dialect: consoleDialect});
+    if (generation !== consoleGeneration) return;
+    showConsoleUpdate(update);
+    if (update.running) scheduleConsolePoll(generation);
+  } catch (error) { showError(error); }
+}
+
+async function stopOutputCommand() {
+  ++consoleGeneration;
+  clearTimeout(consolePollTimer);
+  try { showConsoleUpdate(await invoke("console_stop")); } catch (error) { showError(error); }
+}
+
+function acceptConsoleCompletion(index) {
+  const item = consoleCandidates[index];
+  if (!item) return;
+  outputCommand.value = item.replacement + consoleCompletionSuffix;
+  outputCommand.focus();
+  outputCommand.setSelectionRange(item.replacement.length, item.replacement.length);
+  closeConsoleCompletions();
+}
+
+function renderConsoleCompletions() {
+  consoleCompletions.replaceChildren(...consoleCandidates.map((item, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", String(index === consoleCandidateIndex));
+    button.textContent = item.display;
+    button.addEventListener("click", () => acceptConsoleCompletion(index));
+    return button;
+  }));
+  consoleCompletions.hidden = !consoleCandidates.length;
+  consoleCompletions.querySelector('[aria-selected="true"]')?.scrollIntoView({block: "nearest"});
+}
+
+async function completeOutputCommand() {
+  const value = outputCommand.value;
+  const cursor = outputCommand.selectionStart;
+  const dialect = consoleDialect;
+  try {
+    const items = await invoke("console_complete", {source: value.slice(0, cursor), dialect});
+    if (outputCommand.value !== value || outputCommand.selectionStart !== cursor || consoleDialect !== dialect) return;
+    consoleCompletionSuffix = value.slice(cursor);
+    consoleCandidates = items;
+    consoleCandidateIndex = 0;
+    if (items.length === 1) acceptConsoleCompletion(0);
+    else renderConsoleCompletions();
+  } catch (error) { showError(error); }
 }
 
 function applyCenterMark(value) {
@@ -18397,20 +18501,39 @@ coloringType.addEventListener("change", () => {
   commitColoring(target, coloringType.value, defaultColoringState(coloringType.value, target));
 });
 
+outputCommand.addEventListener("compositionstart", () => { consoleComposition = true; });
+outputCommand.addEventListener("compositionend", () => { consoleComposition = false; consoleCompositionCommit = performance.now(); });
+outputCommand.addEventListener("input", closeConsoleCompletions);
 outputCommand.addEventListener("keydown", (event) => {
-  if (event.key === "Enter") {
+  event.stopPropagation();
+  if (consoleComposition || event.isComposing || event.keyCode === 229) return;
+  if (event.key === "Enter" && performance.now() - consoleCompositionCommit < 40) return;
+  if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+  if (consoleCandidates.length && ["ArrowUp", "ArrowDown", "Tab", "Enter", "Escape"].includes(event.key)) {
+    event.preventDefault();
+    if (event.key === "Escape") closeConsoleCompletions();
+    else if (event.key === "Enter") acceptConsoleCompletion(consoleCandidateIndex);
+    else { consoleCandidateIndex = (consoleCandidateIndex + (event.key === "ArrowUp" ? -1 : 1) + consoleCandidates.length) % consoleCandidates.length; renderConsoleCompletions(); }
+  } else if (event.key === "Enter") {
     event.preventDefault();
     void executeOutputCommand();
-  } else if (event.key === "ArrowUp") {
+  } else if (event.key === "Tab") {
+    event.preventDefault();
+    void completeOutputCommand();
+  } else if (event.key === "ArrowUp" && !outputCommand.value.slice(0, outputCommand.selectionStart).includes("\n")) {
     event.preventDefault();
     if (commandHistoryPosition > 0) recallCommand(commandHistoryPosition - 1);
-  } else if (event.key === "ArrowDown") {
+  } else if (event.key === "ArrowDown" && !outputCommand.value.slice(outputCommand.selectionEnd).includes("\n")) {
     event.preventDefault();
-    if (commandHistoryPosition < commandHistoryEntries.length) {
-      recallCommand(commandHistoryPosition + 1);
-    }
+    if (commandHistoryPosition < commandHistoryEntries.length) recallCommand(commandHistoryPosition + 1);
   }
 });
+document.querySelectorAll("[data-console-dialect]").forEach(button => button.addEventListener("click", () => setConsoleDialect(button.dataset.consoleDialect)));
+consoleRun.addEventListener("click", () => void executeOutputCommand());
+consoleStop.addEventListener("click", () => void stopOutputCommand());
+document.getElementById("console-clear").addEventListener("click", () => void mutate("clear_log", {}, renderShell, false));
+document.getElementById("console-help").addEventListener("click", () => void mutate("console_help", {dialect: consoleDialect}, renderShell, false));
+try { setConsoleDialect(localStorage.getItem("cuemol.console.dialect")); } catch { setConsoleDialect("CueMol"); }
 
 animationPlay.addEventListener("click", () => {
   mutate("animation_control", {

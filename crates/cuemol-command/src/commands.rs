@@ -358,7 +358,7 @@ pub fn call_tool(
             Ok(json!({"objectId":loaded.object_uid.get(),"frames":loaded.frame_count}))
         }
         "append_trajectory" => {let result=state.append_trajectory_block(uid(args,"objId")?,text(args,"path")?,integer(args,"stride",1)?)?;Ok(json!({"objectId":result.object_uid.get(),"frames":result.frame_count}))}
-        "set_frame" => {state.apply_trajectory_frame(uid(args,"objId")?,integer(args,"frame",0)?)?;Ok(json!({"frame":args["frame"]}))}
+        "set_frame" => {let object=uid(args,"objId")?;let frame=integer(args,"frame",0)?;if state.object_has_trajectory(object){state.apply_trajectory_frame(object,frame)?;}else{state.apply_morph_frame(object,frame as f64)?;}Ok(json!({"frame":args["frame"]}))}
         "get_renderer_property" | "set_renderer_property" => {
             let id=uid(args,"rendId")?;let prop=text(args,"prop")?;
             if name=="set_renderer_property" {crate::nodes::set_renderer_property(state,id,prop,text(args,"value")?)?;}
@@ -724,6 +724,16 @@ pub struct PreparedRender {
     dpi: f64,
 }
 impl PreparedRender {
+    pub fn in_memory(mut self) -> Self {
+        self.output = None;
+        self
+    }
+
+    pub fn with_dpi(mut self, dpi: f64) -> Self {
+        self.dpi = dpi.clamp(1., 4800.);
+        self
+    }
+
     pub fn run_with_cancel(self, cancel: &std::sync::atomic::AtomicBool) -> Result<Value> {
         let frame = cuemol_render::render_umbreon_snapshot_with_cancel(
             &self.snapshot,

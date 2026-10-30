@@ -525,8 +525,20 @@
           </section>
               </div>
               <div class="bottom-content active" data-bottom-panel="output">
+                <div class="console-toolbar">
+                  <div role="radiogroup" aria-label="Console language">
+                    <button type="button" role="radio" aria-checked="true" data-console-dialect="CueMol">CueMol</button>
+                    <button type="button" role="radio" aria-checked="false" data-console-dialect="PyMOL">PyMOL</button>
+                    <button type="button" role="radio" aria-checked="false" data-console-dialect="JavaScript">JavaScript</button>
+                  </div>
+                  <button id="console-clear" type="button">Clear</button>
+                  <button id="console-help" type="button">Help</button>
+                  <button id="console-run" type="button">Run</button>
+                  <button id="console-stop" type="button" hidden>Stop</button>
+                </div>
                 <pre id="status-history" class="output-log">cuemol-rs Rust core</pre>
-                <label class="command-line"><span>Js&gt;</span><input id="output-command" type="text" spellcheck="false" autocorrect="off" autocapitalize="off" aria-label="JavaScript command" autocomplete="off" /></label>
+                <div id="console-completions" role="listbox" aria-label="Command completions" hidden></div>
+                <label class="command-line"><span id="console-prompt">CueMol&gt;</span><textarea id="output-command" rows="2" spellcheck="false" autocorrect="off" autocapitalize="off" aria-label="Console command" autocomplete="off"></textarea></label>
               </div>
               <div class="bottom-content sequence-placeholder" data-bottom-panel="sequence">
                 <div id="sequence-view" class="sequence-view">

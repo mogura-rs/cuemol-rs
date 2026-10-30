@@ -18,6 +18,10 @@ image = { version = "0.25", default-features = false, features = ["png"], option
 egui-phosphor = { version = "0.11", optional = true }
 egui = { version = "0.33.3", optional = true }
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures = "0.4"
+
 [features]
 default = []
-egui = ["dep:cuemol-core", "cuemol-command/scripting", "dep:egui-phosphor", "dep:egui", "dep:cuemol-agent", "dep:cuemol-command", "dep:cuemol-desktop-core", "dep:cuemol-qsys", "dep:serde_json", "dep:base64", "dep:zeroize", "dep:image"]
+console-runtime = ["cuemol-command/scripting", "dep:cuemol-agent", "dep:cuemol-command", "dep:cuemol-desktop-core", "dep:cuemol-qsys", "dep:serde_json", "dep:base64"]
+egui = ["console-runtime", "dep:cuemol-core", "dep:egui-phosphor", "dep:egui", "dep:zeroize", "dep:image"]
