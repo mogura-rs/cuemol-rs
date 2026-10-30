@@ -1036,25 +1036,28 @@ impl App {
                 self.logs.remove(0);
             }
         }
-        egui::TopBottomPanel::bottom("bottom-panel")
-            .default_height(if self.bottom_open { 200. } else { 30. })
-            .height_range(if self.bottom_open {
-                100.0..=600.0
-            } else {
-                30.0..=30.0
-            })
-            .resizable(self.bottom_open)
-            .show(ctx, |ui| {
-                ui.set_min_height(ui.available_height());
-                ui.horizontal(|ui| {
-                    for tab in [
-                        "Console",
-                        "Output",
-                        "Sequence",
-                        "Animation",
-                        "MD Trajectory",
-                    ] {
-                        let response = shell::tab(ui, tab, self.bottom_tab == tab);
+        egui::TopBottomPanel::bottom(if self.bottom_open {
+            "bottom-panel"
+        } else {
+            "bottom-panel-collapsed"
+        })
+        .default_height(if self.bottom_open { 200. } else { 30. })
+        .height_range(if self.bottom_open {
+            100.0..=600.0
+        } else {
+            30.0..=30.0
+        })
+        .resizable(self.bottom_open)
+        .show(ctx, |ui| {
+            ui.set_min_height(ui.available_height());
+            let compact = shell::compact_tabs(ui);
+            ui.horizontal(|ui| {
+                if compact {
+                    ui.spacing_mut().item_spacing.x = 2.;
+                }
+                shell::tab_strip(ui, |ui| {
+                    for tab in shell::BOTTOM_TABS {
+                        let response = shell::tab(ui, tab, self.bottom_tab == tab, compact);
                         if response.clicked() {
                             self.bottom_tab = tab.into();
                         }
@@ -1063,128 +1066,141 @@ impl App {
                             self.bottom_open = true;
                         }
                     }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .small_button(if self.bottom_open { "▾" } else { "▴" })
-                            .clicked()
-                        {
-                            self.bottom_open = !self.bottom_open;
-                        }
-                    });
                 });
-                if !self.bottom_open {
-                    return;
-                }
-                ui.separator();
-                match self.bottom_tab.as_str() {
-                    "Console" => {
-                        ui.horizontal(|ui| {
-                            ui.weak("JavaScript");
-                            if ui.small_button("Clear").clicked() {
-                                self.logs.clear();
-                            }
-                            if ui.small_button("Help").clicked() {
-                                self.show_help = true;
-                            }
-                        });
-                        egui::ScrollArea::vertical()
-                            .auto_shrink([false, false])
-                            .min_scrolled_height(0.)
-                            .max_height((ui.available_height() - 30.).max(20.))
-                            .stick_to_bottom(true)
-                            .show(ui, |ui| {
-                                for line in &self.logs {
-                                    ui.monospace(line);
-                                }
-                            });
-                        ui.horizontal(|ui| {
-                            ui.monospace("Js>");
-                            let response = ui.add(
-                                egui::TextEdit::singleline(&mut self.console_source)
-                                    .desired_width(ui.available_width() - 50.),
-                            );
-                            self.record_ui_rect("Console input", &response);
-                            let run = ui.button("Run");
-                            self.record_ui_rect("Console Run", &run);
-                            if run.clicked()
-                                || (response.lost_focus()
-                                    && ui.input(|i| i.key_pressed(egui::Key::Enter)))
-                            {
-                                let source = std::mem::take(&mut self.console_source);
-                                self.call("execute_script", json!({"source":source}));
-                            }
-                        });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let label = if self.bottom_open {
+                        "Collapse panel"
+                    } else {
+                        "Expand panel"
+                    };
+                    let response = shell::icon_button(
+                        ui,
+                        if self.bottom_open {
+                            Icon::Down
+                        } else {
+                            Icon::Up
+                        },
+                        label,
+                        false,
+                        egui::vec2(20., 20.),
+                    );
+                    self.record_ui_rect(label, &response);
+                    if response.clicked() {
+                        self.bottom_open = !self.bottom_open;
                     }
-                    "Output" => {
+                });
+            });
+            if !self.bottom_open {
+                return;
+            }
+            ui.separator();
+            match self.bottom_tab.as_str() {
+                "Console" => {
+                    ui.horizontal(|ui| {
+                        ui.weak("JavaScript");
                         if ui.small_button("Clear").clicked() {
                             self.logs.clear();
                         }
-                        egui::ScrollArea::vertical()
-                            .auto_shrink([false, false])
-                            .min_scrolled_height(0.)
-                            .stick_to_bottom(true)
-                            .show(ui, |ui| {
-                                for line in &self.logs {
-                                    ui.monospace(line);
-                                }
-                            });
-                    }
-                    "Sequence" => {
-                        egui::ScrollArea::both().show(ui, |ui| {
-                            for row in self.state.active_sequence_view(&self.selection) {
-                                ui.horizontal(|ui| {
-                                    ui.label(format!("{} / {}", row.object_name, row.chain_id));
-                                    for residue in row.residues {
-                                        let response = ui
-                                            .selectable_label(residue.selected, &residue.letter)
-                                            .on_hover_text(format!(
-                                                "{} {}",
-                                                residue.res_name, residue.residue_index
-                                            ));
-                                        if response.clicked() {
-                                            self.selected = Some(row.object_uid);
-                                            self.selection = residue.selection;
-                                            self.dirty = true;
-                                        }
-                                    }
-                                });
+                        if ui.small_button("Help").clicked() {
+                            self.show_help = true;
+                        }
+                    });
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .min_scrolled_height(0.)
+                        .max_height((ui.available_height() - 30.).max(20.))
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            for line in &self.logs {
+                                ui.monospace(line);
                             }
                         });
-                    }
-                    "Animation" => {
-                        self.timeline_contents(ui);
-                    }
-                    "MD Trajectory" => {
-                        if let Some((_, frames, current_frame)) = self.trajectory_info() {
-                            ui.horizontal(|ui| {
-                                let label = if self.playing { "Pause" } else { "Play" };
-                                ui.toggle_value(&mut self.playing, label);
-                                let mut frame = current_frame;
-                                if ui
-                                    .add(
-                                        egui::Slider::new(&mut frame, 0..=frames - 1).text("Frame"),
-                                    )
-                                    .changed()
-                                {
-                                    self.request_frame(frame);
-                                }
-                                ui.add(
-                                    egui::DragValue::new(&mut self.fps)
-                                        .range(1.0..=120.)
-                                        .suffix(" fps"),
-                                );
-                            });
-                            ui.label(format!("{} indexed frames", frames));
-                        } else {
-                            ui.label("Open a topology, then choose a trajectory file.");
+                    ui.horizontal(|ui| {
+                        ui.monospace("Js>");
+                        let response = ui.add(
+                            egui::TextEdit::singleline(&mut self.console_source)
+                                .desired_width(ui.available_width() - 50.),
+                        );
+                        self.record_ui_rect("Console input", &response);
+                        let run = ui.button("Run");
+                        self.record_ui_rect("Console Run", &run);
+                        if run.clicked()
+                            || (response.lost_focus()
+                                && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                        {
+                            let source = std::mem::take(&mut self.console_source);
+                            self.call("execute_script", json!({"source":source}));
                         }
-                        if ui.button("Open trajectory…").clicked() {
-                            choose_file();
-                        }
-                    }
-                    _ => {}
+                    });
                 }
-            });
+                "Output" => {
+                    if ui.small_button("Clear").clicked() {
+                        self.logs.clear();
+                    }
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .min_scrolled_height(0.)
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            for line in &self.logs {
+                                ui.monospace(line);
+                            }
+                        });
+                }
+                "Sequence" => {
+                    egui::ScrollArea::both().show(ui, |ui| {
+                        for row in self.state.active_sequence_view(&self.selection) {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("{} / {}", row.object_name, row.chain_id));
+                                for residue in row.residues {
+                                    let response = ui
+                                        .selectable_label(residue.selected, &residue.letter)
+                                        .on_hover_text(format!(
+                                            "{} {}",
+                                            residue.res_name, residue.residue_index
+                                        ));
+                                    if response.clicked() {
+                                        self.selected = Some(row.object_uid);
+                                        self.selection = residue.selection;
+                                        self.dirty = true;
+                                    }
+                                }
+                            });
+                        }
+                    });
+                }
+                "Animation" => {
+                    self.timeline_contents(ui);
+                }
+                "MD Trajectory" => {
+                    if let Some((_, frames, current_frame)) = self.trajectory_info() {
+                        ui.horizontal(|ui| {
+                            let label = if self.playing { "Pause" } else { "Play" };
+                            ui.toggle_value(&mut self.playing, label);
+                            let mut frame = current_frame;
+                            if ui
+                                .add(egui::Slider::new(&mut frame, 0..=frames - 1).text("Frame"))
+                                .changed()
+                            {
+                                self.request_frame(frame);
+                            }
+                            ui.add(
+                                egui::DragValue::new(&mut self.fps)
+                                    .range(1.0..=120.)
+                                    .suffix(" fps"),
+                            );
+                        });
+                        ui.label(format!("{} indexed frames", frames));
+                    } else {
+                        ui.label("Open a topology, then choose a trajectory file.");
+                    }
+                    if ui.button("Open trajectory…").clicked() {
+                        choose_file();
+                    }
+                }
+                _ => {}
+            }
+        });
     }
 }
 

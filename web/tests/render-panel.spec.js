@@ -142,6 +142,39 @@ test('Render remains usable in a small desktop window',async({page},testInfo)=>{
   await page.screenshot({path:testInfo.outputPath('render-small-window.png')});
 });
 
+for (const width of [900,760]) {
+test(`Bottom tabs remain reachable beside the Inspector at ${width}px`,async({page},testInfo)=>{
+  await page.setViewportSize({width,height:650});
+  await page.goto('./?renderer=webgl');
+  await expect.poll(()=>page.evaluate(()=>window.cuemol?.status()?.scene?.sceneId),{timeout:60000}).toBeGreaterThan(0);
+  await load(page,'tabs.pdb',Buffer.from(molecule));
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
+  const object=(await page.evaluate(()=>window.cuemol.status())).scene.objects[0];
+  await click(page,`object:${object.id}`);
+  const viewport=await rect(page,'Viewport');
+  for (const name of ['Console','Output','Sequence','Animation','MD Trajectory']) {
+    const target=await rect(page,name);
+    if (target[0]+target[2]>viewport[0]+viewport[2]-24) {
+      await page.mouse.move(viewport[0]+20,target[1]+target[3]/2);
+      await page.mouse.wheel(500,0);
+      await present(page);
+    }
+    const [x,y,w,h]=await rect(page,name);
+    expect(x).toBeGreaterThanOrEqual(viewport[0]);
+    expect(x+w).toBeLessThanOrEqual(viewport[0]+viewport[2]-24);
+    expect(y+h).toBeLessThanOrEqual(650);
+    await click(page,name);
+    await expect.poll(()=>page.evaluate(()=>window.cuemol.status().ui.bottom)).toBe(name);
+  }
+  const expanded=await rect(page,'Viewport');
+  await click(page,'Collapse panel');
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().ui.rects.Viewport[3])).toBeGreaterThan(expanded[3]);
+  await click(page,'Expand panel');
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().ui.rects.Viewport[3])).toBe(expanded[3]);
+  await page.screenshot({path:testInfo.outputPath('compact-bottom-tabs.png')});
+});
+}
+
 
 test('DPI edits preserve physical image dimensions', async ({page}) => {
   await page.goto('./?renderer=webgl');

@@ -369,7 +369,44 @@ pub fn paint_icon(ui: &Ui, icon: Icon, rect: Rect, color: Color32) {
     );
 }
 
-pub fn tab(ui: &mut Ui, label: &str, selected: bool) -> Response {
+pub const BOTTOM_TABS: [&str; 5] = [
+    "Console",
+    "Output",
+    "Sequence",
+    "Animation",
+    "MD Trajectory",
+];
+
+pub fn compact_tabs(ui: &Ui) -> bool {
+    let labels = BOTTOM_TABS
+        .iter()
+        .map(|label| {
+            ui.painter()
+                .layout_no_wrap(
+                    label.to_uppercase(),
+                    egui::FontId::proportional(12.),
+                    ui.visuals().text_color(),
+                )
+                .size()
+                .x
+                + 34.
+        })
+        .sum::<f32>();
+    labels + 20. + BOTTOM_TABS.len() as f32 * ui.spacing().item_spacing.x > ui.available_width()
+}
+
+pub fn tab_strip(ui: &mut Ui, add_tabs: impl FnOnce(&mut Ui)) {
+    let width = (ui.available_width() - 20. - ui.spacing().item_spacing.x).max(0.);
+    egui::ScrollArea::horizontal()
+        .id_salt("bottom-tabs")
+        .max_width(width)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            ui.horizontal(add_tabs);
+        });
+}
+
+pub fn tab(ui: &mut Ui, label: &str, selected: bool, compact: bool) -> Response {
     let icon = match label {
         "Console" => Icon::Console,
         "Output" => Icon::Output,
@@ -383,8 +420,8 @@ pub fn tab(ui: &mut Ui, label: &str, selected: bool) -> Response {
         egui::FontId::proportional(12.),
         ui.visuals().text_color(),
     );
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(text.size().x + 34., 28.), Sense::click());
+    let width = if compact { 28. } else { text.size().x + 34. };
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 28.), Sense::click());
     if response.hovered() {
         ui.painter()
             .rect_filled(rect, 0., ui.visuals().widgets.hovered.bg_fill);
@@ -399,16 +436,22 @@ pub fn tab(ui: &mut Ui, label: &str, selected: bool) -> Response {
         ui,
         icon,
         Rect::from_center_size(
-            rect.left_center() + egui::vec2(12., 0.),
+            if compact {
+                rect.center()
+            } else {
+                rect.left_center() + egui::vec2(12., 0.)
+            },
             egui::vec2(14., 14.),
         ),
         ui.visuals().weak_text_color(),
     );
-    ui.painter().galley(
-        rect.left_center() + egui::vec2(24., -text.size().y * 0.5),
-        text,
-        ui.visuals().text_color(),
-    );
+    if !compact {
+        ui.painter().galley(
+            rect.left_center() + egui::vec2(24., -text.size().y * 0.5),
+            text,
+            ui.visuals().text_color(),
+        );
+    }
     response.widget_info(|| {
         egui::WidgetInfo::selected(
             egui::WidgetType::SelectableLabel,
@@ -417,7 +460,7 @@ pub fn tab(ui: &mut Ui, label: &str, selected: bool) -> Response {
             label,
         )
     });
-    response
+    response.on_hover_text(label)
 }
 
 pub fn visibility(ui: &mut Ui, visible: &mut bool) -> Response {

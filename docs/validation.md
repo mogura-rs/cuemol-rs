@@ -51,13 +51,16 @@ visit nearer BVH nodes first and retain the original tie order for coincident
 surfaces. The browser reuses its ray index across passes and yields through
 MessageChannel between ray and denoising-guide batches. Regression checks cover
 parallel/boundary rays, distance limits, accepted-hit filters and coincident
-surfaces. The native GUI suite passed 173 tests with one explicit POV-Ray
+surfaces. The native GUI suite passed 174 tests with one explicit POV-Ray
 exclusion, and all 69 shell compatibility checks passed. An input regression
 checks selection, drag payloads, visibility, locking and tree expansion without
 overlapping drag handlers. A Linux source window passed OS drag/wheel input,
 font-family and multiline rendering, and Python helper export. Separate OS mouse
 checks toggled object visibility and started a render; the displayed 64 x 48
 preview matched the command-generated image pixel for pixel.
+A further native window check preserved 1.3 by 0.7 inches at 64.5 DPI and
+produced an 84 x 45 preview and PNG. The PNG stores integer pixels per metre,
+so reading its resolution back gives 64.4906 DPI.
 
 Browser checks cover the preview/save/cancel flow, a small window, physical units,
 visibility and undo, and paint entry editing, addition, reordering and deletion.
@@ -70,6 +73,28 @@ An additional Chromium check delays the real OIDN model request, presses Stop,
 then releases the request. Cancellation rejects the OIDN promise through the
 JavaScript bridge; the earlier preview remains unchanged and no late download
 occurs. This check did not reproduce the review's suspected cancellation leak.
+
+Inspection of the v0.1.7 distribution exposed clipped bottom-panel tabs when the
+Inspector reduced the central area in a small window. A 900-pixel browser window
+reproduced a tab ending at x=681 while its panel ended at x=600. The native GUI
+also failed to operate the hidden panel toggle. Both frontends now use icon tabs
+when the labels would exceed the available width, retain names in tooltips and
+reserve space for the collapse/expand control. Regression checks click all five
+browser tabs and both panel controls, and exercise the native trajectory tab and
+panel controls with the Inspector open. The tab strip also scrolls horizontally
+when even the icons exceed its width. A separate browser check reproduced a
+200-pixel panel reopening at 100 pixels. Expanded and collapsed layouts now keep
+separate sizing state, so reopening preserves the expanded height.
+
+The public Firefox run also exposed a timing assumption in two concurrency tests.
+A render completed normally in about 0.77 seconds, before the PDB-dialog input
+finished; the test incorrectly expected it still to be busy. These tests now hold
+the real render task at a MessageChannel scheduling boundary, verify that queued
+input cannot release its busy state, then cancel and release the task. The PDB
+case checks that no download starts during the render and that HTTP failure is
+handled afterward. The two tests passed three repetitions each on Chrome,
+Firefox and WebKit, for 18 successful executions, without changing application
+code for this timing issue.
 
 ## Browser text input and default appearance
 

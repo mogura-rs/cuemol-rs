@@ -16,6 +16,10 @@ first launch, start with the [README](../README.md#installation).
 The native and browser interfaces use Tritium's activity bar, Explorer,
 scene tabs, right-hand Inspector, viewport tools, and bottom panels for console,
 output, animation, sequence and trajectories. Both support light and dark themes.
+When the central area is narrow, bottom-panel tabs use icons; hover to see their
+names. If the icons still exceed the available width, scroll the tab strip
+horizontally. The panel's collapse/expand button remains at the right edge, and
+opening the panel restores its previous height.
 The View menu provides parallel and cross stereo, eye swapping, and angular
 separation. Each eye has its own projection, picking, labels and post-processing;
 CPU image exports and offscreen depth captures use the same eye cameras.

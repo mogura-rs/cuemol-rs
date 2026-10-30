@@ -290,19 +290,25 @@ impl GuiApplication {
             });
         let response = panel.show(ctx, |ui| {
             let previous = self.bottom_tab;
+            let compact = shell::compact_tabs(ui);
             ui.horizontal(|ui| {
-                for (tab, label) in [
-                    (BottomTab::Console, "Console"),
-                    (BottomTab::Output, "Output"),
-                    (BottomTab::Sequence, "Sequence"),
-                    (BottomTab::Animation, "Animation"),
-                    (BottomTab::Trajectory, "MD Trajectory"),
-                ] {
-                    if shell::tab(ui, label, self.bottom_tab == tab).clicked() {
-                        self.bottom_tab = tab;
-                        self.show_bottom_panel = true;
-                    }
+                if compact {
+                    ui.spacing_mut().item_spacing.x = 2.;
                 }
+                shell::tab_strip(ui, |ui| {
+                    for (tab, label) in [
+                        (BottomTab::Console, "Console"),
+                        (BottomTab::Output, "Output"),
+                        (BottomTab::Sequence, "Sequence"),
+                        (BottomTab::Animation, "Animation"),
+                        (BottomTab::Trajectory, "MD Trajectory"),
+                    ] {
+                        if shell::tab(ui, label, self.bottom_tab == tab, compact).clicked() {
+                            self.bottom_tab = tab;
+                            self.show_bottom_panel = true;
+                        }
+                    }
+                });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if shell::icon_button(
                         ui,
@@ -432,6 +438,46 @@ mod tests {
         assert!(app
             .viewport_rect
             .is_some_and(|rect| rect.left() >= 44. && rect.width() > 300. && rect.height() > 100.));
+    }
+    #[test]
+    fn compact_bottom_tabs_remain_clickable_beside_the_inspector() {
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        let scene = app.state.active_scene().unwrap();
+        let molecule = cuemol_molstr::read_pdb_str(
+            "HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap();
+        let object = app
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene)
+            .unwrap()
+            .add_molecule("tabs", molecule);
+        app.selected_object = Some(object);
+        app.show_bottom_panel = true;
+        app.bottom_panel_height = 240.;
+        let viewports = std::cell::RefCell::new(Vec::new());
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900., 650.))
+            .build(|ctx| {
+                app.ui(ctx, &mut camera);
+                viewports.borrow_mut().push(app.viewport_rect.unwrap());
+            });
+        harness.run();
+        harness.get_by_label("MD Trajectory").click();
+        harness.run();
+        let expanded = *viewports.borrow().last().unwrap();
+        harness.get_by_label("Collapse panel").click();
+        harness.run();
+        assert!(viewports.borrow().last().unwrap().height() > expanded.height());
+        harness.get_by_label("Expand panel").click();
+        harness.run();
+        assert_eq!(*viewports.borrow().last().unwrap(), expanded);
+        drop(harness);
+        assert_eq!(app.bottom_tab, BottomTab::Trajectory);
+        assert!(app.show_bottom_panel);
+        assert!(app.viewport_rect.unwrap().width() < 500.);
     }
     #[test]
     fn log_growth_keeps_the_viewport_fixed_during_atom_clicks() {
