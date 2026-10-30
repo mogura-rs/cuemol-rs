@@ -195,8 +195,8 @@ impl App {
                 self.inspector_target.clone(),
                 self.revision,
             );
-            for args in self.inspector.panel(ctx) {
-                self.call("set_node_prop", args);
+            for (tool, args) in self.inspector.panel(ctx) {
+                self.call(tool, args);
             }
         }
         self.shell_bottom(ctx);

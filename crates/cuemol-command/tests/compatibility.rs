@@ -905,3 +905,490 @@ fn property_paths_match_dotted_names_object_precedence_and_uid_references() {
     );
     assert_eq!(camera.zoom(), 25.);
 }
+
+fn property_row(state: &mut DesktopAppState, camera: &mut Camera, id: u64, key: &str) -> Value {
+    node_property_row(state, camera, "renderer", id, key)
+}
+
+fn node_property_row(
+    state: &mut DesktopAppState,
+    camera: &mut Camera,
+    kind: &str,
+    id: u64,
+    key: &str,
+) -> Value {
+    call(
+        state,
+        camera,
+        "list_node_props",
+        json!({"nodeType":kind,"nodeId":id}),
+    )["properties"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["key"] == key)
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn inspector_object_default_flags_survive_save_and_query_scripts() {
+    let mut state = DesktopAppState::new();
+    let mut camera = Camera::new();
+    let id = molecule(&mut state, &mut camera, "object-defaults", 0.);
+    let values = [
+        ("visible", "true"),
+        ("locked", "false"),
+        ("ui_collapsed", "false"),
+        ("xformMat", "(identity)"),
+    ];
+    for (key, value) in values {
+        assert_eq!(
+            node_property_row(&mut state, &mut camera, "object", id, key)["isdefault"],
+            true,
+            "{key}"
+        );
+        call(
+            &mut state,
+            &mut camera,
+            "set_node_prop",
+            json!({"nodeType":"object","nodeId":id,"prop":key,"value":value}),
+        );
+        assert_eq!(
+            node_property_row(&mut state, &mut camera, "object", id, key)["isdefault"],
+            false,
+            "{key}"
+        );
+    }
+    let bytes = state.active_scene_bytes().unwrap();
+    let mut restored = DesktopAppState::new();
+    restored.open_bytes("defaults.qsc", &bytes).unwrap();
+    let restored_id = restored.active_object_summaries()[0].uid.get();
+    for (key, _) in values {
+        assert_eq!(
+            node_property_row(&mut restored, &mut camera, "object", restored_id, key)["isdefault"],
+            false,
+            "{key}"
+        );
+    }
+    call(
+        &mut restored,
+        &mut camera,
+        "reset_node_props",
+        json!({"nodeType":"object","nodeId":restored_id}),
+    );
+    #[cfg(feature = "scripting")]
+    {
+        let before = restored.clone();
+        restored
+            .run_script_js("print(cuemol.getObject('object-defaults.pdb').visible);")
+            .unwrap();
+        assert!(before.same_undo_state(&restored));
+        restored
+            .run_script_js(
+                "var o=cuemol.getObject('object-defaults.pdb'); o.visible=true; o.locked=false;",
+            )
+            .unwrap();
+        for key in ["visible", "locked"] {
+            assert_eq!(
+                node_property_row(&mut restored, &mut camera, "object", restored_id, key)
+                    ["isdefault"],
+                false,
+                "{key}"
+            );
+        }
+        restored.run_script_js("var o=cuemol.getObject('object-defaults.pdb'); cuemol.resetProp(o,'visible'); cuemol.resetProp(o,'locked');").unwrap();
+    }
+    for (key, _) in values {
+        assert_eq!(
+            node_property_row(&mut restored, &mut camera, "object", restored_id, key)["isdefault"],
+            true,
+            "{key}"
+        );
+    }
+    let bytes = restored.active_scene_bytes().unwrap();
+    let xml = String::from_utf8_lossy(&bytes);
+    let tag = xml.lines().find(|line| line.contains("<object ")).unwrap();
+    for (key, _) in values {
+        assert!(!tag.contains(&format!(" {key}=\"")), "{tag}");
+    }
+}
+
+#[test]
+fn inspector_object_default_color_changes_render_colors_and_roundtrips() {
+    let mut state = DesktopAppState::new();
+    let mut camera = Camera::new();
+    let id = molecule(&mut state, &mut camera, "object-color", 0.);
+    state
+        .set_object_coloring(
+            Uid::new(id),
+            Some("SolidColoring".into()),
+            Default::default(),
+        )
+        .unwrap();
+    let renderer = state
+        .scene_manager_mut()
+        .object_mut(Uid::new(id))
+        .unwrap()
+        .add_renderer("cpk", "color");
+    state
+        .set_renderer_coloring_details(
+            Uid::new(id),
+            renderer,
+            Some("SolidColoring".into()),
+            Default::default(),
+            Vec::new(),
+            Some("$molcol".into()),
+        )
+        .unwrap();
+    call(
+        &mut state,
+        &mut camera,
+        "set_node_prop",
+        json!({"nodeType":"renderer","nodeId":renderer.get(),"prop":"defaultcolor","value":"$molcol"}),
+    );
+    call(
+        &mut state,
+        &mut camera,
+        "set_node_prop",
+        json!({"nodeType":"object","nodeId":id,"prop":"defaultcolor","value":"#2468ac"}),
+    );
+    let assert_color = |state: &DesktopAppState, expected: [u8; 3], stage: &str| {
+        let snapshot = state.active_render_snapshot("").unwrap();
+        assert_eq!(snapshot.atoms.len(), 8);
+        for atom in snapshot.atoms {
+            let rgba = atom.color.unwrap().rgba8().unwrap();
+            assert_eq!(
+                [rgba.r, rgba.g, rgba.b],
+                expected,
+                "{stage}: {:?}",
+                state.active_object_summaries()
+            );
+        }
+    };
+    assert_color(&state, [0x24, 0x68, 0xac], "set");
+    let mut restored = DesktopAppState::new();
+    restored
+        .open_bytes("color.qsc", &state.active_scene_bytes().unwrap())
+        .unwrap();
+    assert_color(&restored, [0x24, 0x68, 0xac], "reload");
+    let id = restored.active_object_summaries()[0].uid.get();
+    call(
+        &mut restored,
+        &mut camera,
+        "reset_node_props",
+        json!({"nodeType":"object","nodeId":id,"props":["defaultcolor"]}),
+    );
+    assert_color(&restored, [255, 255, 255], "reset");
+    #[cfg(feature = "scripting")]
+    {
+        restored
+            .run_script_js(
+                "var o=cuemol.getObject('object-color.pdb'); o.defaultcolor=cuemol.makeColor('blue');",
+            )
+            .unwrap();
+        assert_color(&restored, [0, 0, 255], "script");
+        restored
+            .run_script_js(
+                "var o=cuemol.getObject('object-color.pdb'); cuemol.resetProp(o,'defaultcolor');",
+            )
+            .unwrap();
+        assert_color(&restored, [255, 255, 255], "reset");
+        assert_eq!(
+            node_property_row(&mut restored, &mut camera, "object", id, "defaultcolor")
+                ["isdefault"],
+            true
+        );
+    }
+}
+
+#[test]
+fn inspector_nested_defaults_match_reference_and_survive_scene_reload() {
+    let mut state = DesktopAppState::new();
+    let mut camera = Camera::new();
+    let object = Uid::new(molecule(&mut state, &mut camera, "properties", 0.));
+    let id = state
+        .scene_manager_mut()
+        .object_mut(object)
+        .unwrap()
+        .add_renderer("ribbon", "plain");
+    let initial = property_row(&mut state, &mut camera, id.get(), "helixhead.type");
+    assert_eq!(initial["value"], "arrow");
+    assert_eq!(initial["defaultValue"], "smooth");
+    assert_eq!(initial["isdefault"], true);
+    assert_eq!(initial["allowed"], json!(["arrow", "flat", "smooth"]));
+    assert_eq!(
+        property_row(&mut state, &mut camera, id.get(), "helix.detail")["type"],
+        "integer"
+    );
+    assert_eq!(
+        property_row(&mut state, &mut camera, id.get(), "style")["readonly"],
+        true
+    );
+    for (key, value) in [
+        ("helixhead.type", "flat"),
+        ("helix.width", "2.5"),
+        ("alpha", "1"),
+    ] {
+        call(
+            &mut state,
+            &mut camera,
+            "set_node_prop",
+            json!({"nodeType":"renderer","nodeId":id.get(),"prop":key,"value":value}),
+        );
+        assert_eq!(
+            property_row(&mut state, &mut camera, id.get(), key)["isdefault"],
+            false
+        );
+    }
+    for (key, value) in [
+        ("helixhead.type", "unknown"),
+        ("helix.detail", "1.2"),
+        ("helix.width", "NaN"),
+    ] {
+        assert!(call_tool(
+            &mut state,
+            &mut camera,
+            "set_node_prop",
+            &json!({"nodeType":"renderer","nodeId":id.get(),"prop":key,"value":value})
+        )
+        .is_err());
+    }
+    assert!(call_tool(
+        &mut state,
+        &mut camera,
+        "reset_node_props",
+        &json!({"nodeType":"renderer","nodeId":id.get(),"props":["helix.width","name"]})
+    )
+    .is_err());
+    assert_eq!(
+        property_row(&mut state, &mut camera, id.get(), "helix.width")["value"],
+        "2.5"
+    );
+    let result = call(
+        &mut state,
+        &mut camera,
+        "reset_node_props",
+        json!({"nodeType":"renderer","nodeId":id.get()}),
+    );
+    assert_eq!(result["reset"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        property_row(&mut state, &mut camera, id.get(), "helixhead.type")["value"],
+        "smooth"
+    );
+    assert_eq!(
+        property_row(&mut state, &mut camera, id.get(), "helixhead.type")["isdefault"],
+        true
+    );
+    assert_eq!(
+        property_row(&mut state, &mut camera, id.get(), "name")["value"],
+        "plain"
+    );
+    assert_eq!(
+        call(
+            &mut state,
+            &mut camera,
+            "reset_node_props",
+            json!({"nodeType":"renderer","nodeId":id.get()})
+        )["reset"],
+        json!([])
+    );
+    let bytes = state.active_scene_bytes().unwrap();
+    let mut restored = DesktopAppState::new();
+    restored.open_bytes("properties.qsc", &bytes).unwrap();
+    let loaded_object = restored.active_object_summaries()[0].uid;
+    let loaded_renderer = restored
+        .scene_manager()
+        .object(loaded_object)
+        .unwrap()
+        .renderer_by_name("plain")
+        .unwrap()
+        .uid();
+    assert_eq!(
+        property_row(
+            &mut restored,
+            &mut camera,
+            loaded_renderer.get(),
+            "helixhead.type"
+        )["value"],
+        "smooth"
+    );
+    call(
+        &mut restored,
+        &mut camera,
+        "set_node_prop",
+        json!({"nodeType":"renderer","nodeId":loaded_renderer.get(),"prop":"helix.width","value":"3"}),
+    );
+    let bytes = restored.active_scene_bytes().unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("width=\"3\""));
+}
+
+#[test]
+fn inspector_reset_preserves_style_inheritance_and_selection() {
+    let mut state = DesktopAppState::new();
+    let mut camera = Camera::new();
+    let object = Uid::new(molecule(&mut state, &mut camera, "styled", 0.));
+    let scene = state.active_scene().unwrap();
+    let index = state.create_scene_style(scene, "custom").unwrap();
+    state.update_scene_style(scene, index, "custom", false, r#"<styles id="custom"><style id="ribbon-custom"><helix width="1.75"/><helixhead type="flat"/></style></styles>"#).unwrap();
+    let id = state
+        .scene_manager_mut()
+        .object_mut(object)
+        .unwrap()
+        .add_renderer("ribbon", "styled");
+    state
+        .set_renderer_styles(object, id, "ribbon-custom")
+        .unwrap();
+    call(
+        &mut state,
+        &mut camera,
+        "set_node_prop",
+        json!({"nodeType":"renderer","nodeId":id.get(),"prop":"sel","value":"resid 1:3"}),
+    );
+    assert_eq!(
+        property_row(&mut state, &mut camera, id.get(), "helix.width")["value"],
+        "1.75"
+    );
+    for (key, value) in [("helix.width", "8"), ("helixhead.type", "arrow")] {
+        call(
+            &mut state,
+            &mut camera,
+            "set_node_prop",
+            json!({"nodeType":"renderer","nodeId":id.get(),"prop":key,"value":value}),
+        );
+    }
+    call(
+        &mut state,
+        &mut camera,
+        "reset_node_props",
+        json!({"nodeType":"renderer","nodeId":id.get()}),
+    );
+    assert_eq!(
+        property_row(&mut state, &mut camera, id.get(), "helix.width")["value"],
+        "1.75"
+    );
+    assert_eq!(
+        property_row(&mut state, &mut camera, id.get(), "helixhead.type")["value"],
+        "flat"
+    );
+    assert_eq!(
+        property_row(&mut state, &mut camera, id.get(), "sel")["value"],
+        "resid 1:3"
+    );
+    assert_eq!(
+        property_row(&mut state, &mut camera, id.get(), "style")["value"],
+        "ribbon-custom"
+    );
+    #[cfg(feature = "scripting")]
+    assert_eq!(state.run_script_js("var r=cuemol.getObject('styled.pdb').getRendererByName('styled'); print(r.helixhead.type); print(r.helix.width);").unwrap().0, "flat\n1.75\n");
+}
+
+#[test]
+fn inspector_group_rename_and_structured_visibility_keep_members_together() {
+    let mut state = DesktopAppState::new();
+    let mut camera = Camera::new();
+    let object = Uid::new(molecule(&mut state, &mut camera, "grouped", 0.));
+    let group = call(
+        &mut state,
+        &mut camera,
+        "create_group",
+        json!({"objId":object.get(),"name":"group"}),
+    )["rendererId"]
+        .as_u64()
+        .unwrap();
+    let renderer = state
+        .scene_manager_mut()
+        .object_mut(object)
+        .unwrap()
+        .add_renderer("cpk", "member");
+    state
+        .set_workspace_renderer_group_name(object, renderer, Some("group"))
+        .unwrap();
+    call(
+        &mut state,
+        &mut camera,
+        "set_node_prop",
+        json!({"nodeType":"renderer","nodeId":group,"prop":"name","value":"renamed"}),
+    );
+    assert_eq!(
+        property_row(&mut state, &mut camera, renderer.get(), "group")["value"],
+        "renamed"
+    );
+    call(
+        &mut state,
+        &mut camera,
+        "set_node_prop",
+        json!({"nodeType":"renderer","nodeId":group,"prop":"visible","value":"false"}),
+    );
+    assert_eq!(
+        property_row(&mut state, &mut camera, renderer.get(), "visible")["value"],
+        "true"
+    );
+    call(
+        &mut state,
+        &mut camera,
+        "set_node_prop",
+        json!({"nodeType":"renderer","nodeId":group,"prop":"visible","value":"false","cascadeGroupVisibility":true}),
+    );
+    assert_eq!(
+        property_row(&mut state, &mut camera, renderer.get(), "visible")["value"],
+        "false"
+    );
+    let second = Uid::new(molecule(&mut state, &mut camera, "other", 3.));
+    state
+        .scene_manager_mut()
+        .object_mut(second)
+        .unwrap()
+        .add_renderer("cpk", "occupied");
+    for name in ["member", "occupied"] {
+        assert!(call_tool(
+            &mut state,
+            &mut camera,
+            "set_node_prop",
+            &json!({"nodeType":"renderer","nodeId":group,"prop":"name","value":name})
+        )
+        .is_err());
+    }
+    assert_eq!(
+        property_row(&mut state, &mut camera, group, "name")["value"],
+        "renamed"
+    );
+}
+
+#[cfg(feature = "scripting")]
+#[test]
+fn inspector_script_child_reset_uses_class_default_and_later_writes_are_explicit() {
+    let mut state = DesktopAppState::new();
+    let mut camera = Camera::new();
+    let object = Uid::new(molecule(&mut state, &mut camera, "scripted", 0.));
+    let id = state
+        .scene_manager_mut()
+        .object_mut(object)
+        .unwrap()
+        .add_renderer("ribbon", "plain");
+    let script = "var r=cuemol.getObject('scripted.pdb').getRendererByName('plain'); var j=cuemol.createObj('JctTable'); print(j.type); cuemol.resetProp(j,'type'); print(j.type); r.helixhead.type='flat'; cuemol.resetProp(r.helixhead,'type'); print(r.helixhead.type);";
+    assert_eq!(
+        state.run_script_js(script).unwrap().0,
+        "arrow\nsmooth\nsmooth\n"
+    );
+    assert_eq!(
+        property_row(&mut state, &mut camera, id.get(), "helixhead.type")["isdefault"],
+        true
+    );
+    state.run_script_js("var r=cuemol.getObject('scripted.pdb').getRendererByName('plain'); r.helixhead.type='arrow'; cuemol.resetProp(r.helix,'width'); r.helix.width=2.75;").unwrap();
+    assert_eq!(
+        property_row(&mut state, &mut camera, id.get(), "helixhead.type")["value"],
+        "arrow"
+    );
+    assert_eq!(
+        property_row(&mut state, &mut camera, id.get(), "helixhead.type")["isdefault"],
+        false
+    );
+    assert_eq!(
+        property_row(&mut state, &mut camera, id.get(), "helix.width")["isdefault"],
+        false
+    );
+    assert!(
+        String::from_utf8_lossy(&state.active_scene_bytes().unwrap()).contains("width=\"2.75\"")
+    );
+}

@@ -246,7 +246,11 @@ fn write_node(output: &mut String, node: &LDom2Node, indent: usize) {
 
     let permit_user_type_attr = node.is_read_only() && node.child_count() != 0;
     if !permit_user_type_attr {
-        let type_attr = node.str_attr("type").to_string();
+        let type_attr = node
+            .find_child("type")
+            .filter(|child| !child.is_default() && !child.is_read_only())
+            .map(|child| child.value().to_string())
+            .unwrap_or_default();
         let type_value = if !node.type_name().is_empty() {
             node.type_name()
         } else {

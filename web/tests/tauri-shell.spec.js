@@ -112,6 +112,35 @@ async function openShell(page, storage = {}, options = {}) {
         return {snapshot: structuredClone(snapshot), running: window.__actionsRunning || command !== 'console_stop' && Boolean(options.consoleRunning)};
       }
       if (command === 'console_complete') return [{display: 'Probe', replacement: 'select Probe'}];
+      if (command === 'inspector_request') {
+        const target = args.args.nodeId === 4 ? renderer : molecule;
+        const defaults = {alpha:'1', visible:'true', detail:'4', egtype:'none'};
+        const values = {name:target.name, visible:String(target.visible), uid:String(target.uid),
+          ...(target === renderer ? {alpha:String(renderer.alpha), detail:String(renderer.detail), egtype:renderer.edgeType, style:renderer.style} : {})};
+        const rows = () => Object.entries(values).map(([key,value]) => ({key,value,
+          type: key === 'visible' ? 'boolean' : key === 'alpha' ? 'real' : key === 'detail' || key === 'uid' ? 'integer' : key === 'egtype' ? 'enum' : 'string',
+          category: ['name','visible'].includes(key) ? 'Common' : key === 'uid' ? 'Identity' : 'Appearance',
+          readonly: ['uid','style'].includes(key), hasdefault:Object.hasOwn(defaults,key),
+          isdefault:value === defaults[key], defaultValue:defaults[key], allowed:key === 'egtype' ? ['none','edges','silhouette'] : undefined,
+        }));
+        if (args.tool === 'list_node_props') {
+          const properties=rows();
+          if (window.__delayInspector) { window.__delayInspector=false; return new Promise(resolve=>{window.__releaseInspector=()=>resolve({properties});}); }
+          return {properties};
+        }
+        const set = (key,value) => {
+          values[key]=value;
+          if(key==='name') target.name=value;
+          if(key==='visible') target.visible=value==='true';
+          if(key==='alpha') renderer.alpha=Number(value);
+          if(key==='detail') renderer.detail=Number(value);
+          if(key==='egtype') renderer.edgeType=value;
+        };
+        if(args.tool==='set_node_prop') set(args.args.prop,args.args.value);
+        else for(const key of args.args.props || Object.keys(defaults)) if(Object.hasOwn(values,key)) set(key,defaults[key]);
+        snapshot.canUndo=true; snapshot.undoDescriptions.push('Change properties');
+        return {snapshot:structuredClone(snapshot),result:{properties:rows()}};
+      }
       if (command === 'rename_workspace_node') {
         if (args.input.objectUid !== 3) throw new Error('wrong inspector object');
         if (args.input.kind === 'renderer') renderer.name = args.input.name;
@@ -326,8 +355,8 @@ test('Tauri inspector follows selection and edits the selected renderer', async 
   await page.getByLabel('Inspected name').fill('Visible atoms');
   await page.getByLabel('Inspected name').press('Tab');
   await expect(page.locator('.tree-renderer')).toContainText('Visible atoms');
-  const rename = await page.evaluate(() => window.__shellCalls.find(call => call.command === 'rename_workspace_node'));
-  expect(rename.args.input).toEqual({kind: 'renderer', objectUid: 3, rendererUid: 4, name: 'Visible atoms'});
+  const rename = await page.evaluate(() => window.__shellCalls.find(call => call.command === 'inspector_request' && call.args.tool === 'set_node_prop'));
+  expect(rename.args.args).toEqual({nodeType:'renderer',nodeId:4,prop:'name',value:'Visible atoms',cascadeGroupVisibility:true});
   await page.getByRole('button', {name: 'Close inspector'}).click();
   await expect(page.getByRole('complementary', {name: 'Inspector'})).not.toBeVisible();
   await page.locator('.tree-object').filter({hasText: 'Probe'}).click();
@@ -541,5 +570,31 @@ test('Tauri console keeps multiline drafts, IME, completion, dialect and stop co
   await expect(page.locator('[data-console-dialect="PyMOL"]')).toHaveAttribute('aria-checked', 'true');
   await input.press('ArrowUp');
   await expect(input).toHaveValue(source);
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri inspector uses typed fields and rejects late results after changing selection', async ({page}) => {
+  const errors=await openShell(page);
+  await page.locator('.tree-renderer').filter({hasText:'Atoms'}).click();
+  const alpha=page.getByLabel('Inspected alpha',{exact:true});
+  await expect(alpha).toHaveAttribute('type','number');
+  await alpha.fill('0.4'); await alpha.press('Tab');
+  await expect(page.getByRole('button',{name:'Reset alpha',exact:true})).toBeEnabled();
+  await page.getByRole('button',{name:'Reset alpha',exact:true}).click();
+  await expect(alpha).toHaveValue('1');
+  await page.getByLabel('Inspected egtype',{exact:true}).selectOption('silhouette');
+  await expect(page.getByLabel('Inspected egtype',{exact:true})).toHaveValue('silhouette');
+  await page.getByRole('button',{name:'Reset all to default',exact:true}).click();
+  await expect(page.getByLabel('Inspected egtype',{exact:true})).toHaveValue('none');
+  await page.getByRole('tab',{name:'Generic',exact:true}).click();
+  await expect(page.getByLabel('Inspected uid',{exact:true})).toBeDisabled();
+  await page.evaluate(()=>{window.__delayInspector=true;});
+  await page.locator('.tree-object').filter({hasText:'Probe'}).click();
+  await expect.poll(()=>page.evaluate(()=>typeof window.__releaseInspector)).toBe('function');
+  await page.locator('.tree-renderer').filter({hasText:'Atoms'}).click();
+  await expect(page.getByLabel('Inspected name')).toHaveValue('Atoms');
+  await page.evaluate(()=>window.__releaseInspector());
+  await expect(page.getByLabel('Inspected name')).toHaveValue('Atoms');
   expect(errors).toEqual([]);
 });

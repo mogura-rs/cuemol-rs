@@ -1,4 +1,4 @@
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RendererAttrKind {
     Boolean,
     Integer,
@@ -15,6 +15,159 @@ pub struct RendererAttrProperty {
     pub kind: RendererAttrKind,
     pub default: &'static str,
     pub writable: bool,
+}
+
+impl RendererAttrKind {
+    pub fn type_name(self) -> &'static str {
+        match self {
+            Self::Boolean => "boolean",
+            Self::Integer => "integer",
+            Self::Real => "real",
+            Self::String => "string",
+            Self::Color => "color",
+            Self::Selection => "selection",
+            Self::Vector => "vector",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RendererChildKind {
+    TubeSection,
+    Junction,
+}
+
+pub fn renderer_child_properties(
+    renderer_type: &str,
+) -> &'static [(&'static str, RendererChildKind)] {
+    use RendererChildKind::{Junction, TubeSection};
+    match renderer_type {
+        "tube" | "nucl" => &[("section", TubeSection)],
+        "ribbon" => &[
+            ("helix", TubeSection),
+            ("sheet", TubeSection),
+            ("coil", TubeSection),
+            ("helixhead", Junction),
+            ("helixtail", Junction),
+            ("sheethead", Junction),
+            ("sheettail", Junction),
+        ],
+        "cartoon" => &[
+            ("helix", TubeSection),
+            ("sheet", TubeSection),
+            ("coil", TubeSection),
+            ("sheethead", Junction),
+            ("ribhelix", TubeSection),
+            ("ribhelix_head", Junction),
+            ("ribhelix_tail", Junction),
+        ],
+        _ => &[],
+    }
+}
+
+pub fn renderer_child_specs(kind: RendererChildKind) -> &'static [RendererAttrProperty] {
+    use RendererAttrKind::{Integer, Real, String as Text};
+    const fn prop(
+        name: &'static str,
+        kind: RendererAttrKind,
+        default: &'static str,
+    ) -> RendererAttrProperty {
+        RendererAttrProperty {
+            name,
+            key: name,
+            kind,
+            default,
+            writable: true,
+        }
+    }
+    const SECTION: &[RendererAttrProperty] = &[
+        prop("width", Real, "0.35"),
+        prop("tuber", Real, "1"),
+        prop("sharp", Real, "0.4"),
+        prop("type", Text, "elliptical"),
+        prop("detail", Integer, "16"),
+    ];
+    const JUNCTION: &[RendererAttrProperty] = &[
+        prop("type", Text, "smooth"),
+        prop("gamma", Real, "2.2"),
+        prop("basw", Real, "0"),
+        prop("arrow", Real, "1.8"),
+    ];
+    match kind {
+        RendererChildKind::TubeSection => SECTION,
+        RendererChildKind::Junction => JUNCTION,
+    }
+}
+
+pub fn renderer_property_spec(renderer_type: &str, key: &str) -> Option<RendererAttrProperty> {
+    renderer_common_or_child_property(renderer_type, key).or_else(|| {
+        renderer_attr_properties(renderer_type)
+            .into_iter()
+            .find(|p| p.key == key)
+    })
+}
+
+pub fn renderer_common_or_child_property(
+    renderer_type: &str,
+    key: &str,
+) -> Option<RendererAttrProperty> {
+    use RendererAttrKind::{Boolean, Color, Real, String as Text};
+    if let Some((child, name)) = key.split_once('.') {
+        let (_, kind) = renderer_child_properties(renderer_type)
+            .iter()
+            .find(|(tag, _)| *tag == child)?;
+        return renderer_child_specs(*kind)
+            .iter()
+            .copied()
+            .find(|p| p.name == name);
+    }
+    let common = match key {
+        "visible" => Some((Boolean, "true")),
+        "locked" | "ui_collapsed" => Some((Boolean, "false")),
+        "alpha" => Some((Real, "1")),
+        "eglinew" => Some((Real, "0.01")),
+        "egcolor" => Some((Color, "#000000")),
+        "material" | "group" => Some((Text, "")),
+        "egtype" => Some((Text, "none")),
+        _ => None,
+    };
+    common.map(|(kind, default)| RendererAttrProperty {
+        name: "",
+        key: "",
+        kind,
+        default,
+        writable: true,
+    })
+}
+
+pub fn renderer_property_allowed(renderer_type: &str, key: &str) -> &'static [&'static str] {
+    if let Some((child, "type")) = key.split_once('.') {
+        return match renderer_child_properties(renderer_type)
+            .iter()
+            .find(|(tag, _)| *tag == child)
+            .map(|(_, kind)| kind)
+        {
+            Some(RendererChildKind::TubeSection) => {
+                &["elliptical", "fancy1", "rectangle", "roundsquare"]
+            }
+            Some(RendererChildKind::Junction) => &["arrow", "flat", "smooth"],
+            None => &[],
+        };
+    }
+    match key {
+        "start_captype" | "end_captype" | "captype_start" | "captype_end" => {
+            &["flat", "none", "sphere"]
+        }
+        "valbond_mode" => &["off", "type1"],
+        "glrender_mode" => &["default", "glu", "shader", "vbo"],
+        "putty_mode" => &["linear1", "none", "scale1"],
+        "putty_tgt" => &["bfac", "occ"],
+        "base_type" => &["basepair", "detail1", "detail2", "simple1"],
+        "helix_width_mode" => &["average", "const", "wavy"],
+        "halign" => &["left", "center", "right"],
+        "valign" => &["bottom", "middle", "top"],
+        _ => &[],
+    }
 }
 
 pub fn validate_renderer_attr(
@@ -401,6 +554,23 @@ impl crate::DesktopAppState {
             renderer.xform_matrix().to_script_string(),
         );
         values.extend(renderer.qsc_attrs().clone());
+        for (child, kind) in renderer_child_properties(renderer.renderer_type()) {
+            for property in renderer_child_specs(*kind) {
+                let value = if property.key == "type" {
+                    renderer.resolved_child_type(child, &styles, scene_uid.get())
+                } else {
+                    renderer.resolved_child_attr(child, property.key, &styles, scene_uid.get())
+                }
+                .unwrap_or_else(|| {
+                    if *kind == RendererChildKind::Junction && property.key == "type" {
+                        "arrow".into()
+                    } else {
+                        property.default.into()
+                    }
+                });
+                values.insert(format!("{child}.{}", property.key), value);
+            }
+        }
         Ok(values)
     }
 

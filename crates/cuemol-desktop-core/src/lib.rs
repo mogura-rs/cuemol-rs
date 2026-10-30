@@ -10921,6 +10921,65 @@ impl DesktopAppState {
                 "renderer group name cannot be empty",
             ));
         }
+        let scene_uid = self
+            .scene_manager()
+            .scene_uid_for_object(object_uid)
+            .or_else(|| {
+                self.density_maps
+                    .get(&object_uid)
+                    .map(|object| object.scene_uid)
+            })
+            .or_else(|| self.scene_manager().scene_uid_for_surface(object_uid))
+            .or_else(|| self.scene_manager().scene_uid_for_lw_object(object_uid))
+            .ok_or_else(|| CueMolError::not_found("object"))?;
+        let duplicate = self.scene_manager().scene(scene_uid).is_some_and(|scene| {
+            scene
+                .objects()
+                .iter()
+                .flat_map(|object| object.renderers())
+                .any(|renderer| renderer.uid() != group_uid && renderer.name() == name)
+        }) || self.density_map_summaries(scene_uid).iter().any(|object| {
+            object
+                .renderers
+                .iter()
+                .map(|renderer| (renderer.uid, renderer.name.as_str()))
+                .chain(
+                    object
+                        .renderer_groups
+                        .iter()
+                        .map(|renderer| (renderer.uid, renderer.name.as_str())),
+                )
+                .any(|(uid, current)| uid != group_uid && current == name)
+        }) || self.surface_summaries(scene_uid).iter().any(|object| {
+            object
+                .renderers
+                .iter()
+                .map(|renderer| (renderer.uid, renderer.name.as_str()))
+                .chain(
+                    object
+                        .renderer_groups
+                        .iter()
+                        .map(|renderer| (renderer.uid, renderer.name.as_str())),
+                )
+                .any(|(uid, current)| uid != group_uid && current == name)
+        }) || self.lw_object_summaries(scene_uid).iter().any(|object| {
+            object
+                .renderers
+                .iter()
+                .map(|renderer| (renderer.uid, renderer.name.as_str()))
+                .chain(
+                    object
+                        .renderer_groups
+                        .iter()
+                        .map(|renderer| (renderer.uid, renderer.name.as_str())),
+                )
+                .any(|(uid, current)| uid != group_uid && current == name)
+        });
+        if duplicate {
+            return Err(CueMolError::invalid_argument(format!(
+                "renderer name already exists in this scene: {name}"
+            )));
+        }
         if self.scene_manager().object(object_uid).is_none() {
             return self.rename_aux_renderer_group(object_uid, group_uid, name);
         }
@@ -11551,6 +11610,25 @@ impl DesktopAppState {
         let renderer = object
             .renderer_mut(renderer_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
+        let value = value.into();
+        let path = format!("{child_tag}.{key}");
+        if let Some(property) =
+            property_catalog::renderer_property_spec(renderer.renderer_type(), &path)
+        {
+            use property_catalog::RendererAttrKind;
+            let valid = match property.kind {
+                RendererAttrKind::Integer => value.parse::<i32>().is_ok(),
+                RendererAttrKind::Real => value.parse::<f64>().is_ok_and(f64::is_finite),
+                _ => true,
+            };
+            let allowed =
+                property_catalog::renderer_property_allowed(renderer.renderer_type(), &path);
+            if !valid || (!allowed.is_empty() && !allowed.contains(&value.as_str())) {
+                return Err(CueMolError::invalid_argument(format!(
+                    "invalid {path}: {value}"
+                )));
+            }
+        }
         renderer.set_qsc_child_attr(child_tag, key, value);
         Ok(())
     }
@@ -11569,7 +11647,14 @@ impl DesktopAppState {
         let renderer = object
             .renderer_mut(renderer_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("renderer {}", renderer_uid.get())))?;
-        renderer.remove_qsc_child_attr(child_tag, key);
+        let path = format!("{child_tag}.{key}");
+        if let Some(property) =
+            property_catalog::renderer_property_spec(renderer.renderer_type(), &path)
+        {
+            renderer.set_qsc_child_default(child_tag, key, property.default);
+        } else {
+            renderer.remove_qsc_child_attr(child_tag, key);
+        }
         Ok(())
     }
 
@@ -31457,7 +31542,7 @@ impl DesktopAppState {
                             .get(js_string!("_pending_coloring"), ctx)?;
                         children.push(coloring_node_from_script(&coloring, ctx)?);
                     }
-                    for (child_name, kind) in renderer_child_properties(&renderer_type) {
+                    for &(child_name, kind) in renderer_child_properties(&renderer_type) {
                         let child_value = renderer_value
                             .as_object()
                             .expect("pending renderer is an object")
@@ -32198,6 +32283,67 @@ impl DesktopAppState {
                 object.delete_property_or_throw(JsString::from(name), ctx)?;
                 return Ok(JsValue::undefined());
             };
+            if matches!(class_name.as_str(), "TubeSection" | "JctTable") {
+                let kind = if class_name == "JctTable" {
+                    RendererChildKind::Junction
+                } else {
+                    RendererChildKind::TubeSection
+                };
+                let property = crate::property_catalog::renderer_child_specs(kind)
+                    .iter()
+                    .find(|property| property.key == name)
+                    .ok_or_else(|| {
+                        script_error(format!("{class_name}.{name} is not resettable"))
+                    })?;
+                let uid = object_number_prop(&value, "_renderer_uid", ctx)? as u64;
+                if uid == 0 {
+                    let default: JsValue = match property.kind {
+                        RendererAttrKind::Integer => {
+                            property.default.parse::<i32>().unwrap().into()
+                        }
+                        RendererAttrKind::Real => property.default.parse::<f64>().unwrap().into(),
+                        _ => JsString::from(property.default).into(),
+                    };
+                    object.set(JsString::from(name), default, true, ctx)?;
+                } else {
+                    let (_, tag) = renderer_child_proxy_info(&value, ctx)?;
+                    let renderer = script_renderer(uid)?;
+                    let mut children = renderer.children.clone();
+                    let index = match children.iter().position(|child| child.tag_name() == tag) {
+                        Some(index) => index,
+                        None => {
+                            let mut child = LDom2Node::new();
+                            child.set_tag_name(&tag);
+                            children.push(child);
+                            children.len() - 1
+                        }
+                    };
+                    let child = &mut children[index];
+                    if name == "type" {
+                        child.set_type_name("");
+                    }
+                    child.set_str_attr(&name, property.default);
+                    child.find_child_mut(&name).unwrap().set_default_flag(true);
+                    script_env::with_mut(|env| {
+                        if let Some(target) = env
+                            .objects
+                            .iter_mut()
+                            .flat_map(|object| &mut object.renderers)
+                            .find(|renderer| renderer.uid == uid)
+                        {
+                            target.children = children.clone();
+                        }
+                    });
+                    script_cmds::push(ScriptCmd::SetRendererChildren {
+                        renderer_uid: renderer.uid,
+                        object_uid: renderer.object_uid,
+                        object: script_object(renderer.object_uid)?.name,
+                        renderer: renderer.name,
+                        children,
+                    });
+                }
+                return Ok(JsValue::undefined());
+            }
             if class_name == "Scene" {
                 if reset_scene_property(&value, &name, ctx)? {
                     return Ok(JsValue::undefined());
@@ -32254,7 +32400,22 @@ impl DesktopAppState {
                     "{class_name}.{name} is not resettable"
                 )));
             }
-            object.set(JsString::from(name), default_value, true, ctx)?;
+            object.set(JsString::from(name.as_str()), default_value, true, ctx)?;
+            if runtime_implements(&class_name, "Object")
+                && matches!(
+                    name.as_str(),
+                    "visible" | "locked" | "ui_collapsed" | "xformMat" | "defaultcolor"
+                )
+            {
+                let uid = object_number_prop(&value, "uid", ctx)? as u64;
+                if uid != 0 {
+                    script_cmds::push(ScriptCmd::SetObjectDefaultFlag {
+                        uid,
+                        name,
+                        is_default: true,
+                    });
+                }
+            }
             Ok(JsValue::undefined())
         }
         #[derive(Clone, Copy)]
@@ -32482,6 +32643,21 @@ impl DesktopAppState {
                 | MoleculeProperty::RendererUids => {
                     return Err(script_error("Object property is read-only"));
                 }
+            }
+            let name = match property {
+                MoleculeProperty::Visible => Some("visible"),
+                MoleculeProperty::Locked => Some("locked"),
+                MoleculeProperty::UiCollapsed => Some("ui_collapsed"),
+                MoleculeProperty::Transform => Some("xformMat"),
+                MoleculeProperty::DefaultColor => Some("defaultcolor"),
+                _ => None,
+            };
+            if let Some(name) = name {
+                script_cmds::push(ScriptCmd::SetObjectDefaultFlag {
+                    uid,
+                    name: name.into(),
+                    is_default: false,
+                });
             }
             Ok(JsValue::undefined())
         }
@@ -32888,7 +33064,7 @@ impl DesktopAppState {
                         .get(js_string!("_pending_coloring"), ctx)?;
                     children.push(coloring_node_from_script(&coloring, ctx)?);
                 }
-                for (child_name, kind) in renderer_child_properties(&renderer_type) {
+                for &(child_name, kind) in renderer_child_properties(&renderer_type) {
                     let child_value = renderer_value
                         .as_object()
                         .expect("pending renderer is an object")
@@ -35936,7 +36112,8 @@ impl DesktopAppState {
                 (getter, setter)
             });
             let child_values = renderer_child_properties(renderer_type)
-                .into_iter()
+                .iter()
+                .copied()
                 .map(|(name, kind)| (name, make_renderer_child_proxy(0, name, kind, ctx)))
                 .collect::<Vec<_>>();
             let visible_getter = FunctionObjectBuilder::new(
@@ -36424,61 +36601,24 @@ impl DesktopAppState {
             });
             Ok(JsValue::undefined())
         }
-        #[derive(Clone, Copy)]
-        enum RendererChildKind {
-            TubeSection,
-            Junction,
-        }
-        fn renderer_child_properties(
-            renderer_type: &str,
-        ) -> Vec<(&'static str, RendererChildKind)> {
-            match renderer_type {
-                "tube" | "nucl" => vec![("section", RendererChildKind::TubeSection)],
-                "ribbon" => vec![
-                    ("helix", RendererChildKind::TubeSection),
-                    ("sheet", RendererChildKind::TubeSection),
-                    ("coil", RendererChildKind::TubeSection),
-                    ("helixhead", RendererChildKind::Junction),
-                    ("helixtail", RendererChildKind::Junction),
-                    ("sheethead", RendererChildKind::Junction),
-                    ("sheettail", RendererChildKind::Junction),
-                ],
-                "cartoon" => vec![
-                    ("helix", RendererChildKind::TubeSection),
-                    ("sheet", RendererChildKind::TubeSection),
-                    ("coil", RendererChildKind::TubeSection),
-                    ("sheethead", RendererChildKind::Junction),
-                    ("ribhelix", RendererChildKind::TubeSection),
-                    ("ribhelix_head", RendererChildKind::Junction),
-                    ("ribhelix_tail", RendererChildKind::Junction),
-                ],
-                _ => Vec::new(),
-            }
-        }
+        use crate::property_catalog::{renderer_child_properties, RendererChildKind};
         fn renderer_child_attr(
             renderer: &ScriptRend,
             child_tag: &str,
             name: &str,
             default: &str,
         ) -> String {
-            renderer
-                .children
-                .iter()
-                .find(|child| child.tag_name() == child_tag)
-                .and_then(|child| child.find_child(name))
-                .map(|value| value.value().to_string())
-                .or_else(|| {
-                    let names = renderer.attributes.get("style")?;
-                    script_env::with(|env| {
-                        env.styles.resolve_style_child_attr(
-                            renderer.scene_uid,
-                            names,
-                            child_tag,
-                            name,
-                        )
-                    })
-                })
-                .unwrap_or_else(|| default.to_string())
+            script_env::with(|env| {
+                cuemol_molstr::qsys::resolve_renderer_child_attr(
+                    &renderer.children,
+                    renderer.attributes.get("style").map(String::as_str),
+                    child_tag,
+                    name,
+                    &env.styles,
+                    renderer.scene_uid,
+                )
+            })
+            .unwrap_or_else(|| default.to_string())
         }
         fn renderer_child_proxy_info(this: &JsValue, ctx: &mut Context) -> JsResult<(u64, String)> {
             Ok((
@@ -36580,7 +36720,14 @@ impl DesktopAppState {
                         renderer.children.last_mut().expect("child was appended")
                     }
                 };
+                if property.key == "type" {
+                    child.set_type_name("");
+                }
                 child.set_str_attr(property.key, value);
+                child
+                    .find_child_mut(property.key)
+                    .unwrap()
+                    .set_default_flag(false);
             });
             let renderer = script_renderer(uid)?;
             script_cmds::push(ScriptCmd::SetRendererChildren {
@@ -39820,7 +39967,8 @@ impl DesktopAppState {
                 })
                 .collect::<Vec<_>>();
             let child_values = renderer_child_properties(&renderer.rtype)
-                .into_iter()
+                .iter()
+                .copied()
                 .map(|(name, kind)| {
                     (
                         name,
@@ -45546,7 +45694,7 @@ impl DesktopAppState {
                 children.retain(|child| child.tag_name() != "coloring");
                 children.push(coloring_node_from_script(&coloring, ctx)?);
             }
-            for (child_name, kind) in renderer_child_properties(&renderer_type) {
+            for &(child_name, kind) in renderer_child_properties(&renderer_type) {
                 let child_value = object.get(JsString::from(child_name), ctx)?;
                 let mut child = LDom2Node::new();
                 child.set_tag_name(child_name);
@@ -48338,6 +48486,27 @@ impl DesktopAppState {
                         }
                     }
                 }
+                ScriptCmd::SetObjectDefaultFlag {
+                    uid,
+                    name,
+                    is_default,
+                } => {
+                    if let Some(object) = self.scene_manager_mut().object_mut(Uid::new(uid)) {
+                        if is_default {
+                            object.remove_qsc_extra_attr(&name);
+                        } else {
+                            let value = match name.as_str() {
+                                "visible" => object.is_visible().to_string(),
+                                "locked" => object.is_ui_locked().to_string(),
+                                "ui_collapsed" => object.is_ui_collapsed().to_string(),
+                                "xformMat" => object.xform_matrix().to_script_string(),
+                                "defaultcolor" => object.mol().default_color().script_string(),
+                                _ => continue,
+                            };
+                            object.set_qsc_extra_attr(name, value);
+                        }
+                    }
+                }
                 ScriptCmd::SetObjectVisible { uid, visible } => {
                     let uid = Uid::new(uid);
                     if let Some(object) = self.scene_manager_mut().object_mut(uid) {
@@ -49916,6 +50085,11 @@ enum ScriptCmd {
     SetObjectVisible {
         uid: u64,
         visible: bool,
+    },
+    SetObjectDefaultFlag {
+        uid: u64,
+        name: String,
+        is_default: bool,
     },
     SetObjectTransform {
         uid: u64,
@@ -68618,6 +68792,7 @@ end_header
             });
         let lw_renderer_uid = app.lw_object_summary(lw_uid).unwrap().renderers[0].uid;
 
+        let group_name = |id: Uid| format!("representations-{}", id.get());
         for (object_uid, renderer_uid) in [
             (map_uid, map_renderer_uid),
             (surface_uid, surface_renderer_uid),
@@ -68626,12 +68801,12 @@ end_header
             let group_uid = app.create_renderer_group(object_uid, "group1").unwrap();
             app.set_workspace_renderer_group_name(object_uid, renderer_uid, Some("group1"))
                 .unwrap();
-            app.rename_renderer_group(object_uid, group_uid, "representations")
+            app.rename_renderer_group(object_uid, group_uid, group_name(object_uid))
                 .unwrap();
             app.set_renderer_group_common_properties(
                 object_uid,
                 group_uid,
-                "representations",
+                &group_name(object_uid),
                 false,
                 true,
                 "matte",
@@ -68652,26 +68827,49 @@ end_header
         }
 
         let map = app.density_map_summary(map_uid).unwrap();
-        assert_eq!(map.renderer_groups[0].name, "representations");
+        assert_eq!(map.renderer_groups[0].name, group_name(map_uid));
         assert!(map.renderer_groups[0].locked);
         assert_eq!(map.renderer_groups[0].material, "matte");
         assert!(map.renderer_groups[0].ui_collapsed);
-        assert_eq!(map.renderers[0].group.as_deref(), Some("representations"));
+        assert_eq!(
+            map.renderers[0].group.as_deref(),
+            Some(group_name(map_uid).as_str())
+        );
         assert!(!map.renderers[0].visible);
         let surface = app.surface_summary(surface_uid).unwrap();
-        assert_eq!(surface.renderer_groups[0].name, "representations");
+        assert_eq!(surface.renderer_groups[0].name, group_name(surface_uid));
         assert!(surface.renderer_groups[0].ui_collapsed);
         assert_eq!(
             surface.renderers[0].group.as_deref(),
-            Some("representations")
+            Some(group_name(surface_uid).as_str())
         );
         assert!(!surface.renderers[0].visible);
         let lw = app.lw_object_summary(lw_uid).unwrap();
-        assert_eq!(lw.renderer_groups[0].name, "representations");
+        assert_eq!(lw.renderer_groups[0].name, group_name(lw_uid));
         assert!(lw.renderer_groups[0].ui_collapsed);
-        assert_eq!(lw.renderers[0].group.as_deref(), Some("representations"));
+        assert_eq!(
+            lw.renderers[0].group.as_deref(),
+            Some(group_name(lw_uid).as_str())
+        );
         assert!(!lw.renderers[0].visible);
 
+        assert!(app
+            .rename_renderer_group(
+                surface_uid,
+                surface.renderer_groups[0].uid,
+                group_name(map_uid)
+            )
+            .is_err());
+        assert_eq!(
+            app.surface_summary(surface_uid).unwrap().renderer_groups[0].name,
+            group_name(surface_uid)
+        );
+        assert_eq!(
+            app.surface_summary(surface_uid).unwrap().renderers[0]
+                .group
+                .as_deref(),
+            Some(group_name(surface_uid).as_str())
+        );
         let map_free_uid = app.add_density_renderer(map_uid, "isosurf").unwrap();
         let map_group_uid = app.density_map_summary(map_uid).unwrap().renderer_groups[0].uid;
         assert!(app
@@ -68686,7 +68884,7 @@ end_header
                 .unwrap()
                 .group
                 .as_deref(),
-            Some("representations")
+            Some(group_name(map_uid).as_str())
         );
         assert!(app
             .move_renderer_in_object(map_uid, map_free_uid, map_group_uid, "before")
@@ -68776,8 +68974,8 @@ end_header
                     .map(|entry| (entry.uid, entry.ui_order, entry.group.clone()))
                     .collect::<Vec<_>>(),
                 vec![
-                    (free_uid, 1, Some("representations".to_string())),
-                    (first_uid, 2, Some("representations".to_string())),
+                    (free_uid, 1, Some(group_name(object_uid))),
+                    (first_uid, 2, Some(group_name(object_uid))),
                     (group_uid, 3, None),
                 ],
                 "object {}",
@@ -68792,7 +68990,7 @@ end_header
             );
             assert!(entries[..2]
                 .iter()
-                .all(|entry| entry.group.as_deref() == Some("representations")));
+                .all(|entry| entry.group.as_deref() == Some(group_name(object_uid).as_str())));
         }
 
         let path = std::env::temp_dir().join(format!(
@@ -68802,17 +69000,23 @@ end_header
         app.save_active_scene_qsc(&path).unwrap();
         let qsc = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
         assert_eq!(qsc.matches("type=\"*group\"").count(), 3);
-        assert_eq!(qsc.matches("group=\"representations\"").count(), 6);
+        for id in [map_uid, surface_uid, lw_uid] {
+            assert_eq!(
+                qsc.matches(&format!("group=\"{}\"", group_name(id)))
+                    .count(),
+                2
+            );
+        }
         assert_eq!(qsc.matches("ui_collapsed=\"true\"").count(), 3);
 
         let mut reloaded = DesktopAppState::new();
         let reloaded_scene_uid = reloaded.load_qsc_file(&path).unwrap().unwrap();
         let reloaded_map = reloaded.density_map_summaries(reloaded_scene_uid).remove(0);
-        assert_eq!(reloaded_map.renderer_groups[0].name, "representations");
+        assert_eq!(reloaded_map.renderer_groups[0].name, group_name(map_uid));
         assert!(reloaded_map.renderer_groups[0].ui_collapsed);
         assert_eq!(
             reloaded_map.renderers[0].group.as_deref(),
-            Some("representations")
+            Some(group_name(map_uid).as_str())
         );
         assert_eq!(reloaded_map.renderers.len(), 2);
         assert_eq!(
@@ -68825,7 +69029,10 @@ end_header
             "isosurf 1"
         );
         let reloaded_surface = reloaded.surface_summaries(reloaded_scene_uid).remove(0);
-        assert_eq!(reloaded_surface.renderer_groups[0].name, "representations");
+        assert_eq!(
+            reloaded_surface.renderer_groups[0].name,
+            group_name(surface_uid)
+        );
         assert!(reloaded_surface.renderer_groups[0].ui_collapsed);
         assert_eq!(reloaded_surface.renderers.len(), 2);
         assert_eq!(
@@ -68838,7 +69045,7 @@ end_header
             "molsurf 2"
         );
         let reloaded_lw = reloaded.lw_object_summaries(reloaded_scene_uid).remove(0);
-        assert_eq!(reloaded_lw.renderer_groups[0].name, "representations");
+        assert_eq!(reloaded_lw.renderer_groups[0].name, group_name(lw_uid));
         assert!(reloaded_lw.renderer_groups[0].ui_collapsed);
         assert_eq!(reloaded_lw.renderers.len(), 2);
         assert_eq!(

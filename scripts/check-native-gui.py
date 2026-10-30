@@ -352,6 +352,47 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             capture('palette-shortcut.png')
             pyautogui.hotkey(primary, 'shift', 'p')
             wait_for(lambda: palette_collapsed() == initial_palette)
+
+            pyautogui.click(x + 145, y + 164)
+            time.sleep(0.2)
+            pyautogui.click(x + width - 194, y + 149)
+
+            def inspector_filter(text):
+                pyautogui.click(x + width - 150, y + 174)
+                pyautogui.hotkey(primary, 'a')
+                pyautogui.write(text, interval=0.02)
+                pyautogui.press('tab')
+                time.sleep(0.2)
+
+            inspector_filter('name')
+            capture('inspector-name-before.png')
+            pyautogui.click(x + width - 100, y + 225)
+            pyautogui.hotkey(primary, 'a')
+            pyautogui.write('inspector-probe', interval=0.02)
+            pyautogui.press('enter')
+            wait_for(lambda: call('get_scene_state')['objects'][0]['name'] == 'inspector-probe')
+            capture('inspector-name.png')
+            pyautogui.click(x + width * 0.6, y + height * 0.4)
+            pyautogui.hotkey(primary, 'z')
+            wait_for(lambda: call('get_scene_state')['objects'][0]['name'] == 'console-probe')
+            pyautogui.hotkey(primary, 'shift', 'z')
+            wait_for(lambda: call('get_scene_state')['objects'][0]['name'] == 'inspector-probe')
+            pyautogui.hotkey(primary, 'z')
+            wait_for(lambda: call('get_scene_state')['objects'][0]['name'] == 'console-probe')
+
+            inspector_filter('locked')
+            pyautogui.click(x + width - 168, y + 225)
+            locked_path = f"#{original['id']}.locked"
+            wait_for(lambda: call('get_prop', {'path': locked_path})['value'] == 'true')
+            capture('inspector-locked.png')
+            pyautogui.click(x + width - 20, y + 225)
+            wait_for(lambda: call('get_prop', {'path': locked_path})['value'] == 'false')
+            pyautogui.click(x + width * 0.6, y + height * 0.4)
+            pyautogui.hotkey(primary, 'z')
+            wait_for(lambda: call('get_prop', {'path': locked_path})['value'] == 'true')
+            pyautogui.hotkey(primary, 'shift', 'z')
+            wait_for(lambda: call('get_prop', {'path': locked_path})['value'] == 'false')
+            capture('inspector-reset.png')
             report.update(ok=True, window=bounds,
                           work_area=[available_x, available_y, available_width, available_height],
                           window_contained=True, atoms=state['objects'][0]['atoms'],
@@ -367,6 +408,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                           clipboard_cut_paste_undo=True,
                           clipboard_text_external=True,
                           shell_shortcuts=True,
+                          inspector_text_undo=True, inspector_boolean_reset=True,
                           font_pixels=styled.histogram()[255])
             print(json.dumps(report), flush=True)
         except BaseException as error:

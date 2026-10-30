@@ -5161,7 +5161,6 @@ impl GuiApplication {
             left_panel_drag_start_heights: [None; LeftPanel::ALL.len()],
             left_panel_width,
             reset_left_panel_layout: false,
-            // CueMol2 opens properties on demand (no docked inspector); start closed.
             object_properties_draft: None,
             renderer_properties_draft: None,
             renderer_group_rename_draft: None,

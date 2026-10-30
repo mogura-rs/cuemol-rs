@@ -123,6 +123,15 @@ pub fn renderer_properties(state: &DesktopAppState, id: Uid) -> Result<BTreeMap<
         ("locked", (r.qsc_attr("locked") == Some("true")).to_string()),
         ("sel", r.qsc_attr("sel").unwrap_or("").into()),
         ("style", r.style().unwrap_or("").into()),
+        ("type_name", r.renderer_type().into()),
+        ("uid", r.uid().get().to_string()),
+        ("scene_uid", scene(state)?.get().to_string()),
+        ("group", r.group().unwrap_or("").into()),
+        ("ui_order", r.qsc_attr("ui_order").unwrap_or("0").into()),
+        (
+            "ui_collapsed",
+            r.qsc_attr("ui_collapsed").unwrap_or("false").into(),
+        ),
     ] {
         result.insert(k.into(), v);
     }
@@ -150,6 +159,35 @@ pub fn set_renderer_property(
     };
     if state.scene_manager().object(owner).is_none() {
         return state.set_auxiliary_renderer_property(owner, id, key, value);
+    }
+    let renderer_type = state
+        .scene_manager()
+        .object(owner)
+        .unwrap()
+        .renderer(id)
+        .unwrap()
+        .renderer_type();
+    let allowed =
+        cuemol_desktop_core::property_catalog::renderer_property_allowed(renderer_type, key);
+    if !allowed.is_empty() && !allowed.contains(&value) {
+        return Err(CueMolError::invalid_argument(format!(
+            "invalid {key}: {value}"
+        )));
+    }
+    if key == "group" {
+        let object = state.scene_manager().object(owner).unwrap();
+        let group = value.trim();
+        if !group.is_empty()
+            && (renderer_type == "*group"
+                || !object.renderers().iter().any(|renderer| {
+                    renderer.renderer_type() == "*group" && renderer.name() == group
+                }))
+        {
+            return Err(CueMolError::invalid_argument(
+                "group must name an existing group on the same object",
+            ));
+        }
+        return state.set_workspace_renderer_group_name(owner, id, Some(group));
     }
     match key {
         "name" => {

@@ -720,7 +720,10 @@
           "type": "string"
         },
         "reader": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Optional reader name; null detects the format from the file."
         },
         "rendererType": {
@@ -4631,7 +4634,10 @@
           "description": "USalign only: the atom that represents each residue. Null or auto uses CA for amino acids and C3' for nucleotides."
         },
         "transform": {
-          "type": ["boolean", "null"],
+          "type": [
+            "boolean",
+            "null"
+          ],
           "description": "False reports the fitted RMSD and transform without moving the molecule. Null or true applies the fit."
         },
         "keepAsProperty": {
@@ -4757,7 +4763,7 @@
   },
   {
     "name": "list_node_props",
-    "description": "List the writable properties of one node with their current values and, for enumerated ones, the allowed values. The node may be a renderer, an object, the scene itself -- where the background colour, ambient occlusion, anti-aliasing and colour proofing live -- or the view (stereo, centre mark, mouse speeds). Read this before set_node_prop.",
+    "description": "List properties of a renderer, object, scene or view with current values, types, allowed values, read-only flags and default/reset state. Nested properties use dot paths. Read this before editing or resetting properties.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -4768,7 +4774,8 @@
             "scene",
             "view",
             "object",
-            "renderer"
+            "renderer",
+            "rendGroup"
           ]
         },
         "nodeId": {
@@ -4791,6 +4798,49 @@
     }
   },
   {
+    "name": "reset_node_props",
+    "description": "Reset modified properties of one node to their registered or inherited defaults in one edit. Omit props to reset every modified property with a default. Names, selections, read-only properties and properties without defaults are preserved.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "nodeType": {
+          "type": "string",
+          "description": "What kind of node to address. \"scene\" is the scene as a whole; \"view\" is the current view; \"renderer\" also covers a renderer group.",
+          "enum": [
+            "scene",
+            "view",
+            "object",
+            "renderer",
+            "rendGroup"
+          ]
+        },
+        "nodeId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Uid of the object or renderer, from get_scene_state. Null for the scene and the view, which have no id of their own."
+        },
+        "props": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Property names from list_node_props. Omit to reset all modified properties with defaults."
+        }
+      },
+      "required": [
+        "nodeType"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "set_node_prop",
     "description": "Set one property of one node.\n\n- On the scene: the background colour (`bgcolor`), ambient occlusion (`aoEnabled`, `aoRadius`, `aoIntensity`, `aoSteps`), anti-aliasing (`aa_method`, `aaJitterLevel`), and CMYK colour proofing (`use_colproof`, `icc_filename`).\n- On the view: stereo (`stereoMode`, `stereoDist`, `swapStereoEyes`) and the centre mark (`centerMark`).\n- On a renderer: a width, a detail level, or a mode.\n\nCall `list_node_props` first: the property name, its type, and the allowed values all come from there.",
     "inputSchema": {
@@ -4803,7 +4853,8 @@
             "scene",
             "view",
             "object",
-            "renderer"
+            "renderer",
+            "rendGroup"
           ]
         },
         "nodeId": {
@@ -4820,6 +4871,10 @@
         "value": {
           "type": "string",
           "description": "New value, written as text; it is converted to the property type. A colour is a name such as \"white\" or a hex code such as \"#204080\"."
+        },
+        "cascadeGroupVisibility": {
+          "type": "boolean",
+          "description": "When setting a renderer group visibility, also update its members. Defaults to false for raw property edits."
         }
       },
       "required": [

@@ -584,7 +584,8 @@ impl App {
             return;
         }
         let mutating = cuemol_command::tool_changes_scene(name);
-        let record_history = cuemol_command::tool_records_history(name);
+        let view_property = cuemol_command::is_view_property_write(&self.state, name, &args);
+        let record_history = cuemol_command::tool_records_history(name) && !view_property;
         let before = record_history.then(|| {
             let mut before = self.capture_history();
             before.record =
@@ -604,6 +605,9 @@ impl App {
                         self.history.remove(0);
                     }
                     self.future.clear();
+                }
+                if view_property {
+                    self.revision = self.revision.wrapping_add(1);
                 }
                 self.message = serde_json::to_string_pretty(&value).unwrap();
                 self.dirty |= mutating && changed;

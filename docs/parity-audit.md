@@ -30,7 +30,7 @@ speedup from a single optimized stage or compare timings from different hosts.
 | Feature family | Required comparison | Current audit status |
 | --- | --- | --- |
 | Shell | Activities, menus, toolbar, tab order, docks, compact windows, themes and keyboard access | Application shortcuts, browser tab closing and menu access, shared history dropdowns, Tauri palette folding and tree/text clipboard routing repaired and checked; browser recent files and remaining pane controls are still under comparison |
-| Explorer and Inspector | Object/renderer/group hierarchy, selection, visibility, locking, drag/drop, context menus and property editors | Previous focused checks exist; dialog comparison pending |
+| Explorer and Inspector | Object/renderer/group hierarchy, selection, visibility, locking, drag/drop, context menus and property editors | Typed fields, nested properties, default flags, reset, group writes and undo repaired and checked below; remaining dock targets and specialized editors are under comparison |
 | Color and styles | Coloring modes, paint entries, palettes, property inheritance, style creation/apply/edit/save | Previous focused checks exist; complete editor comparison pending |
 | Console | CueMol/PyMOL dialects, command arguments, completion, history, multiline input, IME and transaction behavior | Shared CueMol/PyMOL interpreters, completion, native QAX logging/replay and cancellable execution implemented; focused shared, browser and OS-input checks passed; affected regression checks, CI and Pages passed at `99b7c16`; public review repairs and release delivery are in progress |
 | Actions | History rows, operation inspection, QAX export, bundled/user macros and reusable actions | History selection, operation inspection, QAX export and bundled/user macro libraries are implemented in native, WASM and Tauri; CI, Pages and the macOS window check passed at `488ce9c`; review repairs passed affected checks and were published at `53100c5` |
@@ -262,6 +262,66 @@ cases check selection preservation and modifier isolation.
 The native menus also retain older UXP-specific entries that the published
 Tritium menu removed; their presence does not demonstrate that the current
 Tritium controls match.
+
+## Inspector properties and defaults
+
+The shared Inspector and Tauri shell now use the command layer's property
+metadata for numeric, boolean, enum and color controls, read-only fields and
+reset buttons. Nested renderer sections are included, and Properties and Generic
+tabs retain their separate grouping. The property list refreshes after an edit
+or target change; Tauri rejects a late response for a previously selected target.
+Numbers must be finite, integer fields reject fractional values, and enum writes
+must name a supported value. The tool schema now describes the metadata that
+`list_node_props` actually returns.
+
+Default flags are distinct from equality with a default value. A published
+reference probe found that a fresh ribbon junction reports `arrow` with its
+default flag set, although resetting an explicitly edited junction yields the
+registered `smooth` default. The implementation now preserves this distinction,
+style inheritance and the omission of default child values when saving QSC.
+Loading that scene restores the reference's reset state. Object visibility,
+locking, transforms and default colors also retain explicit/default state across
+commands, JavaScript and scene round trips. Changing the object's default color
+now reaches the actual inherited molecular colors, including after reloading.
+
+Reset-all excludes names, selections and read-only properties and records one
+reversible edit. Invalid requested properties are rejected before any reset is
+applied. A view edit or an empty reset keeps an existing redo branch. Group
+renaming checks scene-wide renderer names and updates member references. Raw
+Generic visibility changes only the group's flag; the Properties control can
+also change its members. Invalid membership targets and nested groups are
+rejected before the scene changes.
+
+With the published tag's QIF definitions and real molecular fixtures present,
+the affected shared/native run passed 1,132 tests with one ignored. The Tauri
+model run passed 155 with six ignored. All 28 affected browser and Tauri shell
+cases passed, including typed edits, nested reset, read-only identity, undo/redo
+and stale-response rejection. The browser cases use the rebuilt WASM; Tauri
+shell cases use mocked IPC and are complemented by the Rust model tests.
+The Linux window check entered a new object name through the Inspector, toggled
+locking, reset it and verified the scene after OS Undo/Redo shortcuts. Captured
+screens confirm the edited field and its reset control. The existing navigation,
+font, Console, Python helper and clipboard checks passed in the same run.
+
+Saved-scene image probes against the installed public application showed no
+increase in the previously recorded transparent 1CRN or GI 4HHB differences.
+The C++ geometry check requires matching runtime style data: the old local
+reference configuration had a different `DefaultRibbon` definition. The
+published tag's style file matches the installed application's file hash.
+The named-color modifier case additionally needs the same explicit
+`okabe_ito_1=#E69F00` definition in both engines; that palette name is absent from
+the published core style file. These are controlled geometry/color comparisons,
+separate from the installed application's exported-image checks.
+All five C++ geometry suites passed with these inputs, including positions,
+normals, colors, triangle winding and pick ownership across the tested styles,
+selections and transforms. The linked Linux reference library is an existing
+source build; the installed macOS application remains the public binary oracle.
+
+The native/WASM dock currently follows object and renderer selection. Scene,
+View and other context targets, specialized property pages and drag preview
+still require comparison. The existing menu dialogs do not establish parity
+for those dock interactions. Public review and final release checks remain
+delivery gates for this batch.
 
 ## Clipboard comparison and repairs
 

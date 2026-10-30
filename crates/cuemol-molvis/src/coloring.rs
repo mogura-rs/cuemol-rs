@@ -328,7 +328,11 @@ fn set_coloring_layers(
         renderer: layer,
         object: Layer::new(
             object_kind,
-            solid_color_to_spec(object.mol().default_color()),
+            object
+                .qsc_extra_attrs()
+                .get("defaultcolor")
+                .map(|value| color(value, styles, scope))
+                .unwrap_or_else(|| solid_color_to_spec(object.mol().default_color())),
             object.coloring_attrs(),
             object.paint_coloring(),
             styles,

@@ -36,6 +36,8 @@ use cuemol_desktop_core::effects::ViewportOptions;
 mod actions;
 #[path = "tauri_console.rs"]
 mod console;
+#[path = "tauri_inspector.rs"]
+mod inspector;
 
 const MAX_VIEW_DIM: u32 = 4_096;
 const MIN_INTERACTIVE_RENDER_SCALE: f64 = 0.5;
@@ -7916,6 +7918,10 @@ impl AppModel {
 }
 
 enum ModelRequest {
+    Inspector {
+        tool: String,
+        args: serde_json::Value,
+    },
     ClipboardKind,
     ClipboardText,
     SetClipboardText(String),
@@ -8519,6 +8525,7 @@ enum ModelRequest {
 }
 
 enum ModelResponse {
+    Inspector(serde_json::Value),
     Actions(serde_json::Value),
     Console(console::Update),
     ConsoleCompletions(Vec<serde_json::Value>),
@@ -9879,6 +9886,7 @@ fn handle_model_request(
     request: ModelRequest,
 ) -> Result<ModelResponse, String> {
     match request {
+        ModelRequest::Inspector { tool, args } => Ok(ModelResponse::Inspector(model.inspector_request(&tool, &args)?)),
         ModelRequest::Actions { operation, args } => Ok(ModelResponse::Actions(model.actions_request(&operation, &args)?)),
         ModelRequest::StartRendererWarmup => {
             model.start_renderer_warmup();
@@ -13388,6 +13396,7 @@ fn snapshot_response(response: ModelResponse) -> Result<AppSnapshot, String> {
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Console(_)
+        | ModelResponse::Inspector(_)
         | ModelResponse::Actions(_)
         | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => Err("unexpected non-snapshot response".to_string()),
@@ -13416,6 +13425,7 @@ fn molecule_details_response(response: ModelResponse) -> Result<MoleculeDetailsD
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Console(_)
+        | ModelResponse::Inspector(_)
         | ModelResponse::Actions(_)
         | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => Err("unexpected non-molecule-details response".to_string()),
@@ -13444,6 +13454,7 @@ fn viewport_response(response: ModelResponse) -> Result<ViewportDto, String> {
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Console(_)
+        | ModelResponse::Inspector(_)
         | ModelResponse::Actions(_)
         | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => Err("unexpected non-viewport response".to_string()),
@@ -13472,6 +13483,7 @@ fn animation_frame_response(response: ModelResponse) -> Result<AnimationFrameDto
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Console(_)
+        | ModelResponse::Inspector(_)
         | ModelResponse::Actions(_)
         | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => Err("unexpected animation frame response".to_string()),
@@ -13500,6 +13512,7 @@ fn trajectory_frame_response(response: ModelResponse) -> Result<TrajectoryFrameD
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Console(_)
+        | ModelResponse::Inspector(_)
         | ModelResponse::Actions(_)
         | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => Err("unexpected trajectory frame response".to_string()),
@@ -13528,6 +13541,7 @@ fn application_info_response(response: ModelResponse) -> Result<ApplicationInfoD
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Console(_)
+        | ModelResponse::Inspector(_)
         | ModelResponse::Actions(_)
         | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => Err("unexpected application info response".to_string()),
@@ -13556,6 +13570,7 @@ fn preferences_response(response: ModelResponse) -> Result<PreferencesDto, Strin
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Console(_)
+        | ModelResponse::Inspector(_)
         | ModelResponse::Actions(_)
         | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => Err("unexpected non-preferences response".to_string()),
@@ -13584,6 +13599,7 @@ fn preferences_update_response(response: ModelResponse) -> Result<PreferencesUpd
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Console(_)
+        | ModelResponse::Inspector(_)
         | ModelResponse::Actions(_)
         | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => {
@@ -13614,6 +13630,7 @@ fn initial_state_response(response: ModelResponse) -> Result<InitialStateDto, St
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Console(_)
+        | ModelResponse::Inspector(_)
         | ModelResponse::Actions(_)
         | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => Err("unexpected non-initial-state response".to_string()),
@@ -13651,6 +13668,7 @@ fn view_properties_response(response: ModelResponse) -> Result<ViewPropertiesDto
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Console(_)
+        | ModelResponse::Inspector(_)
         | ModelResponse::Actions(_)
         | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => Err("unexpected non-view-properties response".to_string()),
@@ -13720,6 +13738,7 @@ fn view_properties_update_response(
         | ModelResponse::CameraVisibility(_)
         | ModelResponse::PickedAtom(_)
         | ModelResponse::Console(_)
+        | ModelResponse::Inspector(_)
         | ModelResponse::Actions(_)
         | ModelResponse::ConsoleCompletions(_)
         | ModelResponse::Message(_) => {
@@ -16109,6 +16128,18 @@ fn clear_log(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
 }
 
 #[tauri::command]
+fn inspector_request(
+    tool: String,
+    args: serde_json::Value,
+    state: State<'_, ManagedState>,
+) -> Result<serde_json::Value, String> {
+    match request_model(&state, ModelRequest::Inspector { tool, args })? {
+        ModelResponse::Inspector(value) => Ok(value),
+        _ => Err("Unexpected inspector response".into()),
+    }
+}
+
+#[tauri::command]
 fn actions_request(
     operation: String,
     args: serde_json::Value,
@@ -16769,6 +16800,7 @@ pub fn run() -> Result<(), tauri::Error> {
             tick_animation_frame,
             clear_log,
             actions_request,
+            inspector_request,
             console_start,
             console_poll,
             console_stop,
@@ -16806,6 +16838,49 @@ pub fn run() -> Result<(), tauri::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inspector_batches_one_undo_and_queries_preserve_redo() {
+        let mut model = model_without_gpu();
+        model.desktop.open_bytes("inspected.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let object = model.desktop.active_object_summaries()[0].uid;
+        let renderer = model
+            .desktop
+            .scene_manager_mut()
+            .object_mut(object)
+            .unwrap()
+            .add_renderer("ribbon", "plain");
+        let target = serde_json::json!({"nodeType":"renderer","nodeId":renderer.get()});
+        for (key, value) in [("alpha", "0.4"), ("helix.width", "2")] {
+            let mut args = target.clone();
+            args["prop"] = serde_json::json!(key);
+            args["value"] = serde_json::json!(value);
+            model.inspector_request("set_node_prop", &args).unwrap();
+        }
+        assert_eq!(model.undo_stack.len(), 2);
+        model
+            .inspector_request("reset_node_props", &target)
+            .unwrap();
+        assert_eq!(model.undo_stack.len(), 3);
+        model.undo(0).unwrap();
+        let listed = model.inspector_request("list_node_props", &target).unwrap();
+        assert_eq!(
+            listed["properties"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["key"] == "alpha")
+                .unwrap()["value"],
+            "0.4"
+        );
+        assert_eq!(model.redo_stack.len(), 1);
+        model.redo(0).unwrap();
+        model
+            .inspector_request("reset_node_props", &target)
+            .unwrap();
+        assert_eq!(model.undo_stack.len(), 3);
+        assert!(model.inspector_request("delete_node", &target).is_err());
+    }
 
     #[test]
     fn qsc_save_options_dto_validates_reference_values() {

@@ -12,6 +12,19 @@ use cuemol_qsys::{Camera, View};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
+#[path = "property_metadata.rs"]
+mod metadata;
+
+pub fn is_view_property_write(state: &DesktopAppState, name: &str, args: &Value) -> bool {
+    match name {
+        "set_node_prop" | "reset_node_props" => args["nodeType"] == "view",
+        "set_prop" | "reset_prop" => args["path"].as_str().is_some_and(|path| {
+            resolve_property_path(state, path).is_ok_and(|(kind, _, _)| kind == "view")
+        }),
+        _ => false,
+    }
+}
+
 pub fn call_tool(
     state: &mut DesktopAppState,
     camera: &mut Camera,
@@ -19,9 +32,8 @@ pub fn call_tool(
     args: &Value,
 ) -> Result<Value> {
     match name {
-        "list_node_props" | "set_node_prop" | "set_prop" | "get_prop" | "reset_prop" => {
-            properties(state, camera, name, args)
-        }
+        "list_node_props" | "set_node_prop" | "reset_node_props" | "set_prop" | "get_prop"
+        | "reset_prop" => properties(state, camera, name, args),
         "create_style_set" | "delete_style_set" | "set_style_readonly" | "load_style_file"
         | "save_style_file" | "define_color" | "define_selection" | "remove_color"
         | "remove_selection" | "remove_style" => styles(state, name, args),
@@ -421,11 +433,15 @@ const VIEW_EFFECT_DEFAULTS: &[(&str, &str)] = &[
     ("aa_method", "fxaa"),
     ("aaJitterLevel", "0"),
     ("aaSmaaThreshold", "0.05"),
+    ("use_colproof", "false"),
+    ("icc_filename", ""),
+    ("icc_intent", "perceptual"),
+    ("onload", ""),
 ];
 
 fn validate_view_effect_property(key: &str, value: &str) -> Result<()> {
     let valid = match key {
-        "aoEnabled" | "aoHalfRes" => value.parse::<bool>().is_ok(),
+        "aoEnabled" | "aoHalfRes" | "use_colproof" => value.parse::<bool>().is_ok(),
         "aoRadius" | "aoIntensity" => value
             .parse::<f64>()
             .is_ok_and(|n| n.is_finite() && n >= 0.0),
@@ -435,6 +451,10 @@ fn validate_view_effect_property(key: &str, value: &str) -> Result<()> {
         "aoSlices" | "aoSteps" => value.parse::<i32>().is_ok_and(|n| (1..=64).contains(&n)),
         "aaJitterLevel" => value.parse::<i32>().is_ok_and(|n| (0..=5).contains(&n)),
         "aa_method" => matches!(value, "none" | "fxaa" | "smaa"),
+        "icc_intent" => matches!(
+            value,
+            "perceptual" | "absolute_colorimetric" | "relative_colorimetric" | "saturation"
+        ),
         _ => true,
     };
     if valid {
@@ -522,6 +542,42 @@ fn properties(
         )
     };
     let sid = scene(state)?;
+    if name == "reset_node_props" {
+        let rows = metadata::rows(state, camera, &kind, id)?;
+        let requested = args["props"].as_array();
+        if let Some(requested) = requested {
+            for key in requested {
+                if !rows
+                    .iter()
+                    .any(|row| row["key"] == *key && row["hasdefault"] == true)
+                {
+                    return Err(CueMolError::invalid_argument(format!(
+                        "{} has no resettable default",
+                        key
+                    )));
+                }
+            }
+        }
+        let keys = rows
+            .iter()
+            .filter(|row| {
+                row["hasdefault"] == true
+                    && row["isdefault"] == false
+                    && requested.is_none_or(|keys| keys.contains(&row["key"]))
+            })
+            .map(|row| row["key"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        if !keys.is_empty() {
+            let before = state.clone();
+            for key in &keys {
+                if let Err(error) = reset_node_property(state, sid, &kind, id, key) {
+                    *state = before;
+                    return Err(error);
+                }
+            }
+        }
+        return Ok(json!({"properties":metadata::rows(state, camera, &kind, id)?, "reset":keys}));
+    }
     if name == "set_node_prop" || name == "set_prop" {
         let value = text(args, "value")?;
         if property_readonly(state, &kind, id, &prop) {
@@ -530,12 +586,26 @@ fn properties(
             )));
         }
         match kind.as_str() {
-            "renderer" | "rendGroup" => nodes::set_renderer_property(
-                state,
-                id.ok_or_else(|| CueMolError::invalid_argument("nodeId is required"))?,
-                &prop,
-                value,
-            )?,
+            "renderer" | "rendGroup" => {
+                let id = id.ok_or_else(|| CueMolError::invalid_argument("nodeId is required"))?;
+                let owner = renderer_owner(state, id)?;
+                let is_group = kind == "rendGroup"
+                    || state
+                        .scene_manager()
+                        .object(owner)
+                        .and_then(|object| object.renderer(id))
+                        .is_some_and(|renderer| renderer.renderer_type() == "*group");
+                if is_group && prop == "name" {
+                    state.rename_renderer_group(owner, id, value)?;
+                } else if is_group && prop == "visible" && args["cascadeGroupVisibility"] == true {
+                    let visible = value
+                        .parse::<bool>()
+                        .map_err(|_| CueMolError::invalid_argument("expected true or false"))?;
+                    state.set_renderer_group_visible(owner, id, visible)?;
+                } else {
+                    nodes::set_renderer_property(state, id, &prop, value)?;
+                }
+            }
             "object" => set_object_property(
                 state,
                 id.ok_or_else(|| CueMolError::invalid_argument("nodeId is required"))?,
@@ -558,61 +628,12 @@ fn properties(
             _ => return Err(CueMolError::invalid_argument("unknown node type")),
         }
     } else if name == "reset_prop" {
-        match kind.as_str() {
-            "renderer" | "rendGroup" => {
-                let id = id.unwrap();
-                let owner = renderer_owner(state, id)?;
-                if state.scene_manager().object(owner).is_none() {
-                    state.reset_auxiliary_renderer_property(owner, id, &prop)?;
-                } else if prop == "*" {
-                    let keys = state
-                        .scene_manager()
-                        .object(owner)
-                        .and_then(|o| o.renderer(id))
-                        .ok_or_else(|| {
-                            CueMolError::invalid_argument("reset-all requires molecule renderer")
-                        })?
-                        .qsc_attrs()
-                        .keys()
-                        .filter(|k| {
-                            !matches!(k.as_str(), "name" | "type" | "ui_order" | "style" | "group")
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    for key in keys {
-                        state.reset_renderer_property(owner, id, &key)?;
-                    }
-                } else if let Some((child, key)) = prop.split_once('.') {
-                    state.reset_renderer_child_property(owner, id, child, key)?;
-                } else {
-                    state.reset_renderer_property(owner, id, &prop)?;
-                }
-            }
-            "scene" => {
-                state
-                    .scene_manager_mut()
-                    .scene_mut(sid)
-                    .unwrap()
-                    .remove_scene_attribute(&prop);
-            }
-            "object" => reset_object_property(state, id.unwrap(), &prop)?,
-            _ => {
-                return Err(CueMolError::invalid_argument(
-                    "this property has no default",
-                ))
-            }
-        }
+        reset_node_property(state, sid, &kind, id, &prop)?;
     }
-    let mut values = node_property_values(state, camera, &kind, id)?;
     if name == "list_node_props" {
-        Ok(json!({"properties":values.iter().map(|(key,value)| {
-                let readonly = property_readonly(state, &kind, id, key);
-                let allowed = property_allowed(key);
-                let mut row = json!({"key":key,"value":value,"readonly":readonly});
-                if !allowed.is_empty() { row["allowed"] = json!(allowed); }
-                row
-            }).collect::<Vec<_>>()}))
+        Ok(json!({"properties":metadata::rows(state, camera, &kind, id)?}))
     } else {
+        let mut values = node_property_values(state, camera, &kind, id)?;
         let value = if prop == "*" {
             Value::Null
         } else {
@@ -622,6 +643,64 @@ fn properties(
         };
         Ok(json!({"prop":prop,"value":value}))
     }
+}
+
+fn reset_node_property(
+    state: &mut DesktopAppState,
+    sid: Uid,
+    kind: &str,
+    id: Option<Uid>,
+    prop: &str,
+) -> Result<()> {
+    match kind {
+        "renderer" | "rendGroup" => {
+            let id = id.ok_or_else(|| CueMolError::invalid_argument("nodeId is required"))?;
+            let owner = renderer_owner(state, id)?;
+            if state.scene_manager().object(owner).is_none() {
+                state.reset_auxiliary_renderer_property(owner, id, prop)?;
+            } else if prop == "*" {
+                let keys = state
+                    .scene_manager()
+                    .object(owner)
+                    .and_then(|o| o.renderer(id))
+                    .ok_or_else(|| {
+                        CueMolError::invalid_argument("reset-all requires molecule renderer")
+                    })?
+                    .qsc_attrs()
+                    .keys()
+                    .filter(|k| {
+                        !matches!(k.as_str(), "name" | "type" | "ui_order" | "style" | "group")
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for key in keys {
+                    state.reset_renderer_property(owner, id, &key)?;
+                }
+            } else if let Some((child, key)) = prop.split_once('.') {
+                state.reset_renderer_child_property(owner, id, child, key)?;
+            } else {
+                state.reset_renderer_property(owner, id, prop)?;
+            }
+        }
+        "scene" => {
+            state
+                .scene_manager_mut()
+                .scene_mut(sid)
+                .unwrap()
+                .remove_scene_attribute(prop);
+        }
+        "object" => reset_object_property(
+            state,
+            id.ok_or_else(|| CueMolError::invalid_argument("nodeId is required"))?,
+            prop,
+        )?,
+        _ => {
+            return Err(CueMolError::invalid_argument(
+                "this property has no default",
+            ))
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn node_property_values(
@@ -661,6 +740,16 @@ fn object_properties(state: &DesktopAppState, id: Uid) -> Result<BTreeMap<String
         p.extend(o.qsc_extra_attrs().clone());
         p.insert("sel".into(), state.molecule_selection_text(id)?.into());
         p.insert("xformMat".into(), o.xform_matrix().to_script_string());
+        p.insert("uid".into(), id.get().to_string());
+        p.insert("scene_uid".into(), scene(state)?.get().to_string());
+        p.insert("src".into(), o.source().into());
+        p.insert("alt_src".into(), o.alt_source().into());
+        p.insert("srctype".into(), o.source_type().into());
+        p.insert("modified".into(), o.modified().to_string());
+        p.insert("ui_order".into(), o.ui_order().to_string());
+        p.insert("ui_collapsed".into(), o.is_ui_collapsed().to_string());
+        p.entry("defaultcolor".into())
+            .or_insert_with(|| o.mol().default_color().script_string().to_ascii_lowercase());
         (o.name().into(), o.is_visible(), o.is_ui_locked())
     } else if let Some(o) = state.density_map_summary(id) {
         (o.name, o.visible, o.locked)
@@ -692,6 +781,17 @@ fn reset_object_property(state: &mut DesktopAppState, id: Uid, prop: &str) -> Re
             "name" => set_object_property(state, id, key, "")?,
             "visible" => set_object_property(state, id, key, "true")?,
             "locked" => set_object_property(state, id, key, "false")?,
+            "ui_collapsed" => set_object_property(state, id, key, "false")?,
+            "defaultcolor" => {
+                let object = state
+                    .scene_manager_mut()
+                    .object_mut(id)
+                    .ok_or_else(|| CueMolError::not_found("molecule"))?;
+                object
+                    .mol_mut()
+                    .set_default_color(cuemol_gfx::SolidColor::from_rgb(1., 1., 1.));
+                object.remove_qsc_extra_attr(key);
+            }
             "xformMat" => {
                 state.set_workspace_object_transform(id, &Matrix4::IDENTITY.to_script_string())?
             }
@@ -707,6 +807,9 @@ fn reset_object_property(state: &mut DesktopAppState, id: Uid, prop: &str) -> Re
                 }
             }
         }
+        if let Some(object) = state.scene_manager_mut().object_mut(id) {
+            object.remove_qsc_extra_attr(key);
+        }
     }
     Ok(())
 }
@@ -721,6 +824,12 @@ pub(crate) fn property_allowed(key: &str) -> &'static [&'static str] {
         "lod" => &["auto", "step1", "step2", "step4", "step8"],
         "cap_mode" => &["auto", "on", "off"],
         "aa_method" => &["none", "fxaa", "smaa"],
+        "icc_intent" => &[
+            "absolute_colorimetric",
+            "perceptual",
+            "relative_colorimetric",
+            "saturation",
+        ],
         _ => &[],
     }
 }
@@ -744,7 +853,7 @@ pub(crate) fn property_readonly(
         );
     }
     if matches!(kind, "renderer" | "rendGroup") {
-        if cuemol_desktop_core::auxiliary_property_readonly(key) {
+        if key == "style" || cuemol_desktop_core::auxiliary_property_readonly(key) {
             return true;
         }
         if let Some(renderer) = id.and_then(|id| {
@@ -937,6 +1046,41 @@ fn set_object_property(
                 GuiWorkspaceObjectKind::Lightweight => state.set_lw_object_locked(id, locked)?,
             }
         }
+        "ui_collapsed" => {
+            let collapsed = value
+                .parse::<bool>()
+                .map_err(|_| CueMolError::invalid_argument("expected true or false"))?;
+            state
+                .scene_manager_mut()
+                .object_mut(id)
+                .ok_or_else(|| CueMolError::not_found("molecule"))?
+                .set_ui_collapsed(collapsed);
+        }
+        "ui_order" => {
+            let order = value
+                .parse::<i32>()
+                .map_err(|_| CueMolError::invalid_argument("expected integer"))?;
+            state
+                .scene_manager_mut()
+                .object_mut(id)
+                .ok_or_else(|| CueMolError::not_found("molecule"))?
+                .set_ui_order(order);
+        }
+        "defaultcolor" => {
+            let color = state.active_style_color(value).ok_or_else(|| {
+                CueMolError::invalid_argument("default color must resolve to RGBA")
+            })?;
+            let object = state
+                .scene_manager_mut()
+                .object_mut(id)
+                .ok_or_else(|| CueMolError::not_found("molecule"))?;
+            object
+                .mol_mut()
+                .set_default_color(cuemol_gfx::SolidColor::from_rgba_u8(
+                    color.r, color.g, color.b, color.a,
+                ));
+            object.set_qsc_extra_attr(prop, value);
+        }
         "sel" => state.set_molecule_selection_text(id, value)?,
         "xformMat" => state.set_workspace_object_transform(id, value)?,
         _ => {
@@ -944,6 +1088,11 @@ fn set_object_property(
                 .scene_manager_mut()
                 .object_mut(id)
                 .ok_or_else(|| CueMolError::not_found("molecule"))?;
+            object.set_qsc_extra_attr(prop, value);
+        }
+    }
+    if matches!(prop, "visible" | "locked" | "ui_collapsed" | "xformMat") {
+        if let Some(object) = state.scene_manager_mut().object_mut(id) {
             object.set_qsc_extra_attr(prop, value);
         }
     }

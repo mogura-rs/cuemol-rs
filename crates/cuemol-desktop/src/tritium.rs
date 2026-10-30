@@ -52,8 +52,8 @@ impl GuiApplication {
             let mut view = camera.to_qsys_camera("__current");
             self.inspector
                 .inspect(&mut self.state, &mut view, target, self.snapshot_revision);
-            for args in self.inspector.panel(ctx) {
-                self.tritium_command("set_node_prop", args, camera);
+            for (tool, args) in self.inspector.panel(ctx) {
+                self.tritium_command(tool, args, camera);
             }
         }
         self.tritium_bottom(ctx, camera);
@@ -291,12 +291,21 @@ impl GuiApplication {
         camera: &mut CameraController,
     ) {
         let mut view = camera.to_qsys_camera("__current");
-        let mut undo = self.capture_undo();
-        undo.camera = Some(view.clone());
-        undo.record = cuemol_command::console::actions::Record::operation(&self.state, name, &args);
+        let record_history = cuemol_command::tool_records_history(name)
+            && !cuemol_command::is_view_property_write(&self.state, name, &args);
+        let undo = record_history.then(|| {
+            let mut undo = self.capture_undo();
+            undo.camera = Some(view.clone());
+            undo.record =
+                cuemol_command::console::actions::Record::operation(&self.state, name, &args);
+            undo
+        });
         match cuemol_command::call_tool(&mut self.state, &mut view, name, &args) {
             Ok(_) => {
-                if cuemol_command::tool_records_history(name) {
+                if let Some(undo) = undo.filter(|before| {
+                    !before.state.same_undo_state(&self.state)
+                        || before.camera.as_ref() != Some(&view)
+                }) {
                     self.push_undo_snapshot(undo);
                 }
                 *camera = CameraController::from_qsys_camera(&view);
@@ -436,6 +445,36 @@ impl GuiApplication {
 mod tests {
     use super::*;
     use egui_kittest::kittest::Queryable;
+    #[test]
+    fn inspector_view_writes_and_empty_resets_keep_redo() {
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.tritium_command(
+            "set_node_prop",
+            json!({"nodeType":"scene","prop":"bgcolor","value":"red"}),
+            &mut camera,
+        );
+        app.undo(&mut camera);
+        assert_eq!(app.redo_stack.len(), 1);
+        app.tritium_command("reset_node_props", json!({"nodeType":"scene"}), &mut camera);
+        app.tritium_command(
+            "set_node_prop",
+            json!({"nodeType":"view","prop":"zoom","value":"25"}),
+            &mut camera,
+        );
+        assert_eq!(camera.to_qsys_camera("test").zoom(), 25.);
+        assert!(app.undo_stack.is_empty());
+        assert_eq!(app.redo_stack.len(), 1);
+        app.redo(&mut camera);
+        assert_eq!(
+            app.state
+                .scene_manager()
+                .scene(app.state.active_scene().unwrap())
+                .unwrap()
+                .scene_attribute("bgcolor"),
+            Some("red")
+        );
+    }
     #[test]
     fn tritium_activity_buttons_switch_and_collapse_the_sidebar() {
         let mut app = GuiApplication::new();

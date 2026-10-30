@@ -107,6 +107,38 @@ impl AtomIntrKind {
     }
 }
 
+pub fn resolve_renderer_child_attr(
+    children: &[LDom2Node],
+    style: Option<&str>,
+    child_tag: &str,
+    attr: &str,
+    styles: &StyleManager,
+    scope_id: u64,
+) -> Option<String> {
+    let child = children.iter().find(|node| node.tag_name() == child_tag);
+    if attr == "type" {
+        if let Some(value) = child
+            .map(LDom2Node::type_name)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(value.into());
+        }
+    }
+    let leaf = child.and_then(|node| node.find_child(attr));
+    if let Some(value) = leaf.filter(|node| !node.is_default()) {
+        return Some(value.value().into());
+    }
+    style
+        .and_then(|names| {
+            if attr == "type" {
+                styles.resolve_style_child_type(scope_id, names, child_tag)
+            } else {
+                styles.resolve_style_child_attr(scope_id, names, child_tag, attr)
+            }
+        })
+        .or_else(|| leaf.map(|node| node.value().into()))
+}
+
 impl AtomIntrLine {
     pub fn kind(&self) -> AtomIntrKind {
         self.kind
@@ -380,9 +412,48 @@ impl MolRenderer {
             self.qsc_children.last_mut().unwrap()
         };
         if attr == "type" {
+            child.remove_child("type");
             child.set_type_name(value);
         } else {
             child.set_str_attr(attr, value);
+            child.find_child_mut(attr).unwrap().set_default_flag(false);
+        }
+    }
+
+    pub fn set_qsc_child_default(&mut self, child_tag: &str, attr: &str, value: &str) {
+        self.set_qsc_child_attr(child_tag, attr, value);
+        let child = self
+            .qsc_children
+            .iter_mut()
+            .find(|child| child.tag_name() == child_tag)
+            .unwrap();
+        if attr == "type" {
+            child.set_type_name("");
+            child.set_str_attr(attr, value);
+        }
+        child.find_child_mut(attr).unwrap().set_default_flag(true);
+    }
+
+    pub fn qsc_child_is_default(&self, child_tag: &str, attr: &str) -> bool {
+        self.qsc_children
+            .iter()
+            .find(|child| child.tag_name() == child_tag)
+            .is_none_or(|child| {
+                (attr != "type" || child.type_name().is_empty())
+                    && child.find_child(attr).is_none_or(LDom2Node::is_default)
+            })
+    }
+
+    fn restore_child_defaults(&mut self) {
+        let junctions: &[&str] = match self.renderer_type() {
+            "ribbon" => &["helixhead", "helixtail", "sheethead", "sheettail"],
+            "cartoon" => &["sheethead", "ribhelix_head", "ribhelix_tail"],
+            _ => &[],
+        };
+        for child in junctions {
+            if self.qsc_child_attr(child, "type").is_none() {
+                self.set_qsc_child_default(child, "type", "smooth");
+            }
         }
     }
 
@@ -398,7 +469,7 @@ impl MolRenderer {
         let removed = if attr == "type" {
             let changed = !child.type_name().is_empty();
             child.set_type_name("");
-            changed
+            child.remove_child("type") || changed
         } else {
             child.remove_child(attr)
         };
@@ -448,10 +519,7 @@ impl MolRenderer {
         styles.resolve_style_attr(scope_id, style_list, attr)
     }
 
-    /// Resolve an attribute on a nested child element of the renderer's style
-    /// preset (e.g. the ribbon `<helix>`/`<sheet>`/`<coil>` cross-section
-    /// sub-elements). Flat `.qsc` inline attributes cannot express nested
-    /// children, so this resolves through the `style="A,B"` list only.
+    /// Resolve an inline child value, its style override, then its reset default.
     pub fn resolved_child_attr(
         &self,
         child_tag: &str,
@@ -459,50 +527,25 @@ impl MolRenderer {
         styles: &StyleManager,
         scope_id: u64,
     ) -> Option<String> {
-        if let Some(node) = self
-            .qsc_children
-            .iter()
-            .find(|node| node.tag_name() == child_tag)
-        {
-            let value = node.str_attr(attr).to_string();
-            if !value.is_empty() {
-                return Some(value);
-            }
-        }
-        let style_list = self.style()?;
-        styles.resolve_style_child_attr(scope_id, style_list, child_tag, attr)
+        resolve_renderer_child_attr(
+            &self.qsc_children,
+            self.style(),
+            child_tag,
+            attr,
+            styles,
+            scope_id,
+        )
     }
 
-    /// Resolve the `type` of a nested child element of this renderer's style preset
-    /// (e.g. the renderer's own `<coloring type="...">` scheme). `type` is an LDom2
-    /// reserved attribute, so it has a dedicated resolver.
     pub fn resolved_child_type(
         &self,
         child_tag: &str,
         styles: &StyleManager,
         scope_id: u64,
     ) -> Option<String> {
-        if let Some(node) = self
-            .qsc_children
-            .iter()
-            .find(|node| node.tag_name() == child_tag)
-        {
-            let value = if node.type_name().is_empty() {
-                node.str_attr("type").to_string()
-            } else {
-                node.type_name().to_string()
-            };
-            if !value.is_empty() {
-                return Some(value);
-            }
-        }
-        let style_list = self.style()?;
-        styles.resolve_style_child_type(scope_id, style_list, child_tag)
+        self.resolved_child_attr(child_tag, "type", styles, scope_id)
     }
 
-    /// The renderer's `xformMat` display transform (C++ `Renderer::getXformMatrix`,
-    /// applied to its geometry via `multMatrix` at display). Identity when unset or
-    /// malformed. Captured from the `<renderer xformMat="(...)">` attribute.
     pub fn xform_matrix(&self) -> Matrix4 {
         self.qsc_attr("xformMat")
             .and_then(parse_xform_mat)
@@ -694,9 +737,7 @@ pub struct MolObject {
     /// Object-level visibility (C++ `Object::visible`, `Object.qif:33`, default
     /// `true`). An invisible object hides ALL its renderers at display — the
     /// C++ display loop skips it before the per-renderer check (`Scene.cpp:635`
-    /// `if (pObj.isnull() || !pObj->isVisible()) continue;`). Persisted as a
-    /// `visible="false"` attribute on the `<object>` element only when hidden
-    /// (the default-true property is omitted otherwise, like `xformMat`).
+    /// `if (pObj.isnull() || !pObj->isVisible()) continue;`).
     visible: bool,
 }
 
@@ -2737,16 +2778,7 @@ impl MolScene {
                 node.is_attr()
                     && !matches!(
                         node.tag_name(),
-                        "type"
-                            | "name"
-                            | "src"
-                            | "alt_src"
-                            | "srctype"
-                            | "locked"
-                            | "ui_collapsed"
-                            | "ui_order"
-                            | "xformMat"
-                            | "visible"
+                        "type" | "name" | "src" | "alt_src" | "srctype" | "ui_order"
                     )
             })
             .map(|node| (node.tag_name().to_string(), node.value().to_string()))
@@ -2766,6 +2798,16 @@ impl MolScene {
             .ok_or_else(|| CueMolError::NotFound("loaded QSC object".to_string()))?;
         object.object_type = object_type;
         object.qsc_extra_attrs = qsc_extra_attrs;
+        if let Some(color) = object
+            .qsc_extra_attrs
+            .get("defaultcolor")
+            .and_then(|value| cuemol_gfx::parse_color(value).ok())
+            .and_then(|color| color.rgba8())
+        {
+            object
+                .mol_mut()
+                .set_default_color(SolidColor::from_rgba_u8(color.r, color.g, color.b, color.a));
+        }
         object.qsc_extension_nodes = qsc_extension_nodes;
         object.qsc_extra_data = qsc_extra_data
             .into_iter()
@@ -2793,9 +2835,7 @@ impl MolScene {
             object.set_xform_matrix(matrix);
         }
 
-        // Object-level `visible` (C++ `Object::visible`, default true): only a
-        // hidden object carries the attribute. Mirror `MolRenderer::is_visible`'s
-        // tolerance of `false`/`0`/`no`/`off` so the same false-spellings parse.
+        // An explicit value also preserves the non-default property flag.
         if let Some(value) = attr_value(object_line, "visible") {
             object.set_visible(!matches!(value.as_str(), "false" | "0" | "no" | "off"));
         }
@@ -2942,6 +2982,7 @@ impl MolScene {
                 })
                 .cloned()
                 .collect();
+            renderer.restore_child_defaults();
         }
         object.set_modified(false);
         Ok(())
@@ -3006,42 +3047,55 @@ impl MolScene {
             .collect::<Vec<_>>();
         for (index, object) in self.objects.iter().enumerate() {
             let chunk_id = format!("{index:05}");
-            // Emit `xformMat` only for a transformed object (C++ omits the identity
-            // default), in the column-major `(...)` format the reader parses.
-            let xform_attr = if object.xform.is_some() {
-                format!(" xformMat=\"{}\"", format_xform_mat(object.xform_matrix()))
+            let xform_attr =
+                if object.xform.is_some() || object.qsc_extra_attrs.contains_key("xformMat") {
+                    format!(" xformMat=\"{}\"", format_xform_mat(object.xform_matrix()))
+                } else {
+                    String::new()
+                };
+            let visible_attr =
+                if !object.is_visible() || object.qsc_extra_attrs.contains_key("visible") {
+                    format!(" visible=\"{}\"", object.is_visible())
+                } else {
+                    String::new()
+                };
+            let locked_attr =
+                if object.is_ui_locked() || object.qsc_extra_attrs.contains_key("locked") {
+                    format!(" locked=\"{}\"", object.is_ui_locked())
+                } else {
+                    String::new()
+                };
+            let collapsed_attr = if object.is_ui_collapsed()
+                || object.qsc_extra_attrs.contains_key("ui_collapsed")
+            {
+                format!(" ui_collapsed=\"{}\"", object.is_ui_collapsed())
             } else {
                 String::new()
-            };
-            // C++ omits the default-true `visible` property; emit it only when the
-            // object is hidden (`visible="false"`), as a `<object>` attribute —
-            // qlib serializes string-convertible scalars as attributes
-            // (`LDOM2Tree.cpp:172-174` `setValue`+`setAttrFlag(true)`).
-            let visible_attr = if object.is_visible() {
-                String::new()
-            } else {
-                " visible=\"false\"".to_string()
-            };
-            let locked_attr = if object.is_ui_locked() {
-                " locked=\"true\""
-            } else {
-                ""
-            };
-            let collapsed_attr = if object.is_ui_collapsed() {
-                " ui_collapsed=\"true\""
-            } else {
-                ""
             };
             let alt_source_attr = if object.alt_source().is_empty() {
                 String::new()
             } else {
                 format!(" alt_src=\"{}\"", escape_xml(object.alt_source()))
             };
-            let extra_attrs = object
+            let mut extra_attrs = object
                 .qsc_extra_attrs
                 .iter()
+                .filter(|(key, _)| {
+                    !matches!(
+                        key.as_str(),
+                        "visible" | "locked" | "ui_collapsed" | "xformMat"
+                    )
+                })
                 .map(|(name, value)| format!(" {name}=\"{}\"", escape_xml(value)))
                 .collect::<String>();
+            if !object.qsc_extra_attrs.contains_key("defaultcolor")
+                && object.mol().default_color() != &SolidColor::from_rgb(1., 1., 1.)
+            {
+                extra_attrs.push_str(&format!(
+                    " defaultcolor=\"{}\"",
+                    escape_xml(&object.mol().default_color().script_string())
+                ));
+            }
             output.push_str(&format!(
                 "\t<object type=\"{}\" name=\"{}\" src=\"datachunk:{}\" srctype=\"{}\"{}{}{}{}{}{}>\n",
                 escape_xml(&object.object_type),

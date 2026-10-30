@@ -4,6 +4,55 @@ use cuemol_qsys::Camera;
 use serde_json::{json, Value};
 
 #[test]
+fn inspector_view_writes_and_empty_resets_preserve_redo() {
+    let mut state = DesktopAppState::new();
+    state.open_bytes("probe.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+    let mut camera = state.active_view_camera().unwrap();
+    let mut protocol = Protocol::new();
+    request(
+        &mut protocol,
+        &mut state,
+        &mut camera,
+        "initialize",
+        json!({}),
+    );
+    for (tool, args) in [
+        (
+            "set_node_prop",
+            json!({"nodeType":"scene","prop":"bgcolor","value":"red"}),
+        ),
+        ("undo", json!({})),
+        (
+            "set_node_prop",
+            json!({"nodeType":"view","prop":"zoom","value":"25"}),
+        ),
+        ("set_prop", json!({"path":"view.slab","value":"35"})),
+        ("reset_node_props", json!({"nodeType":"scene"})),
+    ] {
+        let result = call(&mut protocol, &mut state, &mut camera, tool, args);
+        assert_eq!(result["isError"], false, "{tool}: {result}");
+    }
+    assert_eq!(camera.zoom(), 25.);
+    assert_eq!(camera.slab_depth(), 35.);
+    assert_eq!(
+        call(&mut protocol, &mut state, &mut camera, "undo", json!({}))["isError"],
+        true
+    );
+    assert_eq!(
+        call(&mut protocol, &mut state, &mut camera, "redo", json!({}))["isError"],
+        false
+    );
+    assert_eq!(
+        state
+            .scene_manager()
+            .scene(state.active_scene().unwrap())
+            .unwrap()
+            .scene_attribute("bgcolor"),
+        Some("red")
+    );
+}
+
+#[test]
 fn image_output_declares_file_writes_and_preserves_scene_redo() {
     let mut state = DesktopAppState::new();
     state.open_bytes("probe.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();

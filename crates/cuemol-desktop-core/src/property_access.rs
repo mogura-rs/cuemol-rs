@@ -229,6 +229,9 @@ impl DesktopAppState {
         values
             .entry("xformMat".into())
             .or_insert_with(|| Matrix4::IDENTITY.to_script_string());
+        values.insert("type_name".into(), node.type_name().into());
+        values.insert("uid".into(), uid.get().to_string());
+        values.insert("scene_uid".into(), scene_uid.get().to_string());
         values.insert("style".into(), style_list);
         values.entry("group".into()).or_default();
         values

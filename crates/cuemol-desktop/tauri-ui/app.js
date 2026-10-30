@@ -13600,8 +13600,6 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
 }
 
 function renderInspector(renderKey = workspaceChromeRenderKey()) {
-  if (renderedInspectorKey === renderKey) return;
-  renderedInspectorKey = renderKey;
   const map = ["densityMap", "densityRenderer"].includes(workspaceSelectionKind)
     ? selectedDensityMap()
     : null;
@@ -13620,6 +13618,8 @@ function renderInspector(renderKey = workspaceChromeRenderKey()) {
   inspectorTitle.textContent =
     object?.name || map?.name || surface?.name || lwObject?.name || camera?.name || style?.name || "No object";
   renderTritiumInspector(object || map || surface || lwObject, camera, style);
+  if (renderedInspectorKey === renderKey) return;
+  renderedInspectorKey = renderKey;
   const labels = style
     ? ["Scope", "Read only", "Source"]
     : camera

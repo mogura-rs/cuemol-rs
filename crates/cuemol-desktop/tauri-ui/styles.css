@@ -4733,3 +4733,17 @@ svg { flex: none; }
 
 .app-brand { display: flex; align-items: center; gap: 7px; }
 .app-brand img { object-fit: contain; }
+
+.inspector-tabs { display: flex; gap: 4px; }
+.inspector-tabs button { flex: 1; }
+.inspector-tabs [aria-selected="true"] { background: var(--bg-active); color: var(--text-primary); }
+.inspector-property-group { margin: 6px 0; }
+.inspector-property-group > summary { padding: 6px 0; font-weight: 600; }
+.inspector-property { display: grid; grid-template-columns: minmax(78px, 0.9fr) minmax(70px, 1.3fr) 24px; gap: 6px; align-items: center; min-height: 30px; }
+.inspector-fields .inspector-property label { display: block; overflow-wrap: anywhere; }
+.inspector-property-input { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.inspector-property-input input, .inspector-property-input select { min-width: 0; width: 100%; }
+.inspector-property-input input[type="checkbox"] { width: auto; }
+.inspector-property-input input[type="color"] { flex: 0 0 24px; width: 24px; padding: 0; }
+.inspector-property > button { padding: 2px; min-width: 24px; }
+.inspector-error { color: var(--danger, #f87171); overflow-wrap: anywhere; }

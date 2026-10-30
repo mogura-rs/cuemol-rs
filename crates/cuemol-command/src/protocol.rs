@@ -238,7 +238,9 @@ impl Protocol {
             return Ok(json!({"changed":true}));
         }
         crate::advance_animation(state, camera).map_err(|e| e.to_string())?;
-        let before = tool_records_history(name).then(|| (state.clone(), camera.clone()));
+        let before = (tool_records_history(name)
+            && !crate::is_view_property_write(state, name, args))
+        .then(|| (state.clone(), camera.clone()));
         match call_tool(state, camera, name, args) {
             Ok(value) => {
                 if let Some(before) = before.filter(|(previous, view)| {

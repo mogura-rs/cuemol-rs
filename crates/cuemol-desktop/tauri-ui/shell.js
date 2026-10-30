@@ -92,47 +92,189 @@ function setCueMolInspectorWidth(value) {
   splitter.setAttribute("aria-valuemax", String(Math.round(maximum)));
 }
 
+const cueMolPropertyInspector = {key: '', target: null, rows: [], source: null, serial: 0, tab: 'Properties', filter: '', error: ''};
+
 function renderTritiumInspector(owner, camera, style) {
   if (cueMolActivity === "actions" && renderActionInspector()) return;
   const rendererUid = workspaceSelectionKind === "densityRenderer" ? selectedDensityRendererUid
     : workspaceSelectionKind === "surfaceRenderer" ? selectedSurfaceRendererUid
     : workspaceSelectionKind === "lwRenderer" ? selectedLwRendererUid
     : ["renderer", "rendererGroup"].includes(workspaceSelectionKind) ? selectedRendererUid : null;
-  const target = owner?.renderers?.find((item) => item.uid === rendererUid) || owner || camera || style;
-  const key = target ? `${workspaceSelectionKind}:${target.uid ?? target.name}` : "";
+  const renderer = owner?.renderers?.find(item => item.uid === rendererUid);
+  const target = renderer || owner || camera || style;
+  const key = target ? `${snapshot?.activeSceneUid}:${workspaceSelectionKind}:${target.uid ?? target.name}` : "";
   if (key !== cueMolInspectorTarget) {
     cueMolInspectorTarget = key;
     cueMolInspectorClosed = false;
+    cueMolPropertyInspector.tab = 'Properties';
+    cueMolPropertyInspector.filter = '';
   }
   contentHolder.classList.toggle("has-inspector", Boolean(target) && !cueMolInspectorClosed);
   document.getElementById("inspector-title").textContent = target?.name || "No object";
   const fields = document.getElementById("inspector-fields");
+  if (!target || !owner) {
+    cueMolPropertyInspector.key = '';
+    cueMolPropertyInspector.target = null;
+    cueMolPropertyInspector.serial += 1;
+    fields.replaceChildren();
+    return;
+  }
+  const node = {nodeType: renderer ? 'renderer' : 'object', nodeId: renderer?.uid ?? owner.uid};
+  const inspector = cueMolPropertyInspector;
+  if (inspector.key === key && inspector.source === snapshot) return;
+  const selectedChanged = inspector.key !== key;
+  inspector.key = key;
+  inspector.target = node;
+  inspector.source = snapshot;
+  inspector.error = '';
+  if (selectedChanged) { inspector.rows = []; fields.textContent = 'Loading properties…'; }
+  const serial = ++inspector.serial;
+  void invoke('inspector_request', {tool:'list_node_props', args:node}).then(result => {
+    if (inspector.serial !== serial || inspector.key !== key) return;
+    inspector.rows = result.properties || [];
+    paintCueMolProperties();
+  }).catch(error => {
+    if (inspector.serial !== serial || inspector.key !== key) return;
+    inspector.error = String(error);
+    paintCueMolProperties();
+  });
+}
+
+async function editCueMolProperty(tool, args) {
+  const inspector = cueMolPropertyInspector;
+  const key = inspector.key;
+  const target = {...inspector.target};
+  setBusy(true);
+  try {
+    const result = await invoke('inspector_request', {tool, args:{...target, ...args}});
+    if (result.snapshot) {
+      snapshot = result.snapshot;
+      syncEmptyMoleculeDetails();
+      renderShell();
+      void renderViewport();
+      scheduleMoleculeDetailsRefresh();
+    }
+    if (key === inspector.key && tool === 'reset_node_props' && result.result?.properties) {
+      inspector.rows = result.result.properties;
+      paintCueMolProperties();
+    }
+  } catch (error) {
+    if (key === inspector.key) { inspector.error = String(error); paintCueMolProperties(); }
+  } finally { setBusy(false); }
+}
+
+function paintCueMolProperties() {
+  const inspector = cueMolPropertyInspector;
+  const fields = document.getElementById('inspector-fields');
+  const active = fields.contains(document.activeElement) ? document.activeElement : null;
+  const focus = active?.id ? {id:active.id, dirty:active.dataset.initialValue !== undefined && active.value !== active.dataset.initialValue, value:active.value, start:active.selectionStart, end:active.selectionEnd} : null;
   fields.replaceChildren();
-  if (!target) return;
-  const coordinates = selectedWorkspaceRenameCoordinates();
-  if (coordinates && !["camera", "style"].includes(workspaceSelectionKind)) {
-    const label = document.createElement("label");
-    label.textContent = "Name";
-    const input = document.createElement("input");
-    input.value = target.name || "";
-    input.setAttribute("aria-label", "Inspected name");
-    input.addEventListener("change", () => void mutateWithoutViewport("rename_workspace_node", {
-      input: { kind: workspaceSelectionKind, ...coordinates, name: input.value },
-    }));
-    label.append(input);
-    fields.append(label);
-    if (typeof target.visible === "boolean") {
-      const visibleLabel = document.createElement("label");
-      visibleLabel.className = "inspector-check";
-      const visible = document.createElement("input");
-      visible.type = "checkbox";
-      visible.checked = target.visible;
-      visible.disabled = target.locked;
-      visible.addEventListener("change", () => void mutate("set_workspace_visible", {
-        target: { kind: workspaceSelectionKind, ...coordinates }, visible: visible.checked,
-      }));
-      visibleLabel.append(visible, "Visible");
-      fields.append(visibleLabel);
+  const tabs = document.createElement('div');
+  tabs.className = 'inspector-tabs';
+  tabs.setAttribute('role', 'tablist');
+  for (const name of ['Properties', 'Generic']) {
+    const tab = document.createElement('button');
+    tab.type = 'button'; tab.textContent = name;
+    tab.setAttribute('role', 'tab'); tab.setAttribute('aria-selected', String(name === inspector.tab));
+    tab.addEventListener('click', () => { inspector.tab = name; paintCueMolProperties(); });
+    tabs.append(tab);
+  }
+  fields.append(tabs);
+  const filter = document.createElement('input');
+  filter.id = 'inspector-filter'; filter.type = 'search'; filter.placeholder = 'Filter properties'; filter.setAttribute('aria-label', 'Filter properties');
+  filter.value = inspector.filter;
+  filter.addEventListener('input', () => {
+    inspector.filter = filter.value;
+    paintCueMolPropertyRows();
+  });
+  fields.append(filter);
+  const reset = document.createElement('button');
+  reset.type = 'button'; reset.textContent = 'Reset all to default';
+  reset.disabled = !inspector.rows.some(row => row.hasdefault && !row.isdefault && !row.readonly);
+  reset.addEventListener('click', () => void editCueMolProperty('reset_node_props', {}));
+  fields.append(reset);
+  if (inspector.error) {
+    const error = document.createElement('p'); error.className = 'inspector-error'; error.setAttribute('role','alert');
+    error.textContent = inspector.error; fields.append(error);
+  }
+  const rows = document.createElement('div'); rows.className = 'inspector-property-rows';
+  fields.append(rows);
+  paintCueMolPropertyRows();
+  if (focus) {
+    const input = document.getElementById(focus.id);
+    if (input && !input.disabled) {
+      if (focus.dirty) input.value=focus.value;
+      input.focus({preventScroll:true});
+      if (focus.start !== null && ['text','search'].includes(input.type)) input.setSelectionRange(focus.start,focus.end);
+    }
+  }
+}
+
+function paintCueMolPropertyRows() {
+  const inspector = cueMolPropertyInspector;
+  const host = document.querySelector('.inspector-property-rows');
+  if (!host) return;
+  host.replaceChildren();
+  const filter = inspector.filter.toLowerCase();
+  const rows = inspector.rows.filter(row => !filter || row.key.toLowerCase().includes(filter));
+  const groups = new Map();
+  for (const row of rows) {
+    const group = inspector.tab === 'Properties' ? row.category || 'Properties' : '';
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(row);
+  }
+  const order = ['Common', 'Appearance', 'Geometry'];
+  const rank = group => group === 'Identity' ? 4 : order.includes(group) ? order.indexOf(group) : 3;
+  for (const [group, entries] of [...groups].sort(([a], [b]) => rank(a)-rank(b) || a.localeCompare(b))) {
+    let container = host;
+    if (group && !filter) {
+      const details = document.createElement('details'); details.className = 'inspector-property-group';
+      details.open = order.includes(group);
+      const summary = document.createElement('summary'); summary.textContent = group;
+      details.append(summary); host.append(details); container = details;
+    }
+    for (const row of entries) {
+      const line = document.createElement('div'); line.className = 'inspector-property';
+      const label = document.createElement('label'); label.textContent = inspector.tab === 'Properties' ? row.key.split('.').at(-1) : row.key;
+      const id = `inspector-property-${row.key}`; label.htmlFor = id; label.title = `${row.key} (${row.type})`;
+      line.append(label);
+      const controls = document.createElement('div'); controls.className = 'inspector-property-input';
+      const input = document.createElement(row.allowed?.length ? 'select' : 'input');
+      input.id = id; input.disabled = row.readonly;
+      input.setAttribute('aria-label', row.key === 'name' ? 'Inspected name' : `Inspected ${row.key}`);
+      if (row.allowed?.length) {
+        for (const value of row.allowed) { const option = document.createElement('option'); option.value=value; option.textContent=value; input.append(option); }
+      } else if (row.type === 'boolean') { input.type='checkbox'; input.checked=row.value === 'true'; }
+      else if (row.type === 'integer' || row.type === 'real') { input.type='number'; input.step=row.type === 'integer' ? '1' : 'any'; }
+      else { input.type='text'; }
+      input.value = row.value;
+      input.dataset.initialValue = row.value;
+      const commit = value => {
+        if (value !== row.value) void editCueMolProperty('set_node_prop', {prop:row.key, value, cascadeGroupVisibility:inspector.tab === 'Properties'});
+      };
+      input.addEventListener('change', () => {
+        if (input.validity && !input.validity.valid) { input.reportValidity(); return; }
+        commit(row.type === 'boolean' ? String(input.checked) : input.value);
+      });
+      input.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.isComposing) { event.preventDefault(); input.blur(); } });
+      if (row.type === 'color' && row.rgba) {
+        const color = document.createElement('input'); color.type='color'; color.disabled=row.readonly;
+        color.value='#'+row.rgba.slice(0,3).map(value=>value.toString(16).padStart(2,'0')).join('');
+        color.setAttribute('aria-label',`Choose color ${row.key}`);
+        color.addEventListener('change',()=>{
+          const rgb=[1,3,5].map(index=>parseInt(color.value.slice(index,index+2),16));
+          commit(`rgba(${rgb.join(',')},${row.rgba[3]/255})`);
+        }); controls.append(color);
+      }
+      controls.append(input); line.append(controls);
+      if (row.hasdefault && !row.readonly) {
+        const reset = document.createElement('button'); reset.type='button'; reset.textContent='↺';
+        reset.disabled=row.isdefault; reset.setAttribute('aria-label',`Reset ${row.key}`);
+        reset.title=`Reset to default${row.defaultValue === undefined ? '' : ` (${row.defaultValue})`}`;
+        reset.addEventListener('click',()=>void editCueMolProperty('reset_node_props',{props:[row.key]}));
+        line.append(reset);
+      }
+      container.append(line);
     }
   }
 }
