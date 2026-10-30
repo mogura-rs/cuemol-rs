@@ -155,11 +155,16 @@ pub fn renderer_property_allowed(renderer_type: &str, key: &str) -> &'static [&'
         };
     }
     match key {
+        "captype_start" | "captype_end" if renderer_type == "atomintr" => {
+            &["flat", "sphere", "arrow"]
+        }
         "start_captype" | "end_captype" | "captype_start" | "captype_end" => {
             &["flat", "none", "sphere"]
         }
         "valbond_mode" => &["off", "type1"],
-        "glrender_mode" => &["default", "glu", "shader", "vbo"],
+        "glrender_mode" if matches!(renderer_type, "cpk" | "ballstick") => {
+            &["default", "glu", "shader", "vbo"]
+        }
         "putty_mode" => &["linear1", "none", "scale1"],
         "putty_tgt" => &["bfac", "occ"],
         "base_type" => &["basepair", "detail1", "detail2", "simple1"],
@@ -483,6 +488,106 @@ pub fn renderer_attr_properties(renderer_type: &str) -> Vec<RendererAttrProperty
         _ => {}
     }
     properties
+}
+
+pub fn map_renderer_attr_property(renderer_type: &str, name: &str) -> Option<RendererAttrProperty> {
+    use RendererAttrKind::{Boolean, Color, Integer, Real, Selection, String as Text, Vector};
+    if !matches!(
+        renderer_type,
+        "MapRenderer"
+            | "contour"
+            | "MapMeshRenderer"
+            | "isosurf"
+            | "MapSurfRenderer"
+            | "gpu_mapmesh"
+            | "gpu_mapmesh2"
+            | "gpu_mapvol"
+            | "GLSLMapMeshRenderer"
+            | "GLSLMapMeshRenderer2"
+            | "GLSLMapVolRenderer"
+    ) && name != "multi_grad"
+    {
+        return None;
+    }
+    let gpu = matches!(
+        renderer_type,
+        "gpu_mapmesh"
+            | "gpu_mapmesh2"
+            | "gpu_mapvol"
+            | "GLSLMapMeshRenderer"
+            | "GLSLMapMeshRenderer2"
+            | "GLSLMapVolRenderer"
+    );
+    let surface = matches!(renderer_type, "isosurf" | "MapSurfRenderer");
+    let (key, kind, default) = match name {
+        "ui_abslevel_min" => ("ui_abslevel_min", Real, "0"),
+        "ui_abslevel_max" => ("ui_abslevel_max", Real, "0"),
+        "ui_level_min" => ("ui_level_min", Real, "0"),
+        "ui_level_max" => ("ui_level_max", Real, "0"),
+        "siglevel_effective" => ("siglevel_effective", Real, "1.1"),
+        "map_type_resolved" => ("map_type_resolved", Text, ""),
+        "region_mode" => ("region_mode", Text, "auto"),
+        "region_mode_resolved" => ("region_mode_resolved", Text, "box"),
+        "lod" => ("lod", Text, "auto"),
+        "lod_budget" => (
+            "lod_budget",
+            Integer,
+            if matches!(renderer_type, "contour" | "MapMeshRenderer") {
+                "2"
+            } else {
+                "16"
+            },
+        ),
+        "zoom_refine" => ("zoom_refine", Boolean, "true"),
+        "maxLevel" => ("maxLevel", Real, "0"),
+        "minLevel" => ("minLevel", Real, "0"),
+        "colormode" => ("colormode", Text, "solid"),
+        "color" | "defaultcolor" => (
+            "color",
+            Color,
+            if gpu {
+                "#00ff00"
+            } else if surface {
+                "#d9d9d9"
+            } else {
+                "#0000ff"
+            },
+        ),
+        "siglevel" | "level" => ("siglevel", Real, "1.1"),
+        "extent" => ("extent", Real, "15"),
+        "center" => ("center", Vector, "(0,0,0,0)"),
+        "use_pbc" => ("use_pbc", Boolean, "true"),
+        "use_abslevel" => ("use_abslevel", Boolean, "false"),
+        "bndry_rng" => ("bndry_rng", Real, "5"),
+        "bndry_molname" => ("bndry_molname", Text, ""),
+        "bndry_sel" => ("bndry_sel", Selection, ""),
+        "multi_grad" => ("multi_grad", Text, ""),
+        "color_mapname" => ("color_mapname", Text, ""),
+        "maxExtent" => ("maxExtent", Real, "0"),
+        "width" => ("width", Real, if surface { "1.2" } else { "1" }),
+        "bufsize" => ("bufsize", Integer, "100"),
+        "autoupdate" => ("autoupdate", Boolean, "true"),
+        "dragupdate" => ("dragupdate", Boolean, if gpu { "true" } else { "false" }),
+        "cullface" => ("cullface", Boolean, "false"),
+        "drawmode" => ("drawmode", Text, "fill"),
+        "binning" => ("binning", Integer, "1"),
+        "max_grids" => ("max_grids", Integer, "100"),
+        "glrender_mode" => ("glrender_mode", Text, "displist"),
+        "omp_thr" => ("omp_thr", Integer, "-1"),
+        "xferfn_type" => ("xferfn_type", Text, "rainbow1"),
+        _ => return None,
+    };
+    Some(RendererAttrProperty {
+        name: match name {
+            "defaultcolor" => "defaultcolor",
+            "level" => "level",
+            _ => key,
+        },
+        key,
+        kind,
+        default,
+        writable: !super::auxiliary_property_readonly(name) && name != "multi_grad",
+    })
 }
 
 impl crate::DesktopAppState {

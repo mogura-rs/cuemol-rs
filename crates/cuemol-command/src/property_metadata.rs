@@ -1,6 +1,7 @@
 use super::*;
 use cuemol_desktop_core::property_catalog::{
-    renderer_attr_properties, renderer_common_or_child_property, renderer_property_allowed,
+    map_renderer_attr_property, renderer_attr_properties, renderer_common_or_child_property,
+    renderer_property_allowed,
 };
 
 fn scalar_type(key: &str, value: &str) -> &'static str {
@@ -66,6 +67,14 @@ pub(super) fn rows(
         None
     };
     let renderer = owner.and_then(|owner| state.scene_manager().object(owner)?.renderer(id?));
+    let auxiliary_explicit = if renderer.is_none() {
+        owner
+            .zip(id)
+            .map(|(owner, id)| state.auxiliary_renderer_explicit_properties(owner, id))
+            .transpose()?
+    } else {
+        None
+    };
     let renderer_type = renderer
         .map(|r| r.renderer_type())
         .unwrap_or_else(|| values.get("type_name").map(String::as_str).unwrap_or(""))
@@ -83,7 +92,8 @@ pub(super) fn rows(
     let mut rows = Vec::with_capacity(values.len());
     for (key, value) in values {
         let spec = renderer_common_or_child_property(&renderer_type, &key)
-            .or_else(|| specs.get(key.as_str()).copied());
+            .or_else(|| specs.get(key.as_str()).copied())
+            .or_else(|| map_renderer_attr_property(&renderer_type, &key));
         let mut default = spec.map(|p| p.default.to_string());
         let mut ty = spec
             .map(|p| p.kind.type_name())
@@ -101,6 +111,7 @@ pub(super) fn rows(
                 "locked" | "ui_collapsed" => Some("false".into()),
                 "defaultcolor" => Some("#ffffff".into()),
                 "xformMat" => Some(Matrix4::IDENTITY.to_script_string()),
+                "map_type" => Some("auto".into()),
                 _ => None,
             };
         } else if kind == "scene" {
@@ -119,9 +130,21 @@ pub(super) fn rows(
         ) {
             default = None;
         }
+        if map_renderer_attr_property(&renderer_type, &key).is_some()
+            && matches!(key.as_str(), "level" | "defaultcolor")
+        {
+            default = None;
+        }
         let readonly = matches!(
             key.as_str(),
-            "uid" | "scene_uid" | "type_name" | "src" | "alt_src" | "srctype" | "modified"
+            "uid"
+                | "scene_uid"
+                | "type_name"
+                | "src"
+                | "alt_src"
+                | "srctype"
+                | "modified"
+                | "map_type_resolved"
         ) || kind == "scene"
             && matches!(key.as_str(), "name" | "basePath" | "obj_uids" | "view_uids")
             || spec.is_some_and(|property| !property.writable)
@@ -146,6 +169,8 @@ pub(super) fn rows(
                 } else {
                     !renderer.qsc_attrs().contains_key(&key)
                 }
+            } else if let Some(explicit) = &auxiliary_explicit {
+                !explicit.contains(key.as_str())
             } else if kind == "scene" {
                 !current_scene.scene_attributes().contains_key(&key)
             } else if let Some(object) = object {
@@ -162,12 +187,21 @@ pub(super) fn rows(
         if !allowed.is_empty() {
             row["allowed"] = json!(allowed);
         }
-        if ty == "color" {
-            if let Some(color) = state.active_style_color(&value) {
-                row["rgba"] = json!([color.r, color.g, color.b, color.a]);
-            }
-        }
         rows.push(row);
+    }
+    let colors = state.active_style_colors(
+        rows.iter()
+            .filter(|row| row["type"] == "color")
+            .filter_map(|row| row["value"].as_str()),
+    );
+    for (row, color) in rows
+        .iter_mut()
+        .filter(|row| row["type"] == "color")
+        .zip(colors)
+    {
+        if let Some(color) = color {
+            row["rgba"] = json!([color.r, color.g, color.b, color.a]);
+        }
     }
     Ok(rows)
 }

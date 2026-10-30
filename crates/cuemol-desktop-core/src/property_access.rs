@@ -241,6 +241,32 @@ impl DesktopAppState {
         Ok(values)
     }
 
+    pub fn auxiliary_renderer_explicit_properties(
+        &self,
+        owner: Uid,
+        uid: Uid,
+    ) -> Result<std::collections::BTreeSet<String>> {
+        if let Some(renderer) = self
+            .density_maps
+            .get(&owner)
+            .and_then(|object| object.renderers.iter().find(|renderer| renderer.uid == uid))
+        {
+            let mut keys: std::collections::BTreeSet<_> =
+                renderer.attributes.keys().cloned().collect();
+            if !renderer.visible {
+                keys.insert("visible".into());
+            }
+            return Ok(keys);
+        }
+        let (_, node) = self.auxiliary_renderer_node(owner, uid)?;
+        Ok(node
+            .children()
+            .iter()
+            .filter(|node| node.is_attr())
+            .map(|node| node.tag_name().to_string())
+            .collect())
+    }
+
     fn replace_auxiliary_renderer_node(
         &mut self,
         owner: Uid,

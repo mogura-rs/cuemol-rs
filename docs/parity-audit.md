@@ -30,7 +30,7 @@ speedup from a single optimized stage or compare timings from different hosts.
 | Feature family | Required comparison | Current audit status |
 | --- | --- | --- |
 | Shell | Activities, menus, toolbar, tab order, docks, compact windows, themes and keyboard access | Application shortcuts, browser tab closing and menu access, shared history dropdowns, Tauri palette folding and tree/text clipboard routing repaired and checked; browser recent files and remaining pane controls are still under comparison |
-| Explorer and Inspector | Object/renderer/group hierarchy, selection, visibility, locking, drag/drop, context menus and property editors | Typed fields, nested properties, default flags, resets, group writes, Scene/View targets and Scene quality presets repaired and checked below; specialized editors and remaining targets are under comparison |
+| Explorer and Inspector | Object/renderer/group hierarchy, selection, visibility, locking, drag/drop, context menus and property editors | Typed fields, nested properties, defaults/resets, group writes, Scene/View targets, quality presets and renderer pages repaired and checked below; selection/font pickers, remaining targets and live previews are under comparison |
 | Color and styles | Coloring modes, paint entries, palettes, property inheritance, style creation/apply/edit/save | Previous focused checks exist; complete editor comparison pending |
 | Console | CueMol/PyMOL dialects, command arguments, completion, history, multiline input, IME and transaction behavior | Shared CueMol/PyMOL interpreters, completion, native QAX logging/replay and cancellable execution implemented; focused shared, browser and OS-input checks passed; affected regression checks, CI and Pages passed at `99b7c16`; public review repairs and release delivery are in progress |
 | Actions | History rows, operation inspection, QAX export, bundled/user macros and reusable actions | History selection, operation inspection, QAX export and bundled/user macro libraries are implemented in native, WASM and Tauri; CI, Pages and the macOS window check passed at `488ce9c`; review repairs passed affected checks and were published at `53100c5` |
@@ -365,8 +365,8 @@ AO undo/redo, read-only Scene identity and pending View edits during navigation;
 the 20 Tauri DOM cases also passed. The DOM tests use mocked IPC, complemented by
 the Rust model tests. The Linux OS-input check opened both contexts, renamed the
 scene and view, checked the displayed zoom after scrolling, and retained pending
-numeric and text edits through navigation. Specialized property pages, remaining
-dock targets and continuous renderer previews still require comparison.
+numeric and text edits through navigation. Further renderer pages are described
+below; remaining dock targets and continuous previews still require comparison.
 
 The public Claude Code review of `5697aaa` reported no high-confidence findings,
 but its malformed-argument concern reproduced a Tauri panic before validation.
@@ -379,6 +379,88 @@ resolution uses exact names, not prefix or wildcard matching; existing Console
 cases cover names containing dots and typed references. View properties have no
 resettable defaults. Camera refresh cost and selection-to-dock behavior remain
 part of the broader Inspector comparison.
+
+### Renderer pages and property-query cost
+
+The Properties tab now shares ordered definitions for common renderer controls,
+simple/trace, CPK, ball-and-stick, anisotropic atoms, trace-stick, spline, tube,
+nucleic acid, ribbon, cartoon, density maps, contours, isosurfaces, molecular
+surfaces, disorder, measurements and name labels. The definitions follow the
+published tag's Inspector schema. They include ranges, fine/coarse steps, units,
+enum labels and dependencies between fields. Current and default detail levels
+remain selectable even when absent from the usual powers-of-two choices.
+Material choices come from the active scene's style manager, including headless
+builds. Generic continues to expose the stored values.
+
+Tube axis widths convert between displayed dimensions and the stored ratio;
+editing the major axis preserves the minor one. Nucleic-base dimensions preserve
+the thickness percentage. Ribbon/cartoon junction controls apply their percent
+conversion and paired writes in one undo entry. Reset follows the reference's
+primary-property rule for these combined controls; center-update resets both
+stored map flags. Inactive ring, tube, arrow and label controls reject edits.
+
+Density-map kind now reaches the shared editor API, changes the effective
+region policy, and survives scene export/reload. Electrostatic maps do not gain
+the density-only setting. Full-region pages show cell budget and zoom refinement;
+box-region pages show buffer/grid limits and periodic boundaries. Display-limit
+controls remain usable before a molecule exists. Disabling the limit clears
+its molecule and selection together. Dash toggles likewise update all six
+segments in one action; blank cells retain the negative unused-segment sentinel.
+An optional loop size remembers its last enabled value and restores its initial
+value after reset.
+
+A regression exposed map widths incorrectly reported as integers and missing
+default metadata. Inspector and JavaScript now share the existing map-property
+definitions, retaining fractional widths and resettable center-update flags.
+Explicit map flags remain distinct from equality with factory values. The
+command checks also verify atomic rollback and saved map-kind restoration.
+Measurement arrow caps use their own enum; applying a tube-only enum previously
+rejected the page's Arrow choice. The repair accepts and saves the arrow setting
+and enables its size controls.
+
+The rebuilt browser and Tauri DOM run passed 28 affected cases, including the
+new optional values, six-field dash undo and empty map-limit behavior. A later
+run passed all seven real-browser Inspector cases; the added Tauri compound
+control and metadata checks passed separately. Twelve command property tests
+with scripting, five shared Inspector tests and eight native/Tauri model
+tests passed. Map-script checks caught a missing base-class entry in the shared
+metadata; all 16 affected map cases passed after restoring it. The native input
+probe also reproduced a crash when a script deleted the inspected renderer:
+the empty property list retained old row indices. Missing targets now clear the
+rows, ordering and drafts together, and the regression paints both tabs after
+deletion. The Linux OS-input check passed deletion, derived-axis undo/redo and
+optional-value off/on restoration in addition to the existing navigation,
+Console, clipboard, label and Scene/View checks. Font and selection popovers,
+live drag preview and the remaining camera/style dock targets are still open
+audit items; these results
+do not establish complete Inspector parity.
+
+Property queries previously rebuilt the scene style manager separately for
+each color. Literal colors now bypass that work, and named colors in one query
+share one lazily constructed manager. Three sequential fresh processes per
+condition used the same ARM64 macOS host, an optimized build, a 20,000-atom PDB,
+four color fields and 300 repeated full `list_node_props` calls. Canonical query
+data and every resolved RGBA value matched before and after the change.
+
+| Registered custom colors | Median first query before / after (ms) | Median repeated query before / after (ms) | Process peak RSS before / after (MiB) |
+| --- | ---: | ---: | --- |
+| 0 | 0.765 / 0.590 | 0.374 / 0.234 | 28.56-30.00 / 28.48-28.78 |
+| 1,000 | 4.660 / 2.617 | 4.149 / 2.183 | 29.91-29.92 / 30.16-30.20 |
+
+The repeated query improved by approximately 1.60x and 1.90x. RSS includes
+molecule loading and the runtime; these samples do not demonstrate a general
+memory reduction. This measures the property API, not GUI frame rate or a
+comparison with C++. To reproduce the query measurement:
+
+```sh
+cargo build --locked --release -p cuemol-command --example inspector_bench
+uv run --no-project python scripts/benchmark-inspector.py \
+  --binary target/release/examples/inspector_bench --fixture input.pdb \
+  --revision "$(git rev-parse HEAD)" --output .cache/inspector/current.json
+```
+
+Pass `--baseline` with an earlier report to require unchanged canonical output.
+Reports include fixture/binary hashes, cold/repeated timings and per-process RSS.
 
 ## Clipboard comparison and repairs
 

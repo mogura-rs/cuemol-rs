@@ -4745,5 +4745,6 @@ svg { flex: none; }
 .inspector-property-input input, .inspector-property-input select { min-width: 0; width: 100%; }
 .inspector-property-input input[type="checkbox"] { width: auto; }
 .inspector-property-input input[type="color"] { flex: 0 0 24px; width: 24px; padding: 0; }
+.inspector-unit { flex: 0 0 auto; font-size: 0.8em; opacity: 0.7; }
 .inspector-property > button { padding: 2px; min-width: 24px; }
 .inspector-error { color: var(--danger, #f87171); overflow-wrap: anywhere; }

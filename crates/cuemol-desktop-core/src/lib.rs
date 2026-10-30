@@ -4286,6 +4286,13 @@ impl DesktopAppState {
         summaries
     }
 
+    pub fn scene_material_names(&self, scene_uid: Uid) -> Vec<String> {
+        self.scene_manager()
+            .scene(scene_uid)
+            .map(|scene| scene_style_manager(scene).material_names(scene_uid.get()))
+            .unwrap_or_default()
+    }
+
     pub fn renderer_style_options(
         &self,
         scene_uid: Uid,
@@ -5646,6 +5653,30 @@ impl DesktopAppState {
             let node = ensure_surface_renderer_node(surface, scene_uid, renderer_uid)?;
             sync_qsc_multi_gradient_node(node, &gradient);
         }
+        Ok(())
+    }
+
+    pub fn density_map_kind(&self, map_uid: Uid) -> Option<(&str, &'static str)> {
+        let object = self.density_maps.get(&map_uid)?;
+        if object.class_name != "DensityMap" {
+            return None;
+        }
+        let map = &object.map;
+        Some((map.map_type(), if map.is_em() { "em" } else { "xtal" }))
+    }
+
+    pub fn set_density_map_type(&mut self, map_uid: Uid, value: &str) -> Result<()> {
+        let object = self
+            .density_maps
+            .get_mut(&map_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("density map {}", map_uid.get())))?;
+        if object.class_name != "DensityMap" {
+            return Err(CueMolError::invalid_argument(
+                "map type applies only to density maps",
+            ));
+        }
+        object.map.set_map_type(value)?;
+        object.modified = true;
         Ok(())
     }
 
@@ -14664,14 +14695,37 @@ impl DesktopAppState {
     }
 
     pub fn active_style_color(&self, value: &str) -> Option<cuemol_gfx::Rgba8> {
+        self.active_style_color_with(value, &std::cell::OnceCell::new())
+    }
+
+    pub fn active_style_colors<'a>(
+        &self,
+        values: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<Option<cuemol_gfx::Rgba8>> {
+        let styles = std::cell::OnceCell::new();
+        values
+            .into_iter()
+            .map(|value| self.active_style_color_with(value, &styles))
+            .collect()
+    }
+
+    fn active_style_color_with(
+        &self,
+        value: &str,
+        styles: &std::cell::OnceCell<StyleManager>,
+    ) -> Option<cuemol_gfx::Rgba8> {
         let scene = self
             .active_scene
             .and_then(|id| self.scene_manager().scene(id))?;
-        let styles = scene_style_manager(scene);
         cuemol_gfx::parse_color(value)
             .ok()?
             .resolve(
-                |name| styles.get_color(name, scene.uid().get()).cloned(),
+                |name| {
+                    styles
+                        .get_or_init(|| scene_style_manager(scene))
+                        .get_color(name, scene.uid().get())
+                        .cloned()
+                },
                 None,
             )
             .map(|color| color.rgba8())
@@ -38406,109 +38460,13 @@ impl DesktopAppState {
         fn map_renderer_fallback_property(
             renderer_type: &str,
             name: &'static str,
-            property: MapRendererProperty,
+            _property: MapRendererProperty,
             writable: bool,
         ) -> RendererAttrProperty {
-            use RendererAttrKind::{
-                Boolean, Color, Integer, Real, Selection, String as Text, Vector,
-            };
-            let (key, kind, default) = match property {
-                MapRendererProperty::UiAbsMin => ("ui_abslevel_min", Real, "0"),
-                MapRendererProperty::UiAbsMax => ("ui_abslevel_max", Real, "0"),
-                MapRendererProperty::UiMin => ("ui_level_min", Real, "0"),
-                MapRendererProperty::UiMax => ("ui_level_max", Real, "0"),
-                MapRendererProperty::EffectiveSigLevel => ("siglevel_effective", Real, "1.1"),
-                MapRendererProperty::MapTypeResolved => ("map_type_resolved", Text, ""),
-                MapRendererProperty::RegionMode => ("region_mode", Text, "auto"),
-                MapRendererProperty::RegionModeResolved => ("region_mode_resolved", Text, "box"),
-                MapRendererProperty::Lod => ("lod", Text, "auto"),
-                MapRendererProperty::LodBudget => (
-                    "lod_budget",
-                    Integer,
-                    if matches!(renderer_type, "contour" | "MapMeshRenderer") {
-                        "2"
-                    } else {
-                        "16"
-                    },
-                ),
-                MapRendererProperty::ZoomRefine => ("zoom_refine", Boolean, "true"),
-                MapRendererProperty::MaxLevel => ("maxLevel", Real, "0"),
-                MapRendererProperty::MinLevel => ("minLevel", Real, "0"),
-                MapRendererProperty::ColorMode => ("colormode", Text, "solid"),
-                MapRendererProperty::Color => (
-                    "color",
-                    Color,
-                    if matches!(
-                        renderer_type,
-                        "gpu_mapmesh"
-                            | "gpu_mapmesh2"
-                            | "gpu_mapvol"
-                            | "GLSLMapMeshRenderer"
-                            | "GLSLMapMeshRenderer2"
-                            | "GLSLMapVolRenderer"
-                    ) {
-                        "#00ff00"
-                    } else if matches!(renderer_type, "isosurf" | "MapSurfRenderer") {
-                        "#d9d9d9"
-                    } else {
-                        "#0000ff"
-                    },
-                ),
-                MapRendererProperty::SigLevel => ("siglevel", Real, "1.1"),
-                MapRendererProperty::Extent => ("extent", Real, "15"),
-                MapRendererProperty::Center => ("center", Vector, "(0,0,0,0)"),
-                MapRendererProperty::Level => ("siglevel", Real, "1.1"),
-                MapRendererProperty::UsePbc => ("use_pbc", Boolean, "true"),
-                MapRendererProperty::UseAbsLevel => ("use_abslevel", Boolean, "false"),
-                MapRendererProperty::BoundaryRange => ("bndry_rng", Real, "5"),
-                MapRendererProperty::BoundaryMolecule => ("bndry_molname", Text, ""),
-                MapRendererProperty::BoundarySelection => ("bndry_sel", Selection, ""),
-                MapRendererProperty::MultiGradient => ("multi_grad", Text, ""),
-                MapRendererProperty::ColorMapName => ("color_mapname", Text, ""),
-                MapRendererProperty::MaxExtent => ("maxExtent", Real, "0"),
-                MapRendererProperty::Width => (
-                    "width",
-                    Real,
-                    if matches!(renderer_type, "isosurf" | "MapSurfRenderer") {
-                        "1.2"
-                    } else {
-                        "1"
-                    },
-                ),
-                MapRendererProperty::BufferSize => ("bufsize", Integer, "100"),
-                MapRendererProperty::AutoUpdate => ("autoupdate", Boolean, "true"),
-                MapRendererProperty::DragUpdate => (
-                    "dragupdate",
-                    Boolean,
-                    if matches!(
-                        renderer_type,
-                        "gpu_mapmesh"
-                            | "gpu_mapmesh2"
-                            | "gpu_mapvol"
-                            | "GLSLMapMeshRenderer"
-                            | "GLSLMapMeshRenderer2"
-                            | "GLSLMapVolRenderer"
-                    ) {
-                        "true"
-                    } else {
-                        "false"
-                    },
-                ),
-                MapRendererProperty::CullFace => ("cullface", Boolean, "false"),
-                MapRendererProperty::DrawMode => ("drawmode", Text, "fill"),
-                MapRendererProperty::Binning => ("binning", Integer, "1"),
-                MapRendererProperty::MaxGrids => ("max_grids", Integer, "100"),
-                MapRendererProperty::GlRenderMode => ("glrender_mode", Text, "displist"),
-                MapRendererProperty::OmpThreads => ("omp_thr", Integer, "-1"),
-                MapRendererProperty::XferFunctionType => ("xferfn_type", Text, "rainbow1"),
-            };
-            RendererAttrProperty {
-                name,
-                key,
-                kind,
-                default,
-                writable,
-            }
+            let mut spec = property_catalog::map_renderer_attr_property(renderer_type, name)
+                .expect("map renderer property metadata");
+            spec.writable = writable;
+            spec
         }
         fn renderer_type_for_runtime_class(class_name: &str) -> Option<&'static str> {
             match class_name {
@@ -48825,12 +48783,7 @@ impl DesktopAppState {
                     }
                 }
                 ScriptCmd::SetDensityMapType { uid, value } => {
-                    let object = self
-                        .density_maps
-                        .get_mut(&Uid::new(uid))
-                        .ok_or_else(|| CueMolError::NotFound(format!("density map {uid}")))?;
-                    object.map.set_map_type(&value)?;
-                    object.modified = true;
+                    self.set_density_map_type(Uid::new(uid), &value)?;
                 }
                 ScriptCmd::CreateDensityMap {
                     target_scene,

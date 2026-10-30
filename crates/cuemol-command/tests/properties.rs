@@ -61,6 +61,263 @@ fn fixture() -> (DesktopAppState, Camera, Vec<(Uid, Uid)>) {
 }
 
 #[test]
+fn density_kind_controls_region_policy_and_roundtrips_through_scene_storage() {
+    let (mut state, mut camera, objects) = fixture();
+    let sid = state.active_scene().unwrap();
+    assert!(state.density_map_kind(objects[0].0).is_none());
+    assert!(state.set_density_map_type(objects[0].0, "em").is_err());
+    let mut map = cuemol_xtal::DensityMap::new();
+    map.set_map_byte_array(&[0, 1, 2, 3, 4, 5, 6, 7], [2; 3], 0., 7., 3.5, 2.);
+    map.set_map_params([0; 3], [2; 3]);
+    map.set_xtal_params(2., 2., 2., 90., 90., 90.);
+    let uid = state.add_density_map(sid, "crystal", map);
+    let renderer = state.add_density_renderer(uid, "contour").unwrap();
+    let metadata = call(
+        &mut state,
+        &mut camera,
+        "list_node_props",
+        json!({"nodeType":"renderer","nodeId":renderer.get()}),
+    );
+    let rows = metadata["properties"].as_array().unwrap();
+    assert_eq!(
+        rows.iter().find(|row| row["key"] == "width").unwrap()["type"],
+        "real"
+    );
+    assert_eq!(
+        rows.iter().find(|row| row["key"] == "autoupdate").unwrap()["hasdefault"],
+        true
+    );
+    call(
+        &mut state,
+        &mut camera,
+        "set_node_props",
+        json!({"nodeType":"renderer","nodeId":renderer.get(),"updates":[{"prop":"autoupdate","value":"true"},{"prop":"dragupdate","value":"true"}]}),
+    );
+    let changed = call(
+        &mut state,
+        &mut camera,
+        "list_node_props",
+        json!({"nodeType":"renderer","nodeId":renderer.get()}),
+    );
+    assert_eq!(
+        changed["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["key"] == "autoupdate")
+            .unwrap()["isdefault"],
+        false
+    );
+    call(
+        &mut state,
+        &mut camera,
+        "reset_node_props",
+        json!({"nodeType":"renderer","nodeId":renderer.get(),"props":["autoupdate","dragupdate"]}),
+    );
+    let reset = call(
+        &mut state,
+        &mut camera,
+        "list_node_props",
+        json!({"nodeType":"renderer","nodeId":renderer.get()}),
+    );
+    assert_eq!(
+        reset["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["key"] == "autoupdate")
+            .unwrap()["isdefault"],
+        true
+    );
+    assert_eq!(
+        state.auxiliary_renderer_properties(uid, renderer).unwrap()["dragupdate"],
+        "false"
+    );
+    call(
+        &mut state,
+        &mut camera,
+        "set_node_prop",
+        json!({"nodeType":"object","nodeId":uid.get(),"prop":"map_type","value":"em"}),
+    );
+    assert_eq!(state.density_map_kind(uid), Some(("em", "em")));
+    let fields = |state: &mut DesktopAppState, camera: &mut Camera| {
+        let result = call(
+            state,
+            camera,
+            "list_node_props",
+            json!({"nodeType":"renderer","nodeId":renderer.get()}),
+        );
+        result["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|section| section["rows"].as_array().unwrap())
+            .map(|row| row["key"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    let full = fields(&mut state, &mut camera);
+    assert!(full.contains(&"lod_budget".into()));
+    assert!(!full.contains(&"use_pbc".into()) && !full.contains(&"bufsize".into()));
+    let before = state.clone();
+    assert!(call_tool(&mut state,&mut camera,"set_node_props",&json!({"nodeType":"object","nodeId":uid.get(),"updates":[{"prop":"map_type","value":"xtal"},{"prop":"map_type_resolved","value":"em"}]})).is_err());
+    assert!(before.same_undo_state(&state));
+    let bytes = state.active_scene_bytes().unwrap();
+    let mut restored = DesktopAppState::new();
+    restored.open_bytes("density.qsc", &bytes).unwrap();
+    let restored_map = restored
+        .active_density_map_summaries()
+        .into_iter()
+        .find(|map| map.name == "crystal")
+        .unwrap();
+    assert_eq!(
+        restored.density_map_kind(restored_map.uid),
+        Some(("em", "em"))
+    );
+    call(
+        &mut state,
+        &mut camera,
+        "reset_node_props",
+        json!({"nodeType":"object","nodeId":uid.get(),"props":["map_type"]}),
+    );
+    assert_eq!(state.density_map_kind(uid), Some(("auto", "xtal")));
+    let boxed = fields(&mut state, &mut camera);
+    assert!(!boxed.contains(&"lod_budget".into()));
+    assert!(boxed.contains(&"use_pbc".into()) && boxed.contains(&"bufsize".into()));
+}
+
+#[test]
+fn renderer_pages_gate_controls_and_keep_custom_detail_levels() {
+    let mut state = DesktopAppState::new();
+    state.open_bytes("pages.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+    let object = state.active_object_summaries()[0].uid;
+    let mut camera = Camera::new();
+    let mut list = |state: &mut DesktopAppState, renderer: Uid| {
+        call(
+            state,
+            &mut camera,
+            "list_node_props",
+            json!({"nodeType":"renderer","nodeId":renderer.get()}),
+        )
+    };
+    let fields = |result: &Value| {
+        result["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|section| section["rows"].as_array().unwrap().iter().cloned())
+            .map(|row| (row["key"].as_str().unwrap().to_string(), row))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let renderer = state
+        .scene_manager_mut()
+        .object_mut(object)
+        .unwrap()
+        .add_renderer("ballstick", "atoms");
+    state
+        .set_renderer_property(object, renderer, "detail", "24")
+        .unwrap();
+    state
+        .set_renderer_property(object, renderer, "ring", "false")
+        .unwrap();
+    let before = fields(&list(&mut state, renderer));
+    assert_eq!(before["thickness"]["disabled"], true);
+    assert_eq!(before["ringcolor"]["disabled"], true);
+    assert_eq!(before["eglinew"]["disabled"], true);
+    assert_eq!(before["alpha"]["max"], 1.);
+    assert_eq!(before["bondw"]["unit"], "Å");
+    let detail = before["detail"]["choices"].as_array().unwrap();
+    assert!(detail.contains(&json!("24")) && detail.contains(&json!("16")));
+    assert!(before["material"]["choices"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("")));
+    state
+        .set_renderer_property(object, renderer, "ring", "true")
+        .unwrap();
+    state
+        .set_renderer_property(object, renderer, "egtype", "edges")
+        .unwrap();
+    let after = fields(&list(&mut state, renderer));
+    assert_eq!(after["thickness"]["disabled"], false);
+    assert_eq!(after["eglinew"]["disabled"], false);
+    for kind in ["simple", "trace", "spline", "*namelabel", "*group"] {
+        let renderer = state
+            .scene_manager_mut()
+            .object_mut(object)
+            .unwrap()
+            .add_renderer(kind, kind);
+        let rows = fields(&list(&mut state, renderer));
+        assert!(!rows.contains_key("egtype"), "{kind}");
+        if kind == "*group" {
+            assert_eq!(
+                rows.keys().map(String::as_str).collect::<Vec<_>>(),
+                ["locked", "name", "visible"]
+            );
+        }
+    }
+}
+
+#[test]
+fn interaction_arrow_caps_roundtrip_through_the_property_editor() {
+    let mut state = DesktopAppState::new();
+    state.open_bytes("measure.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+    let object = state.active_object_summaries()[0].uid;
+    let renderer = state
+        .scene_manager_mut()
+        .object_mut(object)
+        .unwrap()
+        .add_renderer("atomintr", "measure");
+    let mut camera = Camera::new();
+    call(
+        &mut state,
+        &mut camera,
+        "set_node_props",
+        json!({"nodeType":"renderer","nodeId":renderer.get(),"updates":[{"prop":"mode","value":"fancy"},{"prop":"captype_start","value":"arrow"}]}),
+    );
+    let result = call(
+        &mut state,
+        &mut camera,
+        "list_node_props",
+        json!({"nodeType":"renderer","nodeId":renderer.get()}),
+    );
+    let row = result["properties"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["key"] == "captype_start")
+        .unwrap();
+    assert_eq!(row["value"], "arrow");
+    assert_eq!(row["allowed"], json!(["flat", "sphere", "arrow"]));
+    let arrow_width = result["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|section| section["rows"].as_array().unwrap())
+        .find(|row| row["key"] == "arrowwidth")
+        .unwrap();
+    assert_eq!(arrow_width["disabled"], false);
+    let bytes = state.active_scene_bytes().unwrap();
+    let mut restored = DesktopAppState::new();
+    restored.open_bytes("measure.qsc", &bytes).unwrap();
+    let object = restored.active_object_summaries()[0].uid;
+    let renderer = restored
+        .scene_manager()
+        .object(object)
+        .unwrap()
+        .renderers()
+        .iter()
+        .find(|renderer| renderer.name() == "measure")
+        .unwrap()
+        .uid();
+    assert_eq!(
+        restored
+            .molecule_renderer_properties(object, renderer)
+            .unwrap()["captype_start"],
+        "arrow"
+    );
+}
+
+#[test]
 fn scene_context_properties_use_actual_ids_and_reject_cross_scene_targets() {
     let (mut state, mut camera, objects) = fixture();
     let sid = state.active_scene().unwrap();

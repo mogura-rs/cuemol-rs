@@ -48,6 +48,8 @@ async function openShell(page, storage = {}, options = {}) {
       perspective: false, centerMark: options.centerMark || 'none', centerMarkEmbedded: true, lines: [], labels: [], status: 'Ready',
     };
     const sceneValues = {name:scene.name,uid:'1',aoEnabled:'false',aoRadius:'4',aoSteps:'3',aoIntensity:'2.2',aoHalfRes:'false'};
+    const inspectorValues = options.inspectorPages ? {ring:'false',thickness:'0.2',material:'','section.width':'1','section.tuber':'0.5',helix_ribbon:'false',loopsize2:'-1',stipple0:'-1',stipple1:'-1',stipple2:'-1',stipple3:'-1',stipple4:'-1',stipple5:'-1',bndry_molname:'',bndry_sel:''} : {};
+    if (options.inspectorPages) renderer.detail=24;
     const sequenceIndices = options.sequenceExtremes ? [-2147483648, '-2147483648A', 0, 2147483647, '2147483647B'] : [-2, -1, 0, 1, '1A', '1B', ...Array.from({length: 4999}, (_, index) => index + 2)];
     const sequenceResidues = options.sequence ? sequenceIndices.map((index, position) => ({
       letter: 'G', resId: Number.parseInt(index, 10), residueIndex: String(index), resName: 'GLY',
@@ -138,11 +140,11 @@ async function openShell(page, storage = {}, options = {}) {
           return {snapshot:structuredClone(snapshot),result:{properties:rows()}};
         }
         const target = args.args.nodeId === 4 ? renderer : molecule;
-        const defaults = {alpha:'1', visible:'true', detail:'4', egtype:'none'};
+        const defaults = {alpha:'1', visible:'true', detail:'4', egtype:'none',...(options.inspectorPages ? {ring:'false',thickness:'0.2','section.width':'1','section.tuber':'0.5',helix_ribbon:'false',loopsize2:'-1'} : {})};
         const values = {name:target.name, visible:String(target.visible), uid:String(target.uid),
-          ...(target === renderer ? {alpha:String(renderer.alpha), detail:String(renderer.detail), egtype:renderer.edgeType, style:renderer.style} : {})};
+          ...(target === renderer ? {...inspectorValues,alpha:String(renderer.alpha), detail:String(renderer.detail), egtype:renderer.edgeType, style:renderer.style} : {})};
         const rows = () => Object.entries(values).map(([key,value]) => ({key,value,
-          type: key === 'visible' ? 'boolean' : key === 'alpha' ? 'real' : key === 'detail' || key === 'uid' ? 'integer' : key === 'egtype' ? 'enum' : 'string',
+          type: ['visible','ring','helix_ribbon'].includes(key) ? 'boolean' : ['alpha','thickness','section.width','section.tuber','loopsize2'].includes(key) || key.startsWith('stipple') ? 'real' : key === 'detail' || key === 'uid' ? 'integer' : key === 'egtype' ? 'enum' : 'string',
           category: ['name','visible'].includes(key) ? 'Common' : key === 'uid' ? 'Identity' : 'Appearance',
           readonly: ['uid','style'].includes(key), hasdefault:Object.hasOwn(defaults,key),
           isdefault:value === defaults[key], defaultValue:defaults[key], allowed:key === 'egtype' ? ['none','edges','silhouette'] : undefined,
@@ -150,7 +152,23 @@ async function openShell(page, storage = {}, options = {}) {
         if (args.tool === 'list_node_props') {
           const properties=rows();
           if (window.__delayInspector) { window.__delayInspector=false; return new Promise(resolve=>{window.__releaseInspector=()=>resolve({properties});}); }
-          return {properties};
+          const sections=options.inspectorPages && target===renderer ? [{title:'Basic settings',expanded:true,rows:[
+            {key:'name',label:'Name'},{key:'alpha',label:'Opacity',min:0,max:1,step:0.1},
+            {key:'detail',label:'Detail',choices:['2','4','8','16','24','32']},
+            {key:'material',label:'Material',choices:['','Matte'],labels:{'':'(none)'}},
+          ]},{title:'Geometry',expanded:true,rows:[
+            {key:'ring',label:'Show ring'},{key:'thickness',label:'Thickness',min:0,max:3,step:0.01,unit:'Å',disabled:values.ring!=='true'},
+            {key:'section.width',label:'Width1',min:0.01,max:3,step:0.01,writes:[{prop:'section.width'},{prop:'section.tuber',inverse:Number(values['section.width'])*Number(values['section.tuber'])}]},
+            {key:'section.tuber',label:'Width2',display:String(Number(values['section.width'])*Number(values['section.tuber'])),min:0.01,max:3,step:0.01,writes:[{prop:'section.tuber',scale:1/Number(values['section.width'])}]},
+            {key:'helix_ribbon',label:'Type',choices:['false','true'],labels:{false:'Cylinder',true:'Ribbon'}},
+          ]},{title:'Optional and composite controls',expanded:true,rows:[
+            {key:'loopsize2',label:'Loop size 2',min:0,max:10,step:0.1,optional:{off:-1,on:2,label:'Use a separate loop size 2'}},
+            {key:'dash-pattern',kind:'toggle',label:'Dashed',display:String(Array.from({length:6},(_,i)=>Number(values[`stipple${i}`])).some(value=>value>=0)),patches:{true:Object.fromEntries(Array.from({length:6},(_,i)=>[`stipple${i}`,i<2?'1':'-1'])),false:Object.fromEntries(Array.from({length:6},(_,i)=>[`stipple${i}`,'-1']))}},
+            {key:'stipple2',label:'Dash 2',blankNegative:true,enabledWhen:'dash-pattern'},
+            {key:'limit-display',kind:'toggle',label:'Limit display by',display:String(Boolean(values.bndry_molname)),local:true,patches:{true:{},false:{bndry_molname:'',bndry_sel:''}}},
+            {key:'bndry_molname',label:'Target',choices:[''],enabledWhen:'limit-display'},
+          ]}] : [];
+          return {properties,sections};
         }
         const set = (key,value) => {
           values[key]=value;
@@ -159,8 +177,10 @@ async function openShell(page, storage = {}, options = {}) {
           if(key==='alpha') renderer.alpha=Number(value);
           if(key==='detail') renderer.detail=Number(value);
           if(key==='egtype') renderer.edgeType=value;
+          if(Object.hasOwn(inspectorValues,key)) inspectorValues[key]=value;
         };
         if(args.tool==='set_node_prop') set(args.args.prop,args.args.value);
+        else if(args.tool==='set_node_props') for(const {prop,value} of args.args.updates) set(prop,value);
         else for(const key of args.args.props || Object.keys(defaults)) if(Object.hasOwn(values,key)) set(key,defaults[key]);
         snapshot.canUndo=true; snapshot.undoDescriptions.push('Change properties');
         return {snapshot:structuredClone(snapshot),result:{properties:rows()}};
@@ -620,6 +640,73 @@ test('Tauri inspector uses typed fields and rejects late results after changing 
   await expect(page.getByLabel('Inspected name')).toHaveValue('Atoms');
   await page.evaluate(()=>window.__releaseInspector());
   await expect(page.getByLabel('Inspected name')).toHaveValue('Atoms');
+  expect(errors).toEqual([]);
+});
+
+test('Tauri renderer schema applies ranges, gates, choices and derived atomic writes', async ({page}) => {
+  const errors=await openShell(page,{}, {inspectorPages:true});
+  await page.locator('.tree-renderer').filter({hasText:'Atoms'}).click();
+  const input=key=>page.getByLabel(`Inspected ${key}`,{exact:true});
+  await expect(input('detail')).toHaveValue('24');
+  await input('detail').selectOption('16');
+  await expect(input('detail')).toHaveValue('16');
+  await expect(input('thickness')).toBeDisabled();
+  await input('ring').check();
+  await expect(input('thickness')).toBeEnabled();
+  await input('thickness').fill('9'); await input('thickness').press('Tab');
+  await expect(input('thickness')).toHaveValue('3');
+  await input('alpha').fill('0.35'); await input('alpha').press('Tab');
+  await expect(input('alpha')).toHaveValue('0.35');
+  await input('alpha').fill('2'); await input('alpha').press('Tab');
+  await expect(input('alpha')).toHaveValue('1');
+  await input('material').selectOption('Matte');
+  await expect(input('material')).toHaveValue('Matte');
+  await input('section.width').fill('2'); await input('section.width').press('Tab');
+  await expect(input('section.width')).toHaveValue('2');
+  await expect(input('section.tuber')).toHaveValue('0.5');
+  const batch=await page.evaluate(()=>window.__shellCalls.find(call=>call.command==='inspector_request' && call.args.tool==='set_node_props').args.args.updates);
+  expect(batch).toEqual([{prop:'section.width',value:'2'},{prop:'section.tuber',value:'0.25'}]);
+  await input('helix_ribbon').selectOption('true');
+  await expect(input('helix_ribbon')).toHaveValue('true');
+  const flag=await page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='inspector_request' && call.args.args.prop==='helix_ribbon').at(-1).args.args.value);
+  expect(flag).toBe('true');
+  await page.getByRole('tab',{name:'Generic',exact:true}).click();
+  await expect(input('section.tuber')).toHaveValue('0.25');
+  expect(errors).toEqual([]);
+});
+
+test('Tauri optional and compound controls retain local state and submit complete edits', async ({page}) => {
+  const errors=await openShell(page,{}, {inspectorPages:true});
+  await page.locator('.tree-renderer').filter({hasText:'Atoms'}).click();
+  const input=key=>page.getByLabel(`Inspected ${key}`,{exact:true});
+  const gate=page.getByLabel('Use a separate loop size 2',{exact:true});
+  await expect(input('loopsize2')).toBeDisabled();
+  await gate.check();
+  await expect(input('loopsize2')).toHaveValue('2');
+  await input('loopsize2').fill('3.4'); await input('loopsize2').press('Tab');
+  await expect(input('loopsize2')).toHaveValue('3.4');
+  await gate.uncheck();
+  await expect(input('loopsize2')).toBeDisabled();
+  await gate.check();
+  await expect(input('loopsize2')).toHaveValue('3.4');
+  await page.getByRole('button',{name:'Reset loopsize2',exact:true}).click();
+  await gate.check();
+  await expect(input('loopsize2')).toHaveValue('2');
+  await input('dash-pattern').check();
+  const writes=await page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='inspector_request' && call.args.tool==='set_node_props').at(-1).args.args.updates);
+  expect(writes).toEqual(Array.from({length:6},(_,i)=>({prop:`stipple${i}`,value:i<2?'1':'-1'})));
+  await expect(input('stipple2')).toBeEnabled();
+  await expect(input('stipple2')).toHaveValue('');
+  await input('stipple2').fill('2.75'); await input('stipple2').press('Tab');
+  await expect(input('stipple2')).toHaveValue('2.75');
+  await input('stipple2').fill(''); await input('stipple2').press('Tab');
+  const blank=await page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='inspector_request' && call.args.args.prop==='stipple2').at(-1).args.args.value);
+  expect(blank).toBe('-1');
+  await expect(input('bndry_molname')).toBeDisabled();
+  await input('limit-display').check();
+  await expect(input('bndry_molname')).toBeEnabled();
+  await page.getByRole('tab',{name:'Generic',exact:true}).click();
+  await expect(input('dash-pattern')).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 

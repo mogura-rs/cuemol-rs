@@ -92,7 +92,7 @@ function setCueMolInspectorWidth(value) {
   splitter.setAttribute("aria-valuemax", String(Math.round(maximum)));
 }
 
-const cueMolPropertyInspector = {key: '', target: null, rows: [], sections: [], source: null, serial: 0, tab: 'Properties', filter: '', error: ''};
+const cueMolPropertyInspector = {key: '', target: null, rows: [], sections: [], source: null, serial: 0, tab: 'Properties', filter: '', error: '', localToggles: {}, optionalValues: {}};
 let cueMolViewInspectorTimer = null;
 
 function refreshCueMolViewInspector() {
@@ -140,7 +140,7 @@ function renderTritiumInspector(owner, camera, style) {
   inspector.target = node;
   inspector.source = snapshot;
   inspector.error = '';
-  if (selectedChanged) { inspector.rows = []; fields.textContent = 'Loading properties…'; }
+  if (selectedChanged) { inspector.rows = []; inspector.localToggles = {}; inspector.optionalValues = {}; fields.textContent = 'Loading properties…'; }
   const serial = ++inspector.serial;
   void invoke('inspector_request', {tool:'list_node_props', args:node}).then(result => {
     if (inspector.serial !== serial || inspector.key !== key) return;
@@ -235,16 +235,21 @@ function paintCueMolPropertyRows() {
   if (structured) {
     rows = inspector.sections.flatMap(section => section.rows.map(definition => {
       const property = inspector.rows.find(row => row.key === definition.key);
+      if (definition.kind === 'toggle') {
+        return {key:definition.key, value:definition.local && inspector.localToggles[definition.key] ? 'true' : definition.display, type:'toggle', category:section.title, schema:definition};
+      }
       if (definition.options) {
         const matches = definition.options.find(option => Object.entries(option.patch).every(([key, value]) => {
           const current = inspector.rows.find(row => row.key === key)?.value;
           return current === value || current !== '' && value !== '' && Math.abs(Number(current) - Number(value)) < 1e-6;
         }));
-        return {key:definition.key, value:matches?.label || 'Custom', type:'preset', allowed:definition.options.map(option=>option.label), category:section.title, schema:definition};
+        const reset = inspector.rows.find(row=>row.key===definition.reset?.[0]);
+        return {key:definition.key, value:definition.display ?? matches?.label ?? 'Custom', type:'preset', allowed:definition.options.map(option=>option.label), category:section.title, schema:definition, hasdefault:reset?.hasdefault, isdefault:reset?.isdefault};
       }
-      return property ? {...property, category:section.title, schema:definition, readonly:definition.editable ? false : property.readonly} : null;
+      return property ? {...property, value:definition.display ?? property.value, category:section.title, schema:definition, readonly:definition.editable ? false : property.readonly} : null;
     }).filter(Boolean));
   }
+  const values = new Map(rows.map(row=>[row.key,row.value]));
   rows = rows.filter(row => !filter || row.key.toLowerCase().includes(filter));
   const groups = new Map();
   for (const row of rows) {
@@ -268,24 +273,37 @@ function paintCueMolPropertyRows() {
       const id = `inspector-property-${row.key}`; label.htmlFor = id; label.title = `${row.key} (${row.type})`;
       line.append(label);
       const controls = document.createElement('div'); controls.className = 'inspector-property-input';
-      const input = document.createElement(row.allowed?.length ? 'select' : 'input');
-      input.id = id; input.disabled = row.readonly || Boolean(row.schema?.enabledWhen && inspector.rows.find(property=>property.key===row.schema.enabledWhen)?.value !== 'true');
+      const choices = row.schema?.choices || row.allowed;
+      const input = document.createElement(choices?.length ? 'select' : 'input');
+      input.id = id; input.disabled = row.readonly || row.schema?.disabled === true || Boolean(row.schema?.enabledWhen && (values.get(row.schema.enabledWhen) ?? inspector.rows.find(property=>property.key===row.schema.enabledWhen)?.value) !== 'true');
       input.setAttribute('aria-label', row.key === 'name' ? 'Inspected name' : `Inspected ${row.key}`);
-      if (row.allowed?.length) {
+      if (choices?.length) {
         if (row.type === 'preset' && row.value === 'Custom') { const option = document.createElement('option'); option.value='Custom'; option.textContent='Custom'; option.disabled=true; input.append(option); }
-        for (const value of row.allowed) { const option = document.createElement('option'); option.value=value; option.textContent=row.schema?.labels?.[value] || value; input.append(option); }
-      } else if (row.type === 'boolean') { input.type='checkbox'; input.checked=row.value === 'true'; }
-      else if (row.type === 'integer' || row.type === 'real') { input.type='number'; input.step=row.type === 'integer' ? '1' : 'any'; }
-      else { input.type='text'; }
+        for (const value of choices) { const option = document.createElement('option'); option.value=value; option.textContent=row.schema?.labels?.[value] || value; input.append(option); }
+      } else if (row.type === 'boolean' || row.type === 'toggle') { input.type='checkbox'; input.checked=row.value === 'true'; }
+      else if (row.type === 'integer' || row.type === 'real') {
+        input.type='number'; input.step=row.type === 'integer' ? '1' : row.schema?.fineStep ?? (row.schema?.step ? row.schema.step/10 : 'any');
+        if (row.schema?.min !== undefined) input.min=row.schema.min;
+        if (row.schema?.max !== undefined) input.max=row.schema.max;
+      }
+      else { input.type='text'; input.placeholder=row.schema?.placeholder || ''; }
       input.value = row.value;
+      if (row.schema?.blankNegative && Number(row.value)<0) input.value='';
       input.dataset.initialValue = row.value;
       const commit = value => {
         if (value === row.value) return;
         let updates;
-        if (row.type === 'preset') {
+        if (row.type === 'toggle') {
+          if (row.schema.local) inspector.localToggles[row.key] = value === 'true';
+          updates = Object.entries(row.schema.patches[value]).map(([prop,value])=>({prop,value}));
+          if (!updates.length) { paintCueMolPropertyRows(); return; }
+        } else if (row.type === 'preset') {
           updates = Object.entries(row.schema.options.find(option=>option.label===value).patch).map(([prop,value])=>({prop,value}));
         } else {
-          updates = [{prop:row.key,value}];
+          if (row.schema?.writes) {
+            updates=row.schema.writes.map(write=>({prop:write.prop,value:String((write.inverse === undefined ? Number(value)*(write.scale ?? 1) : write.inverse/Number(value))+(write.offset ?? 0))}));
+            if (updates.some(update=>!Number.isFinite(Number(update.value)))) return;
+          } else updates=(row.schema?.targets || [row.key]).map(prop=>({prop,value:row.schema?.blankNegative && (value.trim()==='' || !Number.isFinite(Number(value)) || Number(value)<0) ? '-1' : value}));
           if (value === 'true') {
             for (const [prop, value] of Object.entries(row.schema?.seedWhenEnabled || {})) {
               if (!inspector.rows.find(property=>property.key===prop)?.value) updates.push({prop,value});
@@ -296,13 +314,33 @@ function paintCueMolPropertyRows() {
           ...(updates.length === 1 ? updates[0] : {updates}), cascadeGroupVisibility:inspector.tab === 'Properties',
         });
       };
+      if (row.schema?.optional) {
+        const optional = row.schema.optional;
+        const on = Number(row.value)>=0;
+        if (on) inspector.optionalValues[row.key] = Number(row.value);
+        const remembered = inspector.optionalValues[row.key] ?? optional.on;
+        const gate = document.createElement('input'); gate.type='checkbox'; gate.checked=on; gate.disabled=input.disabled;
+        gate.setAttribute('aria-label',optional.label);
+        gate.addEventListener('change',()=>commit(String(gate.checked ? remembered : optional.off)));
+        controls.append(gate);
+        if (!on) { input.value=String(remembered); input.disabled=true; }
+      }
       input.addEventListener('change', () => {
+        if (input.type === 'number' && row.schema?.min !== undefined && row.schema?.max !== undefined && input.value !== '' && Number.isFinite(Number(input.value))) {
+          const fine=Number(input.step);
+          const value=Math.max(row.schema.min,Math.min(row.schema.max,Number(input.value)));
+          input.value=String(Number.isFinite(fine) && fine>0 ? Number(value.toFixed(Math.max(0,-Math.floor(Math.log10(fine))))) : value);
+        }
         if (input.validity && !input.validity.valid) { input.reportValidity(); return; }
-        commit(row.type === 'boolean' ? String(input.checked) : input.value);
+        commit(input.type === 'checkbox' ? String(input.checked) : input.value);
       });
-      input.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.isComposing) { event.preventDefault(); input.blur(); } });
+      input.addEventListener('keydown', event => {
+        if (event.isComposing) return;
+        if (event.key === 'Escape') { event.preventDefault(); input.value=row.value; input.blur(); }
+        else if (event.key === 'Enter') { event.preventDefault(); input.blur(); }
+      });
       if (row.type === 'color' && row.rgba) {
-        const color = document.createElement('input'); color.type='color'; color.disabled=row.readonly;
+        const color = document.createElement('input'); color.type='color'; color.disabled=input.disabled;
         color.value='#'+row.rgba.slice(0,3).map(value=>value.toString(16).padStart(2,'0')).join('');
         color.setAttribute('aria-label',`Choose color ${row.key}`);
         color.addEventListener('change',()=>{
@@ -310,12 +348,14 @@ function paintCueMolPropertyRows() {
           commit(`rgba(${rgb.join(',')},${row.rgba[3]/255})`);
         }); controls.append(color);
       }
-      controls.append(input); line.append(controls);
+      controls.append(input);
+      if (row.schema?.unit) { const unit=document.createElement('span'); unit.className='inspector-unit'; unit.textContent=row.schema.unit; controls.append(unit); }
+      line.append(controls);
       if (row.hasdefault && !row.readonly) {
         const reset = document.createElement('button'); reset.type='button'; reset.textContent='↺';
         reset.disabled=row.isdefault; reset.setAttribute('aria-label',`Reset ${row.key}`);
         reset.title=`Reset to default${row.defaultValue === undefined ? '' : ` (${row.defaultValue})`}`;
-        reset.addEventListener('click',()=>void editCueMolProperty('reset_node_props',{props:[row.key]}));
+        reset.addEventListener('click',()=>{ delete inspector.optionalValues[row.key]; void editCueMolProperty('reset_node_props',{props:row.schema?.reset || [row.key]}); });
         line.append(reset);
       }
       container.append(line);

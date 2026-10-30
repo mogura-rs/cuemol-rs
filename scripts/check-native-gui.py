@@ -444,6 +444,69 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             pyautogui.press('enter')
             wait_for(lambda: call('get_prop', {'path': 'view.name'})['value'] == 'Orbit view')
             capture('inspector-view.png')
+            script('var tree=JSON.parse(scene.getObjectTreeJSON());'
+                   'var obj=cuemol.getObject(tree[0].ID);'
+                   'tree[0].renderers.forEach(function(r){obj.destroyRenderer(r.ID);});'
+                   'var axes=obj.createRenderer("tube");axes.name="Tube axes";'
+                   'axes.section.width=1;axes.section.tuber=0.5;')
+            axes_id = next(renderer['id'] for renderer in call('get_scene_state')['objects'][0]['renderers']
+                           if renderer['name'] == 'Tube axes')
+            pyautogui.click(x + 175, y + 188)
+            time.sleep(0.2)
+            pyautogui.click(x + width - 255, y + 149)
+            inspector_filter('section.width')
+            capture('inspector-axes-before.png')
+            call('clear_undo')
+            pyautogui.doubleClick(x + width - 100, y + 225, interval=0.1)
+            pyautogui.hotkey(primary, 'a')
+            pyautogui.write('2')
+            pyautogui.press('enter')
+            def axis(key):
+                return call('get_prop', {'path': f'#{axes_id}.section.{key}'})['value']
+            wait_for(lambda: axis('width') == '2' and axis('tuber') == '0.25')
+            inspector_filter('section.tuber')
+            pyautogui.doubleClick(x + width - 100, y + 225, interval=0.1)
+            pyautogui.hotkey(primary, 'a')
+            pyautogui.hotkey(primary, 'c')
+            def copied_axis():
+                try:
+                    return float(clipboard_text()) == 0.5
+                except ValueError:
+                    return False
+            wait_for(copied_axis)
+            pyautogui.click(x + width * 0.6, y + height * 0.4)
+            pyautogui.hotkey(primary, 'z')
+            wait_for(lambda: axis('width') == '1' and axis('tuber') == '0.5')
+            pyautogui.hotkey(primary, 'shift', 'z')
+            wait_for(lambda: axis('width') == '2' and axis('tuber') == '0.25')
+            capture('inspector-axes.png')
+            script(f'var obj=cuemol.getObject(JSON.parse(scene.getObjectTreeJSON())[0].ID);'
+                   f'obj.destroyRenderer({axes_id});'
+                   'var loops=obj.createRenderer("disorder");loops.name="Optional loops";')
+            loops_id = next(renderer['id'] for renderer in call('get_scene_state')['objects'][0]['renderers']
+                            if renderer['name'] == 'Optional loops')
+            pyautogui.click(x + 175, y + 188)
+            time.sleep(0.2)
+            inspector_filter('loopsize2')
+            def loop_size():
+                return call('get_prop', {'path': f'#{loops_id}.loopsize2'})['value']
+            pyautogui.click(x + width - 174, y + 225)
+            wait_for(lambda: loop_size() == '2')
+            pyautogui.doubleClick(x + width - 100, y + 225, interval=0.1)
+            pyautogui.hotkey(primary, 'a')
+            pyautogui.write('3.4')
+            pyautogui.press('enter')
+            wait_for(lambda: loop_size() == '3.4')
+            pyautogui.click(x + width - 174, y + 225)
+            wait_for(lambda: loop_size() == '-1')
+            pyautogui.click(x + width - 174, y + 225)
+            wait_for(lambda: loop_size() == '3.4')
+            pyautogui.click(x + width * 0.6, y + height * 0.4)
+            pyautogui.hotkey(primary, 'z')
+            wait_for(lambda: loop_size() == '-1')
+            pyautogui.hotkey(primary, 'shift', 'z')
+            wait_for(lambda: loop_size() == '3.4')
+            capture('inspector-optional.png')
             report.update(ok=True, window=bounds,
                           work_area=[available_x, available_y, available_width, available_height],
                           window_contained=True, atoms=state['objects'][0]['atoms'],
@@ -463,6 +526,8 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                           inspector_scene_target=True, inspector_view_navigation=True,
                           inspector_numeric_draft=True,
                           inspector_text_draft=True,
+                          inspector_derived_axes=True,
+                          inspector_optional_value=True,
                           font_pixels=styled.histogram()[255])
             print(json.dumps(report), flush=True)
         except BaseException as error:

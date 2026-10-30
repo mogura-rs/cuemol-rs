@@ -619,9 +619,9 @@ fn properties(
         reset_node_property(state, sid, &kind, id, &prop)?;
     }
     if name == "list_node_props" {
-        Ok(
-            json!({"properties":metadata::rows(state, camera, &kind, id)?, "sections":schema::sections(&kind)}),
-        )
+        let rows = metadata::rows(state, camera, &kind, id)?;
+        let sections = schema::sections(state, &kind, &rows);
+        Ok(json!({"properties":rows, "sections":sections}))
     } else {
         let mut values = node_property_values(state, camera, &kind, id)?;
         let value = if prop == "*" {
@@ -829,6 +829,14 @@ fn object_properties(state: &DesktopAppState, id: Uid) -> Result<BTreeMap<String
             .or_insert_with(|| o.mol().default_color().script_string().to_ascii_lowercase());
         (o.name().into(), o.is_visible(), o.is_ui_locked())
     } else if let Some(o) = state.density_map_summary(id) {
+        if let Some((requested, resolved)) = state.density_map_kind(id) {
+            p.insert("map_type".into(), requested.into());
+            p.insert("map_type_resolved".into(), resolved.into());
+        }
+        p.insert("src".into(), o.source);
+        p.insert("type_name".into(), o.class_name);
+        p.insert("uid".into(), id.get().to_string());
+        p.insert("scene_uid".into(), o.scene_uid.get().to_string());
         (o.name, o.visible, o.locked)
     } else if let Some(o) = state.surface_summary(id) {
         (o.name, o.visible, o.locked)
@@ -859,6 +867,7 @@ fn reset_object_property(state: &mut DesktopAppState, id: Uid, prop: &str) -> Re
             "visible" => set_object_property(state, id, key, "true")?,
             "locked" => set_object_property(state, id, key, "false")?,
             "ui_collapsed" => set_object_property(state, id, key, "false")?,
+            "map_type" => state.set_density_map_type(id, "auto")?,
             "defaultcolor" => {
                 let object = state
                     .scene_manager_mut()
@@ -898,6 +907,7 @@ pub(crate) fn property_allowed(key: &str) -> &'static [&'static str] {
         "egtype" => &["none", "edges", "silhouette"],
         "drawmode" => &["fill", "line", "point"],
         "region_mode" => &["auto", "box", "full"],
+        "map_type" => &["auto", "xtal", "em"],
         "lod" => &["auto", "step1", "step2", "step4", "step8"],
         "cap_mode" => &["auto", "on", "off"],
         "aa_method" => &["none", "fxaa", "smaa"],
@@ -919,7 +929,14 @@ pub(crate) fn property_readonly(
 ) -> bool {
     if matches!(
         key,
-        "uid" | "scene_uid" | "type_name" | "src" | "alt_src" | "srctype" | "modified"
+        "uid"
+            | "scene_uid"
+            | "type_name"
+            | "src"
+            | "alt_src"
+            | "srctype"
+            | "modified"
+            | "map_type_resolved"
     ) {
         return true;
     }
@@ -1211,6 +1228,7 @@ fn set_object_property(
             object.set_qsc_extra_attr(prop, value);
         }
         "sel" => state.set_molecule_selection_text(id, value)?,
+        "map_type" => state.set_density_map_type(id, value)?,
         "xformMat" => state.set_workspace_object_transform(id, value)?,
         _ => {
             let object = state

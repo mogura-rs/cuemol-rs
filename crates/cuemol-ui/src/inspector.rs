@@ -20,8 +20,19 @@ struct Property {
     is_default: bool,
     default_value: Option<String>,
     allowed: Vec<String>,
+    structured_choices: Option<Vec<String>>,
+    structured_value: Option<String>,
     rgba: Option<[u8; 4]>,
     schema: Option<Value>,
+}
+
+impl Property {
+    fn displayed_value(&self, structured: bool) -> &str {
+        self.structured_value
+            .as_deref()
+            .filter(|_| structured)
+            .unwrap_or(&self.value)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +46,7 @@ struct NumericEdit {
     id: Option<egui::Id>,
     value: Option<f64>,
     dirty: bool,
+    optional_value: Option<f64>,
 }
 
 #[derive(Debug, Default)]
@@ -56,9 +68,21 @@ pub struct Inspector {
     error: String,
     color_draft: Option<ColorDraft>,
     numeric_edits: BTreeMap<String, NumericEdit>,
+    local_toggles: BTreeMap<String, bool>,
 }
 
 impl Inspector {
+    fn clear_properties(&mut self) {
+        self.rows.clear();
+        self.sections.clear();
+        self.generic_order.clear();
+        self.structured_order.clear();
+        self.committed.clear();
+        self.numeric_edits.clear();
+        self.local_toggles.clear();
+        self.color_draft = None;
+    }
+
     pub fn inspect(
         &mut self,
         state: &mut DesktopAppState,
@@ -110,6 +134,7 @@ impl Inspector {
         };
         if target != self.target || context != self.context {
             self.numeric_edits.clear();
+            self.local_toggles.clear();
         }
         if target != self.target {
             self.visible = target.is_some();
@@ -123,7 +148,8 @@ impl Inspector {
         self.view_size = view_size;
         self.camera = view.then(|| camera.clone());
         let Some(target) = &self.target else {
-            self.rows.clear();
+            self.clear_properties();
+            self.error.clear();
             return;
         };
         match cuemol_command::call_tool(
@@ -157,6 +183,8 @@ impl Inspector {
                             .filter_map(Value::as_str)
                             .map(str::to_string)
                             .collect(),
+                        structured_choices: None,
+                        structured_value: None,
                         rgba: row["rgba"].as_array().and_then(|values| {
                             let values = values
                                 .iter()
@@ -173,8 +201,28 @@ impl Inspector {
                         let mut schema = definition.clone();
                         schema["category"] = section["title"].clone();
                         if let Some(row) = self.rows.iter_mut().find(|row| row.key == key) {
+                            row.structured_value = schema["display"].as_str().map(str::to_string);
+                            if schema["blankNegative"] == true {
+                                row.structured_value = Some(
+                                    if row.value.parse::<f64>().is_ok_and(|value| value < 0.) {
+                                        String::new()
+                                    } else {
+                                        row.value.clone()
+                                    },
+                                );
+                            }
+                            row.structured_choices = schema["choices"].as_array().map(|choices| {
+                                choices
+                                    .iter()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_string)
+                                    .collect()
+                            });
                             row.schema = Some(schema);
-                        } else if let Some(options) = definition["options"].as_array() {
+                        } else if definition["options"].is_array() || definition["kind"] == "toggle"
+                        {
+                            let empty = Vec::new();
+                            let options = definition["options"].as_array().unwrap_or(&empty);
                             let selected = options.iter().find(|option| {
                                 option["patch"].as_object().is_some_and(|patch| {
                                     patch.iter().all(|(key, value)| {
@@ -186,17 +234,32 @@ impl Inspector {
                                     })
                                 })
                             });
+                            let toggle = definition["kind"] == "toggle";
+                            let reset = definition["reset"]
+                                .as_array()
+                                .and_then(|keys| keys.first())
+                                .and_then(Value::as_str)
+                                .and_then(|key| self.rows.iter().find(|row| row.key == key));
+                            let has_default = reset.is_some_and(|row| row.has_default);
+                            let is_default = reset.is_some_and(|row| row.is_default);
+                            let display = if definition["local"] == true
+                                && self.local_toggles.get(key) == Some(&true)
+                            {
+                                Some("true")
+                            } else {
+                                definition["display"].as_str()
+                            };
                             self.rows.push(Property {
                                 key: key.into(),
-                                value: selected
-                                    .and_then(|value| value["label"].as_str())
+                                value: display
+                                    .or_else(|| selected.and_then(|value| value["label"].as_str()))
                                     .unwrap_or("Custom")
                                     .into(),
-                                kind: "preset".into(),
+                                kind: if toggle { "toggle" } else { "preset" }.into(),
                                 category: section["title"].as_str().unwrap_or("").into(),
                                 readonly: false,
-                                has_default: false,
-                                is_default: false,
+                                has_default,
+                                is_default,
                                 default_value: None,
                                 allowed: options
                                     .iter()
@@ -205,6 +268,8 @@ impl Inspector {
                                     })
                                     .collect(),
                                 rgba: None,
+                                structured_choices: None,
+                                structured_value: None,
                                 schema: Some(schema),
                             });
                         }
@@ -214,7 +279,9 @@ impl Inspector {
                     .rows
                     .iter()
                     .enumerate()
-                    .filter_map(|(index, row)| (row.kind != "preset").then_some(index))
+                    .filter_map(|(index, row)| {
+                        (!matches!(row.kind.as_str(), "preset" | "toggle")).then_some(index)
+                    })
                     .collect();
                 self.structured_order = self
                     .sections
@@ -241,7 +308,7 @@ impl Inspector {
                 self.error.clear();
             }
             Err(error) => {
-                self.rows.clear();
+                self.clear_properties();
                 self.error = error.to_string();
             }
         }
@@ -297,7 +364,8 @@ impl Inspector {
                             if (structured && schema.is_none()) || (!structured && row.kind == "preset")
                                 || (self.tab == 0 && category != group) || (!filter.is_empty() && !row.key.to_lowercase().contains(&filter)) { continue; }
                             let editable = !row.readonly || schema.is_some_and(|schema| schema["editable"] == true);
-                            let enabled = schema.and_then(|schema| schema["enabledWhen"].as_str()).is_none_or(|key| self.committed.get(key).is_some_and(|value| value == "true"));
+                            let enabled = schema.is_none_or(|schema| schema["disabled"] != true)
+                                && schema.and_then(|schema| schema["enabledWhen"].as_str()).is_none_or(|key| self.committed.get(key).is_some_and(|value| value == "true"));
                             let label = schema.and_then(|schema| schema["label"].as_str()).unwrap_or_else(|| if self.tab == 0 { row.key.rsplit('.').next().unwrap() } else { row.key.as_str() }).to_string();
                             ui.push_id(egui::Id::new((&target.kind, target.id, self.context, &row.key)), |ui| {
                                 let mut changed = false;
@@ -317,12 +385,20 @@ impl Inspector {
                                             .on_hover_text(format!("Reset {} to default{}", row.key, row.default_value.as_ref().map_or(String::new(), |value| format!(" ({value})"))));
                                         if ui.is_rect_visible(reset.rect) { record(&mut self.rects, &format!("Reset {}", row.key), reset.rect); }
                                         if reset.clicked() {
-                                            changes.push(("reset_node_props", json!({"nodeType":target.kind,"nodeId":target.id,"props":[row.key]})));
+                                            let keys = row.schema.as_ref().filter(|_| structured).and_then(|schema| schema.get("reset")).cloned().unwrap_or_else(|| json!([row.key]));
+                                            self.numeric_edits.remove(&row.key);
+                                            changes.push(("reset_node_props", json!({"nodeType":target.kind,"nodeId":target.id,"props":keys})));
                                         }
                                     } else { ui.add_space(22.); }
                                 });
-                                if changed && self.committed.get(&row.key) != Some(&row.value) {
-                                    changes.push(property_change(&target, row, &self.committed, self.tab == 0));
+                                let original = row.schema.as_ref().filter(|_| structured).and_then(|schema|schema["display"].as_str()).or_else(||self.committed.get(&row.key).map(String::as_str));
+                                if changed && original != Some(row.displayed_value(structured)) {
+                                    if structured && row.kind == "toggle" && row.schema.as_ref().is_some_and(|schema| schema["local"] == true) {
+                                        self.local_toggles.insert(row.key.clone(), row.value == "true");
+                                        self.committed.insert(row.key.clone(), row.value.clone());
+                                    }
+                                    let change = property_change(&target, row, &self.committed, structured);
+                                    if change.0 != "set_node_props" || change.1["updates"].as_array().is_none_or(|updates| !updates.is_empty()) { changes.push(change); }
                                 }
                             });
                         }
@@ -384,11 +460,20 @@ fn property_change(
     structured: bool,
 ) -> (&'static str, Value) {
     let schema = row.schema.as_ref().filter(|_| structured);
+    let value = row.displayed_value(structured);
     let mut updates = Vec::new();
-    if row.kind == "preset" {
+    if row.kind == "toggle" {
+        if let Some(patch) = schema.and_then(|schema| schema["patches"][value].as_object()) {
+            updates.extend(
+                patch
+                    .iter()
+                    .map(|(key, value)| json!({"prop":key,"value":value})),
+            );
+        }
+    } else if row.kind == "preset" {
         if let Some(patch) = schema
             .and_then(|schema| schema["options"].as_array())
-            .and_then(|options| options.iter().find(|option| option["label"] == row.value))
+            .and_then(|options| options.iter().find(|option| option["label"] == value))
             .and_then(|option| option["patch"].as_object())
         {
             updates.extend(
@@ -398,8 +483,34 @@ fn property_change(
             );
         }
     } else {
-        updates.push(json!({"prop":row.key,"value":row.value}));
-        if row.value == "true" {
+        if let Some(writes) = schema.and_then(|schema| schema["writes"].as_array()) {
+            if let Ok(value) = value.parse::<f64>() {
+                for write in writes {
+                    let result = write["inverse"].as_f64().map_or_else(
+                        || value * write["scale"].as_f64().unwrap_or(1.),
+                        |numerator| numerator / value,
+                    ) + write["offset"].as_f64().unwrap_or(0.);
+                    if result.is_finite() {
+                        updates.push(json!({"prop":write["prop"],"value":result.to_string()}));
+                    }
+                }
+            }
+        } else if let Some(targets) = schema.and_then(|schema| schema["targets"].as_array()) {
+            updates.extend(targets.iter().map(|key| json!({"prop":key,"value":value})));
+        } else {
+            if schema.is_some_and(|schema| schema["blankNegative"] == true) {
+                let number = value
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|value| value.is_finite() && *value >= 0.)
+                    .unwrap_or(-1.);
+                updates.push(json!({"prop":row.key,"value":number.to_string()}));
+            } else {
+                updates.push(json!({"prop":row.key,"value":value}));
+            }
+        }
+        if value == "true" {
             if let Some(seeds) = schema.and_then(|schema| schema["seedWhenEnabled"].as_object()) {
                 updates.extend(
                     seeds
@@ -438,7 +549,18 @@ fn edit_field(
     numeric_edits: &mut BTreeMap<String, NumericEdit>,
     structured: bool,
 ) -> bool {
-    let (response, changed) = if !row.allowed.is_empty() {
+    let schema = row.schema.as_ref().filter(|_| structured);
+    let value_text = if structured {
+        row.structured_value.as_mut().unwrap_or(&mut row.value)
+    } else {
+        &mut row.value
+    };
+    let choices = row
+        .structured_choices
+        .as_deref()
+        .filter(|_| structured)
+        .unwrap_or(&row.allowed);
+    let (response, changed) = if !choices.is_empty() {
         let mut changed = false;
         let label = |value: &str| {
             row.schema
@@ -450,48 +572,119 @@ fn edit_field(
         };
         let response = egui::ComboBox::from_id_salt("value")
             .width(ui.available_width())
-            .selected_text(label(&row.value))
+            .selected_text(label(value_text))
             .show_ui(ui, |ui| {
-                for value in &row.allowed {
-                    let option = ui.selectable_value(&mut row.value, value.clone(), label(value));
+                for value in choices {
+                    let option = ui.selectable_value(value_text, value.clone(), label(value));
                     record(rects, &format!("{} option {value}", row.key), option.rect);
                     changed |= option.changed();
                 }
             })
             .response;
         (response, changed)
-    } else if row.kind == "boolean" {
-        let mut flag = row.value == "true";
+    } else if matches!(row.kind.as_str(), "boolean" | "toggle") {
+        let mut flag = value_text == "true";
         let response = ui.checkbox(&mut flag, "");
         let changed = response.changed();
         if changed {
-            row.value = flag.to_string();
+            *value_text = flag.to_string();
         }
         (response, changed)
-    } else if matches!(row.kind.as_str(), "integer" | "real") && row.value.parse::<f64>().is_ok() {
-        let mut value = row.value.parse::<f64>().unwrap();
+    } else if matches!(row.kind.as_str(), "integer" | "real")
+        && value_text.parse::<f64>().is_ok()
+        && !schema.is_some_and(|schema| schema["blankNegative"] == true)
+    {
+        let mut value = value_text.parse::<f64>().unwrap();
         let edit = numeric_edits.entry(row.key.clone()).or_default();
+        let optional = schema.and_then(|schema| schema.get("optional"));
+        let mut optional_on = value >= 0.;
+        let mut toggled = false;
+        if let Some(optional) = optional {
+            if optional_on {
+                edit.optional_value = Some(value);
+            }
+            let gate = ui
+                .checkbox(&mut optional_on, "")
+                .on_hover_text(optional["label"].as_str().unwrap_or("Enabled"));
+            record(rects, &format!("Enable {}", row.key), gate.rect);
+            if gate.changed() {
+                value = if optional_on {
+                    edit.optional_value
+                        .unwrap_or(optional["on"].as_f64().unwrap_or(0.))
+                } else {
+                    optional["off"].as_f64().unwrap_or(-1.)
+                };
+                *value_text = value.to_string();
+                toggled = true;
+            }
+            if !optional_on {
+                value = edit
+                    .optional_value
+                    .unwrap_or(optional["on"].as_f64().unwrap_or(0.));
+            }
+        }
         if edit.value != Some(value) && !edit.dirty {
             if let Some(id) = edit.id {
                 ui.data_mut(|data| data.remove::<String>(id));
             }
         }
         let previous = value;
+        let step = schema
+            .and_then(|schema| schema["step"].as_f64())
+            .unwrap_or(if row.kind == "integer" { 1. } else { 0.01 });
+        let speed = ui.input(|input| {
+            if input.modifiers.ctrl || input.modifiers.command {
+                schema
+                    .and_then(|schema| schema["coarseStep"].as_f64())
+                    .unwrap_or(step * 10.)
+            } else if input.modifiers.shift_only() {
+                schema
+                    .and_then(|schema| schema["fineStep"].as_f64())
+                    .map_or(step, |fine| fine * 10.)
+            } else {
+                step
+            }
+        });
         let mut editor = egui::DragValue::new(&mut value)
-            .speed(if row.kind == "integer" { 1. } else { 0.01 })
+            .speed(speed)
             .update_while_editing(false);
+        if let Some(schema) = schema {
+            if let Some((min, max)) = schema["min"].as_f64().zip(schema["max"].as_f64()) {
+                editor = editor.range(min..=max).clamp_existing_to_range(false);
+            }
+            if let Some(decimals) = schema["decimals"].as_u64() {
+                editor = editor.max_decimals(decimals as usize);
+            }
+            if let Some(unit) = schema["unit"].as_str().filter(|unit| !unit.is_empty()) {
+                editor = editor.suffix(format!(" {unit}"));
+            }
+        }
         if row.kind == "integer" {
             editor = editor.max_decimals(0);
         }
-        let response = ui.add_sized([ui.available_width(), 22.], editor);
+        let response = ui
+            .add_enabled_ui(optional.is_none() || optional_on, |ui| {
+                ui.add_sized([ui.available_width(), 22.], editor)
+            })
+            .inner;
+        if value != previous && schema.is_some() {
+            let fine = schema
+                .and_then(|schema| schema["fineStep"].as_f64())
+                .unwrap_or(step / 10.);
+            if fine.is_finite() && fine > 0. {
+                let scale = 10_f64.powf((-fine.log10().floor()).max(0.));
+                value = (value * scale).round() / scale;
+            }
+        }
         edit.id = Some(response.id);
         edit.value = Some(value);
         edit.dirty =
             response.has_focus() && (edit.dirty || response.changed() && value == previous);
-        if response.changed() {
-            row.value = value.to_string();
+        if response.changed() && (optional.is_none() || optional_on) {
+            *value_text = value.to_string();
         }
-        let changed = (response.changed() && !response.dragged()) || response.drag_stopped();
+        let changed =
+            toggled || (response.changed() && !response.dragged()) || response.drag_stopped();
         (response, changed)
     } else {
         if row.kind == "color" {
@@ -514,8 +707,15 @@ fn edit_field(
                 }
             }
         }
-        let response =
-            ui.add(egui::TextEdit::singleline(&mut row.value).desired_width(ui.available_width()));
+        let response = ui.add(
+            egui::TextEdit::singleline(value_text)
+                .desired_width(ui.available_width())
+                .hint_text(
+                    schema
+                        .and_then(|schema| schema["placeholder"].as_str())
+                        .unwrap_or(""),
+                ),
+        );
         let changed = response.lost_focus()
             || (response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)));
         (response, changed)
@@ -535,6 +735,155 @@ fn edit_field(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deleted_renderer_clears_cached_fields_before_painting() {
+        let mut state = DesktopAppState::new();
+        state.open_bytes("deleted.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let object = state.active_object_summaries()[0].uid;
+        let renderer = state
+            .scene_manager_mut()
+            .object_mut(object)
+            .unwrap()
+            .add_renderer("tube", "Tube");
+        let target = Some(InspectorTarget {
+            kind: "renderer".into(),
+            id: Some(renderer.get()),
+        });
+        let mut inspector = Inspector::default();
+        let mut camera = Camera::new();
+        inspector.inspect(&mut state, &mut camera, target.clone(), 0);
+        assert!(!inspector.structured_order.is_empty());
+        assert!(state
+            .scene_manager_mut()
+            .object_mut(object)
+            .unwrap()
+            .destroy_renderer(renderer));
+        inspector.inspect(&mut state, &mut camera, target, 1);
+        assert!(!inspector.error.is_empty());
+        let ctx = egui::Context::default();
+        for tab in 0..2 {
+            inspector.tab = tab;
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                assert!(inspector.panel(ctx).is_empty());
+            });
+        }
+        assert!(inspector.rows.is_empty());
+        assert!(inspector.sections.is_empty());
+        assert!(inspector.structured_order.is_empty());
+        assert!(inspector.generic_order.is_empty());
+    }
+
+    #[test]
+    fn tube_axes_and_nucleic_ratios_preserve_the_other_dimension() {
+        let mut state = DesktopAppState::new();
+        state.open_bytes("axes.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let object = state.active_object_summaries()[0].uid;
+        let mut camera = Camera::new();
+        for kind in ["tube", "nucl"] {
+            let renderer = state
+                .scene_manager_mut()
+                .object_mut(object)
+                .unwrap()
+                .add_renderer(kind, kind);
+            let target = InspectorTarget {
+                kind: "renderer".into(),
+                id: Some(renderer.get()),
+            };
+            let mut inspector = Inspector::default();
+            let (first, second) = if kind == "tube" {
+                ("section.width", "section.tuber")
+            } else {
+                ("base_size", "base_thick")
+            };
+            let set = |state: &mut DesktopAppState, camera: &mut Camera, key: &str, value: &str| {
+                cuemol_command::call_tool(state,camera,"set_node_prop",&json!({"nodeType":"renderer","nodeId":renderer.get(),"prop":key,"value":value})).unwrap();
+            };
+            set(&mut state, &mut camera, first, "1");
+            set(&mut state, &mut camera, second, "0.5");
+            inspector.inspect(&mut state, &mut camera, Some(target.clone()), 1);
+            let row = inspector
+                .rows
+                .iter_mut()
+                .find(|row| row.key == first)
+                .unwrap();
+            row.value = "2".into();
+            let (tool, args) = property_change(&target, row, &inspector.committed, true);
+            assert_eq!(tool, "set_node_props");
+            assert_eq!(args["updates"].as_array().unwrap().len(), 2);
+            cuemol_command::call_tool(&mut state, &mut camera, tool, &args).unwrap();
+            inspector.inspect(&mut state, &mut camera, Some(target.clone()), 2);
+            let row = inspector
+                .rows
+                .iter_mut()
+                .find(|row| row.key == second)
+                .unwrap();
+            assert_eq!(
+                row.displayed_value(true),
+                if kind == "tube" { "0.5" } else { "50" }
+            );
+            assert_eq!(row.value, if kind == "tube" { "0.25" } else { "1" });
+            row.structured_value = Some(if kind == "tube" { "0.2" } else { "25" }.into());
+            let (tool, args) = property_change(&target, row, &inspector.committed, true);
+            cuemol_command::call_tool(&mut state, &mut camera, tool, &args).unwrap();
+            let values = state
+                .molecule_renderer_properties(object, renderer)
+                .unwrap();
+            assert_eq!(values[first], "2");
+            assert_eq!(values[second], if kind == "tube" { "0.1" } else { "0.5" });
+        }
+    }
+
+    #[test]
+    fn cartoon_helix_switches_pages_and_writes_both_junctions() {
+        let mut state = DesktopAppState::new();
+        state.open_bytes("helix.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let object = state.active_object_summaries()[0].uid;
+        let renderer = state
+            .scene_manager_mut()
+            .object_mut(object)
+            .unwrap()
+            .add_renderer("cartoon", "cartoon");
+        let target = InspectorTarget {
+            kind: "renderer".into(),
+            id: Some(renderer.get()),
+        };
+        let mut camera = Camera::new();
+        let mut inspector = Inspector::default();
+        state
+            .set_renderer_property(object, renderer, "helix_ribbon", "false")
+            .unwrap();
+        inspector.inspect(&mut state, &mut camera, Some(target.clone()), 1);
+        assert!(inspector
+            .structured_order
+            .iter()
+            .any(|index| inspector.rows[*index].key == "helix_extend"));
+        assert!(!inspector
+            .structured_order
+            .iter()
+            .any(|index| inspector.rows[*index].key == "ribhelix.width"));
+        state
+            .set_renderer_property(object, renderer, "helix_ribbon", "true")
+            .unwrap();
+        inspector.inspect(&mut state, &mut camera, Some(target.clone()), 2);
+        assert!(!inspector
+            .structured_order
+            .iter()
+            .any(|index| inspector.rows[*index].key == "helix_extend"));
+        let row = inspector
+            .rows
+            .iter_mut()
+            .find(|row| row.key == "ribhelix_head.arrow")
+            .unwrap();
+        row.structured_value = Some("80".into());
+        let (tool, args) = property_change(&target, row, &inspector.committed, true);
+        cuemol_command::call_tool(&mut state, &mut camera, tool, &args).unwrap();
+        let values = state
+            .molecule_renderer_properties(object, renderer)
+            .unwrap();
+        assert_eq!(values["ribhelix_head.arrow"], "2.6");
+        assert_eq!(values["ribhelix_tail.arrow"], "2.6");
+    }
 
     #[test]
     fn view_refreshes_after_navigation_without_a_scene_revision() {
