@@ -317,11 +317,17 @@ normals, colors, triangle winding and pick ownership across the tested styles,
 selections and transforms. The linked Linux reference library is an existing
 source build; the installed macOS application remains the public binary oracle.
 
-The native/WASM dock currently follows object and renderer selection. Scene,
-View and other context targets, specialized property pages and drag preview
-still require comparison. The existing menu dialogs do not establish parity
-for those dock interactions. Public review and final release checks remain
-delivery gates for this batch.
+The native dock currently follows object and renderer selection, while the
+WASM dock also accepts Scene/View targets. Their context changes, specialized
+property pages and drag preview still require comparison. The existing native
+menu dialogs do not establish parity for those dock interactions.
+
+Public Claude Code review found no confirmed defect. Its two uncertain group
+concerns were checked against the shared setter and reference reset policy:
+resetting all properties clears group membership, and whitespace clears it
+without looking up a group. The compatibility test now exercises both cases
+while preserving the group renderer itself. Final release checks remain a
+delivery gate for this batch.
 
 ## Clipboard comparison and repairs
 

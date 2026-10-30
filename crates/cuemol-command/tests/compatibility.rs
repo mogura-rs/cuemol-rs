@@ -1353,6 +1353,36 @@ fn inspector_group_rename_and_structured_visibility_keep_members_together() {
         property_row(&mut state, &mut camera, group, "name")["value"],
         "renamed"
     );
+    call(
+        &mut state,
+        &mut camera,
+        "reset_node_props",
+        json!({"nodeType":"renderer","nodeId":renderer.get()}),
+    );
+    assert_eq!(
+        property_row(&mut state, &mut camera, renderer.get(), "group")["value"],
+        ""
+    );
+    assert_eq!(
+        property_row(&mut state, &mut camera, renderer.get(), "visible")["value"],
+        "true"
+    );
+    for value in ["renamed", "   "] {
+        call(
+            &mut state,
+            &mut camera,
+            "set_node_prop",
+            json!({"nodeType":"renderer","nodeId":renderer.get(),"prop":"group","value":value}),
+        );
+    }
+    assert_eq!(
+        property_row(&mut state, &mut camera, renderer.get(), "group")["value"],
+        ""
+    );
+    assert_eq!(
+        property_row(&mut state, &mut camera, group, "name")["value"],
+        "renamed"
+    );
 }
 
 #[cfg(feature = "scripting")]
