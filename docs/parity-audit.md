@@ -122,6 +122,31 @@ complete paint multi-selection and native/WASM Paint/Actions routing remain
 part of the editor comparison. Cross-platform OS checks, release delivery and
 the broader shell comparison must still be completed for the final revision.
 
+Public review exposed stale text focus after keyboard navigation, repeated OS
+clipboard queries while a menu remained open, and a paint wire-format mismatch.
+Text focus now clears on leaving an editor and stays attached to a pending
+asynchronous paste. Native menus cache the clipboard kind until the menu closes
+or the window regains focus; Tauri shares one kind query across each context
+menu. Paint envelopes now use the reference's `sel`/`col` keys and accept BOM,
+CRLF and wrapped base64. The worker's `selStr`/`colorValue` names are internal
+DTO fields and are not the clipboard wire keys.
+
+Cutting a selected group together with its member now deletes each once and
+records one undo step. Browser renderer copying resolves the renderer's actual
+owner. Failed pastes restore the scene, and incompatible renderers do not mark
+the destination modified. Affected checks passed: four shared clipboard cases,
+eleven core cases, 178 native GUI cases with one ignored, 154 Tauri model cases
+with six ignored, and the shared focus case. Thirty existing browser and Tauri
+shell cases passed; the expanded text/Undo case also passed after adding its
+missing menu-coordinate probe.
+
+The review's concern about trimming legacy NUL padding was checked against the
+published reference codec. It also trims trailing UTF-16 NUL units and an odd
+padding byte; object data chunks are base64 text after an XML sentinel, so the
+native wire payload does not end in raw QDF NUL bytes. The plain-text envelope
+retains arbitrary binary bytes. Clipboard source loading uses the same scene
+reader as other embedded scene inputs.
+
 ## Sequence comparison and repairs
 
 The reference panel obtains each molecule's own selection. Both frontends now

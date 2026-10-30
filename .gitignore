@@ -27,7 +27,7 @@ crates/cuemol-desktop/icons/app.png
 .cache/
 dist/
 web/pkg/
-web/node_modules/
+web/node_modules
 web/test-results*/
 web/playwright-report/
 /test-results/

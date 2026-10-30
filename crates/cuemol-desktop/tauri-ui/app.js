@@ -9945,6 +9945,7 @@ function showWorkspaceContextMenu(event, items) {
   const menu = document.createElement("div");
   menu.className = "workspace-context-menu";
   menu.setAttribute("role", "menu");
+  let clipboardKind;
   const appendItems = (container, menuItems) => {
     for (const item of menuItems) {
       if (!item) {
@@ -9979,7 +9980,8 @@ function showWorkspaceContextMenu(event, items) {
       entry.disabled = Boolean(item.disabled);
       if (item.clipboardKind) {
         entry.disabled = true;
-        void invoke("clipboard_kind").then(kind => { if (entry.isConnected) entry.disabled = kind !== item.clipboardKind; }).catch(() => {});
+        clipboardKind ??= invoke("clipboard_kind");
+        void clipboardKind.then(kind => { if (entry.isConnected) entry.disabled = kind !== item.clipboardKind; }).catch(() => {});
       }
       if (typeof item.checked === "boolean") {
         entry.classList.toggle("checked", item.checked);

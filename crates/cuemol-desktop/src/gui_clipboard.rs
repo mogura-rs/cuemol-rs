@@ -4,6 +4,57 @@ use cuemol_core::Uid;
 use cuemol_desktop_core::GuiPastedNode;
 use cuemol_ui::clipboard::Scope;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cut_group_and_selected_member_removes_each_once_and_undo_restores_both() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        let object_uid = app
+            .state
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .unwrap()
+            .add_molecule("molecule", cuemol_molstr::MolCoord::new());
+        let group = app
+            .state
+            .create_renderer_group(object_uid, "group")
+            .unwrap();
+        let member = app
+            .state
+            .scene_manager_mut()
+            .object_mut(object_uid)
+            .unwrap()
+            .add_renderer("simple", "lines");
+        app.state
+            .move_renderer_in_object(object_uid, member, group, "inside")
+            .unwrap();
+        app.workspace_multiple_selection = [(group, true), (member, false)]
+            .into_iter()
+            .map(|(renderer_uid, is_group)| NativeWorkspaceTarget::Renderer {
+                scene_uid,
+                owner: NativePropertyObject::Molecule(object_uid),
+                renderer_uid,
+                is_group,
+            })
+            .collect();
+        app.clipboard_focus.scope = Some(Scope::Tree);
+        app.clipboard_action(&egui::Context::default(), "cut");
+        assert!(app.state.renderer_summaries(object_uid).is_empty());
+        assert_eq!(app.status, "Cut selection");
+        assert_eq!(app.undo_stack.len(), 1);
+        app.undo(&mut CameraController::default());
+        assert_eq!(app.state.renderer_summaries(object_uid).len(), 2);
+        let payload = app.system_clipboard.payload().unwrap();
+        let tree =
+            cuemol_core::parse_ldom2_xml(std::str::from_utf8(&payload.bytes).unwrap()).unwrap();
+        assert_eq!(tree.top().tag_name(), "renderer");
+        assert_eq!(tree.top().type_name(), "simple");
+    }
+}
+
 impl GuiApplication {
     pub(super) fn write_clipboard_payload(
         &mut self,
@@ -22,7 +73,7 @@ impl GuiApplication {
     }
 
     pub(super) fn clipboard_has_kind(&mut self, kind: &str) -> bool {
-        self.system_clipboard.kind() == Some(kind)
+        self.system_clipboard.menu_kind() == Some(kind)
     }
 
     fn clipboard_target(&self, target: NativeWorkspaceTarget) -> Option<Target> {
@@ -160,6 +211,13 @@ impl GuiApplication {
         }
         if action == "cut" {
             let undo = self.capture_undo();
+            let mut selected = selected;
+            selected.sort_by_key(|target| target.delete_rank());
+            selected.dedup();
+            let scenes = selected
+                .iter()
+                .map(|target| target.scene_uid())
+                .collect::<Vec<_>>();
             for target in selected {
                 if let Err(error) = self.destroy_workspace_target(target) {
                     self.restore_gui_undo_state(undo);
@@ -168,6 +226,7 @@ impl GuiApplication {
                 }
             }
             self.push_undo_snapshot(undo);
+            self.modified_scenes.extend(scenes);
             self.selected_object = None;
             self.selected_renderer = None;
             self.workspace_aux_selection = None;

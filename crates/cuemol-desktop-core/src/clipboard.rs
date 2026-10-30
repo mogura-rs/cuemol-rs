@@ -191,6 +191,22 @@ impl DesktopAppState {
         target: Option<Uid>,
         target_type: Option<&str>,
     ) -> Result<GuiPastedNode> {
+        let previous = self.clone();
+        let result = self.paste_clipboard_bytes_inner(kind, form, bytes, target, target_type);
+        if result.is_err() {
+            *self = previous;
+        }
+        result
+    }
+
+    fn paste_clipboard_bytes_inner(
+        &mut self,
+        kind: &str,
+        form: &str,
+        bytes: &[u8],
+        target: Option<Uid>,
+        target_type: Option<&str>,
+    ) -> Result<GuiPastedNode> {
         let (xml, suffix) = clipboard_document(bytes)?;
         let tree = parse_ldom2_xml(xml)?;
         let sid = self.ensure_active_scene();
@@ -729,6 +745,11 @@ mod tests {
     #[test]
     fn clipboard_rejects_wrong_xml_root_without_scene_edits() {
         let mut state = DesktopAppState::new();
+        let empty = state.clone();
+        assert!(state
+            .paste_clipboard_bytes("object", "single", b"<scene/>", None, None)
+            .is_err());
+        assert!(state.same_undo_state(&empty));
         molecule(&mut state, "molecule");
         let before = state.clone();
         assert!(state

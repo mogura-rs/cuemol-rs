@@ -291,17 +291,15 @@ impl App {
                         }
                     });
                     let edit_menu = ui.menu_button("Edit", |ui| {
-                        if ui
-                            .add_enabled(self.clipboard_focus.text.is_some() || !self.history.is_empty(), egui::Button::new("Undo"))
-                            .clicked()
-                        {
+                        let undo = ui.add_enabled(self.clipboard_focus.text.is_some() || !self.history.is_empty(), egui::Button::new("Undo"));
+                        self.record_ui_rect("Edit Undo", &undo);
+                        if undo.clicked() {
                             if self.clipboard_focus.text.is_some() { self.clipboard_action(ctx, "undo"); } else { self.call("undo", json!({})); }
                             ui.close();
                         }
-                        if ui
-                            .add_enabled(self.clipboard_focus.text.is_some() || !self.future.is_empty(), egui::Button::new("Redo"))
-                            .clicked()
-                        {
+                        let redo = ui.add_enabled(self.clipboard_focus.text.is_some() || !self.future.is_empty(), egui::Button::new("Redo"));
+                        self.record_ui_rect("Edit Redo", &redo);
+                        if redo.clicked() {
                             if self.clipboard_focus.text.is_some() { self.clipboard_action(ctx, "redo"); } else { self.call("redo", json!({})); }
                             ui.close();
                         }

@@ -27,10 +27,7 @@ impl App {
         }
         let target = self.inspector_target.as_ref();
         match target.map(|target| target.kind.as_str()) {
-            Some("renderer") => Some(Target::Renderer {
-                object: self.selected?,
-                renderer: Uid::new(target?.id?),
-            }),
+            Some("renderer") => clipboard::renderer_target(&self.state, Uid::new(target?.id?)).ok(),
             Some("object") => Some(Target::Object(Uid::new(target?.id?))),
             _ => None,
         }
@@ -67,7 +64,10 @@ impl App {
         let revision = self.revision;
         let target = self.clipboard_target();
         if action == "paste" {
-            let text = self.clipboard_focus.text;
+            let text = self.clipboard_focus.begin_text_read();
+            if let Some(id) = text {
+                ctx.memory_mut(|memory| memory.request_focus(id));
+            }
             let promise = system.read_text();
             spawn_local(async move {
                 let result = JsFuture::from(promise)
@@ -106,6 +106,9 @@ impl App {
     }
 
     pub(super) fn clipboard_complete(&mut self, ctx: &egui::Context, completion: Completion) {
+        if let Completion::Read { text: Some(id), .. } = &completion {
+            self.clipboard_focus.finish_text_read(*id);
+        }
         match completion {
             Completion::Written {
                 result: Err(error), ..

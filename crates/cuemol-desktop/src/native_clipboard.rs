@@ -5,6 +5,7 @@ use cuemol_desktop_core::GuiClipboardPayload;
 
 #[derive(Default)]
 pub(crate) struct Clipboard {
+    menu_kind: Option<Option<&'static str>>,
     #[cfg(not(test))]
     handle: Option<ClipboardContext>,
     #[cfg(test)]
@@ -58,6 +59,7 @@ impl Clipboard {
     }
 
     pub(crate) fn write(&mut self, text: String) -> Result<(), String> {
+        self.invalidate_menu_kind();
         #[cfg(test)]
         {
             self.text = text;
@@ -72,6 +74,7 @@ impl Clipboard {
     }
 
     pub(crate) fn write_payload(&mut self, payload: &GuiClipboardPayload) -> Result<(), String> {
+        self.invalidate_menu_kind();
         #[cfg(test)]
         {
             self.write(clipboard::encode(payload))
@@ -126,5 +129,19 @@ impl Clipboard {
         clipboard::header(&self.read().ok()?)
             .ok()
             .map(|(kind, _)| kind)
+    }
+
+    #[cfg(feature = "egui-gui")]
+    pub(crate) fn menu_kind(&mut self) -> Option<&'static str> {
+        if let Some(kind) = self.menu_kind {
+            return kind;
+        }
+        let kind = self.kind();
+        self.menu_kind = Some(kind);
+        kind
+    }
+
+    pub(crate) fn invalidate_menu_kind(&mut self) {
+        self.menu_kind = None;
     }
 }

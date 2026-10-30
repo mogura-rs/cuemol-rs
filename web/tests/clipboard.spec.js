@@ -59,6 +59,12 @@ test('Edit clipboard commands preserve text focus across the menu', async ({page
   await page.keyboard.press('Enter');
   await expect.poll(async () => (await status(page)).view.zoom).toBe(17);
   expect((await status(page)).scene.objects).toHaveLength(1);
+  await call(page,'set_view',{zoom:29});
+  await click(page,'Console input');
+  await page.keyboard.press('Escape');
+  await present(page);
+  await menu(page,'Undo');
+  await expect.poll(async () => (await status(page)).view.zoom).toBe(17);
 });
 
 test('denied or delayed clipboard writes cannot cut a changed scene', async ({page,context}) => {

@@ -22,7 +22,8 @@ async function openShell(page, storage = {}, options = {}) {
       selection: '*', visible: true, locked: false, style: '', material: '', alpha: 1,
       edgeType: 'none', edgeWidth: 0, edgeColor: '#000000', lineWidth: 1, detail: 4,
       supportsColoring: true, supportsSolidColoring: true, supportsMultiGradient: true,
-      coloringType: 'CPKColoring', coloringAttrs: {}, paintEntries: [], gradientEntries: [],
+      coloringType: options.paint ? 'PaintColoring' : 'CPKColoring', coloringAttrs: {},
+      paintEntries: options.paint ? [{selection:'chain A',color:'red'},{selection:'*',color:'white'}] : [], gradientEntries: [],
       defaultColor: '#cccccc', specific: {},
     };
     const molecule = {
@@ -74,7 +75,17 @@ async function openShell(page, storage = {}, options = {}) {
       if (command === 'clipboard_text') return window.__clipboardText || '';
       if (command === 'set_clipboard_text') { window.__clipboardText = args.text; window.__clipboardKind = ''; return 'Copied text'; }
       if (options.clipboard && command === 'copy_workspace_object') {window.__clipboardKind='object';return 'Copied object';}
-      if (options.clipboard && command === 'paste_workspace_object') {snapshot.objects.push({...molecule,uid:5,name:'Probe_1'});return structuredClone(snapshot);}
+      if (options.clipboard && command === 'paste_workspace_object') {
+        snapshot.objects.push({...molecule,uid:5,name:'Probe_1'});
+        snapshot.canUndo = true;
+        snapshot.undoDescriptions = ['Paste object'];
+        return structuredClone(snapshot);
+      }
+      if (options.paint && command === 'set_coloring') {
+        renderer.coloringType = args.update.coloringType;
+        renderer.paintEntries = args.update.paintEntries;
+        return {snapshot: structuredClone(snapshot), viewport};
+      }
       if (command === 'actions_request') {
         if (args.operation === 'list') {
           const value = {steps: options.actions ? [{id:7,label:'Cartoon + ligand',entryCount:3,undone:false},{id:8,label:'Hide',entryCount:1,undone:false}] : [],done:options.actions ? 2 : 0,running:window.__actionsRunning,
@@ -124,7 +135,7 @@ async function openShell(page, storage = {}, options = {}) {
 }
 
 test('Tauri Edit clipboard routes tree, text and modal focus separately', async ({page}) => {
-  const errors = await openShell(page, {}, {clipboard:true});
+  const errors = await openShell(page, {}, {clipboard:true,shortcuts:true});
   const edit = page.locator('.menu').filter({has:page.locator('summary', {hasText:/^Edit$/})});
   async function menu(action) {await edit.locator('summary').click();await edit.locator(`[data-action="${action}"]`).click();}
   await page.evaluate(() => {window.__clipboardKind='renderer';});
@@ -150,11 +161,35 @@ test('Tauri Edit clipboard routes tree, text and modal focus separately', async 
   await expect(text).toHaveValue('');
   await menu('paste');
   await expect(text).toHaveValue('selected text');
+  await page.locator('#viewport').focus();
+  await menu('undo');
+  expect(await page.evaluate(() => window.__shellCalls.filter(call=>call.command==='undo').length)).toBe(1);
   await page.evaluate(() => {
     const dialog=document.createElement('dialog');dialog.id='clipboard-probe-dialog';dialog.textContent='Modal';document.body.append(dialog);dialog.showModal();
   });
   await page.keyboard.press('Control+v');
   expect(await page.evaluate(() => window.__shellCalls.filter(call=>call.command==='paste_workspace_object').length)).toBe(1);
+  expect(errors).toEqual([]);
+});
+
+test('Tauri paint clipboard reads reference keys, BOM, CRLF and wrapped base64', async ({page}) => {
+  const errors = await openShell(page, {}, {paint:true});
+  await page.locator('#scene-tree button').filter({hasText:'Atoms'}).first().click();
+  await page.locator('#coloring-target').selectOption('renderer:3:4');
+  await expect(page.locator('#coloring-paint-list')).toBeVisible();
+  await page.locator('.coloring-paint-row').first().click();
+  const edit = page.locator('.menu').filter({has:page.locator('summary', {hasText:/^Edit$/})});
+  async function menu(action) {await edit.locator('summary').click();await edit.locator(`[data-action="${action}"]`).click();}
+  await menu('copy');
+  await expect.poll(() => page.evaluate(() => window.__clipboardText || '')).toContain('CueMolClipboard/1');
+  const copied = await page.evaluate(() => JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(window.__clipboardText.split('\n')[2]), char => char.charCodeAt(0)))));
+  expect(copied).toEqual([{sel:'chain A',col:'red'}]);
+  const data = Buffer.from(JSON.stringify([null,{sel:'chain 日本',col:'blue'},{sel:'*',col:'green'},{sel:7,col:'red'}])).toString('base64').match(/.{1,16}/g).join('\r\n');
+  await page.evaluate(text => {window.__clipboardText=text;}, `\uFEFFCueMolClipboard/1\r\n{"kind":"paint","form":"single"}\r\n${data}\r\n`);
+  await menu('paste');
+  await expect.poll(() => page.evaluate(() => window.__shellCalls.filter(call => call.command==='set_coloring').length)).toBe(1);
+  const rows = await page.evaluate(() => window.__shellCalls.find(call => call.command==='set_coloring').args.update.paintEntries);
+  expect(rows).toEqual([{selection:'chain 日本',color:'blue'},{selection:'*',color:'green'},{selection:'chain A',color:'red'},{selection:'*',color:'white'}]);
   expect(errors).toEqual([]);
 });
 

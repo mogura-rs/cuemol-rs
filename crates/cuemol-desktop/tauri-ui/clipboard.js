@@ -19,6 +19,10 @@ document.addEventListener("pointerdown", event => {
       : event.target.closest("#action-history-list") ? "actions" : null;
 }, true);
 
+document.addEventListener("focusin", event => {
+  if (!clipboardMenu(event.target)) clipboardTextTarget = clipboardEditable(event.target) ? event.target : null;
+}, true);
+
 function clipboardTextContext() {
   if (clipboardEditable(document.activeElement)) return document.activeElement;
   return clipboardTextTarget?.isConnected ? clipboardTextTarget : null;
@@ -102,16 +106,18 @@ async function paintClipboardAction(action) {
   if (state.type !== "PaintColoring") return;
   if (action === "paste") {
     const text = await invoke("clipboard_text");
-    const [magic, meta, data] = text.trim().split("\n");
+    const [magic, meta, ...body] = text.replace(/^\uFEFF/, "").split("\n").map(line => line.trim());
     if (magic !== "CueMolClipboard/1" || JSON.parse(meta).kind !== "paint") throw new Error("The clipboard does not contain paint rows");
-    const rows = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(data), char => char.charCodeAt(0))));
-    if (!Array.isArray(rows) || !rows.every(row => typeof row.selStr === "string" && typeof row.colorValue === "string")) throw new Error("Invalid paint rows");
+    const rows = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(body.join("").replace(/\s/g, "")), char => char.charCodeAt(0))));
+    if (!Array.isArray(rows)) throw new Error("Invalid paint rows");
+    const valid = rows.filter(row => row && typeof row.sel === "string" && typeof row.col === "string");
+    if (!valid.length) throw new Error("The clipboard contains no valid paint rows");
     if (snapshot !== before || selectedColoringTarget()?.key !== target.key) return;
-    state.paintEntries.splice(index < 0 ? state.paintEntries.length : index, 0, ...rows.map(row => ({selection:row.selStr,color:row.colorValue})));
+    state.paintEntries.splice(index < 0 ? state.paintEntries.length : index, 0, ...valid.map(row => ({selection:row.sel,color:row.col})));
   } else {
     const row = state.paintEntries[index];
     if (!row) return;
-    const bytes = new TextEncoder().encode(JSON.stringify([{selStr:row.selection,colorValue:row.color}]));
+    const bytes = new TextEncoder().encode(JSON.stringify([{sel:row.selection,col:row.color}]));
     const data = btoa(Array.from(bytes, byte => String.fromCharCode(byte)).join(""));
     await invoke("set_clipboard_text", {text:`CueMolClipboard/1\n{"kind":"paint","form":"single"}\n${data}\n`});
     if (action !== "cut" || snapshot !== before || selectedColoringTarget()?.key !== target.key) return;

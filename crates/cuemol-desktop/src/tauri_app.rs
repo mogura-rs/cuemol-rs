@@ -4225,6 +4225,11 @@ impl AppModel {
         );
         self.desktop.set_active_scene(active);
         let result = result.map_err(|error| error.to_string())?;
+        if matches!(&result, crate::GuiPastedNode::Renderers { uids, group } if uids.is_empty() && group.is_none())
+        {
+            self.status = "No compatible clipboard items".to_string();
+            return Ok(result);
+        }
         self.modified_scenes.insert(scene);
         self.status = match &result {
             crate::GuiPastedNode::Camera(name) => format!("Pasted camera {name}"),
@@ -19509,6 +19514,33 @@ mod tests {
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert!(model.snapshot().objects[0].renderers.is_empty());
         assert_eq!(model.system_clipboard.kind(), Some("renderer"));
+    }
+
+    #[test]
+    fn incompatible_clipboard_renderers_do_not_mark_the_scene_modified() {
+        let (mut model, object_uid, _) = model_with_renderer();
+        model.modified_scenes.clear();
+        let before = model.desktop.clone();
+        model
+            .system_clipboard
+            .write_payload(&crate::GuiClipboardPayload {
+                kind: "renderer",
+                form: "single",
+                bytes: b"<renderer type=\"molsurf\" name=\"surface\"/>".to_vec(),
+            })
+            .unwrap();
+        handle_model_request(
+            &mut model,
+            ModelRequest::PasteWorkspaceRenderers(WorkspaceRendererPasteInput {
+                object_uid: object_uid.get(),
+                destination_group_uid: None,
+            }),
+        )
+        .unwrap();
+        assert!(model.desktop.same_undo_state(&before));
+        assert!(model.modified_scenes.is_empty());
+        assert!(model.undo_stack.is_empty());
+        assert_eq!(model.status, "No compatible clipboard items");
     }
 
     #[test]

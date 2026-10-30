@@ -14,6 +14,13 @@ pub enum Target {
     Style { scene: Uid, index: usize },
 }
 
+pub fn renderer_target(state: &DesktopAppState, renderer: Uid) -> Result<Target> {
+    Ok(Target::Renderer {
+        object: crate::commands::renderer_owner(state, renderer)?,
+        renderer,
+    })
+}
+
 pub fn copy_payload(state: &DesktopAppState, target: &Target) -> Result<GuiClipboardPayload> {
     Ok(match target {
         Target::Object(id) => state.copy_workspace_object(*id)?.to_payload()?,
@@ -180,6 +187,33 @@ pub fn paste(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renderer_target_uses_its_owner_instead_of_the_current_molecule() {
+        let mut state = DesktopAppState::new();
+        let scene = state.ensure_active_scene();
+        let owner = state
+            .scene_manager_mut()
+            .scene_mut(scene)
+            .unwrap()
+            .add_molecule("owner", cuemol_molstr::MolCoord::new());
+        let other = state
+            .scene_manager_mut()
+            .scene_mut(scene)
+            .unwrap()
+            .add_molecule("other", cuemol_molstr::MolCoord::new());
+        let renderer = state
+            .scene_manager_mut()
+            .object_mut(owner)
+            .unwrap()
+            .add_renderer("simple", "lines");
+        let target = renderer_target(&state, renderer).unwrap();
+        assert!(
+            matches!(target, Target::Renderer { object, .. } if object == owner && object != other)
+        );
+        assert!(copy_payload(&state, &target).is_ok());
+        assert!(renderer_target(&state, other).is_err());
+    }
     #[test]
     fn envelope_retains_binary_payload_and_rejects_truncation() {
         let payload = GuiClipboardPayload {

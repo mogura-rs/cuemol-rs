@@ -5609,6 +5609,11 @@ impl GuiApplication {
             }
             self.rebuild_snapshot();
         }
+        if !egui::Popup::is_any_open(ctx)
+            || ctx.input(|input| input.events.contains(&egui::Event::WindowFocused(true)))
+        {
+            self.system_clipboard.invalidate_menu_kind();
+        }
         self.clipboard_focus.begin_frame(ctx);
         self.tritium_layout(ctx, camera);
         self.updates.show(ctx);
