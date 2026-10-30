@@ -177,6 +177,27 @@ The published browser renderer also retained the baseline decoded RGBA hashes
 for 1CRN at 640 x 480 and 1200 x 1200 and for 4HHB at 640 x 480. The three-sample
 performance comparison and its memory limits are recorded above.
 
+An additional Apple M4 Mac mini with 16 GiB memory and macOS 15.6 passed the
+public v0.1.8 command-line and app-bundle installation/update checks, bundled-tool
+calculations, Python helpers and all 100 public browser cases in Chrome
+156.0.8078.74. All 37 Pages assets matched their manifest. WebGPU reported the
+vendor `apple`, architecture `metal-3` and `isFallbackAdapter=false`; WebGL
+reported ANGLE Metal on Apple M4. Three sequential image-export samples per condition gave
+medians of 2.82 s for 1CRN at 640 x 480, 13.81 s at 1200 x 1200 and 10.79 s for
+4HHB at 640 x 480. Maximum observed WASM linear memory was 60.81, 165.31 and
+101.56 MiB, respectively; these are not whole-browser RSS values. All nine
+outputs retained the earlier baseline decoded RGBA hashes.
+
+Native OS-input and screen-capture validation on that host remained unperformed:
+the desktop was locked and the SSH test process lacked Accessibility and Screen
+Recording permission. A separate AppKit pixel-format probe obtained accelerated,
+double-buffered monoscopic formats, but adding
+[`NSOpenGLPFAStereo`](https://developer.apple.com/documentation/appkit/nsopenglpfastereo)
+returned no format, both with and without an explicit acceleration requirement.
+This records the available API configuration on that Mac; it does not validate
+a quad-buffer presentation backend. Real cloud-provider credentials were also
+absent from the CueMol credential store and supported environment variables.
+
 ### Historical release: v0.1.6
 
 The [v0.1.6 release](https://github.com/mogura-rs/cuemol-rs/releases/tag/v0.1.6)
