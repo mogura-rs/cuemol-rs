@@ -191,7 +191,9 @@ pub(crate) fn scene_state(state: &DesktopAppState) -> Result<Value> {
         .into_iter()
         .map(|map| json!({"id":map.uid.get(),"name":map.name,"visible":map.visible}))
         .collect();
-    Ok(json!({"sceneId":id.get(),"objects":objects,"maps":maps,"namedSelections":[]}))
+    let (scene_selections, mut named_selections) = state.selection_definitions();
+    named_selections.extend(scene_selections);
+    Ok(json!({"sceneId":id.get(),"objects":objects,"maps":maps,"namedSelections":named_selections}))
 }
 
 pub(crate) fn loaded_result(loaded: GuiLoadedPath) -> Value {

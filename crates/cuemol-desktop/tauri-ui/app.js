@@ -25,18 +25,6 @@ const sceneTree = document.getElementById("scene-tree");
 const rendererList = document.getElementById("renderer-list");
 const selectionInput = document.getElementById("selection-input");
 const selectionObject = document.getElementById("selection-object");
-const selectionCommandPanel = document.getElementById("selection-command-panel");
-const selectionEditorPanel = document.getElementById("selection-editor-panel");
-const selectionHistory = document.getElementById("selection-history");
-const selectionEditorList = document.getElementById("selection-editor-list");
-const selectionEditorApply = document.getElementById("selection-editor-apply");
-const selectionEditorAdd = document.getElementById("selection-editor-add");
-const selectionEditorDelete = document.getElementById("selection-editor-delete");
-const selectionEditorClear = document.getElementById("selection-editor-clear");
-const selectionChainCandidates = document.getElementById("selection-chain-candidates");
-const selectionResnameCandidates = document.getElementById("selection-resname-candidates");
-const selectionAtomCandidates = document.getElementById("selection-atom-candidates");
-const selectionElementCandidates = document.getElementById("selection-element-candidates");
 const statusText = document.getElementById("status-text");
 const statusHistory = document.getElementById("status-history");
 const outputCommand = document.getElementById("output-command");
@@ -163,7 +151,7 @@ const SIDE_PANEL_DEFAULT_ORDER = [
   "View",
 ];
 const MAX_RECENT_FILES = 10;
-const MAX_SELECTION_HISTORY = 10;
+const MAX_SELECTION_HISTORY = 100;
 const MAX_COMMAND_HISTORY = 100;
 const CAMERA_PREVIEW_SCALE = 1;
 const CAMERA_SETTLE_RENDER_DELAY = 72;
@@ -230,9 +218,6 @@ let molstructSelectionAnchor = null;
 let selectionObjectUid = null;
 let mergeMoleculeSourceUid = null;
 let mergeMoleculeTargetUid = null;
-let selectionActiveTab = "command";
-let selectionEditorItems = [];
-let selectionEditorSelectedIndex = -1;
 let coloringTargetKey = null;
 let symmetryTargetKey = null;
 let densityPanelTargetKey = null;
@@ -311,7 +296,6 @@ let renderedAnimationListKey = "";
 let renderedTrajectoryListKey = "";
 let renderedTrajectoryBlocksKey = "";
 let secondaryPanelRenderGeneration = 0;
-let selectionCandidateCache = { key: "", values: null };
 
 function loadRecentFiles() {
   try {
@@ -399,17 +383,7 @@ function recallCommand(position) {
 }
 
 function rememberSelection(selection) {
-  const value = selection.trim();
-  if (!value) return;
-  selectionHistoryEntries = selectionHistoryEntries.filter((entry) => entry !== value);
-  selectionHistoryEntries.unshift(value);
-  selectionHistoryEntries = selectionHistoryEntries.slice(0, MAX_SELECTION_HISTORY);
-  saveSelectionHistory();
-  renderSelectionHistory();
-}
-
-function renderSelectionHistory() {
-  selectionHistory.disabled = false;
+  void updateCueMolSelectionHistory(selection).then(()=>cueMolSelectionPane?.builder.refresh());
 }
 
 function requestPdbHistory() {
@@ -9525,7 +9499,6 @@ function renderSidePanel(name) {
       break;
     case "Selection":
       renderSelectionPanel();
-      scheduleMoleculeDetailsRefresh(0, selectionObjectUid);
       break;
     case "Coloring":
       renderColoring();
@@ -13819,7 +13792,6 @@ function requestedMoleculeObjectUids() {
   const activeUids = new Set(objects.map((object) => object.uid));
   const visibleObjectUids = [];
   if (sidePanelIsExpanded("MolStruct")) visibleObjectUids.push(molstructObjectUid);
-  if (sidePanelIsExpanded("Selection")) visibleObjectUids.push(selectionObjectUid);
   const requested = [...new Set(visibleObjectUids)].filter((uid) => activeUids.has(uid));
   if (requested.length === 0 && visibleObjectUids.length > 0) {
     const fallback = activeUids.has(selectedObjectUid) ? selectedObjectUid : objects[0]?.uid;
@@ -14234,335 +14206,8 @@ function renderMolStruct() {
   updateMolstructSelectionUi();
 }
 
-function replaceDatalist(datalist, values, cacheKey) {
-  if (datalist.dataset.cacheKey === cacheKey) return;
-  datalist.replaceChildren();
-  for (const value of values) {
-    const option = document.createElement("option");
-    option.value = value;
-    datalist.append(option);
-  }
-  datalist.dataset.cacheKey = cacheKey;
-}
-
-function selectionCandidateValues() {
-  const cacheKey = `${moleculeDetails.structureKey}|${selectionObjectUid ?? ""}`;
-  if (selectionCandidateCache.key === cacheKey && selectionCandidateCache.values) {
-    return selectionCandidateCache.values;
-  }
-  const object = cachedMoleculeStructure(selectionObjectUid);
-  if (!object) {
-    scheduleMoleculeDetailsRefresh(0, selectionObjectUid);
-    const values = {
-      chains: ["A", "B", "C"],
-      residueNames: [],
-      atomNames: ["CA", "CB", "CG"],
-      elements: ["C", "N", "O", "S"],
-    };
-    return values;
-  }
-  const residueNames = new Set();
-  const atomNames = new Set();
-  const elements = new Set();
-  for (const chain of object.chains) {
-    for (const residue of chain.residues) {
-      residueNames.add(residue.resName);
-      for (const atom of residue.atoms) {
-        atomNames.add(atom.name);
-        if (atom.element) elements.add(atom.element);
-      }
-    }
-  }
-  const values = {
-    chains: object.chains.map((chain) => chain.chainId),
-    residueNames: [...residueNames].sort(),
-    atomNames: [...atomNames].sort(),
-    elements: [...elements].sort(),
-  };
-  selectionCandidateCache = { key: cacheKey, values };
-  return values;
-}
-
-function selectionTermDefault(command, candidates = selectionCandidateValues()) {
-  switch (command) {
-    case "c;":
-      return candidates.chains[0] || "A";
-    case "r;":
-      return candidates.residueNames[0] || "ALA";
-    case "n;":
-      return candidates.atomNames[0] || "CA";
-    case "e;":
-      return candidates.elements[0] || "C";
-    default:
-      return "1:100";
-  }
-}
-
-function selectionTermDatalist(command) {
-  return {
-    "c;": "selection-chain-candidates",
-    "r;": "selection-resname-candidates",
-    "n;": "selection-atom-candidates",
-    "e;": "selection-element-candidates",
-  }[command];
-}
-
-function newSelectionEditorItem(type) {
-  if (type === "hier") {
-    return { type, boolOp: "|", chain: "*", residue: "10:100", atom: "*" };
-  }
-  if (type === "term") {
-    return {
-      type,
-      boolOp: "|",
-      command: "c;",
-      args: selectionTermDefault("c;"),
-    };
-  }
-  return { type: "around", command: "around", args: "5" };
-}
-
-function addSelectionEditorItem(type) {
-  if (type === "around" && selectionEditorItems.length === 0) return;
-  const index =
-    selectionEditorItems.length === 0
-      ? 0
-      : Math.min(selectionEditorSelectedIndex + 1, selectionEditorItems.length);
-  selectionEditorItems.splice(index, 0, newSelectionEditorItem(type));
-  selectionEditorSelectedIndex = index;
-  renderSelectionEditor();
-}
-
-function deleteSelectionEditorItem() {
-  if (selectionEditorSelectedIndex < 0) return;
-  selectionEditorItems.splice(selectionEditorSelectedIndex, 1);
-  if (selectionEditorItems[0]?.type === "around") selectionEditorItems.shift();
-  selectionEditorSelectedIndex = selectionEditorItems.length
-    ? Math.min(selectionEditorSelectedIndex, selectionEditorItems.length - 1)
-    : -1;
-  renderSelectionEditor();
-}
-
-function composeSelectionEditorExpression() {
-  let selection = "";
-  for (const item of selectionEditorItems) {
-    if (item.type === "around") {
-      if (!selection) continue;
-      if (item.command === "around" || item.command === "expand") {
-        selection = `(${selection}) ${item.command} ${item.args}`;
-      } else if (item.command === "around byres") {
-        selection = `byres ((${selection}) around ${item.args})`;
-      } else if (item.command === "extend byres") {
-        selection = `byres ((${selection}) extend ${item.args})`;
-      }
-      continue;
-    }
-    const term =
-      item.type === "hier"
-        ? `${item.chain}.${item.residue}.${item.atom}`
-        : `${item.command} ${item.args}`;
-    selection = selection ? `${selection} ${item.boolOp || "|"} ${term}` : term;
-  }
-  return selection;
-}
-
-function updateSelectionEditorUi() {
-  for (const [index, row] of [...selectionEditorList.children].entries()) {
-    row.classList.toggle("selected", index === selectionEditorSelectedIndex);
-  }
-  const selected = selectionEditorSelectedIndex >= 0;
-  selectionEditorApply.disabled = !selectionObjectUid || !selected;
-  selectionEditorDelete.disabled = !selected;
-  selectionEditorClear.disabled = !selected;
-}
-
-function selectionBoolOpControl(item, index) {
-  if (index === 0 || item.type === "around") {
-    const spacer = document.createElement("span");
-    spacer.className = "selection-boolop";
-    return spacer;
-  }
-  const select = document.createElement("select");
-  select.className = "selection-boolop";
-  for (const [value, label] of [
-    ["&", "&"],
-    ["|", "|"],
-  ]) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = label;
-    select.append(option);
-  }
-  select.value = item.boolOp;
-  select.addEventListener("change", () => {
-    item.boolOp = select.value;
-  });
-  return select;
-}
-
-function selectionInputControl(value, className, onInput, list = null) {
-  const input = document.createElement("input");
-  input.className = className;
-  input.value = value;
-  input.spellcheck = false;
-  if (list) input.setAttribute("list", list);
-  input.addEventListener("input", () => onInput(input.value));
-  return input;
-}
-
-function renderSelectionEditor() {
-  selectionEditorList.replaceChildren();
-  if (selectionEditorItems.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "selection-editor-empty";
-    empty.textContent = "No selection items.";
-    selectionEditorList.append(empty);
-    updateSelectionEditorUi();
-    return;
-  }
-  for (const [index, item] of selectionEditorItems.entries()) {
-    const row = document.createElement("div");
-    row.className = `selection-editor-row${index === selectionEditorSelectedIndex ? " selected" : ""}`;
-    row.append(selectionBoolOpControl(item, index));
-    if (item.type === "hier") {
-      row.append(
-        selectionInputControl(
-          item.chain,
-          "selection-hier-chain",
-          (value) => {
-            item.chain = value;
-          },
-          "selection-chain-candidates",
-        ),
-      );
-      const dot1 = document.createElement("span");
-      dot1.textContent = ".";
-      row.append(dot1);
-      row.append(
-        selectionInputControl(item.residue, "selection-hier-residue", (value) => {
-          item.residue = value;
-        }),
-      );
-      const dot2 = document.createElement("span");
-      dot2.textContent = ".";
-      row.append(dot2);
-      row.append(
-        selectionInputControl(
-          item.atom,
-          "selection-hier-atom",
-          (value) => {
-            item.atom = value;
-          },
-          "selection-atom-candidates",
-        ),
-      );
-    } else {
-      const command = document.createElement("select");
-      command.className = "selection-item-command";
-      const commands =
-        item.type === "term"
-          ? [
-              ["c;", "chain"],
-              ["i;", "resid"],
-              ["r;", "resname"],
-              ["n;", "atom"],
-              ["e;", "element"],
-              ["aid", "aid"],
-            ]
-          : [
-              ["around", "around"],
-              ["expand", "expand"],
-              ["around byres", "around byres"],
-              ["extend byres", "extend byres"],
-            ];
-      for (const [value, label] of commands) {
-        const option = document.createElement("option");
-        option.value = value;
-        option.textContent = label;
-        command.append(option);
-      }
-      command.value = item.command;
-      const args = selectionInputControl(
-        item.args,
-        "selection-item-args",
-        (value) => {
-          item.args = value;
-        },
-        item.type === "term" ? selectionTermDatalist(item.command) : null,
-      );
-      command.addEventListener("change", () => {
-        item.command = command.value;
-        item.args =
-          item.type === "term" ? selectionTermDefault(item.command) : item.args || "5";
-        renderSelectionEditor();
-      });
-      row.append(command, args);
-    }
-    row.addEventListener("click", () => {
-      selectionEditorSelectedIndex = index;
-      updateSelectionEditorUi();
-    });
-    selectionEditorList.append(row);
-  }
-  updateSelectionEditorUi();
-}
-
 function renderSelectionPanel() {
-  const objects = activeMoleculeObjects();
-  if (!objects.some((object) => object.uid === selectionObjectUid)) {
-    selectionObjectUid = objects.some((object) => object.uid === selectedObjectUid)
-      ? selectedObjectUid
-      : objects[0]?.uid ?? null;
-  }
-  replaceOptions(
-    selectionObject,
-    objects,
-    selectionObjectUid,
-  );
-  document.querySelectorAll("[data-selection-tab]").forEach((tab) => {
-    const active = tab.dataset.selectionTab === selectionActiveTab;
-    tab.classList.toggle("active", active);
-    tab.setAttribute("aria-selected", String(active));
-  });
-  selectionCommandPanel.hidden = selectionActiveTab !== "command";
-  selectionEditorPanel.hidden = selectionActiveTab !== "editor";
-  renderSelectionHistory();
-  const candidates = selectionCandidateValues();
-  const candidateKey = `${moleculeDetails.structureKey}|${selectionObjectUid ?? ""}|${
-    moleculeStructureIsCurrent(selectionObjectUid) ? "ready" : "loading"
-  }`;
-  replaceDatalist(selectionChainCandidates, candidates.chains, `${candidateKey}|chain`);
-  replaceDatalist(
-    selectionResnameCandidates,
-    candidates.residueNames,
-    `${candidateKey}|resname`,
-  );
-  replaceDatalist(selectionAtomCandidates, candidates.atomNames, `${candidateKey}|atom`);
-  replaceDatalist(selectionElementCandidates, candidates.elements, `${candidateKey}|element`);
-  if (selectionActiveTab === "editor" && selectionEditorList.childElementCount === 0) {
-    renderSelectionEditor();
-  } else {
-    updateSelectionEditorUi();
-  }
-}
-
-async function applySelectionCommand() {
-  const objectUid = Number(selectionObject.value) || null;
-  if (!objectUid) {
-    showError("Select a molecule first.");
-    return false;
-  }
-  return runMoleculeSelectionAction(objectUid, selectionInput.value, "select");
-}
-
-async function applySelectionEditor() {
-  const objectUid = Number(selectionObject.value) || null;
-  const selection = composeSelectionEditorExpression();
-  if (!objectUid || !selection) {
-    showError("Add and select an editor item first.");
-    return false;
-  }
-  return runMoleculeSelectionAction(objectUid, selection, "select");
+  renderCueMolSelectionPane();
 }
 
 function coloringTargets() {
@@ -18121,23 +17766,6 @@ async function handleAction(action, depth = 0) {
     case "projection":
       await cameraCommand("projection");
       break;
-    case "selection-command-apply":
-      await applySelectionCommand();
-      break;
-    case "selection-command-clear":
-      selectionInput.value = "";
-      break;
-    case "selection-editor-apply":
-      await applySelectionEditor();
-      break;
-    case "selection-editor-delete":
-      deleteSelectionEditorItem();
-      break;
-    case "selection-editor-clear":
-      selectionEditorItems = [];
-      selectionEditorSelectedIndex = -1;
-      renderSelectionEditor();
-      break;
     case "add-renderer": {
       if (["styleRoot", "style"].includes(workspaceSelectionKind)) {
         await openNewStyleFlow();
@@ -18457,41 +18085,12 @@ document.querySelectorAll("[data-bottom-select]").forEach((element) => {
   });
 });
 
-document.querySelectorAll("[data-selection-tab]").forEach((element) => {
-  element.addEventListener("click", () => {
-    selectionActiveTab = element.dataset.selectionTab;
-    renderSelectionPanel();
-  });
-});
-
 selectionObject.addEventListener("change", () => {
   selectionObjectUid = Number(selectionObject.value) || null;
   renderSelectionPanel();
 });
 
-selectionHistory.addEventListener("click", (event) => {
-  const items = selectionHistoryEntries.length
-    ? selectionHistoryEntries.map((entry) => ({
-        label: entry,
-        action: () => {
-          selectionInput.value = entry;
-        },
-      }))
-    : [{ label: "(no history)", disabled: true }];
-  showWorkspaceContextMenu(event, items);
-});
 
-selectionEditorAdd.addEventListener("click", (event) => {
-  showWorkspaceContextMenu(event, [
-    { label: "Hierarchical", action: () => addSelectionEditorItem("hier") },
-    { label: "Terminal", action: () => addSelectionEditorItem("term") },
-    {
-      label: "Around/Expand",
-      disabled: selectionEditorItems.length === 0,
-      action: () => addSelectionEditorItem("around"),
-    },
-  ]);
-});
 
 molstructObject.addEventListener("change", () => {
   molstructObjectUid = Number(molstructObject.value) || null;
@@ -18730,12 +18329,7 @@ referenceDialog.addEventListener("close", () => {
   viewport.classList.remove("atom-picking");
 });
 
-selectionInput.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-    event.preventDefault();
-    void applySelectionCommand();
-  }
-});
+
 
 viewport.addEventListener("contextmenu", (event) => event.preventDefault());
 function configuredPointerAction(event) {

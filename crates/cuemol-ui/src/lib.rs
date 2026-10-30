@@ -38,6 +38,9 @@ pub mod sequence;
 pub mod selection;
 
 #[cfg(feature = "egui")]
+pub mod selection_pane;
+
+#[cfg(feature = "egui")]
 pub mod actions;
 #[cfg(feature = "egui")]
 pub mod console;

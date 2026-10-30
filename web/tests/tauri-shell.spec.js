@@ -48,6 +48,12 @@ async function openShell(page, storage = {}, options = {}) {
       perspective: false, centerMark: options.centerMark || 'none', centerMarkEmbedded: true, lines: [], labels: [], status: 'Ready',
     };
     const sceneValues = {name:scene.name,uid:'1',aoEnabled:'false',aoRadius:'4',aoSteps:'3',aoIntensity:'2.2',aoHalfRes:'false'};
+    const selectionHistory=['name C1'], selectionNames=['carbon'];
+    const selectionUndo=[], selectionRedo=[];
+    const rememberSelection=expression=>{
+      const value=expression.trim();
+      if(!['','*','none'].includes(value))selectionHistory.splice(0,selectionHistory.length,...[value,...selectionHistory.filter(item=>item!==value)].slice(0,100));
+    };
     const inspectorValues = options.inspectorPages ? {ring:'false',thickness:'0.2',material:'',font_name:'Portable face','section.width':'1','section.tuber':'0.5',helix_ribbon:'false',loopsize2:'-1',stipple0:'-1',stipple1:'-1',stipple2:'-1',stipple3:'-1',stipple4:'-1',stipple5:'-1',bndry_molname:'',bndry_sel:'',autoupdate:'true',dragupdate:'true'} : {};
     if (options.inspectorPages) renderer.detail=24;
     const sequenceIndices = options.sequenceExtremes ? [-2147483648, '-2147483648A', 0, 2147483647, '2147483647B'] : [-2, -1, 0, 1, '1A', '1B', ...Array.from({length: 4999}, (_, index) => index + 2)];
@@ -111,6 +117,13 @@ async function openShell(page, storage = {}, options = {}) {
         if (args.operation === 'save_history') return {ok:true};
       }
       if (command === 'execute_script') return structuredClone(snapshot);
+      if (options.selectionPane && ['undo','redo'].includes(command)) {
+        const from=command==='undo'?selectionUndo:selectionRedo, to=command==='undo'?selectionRedo:selectionUndo;
+        if(from.length){to.push(molecule.selection);molecule.selection=from.pop();}
+        snapshot.canUndo=selectionUndo.length>0;snapshot.canRedo=selectionRedo.length>0;
+        snapshot.actionHistoryKey=`selection-${window.__shellCalls.length}`;
+        return structuredClone(snapshot);
+      }
       if (options.shortcuts && ['undo', 'redo', 'close_active_scene'].includes(command)) return structuredClone(snapshot);
       if (options.shortcuts && command === 'molecule_selection_action') return {snapshot:structuredClone(snapshot),viewport};
       if (command === 'console_start' || command === 'console_stop' || command === 'console_poll') {
@@ -119,13 +132,35 @@ async function openShell(page, storage = {}, options = {}) {
       }
       if (command === 'console_complete') return [{display: 'Probe', replacement: 'select Probe'}];
       if (command === 'inspector_request') {
+        if(args.tool==='selection_history') {
+          if(args.args.action==='import')for(const value of args.args.entries){if(value.trim()&&!['*','none'].includes(value.trim())&&!selectionHistory.includes(value.trim()))selectionHistory.push(value.trim());}
+          if(args.args.action==='remember')rememberSelection(args.args.expression);
+          return {history:[...selectionHistory]};
+        }
+        if(args.tool==='selection_edit') {
+          const request=args.args;
+          if(request.expression==='chain (')throw new Error('Invalid selection expression');
+          if(request.action==='apply') {
+            selectionUndo.push(molecule.selection);selectionRedo.splice(0);molecule.selection=request.expression;
+            snapshot.canUndo=true;snapshot.canRedo=false;
+            if(request.remember)rememberSelection(request.expression);
+          }
+          if(request.action==='define'){
+            if(request.name==='fail')throw new Error('Definition failed');
+            selectionNames.push(request.name);rememberSelection(request.expression);
+          }
+          snapshot.actionHistoryKey=`selection-${window.__shellCalls.length}`;
+          const result={snapshot:structuredClone(snapshot),history:[...selectionHistory]};
+          if(window.__delaySelectionEdit){window.__delaySelectionEdit=false;return new Promise(resolve=>{window.__releaseSelectionEdit=()=>resolve(result);});}
+          return result;
+        }
         if (args.tool === 'selection_info') {
           const request=args.args;
-          if(request.action==='context') return {current:'name O1',scene:['carbon'],global:['protein'],history:['name C1'],keywords:[
+          if(request.action==='context') return {current:request.moleculeId?molecule.selection:'name O1',scene:[...selectionNames],global:['protein'],history:[...selectionHistory],keywords:[
             {key:'hierarchical',label:'hier',kind:'hierarchical'},
             {key:'name',label:'name',kind:'nameList',candidates:'aname'},
           ]};
-          if(request.action==='values') return ['C1','O1'];
+          if(request.action==='values') return window.__selectionCandidateValues || ['C1','O1'];
           if(request.action==='compose') {
             const term=request.draft.fields.value ? `name ${request.draft.fields.value}` : null;
             const result={expression:term===null ? null : request.operation==='add' ? `(${request.current}) or (${term})` : term};
@@ -805,6 +840,133 @@ test('Tauri Enter ignores empty, failed and superseded selection terms', async (
   await expect(popup).not.toBeVisible();
   await expect(input).toHaveValue('name C1');
   expect((await writes()).map(call=>call.args.args.value)).toEqual(['name C1']);
+  expect(errors).toEqual([]);
+});
+
+test('Tauri selection pane separates typed drafts, applied selection and shared history', async ({page}) => {
+  const errors=await openShell(page,{}, {selectionPane:true});
+  await page.getByRole('button',{name:'Selection',exact:true}).click();
+  await page.locator('[data-panel-name="MolStruct"] > .side-title').click();
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  const detailRequests=()=>page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='get_molecule_details').length);
+  const initialDetails=await detailRequests();
+  const panel=page.locator('[data-panel-name="Selection"]');
+  const input=panel.getByLabel('Selection expression');
+  const edits=()=>page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='inspector_request'&&call.args.tool==='selection_edit').map(call=>call.args.args));
+  await expect(input).toHaveValue('*');
+  await expect(panel.getByRole('button',{name:'Apply selection',exact:true})).toBeDisabled();
+  await input.fill('name O1');
+  await page.getByRole('button',{name:'Explorer',exact:true}).click();
+  await page.getByRole('button',{name:'Selection',exact:true}).click();
+  await expect(input).toHaveValue('name O1');
+  await panel.getByRole('button',{name:'Center view on selection',exact:true}).click();
+  await expect(input).toHaveValue('name O1');
+  expect((await edits()).at(-1)).toMatchObject({action:'center',expression:'*'});
+  await input.press('Enter');
+  await expect(panel.getByRole('button',{name:'Apply selection',exact:true})).toBeDisabled();
+  expect((await edits()).at(-1)).toMatchObject({action:'apply',expression:'name O1',remember:true});
+  await panel.getByRole('button',{name:'Selection tab History',exact:true}).click();
+  await expect(panel.getByRole('button',{name:'Selection choice name O1',exact:true})).toBeVisible();
+  await page.keyboard.press('ControlOrMeta+z');
+  await expect(input).toHaveValue('*');
+  await expect(panel.getByRole('button',{name:'Selection choice name O1',exact:true})).toBeVisible();
+  await input.fill('chain (');
+  await input.press('Enter');
+  await expect(panel.getByRole('alert')).toContainText('Invalid selection');
+  await expect(input).toHaveValue('chain (');
+  await panel.getByRole('button',{name:'Clear selection',exact:true}).click();
+  await expect(input).toHaveValue('');
+  await expect(panel.getByRole('button',{name:'Center view on selection',exact:true})).toBeDisabled();
+  await input.fill('name C1');
+  await panel.getByRole('button',{name:'Define name',exact:true}).click();
+  await panel.getByLabel('Selection definition name').fill('fail');
+  await panel.getByRole('button',{name:'Define',exact:true}).click();
+  await expect(panel.getByRole('alert')).toContainText('Definition failed');
+  await expect(panel.getByLabel('Selection definition name')).toHaveValue('fail');
+  await panel.getByLabel('Selection definition name').fill('carbon2');
+  await panel.getByRole('button',{name:'Define',exact:true}).click();
+  await expect(panel.getByLabel('Selection definition name')).not.toBeVisible();
+  await panel.getByRole('button',{name:'Selection tab Named',exact:true}).click();
+  await panel.getByRole('button',{name:'Selection choice carbon2',exact:true}).click();
+  await expect(input).toHaveValue('carbon2');
+  expect((await edits()).at(-1)).toMatchObject({action:'apply',expression:'carbon2',remember:false});
+  expect(await detailRequests()).toBe(initialDetails);
+  expect(errors).toEqual([]);
+});
+
+test('Tauri inline selection builder serializes live edits and cancels stale target drafts', async ({page}) => {
+  const errors=await openShell(page,{}, {selectionPane:true});
+  await page.getByRole('button',{name:'Selection',exact:true}).click();
+  const panel=page.locator('[data-panel-name="Selection"]');
+  const input=panel.getByLabel('Selection expression');
+  await panel.getByRole('button',{name:'Selection tab Term',exact:true}).click();
+  await panel.getByLabel('Selection keyword',{exact:true}).selectOption('name');
+  await panel.getByLabel('Selection value',{exact:true}).fill('C1');
+  await page.evaluate(()=>{window.__delayCompose=true;document.querySelector('.selection-builder-inline [aria-label="Selection Set"]').click();});
+  await expect.poll(()=>page.evaluate(()=>typeof window.__releaseCompose)).toBe('function');
+  await panel.getByLabel('Selection value',{exact:true}).fill('O1');
+  await panel.getByRole('button',{name:'Selection Add',exact:true}).click();
+  await page.evaluate(()=>window.__releaseCompose());
+  await expect(input).toHaveValue('(name C1) or (name O1)');
+  const edits=()=>page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='inspector_request'&&call.args.tool==='selection_edit').map(call=>call.args.args));
+  expect((await edits()).map(edit=>edit.expression)).toEqual(['name C1','(name C1) or (name O1)']);
+  expect((await edits()).every(edit=>edit.remember===false)).toBe(true);
+  await page.getByRole('button',{name:'Explorer',exact:true}).click();
+  await page.getByRole('button',{name:'Selection',exact:true}).click();
+  await expect(panel.getByLabel('Selection value',{exact:true})).toHaveValue('O1');
+  await page.evaluate(()=>{window.__releaseCompose=undefined;window.__delayCompose=true;document.querySelector('.selection-builder-inline [aria-label="Selection Set"]').click();});
+  await expect.poll(()=>page.evaluate(()=>typeof window.__releaseCompose)).toBe('function');
+  await input.fill('name manual');
+  await page.evaluate(async()=>{window.__releaseCompose();await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));});
+  expect(await edits()).toHaveLength(2);
+  await expect(input).toHaveValue('name manual');
+  await page.evaluate(()=>{window.__selectionCandidateValues=['P1'];snapshot.structureKey='edited';renderShell();});
+  await expect(panel.getByLabel('Selection candidates').locator('option')).toHaveText(['▾','P1']);
+  await expect(panel.getByLabel('Selection value',{exact:true})).toHaveValue('O1');
+  await expect(input).toHaveValue('name manual');
+  await page.evaluate(()=>{snapshot.objects.push({...snapshot.objects[0],uid:8,name:'Other',selection:''});renderShell();});
+  await panel.locator('#selection-object').selectOption('8');
+  await expect(input).toHaveValue('');
+  await panel.getByRole('button',{name:'Selection tab Term',exact:true}).click();
+  await expect(panel.getByLabel('Selection keyword',{exact:true})).toHaveValue('hierarchical');
+  expect(errors).toEqual([]);
+});
+
+test('Tauri selection pane refreshes deferred queries after reopening the activity', async ({page}) => {
+  const errors=await openShell(page,{}, {selectionPane:true});
+  await page.getByRole('button',{name:'Selection',exact:true}).click();
+  const panel=page.locator('[data-panel-name="Selection"]');
+  await panel.getByRole('button',{name:'Selection tab Term',exact:true}).click();
+  await panel.getByLabel('Selection keyword',{exact:true}).selectOption('name');
+  await expect(panel.getByLabel('Selection candidates').locator('option')).toHaveText(['▾','C1','O1']);
+  await page.evaluate(()=>{
+    window.__selectionCandidateValues=['P1'];snapshot.structureKey='hidden-edit';renderShell();
+    selectCueMolActivity('explorer',false);
+  });
+  await page.waitForTimeout(350);
+  await page.getByRole('button',{name:'Selection',exact:true}).click();
+  await expect(panel.getByLabel('Selection candidates').locator('option')).toHaveText(['▾','P1']);
+  await expect(panel.locator('#selection-validation')).toHaveText('1 atoms');
+  expect(errors).toEqual([]);
+});
+
+test('Tauri selection pane retains text typed while an applied edit response is pending', async ({page}) => {
+  const errors=await openShell(page,{}, {selectionPane:true});
+  await page.getByRole('button',{name:'Selection',exact:true}).click();
+  const panel=page.locator('[data-panel-name="Selection"]');
+  const input=panel.getByLabel('Selection expression');
+  await input.fill('name C1');
+  await page.evaluate(()=>{window.__delaySelectionEdit=true;});
+  await input.press('Enter');
+  await expect.poll(()=>page.evaluate(()=>typeof window.__releaseSelectionEdit)).toBe('function');
+  await input.fill('name O1');
+  await page.evaluate(async()=>{window.__releaseSelectionEdit();await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));});
+  await expect(input).toHaveValue('name O1');
+  await expect(panel.getByRole('button',{name:'Apply selection',exact:true})).toBeEnabled();
+  expect(await page.evaluate(()=>snapshot.objects[0].selection)).toBe('name C1');
+  await input.press('Enter');
+  await expect(panel.getByRole('button',{name:'Apply selection',exact:true})).toBeDisabled();
+  expect(await page.evaluate(()=>snapshot.objects[0].selection)).toBe('name O1');
   expect(errors).toEqual([]);
 });
 

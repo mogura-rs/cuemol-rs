@@ -18,8 +18,8 @@ use crate::{
     collect_pov_labels, collect_scene_pov_labels, create_apbs_work_dir, create_pov_work_dir,
     overlay_pov_labels, run_apbs_process, run_pov_process, run_pov_process_with_poll, AnimKind,
     ApbsProcessOutput, ApbsProcessTask, DesktopAppState, GuiApbsChargeMethod, GuiApbsOptions,
-    GuiApbsPaths, GuiAtomLabel, GuiLoadedPath, GuiPovSceneOptions, GuiSequenceSummary,
-    GuiStructObject, PovProcessOptions, PovProcessOutput, PovProcessTask,
+    GuiApbsPaths, GuiAtomLabel, GuiLoadedPath, GuiPovSceneOptions, GuiStructObject,
+    PovProcessOptions, PovProcessOutput, PovProcessTask,
 };
 use cuemol_anim::{
     AnimMgr, AnimMotion, CamMotion, MolAnim, NoopAnimObj, ShowHideAnim, SimpleSpin, SlideInOutAnim,
@@ -1411,6 +1411,7 @@ struct GuiApplication {
     url_download_receiver: Option<mpsc::Receiver<std::result::Result<PathBuf, String>>>,
     script_path: String,
     actions_panel: cuemol_ui::actions::ActionsPanel,
+    selection_pane: cuemol_ui::selection_pane::SelectionPane,
     console: cuemol_ui::console::ConsoleEditor,
     console_session: cuemol_command::console::Session,
     console_run: Option<GuiConsoleExecution>,
@@ -1442,9 +1443,6 @@ struct GuiApplication {
     /// animation frames do not alter hierarchy labels, so rebuilding them every frame
     /// only creates avoidable allocations for large molecules.
     molstruct_tree_cache: Option<(MoleculePanelCacheKey, Arc<Vec<GuiStructObject>>)>,
-    sequence_summary_cache: Option<(MoleculePanelCacheKey, Arc<Vec<GuiSequenceSummary>>)>,
-    /// Active tab of the Selection side panel (Command vs Editor).
-    selection_tab: SelectionTab,
     /// Molecule or density-map object chosen in the Symmetry panel selector.
     symmetry_target: Option<NativeSymmetryTarget>,
     /// Whether the crystallographic unit-cell box is drawn (Symmetry panel "Unit cell").
@@ -1718,8 +1716,6 @@ struct GuiApplication {
     status: String,
     log_lines: Vec<String>,
     selection_history: Vec<String>,
-    selection_editor_items: Vec<NativeSelectionEditorItem>,
-    selection_editor_selected: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -2479,144 +2475,6 @@ use cuemol_ui::sequence::{
     SequencePosition as NativeSequencePosition,
 };
 use cuemol_ui::sequence::{SequenceAction as NativeSequenceAction, SequencePanel};
-
-/// Selection-panel tab (CueMol2 `selection-panel.xul`): the free-text Command tab
-/// vs the click-to-build Editor tab.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SelectionTab {
-    Command,
-    Editor,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum NativeSelectionEditorItem {
-    Hierarchical {
-        bool_op: String,
-        chain: String,
-        residue: String,
-        atom: String,
-    },
-    Terminal {
-        bool_op: String,
-        command: String,
-        args: String,
-    },
-    Around {
-        command: String,
-        args: String,
-    },
-}
-
-fn new_native_selection_editor_item(kind: &str, default_chain: &str) -> NativeSelectionEditorItem {
-    match kind {
-        "hierarchical" => NativeSelectionEditorItem::Hierarchical {
-            bool_op: "|".to_string(),
-            chain: "*".to_string(),
-            residue: "10:100".to_string(),
-            atom: "*".to_string(),
-        },
-        "terminal" => NativeSelectionEditorItem::Terminal {
-            bool_op: "|".to_string(),
-            command: "c;".to_string(),
-            args: if default_chain.is_empty() {
-                "A".to_string()
-            } else {
-                default_chain.to_string()
-            },
-        },
-        _ => NativeSelectionEditorItem::Around {
-            command: "around".to_string(),
-            args: "5".to_string(),
-        },
-    }
-}
-
-fn native_selection_terminal_default(command: &str, default_chain: &str) -> String {
-    match command {
-        "c;" => {
-            if default_chain.is_empty() {
-                "A".to_string()
-            } else {
-                default_chain.to_string()
-            }
-        }
-        "r;" => "ALA".to_string(),
-        "n;" => "CA".to_string(),
-        "e;" => "C".to_string(),
-        _ => "1:100".to_string(),
-    }
-}
-
-fn compose_native_selection_editor(items: &[NativeSelectionEditorItem]) -> String {
-    let mut selection = String::new();
-    for item in items {
-        match item {
-            NativeSelectionEditorItem::Hierarchical {
-                bool_op,
-                chain,
-                residue,
-                atom,
-            } => {
-                let term = format!("{chain}.{residue}.{atom}");
-                selection = if selection.is_empty() {
-                    term
-                } else {
-                    format!("{selection} {bool_op} {term}")
-                };
-            }
-            NativeSelectionEditorItem::Terminal {
-                bool_op,
-                command,
-                args,
-            } => {
-                let term = format!("{command} {args}");
-                selection = if selection.is_empty() {
-                    term
-                } else {
-                    format!("{selection} {bool_op} {term}")
-                };
-            }
-            NativeSelectionEditorItem::Around { command, args } => {
-                if selection.is_empty() {
-                    continue;
-                }
-                selection = match command.as_str() {
-                    "around" | "expand" => format!("({selection}) {command} {args}"),
-                    "around byres" => format!("byres (({selection}) around {args})"),
-                    "extend byres" => format!("byres (({selection}) extend {args})"),
-                    _ => selection,
-                };
-            }
-        }
-    }
-    selection
-}
-
-fn native_selection_bool_operator_ui(ui: &mut egui::Ui, index: usize, bool_op: &mut String) {
-    if index == 0 {
-        ui.add_space(28.0);
-        return;
-    }
-    egui::ComboBox::from_id_salt(("selection_bool_operator", index))
-        .selected_text(bool_op.as_str())
-        .width(28.0)
-        .show_ui(ui, |ui| {
-            ui.selectable_value(bool_op, "&".to_string(), "&");
-            ui.selectable_value(bool_op, "|".to_string(), "|");
-        });
-}
-
-fn native_selection_terminal_label(command: &str) -> &str {
-    match command {
-        "c;" => "chain",
-        "i;" => "resid",
-        "r;" => "resname",
-        "n;" => "atom",
-        "e;" => "element",
-        "aid" => "aid",
-        _ => command,
-    }
-}
 
 /// Object-level coloring scheme chosen in the Coloring panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5045,6 +4903,7 @@ impl GuiApplication {
                     &cuemol_command::config::directory().join("actions"),
                 ),
             ),
+            selection_pane: cuemol_ui::selection_pane::SelectionPane::default(),
             console: cuemol_ui::console::ConsoleEditor::default(),
             console_session: cuemol_command::console::Session::default(),
             console_run: None,
@@ -5066,8 +4925,6 @@ impl GuiApplication {
             molstruct_selection_anchor: None,
             molstruct_expand_all: false,
             molstruct_tree_cache: None,
-            sequence_summary_cache: None,
-            selection_tab: SelectionTab::Command,
             symmetry_target: None,
             show_unit_cell: false,
             show_symm_mates: false,
@@ -5312,8 +5169,6 @@ impl GuiApplication {
             status: "Ready".to_string(),
             log_lines: Vec::new(),
             selection_history,
-            selection_editor_items: Vec::new(),
-            selection_editor_selected: None,
         }
     }
 
@@ -6522,7 +6377,7 @@ impl GuiApplication {
         match panel {
             LeftPanel::Workspace => self.workspace_section(ui, camera),
             LeftPanel::MolStruct => self.molstruct_section(ui, camera),
-            LeftPanel::Selection => self.selection_section(ui),
+            LeftPanel::Selection => self.selection_section(ui, camera),
             LeftPanel::Coloring => self.coloring_section(ui),
             LeftPanel::Symmetry => self.symmetry_section(ui, camera),
             LeftPanel::DensityMap => self.densitymap_section(ui, camera),
@@ -10288,28 +10143,8 @@ impl GuiApplication {
         )
     }
 
-    fn cached_active_sequence_summaries(&mut self) -> Arc<Vec<GuiSequenceSummary>> {
-        let key = self.molecule_panel_cache_key();
-        let current = self
-            .sequence_summary_cache
-            .as_ref()
-            .is_some_and(|(cached_key, _)| cached_key == &key);
-        if !current {
-            self.sequence_summary_cache =
-                Some((key, Arc::new(self.state.active_sequence_summaries())));
-        }
-        Arc::clone(
-            &self
-                .sequence_summary_cache
-                .as_ref()
-                .expect("molecule sequence cache was initialized")
-                .1,
-        )
-    }
-
     fn invalidate_molecule_panel_caches(&mut self) {
         self.molstruct_tree_cache = None;
-        self.sequence_summary_cache = None;
     }
 
     /// MolStruct section — the molecule's chain → residue → atom hierarchy
@@ -10680,297 +10515,23 @@ impl GuiApplication {
         }
     }
 
-    /// Selection section (CueMol2 `selection-panel.xul`): a molecule selector and two
-    /// tabs — a free-text Command tab and a click-to-build Editor tab — over the shared
-    /// selection grammar.
-    fn selection_section(&mut self, ui: &mut egui::Ui) {
-        // Molecule selector menulist (parity with the XUL panel; the chosen molecule
-        // scopes the Editor tab's per-chain quick-selects).
-        let sequences = self.cached_active_sequence_summaries();
-        if !sequences.is_empty() {
-            let mut selected = self
-                .molstruct_object
-                .filter(|uid| sequences.iter().any(|seq| seq.object_uid == *uid))
-                .or_else(|| sequences.first().map(|seq| seq.object_uid));
-            let before = selected;
-            let name = sequences
-                .iter()
-                .find(|seq| Some(seq.object_uid) == selected)
-                .map(|seq| seq.object_name.clone())
-                .unwrap_or_default();
-            egui::ComboBox::from_id_salt("selection-molecule")
-                .selected_text(name)
-                .show_ui(ui, |ui| {
-                    let mut seen = std::collections::BTreeSet::new();
-                    for seq in sequences.iter() {
-                        if seen.insert(seq.object_uid) {
-                            ui.selectable_value(
-                                &mut selected,
-                                Some(seq.object_uid),
-                                &seq.object_name,
-                            );
-                        }
-                    }
-                });
-            self.molstruct_object = selected;
-            if selected != before {
-                if let Some(object_uid) = selected {
-                    self.selection_text = self
-                        .state
-                        .molecule_selection_text(object_uid)
-                        .unwrap_or_default()
-                        .to_string();
-                }
+    fn selection_section(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
+        let Some(action) = self
+            .selection_pane
+            .show(ui, &self.state, self.snapshot_revision)
+        else {
+            return;
+        };
+        let (name, args) = action.command(&self.state);
+        let error = if self.try_tritium_command(name, args, camera) {
+            if let Some(expression) = action.history_expression() {
+                self.remember_selection_history(expression);
             }
-        }
-
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.selection_tab, SelectionTab::Command, "A↝")
-                .on_hover_text("Input command");
-            ui.selectable_value(&mut self.selection_tab, SelectionTab::Editor, "▤")
-                .on_hover_text("Editor");
-        });
-        ui.separator();
-
-        match self.selection_tab {
-            SelectionTab::Command => self.selection_command_tab(ui),
-            SelectionTab::Editor => self.selection_editor_tab(ui, sequences.as_slice()),
-        }
-    }
-
-    /// Command tab: the free-text selection expression + history (CueMol2 Command tab).
-    fn selection_command_tab(&mut self, ui: &mut egui::Ui) {
-        ui.add_sized(
-            [ui.available_width(), 56.0],
-            egui::TextEdit::multiline(&mut self.selection_text)
-                .hint_text("Input selection command")
-                .font(egui::TextStyle::Monospace),
-        );
-        let mut history_pick = None;
-        ui.horizontal(|ui| {
-            ui.menu_button("↶", |ui| {
-                if self.selection_history.is_empty() {
-                    ui.add_enabled(false, egui::Button::new("(no history)"));
-                } else {
-                    for past in &self.selection_history {
-                        if ui.selectable_label(false, past).clicked() {
-                            history_pick = Some(past.clone());
-                            ui.close();
-                        }
-                    }
-                }
-            })
-            .response
-            .on_hover_text("History");
-            if ui.button("↖").on_hover_text("Select").clicked() {
-                if let Some(object_uid) = self.selection_target_object() {
-                    self.apply_molecule_selection(
-                        object_uid,
-                        self.selection_text.clone(),
-                        "Applied molecule selection",
-                    );
-                } else {
-                    self.set_status("No molecule selected");
-                }
-            }
-            if ui.button("×").on_hover_text("Clear input").clicked() {
-                self.selection_text.clear();
-            }
-        });
-        if let Some(selection) = history_pick {
-            self.selection_text = selection;
-        }
-    }
-
-    /// Editor tab: click-to-build selection terms over the shared grammar — the egui
-    /// analogue of the XUL Editor tab's Hierarchical / Terminal / Around–Expand adds.
-    fn selection_editor_tab(&mut self, ui: &mut egui::Ui, sequences: &[GuiSequenceSummary]) {
-        let active = self
-            .molstruct_object
-            .or_else(|| sequences.first().map(|sequence| sequence.object_uid));
-        let mut chains = sequences
-            .iter()
-            .filter(|sequence| Some(sequence.object_uid) == active)
-            .map(|sequence| sequence.chain_id.clone())
-            .collect::<Vec<_>>();
-        chains.sort();
-        chains.dedup();
-        let default_chain = chains.first().map(String::as_str).unwrap_or("A");
-        let mut apply = false;
-        let mut add_kind = None;
-        let mut delete = false;
-        let mut clear = false;
-
-        egui::ScrollArea::vertical()
-            .id_salt("native_selection_editor_list")
-            .max_height(220.0)
-            .show(ui, |ui| {
-                if self.selection_editor_items.is_empty() {
-                    ui.weak("No selection items.");
-                }
-                let selected = &mut self.selection_editor_selected;
-                for (index, item) in self.selection_editor_items.iter_mut().enumerate() {
-                    let row = ui.horizontal(|ui| {
-                        ui.selectable_value(selected, Some(index), "");
-                        match item {
-                            NativeSelectionEditorItem::Hierarchical {
-                                bool_op,
-                                chain,
-                                residue,
-                                atom,
-                            } => {
-                                native_selection_bool_operator_ui(ui, index, bool_op);
-                                egui::ComboBox::from_id_salt(("selection_hier_chain", index))
-                                    .selected_text(chain.as_str())
-                                    .width(42.0)
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(chain, "*".to_string(), "*");
-                                        for candidate in &chains {
-                                            ui.selectable_value(
-                                                chain,
-                                                candidate.clone(),
-                                                if candidate.is_empty() { "_" } else { candidate },
-                                            );
-                                        }
-                                    });
-                                ui.label(".");
-                                ui.add(egui::TextEdit::singleline(residue).desired_width(62.0));
-                                ui.label(".");
-                                ui.add(egui::TextEdit::singleline(atom).desired_width(42.0));
-                            }
-                            NativeSelectionEditorItem::Terminal {
-                                bool_op,
-                                command,
-                                args,
-                            } => {
-                                native_selection_bool_operator_ui(ui, index, bool_op);
-                                let previous = command.clone();
-                                egui::ComboBox::from_id_salt(("selection_term_command", index))
-                                    .selected_text(native_selection_terminal_label(command))
-                                    .width(68.0)
-                                    .show_ui(ui, |ui| {
-                                        for (value, label) in [
-                                            ("c;", "chain"),
-                                            ("i;", "resid"),
-                                            ("r;", "resname"),
-                                            ("n;", "atom"),
-                                            ("e;", "element"),
-                                            ("aid", "aid"),
-                                        ] {
-                                            ui.selectable_value(command, value.to_string(), label);
-                                        }
-                                    });
-                                if *command != previous {
-                                    *args =
-                                        native_selection_terminal_default(command, default_chain);
-                                }
-                                ui.add(egui::TextEdit::singleline(args).desired_width(92.0));
-                            }
-                            NativeSelectionEditorItem::Around { command, args } => {
-                                ui.add_space(28.0);
-                                egui::ComboBox::from_id_salt(("selection_around_command", index))
-                                    .selected_text(command.as_str())
-                                    .width(92.0)
-                                    .show_ui(ui, |ui| {
-                                        for value in
-                                            ["around", "expand", "around byres", "extend byres"]
-                                        {
-                                            ui.selectable_value(command, value.to_string(), value);
-                                        }
-                                    });
-                                ui.add(egui::TextEdit::singleline(args).desired_width(62.0));
-                            }
-                        }
-                    });
-                    if row.response.clicked() {
-                        *selected = Some(index);
-                    }
-                }
-            });
-
-        let has_selection = self.selection_editor_selected.is_some();
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(has_selection, egui::Button::new("↖"))
-                .on_hover_text("Select")
-                .clicked()
-            {
-                apply = true;
-            }
-            ui.menu_button("＋", |ui| {
-                for (kind, label, enabled) in [
-                    ("hierarchical", "Hierarchical", true),
-                    ("terminal", "Terminal", true),
-                    (
-                        "around",
-                        "Around/Expand",
-                        !self.selection_editor_items.is_empty(),
-                    ),
-                ] {
-                    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
-                        add_kind = Some(kind);
-                        ui.close();
-                    }
-                }
-            })
-            .response
-            .on_hover_text("Add");
-            if ui
-                .add_enabled(has_selection, egui::Button::new("−"))
-                .on_hover_text("Delete")
-                .clicked()
-            {
-                delete = true;
-            }
-            if ui
-                .add_enabled(has_selection, egui::Button::new("×"))
-                .on_hover_text("Delete all")
-                .clicked()
-            {
-                clear = true;
-            }
-        });
-
-        if let Some(kind) = add_kind {
-            let insertion = if self.selection_editor_items.is_empty() {
-                0
-            } else {
-                self.selection_editor_selected
-                    .map(|index| index + 1)
-                    .unwrap_or(self.selection_editor_items.len())
-                    .min(self.selection_editor_items.len())
-            };
-            self.selection_editor_items.insert(
-                insertion,
-                new_native_selection_editor_item(kind, default_chain),
-            );
-            self.selection_editor_selected = Some(insertion);
-        } else if delete {
-            if let Some(index) = self.selection_editor_selected {
-                if index < self.selection_editor_items.len() {
-                    self.selection_editor_items.remove(index);
-                }
-                if matches!(
-                    self.selection_editor_items.first(),
-                    Some(NativeSelectionEditorItem::Around { .. })
-                ) {
-                    self.selection_editor_items.remove(0);
-                }
-                self.selection_editor_selected = if self.selection_editor_items.is_empty() {
-                    None
-                } else {
-                    Some(index.min(self.selection_editor_items.len() - 1))
-                };
-            }
-        } else if clear {
-            self.selection_editor_items.clear();
-            self.selection_editor_selected = None;
-        } else if apply {
-            let expression = compose_native_selection_editor(&self.selection_editor_items);
-            if let Some(object_uid) = self.selection_target_object() {
-                self.apply_molecule_selection(object_uid, expression, "Applied molecule selection");
-            }
-        }
+            None
+        } else {
+            Some(self.status.clone())
+        };
+        self.selection_pane.completed(&action, error);
     }
 
     /// Push the current selection text onto the most-recently-used history list.
@@ -39632,14 +39193,8 @@ mod tests {
             .add_molecule("cached", cuemol_molstr::MolCoord::new());
 
         let structure = app.cached_active_structure_tree();
-        let sequence = app.cached_active_sequence_summaries();
         assert_eq!(structure.len(), 1);
-        assert!(sequence.is_empty());
         assert!(Arc::ptr_eq(&structure, &app.cached_active_structure_tree()));
-        assert!(Arc::ptr_eq(
-            &sequence,
-            &app.cached_active_sequence_summaries()
-        ));
 
         app.rebuild_snapshot();
         assert!(Arc::ptr_eq(&structure, &app.cached_active_structure_tree()));
@@ -39888,7 +39443,7 @@ mod tests {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     app.workspace_section(ui, &mut camera);
                     app.molstruct_section(ui, &mut camera);
-                    app.selection_section(ui);
+                    app.selection_section(ui, &mut camera);
                     app.coloring_section(ui);
                     app.symmetry_section(ui, &camera);
                     app.densitymap_section(ui, &mut camera);
@@ -39962,47 +39517,6 @@ mod tests {
         ] {
             cuemol_molstr::parse_selector(&expression).expect("valid selection expression");
         }
-    }
-
-    #[test]
-    fn native_selection_editor_composes_reference_rows() {
-        let items = vec![
-            NativeSelectionEditorItem::Hierarchical {
-                bool_op: "|".to_string(),
-                chain: "A".to_string(),
-                residue: "10:100".to_string(),
-                atom: "*".to_string(),
-            },
-            NativeSelectionEditorItem::Terminal {
-                bool_op: "&".to_string(),
-                command: "n;".to_string(),
-                args: "CA".to_string(),
-            },
-            NativeSelectionEditorItem::Around {
-                command: "around byres".to_string(),
-                args: "5".to_string(),
-            },
-        ];
-        let expression = compose_native_selection_editor(&items);
-        assert_eq!(expression, "byres ((A.10:100.* & n; CA) around 5)");
-        cuemol_molstr::parse_selector(&expression).expect("valid editor expression");
-        assert_eq!(
-            new_native_selection_editor_item("terminal", "B"),
-            NativeSelectionEditorItem::Terminal {
-                bool_op: "|".to_string(),
-                command: "c;".to_string(),
-                args: "B".to_string(),
-            }
-        );
-        let mut app = GuiApplication::new();
-        assert!(app.selection_editor_items.is_empty());
-        assert_eq!(app.selection_editor_selected, None);
-        let context = egui::Context::default();
-        let _ = context.run(egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                app.selection_editor_tab(ui, &[]);
-            });
-        });
     }
 
     #[test]
@@ -42166,8 +41680,6 @@ mod tests {
             load(&mut app, &mut camera);
             // Expand the MolStruct tree so the chain → residue nesting is visible.
             app.molstruct_expand_all = true;
-            // Show the Selection Editor tab (the new build-by-click controls).
-            app.selection_tab = SelectionTab::Editor;
             // Put the Coloring panel into Rainbow mode so its hue controls render.
             if let Some(uid) = app.state.active_object_summaries().first().map(|o| o.uid) {
                 app.apply_object_coloring(uid, ColoringMode::Rainbow);
@@ -42189,7 +41701,7 @@ mod tests {
                             app.molstruct_section(ui, &mut camera);
                             ui.separator();
                             ui.heading("Selection");
-                            app.selection_section(ui);
+                            app.selection_section(ui, &mut camera);
                             ui.separator();
                             ui.heading("Coloring");
                             app.coloring_section(ui);

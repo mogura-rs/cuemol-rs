@@ -1337,24 +1337,22 @@ impl App {
         }
     }
     fn selection_controls(&mut self, ui: &mut egui::Ui) {
-        if ui
-            .add(
-                egui::TextEdit::multiline(&mut self.selection)
-                    .hint_text("chain A and resi 10:30")
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(3),
-            )
-            .changed()
-        {
-            self.dirty = true;
-        }
-        ui.horizontal(|ui|{if ui.button("Center").clicked(){if let Some(id)=self.selected{self.call("center_view",json!({"objId":id.get(),"selection":if self.selection.is_empty(){"*"}else{&self.selection},"zoom":false}));}}if ui.button("Zoom").clicked(){self.fit(true);}if ui.button("Clear").clicked(){self.selection.clear();self.dirty=true;}});
-        for value in ["protein", "nucleic", "all", "none"] {
-            if ui.button(value).clicked() {
-                self.selection = value.into();
-                self.dirty = true;
+        let action = self.selection_pane.show(ui, &self.state, self.revision);
+        self.ui_rects.extend(self.selection_pane.rects.clone());
+        let Some(action) = action else {
+            return;
+        };
+        let (name, args) = action.command(&self.state);
+        let error = if self.call_shared(name, args) {
+            if let Some(expression) = action.history_expression() {
+                self.state.remember_selection(expression);
+                self.persist_selection_history();
             }
-        }
+            None
+        } else {
+            Some(self.message.clone())
+        };
+        self.selection_pane.completed(&action, error);
     }
     fn apply_sequence_action(
         &mut self,

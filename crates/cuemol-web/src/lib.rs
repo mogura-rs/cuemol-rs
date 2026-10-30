@@ -241,6 +241,7 @@ struct App {
     bottom_open: bool,
     sequence_panel: cuemol_ui::sequence::SequencePanel,
     actions_panel: cuemol_ui::actions::ActionsPanel,
+    selection_pane: cuemol_ui::selection_pane::SelectionPane,
     console: cuemol_ui::console::ConsoleEditor,
     console_session: cuemol_command::console::Session,
     console_run: Option<console::ConsoleExecution>,
@@ -407,6 +408,7 @@ impl App {
             bottom_open: true,
             sequence_panel: cuemol_ui::sequence::SequencePanel::default(),
             actions_panel: cuemol_ui::actions::ActionsPanel::with_files(actions::read_library()),
+            selection_pane: cuemol_ui::selection_pane::SelectionPane::default(),
             console: {
                 let mut editor = cuemol_ui::console::ConsoleEditor::default();
                 if let Some(history) = storage
@@ -601,7 +603,13 @@ impl App {
             self.message = "Undo history cleared.".into();
             return;
         }
+        self.call_shared(name, args);
+    }
+    fn call_shared(&mut self, name: &str, args: Value) -> bool {
         let mutating = cuemol_command::tool_changes_scene(name);
+        if mutating {
+            self.cancel_console("Scene changed outside the console; remaining commands cancelled.");
+        }
         let view_property = cuemol_command::is_view_property_write(&self.state, name, &args);
         let record_history = cuemol_command::tool_records_history(name) && !view_property;
         let before = record_history.then(|| {
@@ -629,15 +637,21 @@ impl App {
                 }
                 self.message = serde_json::to_string_pretty(&value).unwrap();
                 self.dirty |= mutating && changed;
+                if name == "set_mol_selection" {
+                    self.selected = args["objId"].as_u64().map(Uid::new);
+                    self.selection = args["selection"].as_str().unwrap_or_default().into();
+                }
                 if cuemol_command::selection::remember_property_edit(&mut self.state, name, &args) {
                     self.persist_selection_history();
                 }
+                true
             }
             Err(e) => {
                 if let Some(before) = before {
                     self.restore_history(before);
                 }
                 self.message = e.to_string();
+                false
             }
         }
     }

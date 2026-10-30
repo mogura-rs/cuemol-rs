@@ -162,6 +162,7 @@ async function editCueMolProperty(tool, args) {
   setBusy(true);
   try {
     const result = await invoke('inspector_request', {tool, args:{...target, ...args}});
+    syncCueMolSelectionHistory(result);
     if (result.snapshot) {
       snapshot = result.snapshot;
       syncEmptyMoleculeDetails();

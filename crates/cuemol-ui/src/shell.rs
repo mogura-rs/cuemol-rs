@@ -95,6 +95,8 @@ pub enum Icon {
     Color,
     Lock,
     Unlock,
+    Clear,
+    Tag,
 }
 
 pub fn theme(ctx: &Context, light: bool) {
@@ -408,6 +410,8 @@ pub fn paint_icon(ui: &Ui, icon: Icon, rect: Rect, color: Color32) {
         Icon::Color => glyph::DROP,
         Icon::Lock => glyph::LOCK_SIMPLE,
         Icon::Unlock => glyph::LOCK_SIMPLE_OPEN,
+        Icon::Clear => glyph::ERASER,
+        Icon::Tag => glyph::TAG,
     };
     ui.painter().text(
         rect.center(),

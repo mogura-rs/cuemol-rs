@@ -37,7 +37,7 @@ speedup from a single optimized stage or compare timings from different hosts.
 | Scripts and services | JavaScript/Python helpers, retained state, callbacks, errors, file arguments and asynchronous readers | Previous compatibility checks exist; shared workload comparison pending |
 | File and scene I/O | Reader options, saved cameras, source metadata, selections, linked/embedded data and cancellation | Embedded QDF/PDB secondary-structure defaults and topology transfers repaired; paired scene loading measured below; broader I/O comparison pending |
 | Navigation and cameras | Rotation, pan, zoom, fitting, clipping, bookmarks, visibility and screen coordinates | Previous numeric and interaction oracles exist; integrated comparison pending |
-| Selection and annotation | Expressions, residue ranges, lasso, named selections, labels and measurement modes | Sequence toggle/range/context actions now share a virtualized native/browser panel; insertion-code selection and pivot centering repaired; broader annotation comparison pending |
+| Selection and annotation | Expressions, residue ranges, lasso, named selections, labels and measurement modes | Sequence actions, selection pickers and the live Selection pane now share behavior across frontends; scene-scoped named selections, insertion codes and pivot centering repaired; cross-molecule distance expressions and broader annotation comparison remain pending |
 | Molecular editing | Merge/delete, chain/residue changes, secondary structure, transformations and undo/redo | Command coverage exists; dialog and edge-case comparison pending |
 | Analysis and surfaces | Alignment, interactions, surface creation/regeneration/cutting and electrostatics | Numerical/tool checks exist; dialog and performance comparison pending |
 | Viewport rendering | Molecular/map/surface representations, transparency, lighting, edges, fog, AA and AO | Ribbon widths, topology links, applied pivots and secondary-structure junctions repaired; remaining viewport effects and scene comparisons are pending |
@@ -581,8 +581,8 @@ nested choices, draft isolation, cancellation, validation, history and reload.
 A failing anchor-click case reproduced premature popup closure before the
 repair; clicking the selection text field now keeps the picker open. The Linux
 OS-input check built and committed an expression with mouse/keyboard input and
-restored both values with Undo/Redo. Selection panes, Paint-table cells and other
-dialogs remain part of the broader editor comparison.
+restored both values with Undo/Redo. The Selection pane comparison continues
+below; Paint-table cells and other dialogs remain under comparison.
 
 Public review of `42aa731` reported no high-confidence defect. Independent
 checks confirmed that selection schemas do not use derived display fields,
@@ -650,6 +650,58 @@ The six affected browser checks passed before this follow-up, including the
 two real WASM picker cases. The resolved reference path also ran all molstr
 tests with the sibling fixtures present, and the 68 shell checks plus the
 native history behavior test passed.
+
+## Selection pane and named-selection repairs
+
+The native and WASM Selection activity now share one pane, and Tauri uses the
+same command model. The reference's `SelectionPane.tsx` and `saveSelDef.ts`
+define the behavior: typed text remains a draft until Apply or Enter, whereas
+Named/History/Term/Mod choices apply immediately. Center uses the applied
+selection, Clear clears it, and Define saves the draft without applying it.
+Only explicit Apply and Define add selection history. The first writable scene
+style set receives a definition; if none exists, a new default set gets a unique
+name without modifying a locked set. Activity changes preserve a draft, while a
+different scene or target molecule resets it.
+
+The old separate Command/Editor interfaces were removed. Tauri now imports its
+legacy history into the shared 100-entry store and retains it across Undo/Redo.
+Candidate lists load on demand and refresh when the molecule changes without
+replacing focused fields. Delayed-IPC tests cover queued live edits and reject
+results superseded by manual text or a target change. A real browser test also
+reproduced premature closing of the Define popup; clicks inside it now preserve
+the name and error state until a definition succeeds or the user closes it.
+
+Named selections exposed a deeper mismatch. The object kept the expression,
+but sequence highlights, selection overlays, centering, editing, surfaces and
+some analysis helpers evaluated it without the owning scene's definitions.
+Applying a name in the native window could therefore raise an error during
+rendering. These paths now resolve names in the target molecule's scene, and
+alignment resolves each molecule separately. Definitions remain expressions
+and are reevaluated after a definition changes. Direct expressions bypass
+style-manager construction; no persistent selection-result cache is introduced.
+JavaScript measurement now uses the script scene's definitions as well.
+
+The `define_selection` tool documentation promised a name listed by
+`get_scene_state`, but that API always returned an empty `namedSelections`
+array. It now returns global names followed by active-scene names, matching
+the reference snapshot. Regressions first reproduced the empty catalog,
+failed molecular edit and null script measurement. Further checks cover
+same-named definitions in different scenes, surface geometry, cross-scene
+alignment and RMSD reports, dynamic sequence/overlay updates and locked styles.
+
+All shared command checks passed, including ten selection-builder cases with
+scripting enabled. The affected full core run passed 292 tests, and the native
+GUI run passed 178 with one unrelated real-POV-Ray check ignored. All 15 shared
+UI tests and 68 shell compatibility checks passed. Eleven focused browser checks
+passed against the rebuilt WASM and Tauri DOM, including locked-style definition
+and existing Inspector picker behavior. Two additional delayed-IPC/activity
+checks retained text typed while an apply response was pending and refreshed
+queries after reopening the activity. The Linux OS-input check exercised draft retention,
+Center, Apply, Undo/Redo, Clear, Define and live Term input; the final named and
+builder screenshots were inspected and contained no error dialog. The complete
+29-case Tauri DOM suite also passed, including other dialogs and clipboard paths
+that use selection history. Public review
+and delivery results are recorded after their terminal checks.
 
 ## Clipboard comparison and repairs
 

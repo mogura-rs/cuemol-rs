@@ -144,6 +144,62 @@ test('Selection picker composes drafts without mutating the molecule and keeps h
   await expect.poll(()=>prop(page,reloaded.id,'sel')).toBe('name C1');
 });
 
+test('Selection pane applies live builder choices and preserves hand edits across activities', async ({page},testInfo) => {
+  const {object}=await setup(page);
+  const choose=(label)=>click(page,label,false);
+  const type=async(label,text)=>{
+    await choose(label);
+    await page.keyboard.press('ControlOrMeta+a');
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    await page.keyboard.insertText(text);
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  };
+  await command(page,'set_mol_selection',{objId:object.id,selection:'name O1'});
+  await choose('Selection');
+  await type('Selection expression','name C1');
+  await choose('Explorer');
+  await choose('Selection');
+  await choose('Center view on selection');
+  await expect.poll(async()=>(await status(page)).view.center[0]).toBeCloseTo(1.4,5);
+  expect(await prop(page,object.id,'sel')).toBe('name O1');
+  await choose('Apply selection');
+  await expect.poll(()=>prop(page,object.id,'sel')).toBe('name C1');
+  await command(page,'undo');
+  await expect.poll(()=>prop(page,object.id,'sel')).toBe('name O1');
+  await choose('Selection tab History');
+  await choose('Selection choice name C1');
+  await expect.poll(()=>prop(page,object.id,'sel')).toBe('name C1');
+  await choose('Clear selection');
+  await expect.poll(()=>prop(page,object.id,'sel')).toBe('');
+  await type('Selection expression','chain (');
+  await page.keyboard.press('Enter');
+  expect(await prop(page,object.id,'sel')).toBe('');
+  await type('Selection expression','name C1');
+  await command(page,'create_style_set',{name:'default'});
+  await command(page,'set_style_readonly',{styleSet:'default',readonly:true});
+  await choose('Define name');
+  await type('Selection definition name','pane_carbon');
+  await choose('Define selection');
+  expect(await prop(page,object.id,'sel')).toBe('');
+  await choose('Selection tab Named');
+  await choose('Selection choice pane_carbon');
+  await expect.poll(()=>prop(page,object.id,'sel')).toBe('pane_carbon');
+  expect((await command(page,'count_selection',{objId:object.id,selection:'pane_carbon'})).count).toBe(1);
+  await page.screenshot({path:testInfo.outputPath('selection-pane-named.png')});
+  await choose('Selection tab Term');
+  await choose('Selection keyword');
+  const [x,y,w,h]=(await status(page)).ui.rects['Selection keyword hierarchical'];
+  await page.mouse.move(x+w/2,y+h/2);await page.mouse.wheel(0,160);
+  await choose('Selection keyword name');
+  await type('Selection value','O1');
+  await choose('Selection Add');
+  await expect.poll(async()=>(await command(page,'count_selection',{objId:object.id,selection:await prop(page,object.id,'sel')})).count).toBe(2);
+  const composed=await prop(page,object.id,'sel');
+  await choose('Selection tab History');
+  expect((await status(page)).ui.rects[`Selection choice ${composed}`]).toBeUndefined();
+  await page.screenshot({path:testInfo.outputPath('selection-pane-history.png')});
+});
+
 for (const fontAccess of ['resolved', 'denied']) {
   test(`Font picker preserves scene fonts and handles ${fontAccess} local enumeration`, async ({page}, testInfo) => {
     await page.addInitScript(access => {

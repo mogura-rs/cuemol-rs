@@ -69,11 +69,6 @@ fn tauri_reference_panels_are_bound_to_shared_core_data() {
     for id in [
         "molstruct-tree",
         "selection-object",
-        "selection-history",
-        "selection-editor-list",
-        "selection-editor-add",
-        "selection-editor-delete",
-        "selection-editor-clear",
         "coloring-target",
         "coloring-type",
         "coloring-deck",
@@ -173,27 +168,8 @@ fn tauri_reference_panels_are_bound_to_shared_core_data() {
     }
     assert!(!NATIVE_GUI_RS.contains(".button(surface_label)"));
     assert!(!NATIVE_GUI_RS.contains(".button(clip_label)"));
-    assert!(!CSS.contains("#selection-editor-add-kind"));
     assert!(JS.contains("selectedMolstructExpression()"));
     assert!(JS.contains("event.shiftKey"));
-    assert!(JS.contains("composeSelectionEditorExpression()"));
-    assert!(JS.contains("selectionActiveTab = element.dataset.selectionTab"));
-    assert!(HTML.contains("data-selection-tab=\"command\" aria-label=\"Input command\""));
-    assert!(HTML.contains("data-selection-tab=\"editor\" aria-label=\"Editor\""));
-    assert!(JS.contains("byres ((${selection}) around ${item.args})"));
-    assert!(JS.contains("await applySelectionCommand()"));
-    assert!(!HTML.contains("id=\"selection-editor-add-kind\""));
-    assert!(HTML.contains("id=\"selection-editor-add\" type=\"button\" aria-label=\"Add selection item\" aria-haspopup=\"menu\""));
-    assert!(JS.contains("selectionEditorAdd.addEventListener(\"click\""));
-    assert!(JS.contains("label: \"Around/Expand\""));
-    assert!(JS.contains("selectionHistoryEntries.map((entry) => ({"));
-    assert!(JS.contains("const MAX_SELECTION_HISTORY = 10"));
-    assert!(JS.contains("localStorage.setItem(SELECTION_HISTORY_STORAGE_KEY"));
-    assert!(JS.contains("[{ label: \"(no history)\", disabled: true }]"));
-    assert!(NATIVE_GUI_RS.contains("enum NativeSelectionEditorItem"));
-    assert!(NATIVE_GUI_RS.contains("fn compose_native_selection_editor("));
-    assert!(NATIVE_GUI_RS.contains("\"Around/Expand\""));
-    assert!(NATIVE_GUI_RS.contains("egui::Button::new(\"(no history)\")"));
     assert!(!NATIVE_GUI_RS.contains("ui.label(\"Whole molecule\")"));
     assert!(JS.contains("item.supportsColoring"));
     assert!(JS.contains("PaintColoring"));
@@ -1029,7 +1005,6 @@ fn tauri_startup_uses_a_compact_critical_ipc_and_lazy_molecule_details() {
     assert!(JS.contains("globalThis.requestIdleCallback(render, { timeout: 100 })"));
     assert!(JS.contains("function sidePanelIsExpanded(name)"));
     assert!(JS.contains("if (sidePanelIsExpanded(\"MolStruct\")) visibleObjectUids.push"));
-    assert!(JS.contains("if (sidePanelIsExpanded(\"Selection\")) visibleObjectUids.push"));
     let render_shell = JS
         .split("function renderShell()")
         .nth(1)

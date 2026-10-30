@@ -4874,6 +4874,11 @@ impl DesktopAppState {
     }
 
     pub fn set_molecule_selection_text(&mut self, object_uid: Uid, selection: &str) -> Result<()> {
+        let scene = self
+            .scene_manager()
+            .scene_uid_for_object(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        self.parse_scene_selector(scene, selection)?;
         let object = self
             .scene_manager_mut()
             .object_mut(object_uid)
@@ -4944,7 +4949,13 @@ impl DesktopAppState {
             .scene_manager()
             .object(object_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
-        Ok(object.mol().center_pos(Some(&parse_selector(selection)?)))
+        let scene = self
+            .scene_manager()
+            .scene_uid_for_object(object_uid)
+            .unwrap();
+        Ok(object
+            .mol()
+            .center_pos(Some(&self.parse_scene_selector(scene, selection)?)))
     }
 
     pub fn molecule_residue_pivot_for_text(
@@ -4956,7 +4967,11 @@ impl DesktopAppState {
             .scene_manager()
             .object(object_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
-        let selector = parse_selector(selection)?;
+        let scene = self
+            .scene_manager()
+            .scene_uid_for_object(object_uid)
+            .unwrap();
+        let selector = self.parse_scene_selector(scene, selection)?;
         let Some(index) = object.mol().select_indices(&selector).first().copied() else {
             return Ok(None);
         };
@@ -4976,7 +4991,13 @@ impl DesktopAppState {
             .scene_manager()
             .object(object_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
-        Ok(object.mol().get_center_pos(true))
+        let scene = self
+            .scene_manager()
+            .scene_uid_for_object(object_uid)
+            .unwrap();
+        Ok(object.mol().center_pos(Some(
+            &self.parse_scene_selector(scene, object.mol().selection_text())?,
+        )))
     }
 
     pub fn fit_selected_molecule_view(&self, object_uid: Uid, view: &mut View) -> Result<bool> {
@@ -4984,11 +5005,14 @@ impl DesktopAppState {
             .scene_manager()
             .object(object_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
-        Ok(object.mol().fit_view_with_xform(
-            view,
-            Some(object.mol().selection()),
-            object.xform_matrix(),
-        ))
+        let scene = self
+            .scene_manager()
+            .scene_uid_for_object(object_uid)
+            .unwrap();
+        let selection = self.parse_scene_selector(scene, object.mol().selection_text())?;
+        Ok(object
+            .mol()
+            .fit_view_with_xform(view, Some(&selection), object.xform_matrix()))
     }
 
     pub fn fit_density_map_view(&self, map_uid: Uid, view: &mut View) -> Result<()> {
@@ -14808,18 +14832,17 @@ impl DesktopAppState {
         let Some(scene) = self.scene_manager().scene(scene_uid) else {
             return Vec::new();
         };
-        let fallback_selector = parse_gui_selector(selection_text).ok().flatten();
+        let fallback_selector = parse_selector(selection_text).ok();
+        let styles = std::cell::OnceCell::new();
         let mut out = Vec::new();
         for object in scene.objects() {
             let mol = object.mol();
-            let selected = if mol.selection_text().is_empty() {
-                fallback_selector
-                    .as_ref()
-                    .map(|selector| mol.select_indices(selector))
-                    .unwrap_or_default()
-            } else {
-                mol.select_indices(mol.selection())
-            };
+            let selected = selection_support::indices(
+                object,
+                fallback_selector.as_ref(),
+                || styles.get_or_init(|| scene_style_manager(scene)),
+                scene_uid.get(),
+            );
             let mut selected = selected.into_iter().peekable();
             let ordered = mol.atoms().windows(2).all(|atoms| {
                 (
@@ -15162,19 +15185,18 @@ impl DesktopAppState {
     pub fn active_measure(&self, selection_text: &str) -> Option<String> {
         let scene_uid = self.active_scene?;
         let scene = self.scene_manager().scene(scene_uid)?;
-        let selector = parse_gui_selector(selection_text).ok().flatten();
+        let selector = parse_selector(selection_text).ok();
+        let styles = std::cell::OnceCell::new();
         let mut points: Vec<cuemol_core::Vector4> = Vec::new();
         for object in scene.objects() {
             let mol = object.mol();
             let atoms = mol.atoms();
-            let selected_indices = if mol.selection_text().is_empty() {
-                selector
-                    .as_ref()
-                    .map(|selector| mol.select_indices(selector))
-                    .unwrap_or_default()
-            } else {
-                mol.select_indices(mol.selection())
-            };
+            let selected_indices = selection_support::indices(
+                object,
+                selector.as_ref(),
+                || styles.get_or_init(|| scene_style_manager(scene)),
+                scene_uid.get(),
+            );
             for index in selected_indices {
                 if let Some(atom) = atoms.get(index) {
                     points.push(atom.position);
@@ -15206,7 +15228,11 @@ impl DesktopAppState {
             .scene_manager()
             .scene(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
-        let selector = parse_gui_selector(selection_text)?;
+        let selector = if selection_text.trim().is_empty() {
+            None
+        } else {
+            Some(parse_selector(selection_text)?)
+        };
         let styles = scene_style_manager(scene);
         let mut atoms = Vec::new();
         for object in scene
@@ -15214,24 +15240,10 @@ impl DesktopAppState {
             .iter()
             .filter(|object| object.is_visible() && !object.is_ui_locked())
         {
-            let selected = if object.mol().selection_text().is_empty() {
-                selector
-                    .as_ref()
-                    .map(|selector| {
-                        object
-                            .mol()
-                            .select_indices(selector)
-                            .into_iter()
-                            .collect::<BTreeSet<_>>()
-                    })
-                    .unwrap_or_default()
-            } else {
-                object
-                    .mol()
-                    .select_indices(object.mol().selection())
+            let selected =
+                selection_support::indices(object, selector.as_ref(), || &styles, scene_uid.get())
                     .into_iter()
-                    .collect()
-            };
+                    .collect::<BTreeSet<_>>();
             let mut append =
                 |indices: Vec<usize>, xform: Matrix4, seen: &mut BTreeSet<(usize, [u64; 3])>| {
                     for index in indices {
@@ -15517,8 +15529,16 @@ impl DesktopAppState {
             .scene_manager()
             .scene(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
-        let selector = parse_gui_selector(selection_text)?;
         let styles = scene_style_manager(scene);
+        let selector = if selection_text.trim().is_empty() {
+            None
+        } else {
+            Some(parse_selector_with_styles(
+                selection_text,
+                &styles,
+                scene_uid.get(),
+            )?)
+        };
         let mut snapshot = RenderSceneSnapshot::empty();
         for object in scene.objects() {
             // C++ `Scene::displayRendImpl` skips an invisible object before its
@@ -15839,7 +15859,7 @@ impl DesktopAppState {
         object_uid: Uid,
         selection_text: &str,
     ) -> Result<usize> {
-        let selector = parse_gui_selector(selection_text)?.unwrap_or(Selector::All);
+        let selector = self.parse_object_selector(object_uid, selection_text)?;
         let object = self
             .scene_manager_mut()
             .object_mut(object_uid)
@@ -15859,7 +15879,7 @@ impl DesktopAppState {
         selection_text: &str,
         chain_name: &str,
     ) -> Result<usize> {
-        let selector = parse_gui_selector(selection_text)?.unwrap_or(Selector::All);
+        let selector = self.parse_object_selector(object_uid, selection_text)?;
         let object = self
             .scene_manager_mut()
             .object_mut(object_uid)
@@ -15887,7 +15907,7 @@ impl DesktopAppState {
         value: i32,
         renumber: bool,
     ) -> Result<usize> {
-        let selector = parse_gui_selector(selection_text)?.unwrap_or(Selector::All);
+        let selector = self.parse_object_selector(object_uid, selection_text)?;
         let object = self
             .scene_manager_mut()
             .object_mut(object_uid)
@@ -15914,7 +15934,7 @@ impl DesktopAppState {
                 "source and target molecules must differ",
             ));
         }
-        let selector = parse_gui_selector(selection_text)?.unwrap_or(Selector::All);
+        let selector = self.parse_object_selector(source_object, selection_text)?;
         let source = self
             .scene_manager()
             .object(source_object)
@@ -16026,8 +16046,7 @@ impl DesktopAppState {
                 "invalid secondary structure type {secondary_type}"
             )));
         }
-        let selector =
-            parse_gui_selector(nonempty_selection(selection_text))?.unwrap_or(Selector::All);
+        let selector = self.parse_object_selector(object_uid, selection_text)?;
         let object = self
             .scene_manager_mut()
             .object_mut(object_uid)
@@ -16106,7 +16125,7 @@ impl DesktopAppState {
         hbond: bool,
         max_count: usize,
     ) -> Result<String> {
-        let selector = parse_gui_selector(selection_text)?.unwrap_or(Selector::All);
+        let selector = self.parse_object_selector(object_uid, selection_text)?;
         let object = self
             .scene_manager()
             .object(object_uid)
@@ -16144,9 +16163,6 @@ impl DesktopAppState {
                 "contact distance range or maximum count is invalid",
             ));
         }
-        let selector1 = parse_gui_selector(selection1)?.unwrap_or(Selector::All);
-        let selector2 =
-            parse_gui_selector(selection2.unwrap_or_default())?.unwrap_or(Selector::All);
         let object2_uid = object2_uid.unwrap_or(object_uid);
         let scene_uid = self
             .scene_manager()
@@ -16157,6 +16173,8 @@ impl DesktopAppState {
                 "interaction molecules must belong to the same scene",
             ));
         }
+        let selector1 = self.parse_object_selector(object_uid, selection1)?;
+        let selector2 = self.parse_object_selector(object2_uid, selection2.unwrap_or_default())?;
 
         let lines = {
             let object1 = self
@@ -16382,15 +16400,9 @@ impl DesktopAppState {
         let reference_selection = nonempty_selection(reference_selection);
         let moving_selection = nonempty_selection(moving_selection);
         let manager = MolAnlManager::new();
-        let selector = |text: &str| -> Result<Selector> {
-            if let Some(scene) = self.active_scene() {
-                self.parse_scene_selector(scene, text)
-            } else {
-                Ok(parse_gui_selector(text)?.unwrap_or(Selector::All))
-            }
-        };
-        let reference_selector = selector(reference_selection)?;
-        let moving_selector = selector(moving_selection)?;
+        let reference_selector =
+            self.parse_object_selector(reference_object, reference_selection)?;
+        let moving_selector = self.parse_object_selector(moving_object, moving_selection)?;
         let world_molecule = |uid: Uid| -> Result<MolCoord> {
             let object = self
                 .scene_manager()
@@ -16494,9 +16506,8 @@ impl DesktopAppState {
         path: impl AsRef<Path>,
     ) -> Result<f64> {
         let reference_selector =
-            parse_gui_selector(nonempty_selection(reference_selection))?.unwrap_or(Selector::All);
-        let moving_selector =
-            parse_gui_selector(nonempty_selection(moving_selection))?.unwrap_or(Selector::All);
+            self.parse_object_selector(reference_object, reference_selection)?;
+        let moving_selector = self.parse_object_selector(moving_object, moving_selection)?;
         let reference_uid = reference_object;
         let moving_uid = moving_object;
         let reference_object = self.scene_manager().object(reference_uid).ok_or_else(|| {
@@ -16597,7 +16608,7 @@ impl DesktopAppState {
         paths: &GuiApbsPaths,
     ) -> Result<GuiApbsSummary> {
         validate_apbs_options(options)?;
-        let selector = parse_gui_selector(selection_text)?.unwrap_or(Selector::All);
+        let selector = self.parse_object_selector(object_uid, selection_text)?;
         let object = self
             .scene_manager()
             .object(object_uid)
@@ -16976,7 +16987,7 @@ impl DesktopAppState {
         density: f64,
         probe_radius: f64,
     ) -> Result<MolSurfObj> {
-        let selector = parse_gui_selector(selection_text)?.unwrap_or(Selector::All);
+        let selector = self.parse_object_selector(object_uid, selection_text)?;
         let object = self
             .scene_manager()
             .object(object_uid)
@@ -17063,7 +17074,7 @@ impl DesktopAppState {
         density: f64,
         probe_radius: f64,
     ) -> Result<cuemol_render::RenderMesh> {
-        let selector = parse_gui_selector(selection_text)?.unwrap_or(Selector::All);
+        let selector = self.parse_object_selector(object_uid, selection_text)?;
         let object = self
             .scene_manager()
             .object(object_uid)
@@ -17087,7 +17098,7 @@ impl DesktopAppState {
         normal: cuemol_core::Vector4,
         position: cuemol_core::Vector4,
     ) -> Result<cuemol_render::RenderMesh> {
-        let selector = parse_gui_selector(selection_text)?.unwrap_or(Selector::All);
+        let selector = self.parse_object_selector(object_uid, selection_text)?;
         let object = self
             .scene_manager()
             .object(object_uid)
@@ -17186,7 +17197,7 @@ impl DesktopAppState {
                 "no electrostatic potential loaded (load a .dx map first)",
             )
         })?;
-        let selector = parse_gui_selector(selection_text)?.unwrap_or(Selector::All);
+        let selector = self.parse_object_selector(object_uid, selection_text)?;
         let object = self
             .scene_manager()
             .object(object_uid)
@@ -47376,8 +47387,13 @@ impl DesktopAppState {
         // Measure ribbon, so a script can read a measurement programmatically.
         fn js_measure(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
             let sel = arg0(args, ctx);
+            if sel.trim().is_empty() {
+                return Ok(JsValue::null());
+            }
+            let scope = script_env::with(|env| env.scene_uid);
+            let selector = parse_script_selector(&sel, scope).ok();
             let result = script_env::with(|env| {
-                let selector = parse_gui_selector(&sel).ok().flatten()?;
+                let selector = selector.as_ref()?;
                 let mut points = Vec::new();
                 for entry in env
                     .molecules
@@ -47386,7 +47402,7 @@ impl DesktopAppState {
                 {
                     let mol = &entry.molecule;
                     let atoms = mol.atoms();
-                    for index in mol.select_indices(&selector) {
+                    for index in mol.select_indices(selector) {
                         if let Some(atom) = atoms.get(index) {
                             points.push(atom.position);
                         }
@@ -51414,13 +51430,7 @@ fn append_object_snapshot(
     scalar_maps: &BTreeMap<Uid, GuiDensityMapObject>,
     scene: &MolScene,
 ) {
-    let selected_indices = if object.mol().selection_text().is_empty() {
-        selector
-            .map(|selector| object.mol().select_indices(selector))
-            .unwrap_or_default()
-    } else {
-        object.mol().select_indices(object.mol().selection())
-    };
+    let selected_indices = selection_support::indices(object, selector, || styles, style_scope_id);
     let selection_renderers = object
         .renderers()
         .iter()
@@ -53977,15 +53987,6 @@ fn selected_residue_atom_count(molecule: &MolCoord, selector: &Selector) -> usiz
             ))
         })
         .count()
-}
-
-fn parse_gui_selector(selection_text: &str) -> Result<Option<cuemol_molstr::Selector>> {
-    let trimmed = selection_text.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    let styles = cuemol_molvis::default_style_manager();
-    Ok(Some(parse_selector_with_styles(trimmed, &styles, 0)?))
 }
 
 fn parse_selector_with_styles(

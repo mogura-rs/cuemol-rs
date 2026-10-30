@@ -20,15 +20,17 @@ function attachCueMolSelectionPicker(input, controls, target, commit) {
   });
 }
 
-function createCueMolSelectionPicker(input, target, identity, commit) {
+function createCueMolSelectionPicker(input, target, identity, commit, options = {}) {
+  const inline = Boolean(options.container);
   const inspectorKey = cueMolPropertyInspector.key;
   const original = input.value;
   let value = original;
   let tab = 'Named';
   let context = null;
-  const draft = cueMolPropertyInspector.selectionDrafts.get(input.id) || {keyword:'hierarchical',fields:{},picked:'',distance:'5'};
-  cueMolPropertyInspector.selectionDrafts.set(input.id, draft);
+  const draft = options.draft || cueMolPropertyInspector.selectionDrafts.get(input.id) || {keyword:'hierarchical',fields:{},picked:'',distance:'5'};
+  if (!inline) cueMolPropertyInspector.selectionDrafts.set(input.id, draft);
   const candidates = new Map();
+  let candidateRevision = snapshot?.structureKey;
   let disposed = false;
   let composeTail = Promise.resolve();
   let valueGeneration = 0;
@@ -36,14 +38,14 @@ function createCueMolSelectionPicker(input, target, identity, commit) {
   let timer = null;
   let closing = false;
   const popup = document.createElement('div');
-  popup.className = 'selection-builder-popup';
-  popup.setAttribute('role', 'dialog'); popup.setAttribute('aria-label', 'Build selection');
-  document.body.append(popup);
-  const live = () => !disposed && cueMolPropertyInspector.key === inspectorKey && snapshot?.activeSceneUid === Number(identity.split(':')[0]);
+  popup.className = inline ? 'selection-builder-inline' : 'selection-builder-popup';
+  popup.setAttribute('role', inline ? 'group' : 'dialog'); popup.setAttribute('aria-label', 'Build selection');
+  (options.container || document.body).append(popup);
+  const live = () => !disposed && (inline ? options.isLive() : cueMolPropertyInspector.key === inspectorKey && snapshot?.activeSceneUid === Number(identity.split(':')[0]));
   const request = args => invoke('inspector_request', {tool:'selection_info',args:{...target,...args}});
   const currentDraft = () => ({...draft,fields:{...draft.fields}});
   const rect = () => {
-    if (!input.isConnected) return;
+    if (inline || !input.isConnected) return;
     const anchor = input.getBoundingClientRect();
     const below = innerHeight-anchor.bottom-12;
     const above = anchor.top-12;
@@ -59,7 +61,7 @@ function createCueMolSelectionPicker(input, target, identity, commit) {
     document.removeEventListener('keydown', escape, true);
     window.removeEventListener('resize', rect);
     popup.remove();
-    if (cancel && input.isConnected && cueMolPropertyInspector.key === inspectorKey) input.value = original;
+    if (!inline && cancel && input.isConnected && cueMolPropertyInspector.key === inspectorKey) input.value = original;
     if (cueMolSelectionPicker?.identity === identity) cueMolSelectionPicker = null;
   };
   const finish = async cancel => {
@@ -85,21 +87,52 @@ function createCueMolSelectionPicker(input, target, identity, commit) {
   const escape = event => {
     if (event.key === 'Escape' && !event.isComposing) { event.preventDefault(); event.stopPropagation(); close(true); }
   };
-  const showError = text => { const status=popup.querySelector('.selection-builder-status'); if (status) {status.textContent=text; status.classList.add('error');} };
+  const showError = text => { if(options.onError)options.onError(text);const status=popup.querySelector('.selection-builder-status'); if (status) {status.textContent=text; status.classList.add('error');} };
   const button = (label, action, aria=label) => {
     const element=document.createElement('button'); element.type='button'; element.textContent=label; element.setAttribute('aria-label',aria); element.addEventListener('click',action); return element;
   };
   const setValue = (next, external=true) => {
     if (external) valueGeneration++;
-    value=next; input.value=next; scheduleCounts();
+    value=next; if(!inline)input.value=next; scheduleCounts();
   };
-  const quick = expression => { setValue(expression); void finish(false); };
+  const apply = async (expression, generation) => {
+    if(!live()||generation!==valueGeneration)return false;
+    if(inline && !await commit(expression))return false;
+    if(!live()||generation!==valueGeneration)return false;
+    setValue(expression,false);
+    return true;
+  };
+  const quick = expression => {
+    if(!inline){setValue(expression);void finish(false);return;}
+    const generation=valueGeneration;
+    composeTail=composeTail.then(()=>apply(expression,generation)).catch(error=>{if(live())showError(String(error));return false;});
+  };
   const field = (key, placeholder) => {
     const element=document.createElement('input'); element.type='text'; element.placeholder=placeholder; element.value=draft.fields[key] || '';
     element.setAttribute('aria-label',`Selection ${key}`);
     element.addEventListener('input',()=>{draft.fields[key]=element.value;scheduleCounts();});
     element.addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.isComposing&&!value.trim()){event.preventDefault();void compose('set',true);}});
     return element;
+  };
+  const populateCandidates = (input, fields, kind) => {
+    const revision=snapshot?.structureKey;
+    if(candidateRevision!==revision){candidateRevision=revision;candidates.clear();}
+    if(!candidates.has(kind))candidates.set(kind,request({action:'values',kind}));
+    void candidates.get(kind).then(values=>{
+      if(!live()||!input.isConnected||snapshot?.structureKey!==revision)return;
+      let select=fields.querySelector('[aria-label="Selection candidates"]');
+      if(!values.length){select?.remove();return;}
+      if(!select){
+        select=document.createElement('select');select.setAttribute('aria-label','Selection candidates');
+        select.addEventListener('change',()=>{input.value=select.value;draft.fields.value=select.value;scheduleCounts();});fields.append(select);
+      }
+      const key=JSON.stringify(values);
+      if(select.dataset.values===key)return;
+      const previous=select.value;select.dataset.values=key;select.replaceChildren();
+      const empty=document.createElement('option');empty.value='';empty.textContent='▾';select.append(empty);
+      for(const value of values){const option=document.createElement('option');option.value=value;option.textContent=value;select.append(option);}
+      select.value=values.includes(previous)?previous:'';
+    }).catch(error=>{if(live())showError(String(error));});
   };
   const compose = (operation, immediate=false) => {
     if (!live() || closing) return;
@@ -108,10 +141,9 @@ function createCueMolSelectionPicker(input, target, identity, commit) {
       if(!live()||generation!==valueGeneration)return false;
       const result=await request({action:'compose',current:value,draft:term,operation});
       if(!live()||generation!==valueGeneration||result.expression===null)return false;
-      setValue(result.expression,false);
-      return true;
+      return apply(result.expression,generation);
     }).catch(error=>{if(live()&&generation===valueGeneration)showError(String(error));return false;});
-    if(immediate)void composeTail.then(applied=>{if(applied&&live()&&generation===valueGeneration)return finish(false);});
+    if(immediate&&!inline)void composeTail.then(applied=>{if(applied&&live()&&generation===valueGeneration)return finish(false);});
     return composeTail;
   };
   const scheduleCounts = () => {
@@ -121,10 +153,12 @@ function createCueMolSelectionPicker(input, target, identity, commit) {
       const current=value, term=currentDraft();
       const buttons=[...popup.querySelectorAll('[data-selection-op]')];
       try {
-        const evaluated=await request({action:'evaluate',expression:current});
-        if(!live()||generation!==countGeneration)return;
-        const status=popup.querySelector('.selection-builder-status');
-        if(status){status.classList.toggle('error',!evaluated.valid);status.textContent=evaluated.valid?(evaluated.count===null?'':`${evaluated.count} atoms`):(evaluated.error||'Invalid selection expression');}
+        if(!inline){
+          const evaluated=await request({action:'evaluate',expression:current});
+          if(!live()||generation!==countGeneration)return;
+          const status=popup.querySelector('.selection-builder-status');
+          if(status){status.classList.toggle('error',!evaluated.valid);status.textContent=evaluated.valid?(evaluated.count===null?'':`${evaluated.count} atoms`):(evaluated.error||'Invalid selection expression');}
+        }
         for(const control of buttons){
           const result=await request({action:'compose',current,draft:term,operation:control.dataset.selectionOp});
           if(!live()||generation!==countGeneration)return;
@@ -151,7 +185,7 @@ function createCueMolSelectionPicker(input, target, identity, commit) {
     const choice=(label,expression)=>{const control=button(label,()=>quick(expression),`Selection choice ${expression}`);control.title=expression;control.classList.toggle('active',expression===value.trim());body.append(control);};
     if(tab==='Named'){
       choice('all (*)','*');
-      for(const [label,values] of [['Selected',context.current?[context.current]:[]],['Scene',context.scene],['Global',context.global]]){
+      for(const [label,values] of [['Selected',!inline&&context.current?[context.current]:[]],['Scene',context.scene],['Global',context.global]]){
         if(!values.length)continue;const heading=document.createElement('div');heading.className='selection-builder-heading';heading.textContent=label;body.append(heading);
         for(const expression of values)choice(expression,expression);
       }
@@ -180,17 +214,7 @@ function createCueMolSelectionPicker(input, target, identity, commit) {
           select.value=draft.fields.op||'<';select.addEventListener('change',()=>{draft.fields.op=select.value;scheduleCounts();});fields.append(select);
         }else if(definition.kind==='nameValue')fields.append(field('name','property'));
         const input=field('value','value');fields.append(input);
-        if(definition.candidates){
-          const kind=definition.candidates;
-          if(!candidates.has(kind))candidates.set(kind,request({action:'values',kind}));
-          void candidates.get(kind).then(values=>{
-            if(!live()||!input.isConnected||!values.length)return;
-            const select=document.createElement('select');select.setAttribute('aria-label','Selection candidates');
-            const empty=document.createElement('option');empty.value='';empty.textContent='▾';select.append(empty);
-            for(const value of values){const option=document.createElement('option');option.value=value;option.textContent=value;select.append(option);}
-            select.addEventListener('change',()=>{input.value=select.value;draft.fields.value=select.value;scheduleCounts();});fields.append(select);
-          }).catch(error=>{if(live())showError(String(error));});
-        }
+        if(definition.candidates)populateCandidates(input,fields,definition.candidates);
       }
     }else{
       const select=document.createElement('select');select.setAttribute('aria-label','Selection distance');
@@ -204,10 +228,184 @@ function createCueMolSelectionPicker(input, target, identity, commit) {
     }
     scheduleCounts();rect();
   };
-  document.addEventListener('pointerdown',outside,true);
-  document.addEventListener('keydown',escape,true);
-  window.addEventListener('resize',rect);
+  if(!inline){
+    document.addEventListener('pointerdown',outside,true);
+    document.addEventListener('keydown',escape,true);
+    window.addEventListener('resize',rect);
+  }
   render();
-  void request({action:'context'}).then(result=>{if(live()){context=result;render();}}).catch(error=>{if(live())showError(String(error));});
-  return {identity,original,finish,cancel:()=>close(true),setValue,owns:element=>element===input,attach:element=>{input=element;input.value=value;requestAnimationFrame(rect);}};
+  const refresh = async () => {
+    try {
+      if(!await updateCueMolSelectionHistory() || !live())return;
+      const result=await request({action:'context'});
+      if(!live())return;
+      const changed=JSON.stringify(context)!==JSON.stringify(result);
+      const initial=context===null;
+      context=result;
+      if(JSON.stringify(selectionHistoryEntries)!==JSON.stringify(context.history))syncCueMolSelectionHistory(context);
+      if(initial || changed && (tab==='Named'||tab==='History'||['named','history'].includes(draft.keyword)))render();
+      else {
+        const kind=context.keywords.find(item=>item.key===draft.keyword)?.candidates;
+        const fields=popup.querySelector('.selection-builder-fields');
+        const input=fields?.querySelector('[aria-label="Selection value"]');
+        if(tab==='Term'&&kind&&input)populateCandidates(input,fields,kind);
+        scheduleCounts();
+      }
+    } catch(error){if(live())showError(String(error));}
+  };
+  void refresh();
+  return {identity,original,finish,cancel:()=>close(true),setValue,refresh,
+    invalidate:()=>{valueGeneration++;},
+    syncValue:(next,external=true)=>{if(next!==value)setValue(next,external);},
+    owns:element=>element===input,attach:element=>{input=element;input.value=value;requestAnimationFrame(rect);}};
+}
+
+let cueMolSelectionPane = null;
+let cueMolSelectionHistoryReady = false;
+let cueMolSelectionHistoryTail = Promise.resolve();
+
+function syncCueMolSelectionHistory(result) {
+  if (Array.isArray(result?.history)) {
+    selectionHistoryEntries = result.history;
+    saveSelectionHistory();
+  }
+  if (result?.warning) showError(result.warning);
+}
+
+function updateCueMolSelectionHistory(expression) {
+  if (!invoke) return Promise.resolve(false);
+  const legacy=[...selectionHistoryEntries];
+  cueMolSelectionHistoryTail = cueMolSelectionHistoryTail.then(async () => {
+    if (!cueMolSelectionHistoryReady) {
+      syncCueMolSelectionHistory(await invoke('inspector_request', {tool:'selection_history',args:{action:'import',entries:legacy}}));
+      cueMolSelectionHistoryReady = true;
+    }
+    if (expression !== undefined) {
+      syncCueMolSelectionHistory(await invoke('inspector_request', {tool:'selection_history',args:{action:'remember',expression}}));
+    }
+    return true;
+  }).catch(error => {showError(String(error));return false;});
+  return cueMolSelectionHistoryTail;
+}
+
+function renderCueMolSelectionPane() {
+  const scene = snapshot?.activeSceneUid;
+  const objects = activeMoleculeObjects();
+  if (cueMolSelectionPane && cueMolSelectionPane.scene !== scene) selectionObjectUid = null;
+  if (!objects.some(object => object.uid === selectionObjectUid)) selectionObjectUid = objects[0]?.uid ?? null;
+  replaceOptions(selectionObject, objects, selectionObjectUid);
+  const object = objects.find(object => object.uid === selectionObjectUid);
+  const identity = `${scene}:${selectionObjectUid}`;
+  if (cueMolSelectionPane?.identity !== identity) {
+    cueMolSelectionPane?.dispose();
+    cueMolSelectionPane = createCueMolSelectionPane(scene, object, identity);
+  }
+  cueMolSelectionPane.sync(object);
+}
+
+function createCueMolSelectionPane(scene, object, identity) {
+  const molecule = object?.uid;
+  const byId = id => document.getElementById(`selection-${id}`);
+  const applyButton=byId('apply'), center=byId('center'), clear=byId('clear'), define=byId('define');
+  const definition=byId('definition'), name=byId('definition-name');
+  const validation=byId('validation'), error=byId('error'), container=byId('builder');
+  let current=object?.selection || '';
+  let pendingExpression=null;
+  let disposed=false, timer=null, refreshTimer=null, validationGeneration=0;
+  let editTail=Promise.resolve();
+  let validationKey='', refreshKey='';
+  const live=()=>!disposed && snapshot?.activeSceneUid===scene && selectionObjectUid===molecule;
+  const visible=()=>live() && sidePanelIsExpanded('Selection');
+  const showError=text=>{if(live())error.textContent=text;};
+  selectionInput.value=current;
+  selectionInput.disabled=!molecule;
+  name.value=''; definition.hidden=true; define.setAttribute('aria-expanded','false');
+  validation.textContent=''; error.textContent=''; container.replaceChildren();
+  const controls=()=>{
+    applyButton.disabled=!molecule || selectionInput.value===current;
+    center.disabled=!molecule || current==='';
+    clear.disabled=!molecule || selectionInput.value==='' && current==='';
+    define.disabled=!molecule || !selectionInput.value.trim();
+    definition.querySelector('button').disabled=define.disabled || !name.value.trim();
+  };
+  const validate=()=>{
+    clearTimeout(timer); const generation=++validationGeneration;
+    validation.textContent=''; validation.classList.remove('error');
+    if(!molecule || !selectionInput.value.trim())return;
+    timer=setTimeout(async()=>{
+      if(!visible())return;
+      try {
+        const result=await invoke('inspector_request',{tool:'selection_info',args:{moleculeId:molecule,action:'evaluate',expression:selectionInput.value}});
+        if(!live() || generation!==validationGeneration)return;
+        validation.classList.toggle('error',!result.valid);
+        validation.textContent=result.valid ? result.count===null ? '' : `${result.count} atoms` : result.error || 'Invalid selection expression';
+      } catch(error){if(live()&&generation===validationGeneration)showError(String(error));}
+    },250);
+  };
+  const edit=(action,expression,remember=false,selectionName)=>{
+    editTail=editTail.then(async()=>{
+      if(!live())return false;
+      pendingExpression=action==='apply' ? expression : null;
+      try {
+        const result=await invoke('inspector_request',{tool:'selection_edit',args:{sceneId:scene,moleculeId:molecule,action,expression,remember,name:selectionName}});
+        if(!live())return false;
+        error.textContent='';
+        syncCueMolSelectionHistory(result);
+        snapshot=result.snapshot;
+        renderShell();
+        void renderViewport();
+        if(action==='define'){
+          definition.hidden=true; name.value=''; define.setAttribute('aria-expanded','false');
+        }
+        void builder.refresh();
+        return true;
+      } catch(error){showError(String(error));return false;}
+      finally {pendingExpression=null;if(live())controls();}
+    });
+    return editTail;
+  };
+  const builder=createCueMolSelectionPicker(selectionInput,{moleculeId:molecule},identity,expression=>edit('apply',expression),{
+    container,draft:{keyword:'hierarchical',fields:{},picked:'',distance:'5'},isLive:live,onError:showError,
+  });
+  container.hidden=!molecule;
+  selectionInput.oninput=()=>{builder.invalidate();error.textContent='';controls();validate();};
+  selectionInput.onkeydown=event=>{
+    if(event.key==='Enter'&&!event.isComposing){event.preventDefault();if(!applyButton.disabled)void edit('apply',selectionInput.value,true);}
+  };
+  applyButton.onclick=()=>{builder.invalidate();void edit('apply',selectionInput.value,true);};
+  center.onclick=()=>{void edit('center',current);};
+  clear.onclick=()=>{builder.invalidate();selectionInput.value='';controls();validate();void edit('apply','');};
+  define.onclick=()=>{
+    definition.hidden=!definition.hidden; name.value='';
+    define.setAttribute('aria-expanded',String(!definition.hidden)); controls();
+    if(!definition.hidden)name.focus();
+  };
+  name.oninput=controls;
+  name.onkeydown=event=>{
+    if(event.key==='Enter'&&event.isComposing){event.preventDefault();}
+    else if(event.key==='Escape'&&!event.isComposing){event.preventDefault();definition.hidden=true;define.setAttribute('aria-expanded','false');}
+  };
+  definition.onsubmit=event=>{
+    event.preventDefault();
+    if(name.value.trim()&&selectionInput.value.trim())void edit('define',selectionInput.value,false,name.value.trim());
+  };
+  controls();
+  return {identity,scene,builder,
+    sync:object=>{
+      const applied=object?.selection || '';
+      if(current!==applied){
+        current=applied; selectionInput.value=applied; error.textContent='';
+        builder.syncValue(applied,applied!==pendingExpression);
+      }
+      const key=JSON.stringify([selectionInput.value,snapshot?.structureKey,snapshot?.actionHistoryKey]);
+      if(validationKey!==key){validationKey=key;validate();}
+      const next=JSON.stringify([snapshot?.structureKey,snapshot?.actionHistoryKey,snapshot?.styles,selectionHistoryEntries]);
+      if(refreshKey!==next){
+        refreshKey=next;clearTimeout(refreshTimer);
+        refreshTimer=setTimeout(()=>{if(visible())void builder.refresh();},30);
+      }
+      controls();
+    },
+    dispose:()=>{disposed=true;clearTimeout(timer);clearTimeout(refreshTimer);validationGeneration++;builder.cancel();},
+  };
 }

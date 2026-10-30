@@ -731,16 +731,32 @@ impl crate::DesktopAppState {
             .scene_manager()
             .scene(scene_uid)
             .ok_or_else(|| cuemol_core::CueMolError::not_found("scene"))?;
-        let styles = crate::scene_style_manager(scene);
-        crate::parse_selector_with_styles(
-            if selection.trim().is_empty() {
-                "*"
-            } else {
-                selection
-            },
-            &styles,
+        let selector = crate::parse_selector(if selection.trim().is_empty() {
+            "*"
+        } else {
+            selection
+        })?;
+        let styles = std::cell::OnceCell::new();
+        match crate::selection_support::resolve(
+            &selector,
+            || styles.get_or_init(|| crate::scene_style_manager(scene)),
             scene_uid.get(),
-        )
+        )? {
+            std::borrow::Cow::Borrowed(_) => Ok(selector),
+            std::borrow::Cow::Owned(resolved) => Ok(resolved),
+        }
+    }
+
+    pub fn parse_object_selector(
+        &self,
+        object_uid: cuemol_core::Uid,
+        selection: &str,
+    ) -> cuemol_core::Result<cuemol_molstr::Selector> {
+        let scene = self
+            .scene_manager()
+            .scene_uid_for_object(object_uid)
+            .ok_or_else(|| cuemol_core::CueMolError::not_found("molecule"))?;
+        self.parse_scene_selector(scene, selection)
     }
 
     pub fn molecule_renderer_properties(

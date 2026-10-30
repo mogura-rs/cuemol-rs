@@ -119,6 +119,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, required=True)
     parser.add_argument('--out', type=Path, required=True)
+    parser.add_argument('--selection-pane-only', action='store_true')
     args = parser.parse_args()
     binary, work = args.binary.resolve(), args.out.resolve()
     work.mkdir(parents=True, exist_ok=True)
@@ -176,6 +177,75 @@ def main():
                 if name:
                     image.save(work / name)
                 return image
+
+            def check_selection_pane():
+                primary = 'command' if sys.platform == 'darwin' else 'ctrl'
+                object_id = call('get_scene_state')['objects'][0]['id']
+                dy = (height - 768) * 0.48
+
+                def selection():
+                    return call('get_prop', {'path': f'#{object_id}.sel'})['value']
+
+                def input_text(text):
+                    pyautogui.click(x + 120, y + 512 + dy)
+                    pyautogui.hotkey(primary, 'a')
+                    pyautogui.write(text, interval=0.02)
+
+                call('set_mol_selection', {'objId': object_id, 'selection': 'name O1'})
+                call('center_view', {'objId': object_id, 'selection': 'name O1', 'zoom': False})
+                expected_center = call('get_view')['center']
+                call('set_view', {'center': [40, 50, 60]})
+                pyautogui.click(x + 22, y + 176)
+                time.sleep(0.3)
+                input_text('name C1')
+                pyautogui.click(x + 22, y + 88)
+                pyautogui.click(x + 22, y + 176)
+                pyautogui.click(x + 112, y + 540 + dy)
+                wait_for(lambda: call('get_view')['center'] == expected_center)
+                if selection() != 'name O1':
+                    raise RuntimeError('Center applied an uncommitted selection draft')
+                pyautogui.click(x + 80, y + 540 + dy)
+                wait_for(lambda: selection() == 'name C1')
+                pyautogui.hotkey(primary, 'z')
+                wait_for(lambda: selection() == 'name O1')
+                pyautogui.hotkey(primary, 'shift', 'z')
+                wait_for(lambda: selection() == 'name C1')
+                capture('selection-pane-applied.png')
+                pyautogui.click(x + 144, y + 540 + dy)
+                wait_for(lambda: selection() == '')
+                input_text('name C1')
+                pyautogui.click(x + 176, y + 540 + dy)
+                time.sleep(0.2)
+                pyautogui.click(x + 250, y + 569 + dy)
+                pyautogui.write('os_carbon', interval=0.03)
+                pyautogui.press('enter')
+                wait_for(lambda: 'os_carbon' in call('get_scene_state')['namedSelections'])
+                if call('count_selection', {'objId': object_id, 'selection': 'os_carbon'})['count'] != 1:
+                    raise RuntimeError('The named selection does not match its definition')
+                if selection() != '':
+                    raise RuntimeError('Defining a name changed the applied selection')
+                input_text('os_carbon')
+                pyautogui.press('enter')
+                wait_for(lambda: selection() == 'os_carbon')
+                capture('selection-pane-named.png')
+                time.sleep(0.3)
+                pyautogui.click(x + 195, y + 596 + dy)
+                time.sleep(0.2)
+                pyautogui.click(x + 100, y + 659 + dy)
+                pyautogui.write('A')
+                pyautogui.click(x + 120, y + 687 + dy)
+                wait_for(lambda: selection() == "'A'.*.*")
+                if call('count_selection', {'objId': object_id, 'selection': selection()})['count'] != 3:
+                    raise RuntimeError('The live selection builder did not select the fixture chain')
+                capture('selection-pane-builder.png')
+                return {'selection_pane_drafts': True, 'selection_pane_center': True,
+                        'selection_pane_undo': True, 'selection_pane_named': True,
+                        'selection_pane_live_builder': True}
+
+            if args.selection_pane_only:
+                report.update(check_selection_pane(), ok=True, window=bounds)
+                print(json.dumps(report), flush=True)
+                return
 
             before_image = capture('before.png')
             before = call('get_view')
@@ -574,6 +644,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             wait_for(lambda: renderer_selection() == initial_selection)
             pyautogui.hotkey(primary, 'shift', 'z')
             wait_for(lambda: renderer_selection() == "chain 'A'")
+            report.update(check_selection_pane())
             report.update(ok=True, window=bounds,
                           work_area=[available_x, available_y, available_width, available_height],
                           window_contained=True, atoms=state['objects'][0]['atoms'],

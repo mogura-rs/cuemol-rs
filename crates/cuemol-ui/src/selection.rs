@@ -37,9 +37,17 @@ pub struct Builder {
     count_request: Vec<String>,
     count_deadline: f64,
     counts_ready: bool,
+    omit_applied: bool,
 }
 
 impl Builder {
+    pub fn for_molecule() -> Self {
+        Self {
+            omit_applied: true,
+            ..Self::default()
+        }
+    }
+
     pub fn opened(&mut self) {
         self.tab = 0;
         self.key = None;
@@ -103,7 +111,7 @@ impl Builder {
                         for (name, values) in [
                             (
                                 "Selected",
-                                if self.context.current.is_empty() {
+                                if self.omit_applied || self.context.current.is_empty() {
                                     &[][..]
                                 } else {
                                     std::slice::from_ref(&self.context.current)
@@ -335,7 +343,11 @@ impl Builder {
             .iter()
             .map(|(operation, _)| self.draft.apply(current, operation))
             .collect();
-        let mut requested = vec![current.to_string()];
+        let mut requested = if self.omit_applied {
+            Vec::new()
+        } else {
+            vec![current.to_string()]
+        };
         requested.extend(expressions.iter().flatten().cloned());
         requested.retain(|v| !v.trim().is_empty());
         requested.sort();
@@ -361,7 +373,7 @@ impl Builder {
                     .request_repaint_after(Duration::from_secs_f64(self.count_deadline - now));
             }
         }
-        if let Some(evaluation) = self.counts.get(current) {
+        if let Some(evaluation) = self.counts.get(current).filter(|_| !self.omit_applied) {
             if let Some(error) = &evaluation.error {
                 ui.colored_label(egui::Color32::LIGHT_RED, error);
             } else if let Some(count) = evaluation.count {

@@ -315,6 +315,34 @@ pub fn context(state: &DesktopAppState, molecule: Option<Uid>) -> Context {
     }
 }
 
+pub fn definition_style_set(state: &DesktopAppState) -> String {
+    let Some(scene) = state
+        .active_scene()
+        .and_then(|id| state.scene_manager().scene(id))
+    else {
+        return "default".into();
+    };
+    if let Some(style) = scene
+        .loaded_styles()
+        .iter()
+        .find(|style| !style.node.str_attr("readonly").equals_ignore_case("true"))
+    {
+        return style.node.str_attr("id").to_string();
+    }
+    let names = scene
+        .loaded_styles()
+        .iter()
+        .map(|style| style.node.str_attr("id").to_string())
+        .collect::<BTreeSet<_>>();
+    if !names.contains("default") {
+        return "default".into();
+    }
+    (0..)
+        .map(|index| format!("default_{index}"))
+        .find(|name| !names.contains(name))
+        .unwrap()
+}
+
 pub fn values(state: &DesktopAppState, molecule: Option<Uid>, kind: &str) -> Vec<String> {
     let Some(object) = molecule.and_then(|id| state.scene_manager().object(id)) else {
         return Vec::new();

@@ -306,6 +306,15 @@ impl GuiApplication {
         args: serde_json::Value,
         camera: &mut CameraController,
     ) {
+        self.try_tritium_command(name, args, camera);
+    }
+
+    pub(super) fn try_tritium_command(
+        &mut self,
+        name: &str,
+        args: serde_json::Value,
+        camera: &mut CameraController,
+    ) -> bool {
         let mut view = camera.to_qsys_camera("__current");
         let record_history = cuemol_command::tool_records_history(name)
             && !cuemol_command::is_view_property_write(&self.state, name, &args);
@@ -325,13 +334,27 @@ impl GuiApplication {
                     self.push_undo_snapshot(undo);
                 }
                 *camera = CameraController::from_qsys_camera(&view);
+                if name == "set_mol_selection" {
+                    self.selected_object = args["objId"].as_u64().map(cuemol_core::Uid::new);
+                    self.molstruct_object = self.selected_object;
+                    self.selected_renderer = None;
+                    self.workspace_aux_selection = None;
+                    self.selection_text = args["selection"].as_str().unwrap_or_default().into();
+                }
                 if cuemol_command::selection::remember_property_edit(&mut self.state, name, &args) {
                     self.selection_history = self.state.selection_history();
                 }
                 self.sync_active_scene_properties();
                 self.rebuild_snapshot();
+                true
             }
-            Err(error) => self.set_status(error.to_string()),
+            Err(error) => {
+                if let Some(undo) = undo {
+                    self.restore_gui_undo_state(undo);
+                }
+                self.set_status(error.to_string());
+                false
+            }
         }
     }
     fn tritium_bottom(&mut self, ctx: &egui::Context, camera: &mut CameraController) {

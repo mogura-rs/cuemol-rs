@@ -16842,6 +16842,92 @@ mod tests {
     use super::*;
 
     #[test]
+    fn selection_pane_edits_record_deliberate_history_and_restore_undo() {
+        let mut model = model_without_gpu();
+        model.desktop.open_bytes("selection.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nHETATM    2  O1  LIG A   2      10.000   0.000   0.000  1.00 10.00           O\nEND\n").unwrap();
+        let object = model.desktop.active_object_summaries()[0].uid;
+        let scene = model.desktop.active_scene().unwrap();
+        let mut args = serde_json::json!({"sceneId":scene.get(),"moleculeId":object.get(),"action":"apply","expression":"name C1"});
+        model.inspector_request("selection_edit", &args).unwrap();
+        assert!(model.desktop.selection_history().is_empty());
+        assert_eq!(
+            model.desktop.molecule_selection_text(object).unwrap(),
+            "name C1"
+        );
+        assert_eq!(model.undo_stack.len(), 1);
+        args["expression"] = serde_json::json!("name O1");
+        args["remember"] = serde_json::json!(true);
+        model.inspector_request("selection_edit", &args).unwrap();
+        assert_eq!(model.desktop.selection_history(), ["name O1"]);
+        model.undo(0).unwrap();
+        assert_eq!(
+            model.desktop.molecule_selection_text(object).unwrap(),
+            "name C1"
+        );
+        assert_eq!(model.desktop.selection_history(), ["name O1"]);
+        model.redo(0).unwrap();
+        assert_eq!(
+            model.desktop.molecule_selection_text(object).unwrap(),
+            "name O1"
+        );
+        let before = model.capture_undo();
+        let depth = model.undo_stack.len();
+        args["expression"] = serde_json::json!("chain (");
+        assert!(model.inspector_request("selection_edit", &args).is_err());
+        assert!(before.desktop.same_undo_state(&model.desktop));
+        assert_eq!(model.undo_stack.len(), depth);
+        args["expression"] = serde_json::json!("name O1");
+        args["sceneId"] = serde_json::json!(scene.get() + 1);
+        assert!(model.inspector_request("selection_edit", &args).is_err());
+        assert!(before.desktop.same_undo_state(&model.desktop));
+        args["sceneId"] = serde_json::json!(scene.get());
+        args["action"] = serde_json::json!("define");
+        args["name"] = serde_json::Value::Null;
+        assert!(model.inspector_request("selection_edit", &args).is_err());
+        assert!(before.desktop.same_undo_state(&model.desktop));
+        args["name"] = serde_json::json!("oxygen");
+        model.inspector_request("selection_edit", &args).unwrap();
+        assert!(model
+            .desktop
+            .selection_definitions()
+            .0
+            .contains(&"oxygen".into()));
+        args["action"] = serde_json::json!("apply");
+        args["expression"] = serde_json::json!("oxygen");
+        args["remember"] = serde_json::json!(false);
+        model.inspector_request("selection_edit", &args).unwrap();
+        args["action"] = serde_json::json!("center");
+        model.inspector_request("selection_edit", &args).unwrap();
+        assert_eq!(model.camera.center().x(), 10.);
+        assert_eq!(model.desktop.selection_history(), ["name O1"]);
+        args["action"] = serde_json::json!("apply");
+        args["expression"] = serde_json::json!("");
+        model.inspector_request("selection_edit", &args).unwrap();
+        assert_eq!(model.desktop.molecule_selection_text(object).unwrap(), "");
+        assert_eq!(model.desktop.selection_history(), ["name O1"]);
+    }
+
+    #[test]
+    fn selection_pane_history_import_keeps_shared_order_and_redo() {
+        let mut model = model_without_gpu();
+        model.desktop.remember_selection("name C1");
+        let before = model.capture_undo();
+        let result = model.inspector_request("selection_history", &serde_json::json!({"action":"import","entries":["name O1","name C1","*","none"," name O1 "]})).unwrap();
+        assert_eq!(result["history"], serde_json::json!(["name C1", "name O1"]));
+        let mut expected = before.desktop;
+        expected.restore_selection_history(&model.desktop.selection_history());
+        assert!(expected.same_undo_state(&model.desktop));
+        assert!(model.undo_stack.is_empty());
+        model
+            .inspector_request(
+                "selection_history",
+                &serde_json::json!({"action":"remember","expression":"name O1"}),
+            )
+            .unwrap();
+        assert_eq!(model.desktop.selection_history(), ["name O1", "name C1"]);
+    }
+
+    #[test]
     fn inspector_rejects_non_object_requests_without_mutation() {
         let mut model = model_without_gpu();
         let before = model.capture_undo();

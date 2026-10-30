@@ -1,6 +1,58 @@
-use crate::DesktopAppState;
+use crate::{DesktopAppState, MolObject, Selector, StyleManager};
+use std::borrow::Cow;
 
 pub const MAX_SELECTION_HISTORY: usize = 100;
+
+fn has_named_references(selector: &Selector) -> bool {
+    match selector {
+        Selector::Ref(_) => true,
+        Selector::Not(inner) | Selector::Unary { inner, .. } | Selector::Distance { inner, .. } => {
+            has_named_references(inner)
+        }
+        Selector::And(left, right) | Selector::Or(left, right) => {
+            has_named_references(left) || has_named_references(right)
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn resolve<'a, 's>(
+    selector: &'a Selector,
+    styles: impl FnOnce() -> &'s StyleManager,
+    scope: u64,
+) -> cuemol_core::Result<Cow<'a, Selector>> {
+    if has_named_references(selector) {
+        let registry = styles()
+            .str_data_entries("sel", scope)
+            .into_iter()
+            .filter_map(|(name, expression)| {
+                crate::parse_selector(&expression)
+                    .ok()
+                    .map(|selector| (name, selector))
+            })
+            .collect();
+        selector.resolve_named(&registry).map(Cow::Owned)
+    } else {
+        Ok(Cow::Borrowed(selector))
+    }
+}
+
+pub(crate) fn indices<'s>(
+    object: &MolObject,
+    fallback: Option<&Selector>,
+    styles: impl FnOnce() -> &'s StyleManager,
+    scope: u64,
+) -> Vec<usize> {
+    let selector = if object.mol().selection_text().is_empty() {
+        fallback
+    } else {
+        Some(object.mol().selection())
+    };
+    selector
+        .and_then(|selector| resolve(selector, styles, scope).ok())
+        .map(|selector| object.mol().select_indices(&selector))
+        .unwrap_or_default()
+}
 
 impl DesktopAppState {
     pub fn selection_definitions(&self) -> (Vec<String>, Vec<String>) {
