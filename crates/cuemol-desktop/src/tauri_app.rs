@@ -16840,6 +16840,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn inspector_rejects_non_object_requests_without_mutation() {
+        let mut model = model_without_gpu();
+        let before = model.capture_undo();
+        for args in [
+            serde_json::Value::Null,
+            serde_json::json!([]),
+            serde_json::json!("invalid"),
+        ] {
+            assert!(model.inspector_request("set_node_props", &args).is_err());
+            assert!(before.desktop.same_undo_state(&model.desktop));
+            assert!(model.undo_stack.is_empty());
+        }
+    }
+
+    #[test]
     fn inspector_batches_one_undo_and_queries_preserve_redo() {
         let mut model = model_without_gpu();
         model.desktop.open_bytes("inspected.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();

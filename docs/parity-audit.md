@@ -368,6 +368,18 @@ scene and view, checked the displayed zoom after scrolling, and retained pending
 numeric and text edits through navigation. Specialized property pages, remaining
 dock targets and continuous renderer previews still require comparison.
 
+The public Claude Code review of `5697aaa` reported no high-confidence findings,
+but its malformed-argument concern reproduced a Tauri panic before validation.
+Inspector IPC now rejects non-object arguments before recording or changing
+state; Actions recording also handles them without panicking. The regression
+failed at the original `unwrap` and passed after the repair, alongside all seven
+affected native/Tauri Inspector tests. The undo helper always appends an entry,
+so assigning the new record cannot replace an earlier coalesced edit. Property
+resolution uses exact names, not prefix or wildcard matching; existing Console
+cases cover names containing dots and typed references. View properties have no
+resettable defaults. Camera refresh cost and selection-to-dock behavior remain
+part of the broader Inspector comparison.
+
 ## Clipboard comparison and repairs
 
 The reference uses typed XML/QDF payloads for objects, renderers, cameras and

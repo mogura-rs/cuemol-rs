@@ -155,6 +155,9 @@ impl Record {
             }
         };
         let record = Self::new(&label, "gui");
+        if !args.is_object() {
+            return record;
+        }
         if name == "set_node_props" {
             let mut single = args.clone();
             single.as_object_mut().unwrap().remove("updates");

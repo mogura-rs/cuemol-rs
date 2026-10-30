@@ -9,6 +9,9 @@ impl AppModel {
         ) {
             return Err("Unsupported inspector operation".into());
         }
+        if !args.is_object() {
+            return Err("Inspector arguments must be an object".into());
+        }
         if tool == "list_node_props" {
             return cuemol_command::call_tool(&mut self.desktop, &mut self.camera, tool, args)
                 .map_err(|error| error.to_string());

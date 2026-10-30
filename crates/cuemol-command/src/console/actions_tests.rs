@@ -21,6 +21,15 @@ fn run(
 }
 
 #[test]
+fn malformed_inspector_arguments_do_not_create_a_record() {
+    let state = super::super::tests::state();
+    for args in [serde_json::Value::Null, json!([]), json!("invalid")] {
+        let record = Record::operation(&state, "set_node_props", &args);
+        assert_eq!(record.entry_count(), 0);
+    }
+}
+
+#[test]
 fn inspector_presets_and_default_resets_export_replayable_operations() {
     let mut state = super::super::tests::state();
     let sid = state.active_scene().unwrap();
