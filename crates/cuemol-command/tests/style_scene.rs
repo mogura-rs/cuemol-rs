@@ -563,3 +563,26 @@ fn script_style_files_take_priority_and_reject_invalid_or_duplicate_ids() {
     }
     assert_eq!(selected_names(&state), ["O1"]);
 }
+
+#[test]
+fn script_style_string_values_preserve_xml_characters_through_scene_save() {
+    let (mut state, _, _) = fixture();
+    let scope = state.active_scene().unwrap().get();
+    let id = create_selection(&mut state, "text", scope);
+    let value = "quotes \"<&>'\n\t日本語";
+    let encoded = serde_json::to_string(value).unwrap();
+    script(
+        &mut state,
+        &format!(
+            "cuemol.getService('StyleManager').setStrData('note','text',{encoded},{scope},{id});"
+        ),
+    );
+    let read = "print(JSON.stringify(cuemol.getService('StyleManager').getStrData('note','text',scene.uid)));";
+    assert_eq!(script(&mut state, read), format!("{encoded}\n"));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("text.qsc");
+    state.save_active_scene_qsc(&path).unwrap();
+    let mut loaded = DesktopAppState::new();
+    loaded.load_qsc_file(&path).unwrap();
+    assert_eq!(script(&mut loaded, read), format!("{encoded}\n"));
+}

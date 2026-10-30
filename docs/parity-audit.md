@@ -1270,7 +1270,13 @@ The final affected shared run passed 568 tests, including all fourteen style
 integration cases. Native GUI tests passed 178 cases with the unrelated
 real-POV-Ray case ignored. All seventeen rebuilt browser cases passed, covering
 the two style backends, cross-molecule selections and Inspector regressions.
-Public review and terminal CI/delivery are recorded after completion.
+The public Claude Code review of `1a34f31` found no verified defect in the
+supplied diff and supporting source. It was a text review and did not execute
+the tests or inspect every caller. Follow-up tracing checked registry validation,
+scope-specific callers and the reference's literal source-path comparison.
+An additional regression preserves quotes, XML delimiters, whitespace and
+Japanese text through script reads and a QSC save/reload; all fifteen style
+integration cases passed. Terminal CI and delivery are recorded after completion.
 
 ### Style-copy and property-query cost
 
