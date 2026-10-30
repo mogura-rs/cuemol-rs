@@ -59,6 +59,22 @@ irm https://raw.githubusercontent.com/mogura-rs/cuemol-rs/main/install.ps1 | iex
 
 The default destination is `%LOCALAPPDATA%/CueMol/bin`.
 
+### Python package from Git
+
+```sh
+uv pip install 'git+https://github.com/mogura-rs/cuemol-rs.git'
+# Or use pip in an activated Python environment:
+pip install 'git+https://github.com/mogura-rs/cuemol-rs.git'
+```
+
+This compiles the checked-out Rust source and installs the native `cuemol`
+command in the Python environment. It requires Python 3.10 or newer, Git, Rust,
+a C++20 compiler and the [native build dependencies](docs/development.md#build-from-source).
+The source package includes the GUI, scripting, MCP and the offline agent skill.
+Browser assets and external tool bundles are separate build steps; the release
+installer above provides those prebuilt. Append `@TAG` or `@COMMIT` to the Git URL
+to install a particular revision.
+
 ### Updates
 
 ```sh
@@ -85,6 +101,7 @@ cartoons, and other atoms as ball-and-stick models.
 | Left drag | Rotate |
 | Right drag | Pan |
 | Wheel | Zoom |
+| Shift + left drag, horizontal | Adjust slab thickness |
 | Click an atom | Toggle its label |
 | Double-click an atom | Toggle its residue selection |
 | `C` / `F` / `Home` | Center selection / fit selection / fit scene |
@@ -113,6 +130,7 @@ cuemol export-scene example.pdb model.obj
 cuemol trajectory-info trajectory.xtc
 cuemol run commands.js
 cuemol -c 'print(21 * 2);'
+cuemol skill
 cuemol mcp config
 ```
 
@@ -121,6 +139,12 @@ to the running native GUI; `cuemol mcp serve` owns an independent headless scene
 Use `cuemol mcp tools` to inspect the installed command schemas. See
 [commands and configuration](docs/usage.md#commands-mcp-and-configuration) or
 the [AI Agent guide](docs/usage.md#ai-agent) for further setup.
+
+`cuemol skill` prints a self-contained Markdown skill for agents, including
+headless notebook use. Save it with `cuemol skill > SKILL.md`, or read the same
+[skill on GitHub](skills/cuemol/SKILL.md).
+The [Colab notebook](https://colab.research.google.com/github/mogura-rs/cuemol-rs/blob/main/notebooks/cuemol.ipynb)
+installs a release, displays the skill and checks headless scripting and MCP.
 
 ## Build from source
 

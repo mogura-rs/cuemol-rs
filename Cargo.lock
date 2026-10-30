@@ -1764,6 +1764,7 @@ dependencies = [
  "base64 0.22.1",
  "cuemol-agent",
  "cuemol-command",
+ "cuemol-core",
  "cuemol-desktop-core",
  "cuemol-qsys",
  "cuemol-render",

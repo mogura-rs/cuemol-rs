@@ -184,6 +184,22 @@ def main():
             if colored < 100:
                 raise RuntimeError(f'The window contains too few colored pixels: {colored}')
 
+            pyautogui.moveTo(x + width * 0.58, y + height * 0.43)
+            pyautogui.keyDown('shift')
+            try:
+                pyautogui.dragRel(80, 0, duration=0.5, button='left')
+            finally:
+                pyautogui.keyUp('shift')
+            clipped = wait_for(lambda: view if (view := call('get_view'))['slab'] != zoomed['slab'] else None)
+            if abs(clipped['zoom'] - zoomed['zoom']) > 1e-6:
+                raise RuntimeError('Horizontal Shift-drag changed zoom instead of only the slab')
+            capture('slab.png')
+            call('set_mol_selection', {'objId': state['objects'][0]['id'], 'selection': 'name O1'})
+            call('set_view', {'center': [4, 5, 6]})
+            pyautogui.press('c')
+            centered = wait_for(lambda: view if (view := call('get_view'))['center'] == [0, 0, 0] else None)
+            capture('centered.png')
+
             def script(source, timeout=10):
                 return call('execute_script', {'source': source}, timeout=timeout)
 
@@ -256,6 +272,8 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                           window_contained=True, atoms=state['objects'][0]['atoms'],
                           rotation_before=before['rotation'], rotation_after=rotated['rotation'],
                           zoom_before=rotated['zoom'], zoom_after=zoomed['zoom'],
+                          slab_before=zoomed['slab'], slab_after=clipped['slab'],
+                          centered_selection=centered['center'],
                           changed_pixels=changed, colored_pixels=colored,
                           font_family_pixels_changed=True, font_style_case_equal=True,
                           font_line_endings_equal=True,

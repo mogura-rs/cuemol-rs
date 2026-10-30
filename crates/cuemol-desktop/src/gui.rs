@@ -1473,12 +1473,7 @@ struct GuiApplication {
     color_proofing: bool,
     bottom_tab: BottomTab,
     bottom_panel_height: f32,
-    sequence_marker: Option<NativeSequencePosition>,
-    sequence_drag_start: Option<NativeSequencePosition>,
-    sequence_drag_end: Option<NativeSequencePosition>,
-    sequence_scroll_offset: egui::Vec2,
-    sequence_name_width: f32,
-    sequence_name_drag_start_width: Option<f32>,
+    sequence_panel: SequencePanel,
     trajectory_target: Option<cuemol_core::Uid>,
     trajectory_playing: bool,
     trajectory_loop: bool,
@@ -2420,124 +2415,13 @@ impl BottomTab {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct NativeSequencePosition {
-    object_uid: cuemol_core::Uid,
-    chain_id: String,
-    position: usize,
-}
-
-#[derive(Debug, Clone)]
-enum NativeSequenceAction {
-    Range {
-        object_uid: cuemol_core::Uid,
-        anchor_selection: String,
-        range_selection: String,
-        toggle: bool,
-        center_selection: Option<String>,
-    },
-    Selection {
-        object_uid: cuemol_core::Uid,
-        expression: String,
-        status: &'static str,
-    },
-    Center {
-        object_uid: cuemol_core::Uid,
-        selection: String,
-    },
-    Copy(String),
-}
-
-const NATIVE_SEQUENCE_CELL_WIDTH: f32 = 10.0;
-const NATIVE_SEQUENCE_ROW_HEIGHT: f32 = 19.0;
-const NATIVE_SEQUENCE_RULER_HEIGHT: f32 = 16.0;
-const NATIVE_SEQUENCE_MAX_WIDTH: f32 = 30_000.0;
-
-fn sequence_residue_column(index: &str) -> Option<usize> {
-    let index = index.trim_start();
-    let index = index.strip_prefix('+').unwrap_or(index);
-    let digit_count = index.bytes().take_while(u8::is_ascii_digit).count();
-    if digit_count == 0 {
-        return None;
-    }
-    index[..digit_count].parse().ok()
-}
-
-fn native_sequence_column_count(chains: &[crate::GuiSeqChain]) -> usize {
-    let maximum = chains
-        .iter()
-        .flat_map(|chain| &chain.residues)
-        .filter_map(|residue| sequence_residue_column(&residue.residue_index))
-        .max()
-        .unwrap_or(0);
-    maximum
-        .saturating_add(10)
-        .min((NATIVE_SEQUENCE_MAX_WIDTH / NATIVE_SEQUENCE_CELL_WIDTH) as usize)
-}
-
-fn sequence_positions_share_row(
-    lhs: &NativeSequencePosition,
-    rhs: &NativeSequencePosition,
-) -> bool {
-    lhs.object_uid == rhs.object_uid && lhs.chain_id == rhs.chain_id
-}
-
-fn sequence_position_in_drag_range(
-    position: &NativeSequencePosition,
-    start: Option<&NativeSequencePosition>,
-    end: Option<&NativeSequencePosition>,
-) -> bool {
-    let (Some(start), Some(end)) = (start, end) else {
-        return false;
-    };
-    if !sequence_positions_share_row(start, end) || !sequence_positions_share_row(start, position) {
-        return false;
-    }
-    let (first, last) = if start.position <= end.position {
-        (start.position, end.position)
-    } else {
-        (end.position, start.position)
-    };
-    (first..=last).contains(&position.position)
-}
-
-fn native_sequence_range_action(
-    chains: &[crate::GuiSeqChain],
-    start: &NativeSequencePosition,
-    end: &NativeSequencePosition,
-    toggle: bool,
-    center: bool,
-) -> Option<NativeSequenceAction> {
-    if !sequence_positions_share_row(start, end) {
-        return None;
-    }
-    let chain = chains
-        .iter()
-        .find(|chain| chain.object_uid == start.object_uid && chain.chain_id == start.chain_id)?;
-    let anchor_selection = chain.residues.get(start.position)?.selection.clone();
-    let center_selection = if center {
-        Some(chain.residues.get(end.position)?.selection.clone())
-    } else {
-        None
-    };
-    let (first, last) = if start.position <= end.position {
-        (start.position, end.position)
-    } else {
-        (end.position, start.position)
-    };
-    let range_selection = chain.residues[first..=last]
-        .iter()
-        .map(|residue| residue.selection.as_str())
-        .collect::<Vec<_>>()
-        .join("|");
-    Some(NativeSequenceAction::Range {
-        object_uid: start.object_uid,
-        anchor_selection,
-        range_selection,
-        toggle,
-        center_selection,
-    })
-}
+#[cfg(test)]
+use cuemol_ui::sequence::{
+    sequence_column_count as native_sequence_column_count, sequence_position_in_drag_range,
+    sequence_range_action as native_sequence_range_action, sequence_residue_column,
+    SequencePosition as NativeSequencePosition,
+};
+use cuemol_ui::sequence::{SequenceAction as NativeSequenceAction, SequencePanel};
 
 /// Selection-panel tab (CueMol2 `selection-panel.xul`): the free-text Command tab
 /// vs the click-to-build Editor tab.
@@ -5156,12 +5040,7 @@ impl GuiApplication {
             color_proofing: false,
             bottom_tab,
             bottom_panel_height,
-            sequence_marker: None,
-            sequence_drag_start: None,
-            sequence_drag_end: None,
-            sequence_scroll_offset: egui::Vec2::ZERO,
-            sequence_name_width,
-            sequence_name_drag_start_width: None,
+            sequence_panel: SequencePanel::new(sequence_name_width),
             trajectory_target: None,
             trajectory_playing: false,
             trajectory_loop: false,
@@ -15287,15 +15166,6 @@ impl GuiApplication {
         }
     }
 
-    fn sequence_current_selection(&self, object_uid: cuemol_core::Uid) -> String {
-        self.state
-            .molecule_selection_text(object_uid)
-            .ok()
-            .filter(|selection| !selection.trim().is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| self.selection_text.trim().to_string())
-    }
-
     fn apply_native_sequence_action(
         &mut self,
         action: NativeSequenceAction,
@@ -15311,7 +15181,7 @@ impl GuiApplication {
                 center_selection,
             } => match self.state.molecule_residue_range_selection_text(
                 object_uid,
-                &self.selection_text,
+                "",
                 &anchor_selection,
                 &range_selection,
                 toggle,
@@ -15325,7 +15195,7 @@ impl GuiApplication {
                         if let Some(selection) = center_selection {
                             match self
                                 .state
-                                .molecule_selection_center_for_text(object_uid, &selection)
+                                .molecule_residue_pivot_for_text(object_uid, &selection)
                             {
                                 Ok(Some(center)) => {
                                     camera.target = Vec3::new(
@@ -15354,7 +15224,7 @@ impl GuiApplication {
                 selection,
             } => match self
                 .state
-                .molecule_selection_center_for_text(object_uid, &selection)
+                .molecule_residue_pivot_for_text(object_uid, &selection)
             {
                 Ok(Some(center)) => {
                     camera.target = Vec3::new(center.x as f32, center.y as f32, center.z as f32);
@@ -15370,417 +15240,11 @@ impl GuiApplication {
         }
     }
 
-    /// Interactive per-residue sequence viewer (CueMol2 `seqpanel`).
     fn sequence_tab(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
-        let chains = self.state.active_sequence_view(&self.selection_text);
-        if chains.is_empty() {
-            ui.weak("No molecule loaded.");
-            return;
-        }
-        let mut action = None;
-        let pointer_position = ui.input(|input| input.pointer.hover_pos());
-        let primary_pressed = ui.input(|input| input.pointer.primary_pressed());
-        let primary_down = ui.input(|input| input.pointer.primary_down());
-        let primary_released = ui.input(|input| input.pointer.primary_released());
-        let shift = ui.input(|input| input.modifiers.shift);
-        let column_count = native_sequence_column_count(&chains);
-        let sequence_width = column_count as f32 * NATIVE_SEQUENCE_CELL_WIDTH;
-        let name_width = self.sequence_name_width;
-        let mut scroll_offset = self.sequence_scroll_offset;
-        ui.horizontal(|ui| {
-            ui.add_sized(
-                [name_width, NATIVE_SEQUENCE_RULER_HEIGHT],
-                egui::Label::new(""),
-            );
-            ui.separator();
-            let ruler_width = ui.available_width();
-            let ruler_output = ui
-                .allocate_ui(
-                    egui::vec2(ruler_width, NATIVE_SEQUENCE_RULER_HEIGHT),
-                    |ui| {
-                        egui::ScrollArea::horizontal()
-                            .id_salt("native_sequence_ruler")
-                            .scroll_offset(egui::vec2(scroll_offset.x, 0.0))
-                            .scroll_bar_visibility(
-                                egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
-                            )
-                            .show(ui, |ui| {
-                                let (rect, _) = ui.allocate_exact_size(
-                                    egui::vec2(sequence_width, NATIVE_SEQUENCE_RULER_HEIGHT),
-                                    egui::Sense::hover(),
-                                );
-                                let color = ui.visuals().weak_text_color();
-                                for column in 0..column_count {
-                                    let x = rect.left()
-                                        + (column as f32 + 0.5) * NATIVE_SEQUENCE_CELL_WIDTH;
-                                    ui.painter().line_segment(
-                                        [
-                                            egui::pos2(x, rect.top() + 12.0),
-                                            egui::pos2(x, rect.bottom()),
-                                        ],
-                                        egui::Stroke::new(1.0, color),
-                                    );
-                                    if column >= 5 && column % 5 == 0 {
-                                        ui.painter().text(
-                                            egui::pos2(x, rect.top()),
-                                            egui::Align2::CENTER_TOP,
-                                            column,
-                                            egui::FontId::monospace(10.0),
-                                            color,
-                                        );
-                                    }
-                                }
-                            })
-                    },
-                )
-                .inner;
-            scroll_offset.x = ruler_output.state.offset.x;
-        });
-
-        let content_height = ui.available_height();
-        let updated_offset = ui
-            .horizontal(|ui| {
-                ui.allocate_ui(egui::vec2(name_width, content_height), |ui| {
-                    egui::ScrollArea::vertical()
-                        .id_salt("native_sequence_names")
-                        .scroll_offset(egui::vec2(0.0, scroll_offset.y))
-                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                        .show(ui, |ui| {
-                            for (row_index, chain) in chains.iter().enumerate() {
-                                let chain_disp = if chain.chain_id.is_empty() {
-                                    "_"
-                                } else {
-                                    chain.chain_id.as_str()
-                                };
-                                let title = format!("{}:{}", chain_disp, chain.object_name);
-                                let (rect, response) = ui.allocate_exact_size(
-                                    egui::vec2(name_width, NATIVE_SEQUENCE_ROW_HEIGHT),
-                                    egui::Sense::hover(),
-                                );
-                                if row_index % 2 == 1 {
-                                    ui.painter().rect_filled(
-                                        rect,
-                                        0.0,
-                                        ui.visuals().faint_bg_color,
-                                    );
-                                }
-                                ui.painter().text(
-                                    rect.left_center() + egui::vec2(4.0, 0.0),
-                                    egui::Align2::LEFT_CENTER,
-                                    &title,
-                                    egui::FontId::proportional(12.0),
-                                    ui.visuals().text_color(),
-                                );
-                                response.on_hover_text(title);
-                                ui.separator();
-                            }
-                        });
-                });
-                let (splitter_rect, splitter) =
-                    ui.allocate_exact_size(egui::vec2(5.0, content_height), egui::Sense::drag());
-                let splitter_color = if splitter.hovered() || splitter.dragged() {
-                    ui.visuals().text_color()
-                } else {
-                    ui.visuals().widgets.noninteractive.bg_stroke.color
-                };
-                ui.painter().line_segment(
-                    [splitter_rect.center_top(), splitter_rect.center_bottom()],
-                    egui::Stroke::new(1.0, splitter_color),
-                );
-                if splitter.drag_started() {
-                    self.sequence_name_drag_start_width = Some(name_width);
-                }
-                if splitter.dragged() {
-                    if let Some(start_width) = self.sequence_name_drag_start_width {
-                        self.sequence_name_width =
-                            (start_width + splitter.drag_delta().x).clamp(50.0, 400.0);
-                        ui.ctx().request_repaint();
-                    }
-                }
-                if splitter.drag_stopped() {
-                    self.sequence_name_drag_start_width = None;
-                    self.state.put_config_value(
-                        "sequence_panel:name_width",
-                        self.sequence_name_width.to_string(),
-                    );
-                }
-                let grid_width = ui.available_width();
-                ui.allocate_ui(egui::vec2(grid_width, content_height), |ui| {
-                    egui::ScrollArea::both()
-                        .id_salt("native_sequence_grid")
-                        .scroll_offset(scroll_offset)
-                        .show(ui, |ui| {
-                            for (row_index, chain) in chains.iter().enumerate() {
-                                let current_selection =
-                                    self.sequence_current_selection(chain.object_uid);
-                                egui::Frame::NONE
-                                    .fill(if row_index % 2 == 1 {
-                                        ui.visuals().faint_bg_color
-                                    } else {
-                                        egui::Color32::TRANSPARENT
-                                    })
-                                    .show(ui, |ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.spacing_mut().item_spacing.x = 0.0;
-                                            let mut next_column = 0;
-                                            for (position, residue) in
-                                                chain.residues.iter().enumerate()
-                                            {
-                                                let Some(column) =
-                                                    sequence_residue_column(&residue.residue_index)
-                                                else {
-                                                    continue;
-                                                };
-                                                if column >= column_count || column < next_column {
-                                                    continue;
-                                                }
-                                                if column > next_column {
-                                                    ui.add_space(
-                                                        (column - next_column) as f32
-                                                            * NATIVE_SEQUENCE_CELL_WIDTH,
-                                                    );
-                                                }
-                                                let sequence_position = NativeSequencePosition {
-                                                    object_uid: chain.object_uid,
-                                                    chain_id: chain.chain_id.clone(),
-                                                    position,
-                                                };
-                                                let response = ui
-                                                    .add_sized(
-                                                        [
-                                                            NATIVE_SEQUENCE_CELL_WIDTH,
-                                                            NATIVE_SEQUENCE_ROW_HEIGHT,
-                                                        ],
-                                                        egui::Button::selectable(
-                                                            residue.selected,
-                                                            egui::RichText::new(&residue.letter)
-                                                                .monospace(),
-                                                        ),
-                                                    )
-                                                    .on_hover_text(format!(
-                                                        "{} {}",
-                                                        residue.res_name.trim(),
-                                                        residue.residue_index
-                                                    ));
-                                                let pointer_over =
-                                                    pointer_position.is_some_and(|position| {
-                                                        response.rect.contains(position)
-                                                    });
-                                                if primary_pressed && pointer_over {
-                                                    self.sequence_drag_start =
-                                                        Some(sequence_position.clone());
-                                                    self.sequence_drag_end =
-                                                        Some(sequence_position.clone());
-                                                    if !shift {
-                                                        self.sequence_marker =
-                                                            Some(sequence_position.clone());
-                                                    }
-                                                }
-                                                if primary_down
-                                                    && pointer_over
-                                                    && self
-                                                        .sequence_drag_start
-                                                        .as_ref()
-                                                        .is_some_and(|start| {
-                                                            sequence_positions_share_row(
-                                                                start,
-                                                                &sequence_position,
-                                                            )
-                                                        })
-                                                {
-                                                    self.sequence_drag_end =
-                                                        Some(sequence_position.clone());
-                                                    ui.ctx().request_repaint();
-                                                }
-                                                if response.secondary_clicked() {
-                                                    self.sequence_marker =
-                                                        Some(sequence_position.clone());
-                                                }
-                                                if self.sequence_marker.as_ref()
-                                                    == Some(&sequence_position)
-                                                {
-                                                    ui.painter().line_segment(
-                                                        [
-                                                            response.rect.left_bottom(),
-                                                            response.rect.right_bottom(),
-                                                        ],
-                                                        egui::Stroke::new(2.0, egui::Color32::RED),
-                                                    );
-                                                }
-                                                if sequence_position_in_drag_range(
-                                                    &sequence_position,
-                                                    self.sequence_drag_start.as_ref(),
-                                                    self.sequence_drag_end.as_ref(),
-                                                ) {
-                                                    ui.painter().rect_stroke(
-                                                        response.rect,
-                                                        0.0,
-                                                        egui::Stroke::new(
-                                                            1.0,
-                                                            egui::Color32::from_rgb(0, 128, 0),
-                                                        ),
-                                                        egui::StrokeKind::Inside,
-                                                    );
-                                                }
-                                                response.context_menu(|ui| {
-                                                    ui.add_enabled(
-                                                        false,
-                                                        egui::Button::new(format!(
-                                                            "{} {}{} {}",
-                                                            chain.object_name,
-                                                            if chain.chain_id.is_empty() {
-                                                                "_"
-                                                            } else {
-                                                                &chain.chain_id
-                                                            },
-                                                            residue.residue_index,
-                                                            residue.res_name.trim()
-                                                        )),
-                                                    );
-                                                    ui.separator();
-                                                    if ui.button("Center here").clicked() {
-                                                        action =
-                                                            Some(NativeSequenceAction::Center {
-                                                                object_uid: chain.object_uid,
-                                                                selection: residue
-                                                                    .selection
-                                                                    .clone(),
-                                                            });
-                                                        ui.close();
-                                                    }
-                                                    if ui.button("Toggle sel").clicked() {
-                                                        action =
-                                                            Some(NativeSequenceAction::Range {
-                                                                object_uid: chain.object_uid,
-                                                                anchor_selection: residue
-                                                                    .selection
-                                                                    .clone(),
-                                                                range_selection: residue
-                                                                    .selection
-                                                                    .clone(),
-                                                                toggle: true,
-                                                                center_selection: None,
-                                                            });
-                                                        ui.close();
-                                                    }
-                                                    for (label, by_residue) in [
-                                                        ("Around Byresid", true),
-                                                        ("Around", false),
-                                                    ] {
-                                                        ui.menu_button(label, |ui| {
-                                                            for radius in [3.0_f64, 5.0, 7.0, 10.0]
-                                                            {
-                                                                if ui
-                                                                    .button(format!(
-                                                                        "{radius:.0} Å"
-                                                                    ))
-                                                                    .clicked()
-                                                                {
-                                                                    if !current_selection.is_empty()
-                                                                    {
-                                                                        action =
-                                                        Some(NativeSequenceAction::Selection {
-                                                            object_uid: chain.object_uid,
-                                                            expression: around_selection_expression(
-                                                                &current_selection,
-                                                                radius,
-                                                                by_residue,
-                                                            ),
-                                                            status: "Around mol selection",
-                                                        });
-                                                                    }
-                                                                    ui.close();
-                                                                }
-                                                            }
-                                                        });
-                                                    }
-                                                    ui.separator();
-                                                    if ui.button("Unselect all").clicked() {
-                                                        action =
-                                                            Some(NativeSequenceAction::Selection {
-                                                                object_uid: chain.object_uid,
-                                                                expression: String::new(),
-                                                                status: "Unselect all",
-                                                            });
-                                                        ui.close();
-                                                    }
-                                                    if ui.button("Invert sel").clicked() {
-                                                        action =
-                                                            Some(NativeSequenceAction::Selection {
-                                                                object_uid: chain.object_uid,
-                                                                expression:
-                                                                    invert_selection_expression(
-                                                                        &current_selection,
-                                                                    ),
-                                                                status: "Invert sel",
-                                                            });
-                                                        ui.close();
-                                                    }
-                                                    ui.separator();
-                                                    if ui.button("Copy sequence").clicked() {
-                                                        action = Some(NativeSequenceAction::Copy(
-                                                            chain
-                                                                .residues
-                                                                .iter()
-                                                                .map(|residue| {
-                                                                    if residue.letter == "X" {
-                                                                        "*"
-                                                                    } else {
-                                                                        residue.letter.as_str()
-                                                                    }
-                                                                })
-                                                                .collect(),
-                                                        ));
-                                                        ui.close();
-                                                    }
-                                                });
-                                                next_column = column + 1;
-                                            }
-                                            if next_column < column_count {
-                                                ui.add_space(
-                                                    (column_count - next_column) as f32
-                                                        * NATIVE_SEQUENCE_CELL_WIDTH,
-                                                );
-                                            }
-                                        });
-                                    });
-                                ui.separator();
-                            }
-                        })
-                        .state
-                        .offset
-                })
-                .inner
-            })
-            .inner;
-        self.sequence_scroll_offset = updated_offset;
-
-        if primary_released {
-            let start = self.sequence_drag_start.take();
-            let end = self.sequence_drag_end.take();
-            if let (Some(start), Some(end)) = (start, end) {
-                if sequence_positions_share_row(&start, &end) {
-                    if start.position != end.position {
-                        self.sequence_marker = Some(end.clone());
-                        action = native_sequence_range_action(&chains, &start, &end, true, false);
-                    } else if shift {
-                        if let Some(marker) = self
-                            .sequence_marker
-                            .clone()
-                            .filter(|marker| sequence_positions_share_row(marker, &end))
-                        {
-                            self.sequence_marker = Some(end.clone());
-                            action =
-                                native_sequence_range_action(&chains, &marker, &end, false, false);
-                        }
-                    } else {
-                        self.sequence_marker = Some(end.clone());
-                        action = native_sequence_range_action(&chains, &start, &end, true, true);
-                    }
-                }
-            }
-        }
-        if let Some(action) = action {
+        if let Some(action) = self
+            .sequence_panel
+            .show(ui, &mut self.state, self.snapshot_revision)
+        {
             self.apply_native_sequence_action(action, camera, ui.ctx());
         }
     }
@@ -21192,7 +20656,7 @@ impl GuiApplication {
             .unwrap_or(200.0)
             .clamp(100.0, 600.0);
         self.show_bottom_panel = config_bool(&self.state, "bottom_panel:visible", true);
-        self.sequence_name_width = self
+        self.sequence_panel.name_width = self
             .state
             .config_value("sequence_panel:name_width")
             .parse::<f32>()
@@ -35547,7 +35011,7 @@ mod tests {
         assert!(!app.show_bottom_panel);
         assert_eq!(app.bottom_tab, BottomTab::Sequence);
         assert_eq!(app.bottom_panel_height, 240.0);
-        assert_eq!(app.sequence_name_width, 220.0);
+        assert_eq!(app.sequence_panel.name_width, 220.0);
         assert_eq!(app.animation_name_column_width, 180.0);
         assert_eq!(app.animation_start_column_width, 70.0);
         assert_eq!(app.coloring_paint_selection_column_width, 165.0);
@@ -39719,7 +39183,7 @@ mod tests {
             .unwrap()
             .add_molecule_with_source_type("molecule", molecule, "pdb");
         let chains = app.state.active_sequence_view("");
-        assert_eq!(native_sequence_column_count(&chains), 13);
+        assert_eq!(native_sequence_column_count(&chains, 10.), 13);
         let position = |value| NativeSequencePosition {
             object_uid,
             chain_id: "A".to_string(),

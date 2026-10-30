@@ -104,6 +104,12 @@ scripted `ViewInputConfig` changes. Dragging starts at two logical pixels; mixed
 operations lock to the dominant axis until release. The native and browser
 viewports share this input calculation.
 
+To select the PyMOL preset before launching the application, run:
+
+```sh
+cuemol config set cuemol2.ui.viewinconf PymolViewInConf
+```
+
 The viewport palette and `N`, `B`, `L`, `D`, `A`, `T`, `E` keys select navigation,
 rectangle selection, lasso selection, distance, angle, torsion, and bond editing.
 Rectangle and lasso drags replace the selection; hold Shift to add atoms. A click
@@ -180,6 +186,16 @@ The optional second argument is the frame stride. Legacy `dcd-info`, `xtc-info`,
 `trr-info`, and `ambernetcdf-info` commands retain their diagnostic reader behavior.
 
 ## Commands, MCP and configuration
+
+### Agent skill
+
+`cuemol skill` prints the bundled [agent skill](../skills/cuemol/SKILL.md) as
+Markdown without network access or startup-script execution. Use
+`cuemol skill > SKILL.md` to save it for an agent. The same document covers
+native GUI sessions, persistent MCP scenes and headless notebook commands.
+It directs agents to `cuemol mcp tools` for the installed command schemas.
+The [Colab notebook](https://colab.research.google.com/github/mogura-rs/cuemol-rs/blob/main/notebooks/cuemol.ipynb)
+provides the same skill alongside release installation and headless examples.
 
 ### Connect to the application with MCP
 
@@ -274,6 +290,14 @@ Put startup JavaScript in `startup.js`; it runs before command-line files open.
 `cuemol config path`, `get KEY`, and `set KEY VALUE` inspect or edit preferences.
 Configuration inspection does not execute startup scripts. Download caches use
 `$XDG_CACHE_HOME/cuemol` or `~/.cache/cuemol`, with `CUEMOL_CACHE_DIR` as an override.
+
+For example, save the following as `startup.js` in the directory printed by
+`cuemol config path`:
+
+```javascript
+scene.setName('My session');
+print('Startup commands loaded');
+```
 
 ### Image rendering
 

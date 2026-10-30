@@ -1,0 +1,23 @@
+[build-system]
+requires = ["maturin>=1.8,<2"]
+build-backend = "maturin"
+
+[project]
+name = "cuemol-rs"
+dynamic = ["version"]
+description = "Molecular graphics for the desktop and command line"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+
+[project.urls]
+Repository = "https://github.com/mogura-rs/cuemol-rs"
+Documentation = "https://github.com/mogura-rs/cuemol-rs/blob/main/docs/usage.md"
+
+[tool.maturin]
+bindings = "bin"
+manifest-path = "crates/cuemol-cli/Cargo.toml"
+features = ["gui"]
+locked = true
+compatibility = "linux"
+sdist-generator = "git"

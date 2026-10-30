@@ -1822,9 +1822,10 @@ fn split_residue_insert(input: &str) -> Option<(i32, Option<char>)> {
     }
     let number = input[..end].parse().ok()?;
     let suffix = &input[end..];
-    match suffix.chars().collect::<Vec<_>>().as_slice() {
-        [] => Some((number, None)),
-        [code] if code.is_ascii_alphabetic() => Some((number, Some(*code))),
+    let mut suffix = suffix.chars();
+    match (suffix.next(), suffix.next()) {
+        (None, None) => Some((number, None)),
+        (Some(code), None) if code.is_ascii_alphabetic() => Some((number, Some(code))),
         _ => None,
     }
 }
@@ -2022,27 +2023,16 @@ fn split_hier_parts(input: &str) -> Result<Vec<&str>> {
 }
 
 fn residue_selector_matches(selector: &str, atom: &Atom) -> bool {
+    let residue = (atom.res_id, atom.ins_code);
     selector.split(',').any(|part| {
         if let Some((start, end)) = part.split_once(':') {
-            parse_residue_number(start)
-                .zip(parse_residue_number(end))
-                .is_some_and(|(start, end)| start <= atom.res_id && atom.res_id <= end)
+            split_residue_insert(start)
+                .zip(split_residue_insert(end))
+                .is_some_and(|(start, end)| start.min(end) <= residue && residue <= start.max(end))
         } else {
-            parse_residue_number(part) == Some(atom.res_id)
+            split_residue_insert(part) == Some(residue)
         }
     })
-}
-
-fn parse_residue_number(input: &str) -> Option<i32> {
-    let mut end = 0;
-    for (index, ch) in input.char_indices() {
-        if index == 0 && ch == '-' || ch.is_ascii_digit() {
-            end = index + ch.len_utf8();
-        } else {
-            break;
-        }
-    }
-    input.get(..end)?.parse().ok()
 }
 
 fn is_residue_id_token(input: &str) -> bool {

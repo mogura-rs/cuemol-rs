@@ -1296,6 +1296,45 @@ pub struct GuiSeqChain {
     pub residues: Vec<GuiSeqResidue>,
 }
 
+/// Reuses sequence rows until the scene, caller's edit generation, or selection changes.
+#[derive(Debug, Default)]
+pub struct GuiSequenceCache {
+    key: Option<(Option<Uid>, u64, String)>,
+    rows: Vec<GuiSeqChain>,
+}
+
+impl GuiSequenceCache {
+    pub fn refresh(&mut self, state: &DesktopAppState, selection: &str, generation: u64) -> bool {
+        let scene = state.active_scene();
+        let valid = self.key.as_ref().is_some_and(
+            |(previous_scene, previous_generation, previous_selection)| {
+                *previous_scene == scene
+                    && *previous_generation == generation
+                    && previous_selection == selection
+            },
+        );
+        if !valid {
+            self.rows = state.active_sequence_view(selection);
+            self.key = Some((scene, generation, selection.to_string()));
+        }
+        !valid
+    }
+
+    pub fn rows(&self) -> &[GuiSeqChain] {
+        &self.rows
+    }
+
+    pub fn view(
+        &mut self,
+        state: &DesktopAppState,
+        selection: &str,
+        generation: u64,
+    ) -> &[GuiSeqChain] {
+        self.refresh(state, selection, generation);
+        self.rows()
+    }
+}
+
 /// Crystal cell / space-group readout for the Symmetry side panel
 /// (CueMol2 `symmetry-panel.xul`).
 #[derive(Debug, Clone, PartialEq)]
@@ -4882,6 +4921,30 @@ impl DesktopAppState {
             .object(object_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
         Ok(object.mol().center_pos(Some(&parse_selector(selection)?)))
+    }
+
+    pub fn molecule_residue_pivot_for_text(
+        &self,
+        object_uid: Uid,
+        selection: &str,
+    ) -> Result<Option<Vector4>> {
+        let object = self
+            .scene_manager()
+            .object(object_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        let selector = parse_selector(selection)?;
+        let Some(index) = object.mol().select_indices(&selector).first().copied() else {
+            return Ok(None);
+        };
+        let atom = &object.mol().atoms()[index];
+        let residue = cuemol_molstr::ResidueKey::new(&atom.chain_id, atom.res_id, atom.ins_code);
+        let mut position = object
+            .mol()
+            .residue_pivot_pos(&atom.chain_id, &residue.script_index())?;
+        if let Some(position) = &mut position {
+            object.xform_matrix().xform3d(position);
+        }
+        Ok(position)
     }
 
     pub fn selected_molecule_center(&self, object_uid: Uid) -> Result<Option<Vector4>> {
@@ -14489,48 +14552,83 @@ impl DesktopAppState {
         let mut out = Vec::new();
         for object in scene.objects() {
             let mol = object.mol();
-            let selected: std::collections::HashSet<usize> = if mol.selection_text().is_empty() {
+            let selected = if mol.selection_text().is_empty() {
                 fallback_selector
                     .as_ref()
-                    .map(|selector| mol.select_indices(selector).into_iter().collect())
+                    .map(|selector| mol.select_indices(selector))
                     .unwrap_or_default()
             } else {
-                mol.select_indices(mol.selection()).into_iter().collect()
+                mol.select_indices(mol.selection())
             };
-            let residues = mol.residue_summaries();
-            let mut residue_index = 0;
-            for chain in mol.chain_summaries() {
-                let mut chain_residues = Vec::new();
-                for key in &chain.residue_keys {
-                    let Some(residue) = next_ordered_residue(&residues, &mut residue_index, key)
-                    else {
-                        continue;
-                    };
-                    let is_selected = residue
-                        .atom_indices
-                        .iter()
-                        .any(|index| selected.contains(index));
-                    let residue_index = key.script_index();
-                    let selection = if chain.chain_id.is_empty() {
-                        format!("resid {residue_index}")
+            let mut selected = selected.into_iter().peekable();
+            let ordered = mol.atoms().windows(2).all(|atoms| {
+                (
+                    atoms[0].chain_id.as_str(),
+                    atoms[0].res_id,
+                    atoms[0].ins_code,
+                ) <= (
+                    atoms[1].chain_id.as_str(),
+                    atoms[1].res_id,
+                    atoms[1].ins_code,
+                )
+            });
+            let mut residues: Vec<((&str, i32, Option<char>), (&str, bool))> = Vec::new();
+            if ordered {
+                for (index, atom) in mol.atoms().iter().enumerate() {
+                    let is_selected = selected.peek() == Some(&index);
+                    if is_selected {
+                        selected.next();
+                    }
+                    let key = (atom.chain_id.as_str(), atom.res_id, atom.ins_code);
+                    if let Some((_, (_, value))) =
+                        residues.last_mut().filter(|(previous, _)| *previous == key)
+                    {
+                        *value |= is_selected;
                     } else {
-                        format!("'{}'.{residue_index}.*", chain.chain_id)
-                    };
-                    chain_residues.push(GuiSeqResidue {
-                        letter: residue_one_letter(&residue.res_name).to_string(),
-                        res_id: key.res_id,
-                        residue_index,
-                        res_name: residue.res_name.clone(),
-                        selection,
-                        selected: is_selected,
-                    });
+                        residues.push((key, (atom.res_name.as_str(), is_selected)));
+                    }
                 }
-                out.push(GuiSeqChain {
+            } else {
+                let mut grouped = BTreeMap::<(&str, i32, Option<char>), (&str, bool)>::new();
+                for (index, atom) in mol.atoms().iter().enumerate() {
+                    let is_selected = selected.peek() == Some(&index);
+                    if is_selected {
+                        selected.next();
+                    }
+                    grouped
+                        .entry((atom.chain_id.as_str(), atom.res_id, atom.ins_code))
+                        .and_modify(|(_, value)| *value |= is_selected)
+                        .or_insert((atom.res_name.as_str(), is_selected));
+                }
+                residues.extend(grouped);
+            }
+            let mut chain: Option<GuiSeqChain> = None;
+            for ((chain_id, res_id, ins_code), (res_name, is_selected)) in residues {
+                if chain.as_ref().is_some_and(|row| row.chain_id != chain_id) {
+                    out.push(chain.take().unwrap());
+                }
+                let row = chain.get_or_insert_with(|| GuiSeqChain {
                     object_uid: object.uid(),
                     object_name: object.name().to_string(),
-                    chain_id: chain.chain_id,
-                    residues: chain_residues,
+                    chain_id: chain_id.to_string(),
+                    residues: Vec::new(),
                 });
+                let mut residue_index = res_id.to_string();
+                if let Some(code) = ins_code {
+                    residue_index.push(code);
+                }
+                let selection = format!("'{chain_id}'.{residue_index}.*");
+                row.residues.push(GuiSeqResidue {
+                    letter: residue_one_letter(res_name).to_string(),
+                    res_id,
+                    residue_index,
+                    res_name: res_name.to_string(),
+                    selection,
+                    selected: is_selected,
+                });
+            }
+            if let Some(chain) = chain {
+                out.push(chain);
             }
         }
         out
@@ -21527,21 +21625,16 @@ impl DesktopAppState {
                 return Ok(make_vector(Vector4::ZERO, ctx));
             }
             let (molecule, summary) = residue_summary_from_proxy(this, ctx)?;
-            let positions = summary
-                .atom_indices
-                .iter()
-                .filter_map(|index| molecule.molecule.atoms().get(*index))
-                .map(|atom| atom.position)
-                .collect::<Vec<_>>();
-            let pivot = if positions.is_empty() {
-                Vector4::ZERO
-            } else {
-                positions
-                    .iter()
-                    .copied()
-                    .fold(Vector4::ZERO, |sum, value| sum + value)
-                    / positions.len() as f64
-            };
+            let mut pivot = molecule
+                .molecule
+                .residue_pivot_pos(&summary.key.chain_id, &summary.key.script_index())
+                .map_err(|error| script_error(error.to_string()))?
+                .unwrap_or(Vector4::ZERO);
+            script_env::with(|env| {
+                if let Some(object) = env.objects.iter().find(|object| object.uid == molecule.uid) {
+                    object.xform.xform3d(&mut pivot);
+                }
+            });
             Ok(make_vector(pivot, ctx))
         }
         fn mol_residue_get_atom(
@@ -62851,7 +62944,7 @@ end_header
         );
         assert!(
             log.contains("residIter=GLY/1/2/2,ALA/2/3/1:ResidIterator(size=2, cursor=2)")
-                && log.contains("residApi=5:A 1 GLY")
+                && log.contains("residApi=1:A 1 GLY")
                 && log.contains("residueState=GXX:protein:10A:10:A"),
             "ResidIterator log: {log:?}"
         );
@@ -64144,6 +64237,138 @@ end_header
         assert!(!chain.residues[3].selected, "resid 4 is not selected");
         assert_eq!(chain.residues[0].residue_index, "1");
         assert_eq!(chain.residues[0].selection, "'A'.1.*");
+    }
+
+    #[test]
+    fn active_sequence_view_is_independent_of_atom_order() {
+        let template = read_pdb_str(
+            "ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00 10.00           C  \nEND\n",
+        )
+        .unwrap()
+        .atoms()[0]
+            .clone();
+        let mut molecule = cuemol_molstr::MolCoord::new();
+        for (chain, residue, insertion, name) in [
+            ("A", -1, None, "GLY"),
+            ("A", 1, None, "ALA"),
+            ("A", 1, Some('A'), "SER"),
+            ("B", 1, None, "THR"),
+        ] {
+            for atom_name in ["N", "CA", "C"] {
+                let mut atom = template.clone();
+                atom.serial = molecule.atom_count() as i32 + 1;
+                atom.chain_id = chain.into();
+                atom.res_id = residue;
+                atom.ins_code = insertion;
+                atom.res_name = name.into();
+                atom.name = atom_name.into();
+                molecule.push_atom(atom);
+            }
+        }
+        let mut app = DesktopAppState::new();
+        let scene = app.ensure_active_scene();
+        let object = app
+            .scene_manager_mut()
+            .scene_mut(scene)
+            .unwrap()
+            .add_molecule("permuted", molecule);
+        let expected = app.active_sequence_view("'A'.1A.CA or 'B'.1.N");
+        assert_eq!(expected.len(), 2);
+        assert_eq!(expected[0].residues.len(), 3);
+        assert!(!expected[0].residues[1].selected);
+        assert!(expected[0].residues[2].selected);
+        assert!(expected[1].residues[0].selected);
+        app.scene_manager_mut()
+            .object_mut(object)
+            .unwrap()
+            .mol_mut()
+            .atoms_mut()
+            .reverse();
+        assert_eq!(app.active_sequence_view("'A'.1A.CA or 'B'.1.N"), expected);
+        app.scene_manager_mut()
+            .object_mut(object)
+            .unwrap()
+            .mol_mut()
+            .atoms_mut()
+            .rotate_left(5);
+        assert_eq!(app.active_sequence_view("'A'.1A.CA or 'B'.1.N"), expected);
+    }
+
+    #[test]
+    fn sequence_pivot_and_empty_chain_match_reference() {
+        let mut app = DesktopAppState::new();
+        let scene = app.ensure_active_scene();
+        let mut molecule = read_pdb_str(
+            "ATOM      1  N   GLY     1       0.000   0.000   0.000  1.00 10.00           N  \n\
+             ATOM      2  CA  GLY     1      10.000   0.000   0.000  1.00 10.00           C  \n\
+             ATOM      3  C   GLY     1      40.000   0.000   0.000  1.00 10.00           C  \n\
+             ATOM      4  N   GLY A   2       3.000   0.000   0.000  1.00 10.00           N  \n\
+             ATOM      5  C   GLY A   2       9.000   0.000   0.000  1.00 10.00           C  \n\
+             ATOM      6  P    DA A   3      20.000   0.000   0.000  1.00 10.00           P  \n\
+             ATOM      7  C1'  DA A   3      50.000   0.000   0.000  1.00 10.00           C  \n\
+             HETATM    8  C1  LIG A   4      60.000   0.000   0.000  1.00 10.00           C  \n\
+             HETATM    9  C2  LIG A   4      80.000   0.000   0.000  1.00 10.00           C  \nEND\n",
+        ).unwrap();
+        for atom in molecule.atoms_mut() {
+            if atom.chain_id == "_" {
+                atom.chain_id.clear();
+            }
+        }
+        let object = app
+            .scene_manager_mut()
+            .scene_mut(scene)
+            .unwrap()
+            .add_molecule("pivots", molecule);
+        let rows = app.active_sequence_view("aid 1");
+        assert_eq!(rows[0].chain_id, "");
+        assert!(rows[0].residues[0].selected);
+        assert_eq!(rows[0].residues[0].selection, "''.1.*");
+        let empty_chain = parse_selector(&rows[0].residues[0].selection).unwrap();
+        assert_eq!(
+            app.scene_manager()
+                .object(object)
+                .unwrap()
+                .mol()
+                .select_indices(&empty_chain)
+                .len(),
+            3
+        );
+        for (selection, expected) in [
+            ("''.1.*", 10.),
+            ("'A'.2.*", 6.),
+            ("'A'.3.*", 20.),
+            ("'A'.4.*", 70.),
+        ] {
+            assert_eq!(
+                app.molecule_residue_pivot_for_text(object, selection)
+                    .unwrap()
+                    .unwrap()
+                    .x,
+                expected
+            );
+        }
+        let transform = Matrix4::make_trans_mat(Vector4::new3(5., 0., 0.));
+        app.scene_manager_mut()
+            .object_mut(object)
+            .unwrap()
+            .set_xform_matrix(transform);
+        assert_eq!(
+            app.molecule_residue_pivot_for_text(object, "''.1.*")
+                .unwrap()
+                .unwrap()
+                .x,
+            15.
+        );
+        #[cfg(feature = "scripting")]
+        {
+            let (log, _) = app
+                .run_script_js(&format!(
+                    "print(cuemol.getObject({}).getResidue('', '1').getPivotPos().x);",
+                    object.get()
+                ))
+                .unwrap();
+            assert_eq!(log, "15\n");
+        }
     }
 
     #[test]

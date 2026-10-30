@@ -545,6 +545,25 @@ impl MolCoord {
             .collect())
     }
 
+    /// Uses the topology pivot atom, falling back to the residue centroid.
+    pub fn residue_pivot_pos(&self, chain: &str, sindex: &str) -> Result<Option<Vector4>> {
+        let atoms = self.residue_atoms(chain, sindex)?;
+        let Some(first) = atoms.first() else {
+            return Ok(None);
+        };
+        if let Some(name) = crate::toppar::TopoDB::global().pivot_atom(&first.res_name) {
+            if let Some(atom) = self.atom_by_spec(chain, sindex, name)? {
+                return Ok(Some(atom.position));
+            }
+        }
+        Ok(Some(
+            atoms
+                .iter()
+                .fold(Vector4::ZERO, |sum, atom| sum + atom.position)
+                / atoms.len() as f64,
+        ))
+    }
+
     pub fn get_residue(&self, chain: &str, sindex: &str) -> Result<Option<ResidueSummary>> {
         let atoms = self.residue_atoms(chain, sindex)?;
         let Some(first) = atoms.first() else {

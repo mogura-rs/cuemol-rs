@@ -28,3 +28,6 @@ pub use inspector::{Inspector, InspectorTarget};
 mod render;
 #[cfg(feature = "egui")]
 pub use render::{RenderAction, RenderControls, RenderPanel};
+
+#[cfg(feature = "egui")]
+pub mod sequence;

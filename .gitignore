@@ -36,5 +36,8 @@ web/playwright-report/
 # Python build-helper bytecode
 __pycache__/
 *.py[cod]
+.venv/
+*.egg-info/
+.ipynb_checkpoints/
 
 third_party/*/Cargo.lock

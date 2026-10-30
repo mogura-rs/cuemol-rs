@@ -1,6 +1,42 @@
 use cuemol_molstr::SelCommand;
 
 #[test]
+fn residue_insertion_selection_matches_published_reference() {
+    let mut pdb = String::new();
+    for (index, (residue, insertion)) in
+        [(-1, ' '), (1, ' '), (1, 'A'), (1, 'B'), (2, ' '), (2, 'A')]
+            .into_iter()
+            .enumerate()
+    {
+        pdb.push_str(&format!(
+            "ATOM  {:5}  CA  GLY A{residue:4}{insertion}   {:8.3}{:8.3}{:8.3}  1.00 10.00           C  \n",
+            index + 1, index as f64, 0., 0.
+        ));
+    }
+    let molecule = cuemol_molstr::read_pdb_str(&pdb).unwrap();
+    for (expression, expected) in [
+        ("'A'.1.*", vec![1]),
+        ("'A'.1A.*", vec![2]),
+        ("resi 1", vec![1]),
+        ("resi 1A", vec![2]),
+        ("resi 1:2", vec![1, 2, 3, 4]),
+        ("resi 1A:2", vec![2, 3, 4]),
+        ("resi 1:1B", vec![1, 2, 3]),
+        ("resi 1B:2A", vec![3, 4, 5]),
+        ("resi -1:1A", vec![0, 1, 2]),
+        ("resi 1B,2A", vec![3, 5]),
+        ("resi 2A:1B", vec![3, 4, 5]),
+    ] {
+        let selection = cuemol_molstr::parse_selector(expression).unwrap();
+        assert_eq!(
+            molecule.select_indices(&selection),
+            expected,
+            "{expression}"
+        );
+    }
+}
+
+#[test]
 fn altconf_selection_dump_matches_reference_cases() {
     let mut cmd = SelCommand::new();
     for (expression, expected) in [

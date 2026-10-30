@@ -15,6 +15,11 @@ The sibling `../cuemol2` checkout is an optional, read-only reference; set
 
 ## Build from source
 
+For Debian/Ubuntu native source builds, install `build-essential`,
+`libxkbcommon-dev`, `libxkbcommon-x11-0` and `libwayland-dev`. On macOS, install
+the Xcode command-line tools. On Windows, use the MSVC Rust toolchain and
+Visual Studio Build Tools with the C++ workload.
+
 ```sh
 cargo build --locked --release -p cuemol-cli --features gui
 cargo run --locked --release -p cuemol-cli --features gui -- example.pdb
@@ -40,6 +45,14 @@ builds OIDN with pinned ISPC and oneTBB sources; other targets use verified
 prebuilt OIDN libraries. The native tests require the OIDN runtime bundle. See the
 [release workflow](../.github/workflows/release.yml) for platform dependencies.
 Generated builds, downloaded tools, browser packages, and test output are ignored.
+
+The root `pyproject.toml` uses Maturin's binary packaging to install `cuemol`
+from a Git URL or a local checkout. It builds the `gui` feature with the checked-in
+Cargo lockfile. For a local Python installation, run `uv venv`, then
+`uv pip install .`. This source installation does not build browser assets or
+bundle external executables. To validate the same PEP 517 path used by pip, run
+`uv run --no-project --with pip python -m pip wheel --no-deps . --wheel-dir .cache/wheels`.
+
 The root `cuemol-rs.png` is the logo source. Tauri builds generate the RGBA icon
 and webview copy; browser builds copy it into `pkg`, and macOS packaging generates
 the ICNS sizes. These derived assets are ignored. Use a release build when

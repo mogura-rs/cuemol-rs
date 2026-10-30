@@ -2,6 +2,7 @@ mod agent;
 mod export;
 mod external_tools;
 mod runtime;
+mod skill;
 mod web;
 use cuemol_mdtools::{
     read_amber_mdcrd_file, read_amber_netcdf_file_with_options, read_amber_prmtop_file,
@@ -72,6 +73,7 @@ fn run() -> Result<(), String> {
             }
         }
         "mcp" => runtime::mcp(args.collect()),
+        "skill" => skill::run(args.collect()),
         "agent" => agent::run(args.collect()),
         "web" => web::run(args.collect()),
         "tools" => external_tools::run(args.collect()),
@@ -832,8 +834,9 @@ fn self_upgrade() -> Result<(), String> {
 
 fn print_usage() {
     println!("  cuemol web build | serve [--port PORT] [--dir DIR]");
-    println!("CueMol3: cuemol [FILE ...] | mcp | config | run SCRIPT.js [ARGS...] | -c JAVASCRIPT [ARGS...] | exec TOOL JSON | render INPUT OUTPUT | trajectory-info FILE [STRIDE]");
+    println!("cuemol [FILE ...] | skill | mcp | config | run SCRIPT.js [ARGS...] | -c JAVASCRIPT [ARGS...] | exec TOOL JSON | render INPUT OUTPUT | trajectory-info FILE [STRIDE]");
     eprintln!("Usage:");
+    eprintln!("  cuemol skill [--help]   Print the agent skill as Markdown");
     eprintln!("  cuemol self-upgrade [--check]");
     eprintln!("  cuemol tools list | path NAME | run NAME [ARG ...] | bundle [--out DIR]");
     eprintln!("  cuemol [file ...]");

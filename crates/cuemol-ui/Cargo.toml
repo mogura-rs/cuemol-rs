@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+cuemol-core = { workspace = true, optional = true }
 cuemol-render.workspace = true
 cuemol-agent = { workspace = true, optional = true }
 cuemol-command = { workspace = true, optional = true }
@@ -19,4 +20,4 @@ egui = { version = "0.33.3", optional = true }
 
 [features]
 default = []
-egui = ["cuemol-command/scripting", "dep:egui-phosphor", "dep:egui", "dep:cuemol-agent", "dep:cuemol-command", "dep:cuemol-desktop-core", "dep:cuemol-qsys", "dep:serde_json", "dep:base64", "dep:zeroize", "dep:image"]
+egui = ["dep:cuemol-core", "cuemol-command/scripting", "dep:egui-phosphor", "dep:egui", "dep:cuemol-agent", "dep:cuemol-command", "dep:cuemol-desktop-core", "dep:cuemol-qsys", "dep:serde_json", "dep:base64", "dep:zeroize", "dep:image"]

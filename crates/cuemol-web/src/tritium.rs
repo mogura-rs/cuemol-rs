@@ -1028,6 +1028,79 @@ impl App {
             }
         }
     }
+    fn apply_sequence_action(
+        &mut self,
+        action: cuemol_ui::sequence::SequenceAction,
+        ctx: &egui::Context,
+    ) {
+        use cuemol_ui::sequence::SequenceAction;
+        let (object_uid, expression, center) = match action {
+            SequenceAction::Range {
+                object_uid,
+                anchor_selection,
+                range_selection,
+                toggle,
+                center_selection,
+            } => {
+                match self.state.molecule_residue_range_selection_text(
+                    object_uid,
+                    "",
+                    &anchor_selection,
+                    &range_selection,
+                    toggle,
+                ) {
+                    Ok(expression) => (object_uid, expression, center_selection),
+                    Err(error) => {
+                        self.message = error.to_string();
+                        return;
+                    }
+                }
+            }
+            SequenceAction::Selection {
+                object_uid,
+                expression,
+                ..
+            } => (object_uid, expression, None),
+            SequenceAction::Center {
+                object_uid,
+                selection,
+            } => {
+                match self
+                    .state
+                    .molecule_residue_pivot_for_text(object_uid, &selection)
+                {
+                    Ok(Some(center)) => {
+                        self.camera.set_center(center);
+                        self.message = "Center here".into();
+                    }
+                    Ok(None) => {}
+                    Err(error) => self.message = error.to_string(),
+                }
+                return;
+            }
+            SequenceAction::Copy(sequence) => {
+                ctx.copy_text(sequence);
+                self.message = "Sequence copied".into();
+                return;
+            }
+        };
+        if self.apply_navigation_commands(vec![cuemol_command::navigation::Command {
+            name: "set_mol_selection",
+            args: json!({"objId":object_uid.get(), "selection":expression}),
+        }]) {
+            if let Some(selection) = center {
+                match self
+                    .state
+                    .molecule_residue_pivot_for_text(object_uid, &selection)
+                {
+                    Ok(Some(center)) => self.camera.set_center(center),
+                    Ok(None) => {}
+                    Err(error) => self.message = error.to_string(),
+                }
+            }
+        }
+    }
+
     fn shell_bottom(&mut self, ctx: &egui::Context) {
         if self.message != self.last_log {
             self.logs.push(self.message.chars().take(4096).collect());
@@ -1148,26 +1221,16 @@ impl App {
                         });
                 }
                 "Sequence" => {
-                    egui::ScrollArea::both().show(ui, |ui| {
-                        for row in self.state.active_sequence_view(&self.selection) {
-                            ui.horizontal(|ui| {
-                                ui.label(format!("{} / {}", row.object_name, row.chain_id));
-                                for residue in row.residues {
-                                    let response = ui
-                                        .selectable_label(residue.selected, &residue.letter)
-                                        .on_hover_text(format!(
-                                            "{} {}",
-                                            residue.res_name, residue.residue_index
-                                        ));
-                                    if response.clicked() {
-                                        self.selected = Some(row.object_uid);
-                                        self.selection = residue.selection;
-                                        self.dirty = true;
-                                    }
-                                }
-                            });
-                        }
-                    });
+                    let action = self.sequence_panel.show(ui, &mut self.state, self.revision);
+                    self.ui_rects.extend(
+                        self.sequence_panel
+                            .rects
+                            .iter()
+                            .map(|(name, rect)| (name.clone(), *rect)),
+                    );
+                    if let Some(action) = action {
+                        self.apply_sequence_action(action, ui.ctx());
+                    }
                 }
                 "Animation" => {
                     self.timeline_contents(ui);
