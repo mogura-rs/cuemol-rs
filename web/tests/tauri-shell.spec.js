@@ -129,7 +129,7 @@ async function openShell(page, storage = {}, options = {}) {
           if(request.action==='compose') {
             const term=request.draft.fields.value ? `name ${request.draft.fields.value}` : null;
             const result={expression:term===null ? null : request.operation==='add' ? `(${request.current}) or (${term})` : term};
-            if(window.__delayCompose) {window.__delayCompose=false;return new Promise(resolve=>{window.__releaseCompose=()=>resolve(result);});}
+            if(window.__delayCompose) {window.__delayCompose=false;return new Promise((resolve,reject)=>{window.__releaseCompose=()=>window.__composeError?reject(new Error('Composition failed')):resolve(result);});}
             return result;
           }
           if(request.action==='evaluate') {
@@ -766,6 +766,45 @@ test('Tauri selection builder preserves queued operations before committing on c
   await expect(popup).not.toBeVisible();
   await expect(input).toHaveValue('name O1');
   expect(await writes()).toHaveLength(2);
+  expect(errors).toEqual([]);
+});
+
+test('Tauri Enter ignores empty, failed and superseded selection terms', async ({page}) => {
+  const errors=await openShell(page,{}, {selectionPicker:true});
+  await page.locator('.tree-renderer').filter({hasText:'Atoms'}).click();
+  const input=page.getByLabel('Inspected sel',{exact:true});
+  const popup=page.getByRole('dialog',{name:'Build selection',exact:true});
+  const writes=()=>page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='inspector_request'&&call.args.tool==='set_node_prop'&&call.args.args.prop==='sel'));
+  for(const mode of ['empty','failed','superseded']) {
+    await page.getByRole('button',{name:'Build sel',exact:true}).click();
+    await page.getByRole('button',{name:'Selection tab Term',exact:true}).click();
+    await page.getByLabel('Selection keyword',{exact:true}).selectOption('name');
+    await input.fill('');
+    const term=page.getByLabel('Selection value',{exact:true});
+    await term.fill(mode==='empty'?'':'C1');
+    await page.evaluate(mode=>{
+      window.__delayCompose=true;window.__composeError=mode==='failed';window.__releaseCompose=undefined;
+      document.querySelector('[aria-label="Selection value"]').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));
+    },mode);
+    await expect.poll(()=>page.evaluate(()=>typeof window.__releaseCompose)).toBe('function');
+    if(mode==='superseded') await input.fill('name O1');
+    await page.evaluate(async()=>{window.__releaseCompose();await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));});
+    await expect(popup).toBeVisible();
+    await expect(input).toHaveValue(mode==='superseded'?'name O1':'');
+    if(mode==='failed') await expect(popup).toContainText('Composition failed');
+    expect(await writes()).toHaveLength(0);
+    await page.keyboard.press('Escape');
+    await expect(input).toHaveValue('*');
+  }
+  await page.getByRole('button',{name:'Build sel',exact:true}).click();
+  await page.getByRole('button',{name:'Selection tab Term',exact:true}).click();
+  await input.fill('');
+  const term=page.getByLabel('Selection value',{exact:true});
+  await term.fill('C1');
+  await term.press('Enter');
+  await expect(popup).not.toBeVisible();
+  await expect(input).toHaveValue('name C1');
+  expect((await writes()).map(call=>call.args.args.value)).toEqual(['name C1']);
   expect(errors).toEqual([]);
 });
 

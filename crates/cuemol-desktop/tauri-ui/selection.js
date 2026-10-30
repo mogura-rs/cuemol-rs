@@ -105,12 +105,13 @@ function createCueMolSelectionPicker(input, target, identity, commit) {
     if (!live() || closing) return;
     const generation=valueGeneration, term=currentDraft();
     composeTail=composeTail.then(async()=>{
-      if(!live()||generation!==valueGeneration)return;
+      if(!live()||generation!==valueGeneration)return false;
       const result=await request({action:'compose',current:value,draft:term,operation});
-      if(!live()||generation!==valueGeneration)return;
-      if(result.expression!==null)setValue(result.expression,false);
-    }).catch(error=>{if(live()&&generation===valueGeneration)showError(String(error));});
-    if(immediate)void composeTail.then(()=>finish(false));
+      if(!live()||generation!==valueGeneration||result.expression===null)return false;
+      setValue(result.expression,false);
+      return true;
+    }).catch(error=>{if(live()&&generation===valueGeneration)showError(String(error));return false;});
+    if(immediate)void composeTail.then(applied=>{if(applied&&live()&&generation===valueGeneration)return finish(false);});
     return composeTail;
   };
   const scheduleCounts = () => {

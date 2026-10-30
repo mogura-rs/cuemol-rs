@@ -590,7 +590,7 @@ that candidate sampling follows the reference's sorted chain/residue queries,
 and that term quoting follows the reference builder. A delayed-IPC regression
 then reproduced a Tauri race: closing the picker before composition returned
 lost the pending operation, and a second operation was dropped. Compositions
-now run in order, capture their operand at each click and finish before a close
+now run in order, capture each term draft at its click and finish before a close
 commits the value. Manual text edits and cancellation invalidate late results.
 Both Tauri selection tests pass, including queued operations, immediate close,
 manual replacement and cancellation while a request is pending.
@@ -640,6 +640,16 @@ remain unresolved. The Rust bond-distance `neighbor`/`extend` extension is
 retained; the reference source parses these operators but returns no matches.
 An installed-reference probe also returned zero atoms for both operators on
 1CRN with `name CA` as the operand.
+
+The public review of `c4cc15a` identified an Enter-key race in the queued
+composition path. A null, failed or superseded composition could still run
+the immediate close handler. A new delayed-IPC test reproduced that close;
+immediate confirmation now requires a successfully applied composition from
+the same text generation. Explicit close continues to wait for queued edits.
+The six affected browser checks passed before this follow-up, including the
+two real WASM picker cases. The resolved reference path also ran all molstr
+tests with the sibling fixtures present, and the 68 shell checks plus the
+native history behavior test passed.
 
 ## Clipboard comparison and repairs
 
