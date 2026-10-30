@@ -61,6 +61,111 @@ fn fixture() -> (DesktopAppState, Camera, Vec<(Uid, Uid)>) {
 }
 
 #[test]
+fn scene_context_properties_use_actual_ids_and_reject_cross_scene_targets() {
+    let (mut state, mut camera, objects) = fixture();
+    let sid = state.active_scene().unwrap();
+    let list = call(
+        &mut state,
+        &mut camera,
+        "list_node_props",
+        json!({"nodeType":"scene","nodeId":sid.get()}),
+    );
+    let row = |key: &str| {
+        list["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["key"] == key)
+            .unwrap()
+    };
+    assert_eq!(row("name")["readonly"], true);
+    assert_eq!(row("uid")["value"], sid.get().to_string());
+    let ids = row("obj_uids")["value"]
+        .as_str()
+        .unwrap()
+        .split(',')
+        .map(|id| id.parse::<u64>().unwrap())
+        .collect::<Vec<_>>();
+    for (object, renderer) in objects {
+        assert!(ids.contains(&object.get()));
+        for (key, id) in [("activeObjID", object), ("activeRendID", renderer)] {
+            call(
+                &mut state,
+                &mut camera,
+                "set_node_prop",
+                json!({"nodeType":"scene","prop":key,"value":id.get().to_string()}),
+            );
+            let scene = state.scene_manager().scene(sid).unwrap();
+            assert_eq!(
+                if key == "activeObjID" {
+                    scene.active_object_uid()
+                } else {
+                    scene.active_renderer_uid()
+                },
+                Some(id)
+            );
+        }
+    }
+    assert!(call_tool(
+        &mut state,
+        &mut camera,
+        "set_node_prop",
+        &json!({"nodeType":"scene","prop":"activeObjID","value":"0"})
+    )
+    .is_err());
+    let old = state.clone();
+    assert!(call_tool(
+        &mut state,
+        &mut camera,
+        "set_node_prop",
+        &json!({"nodeType":"scene","prop":"obj_uids","value":"7"})
+    )
+    .is_err());
+    assert!(old.same_undo_state(&state));
+    state.new_scene("second", true);
+    assert!(call_tool(
+        &mut state,
+        &mut camera,
+        "set_node_prop",
+        &json!({"nodeType":"scene","nodeId":sid.get(),"prop":"name","value":"stale"})
+    )
+    .is_err());
+    assert_eq!(
+        state.scene_manager().scene(sid).unwrap().name(),
+        "properties"
+    );
+}
+
+#[test]
+fn property_batches_roll_back_scene_and_camera_on_invalid_updates() {
+    let mut state = DesktopAppState::new();
+    state.new_scene("scene", true);
+    let mut camera = Camera::new();
+    for (kind, updates) in [
+        (
+            "scene",
+            json!([{"prop":"aoRadius","value":"12"},{"prop":"aoSteps","value":"NaN"}]),
+        ),
+        (
+            "view",
+            json!([{"prop":"zoom","value":"25"},{"prop":"center","value":"invalid"}]),
+        ),
+    ] {
+        let before = state.clone();
+        let before_camera = camera.clone();
+        assert!(call_tool(
+            &mut state,
+            &mut camera,
+            "set_node_props",
+            &json!({"nodeType":kind,"updates":updates})
+        )
+        .is_err());
+        assert!(before.same_undo_state(&state));
+        assert_eq!(before_camera, camera);
+    }
+}
+
+#[test]
 fn auxiliary_properties_edit_render_state_and_roundtrip() {
     let (mut state, mut camera, objects) = fixture();
     let transform = Matrix4::make_trans_mat(Vector4::new3(5.0, 2.0, -1.0));
@@ -284,6 +389,25 @@ fn auxiliary_renderer_groups_use_the_same_property_interface() {
                 &mut camera,
                 "get_prop",
                 json!({"path":format!("#{}.alpha",group.get())})
+            )["value"],
+            "0.3"
+        );
+        let objects = call(&mut state, &mut camera, "get_scene_state", json!({}));
+        let object_name = objects["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == object.get())
+            .unwrap()["name"]
+            .as_str()
+            .unwrap();
+        let typed_path = format!("{object_name}/group@*group#{}.alpha", group.get());
+        assert_eq!(
+            call(
+                &mut state,
+                &mut camera,
+                "get_prop",
+                json!({"path":typed_path})
             )["value"],
             "0.3"
         );

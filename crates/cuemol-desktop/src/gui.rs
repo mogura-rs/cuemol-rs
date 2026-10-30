@@ -1491,6 +1491,7 @@ struct GuiApplication {
     light_theme: bool,
     activity: Option<cuemol_ui::shell::Activity>,
     inspector: cuemol_ui::Inspector,
+    inspector_context: Option<cuemol_ui::InspectorTarget>,
     /// Force every left-dock accordion section open (an "expand all panels" aid, also
     /// used to snapshot the bodies inside the REAL narrow dock for layout review).
     #[cfg(test)]
@@ -5098,6 +5099,7 @@ impl GuiApplication {
             light_theme: false,
             activity: Some(cuemol_ui::shell::Activity::Explorer),
             inspector: Default::default(),
+            inspector_context: None,
             #[cfg(test)]
             force_open_all_panels: false,
             coloring_start_hue: 240.0,
@@ -6641,6 +6643,7 @@ impl GuiApplication {
     }
 
     fn apply_workspace_target(&mut self, target: NativeWorkspaceTarget) {
+        self.inspector_context = None;
         self.selected_object = None;
         self.selected_renderer = None;
         self.workspace_aux_selection = None;
@@ -6839,6 +6842,7 @@ impl GuiApplication {
         multiple: bool,
         range: bool,
     ) -> bool {
+        self.inspector_context = None;
         if !range {
             return self.select_workspace_target(target, multiple);
         }
@@ -7032,6 +7036,7 @@ impl GuiApplication {
                 self.selected_object = None;
                 self.selected_renderer = None;
                 self.workspace_aux_selection = None;
+                self.open_scene_properties();
             }
             if scene_response.double_clicked() {
                 self.activate_workspace_scene(scene.uid, camera);
@@ -23418,17 +23423,16 @@ impl GuiApplication {
     }
 
     fn open_scene_properties(&mut self) {
-        let Some(mut properties) = NativeSceneProperties::from_state(&self.state) else {
+        let Some(scene) = self.state.active_scene() else {
             self.set_status("No active scene");
             return;
         };
-        properties.modified = self
-            .state
-            .active_scene()
-            .is_some_and(|uid| self.modified_scenes.contains(&uid));
-        self.scene_properties_draft = Some(properties);
-        self.scene_property_selected = 0;
-        self.show_scene_props = true;
+        self.inspector_context = Some(cuemol_ui::InspectorTarget {
+            kind: "scene".into(),
+            id: Some(scene.get()),
+        });
+        self.inspector.visible = true;
+        self.show_scene_props = false;
     }
 
     fn renderer_group_rename_dialog(&mut self, ctx: &egui::Context) {
@@ -23911,14 +23915,14 @@ impl GuiApplication {
         self.set_status(format!("Color proofing: {}", self.color_proofing));
     }
 
-    fn open_view_properties(&mut self, camera: &CameraController) {
+    fn open_view_properties(&mut self, _camera: &CameraController) {
         self.editing_saved_camera = None;
-        self.view_properties_draft = Some(NativeViewProperties::from_camera(
-            camera,
-            self.viewport_rect,
-        ));
-        self.view_property_selected = 0;
-        self.show_view_props = true;
+        self.inspector_context = Some(cuemol_ui::InspectorTarget {
+            kind: "view".into(),
+            id: self.state.active_view_summary().map(|view| view.uid.get()),
+        });
+        self.inspector.visible = true;
+        self.show_view_props = false;
     }
 
     fn camera_summary_for_selection(
@@ -39197,18 +39201,27 @@ mod tests {
     }
 
     #[test]
-    fn native_scene_property_dialog_keeps_an_isolated_draft() {
+    fn native_scene_inspector_opens_the_dock_and_applies_shared_edits() {
         let ctx = egui::Context::default();
         let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
         app.open_scene_properties();
-        let _ = ctx.run(egui::RawInput::default(), |ctx| app.scene_props_dialog(ctx));
-        assert!(app.show_scene_props);
-        assert!(app.scene_properties_draft.is_some());
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            app.tritium_layout(ctx, &mut camera)
+        });
+        assert!(!app.show_scene_props);
+        assert_eq!(app.inspector.target.as_ref().unwrap().kind, "scene");
         assert_eq!(app.background, SceneBackground::Black);
+        app.tritium_command(
+            "set_node_prop",
+            serde_json::json!({"nodeType":"scene","prop":"bgcolor","value":"white"}),
+            &mut camera,
+        );
+        assert_eq!(app.background, SceneBackground::White);
     }
 
     #[test]
-    fn native_view_property_dialog_keeps_an_isolated_draft() {
+    fn native_view_inspector_opens_the_dock_without_editing_the_camera() {
         let ctx = egui::Context::default();
         let mut app = GuiApplication::new();
         let mut camera = CameraController::default();
@@ -39218,10 +39231,11 @@ mod tests {
         ));
         app.open_view_properties(&camera);
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            app.view_props_dialog(ctx, &mut camera)
+            app.tritium_layout(ctx, &mut camera)
         });
-        assert!(app.show_view_props);
-        assert!(app.view_properties_draft.is_some());
+        assert!(!app.show_view_props);
+        assert_eq!(app.inspector.target.as_ref().unwrap().kind, "view");
+        assert!(app.view_properties_draft.is_none());
         assert_eq!(camera.name, "__current");
     }
 

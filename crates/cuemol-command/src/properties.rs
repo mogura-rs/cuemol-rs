@@ -1,6 +1,6 @@
 use crate::{
-    advanced::resolve_node,
     commands::{fit, renderer_owner, scene, text, uid},
+    console::resolve_property_reference,
     nodes,
 };
 use cuemol_core::{
@@ -14,10 +14,12 @@ use std::collections::BTreeMap;
 
 #[path = "property_metadata.rs"]
 mod metadata;
+#[path = "property_schema.rs"]
+mod schema;
 
 pub fn is_view_property_write(state: &DesktopAppState, name: &str, args: &Value) -> bool {
     match name {
-        "set_node_prop" | "reset_node_props" => args["nodeType"] == "view",
+        "set_node_prop" | "set_node_props" | "reset_node_props" => args["nodeType"] == "view",
         "set_prop" | "reset_prop" => args["path"].as_str().is_some_and(|path| {
             resolve_property_path(state, path).is_ok_and(|(kind, _, _)| kind == "view")
         }),
@@ -32,8 +34,8 @@ pub fn call_tool(
     args: &Value,
 ) -> Result<Value> {
     match name {
-        "list_node_props" | "set_node_prop" | "reset_node_props" | "set_prop" | "get_prop"
-        | "reset_prop" => properties(state, camera, name, args),
+        "list_node_props" | "set_node_prop" | "set_node_props" | "reset_node_props"
+        | "set_prop" | "get_prop" | "reset_prop" => properties(state, camera, name, args),
         "create_style_set" | "delete_style_set" | "set_style_readonly" | "load_style_file"
         | "save_style_file" | "define_color" | "define_selection" | "remove_color"
         | "remove_selection" | "remove_style" => styles(state, name, args),
@@ -474,51 +476,12 @@ pub(crate) fn resolve_property_path(
     if path.is_empty() {
         return Err(CueMolError::invalid_argument("no property given"));
     }
-    let slash = path.find('/');
-    if slash.is_some() || path.starts_with('#') {
-        let start = slash.unwrap_or(0);
-        let dot = path[start..]
-            .find('.')
-            .map(|i| start + i)
-            .ok_or_else(|| CueMolError::invalid_argument("a node reference needs a property"))?;
-        let (id, object) = resolve_node(state, &path[..dot])?;
+    if let Some((id, object, dot)) = resolve_property_reference(state, path)? {
         return Ok((
             if object { "object" } else { "renderer" }.into(),
             Some(id),
             path[dot + 1..].into(),
         ));
-    }
-    let scene = state.scene_manager().scene(scene(state)?).unwrap();
-    let mut objects = scene
-        .objects()
-        .iter()
-        .map(|object| (object.uid(), object.name().to_string()))
-        .collect::<Vec<_>>();
-    objects.extend(
-        nodes::extra_scene_objects(state)?
-            .iter()
-            .filter_map(|object| {
-                Some((
-                    Uid::new(object["id"].as_u64()?),
-                    object["name"].as_str()?.to_string(),
-                ))
-            }),
-    );
-    for (dot, _) in path.match_indices('.') {
-        let found = objects
-            .iter()
-            .filter(|(_, name)| name == &path[..dot])
-            .collect::<Vec<_>>();
-        match found.as_slice() {
-            [(id, _)] => return Ok(("object".into(), Some(*id), path[dot + 1..].into())),
-            [] => {}
-            _ => {
-                return Err(CueMolError::invalid_argument(format!(
-                    "ambiguous object name: {}; use #uid",
-                    &path[..dot]
-                )))
-            }
-        }
     }
     if let Some(property) = path.strip_prefix("view.") {
         return Ok(("view".into(), None, property.into()));
@@ -542,31 +505,49 @@ fn properties(
         )
     };
     let sid = scene(state)?;
-    if name == "reset_node_props" {
-        let rows = metadata::rows(state, camera, &kind, id)?;
-        let requested = args["props"].as_array();
-        if let Some(requested) = requested {
-            for key in requested {
-                if !rows
-                    .iter()
-                    .any(|row| row["key"] == *key && row["hasdefault"] == true)
-                {
-                    return Err(CueMolError::invalid_argument(format!(
-                        "{} has no resettable default",
-                        key
-                    )));
-                }
+    if kind == "scene" && id.is_some_and(|id| id != sid)
+        || kind == "view"
+            && id.is_some_and(|id| state.active_view_summary().map(|view| view.uid) != Some(id))
+    {
+        return Err(CueMolError::invalid_argument(
+            "the inspected context is no longer active",
+        ));
+    }
+    if name == "set_node_props" {
+        let updates = args["updates"]
+            .as_array()
+            .ok_or_else(|| CueMolError::invalid_argument("updates must be an array"))?;
+        if updates.is_empty() {
+            return Err(CueMolError::invalid_argument(
+                "at least one property update is required",
+            ));
+        }
+        for update in updates {
+            if !update["prop"].as_str().is_some_and(|key| !key.is_empty())
+                || !update["value"].is_string()
+            {
+                return Err(CueMolError::invalid_argument(
+                    "each update requires a property name and text value",
+                ));
             }
         }
-        let keys = rows
-            .iter()
-            .filter(|row| {
-                row["hasdefault"] == true
-                    && row["isdefault"] == false
-                    && requested.is_none_or(|keys| keys.contains(&row["key"]))
-            })
-            .map(|row| row["key"].as_str().unwrap().to_string())
-            .collect::<Vec<_>>();
+        let before = state.clone();
+        let before_camera = camera.clone();
+        let mut single = args.clone();
+        single.as_object_mut().unwrap().remove("updates");
+        for update in updates {
+            single["prop"] = update["prop"].clone();
+            single["value"] = update["value"].clone();
+            if let Err(error) = properties(state, camera, "set_node_prop", &single) {
+                *state = before;
+                *camera = before_camera;
+                return Err(error);
+            }
+        }
+        return Ok(json!({"properties":metadata::rows(state, camera, &kind, id)?}));
+    }
+    if name == "reset_node_props" {
+        let keys = reset_property_keys(state, &kind, id, args["props"].as_array())?;
         if !keys.is_empty() {
             let before = state.clone();
             for key in &keys {
@@ -614,15 +595,22 @@ fn properties(
             )?,
             "view" => set_view_property(state, camera, &prop, value)?,
             "scene" => {
-                validate_view_effect_property(&prop, value)?;
-                if prop == "bgcolor" {
-                    cuemol_gfx::parse_color(value)?;
-                }
-                let s = state.scene_manager_mut().scene_mut(sid).unwrap();
-                if prop == "name" {
-                    s.set_name(value);
+                if matches!(
+                    prop.as_str(),
+                    "activeObjID" | "activeRendID" | "activeViewID"
+                ) {
+                    set_scene_active_id(state, camera, sid, &prop, value)?;
                 } else {
-                    s.set_scene_attribute(prop.clone(), value);
+                    validate_view_effect_property(&prop, value)?;
+                    if prop == "bgcolor" {
+                        cuemol_gfx::parse_color(value)?;
+                    }
+                    let s = state.scene_manager_mut().scene_mut(sid).unwrap();
+                    if prop == "name" {
+                        s.set_name(value);
+                    } else {
+                        s.set_scene_attribute(prop.clone(), value);
+                    }
                 }
             }
             _ => return Err(CueMolError::invalid_argument("unknown node type")),
@@ -631,7 +619,9 @@ fn properties(
         reset_node_property(state, sid, &kind, id, &prop)?;
     }
     if name == "list_node_props" {
-        Ok(json!({"properties":metadata::rows(state, camera, &kind, id)?}))
+        Ok(
+            json!({"properties":metadata::rows(state, camera, &kind, id)?, "sections":schema::sections(&kind)}),
+        )
     } else {
         let mut values = node_property_values(state, camera, &kind, id)?;
         let value = if prop == "*" {
@@ -643,6 +633,37 @@ fn properties(
         };
         Ok(json!({"prop":prop,"value":value}))
     }
+}
+
+pub(crate) fn reset_property_keys(
+    state: &DesktopAppState,
+    kind: &str,
+    id: Option<Uid>,
+    requested: Option<&Vec<Value>>,
+) -> Result<Vec<String>> {
+    let rows = metadata::rows(state, &Camera::new(), kind, id)?;
+    if let Some(requested) = requested {
+        for key in requested {
+            if !rows
+                .iter()
+                .any(|row| row["key"] == *key && row["hasdefault"] == true)
+            {
+                return Err(CueMolError::invalid_argument(format!(
+                    "{} has no resettable default",
+                    key
+                )));
+            }
+        }
+    }
+    Ok(rows
+        .iter()
+        .filter(|row| {
+            row["hasdefault"] == true
+                && row["isdefault"] == false
+                && requested.is_none_or(|keys| keys.contains(&row["key"]))
+        })
+        .map(|row| row["key"].as_str().unwrap().to_string())
+        .collect())
 }
 
 fn reset_node_property(
@@ -722,7 +743,63 @@ pub(crate) fn node_property_values(
         "scene" => {
             let s = state.scene_manager().scene(sid).unwrap();
             let mut v = s.scene_attributes().clone();
+            v.retain(|key, _| !key.starts_with('_'));
             v.insert("name".into(), s.name().into());
+            let mut object_uids = s
+                .objects()
+                .iter()
+                .map(|object| object.uid().get())
+                .collect::<Vec<_>>();
+            object_uids.extend(
+                nodes::extra_scene_objects(state)?
+                    .iter()
+                    .filter_map(|object| object["id"].as_u64()),
+            );
+            object_uids.sort_unstable();
+            object_uids.dedup();
+            for (key, value) in [
+                ("uid", sid.get().to_string()),
+                ("src", s.source().into()),
+                ("srctype", s.source_type().into()),
+                ("basePath", s.base_path().into()),
+                (
+                    "obj_uids",
+                    object_uids
+                        .iter()
+                        .map(u64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                ),
+                (
+                    "view_uids",
+                    state
+                        .command_manager()
+                        .views()
+                        .iter()
+                        .filter(|view| view.scene_uid() == sid)
+                        .map(|view| view.uid().get().to_string())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                ),
+                (
+                    "activeObjID",
+                    s.active_object_uid().map_or(0, Uid::get).to_string(),
+                ),
+                (
+                    "activeRendID",
+                    s.active_renderer_uid().map_or(0, Uid::get).to_string(),
+                ),
+                (
+                    "activeViewID",
+                    s.active_view_uid().map_or(0, Uid::get).to_string(),
+                ),
+                (
+                    "modified",
+                    (s.scene_attribute("_script_modified") == Some("true")).to_string(),
+                ),
+            ] {
+                v.insert(key.into(), value);
+            }
             v.entry("bgcolor".into()).or_insert_with(|| "black".into());
             for (key, value) in VIEW_EFFECT_DEFAULTS {
                 v.entry((*key).into()).or_insert_with(|| (*value).into());
@@ -852,6 +929,9 @@ pub(crate) fn property_readonly(
             "width" | "height" | "hasHWStereo" | "up_vec" | "right_vec" | "forward_vec" | "style"
         );
     }
+    if kind == "scene" && matches!(key, "basePath" | "obj_uids" | "view_uids") {
+        return true;
+    }
     if matches!(kind, "renderer" | "rendGroup") {
         if key == "style" || cuemol_desktop_core::auxiliary_property_readonly(key) {
             return true;
@@ -916,6 +996,7 @@ fn view_properties(state: &DesktopAppState, camera: &Camera) -> BTreeMap<String,
     let mut current = view.unwrap_or(&defaults).clone();
     current.set_camera(camera);
     for (key, value) in [
+        ("uid", view.map_or(0, |view| view.uid().get()).to_string()),
         ("name", view.map_or("", View::name).to_string()),
         ("active", current.active().to_string()),
         ("width", current.width().to_string()),
@@ -932,6 +1013,54 @@ fn view_properties(state: &DesktopAppState, camera: &Camera) -> BTreeMap<String,
         values.insert(key.into(), value);
     }
     values
+}
+
+fn set_scene_active_id(
+    state: &mut DesktopAppState,
+    camera: &mut Camera,
+    sid: Uid,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    let id =
+        Uid::new(value.parse::<u64>().map_err(|_| {
+            CueMolError::invalid_argument("expected an object, renderer or view UID")
+        })?);
+    let extra = nodes::extra_scene_objects(state)?;
+    let belongs = |id: Uid| {
+        state
+            .scene_manager()
+            .scene(sid)
+            .unwrap()
+            .objects()
+            .iter()
+            .any(|object| object.uid() == id)
+            || extra.iter().any(|object| object["id"] == id.get())
+    };
+    let valid = match key {
+        "activeObjID" => belongs(id),
+        "activeRendID" => renderer_owner(state, id).is_ok_and(belongs),
+        _ => state
+            .command_manager()
+            .view(id)
+            .is_some_and(|view| view.scene_uid() == sid),
+    };
+    if !valid {
+        return Err(CueMolError::not_found(format!(
+            "{key} {value} is not in the active scene"
+        )));
+    }
+    if key == "activeViewID" {
+        *camera = state.activate_view(id)?;
+    } else {
+        let scene = state.scene_manager_mut().scene_mut(sid).unwrap();
+        if key == "activeObjID" {
+            scene.set_active_object_uid(Some(id));
+        } else {
+            scene.set_active_renderer_uid(Some(id));
+        }
+    }
+    Ok(())
 }
 
 fn set_view_property(

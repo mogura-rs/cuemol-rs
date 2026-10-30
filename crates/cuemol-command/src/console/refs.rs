@@ -161,7 +161,7 @@ fn wildcard_ref(text: &str) -> bool {
     text.split('/').any(|segment| is_glob(type_part(segment).0))
 }
 
-fn candidates<'a>(
+pub(super) fn candidates<'a>(
     nodes: &'a [Node],
     text: &str,
     semantic: &str,

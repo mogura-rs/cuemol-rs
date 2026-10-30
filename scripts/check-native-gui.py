@@ -393,6 +393,57 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             pyautogui.hotkey(primary, 'shift', 'z')
             wait_for(lambda: call('get_prop', {'path': locked_path})['value'] == 'false')
             capture('inspector-reset.png')
+
+            pyautogui.click(x + 145, y + 140)
+            time.sleep(0.2)
+            inspector_filter('name')
+            pyautogui.click(x + width - 100, y + 225)
+            pyautogui.hotkey(primary, 'a')
+            pyautogui.write('Inspector scene', interval=0.02)
+            pyautogui.press('enter')
+            wait_for(lambda: call('get_prop', {'path': 'name'})['value'] == 'Inspector scene')
+            if call('get_scene_state')['objects'][0]['name'] != 'console-probe':
+                raise RuntimeError('The Scene inspector edited the selected object')
+            capture('inspector-scene.png')
+
+            pyautogui.click(x + 180, y + 13)
+            time.sleep(0.2)
+            capture('inspector-view-menu.png')
+            pyautogui.click(x + 240, y + 228)
+            time.sleep(0.2)
+            inspector_filter('zoom')
+            before_inspector_zoom = call('get_view')['zoom']
+            pyautogui.moveTo(x + width * 0.6, y + height * 0.4)
+            pyautogui.scroll(2)
+            inspector_zoom = wait_for(lambda: zoom if (zoom := call('get_view')['zoom']) != before_inspector_zoom else None)
+            pyautogui.doubleClick(x + width - 100, y + 225, interval=0.1)
+            pyautogui.hotkey(primary, 'a')
+            pyautogui.hotkey(primary, 'c')
+            wait_for(lambda: clipboard_text() != command)
+            if abs(float(clipboard_text()) - inspector_zoom) > 0.01:
+                raise RuntimeError('The View inspector retained an old zoom value')
+            pyautogui.write('37.25', interval=0.1)
+            pyautogui.moveTo(x + width * 0.6, y + height * 0.4)
+            pyautogui.scroll(-2)
+            wait_for(lambda: call('get_view')['zoom'] != inspector_zoom)
+            pyautogui.hotkey(primary, 'a')
+            pyautogui.hotkey(primary, 'c')
+            wait_for(lambda: clipboard_text() == '37.25')
+            pyautogui.press('enter')
+            wait_for(lambda: abs(call('get_view')['zoom'] - 37.25) < 0.001)
+            inspector_filter('name')
+            pyautogui.click(x + width - 100, y + 225)
+            pyautogui.hotkey(primary, 'a')
+            pyautogui.write('Orbit view', interval=0.02)
+            pyautogui.moveTo(x + width * 0.6, y + height * 0.4)
+            pyautogui.scroll(2)
+            wait_for(lambda: abs(call('get_view')['zoom'] - 37.25) > 0.01)
+            pyautogui.hotkey(primary, 'a')
+            pyautogui.hotkey(primary, 'c')
+            wait_for(lambda: clipboard_text() == 'Orbit view')
+            pyautogui.press('enter')
+            wait_for(lambda: call('get_prop', {'path': 'view.name'})['value'] == 'Orbit view')
+            capture('inspector-view.png')
             report.update(ok=True, window=bounds,
                           work_area=[available_x, available_y, available_width, available_height],
                           window_contained=True, atoms=state['objects'][0]['atoms'],
@@ -409,6 +460,9 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                           clipboard_text_external=True,
                           shell_shortcuts=True,
                           inspector_text_undo=True, inspector_boolean_reset=True,
+                          inspector_scene_target=True, inspector_view_navigation=True,
+                          inspector_numeric_draft=True,
+                          inspector_text_draft=True,
                           font_pixels=styled.histogram()[255])
             print(json.dumps(report), flush=True)
         except BaseException as error:

@@ -47,6 +47,7 @@ async function openShell(page, storage = {}, options = {}) {
       image: null, width: 320, height: 240, center: [0, 0, 0], zoom: 10, distance: 100, slab: 50,
       perspective: false, centerMark: options.centerMark || 'none', centerMarkEmbedded: true, lines: [], labels: [], status: 'Ready',
     };
+    const sceneValues = {name:scene.name,uid:'1',aoEnabled:'false',aoRadius:'4',aoSteps:'3',aoIntensity:'2.2',aoHalfRes:'false'};
     const sequenceIndices = options.sequenceExtremes ? [-2147483648, '-2147483648A', 0, 2147483647, '2147483647B'] : [-2, -1, 0, 1, '1A', '1B', ...Array.from({length: 4999}, (_, index) => index + 2)];
     const sequenceResidues = options.sequence ? sequenceIndices.map((index, position) => ({
       letter: 'G', resId: Number.parseInt(index, 10), residueIndex: String(index), resName: 'GLY',
@@ -62,7 +63,10 @@ async function openShell(page, storage = {}, options = {}) {
       window.__shellCalls.push({command, args});
       if (command === 'get_initial_state') return {snapshot, viewport, preferences: {}, startupPathsPending: false};
       if (command === 'render_viewport') return viewport;
-      if (command === 'update_camera') return {...viewport, width: args.width, height: args.height};
+      if (command === 'update_camera') {
+        if (args.action === 'zoom') viewport.zoom *= args.x;
+        return {...viewport, width: args.width, height: args.height};
+      }
       if (command === 'pick_atom' || command === 'select_screen_rect') return {snapshot, viewport};
       if (command === 'hover_at_screen') return {...viewport, image: null};
       if (command === 'get_molecule_details') return {structureKey: 'initial', sequenceKey: snapshot.sequenceKey, structureObjectUid: 3, structure: [], sequence, sequenceLayout};
@@ -113,6 +117,26 @@ async function openShell(page, storage = {}, options = {}) {
       }
       if (command === 'console_complete') return [{display: 'Probe', replacement: 'select Probe'}];
       if (command === 'inspector_request') {
+        if (['scene','view'].includes(args.args.nodeType)) {
+          const isScene=args.args.nodeType==='scene';
+          const values=isScene ? sceneValues : {name:snapshot.views[0].name,uid:'2',zoom:String(viewport.zoom)};
+          const sections=isScene ? [
+            {title:'Basic settings',expanded:true,rows:[{key:'name',label:'Name',editable:true}]},
+            {title:'Ambient occlusion',expanded:true,rows:[{key:'aoEnabled',label:'Enabled'},{key:'ao-preset',label:'Preset',enabledWhen:'aoEnabled',options:[
+              {label:'Low',patch:{aoRadius:'4',aoSteps:'3',aoIntensity:'2.2',aoHalfRes:'false'}},
+              {label:'High',patch:{aoRadius:'12',aoSteps:'5',aoIntensity:'1.7',aoHalfRes:'true'}},
+            ]}]},
+          ] : [];
+          const rows=()=>Object.entries(values).map(([key,value])=>({key,value,type:key==='aoEnabled' || key==='aoHalfRes' ? 'boolean' : key==='name' ? 'string' : 'real',readonly:key==='uid' || isScene && key==='name',category:'Common',hasdefault:false}));
+          if(args.tool==='list_node_props') return {properties:rows(),sections};
+          for(const {prop,value} of args.tool==='set_node_props' ? args.args.updates : [args.args]) {
+            values[prop]=value;
+            if(isScene && prop==='name') scene.name=value;
+            if(!isScene && prop==='name') snapshot.views[0].name=value;
+            if(!isScene && prop==='zoom') viewport.zoom=Number(value);
+          }
+          return {snapshot:structuredClone(snapshot),result:{properties:rows()}};
+        }
         const target = args.args.nodeId === 4 ? renderer : molecule;
         const defaults = {alpha:'1', visible:'true', detail:'4', egtype:'none'};
         const values = {name:target.name, visible:String(target.visible), uid:String(target.uid),
@@ -596,5 +620,42 @@ test('Tauri inspector uses typed fields and rejects late results after changing 
   await expect(page.getByLabel('Inspected name')).toHaveValue('Atoms');
   await page.evaluate(()=>window.__releaseInspector());
   await expect(page.getByLabel('Inspected name')).toHaveValue('Atoms');
+  expect(errors).toEqual([]);
+});
+
+test('Tauri Scene and View inspectors share presets and refresh after camera input', async ({page}) => {
+  const errors=await openShell(page);
+  await page.locator('.menu').filter({has:page.locator('[data-dialog="Scene Properties"]')}).locator('summary').click();
+  await page.locator('[data-dialog="Scene Properties"]').click();
+  const name=page.getByLabel('Inspected name',{exact:true});
+  await expect(name).toBeEnabled();
+  await name.fill('Scene from Inspector'); await name.press('Tab');
+  await expect(name).toHaveValue('Scene from Inspector');
+  await page.getByLabel('Inspected aoEnabled',{exact:true}).check();
+  await page.getByLabel('Inspected ao-preset',{exact:true}).selectOption('High');
+  await expect.poll(()=>page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='inspector_request' && call.args.tool==='set_node_props').length)).toBe(1);
+  const batch=await page.evaluate(()=>window.__shellCalls.find(call=>call.command==='inspector_request' && call.args.tool==='set_node_props').args.args);
+  expect(batch.nodeType).toBe('scene');
+  expect(batch.updates).toEqual([{prop:'aoRadius',value:'12'},{prop:'aoSteps',value:'5'},{prop:'aoIntensity',value:'1.7'},{prop:'aoHalfRes',value:'true'}]);
+  await page.getByRole('tab',{name:'Generic',exact:true}).click();
+  await expect(name).toBeDisabled();
+  await page.locator('.menu').filter({has:page.locator('[data-dialog="View Property"]')}).locator('summary').click();
+  await page.locator('[data-dialog="View Property"]').click();
+  const zoom=page.getByLabel('Inspected zoom',{exact:true});
+  await expect(zoom).toHaveValue('10');
+  const rect=await page.locator('#viewport').boundingBox();
+  await page.mouse.move(rect.x+rect.width/2,rect.y+rect.height/2);
+  await page.mouse.wheel(0,160);
+  await expect(zoom).not.toHaveValue('10');
+  await name.fill('Pending view');
+  const queries=await page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='inspector_request' && call.args.tool==='list_node_props').length);
+  await page.mouse.wheel(0,160);
+  await expect.poll(()=>page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='inspector_request' && call.args.tool==='list_node_props').length)).toBeGreaterThan(queries);
+  await expect(name).toHaveValue('Pending view');
+  await page.evaluate(()=>window.__TAURI__.core.invoke('inspector_request',{tool:'set_node_prop',args:{nodeType:'view',nodeId:2,prop:'name',value:'External view'}}));
+  await page.mouse.wheel(0,160);
+  await expect(name).toHaveValue('External view');
+  await page.locator('.tree-object').filter({hasText:'Probe'}).click();
+  await expect(name).toHaveValue('Probe');
   expect(errors).toEqual([]);
 });

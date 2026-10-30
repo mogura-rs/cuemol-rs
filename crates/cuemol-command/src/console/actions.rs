@@ -155,6 +155,55 @@ impl Record {
             }
         };
         let record = Self::new(&label, "gui");
+        if name == "set_node_props" {
+            let mut single = args.clone();
+            single.as_object_mut().unwrap().remove("updates");
+            for update in args["updates"].as_array().into_iter().flatten() {
+                single["prop"] = update["prop"].clone();
+                single["value"] = update["value"].clone();
+                if let Some(op) = Session::record_operation(state, "set_node_prop", &single) {
+                    record.append(op);
+                }
+            }
+            return record;
+        }
+        if name == "reset_node_props" {
+            let kind = args["nodeType"].as_str().unwrap_or("");
+            let id = args["nodeId"].as_u64();
+            if let Ok(keys) = crate::properties::reset_property_keys(
+                state,
+                kind,
+                id.map(cuemol_core::Uid::new),
+                args["props"].as_array(),
+            ) {
+                let inventory = nodes(state).unwrap_or_default();
+                for key in keys {
+                    let path = match kind {
+                        "scene" => key,
+                        "view" => format!("view.{key}"),
+                        _ => {
+                            let Some(id) = id else {
+                                continue;
+                            };
+                            let path = inventory
+                                .iter()
+                                .find(|node| node.id == id)
+                                .map(|node| format!("{}@{}#{}", node.path, node.class, node.id))
+                                .unwrap_or_else(|| format!("#{id}"));
+                            format!("{path}.{key}")
+                        }
+                    };
+                    if let Some(op) = Session::record_operation(
+                        state,
+                        "reset_prop",
+                        &serde_json::json!({"path":path}),
+                    ) {
+                        record.append(op);
+                    }
+                }
+            }
+            return record;
+        }
         if let Some(op) = Session::record_operation(state, name, args) {
             record.append(op);
         }

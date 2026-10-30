@@ -45,6 +45,7 @@ fn group(name: &str) -> &str {
         | "rename_node"
         | "list_node_props"
         | "set_node_prop"
+        | "set_node_props"
         | "set_visible"
         | "list_renderer_types"
         | "set_renderer_coloring"

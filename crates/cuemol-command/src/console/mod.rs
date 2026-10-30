@@ -218,7 +218,12 @@ fn nodes(state: &DesktopAppState) -> Result<Vec<Node>, String> {
             path: name.clone(),
             name: name.clone(),
         });
-        for renderer in object["renderers"].as_array().into_iter().flatten() {
+        for renderer in object["renderers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .chain(object["rendererGroups"].as_array().into_iter().flatten())
+        {
             let label = renderer["name"].as_str().unwrap_or("").to_string();
             result.push(Node {
                 id: renderer["id"].as_u64().unwrap(),
@@ -253,6 +258,40 @@ fn node_accepts(node: &Node, semantic: &str) -> bool {
 
 fn resolve_node<'a>(nodes: &'a [Node], word: &str, semantic: &str) -> Result<&'a Node, String> {
     refs::resolve(nodes, word, semantic)
+}
+
+pub(crate) fn resolve_property_reference(
+    state: &DesktopAppState,
+    path: &str,
+) -> cuemol_core::Result<Option<(cuemol_core::Uid, bool, usize)>> {
+    use cuemol_core::{CueMolError, Uid};
+    let inventory = nodes(state).map_err(CueMolError::invalid_argument)?;
+    let slash = path.find('/');
+    if slash.is_some() || path.starts_with('#') {
+        let start = slash.unwrap_or(0);
+        let dot = path[start..]
+            .find('.')
+            .map(|index| start + index)
+            .ok_or_else(|| CueMolError::invalid_argument("a node reference needs a property"))?;
+        let node = resolve_node(&inventory, &path[..dot], "node")
+            .map_err(CueMolError::invalid_argument)?;
+        return Ok(Some((Uid::new(node.id), node.kind == "object", dot)));
+    }
+    for (dot, _) in path.match_indices('.') {
+        let found = refs::candidates(&inventory, &path[..dot], "object", false)
+            .map_err(CueMolError::invalid_argument)?;
+        match found.as_slice() {
+            [node] => return Ok(Some((Uid::new(node.id), true, dot))),
+            [] => {}
+            _ => {
+                return Err(CueMolError::invalid_argument(format!(
+                    "ambiguous object name: {}; use #uid",
+                    &path[..dot]
+                )))
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn tool_schema(name: &str) -> &'static Value {

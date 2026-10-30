@@ -92,7 +92,18 @@ function setCueMolInspectorWidth(value) {
   splitter.setAttribute("aria-valuemax", String(Math.round(maximum)));
 }
 
-const cueMolPropertyInspector = {key: '', target: null, rows: [], source: null, serial: 0, tab: 'Properties', filter: '', error: ''};
+const cueMolPropertyInspector = {key: '', target: null, rows: [], sections: [], source: null, serial: 0, tab: 'Properties', filter: '', error: ''};
+let cueMolViewInspectorTimer = null;
+
+function refreshCueMolViewInspector() {
+  if (workspaceSelectionKind !== 'view' || cueMolInspectorClosed || cueMolViewInspectorTimer !== null) return;
+  cueMolViewInspectorTimer = setTimeout(() => {
+    cueMolViewInspectorTimer = null;
+    if (workspaceSelectionKind !== 'view' || cueMolInspectorClosed) return;
+    cueMolPropertyInspector.source = null;
+    renderTritiumInspector(null, null, null);
+  }, 80);
+}
 
 function renderTritiumInspector(owner, camera, style) {
   if (cueMolActivity === "actions" && renderActionInspector()) return;
@@ -101,25 +112,27 @@ function renderTritiumInspector(owner, camera, style) {
     : workspaceSelectionKind === "lwRenderer" ? selectedLwRendererUid
     : ["renderer", "rendererGroup"].includes(workspaceSelectionKind) ? selectedRendererUid : null;
   const renderer = owner?.renderers?.find(item => item.uid === rendererUid);
-  const target = renderer || owner || camera || style;
+  const context = workspaceSelectionKind === 'scene' ? snapshot?.scenes.find(scene => scene.active)
+    : workspaceSelectionKind === 'view' ? snapshot?.views.find(view => view.active) : null;
+  const target = context || renderer || owner || camera || style;
   const key = target ? `${snapshot?.activeSceneUid}:${workspaceSelectionKind}:${target.uid ?? target.name}` : "";
   if (key !== cueMolInspectorTarget) {
     cueMolInspectorTarget = key;
     cueMolInspectorClosed = false;
-    cueMolPropertyInspector.tab = 'Properties';
+    cueMolPropertyInspector.tab = workspaceSelectionKind === 'view' ? 'Generic' : 'Properties';
     cueMolPropertyInspector.filter = '';
   }
   contentHolder.classList.toggle("has-inspector", Boolean(target) && !cueMolInspectorClosed);
   document.getElementById("inspector-title").textContent = target?.name || "No object";
   const fields = document.getElementById("inspector-fields");
-  if (!target || !owner) {
+  if (!target || (!owner && !context)) {
     cueMolPropertyInspector.key = '';
     cueMolPropertyInspector.target = null;
     cueMolPropertyInspector.serial += 1;
     fields.replaceChildren();
     return;
   }
-  const node = {nodeType: renderer ? 'renderer' : 'object', nodeId: renderer?.uid ?? owner.uid};
+  const node = {nodeType: context ? workspaceSelectionKind : renderer ? 'renderer' : 'object', nodeId: target.uid};
   const inspector = cueMolPropertyInspector;
   if (inspector.key === key && inspector.source === snapshot) return;
   const selectedChanged = inspector.key !== key;
@@ -132,6 +145,7 @@ function renderTritiumInspector(owner, camera, style) {
   void invoke('inspector_request', {tool:'list_node_props', args:node}).then(result => {
     if (inspector.serial !== serial || inspector.key !== key) return;
     inspector.rows = result.properties || [];
+    inspector.sections = result.sections || [];
     paintCueMolProperties();
   }).catch(error => {
     if (inspector.serial !== serial || inspector.key !== key) return;
@@ -167,7 +181,7 @@ function paintCueMolProperties() {
   const inspector = cueMolPropertyInspector;
   const fields = document.getElementById('inspector-fields');
   const active = fields.contains(document.activeElement) ? document.activeElement : null;
-  const focus = active?.id ? {id:active.id, dirty:active.dataset.initialValue !== undefined && active.value !== active.dataset.initialValue, value:active.value, start:active.selectionStart, end:active.selectionEnd} : null;
+  const focus = active?.id ? {id:active.id, dirty:active.dataset.initialValue !== undefined && active.value !== active.dataset.initialValue, initial:active.dataset.initialValue, value:active.value, start:active.selectionStart, end:active.selectionEnd} : null;
   fields.replaceChildren();
   const tabs = document.createElement('div');
   tabs.className = 'inspector-tabs';
@@ -203,7 +217,7 @@ function paintCueMolProperties() {
   if (focus) {
     const input = document.getElementById(focus.id);
     if (input && !input.disabled) {
-      if (focus.dirty) input.value=focus.value;
+      if (focus.dirty && (input.type === 'number' || input.dataset.initialValue === focus.initial)) input.value=focus.value;
       input.focus({preventScroll:true});
       if (focus.start !== null && ['text','search'].includes(input.type)) input.setSelectionRange(focus.start,focus.end);
     }
@@ -216,7 +230,22 @@ function paintCueMolPropertyRows() {
   if (!host) return;
   host.replaceChildren();
   const filter = inspector.filter.toLowerCase();
-  const rows = inspector.rows.filter(row => !filter || row.key.toLowerCase().includes(filter));
+  const structured = inspector.tab === 'Properties' && inspector.sections.length > 0;
+  let rows = inspector.rows;
+  if (structured) {
+    rows = inspector.sections.flatMap(section => section.rows.map(definition => {
+      const property = inspector.rows.find(row => row.key === definition.key);
+      if (definition.options) {
+        const matches = definition.options.find(option => Object.entries(option.patch).every(([key, value]) => {
+          const current = inspector.rows.find(row => row.key === key)?.value;
+          return current === value || current !== '' && value !== '' && Math.abs(Number(current) - Number(value)) < 1e-6;
+        }));
+        return {key:definition.key, value:matches?.label || 'Custom', type:'preset', allowed:definition.options.map(option=>option.label), category:section.title, schema:definition};
+      }
+      return property ? {...property, category:section.title, schema:definition, readonly:definition.editable ? false : property.readonly} : null;
+    }).filter(Boolean));
+  }
+  rows = rows.filter(row => !filter || row.key.toLowerCase().includes(filter));
   const groups = new Map();
   for (const row of rows) {
     const group = inspector.tab === 'Properties' ? row.category || 'Properties' : '';
@@ -224,33 +253,48 @@ function paintCueMolPropertyRows() {
     groups.get(group).push(row);
   }
   const order = ['Common', 'Appearance', 'Geometry'];
-  const rank = group => group === 'Identity' ? 4 : order.includes(group) ? order.indexOf(group) : 3;
+  const rank = group => structured ? inspector.sections.findIndex(section=>section.title===group) : group === 'Identity' ? 4 : order.includes(group) ? order.indexOf(group) : 3;
   for (const [group, entries] of [...groups].sort(([a], [b]) => rank(a)-rank(b) || a.localeCompare(b))) {
     let container = host;
     if (group && !filter) {
       const details = document.createElement('details'); details.className = 'inspector-property-group';
-      details.open = order.includes(group);
+      details.open = structured ? inspector.sections.find(section=>section.title===group)?.expanded : order.includes(group);
       const summary = document.createElement('summary'); summary.textContent = group;
       details.append(summary); host.append(details); container = details;
     }
     for (const row of entries) {
       const line = document.createElement('div'); line.className = 'inspector-property';
-      const label = document.createElement('label'); label.textContent = inspector.tab === 'Properties' ? row.key.split('.').at(-1) : row.key;
+      const label = document.createElement('label'); label.textContent = row.schema?.label || (inspector.tab === 'Properties' ? row.key.split('.').at(-1) : row.key);
       const id = `inspector-property-${row.key}`; label.htmlFor = id; label.title = `${row.key} (${row.type})`;
       line.append(label);
       const controls = document.createElement('div'); controls.className = 'inspector-property-input';
       const input = document.createElement(row.allowed?.length ? 'select' : 'input');
-      input.id = id; input.disabled = row.readonly;
+      input.id = id; input.disabled = row.readonly || Boolean(row.schema?.enabledWhen && inspector.rows.find(property=>property.key===row.schema.enabledWhen)?.value !== 'true');
       input.setAttribute('aria-label', row.key === 'name' ? 'Inspected name' : `Inspected ${row.key}`);
       if (row.allowed?.length) {
-        for (const value of row.allowed) { const option = document.createElement('option'); option.value=value; option.textContent=value; input.append(option); }
+        if (row.type === 'preset' && row.value === 'Custom') { const option = document.createElement('option'); option.value='Custom'; option.textContent='Custom'; option.disabled=true; input.append(option); }
+        for (const value of row.allowed) { const option = document.createElement('option'); option.value=value; option.textContent=row.schema?.labels?.[value] || value; input.append(option); }
       } else if (row.type === 'boolean') { input.type='checkbox'; input.checked=row.value === 'true'; }
       else if (row.type === 'integer' || row.type === 'real') { input.type='number'; input.step=row.type === 'integer' ? '1' : 'any'; }
       else { input.type='text'; }
       input.value = row.value;
       input.dataset.initialValue = row.value;
       const commit = value => {
-        if (value !== row.value) void editCueMolProperty('set_node_prop', {prop:row.key, value, cascadeGroupVisibility:inspector.tab === 'Properties'});
+        if (value === row.value) return;
+        let updates;
+        if (row.type === 'preset') {
+          updates = Object.entries(row.schema.options.find(option=>option.label===value).patch).map(([prop,value])=>({prop,value}));
+        } else {
+          updates = [{prop:row.key,value}];
+          if (value === 'true') {
+            for (const [prop, value] of Object.entries(row.schema?.seedWhenEnabled || {})) {
+              if (!inspector.rows.find(property=>property.key===prop)?.value) updates.push({prop,value});
+            }
+          }
+        }
+        void editCueMolProperty(updates.length === 1 ? 'set_node_prop' : 'set_node_props', {
+          ...(updates.length === 1 ? updates[0] : {updates}), cascadeGroupVisibility:inspector.tab === 'Properties',
+        });
       };
       input.addEventListener('change', () => {
         if (input.validity && !input.validity.valid) { input.reportValidity(); return; }

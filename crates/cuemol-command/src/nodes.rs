@@ -281,17 +281,23 @@ pub fn move_target(args: &Value, from: usize, count: usize) -> Result<usize> {
     }
 }
 
+fn renderer_groups(groups: Vec<cuemol_desktop_core::GuiAuxRendererGroupSummary>) -> Value {
+    json!(groups.into_iter().map(|group|
+        json!({"id":group.uid.get(),"name":group.name,"type":"*group","visible":group.visible})
+    ).collect::<Vec<_>>())
+}
+
 pub fn extra_scene_objects(state: &DesktopAppState) -> Result<Vec<Value>> {
     let scene = scene(state)?;
     let mut objects = Vec::new();
     for map in state.density_map_summaries(scene) {
-        objects.push(json!({"id":map.uid.get(),"name":map.name,"className":map.class_name,"visible":map.visible,"renderers":map.renderers.into_iter().map(|r|json!({"id":r.uid.get(),"name":r.name,"type":r.renderer_type,"visible":r.visible,"group":r.group})).collect::<Vec<_>>()}));
+        objects.push(json!({"id":map.uid.get(),"name":map.name,"className":map.class_name,"visible":map.visible,"rendererGroups":renderer_groups(map.renderer_groups),"renderers":map.renderers.into_iter().map(|r|json!({"id":r.uid.get(),"name":r.name,"type":r.renderer_type,"visible":r.visible,"group":r.group})).collect::<Vec<_>>()}));
     }
     for surface in state.surface_summaries(scene) {
-        objects.push(json!({"id":surface.uid.get(),"name":surface.name,"className":surface.class_name,"visible":surface.visible,"renderers":surface.renderers.into_iter().map(|r|json!({"id":r.uid.get(),"name":r.name,"type":r.renderer_type,"visible":r.visible,"group":r.group})).collect::<Vec<_>>()}));
+        objects.push(json!({"id":surface.uid.get(),"name":surface.name,"className":surface.class_name,"visible":surface.visible,"rendererGroups":renderer_groups(surface.renderer_groups),"renderers":surface.renderers.into_iter().map(|r|json!({"id":r.uid.get(),"name":r.name,"type":r.renderer_type,"visible":r.visible,"group":r.group})).collect::<Vec<_>>()}));
     }
     for object in state.lw_object_summaries(scene) {
-        objects.push(json!({"id":object.uid.get(),"name":object.name,"className":object.class_name,"visible":object.visible,"renderers":object.renderers.into_iter().map(|r|json!({"id":r.uid.get(),"name":r.name,"type":r.renderer_type,"visible":r.visible,"group":r.group})).collect::<Vec<_>>()}));
+        objects.push(json!({"id":object.uid.get(),"name":object.name,"className":object.class_name,"visible":object.visible,"rendererGroups":renderer_groups(object.renderer_groups),"renderers":object.renderers.into_iter().map(|r|json!({"id":r.uid.get(),"name":r.name,"type":r.renderer_type,"visible":r.visible,"group":r.group})).collect::<Vec<_>>()}));
     }
     Ok(objects)
 }

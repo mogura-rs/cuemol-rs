@@ -11,9 +11,11 @@ fn scalar_type(key: &str, value: &str) -> &'static str {
         "xformMat" => "matrix",
         "bgcolor" | "defaultcolor" | "egcolor" | "color" => "color",
         "uid" | "scene_uid" | "ui_order" | "width" | "height" | "aaJitterLevel" | "aoSlices"
-        | "aoSteps" => "integer",
+        | "aoSteps" | "activeObjID" | "activeRendID" | "activeViewID" => "integer",
         "name" | "style" | "material" | "group" | "egroup" | "src" | "srctype" | "alt_src"
-        | "type_name" | "onload" | "icc_filename" => "string",
+        | "type_name" | "onload" | "icc_filename" | "basePath" | "obj_uids" | "view_uids" => {
+            "string"
+        }
         _ if matches!(value, "true" | "false") => "boolean",
         _ if value.parse::<f64>().is_ok() => "real",
         _ => "string",
@@ -120,7 +122,9 @@ pub(super) fn rows(
         let readonly = matches!(
             key.as_str(),
             "uid" | "scene_uid" | "type_name" | "src" | "alt_src" | "srctype" | "modified"
-        ) || spec.is_some_and(|property| !property.writable)
+        ) || kind == "scene"
+            && matches!(key.as_str(), "name" | "basePath" | "obj_uids" | "view_uids")
+            || spec.is_some_and(|property| !property.writable)
             || matches!(kind, "renderer" | "rendGroup")
                 && (key == "style" || cuemol_desktop_core::auxiliary_property_readonly(&key))
             || kind == "view"

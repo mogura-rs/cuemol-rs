@@ -30,7 +30,7 @@ speedup from a single optimized stage or compare timings from different hosts.
 | Feature family | Required comparison | Current audit status |
 | --- | --- | --- |
 | Shell | Activities, menus, toolbar, tab order, docks, compact windows, themes and keyboard access | Application shortcuts, browser tab closing and menu access, shared history dropdowns, Tauri palette folding and tree/text clipboard routing repaired and checked; browser recent files and remaining pane controls are still under comparison |
-| Explorer and Inspector | Object/renderer/group hierarchy, selection, visibility, locking, drag/drop, context menus and property editors | Typed fields, nested properties, default flags, reset, group writes and undo repaired and checked below; remaining dock targets and specialized editors are under comparison |
+| Explorer and Inspector | Object/renderer/group hierarchy, selection, visibility, locking, drag/drop, context menus and property editors | Typed fields, nested properties, default flags, resets, group writes, Scene/View targets and Scene quality presets repaired and checked below; specialized editors and remaining targets are under comparison |
 | Color and styles | Coloring modes, paint entries, palettes, property inheritance, style creation/apply/edit/save | Previous focused checks exist; complete editor comparison pending |
 | Console | CueMol/PyMOL dialects, command arguments, completion, history, multiline input, IME and transaction behavior | Shared CueMol/PyMOL interpreters, completion, native QAX logging/replay and cancellable execution implemented; focused shared, browser and OS-input checks passed; affected regression checks, CI and Pages passed at `99b7c16`; public review repairs and release delivery are in progress |
 | Actions | History rows, operation inspection, QAX export, bundled/user macros and reusable actions | History selection, operation inspection, QAX export and bundled/user macro libraries are implemented in native, WASM and Tauri; CI, Pages and the macOS window check passed at `488ce9c`; review repairs passed affected checks and were published at `53100c5` |
@@ -317,17 +317,56 @@ normals, colors, triangle winding and pick ownership across the tested styles,
 selections and transforms. The linked Linux reference library is an existing
 source build; the installed macOS application remains the public binary oracle.
 
-The native dock currently follows object and renderer selection, while the
-WASM dock also accepts Scene/View targets. Their context changes, specialized
-property pages and drag preview still require comparison. The existing native
-menu dialogs do not establish parity for those dock interactions.
-
 Public Claude Code review found no confirmed defect. Its two uncertain group
 concerns were checked against the shared setter and reference reset policy:
 resetting all properties clears group membership, and whitespace clears it
 without looking up a group. The compatibility test now exercises both cases
 while preserving the group renderer itself. Final release checks remain a
 delivery gate for this batch.
+
+### Scene and View contexts
+
+Native, WASM and Tauri now open Scene/View properties in the Inspector dock.
+The Scene Properties tab provides the reference AO and AA presets, background
+color and color-proofing settings. Scene names remain read-only in Generic,
+while the structured Name field uses the rename operation. Enabling proofing
+seeds the default profile only when its name is empty. A preset or a seeded
+change is one atomic edit; an invalid member restores both scene and camera and
+preserves redo. View writes remain outside scene history.
+
+Scene metadata now uses the actual object, renderer and view identities,
+including maps, surfaces and lightweight objects. Writing an active identity
+checks scene membership. A request for a Scene/View target that is no longer
+active fails before applying a change. Scene `modified` currently reflects the
+scripting flag; reconciliation with the frontends' saved-state tracking remains
+part of the I/O audit.
+
+View fields refresh after camera movement or viewport resizing without requiring
+a scene edit. Two real browser probes exposed different draft failures: a
+focused numeric field retained its old value after navigation, and a text field
+lost its pending name. Numeric fields now refresh when untouched; pending numeric
+and text input survives navigation until confirmed. An external rename replaces
+a pending name, and drafts do not carry over to another target. Tauri also
+preserves a focused dirty field when refreshing the property list.
+
+Inspector presets and resets export QAX operations accepted by the reference
+catalog. Each preset's writes share one Actions record, and resets use named
+property paths with type and UID hints. Replay resolves those hints against the
+current scene instead of relying on the original IDs. Auxiliary renderer groups
+are now included in the node inventory. A regression records a preset and nested
+resets, replays them in another scene, and checks that the original object stays
+unchanged. Separate checks cover typed paths to map, surface and lightweight
+renderer groups.
+
+The affected command checks passed nine property cases, seven protocol cases
+and 33 Console cases. Shared Inspector cache checks and seven native/Tauri model
+tests passed. The rebuilt WASM passed all three Inspector scenarios, including
+AO undo/redo, read-only Scene identity and pending View edits during navigation;
+the 20 Tauri DOM cases also passed. The DOM tests use mocked IPC, complemented by
+the Rust model tests. The Linux OS-input check opened both contexts, renamed the
+scene and view, checked the displayed zoom after scrolling, and retained pending
+numeric and text edits through navigation. Specialized property pages, remaining
+dock targets and continuous renderer previews still require comparison.
 
 ## Clipboard comparison and repairs
 
@@ -537,8 +576,9 @@ GitHub, and a Colab notebook installs a release and displays it.
 The root Python package now builds the native GUI command through Maturin.
 Actual pip source installations on Linux x86_64 and macOS ARM64 passed execution
 checks outside the checkout: version, offline skill, startup scripting, config
-directory and the 140-tool MCP catalog. A separately built source-distribution
-archive passed the same installed-command checks. The Linux installed binary also passed
+directory and the MCP catalog, which had 140 tools at that revision. A separately
+built source-distribution archive passed the same installed-command checks.
+The Linux installed binary also passed
 the native OS-input and captured-pixel check. The release matrix repeats the
 Python installation check on all five supported targets. A public Git-URL
 installation pinned to `d34bd69` also passed the installed-command checks.

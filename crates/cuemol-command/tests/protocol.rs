@@ -4,6 +4,81 @@ use cuemol_qsys::Camera;
 use serde_json::{json, Value};
 
 #[test]
+fn inspector_scene_preset_is_one_undo_and_failed_batches_preserve_redo() {
+    let mut state = DesktopAppState::new();
+    let scene = state.new_scene("preset", true).result_scene;
+    let mut camera = Camera::new();
+    let mut protocol = Protocol::new();
+    request(
+        &mut protocol,
+        &mut state,
+        &mut camera,
+        "initialize",
+        json!({}),
+    );
+    let result = call(
+        &mut protocol,
+        &mut state,
+        &mut camera,
+        "set_node_props",
+        json!({"nodeType":"scene","updates":[
+            {"prop":"aa_method","value":"fxaa"}, {"prop":"aaJitterLevel","value":"5"}
+        ]}),
+    );
+    assert_eq!(result["isError"], false);
+    assert_eq!(
+        state
+            .scene_manager()
+            .scene(scene)
+            .unwrap()
+            .scene_attribute("aaJitterLevel"),
+        Some("5")
+    );
+    assert_eq!(
+        call(&mut protocol, &mut state, &mut camera, "undo", json!({}))["isError"],
+        false
+    );
+    assert_eq!(
+        state
+            .scene_manager()
+            .scene(scene)
+            .unwrap()
+            .scene_attribute("aa_method"),
+        None
+    );
+    assert_eq!(
+        state
+            .scene_manager()
+            .scene(scene)
+            .unwrap()
+            .scene_attribute("aaJitterLevel"),
+        None
+    );
+    let bad = call(
+        &mut protocol,
+        &mut state,
+        &mut camera,
+        "set_node_props",
+        json!({"nodeType":"scene","updates":[
+            {"prop":"aa_method","value":"none"}, {"prop":"aaJitterLevel","value":"invalid"}
+        ]}),
+    );
+    assert_eq!(bad["isError"], true);
+    assert_eq!(
+        call(&mut protocol, &mut state, &mut camera, "redo", json!({}))["isError"],
+        false
+    );
+    assert_eq!(
+        state
+            .scene_manager()
+            .scene(scene)
+            .unwrap()
+            .scene_attribute("aaJitterLevel"),
+        Some("5")
+    );
+}
+
+#[test]
 fn inspector_view_writes_and_empty_resets_preserve_redo() {
     let mut state = DesktopAppState::new();
     state.open_bytes("probe.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();

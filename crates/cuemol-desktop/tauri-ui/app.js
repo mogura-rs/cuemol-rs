@@ -5553,6 +5553,12 @@ async function showEditInteractionListDialog(object, renderer) {
 
 async function showReferenceDialog(title, initialTrajectoryPaths = []) {
   if (referenceDialog.open) referenceDialog.close();
+  if (title === 'Scene Properties' || title === 'View Property') {
+    workspaceSelectionKind = title === 'Scene Properties' ? 'scene' : 'view';
+    cueMolInspectorClosed = false;
+    renderInspector();
+    return;
+  }
   atomPickerTarget = null;
   viewport.classList.remove("atom-picking");
   dialogTitle.textContent = title;
@@ -12493,6 +12499,7 @@ function normalizeSelection() {
     if (
       ![
         "scene",
+        "view",
         "cameraRoot",
         "camera",
         "styleRoot",
@@ -17357,6 +17364,7 @@ function viewportDimensions(forceMeasure = false) {
 
 function applyViewport(result, sequence) {
   if (sequence !== requestSequence) return;
+  refreshCueMolViewInspector();
   renderedViewportSize = `${result.width}x${result.height}`;
   viewport.classList.toggle(
     "has-image",
@@ -18259,6 +18267,10 @@ document.querySelectorAll("[data-dialog]").forEach((element) => {
 });
 
 workspaceProperties.addEventListener("click", async () => {
+  if (workspaceSelectionKind === 'view') {
+    await showReferenceDialog('View Property');
+    return;
+  }
   if (
     workspaceSelectionKind === "style" &&
     selectedStyle() &&

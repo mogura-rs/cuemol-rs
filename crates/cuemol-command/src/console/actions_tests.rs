@@ -21,6 +21,95 @@ fn run(
 }
 
 #[test]
+fn inspector_presets_and_default_resets_export_replayable_operations() {
+    let mut state = super::super::tests::state();
+    let sid = state.active_scene().unwrap();
+    let object = state.active_object_summaries()[0].uid;
+    let renderer = state
+        .scene_manager_mut()
+        .object_mut(object)
+        .unwrap()
+        .add_renderer("ribbon", "body");
+    state
+        .set_renderer_property(object, renderer, "alpha", "0.4")
+        .unwrap();
+    state
+        .set_renderer_child_property(object, renderer, "helix", "width", "2.75")
+        .unwrap();
+    let preset = Record::operation(
+        &state,
+        "set_node_props",
+        &json!({"nodeType":"scene","nodeId":sid.get(),"cascadeGroupVisibility":true,"updates":[
+            {"prop":"aa_method","value":"fxaa"},{"prop":"aaJitterLevel","value":"5"}
+        ]}),
+    );
+    assert_eq!(preset.entry_count(), 2);
+    let reset = Record::operation(
+        &state,
+        "reset_node_props",
+        &json!({"nodeType":"renderer","nodeId":renderer.get(),"props":["alpha","helix.width"]}),
+    );
+    assert_eq!(reset.entry_count(), 2);
+    let source = export(&[preset, reset]);
+    assert!(!source.contains("set_node_props"));
+    assert!(!source.contains("cascadeGroupVisibility"));
+    state.new_scene("other", true);
+    let first = state.scene_manager().object(object).unwrap().mol().clone();
+    let new_scene = state.active_scene().unwrap();
+    let new_object = state
+        .scene_manager_mut()
+        .scene_mut(new_scene)
+        .unwrap()
+        .add_molecule("protein", first);
+    let new_renderer = state
+        .scene_manager_mut()
+        .object_mut(new_object)
+        .unwrap()
+        .add_renderer("ribbon", "body");
+    state
+        .set_renderer_property(new_object, new_renderer, "alpha", "0.7")
+        .unwrap();
+    state
+        .set_renderer_child_property(new_object, new_renderer, "helix", "width", "3.25")
+        .unwrap();
+    assert_ne!(sid, new_scene);
+    run(
+        &mut Submission::library(&source, None, &[]).unwrap(),
+        &mut state,
+        &mut Session::default(),
+    )
+    .unwrap();
+    let scene = state.scene_manager().scene(new_scene).unwrap();
+    assert_eq!(scene.scene_attribute("aaJitterLevel"), Some("5"));
+    let result = crate::call_tool(
+        &mut state,
+        &mut Camera::new(),
+        "list_node_props",
+        &json!({"nodeType":"renderer","nodeId":new_renderer.get()}),
+    )
+    .unwrap();
+    for key in ["alpha", "helix.width"] {
+        let row = result["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["key"] == key)
+            .unwrap();
+        assert_eq!(row["isdefault"], true, "{key}");
+    }
+    assert_eq!(
+        state
+            .scene_manager()
+            .object(object)
+            .unwrap()
+            .renderer(renderer)
+            .unwrap()
+            .qsc_attr("alpha"),
+        Some("0.4")
+    );
+}
+
+#[test]
 fn recording_survives_shared_undo_handles_and_exports_portable_commands() {
     let mut state = super::super::tests::state();
     let mut session = Session::default();

@@ -16883,6 +16883,32 @@ mod tests {
     }
 
     #[test]
+    fn inspector_scene_presets_update_display_and_keep_view_edits_out_of_undo() {
+        let mut model = model_without_gpu();
+        model.desktop.new_scene("scene", true);
+        model.inspector_request("set_node_props", &serde_json::json!({"nodeType":"scene","updates":[
+            {"prop":"bgcolor","value":"white"}, {"prop":"aoEnabled","value":"true"}, {"prop":"aoRadius","value":"12"}
+        ]})).unwrap();
+        assert_eq!(model.undo_stack.len(), 1);
+        assert_eq!(model.background, "white");
+        model.undo(0).unwrap();
+        assert_eq!(model.background, "black");
+        model
+            .inspector_request(
+                "set_node_props",
+                &serde_json::json!({"nodeType":"view","updates":[
+                    {"prop":"zoom","value":"23"}, {"prop":"slabdepth","value":"34"}
+                ]}),
+            )
+            .unwrap();
+        assert!(model.undo_stack.is_empty());
+        assert_eq!(model.redo_stack.len(), 1);
+        assert_eq!(model.camera.zoom(), 23.);
+        model.redo(0).unwrap();
+        assert_eq!(model.background, "white");
+    }
+
+    #[test]
     fn qsc_save_options_dto_validates_reference_values() {
         let options: crate::GuiSceneSaveOptions = QscSaveOptionsDto {
             embed_all: true,

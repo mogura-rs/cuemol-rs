@@ -4783,7 +4783,7 @@
             "integer",
             "null"
           ],
-          "description": "Uid of the object or renderer, from get_scene_state. Null for the scene and the view, which have no id of their own."
+          "description": "UID of the node. Omit or use null for the current scene or view."
         }
       },
       "required": [
@@ -4819,7 +4819,7 @@
             "integer",
             "null"
           ],
-          "description": "Uid of the object or renderer, from get_scene_state. Null for the scene and the view, which have no id of their own."
+          "description": "UID of the node. Omit or use null for the current scene or view."
         },
         "props": {
           "type": "array",
@@ -4862,7 +4862,7 @@
             "integer",
             "null"
           ],
-          "description": "Uid of the object or renderer, from get_scene_state. Null for the scene and the view, which have no id of their own."
+          "description": "UID of the node. Omit or use null for the current scene or view."
         },
         "prop": {
           "type": "string",
@@ -4881,6 +4881,67 @@
         "nodeType",
         "prop",
         "value"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "set_node_props",
+    "description": "Set several properties of one node atomically in one edit. If any update fails, restore all properties and the camera. Values use the same text format as set_node_prop.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "nodeType": {
+          "type": "string",
+          "description": "What kind of node to address. \"scene\" is the scene as a whole; \"view\" is the current view; \"renderer\" also covers a renderer group.",
+          "enum": [
+            "scene",
+            "view",
+            "object",
+            "renderer",
+            "rendGroup"
+          ]
+        },
+        "nodeId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "UID of the node. Omit or use null for the current scene or view."
+        },
+        "cascadeGroupVisibility": {
+          "type": "boolean",
+          "description": "When setting a renderer group visibility, also update its members. Defaults to false for raw property edits."
+        },
+        "updates": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "properties": {
+              "prop": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "prop",
+              "value"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "nodeType",
+        "updates"
       ],
       "additionalProperties": false
     },

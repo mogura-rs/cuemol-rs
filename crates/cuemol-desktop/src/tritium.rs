@@ -28,24 +28,40 @@ impl GuiApplication {
         if self.show_workspace {
             self.tritium_sidebar(ctx, camera);
         }
-        let target = match self.current_workspace_target() {
-            Some(NativeWorkspaceTarget::Object { owner, .. }) => Some(cuemol_ui::InspectorTarget {
-                kind: "object".into(),
-                id: Some(match owner {
-                    NativePropertyObject::Molecule(id)
-                    | NativePropertyObject::DensityMap(id)
-                    | NativePropertyObject::Surface(id)
-                    | NativePropertyObject::Lightweight(id) => id.get(),
-                }),
-            }),
-            Some(NativeWorkspaceTarget::Renderer { renderer_uid, .. }) => {
-                Some(cuemol_ui::InspectorTarget {
-                    kind: "renderer".into(),
-                    id: Some(renderer_uid.get()),
-                })
-            }
-            _ => None,
-        };
+        if let Some(context) = &mut self.inspector_context {
+            context.id = if context.kind == "scene" {
+                self.state.active_scene().map(|id| id.get())
+            } else {
+                self.state
+                    .active_scene()
+                    .and_then(|id| self.state.scene_manager().scene(id))
+                    .and_then(|scene| scene.active_view_uid())
+                    .map(|id| id.get())
+            };
+        }
+        let target =
+            self.inspector_context
+                .clone()
+                .or_else(|| match self.current_workspace_target() {
+                    Some(NativeWorkspaceTarget::Object { owner, .. }) => {
+                        Some(cuemol_ui::InspectorTarget {
+                            kind: "object".into(),
+                            id: Some(match owner {
+                                NativePropertyObject::Molecule(id)
+                                | NativePropertyObject::DensityMap(id)
+                                | NativePropertyObject::Surface(id)
+                                | NativePropertyObject::Lightweight(id) => id.get(),
+                            }),
+                        })
+                    }
+                    Some(NativeWorkspaceTarget::Renderer { renderer_uid, .. }) => {
+                        Some(cuemol_ui::InspectorTarget {
+                            kind: "renderer".into(),
+                            id: Some(renderer_uid.get()),
+                        })
+                    }
+                    _ => None,
+                });
         if self.activity == Some(Activity::Actions) {
             self.actions_panel.inspector(ctx);
         } else {
@@ -284,7 +300,7 @@ impl GuiApplication {
             });
     }
 
-    fn tritium_command(
+    pub(super) fn tritium_command(
         &mut self,
         name: &str,
         args: serde_json::Value,
@@ -309,6 +325,7 @@ impl GuiApplication {
                     self.push_undo_snapshot(undo);
                 }
                 *camera = CameraController::from_qsys_camera(&view);
+                self.sync_active_scene_properties();
                 self.rebuild_snapshot();
             }
             Err(error) => self.set_status(error.to_string()),

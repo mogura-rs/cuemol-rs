@@ -219,6 +219,42 @@ impl Session {
         name: &str,
         args: &Value,
     ) -> Option<LDom2Node> {
+        let mut normalized;
+        let args = if name == "set_node_prop" {
+            normalized = args.clone();
+            if matches!(args["nodeType"].as_str(), Some("scene" | "view")) {
+                normalized["nodeId"] = Value::Null;
+            }
+            let group = args["nodeType"] == "rendGroup"
+                || args["nodeType"] == "renderer"
+                    && args["nodeId"].as_u64().is_some_and(|id| {
+                        crate::nodes::renderer_properties(state, cuemol_core::Uid::new(id))
+                            .is_ok_and(|props| {
+                                props.get("type_name").is_some_and(|kind| kind == "*group")
+                            })
+                    });
+            if group && args["prop"] == "name" {
+                return Self::record_operation(
+                    state,
+                    "rename_node",
+                    &json!({"nodeType":"rendGroup","nodeId":args["nodeId"],"name":args["value"]}),
+                );
+            }
+            if group && args["prop"] == "visible" && args["cascadeGroupVisibility"] == true {
+                return Self::record_operation(
+                    state,
+                    "set_visible",
+                    &json!({"nodeType":"rendGroup","nodeId":args["nodeId"],"visible":args["value"] == "true"}),
+                );
+            }
+            if normalized["nodeType"] == "rendGroup" {
+                normalized["nodeType"] = json!("renderer");
+            }
+            normalized.as_object_mut()?.remove("cascadeGroupVisibility");
+            &normalized
+        } else {
+            args
+        };
         if name == "set_prop" {
             let (kind, id, prop) =
                 crate::properties::resolve_property_path(state, args["path"].as_str()?).ok()?;

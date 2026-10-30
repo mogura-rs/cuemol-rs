@@ -341,10 +341,12 @@ impl App {
                         if ui.checkbox(&mut proof, "Use color proofing").changed() {
                             self.call("set_node_prop", json!({"nodeType":"scene","prop":"use_colproof","value":proof.to_string()}));
                         }
-                        if ui.button("Properties…").clicked() { self.open_properties("scene", None); ui.close(); }
+                        let properties = ui.button("Properties…");
+                        self.record_ui_rect("Scene Properties", &properties);
+                        if properties.clicked() { self.open_properties("scene", None); ui.close(); }
                     });
                     self.record_ui_rect("Scene menu", &scene_menu.response);
-                    ui.menu_button("View", |ui| {
+                    let view_menu = ui.menu_button("View", |ui| {
                         for (value, label) in [(true,"Perspective"),(false,"Orthographic")] {
                             if ui.selectable_label(self.camera.is_perspective() == value, label).clicked() {
                                 self.call("set_projection", json!({"perspective":value}));
@@ -359,7 +361,9 @@ impl App {
                                 }
                             }
                         });
-                        if ui.button("View property…").clicked() { self.open_properties("view", None); ui.close(); }
+                        let properties = ui.button("View property…");
+                        self.record_ui_rect("View Properties", &properties);
+                        if properties.clicked() { self.open_properties("view", None); ui.close(); }
                         ui.separator();
                         if cuemol_ui::navigation::palette_menu(ui, &mut self.state) {
                             self.settings_text = self.state.config_text();
@@ -412,6 +416,7 @@ impl App {
                             ui.close();
                         }
                     });
+                    self.record_ui_rect("View menu", &view_menu.response);
                     ui.menu_button("Rendering", |ui| {
                         if ui.button("Render image…").clicked() {
                             self.open_render();
@@ -829,6 +834,7 @@ impl App {
                     None,
                     None,
                 );
+                self.record_ui_rect(&format!("scene:{}", scene.uid.get()), &response);
                 if response.clicked() {
                     self.call("switch_scene", json!({"sceneId":scene.uid.get()}));
                     self.open_properties("scene", Some(scene.uid.get()));

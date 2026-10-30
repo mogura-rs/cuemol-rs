@@ -5,7 +5,7 @@ impl AppModel {
     pub(super) fn inspector_request(&mut self, tool: &str, args: &Value) -> Result<Value, String> {
         if !matches!(
             tool,
-            "list_node_props" | "set_node_prop" | "reset_node_props"
+            "list_node_props" | "set_node_prop" | "set_node_props" | "reset_node_props"
         ) {
             return Err("Unsupported inspector operation".into());
         }
@@ -15,6 +15,7 @@ impl AppModel {
         }
         self.stop_console();
         let before = self.capture_undo();
+        let record = cuemol_command::console::actions::Record::operation(&self.desktop, tool, args);
         let result = cuemol_command::call_tool(&mut self.desktop, &mut self.camera, tool, args)
             .map_err(|error| error.to_string())?;
         self.sync_active_scene_properties();
@@ -27,6 +28,9 @@ impl AppModel {
             };
             if args["nodeType"] != "view" && changed {
                 self.push_undo(before);
+                if let Some(entry) = self.undo_stack.last_mut() {
+                    entry.record = record;
+                }
             }
             self.invalidate_snapshot(false);
         }
