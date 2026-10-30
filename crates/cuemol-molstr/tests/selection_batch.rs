@@ -147,10 +147,10 @@ fn distance_queries_preserve_nonfinite_and_extreme_input_behavior() {
             0.,
             -1.,
             3.,
-            f32::MIN_POSITIVE,
-            f32::MAX,
-            f32::NAN,
-            f32::INFINITY,
+            f64::MIN_POSITIVE,
+            f64::MAX,
+            f64::NAN,
+            f64::INFINITY,
         ] {
             for op in [DistanceOp::Around, DistanceOp::Expand] {
                 let selector = Selector::Distance {
@@ -185,7 +185,7 @@ fn graph_queries_preserve_cycles_depth_and_duplicate_identity_behavior() {
         [0, 1, 2, 3, 4, 7, 8]
     );
     for inner in ["aid 1", "aprop marked=1", "name CA", "none", "*"] {
-        for distance in [0., 1., 1.1, 10., f32::INFINITY] {
+        for distance in [0., 1., 1.1, 10., f64::INFINITY] {
             for op in [DistanceOp::Neighbor, DistanceOp::Extend] {
                 let selector = Selector::Distance {
                     op,
@@ -196,5 +196,66 @@ fn graph_queries_preserve_cycles_depth_and_duplicate_identity_behavior() {
                 assert_scalar_equivalent(&molecule, &selector);
             }
         }
+    }
+}
+
+#[test]
+fn scene_distance_grid_matches_world_space_scan_with_extreme_coordinates() {
+    use cuemol_core::Matrix4;
+    use cuemol_molstr::MolSceneManager;
+
+    let mut atoms: Vec<_> = (0..280)
+        .map(|index| {
+            atom(
+                index,
+                Vector4::new3((index % 8) as f64 * 1.2, (index / 8) as f64 * 1.3, 0.),
+            )
+        })
+        .collect();
+    for value in [f64::NAN, f64::INFINITY, f64::MAX, f64::MIN] {
+        atoms.push(atom(atoms.len(), Vector4::new3(value, 0., 0.)));
+    }
+    let mut manager = MolSceneManager::new();
+    let scene_id = manager.new_scene("scene");
+    let scene = manager.scene_mut(scene_id).unwrap();
+    let probe = scene.add_molecule("Probe", MolCoord::with_atoms(atoms.clone()));
+    let target = scene.add_molecule("Target", MolCoord::with_atoms(atoms));
+    let mut transform = Matrix4::IDENTITY;
+    transform.set_trans_part(Vector4::new3(-1.7, 2.9, 0.));
+    scene
+        .object_mut(target)
+        .unwrap()
+        .set_xform_matrix(transform);
+    let probe = scene.object(probe).unwrap();
+    let target = scene.object(target).unwrap();
+    for cutoff in [0., 1.3, 3., f64::MIN_POSITIVE, f64::MAX, f64::INFINITY] {
+        let selector = Selector::Distance {
+            op: DistanceOp::Around,
+            inner: Box::new(parse_selector("name CA").unwrap()),
+            distance: cutoff,
+            molecule: Some("Target".into()),
+        };
+        let expected: Vec<_> = probe
+            .mol()
+            .atoms()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, atom)| {
+                target
+                    .mol()
+                    .atoms()
+                    .iter()
+                    .filter(|other| other.name == "CA")
+                    .any(|other| {
+                        let mut position = other.position;
+                        transform.xform3d(&mut position);
+                        (atom.position - position).length3d() < cutoff
+                    })
+                    .then_some(index)
+            })
+            .collect();
+        let bound = selector.bind_to_scene(probe, scene);
+        assert_eq!(probe.mol().select_indices(&bound), expected, "{cutoff}");
+        assert_eq!(probe.mol().atom_sel_count(&bound), expected.len());
     }
 }

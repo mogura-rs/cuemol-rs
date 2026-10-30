@@ -2,10 +2,10 @@ import path from 'node:path';
 import {existsSync} from 'node:fs';
 import {createRequire} from 'node:module';
 
-const [root, fixture, iterationsText, expression] = process.argv.slice(2);
+const [root, fixture, iterationsText, expression, targetFixture] = process.argv.slice(2);
 const iterations = Number(iterationsText);
 if (!root || !fixture || !Number.isInteger(iterations) || iterations < 1 || !expression) {
-  throw new Error('usage: benchmark-reference-selection.mjs APP_ROOT MOLECULE ITERATIONS EXPRESSION');
+  throw new Error('usage: benchmark-reference-selection.mjs APP_ROOT MOLECULE ITERATIONS EXPRESSION [TARGET_MOLECULE]');
 }
 const resources = existsSync(path.join(root, 'Contents/Resources')) ? path.join(root, 'Contents/Resources') : path.join(root, 'resources');
 const require = createRequire(import.meta.url);
@@ -17,10 +17,23 @@ const molecule = reader.invokeMethod('createDefaultObj');
 reader.invokeMethod('attach', molecule);
 reader.invokeMethod('read');
 reader.invokeMethod('detach');
+let scene;
+if (targetFixture) {
+  scene = cm.getService('SceneManager').invokeMethod('createScene');
+  molecule.setProp('name', 'Probe');
+  scene.invokeMethod('addObject', molecule);
+  reader.invokeMethod('setPath', path.resolve(targetFixture));
+  const target = reader.invokeMethod('createDefaultObj');
+  reader.invokeMethod('attach', target);
+  reader.invokeMethod('read');
+  reader.invokeMethod('detach');
+  target.setProp('name', 'Target');
+  scene.invokeMethod('addObject', target);
+}
 let selection;
 function query() {
   selection = cm.createObj('SelCommand');
-  if (!selection.invokeMethod('compile', expression, 0)) throw new Error('Invalid selection');
+  if (!selection.invokeMethod('compile', expression, scene ? scene.getProp('uid') : 0)) throw new Error('Invalid selection');
   return molecule.invokeMethod('getAtomSelSize', selection);
 }
 let start = performance.now();

@@ -1,4 +1,4 @@
-use crate::{DesktopAppState, MolObject, Selector, StyleManager};
+use crate::{DesktopAppState, MolObject, MolRenderer, MolScene, Selector, StyleManager};
 use std::borrow::Cow;
 
 pub const MAX_SELECTION_HISTORY: usize = 100;
@@ -41,7 +41,7 @@ pub(crate) fn indices<'s>(
     object: &MolObject,
     fallback: Option<&Selector>,
     styles: impl FnOnce() -> &'s StyleManager,
-    scope: u64,
+    scene: &MolScene,
 ) -> Vec<usize> {
     let selector = if object.mol().selection_text().is_empty() {
         fallback
@@ -49,9 +49,31 @@ pub(crate) fn indices<'s>(
         Some(object.mol().selection())
     };
     selector
-        .and_then(|selector| resolve(selector, styles, scope).ok())
-        .map(|selector| object.mol().select_indices(&selector))
+        .and_then(|selector| resolve(selector, styles, scene.uid().get()).ok())
+        .map(|selector| {
+            object
+                .mol()
+                .select_indices(&selector.bind_to_scene(object, scene))
+        })
         .unwrap_or_default()
+}
+
+pub(crate) fn renderer_selector(
+    object: &MolObject,
+    renderer: &MolRenderer,
+    styles: &StyleManager,
+    scene: &MolScene,
+) -> cuemol_core::Result<Selector> {
+    let parsed = renderer
+        .qsc_attr("sel")
+        .map(|text| crate::parse_selector(if text.trim().is_empty() { "*" } else { text }))
+        .transpose()?;
+    let selector = resolve(
+        parsed.as_ref().unwrap_or_else(|| renderer.selection()),
+        || styles,
+        scene.uid().get(),
+    )?;
+    Ok(selector.bind_to_scene(object, scene).into_owned())
 }
 
 impl DesktopAppState {

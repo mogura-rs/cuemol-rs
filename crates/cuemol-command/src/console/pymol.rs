@@ -445,7 +445,7 @@ pub(super) fn plan(
             let (items, _) = selections(state, arg("selection"))?;
             let mut total = 0;
             for item in &items {
-                let selector = state.parse_scene_selector(state.active_scene().unwrap(), &item.expression).map_err(|error| error.to_string())?;
+                let selector = state.parse_object_selector(item.id, &item.expression).map_err(|error| error.to_string())?;
                 let count = state.scene_manager().object(item.id).unwrap().mol().select_indices(&selector).len();
                 total += count;
                 if items.len() > 1 { actions.push(Action::Output(format!("{}: {count}", item.name))); }
@@ -532,7 +532,7 @@ pub(super) fn plan(
             let (items, _) = selections(state, arg("selection"))?;
             let item = &items[0];
             if items.len() > 1 { actions.push(Action::Output(format!("Orienting {} only; name a molecule to choose another.", item.name))); }
-            let selector = state.parse_scene_selector(state.active_scene().unwrap(), &item.expression).map_err(|error| error.to_string())?;
+            let selector = state.parse_object_selector(item.id, &item.expression).map_err(|error| error.to_string())?;
             let object = state.scene_manager().object(item.id).unwrap();
             let mut view = cuemol_qsys::View::new(Uid::new(1), state.active_scene().unwrap());
             view.set_camera(camera);

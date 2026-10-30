@@ -417,7 +417,7 @@ impl MolAnlManager {
         let selected = molecule
             .atoms()
             .iter()
-            .filter(|atom| selector.matches(atom))
+            .filter(|atom| selector.matches_in_molecule(atom, molecule))
             .map(|atom| ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code))
             .collect::<BTreeSet<_>>();
         if selected.is_empty() {
@@ -482,7 +482,7 @@ impl MolAnlManager {
         for atom in molecule
             .atoms()
             .iter()
-            .filter(|atom| selector.matches(atom))
+            .filter(|atom| selector.matches_in_molecule(atom, molecule))
         {
             let key = ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code);
             if selected.insert(key.clone()) {
@@ -570,7 +570,7 @@ impl MolAnlManager {
         for atom in molecule
             .atoms()
             .iter()
-            .filter(|atom| selector.matches(atom))
+            .filter(|atom| selector.matches_in_molecule(atom, molecule))
         {
             let key = ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code);
             if selected.insert(key.clone()) {
@@ -1005,7 +1005,7 @@ fn selected_residue_keys_in_atom_order(
     molecule
         .atoms()
         .iter()
-        .filter(|atom| selector.matches(atom))
+        .filter(|atom| selector.matches_in_molecule(atom, molecule))
         .filter_map(|atom| {
             let key = ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code);
             seen.insert(key.clone()).then_some(key)
@@ -1164,16 +1164,20 @@ fn contact_pairs_same_molecule(
         .collect::<BTreeSet<_>>();
     let mut hits = BTreeSet::new();
     let atoms = molecule.atoms();
+    let selected1 = molecule.select_indices(selector1);
+    let selected2 = molecule.select_indices(selector2);
     let mut checked = vec![false; atoms.len()];
-    for (index1, atom1) in atoms.iter().enumerate() {
-        if !selector1.matches(atom1) || excluded_contact_atom(atom1, hbond) {
+    for index1 in selected1 {
+        let atom1 = &atoms[index1];
+        if excluded_contact_atom(atom1, hbond) {
             continue;
         }
-        for (index2, atom2) in atoms.iter().enumerate() {
+        for &index2 in &selected2 {
+            let atom2 = &atoms[index2];
             if checked[index2] {
                 continue;
             }
-            if !selector2.matches(atom2) || excluded_contact_atom(atom2, hbond) {
+            if excluded_contact_atom(atom2, hbond) {
                 continue;
             }
             if same_residue(atom1, atom2) {
@@ -1205,12 +1209,16 @@ fn contact_pairs_two_molecules(
     max_count: usize,
 ) -> Vec<(i32, i32)> {
     let mut hits = BTreeSet::new();
-    for atom1 in molecule1.atoms() {
-        if !selector1.matches(atom1) || excluded_contact_atom(atom1, hbond) {
+    let selected1 = molecule1.select_indices(selector1);
+    let selected2 = molecule2.select_indices(selector2);
+    for index1 in selected1 {
+        let atom1 = &molecule1.atoms()[index1];
+        if excluded_contact_atom(atom1, hbond) {
             continue;
         }
-        for atom2 in molecule2.atoms() {
-            if !selector2.matches(atom2) || excluded_contact_atom(atom2, hbond) {
+        for &index2 in &selected2 {
+            let atom2 = &molecule2.atoms()[index2];
+            if excluded_contact_atom(atom2, hbond) {
                 continue;
             }
             let distance = (atom1.position - atom2.position).length3d();

@@ -319,6 +319,7 @@ impl MolRenderer {
     }
 
     pub fn set_selection(&mut self, value: Selector) {
+        self.qsc_attrs.insert("sel".into(), value.expression());
         self.selection = value;
     }
 
@@ -4757,6 +4758,35 @@ mod tests {
         assert_eq!(object.alt_source(), "fallback.pdb");
         assert_eq!(object.source(), "datachunk:00000");
         assert!(!object.modified());
+    }
+
+    #[test]
+    fn renderer_selection_replaces_serialized_expression_and_preserves_names() {
+        let mut manager = MolSceneManager::new();
+        let scene = manager.new_scene("selection");
+        let object = manager
+            .scene_mut(scene)
+            .unwrap()
+            .add_molecule("molecule", MolCoord::new());
+        let object = manager.object_mut(object).unwrap();
+        let renderer = object.add_renderer("cpk", "atoms");
+        let renderer = object.renderer_mut(renderer).unwrap();
+        renderer.set_qsc_attr("sel", "*");
+        for expression in [
+            "aid 2",
+            "(saved around 1.1000000000001 [Target]) and name C1",
+            "name C1 around 0.1 ['Target \"A\"']",
+            "name C1 around 0.1 [a\"b'c]",
+            "*",
+        ] {
+            let selection = crate::parse_selector(expression).unwrap();
+            renderer.set_selection(selection.clone());
+            assert_eq!(renderer.selection(), &selection);
+            assert_eq!(
+                crate::parse_selector(renderer.qsc_attr("sel").unwrap()).unwrap(),
+                selection
+            );
+        }
     }
 
     #[test]

@@ -180,10 +180,16 @@ impl DesktopAppState {
             .iter()
             .find(|o| o.name() == config.bndry_molname)?;
         let transform = map.xform.invert().ok()?.mul_mat(object.xform_matrix());
+        let expression = config
+            .attributes
+            .get("bndry_sel")
+            .cloned()
+            .unwrap_or_else(|| config.bndry_sel.expression());
+        let selector = self.parse_object_selector(object.uid(), &expression).ok()?;
         Some(
             object
                 .mol()
-                .select_indices(&config.bndry_sel)
+                .select_indices(&selector)
                 .into_iter()
                 .map(|i| {
                     let p = object.mol().atoms()[i].position;
@@ -214,6 +220,43 @@ mod tests {
         map.set_origin(origin);
         map.set_detected_map_type(2);
         map
+    }
+
+    #[test]
+    fn boundary_points_rebind_scene_distances_before_map_coordinate_conversion() {
+        let mut app = DesktopAppState::new();
+        let scene_id = app.new_scene("boundary", true).result_scene;
+        let molecule = cuemol_molstr::read_pdb_str("HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00  0.00           C\nHETATM    2  O1  LIG A   1       1.400   0.000   0.000  1.00  0.00           O\nEND\n").unwrap();
+        let scene = app.scene_manager_mut().scene_mut(scene_id).unwrap();
+        let probe = scene.add_molecule("Probe", molecule.clone());
+        let target = scene.add_molecule("Target", molecule);
+        let map_id = app.add_density_map(scene_id, "map", radial_map(9, Vector4::ZERO));
+        app.add_density_renderer(map_id, "isosurf").unwrap();
+        let map = app.density_maps.get_mut(&map_id).unwrap();
+        map.xform.set_trans_part(Vector4::new3(5., 0., 0.));
+        map.renderers[0].bndry_molname = "Probe".into();
+        map.renderers[0].bndry_sel = parse_selector("name C1 around 2 [Target]").unwrap();
+        let points = |app: &DesktopAppState| {
+            let map = &app.density_maps[&map_id];
+            app.density_boundary_points(map, &map.renderers[0])
+                .unwrap()
+                .into_iter()
+                .map(|point| [point.x, point.y, point.z])
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(points(&app), [[-5., 0., 0.], [-3.6, 0., 0.]]);
+        let mut transform = Matrix4::IDENTITY;
+        transform.set_trans_part(Vector4::new3(10., 0., 0.));
+        app.scene_manager_mut()
+            .object_mut(target)
+            .unwrap()
+            .set_xform_matrix(transform);
+        assert!(points(&app).is_empty());
+        app.scene_manager_mut()
+            .object_mut(probe)
+            .unwrap()
+            .set_xform_matrix(transform);
+        assert_eq!(points(&app), [[5., 0., 0.], [6.4, 0., 0.]]);
     }
 
     #[test]

@@ -390,10 +390,14 @@ pub struct Evaluation {
 }
 
 pub fn evaluate(state: &DesktopAppState, molecule: Option<Uid>, expression: &str) -> Evaluation {
-    let result = state
-        .active_scene()
-        .ok_or_else(|| CueMolError::not_found("active scene"))
-        .and_then(|scene| state.parse_scene_selector(scene, expression));
+    let result = if let Some(molecule) = molecule {
+        state.parse_object_selector(molecule, expression)
+    } else {
+        state
+            .active_scene()
+            .ok_or_else(|| CueMolError::not_found("active scene"))
+            .and_then(|scene| state.parse_scene_selector(scene, expression))
+    };
     match result {
         Ok(selector) => Evaluation {
             valid: true,

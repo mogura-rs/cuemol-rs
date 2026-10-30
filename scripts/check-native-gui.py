@@ -120,6 +120,7 @@ def main():
     parser.add_argument('--binary', type=Path, required=True)
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--selection-pane-only', action='store_true')
+    parser.add_argument('--cross-selection-only', action='store_true')
     args = parser.parse_args()
     binary, work = args.binary.resolve(), args.out.resolve()
     work.mkdir(parents=True, exist_ok=True)
@@ -177,6 +178,52 @@ def main():
                 if name:
                     image.save(work / name)
                 return image
+
+            if args.cross_selection_only:
+                probe = state['objects'][0]
+                target = call('load_file', {'path': str(fixture)})['objectId']
+                call('rename_node', {'nodeType': 'object', 'nodeId': target, 'name': 'Target'})
+                call('set_visible', {'nodeType': 'object', 'nodeId': target, 'visible': False})
+                for renderer in probe['renderers']:
+                    call('delete_node', {'nodeType': 'renderer', 'nodeId': renderer['id']})
+                expression = 'name C1 around 2.1 [Target]'
+                call('create_renderer', {'objId': probe['id'], 'rendererType': 'cpk',
+                                         'name': 'cross', 'selection': expression})
+                call('set_projection', {'perspective': False})
+                call('set_view', {'center': [-1, 0, 0], 'zoom': 12, 'distance': 200, 'slab': 50})
+                pyautogui.moveTo(x + 5, y + 5)
+                crop = (int(width * .32), int(height * .18), int(width * .95), int(height * .70))
+
+                def count():
+                    return call('count_selection', {'objId': probe['id'], 'selection': expression})['count']
+
+                def shift(value):
+                    call('execute_script', {'source':
+                        f"var offset = cuemol.createObj('Vector'); offset.x = {value}; "
+                        "var matrix = cuemol.createObj('Matrix'); matrix.setTranslate(offset); "
+                        f"cuemol.getObject({target}).xformMat = matrix;"})
+
+                if count() != 2:
+                    raise RuntimeError('The cross-molecule selection did not select two atoms')
+                time.sleep(.3)
+                before = capture('cross-selected.png').crop(crop)
+                shift(20)
+                if count() != 0:
+                    raise RuntimeError('The selection retained atoms after its target moved')
+                wait_for(lambda: ImageChops.difference(before, capture().crop(crop)).getbbox())
+                empty = capture('cross-target-moved.png').crop(crop)
+                changed = sum(max(pixel) > 12 for pixel in ImageChops.difference(before, empty).getdata())
+                if changed < 100:
+                    raise RuntimeError(f'Target movement changed only {changed} viewport pixels')
+                shift(0)
+                if count() != 2:
+                    raise RuntimeError('The selection did not update after restoring its target')
+                wait_for(lambda: ImageChops.difference(before, capture().crop(crop)).getbbox() is None)
+                capture('cross-restored.png')
+                report.update(ok=True, window=bounds, cross_selection_live=True,
+                              cross_selection_changed_pixels=changed, cross_selection_restored_pixels=True)
+                print(json.dumps(report), flush=True)
+                return
 
             def check_selection_pane():
                 primary = 'command' if sys.platform == 'darwin' else 'ctrl'

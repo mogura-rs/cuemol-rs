@@ -1978,17 +1978,19 @@ impl MolCoord {
 
     pub fn is_selected(&self, serial: i32, selector: &Selector) -> bool {
         self.atom_by_serial(serial)
-            .is_some_and(|atom| selector.matches(atom))
+            .is_some_and(|atom| selector.matches_in_molecule(atom, self))
     }
 
     pub fn is_selected_mol(&self, selector: &Selector) -> bool {
-        self.atoms.iter().any(|atom| selector.matches(atom))
+        self.atoms
+            .iter()
+            .any(|atom| selector.matches_in_molecule(atom, self))
     }
 
     pub fn is_selected_chain(&self, chain: &str, selector: &Selector) -> bool {
         self.atoms
             .iter()
-            .any(|atom| atom.chain_id == chain && selector.matches(atom))
+            .any(|atom| atom.chain_id == chain && selector.matches_in_molecule(atom, self))
     }
 
     pub fn is_selected_resid(
@@ -2002,7 +2004,7 @@ impl MolCoord {
             atom.chain_id == chain
                 && atom.res_id == res_id
                 && atom.ins_code == ins_code
-                && selector.matches(atom)
+                && selector.matches_in_molecule(atom, self)
         }))
     }
 

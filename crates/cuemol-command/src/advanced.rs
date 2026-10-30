@@ -486,7 +486,7 @@ fn molecule_annotations(state: &mut DesktopAppState, name: &str, args: &Value) -
             .object(id)
             .ok_or_else(|| CueMolError::not_found("molecule"))?
             .mol()
-            .select_indices(&state.parse_scene_selector(scene(state)?, selection(args))?)
+            .select_indices(&state.parse_object_selector(id, selection(args))?)
     } else {
         atom_indices(state, id, args)?
     };

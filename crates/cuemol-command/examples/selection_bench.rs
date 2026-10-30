@@ -5,8 +5,10 @@ use std::{env, path::PathBuf, time::Instant};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = env::args().skip(1).collect();
-    if args.len() != 3 {
-        return Err("usage: selection_bench MOLECULE ITERATIONS EXPRESSION".into());
+    if !(3..=4).contains(&args.len()) {
+        return Err(
+            "usage: selection_bench MOLECULE ITERATIONS EXPRESSION [TARGET_MOLECULE]".into(),
+        );
     }
     let path = PathBuf::from(&args[0]);
     let iterations: usize = args[1].parse()?;
@@ -22,7 +24,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &std::fs::read(&path)?,
     )?;
     let object = state.active_object_summaries()[0].uid;
-    let scene = state.active_scene().ok_or("missing scene")?;
+    if let Some(target) = args.get(3) {
+        let scene = state.active_scene().ok_or("missing scene")?;
+        let scene = state.scene_manager_mut().scene_mut(scene).unwrap();
+        scene.object_mut(object).unwrap().set_name("Probe");
+        scene.add_molecule("Target", cuemol_molstr::read_pdb_file(target)?);
+    }
     let query = || -> Result<usize, Box<dyn std::error::Error>> {
         let result = selection::evaluate(&state, Some(object), expression);
         result.count.ok_or_else(|| {
@@ -47,7 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .object(object)
         .ok_or("missing molecule")?
         .mol();
-    let indices = molecule.select_indices(&state.parse_scene_selector(scene, expression)?);
+    let indices = molecule.select_indices(&state.parse_object_selector(object, expression)?);
     if indices.len() != count {
         return Err("selection mask differs from count".into());
     }

@@ -1,6 +1,9 @@
 mod backbone;
 mod coloring;
-pub use coloring::{apply_molecular_coloring, apply_molecular_node_coloring, MolecularColoring};
+pub use coloring::{
+    apply_molecular_coloring, apply_molecular_node_coloring, apply_molecular_object_coloring,
+    MolecularColoring,
+};
 
 use cuemol_core::Vector4;
 use cuemol_gfx::{ColorBase, ColorSpec, MolColorRef, SolidColor};

@@ -2999,6 +2999,7 @@ impl DesktopAppState {
                                                 .ok()
                                             })
                                             .unwrap_or(Selector::All);
+                                        let selector = selector.bind_to_scene(object, scene);
                                         let mut options = MoleculeRenderOptions::default();
                                         cuemol_molvis::apply_molecular_node_coloring(
                                             &mut options,
@@ -3008,6 +3009,9 @@ impl DesktopAppState {
                                             scene.uid().get(),
                                             "#c0c0ff",
                                         );
+                                        if let Some(coloring) = &mut options.molecular_coloring {
+                                            coloring.bind_to_scene(object, scene);
+                                        }
                                         let colors = cuemol_molvis::resolve_atom_colors(
                                             object.mol(),
                                             &options,
@@ -3141,6 +3145,8 @@ impl DesktopAppState {
                                         .ok()
                                     })
                                     .unwrap_or(Selector::All);
+                                let map_selection = map_selection.bind_to_scene(object, scene);
+                                let show_selection = show_selection.bind_to_scene(object, scene);
                                 render_mesh = filter_surface_mesh_by_atom_selection(
                                     render_mesh,
                                     &mesh,
@@ -4860,12 +4866,20 @@ impl DesktopAppState {
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
         let selection = renderer_uid
             .map(|renderer_uid| {
-                object
-                    .renderer(renderer_uid)
-                    .map(|renderer| renderer.selection().clone())
-                    .ok_or_else(|| {
-                        CueMolError::NotFound(format!("renderer {}", renderer_uid.get()))
-                    })
+                let renderer = object.renderer(renderer_uid).ok_or_else(|| {
+                    CueMolError::NotFound(format!("renderer {}", renderer_uid.get()))
+                })?;
+                let scene_uid = self
+                    .scene_manager()
+                    .scene_uid_for_object(object_uid)
+                    .unwrap();
+                let scene = self.scene_manager().scene(scene_uid).unwrap();
+                selection_support::renderer_selector(
+                    object,
+                    renderer,
+                    &scene_style_manager(scene),
+                    scene,
+                )
             })
             .transpose()?;
         Ok(object
@@ -4923,7 +4937,10 @@ impl DesktopAppState {
         };
         let mut ranges = ResidRangeSet::new();
         if !current_selection.is_empty() {
-            ranges.from_sel(molecule, &parse_selector(current_selection)?);
+            ranges.from_sel(
+                molecule,
+                &self.parse_object_selector(object_uid, current_selection)?,
+            );
         }
         let mut anchor_ranges = ResidRangeSet::new();
         anchor_ranges.from_sel(molecule, &parse_selector(anchor_selection)?);
@@ -4949,13 +4966,9 @@ impl DesktopAppState {
             .scene_manager()
             .object(object_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
-        let scene = self
-            .scene_manager()
-            .scene_uid_for_object(object_uid)
-            .unwrap();
         Ok(object
             .mol()
-            .center_pos(Some(&self.parse_scene_selector(scene, selection)?)))
+            .center_pos(Some(&self.parse_object_selector(object_uid, selection)?)))
     }
 
     pub fn molecule_residue_pivot_for_text(
@@ -4967,11 +4980,7 @@ impl DesktopAppState {
             .scene_manager()
             .object(object_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
-        let scene = self
-            .scene_manager()
-            .scene_uid_for_object(object_uid)
-            .unwrap();
-        let selector = self.parse_scene_selector(scene, selection)?;
+        let selector = self.parse_object_selector(object_uid, selection)?;
         let Some(index) = object.mol().select_indices(&selector).first().copied() else {
             return Ok(None);
         };
@@ -4991,12 +5000,8 @@ impl DesktopAppState {
             .scene_manager()
             .object(object_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
-        let scene = self
-            .scene_manager()
-            .scene_uid_for_object(object_uid)
-            .unwrap();
         Ok(object.mol().center_pos(Some(
-            &self.parse_scene_selector(scene, object.mol().selection_text())?,
+            &self.parse_object_selector(object_uid, object.mol().selection_text())?,
         )))
     }
 
@@ -5005,11 +5010,7 @@ impl DesktopAppState {
             .scene_manager()
             .object(object_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
-        let scene = self
-            .scene_manager()
-            .scene_uid_for_object(object_uid)
-            .unwrap();
-        let selection = self.parse_scene_selector(scene, object.mol().selection_text())?;
+        let selection = self.parse_object_selector(object_uid, object.mol().selection_text())?;
         Ok(object
             .mol()
             .fit_view_with_xform(view, Some(&selection), object.xform_matrix()))
@@ -6266,7 +6267,7 @@ impl DesktopAppState {
         map_uid: Uid,
         renderer_uid: Uid,
     ) -> Result<Uid> {
-        let (scene_uid, map_name, map_xform, map, config) = {
+        let (scene_uid, map_name, map_xform, map, config, boundary_points) = {
             let object = self
                 .density_maps
                 .get(&map_uid)
@@ -6287,22 +6288,8 @@ impl DesktopAppState {
                 object.xform,
                 object.map.clone(),
                 config.clone(),
+                self.density_boundary_points(object, config),
             )
-        };
-        let boundary_points = if config.bndry_molname.is_empty() {
-            None
-        } else {
-            self.scene_manager()
-                .scene(scene_uid)
-                .and_then(|scene| scene.object_by_name(&config.bndry_molname))
-                .map(|object| {
-                    object
-                        .mol()
-                        .select_indices(&config.bndry_sel)
-                        .into_iter()
-                        .map(|index| object.mol().atoms()[index].position)
-                        .collect::<Vec<_>>()
-                })
         };
         let mut generator = MapSurfRenderer::new();
         configure_density_level(generator.map_mut(), &config);
@@ -6475,11 +6462,7 @@ impl DesktopAppState {
             (object.name().to_string(), object.mol().clone())
         };
         let selection_text = selection.trim();
-        let selector = if selection_text.is_empty() {
-            Selector::All
-        } else {
-            parse_selector(selection_text)?
-        };
+        let selector = self.parse_object_selector(object_uid, selection_text)?;
         let mut surface = MolSurfObj::new();
         let requested_backend = cuemol_surface::backends::SesBackend::parse(backend)?;
         let used_backend = surface.create_ses_from_mol_with_backend(
@@ -6616,21 +6599,20 @@ impl DesktopAppState {
                 "surface has no original molecule",
             ));
         }
-        let (molecule, raw_data, stored_backend) = {
+        let (object_uid, molecule, raw_data, stored_backend) = {
             let scene = self
                 .scene_manager()
                 .scene(scene_uid)
                 .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
-            let molecule = scene
+            let object = scene
                 .object_by_name(&summary.original_molecule)
                 .ok_or_else(|| {
                     CueMolError::NotFound(format!(
                         "original molecule {}",
                         summary.original_molecule
                     ))
-                })?
-                .mol()
-                .clone();
+                })?;
+            let molecule = object.mol().clone();
             let raw_data = scene
                 .loaded_surface(surface_uid)
                 .ok_or_else(|| CueMolError::NotFound(format!("surface {}", surface_uid.get())))?
@@ -6642,11 +6624,11 @@ impl DesktopAppState {
                 .map(|node| node.str_attr("sesbackend").to_string())
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| "auto".to_string());
-            (molecule, raw_data, backend)
+            (object.uid(), molecule, raw_data, backend)
         };
         let mut surface = cuemol_surface::qdf::read_qdf_surface_bytes(&raw_data)?;
         let selection = (!summary.original_selection.trim().is_empty())
-            .then(|| parse_selector(&summary.original_selection))
+            .then(|| self.parse_object_selector(object_uid, &summary.original_selection))
             .transpose()?;
         let density = if density > 0.0 {
             density
@@ -14403,11 +14385,7 @@ impl DesktopAppState {
             .scene_manager()
             .object(object_uid)
             .ok_or_else(|| CueMolError::not_found("molecule"))?;
-        let selector = self.parse_scene_selector(
-            self.active_scene()
-                .ok_or_else(|| CueMolError::not_found("active scene"))?,
-            selection,
-        )?;
+        let selector = self.parse_object_selector(object_uid, selection)?;
         if object.mol().select_indices(&selector).is_empty() {
             return Err(CueMolError::invalid_argument(
                 "selection matched no atoms; nothing written",
@@ -14841,7 +14819,7 @@ impl DesktopAppState {
                 object,
                 fallback_selector.as_ref(),
                 || styles.get_or_init(|| scene_style_manager(scene)),
-                scene_uid.get(),
+                scene,
             );
             let mut selected = selected.into_iter().peekable();
             let ordered = mol.atoms().windows(2).all(|atoms| {
@@ -15195,7 +15173,7 @@ impl DesktopAppState {
                 object,
                 selector.as_ref(),
                 || styles.get_or_init(|| scene_style_manager(scene)),
-                scene_uid.get(),
+                scene,
             );
             for index in selected_indices {
                 if let Some(atom) = atoms.get(index) {
@@ -15240,10 +15218,9 @@ impl DesktopAppState {
             .iter()
             .filter(|object| object.is_visible() && !object.is_ui_locked())
         {
-            let selected =
-                selection_support::indices(object, selector.as_ref(), || &styles, scene_uid.get())
-                    .into_iter()
-                    .collect::<BTreeSet<_>>();
+            let selected = selection_support::indices(object, selector.as_ref(), || &styles, scene)
+                .into_iter()
+                .collect::<BTreeSet<_>>();
             let mut append =
                 |indices: Vec<usize>, xform: Matrix4, seen: &mut BTreeSet<(usize, [u64; 3])>| {
                     for index in indices {
@@ -15285,6 +15262,8 @@ impl DesktopAppState {
                         "selection" | "atomintr" | "symm" | "unitcell"
                     )
             }) {
+                let selection =
+                    selection_support::renderer_selector(object, renderer, &styles, scene)?;
                 let indices = if matches!(
                     renderer.renderer_type(),
                     "trace" | "tracestick" | "ribbon" | "cartoon" | "tube" | "spline" | "nucl"
@@ -15292,11 +15271,11 @@ impl DesktopAppState {
                     let pivot = renderer.resolved_attr("pivotatom", &styles, scene_uid.get());
                     cuemol_molvis::mainchain_pick_indices(
                         object.mol(),
-                        renderer.selection(),
+                        &selection,
                         pivot.as_deref(),
                     )
                 } else {
-                    object.mol().select_indices(renderer.selection())
+                    object.mol().select_indices(&selection)
                 };
                 append(
                     indices,
@@ -15618,6 +15597,7 @@ impl DesktopAppState {
                             Some(renderer),
                             &styles,
                             source_uid.get(),
+                            source,
                         );
                         cuemol_lwview::RenderLWRendererSnapshot {
                             name: if renderer.name().is_empty() {
@@ -15649,6 +15629,7 @@ impl DesktopAppState {
                         None,
                         &styles,
                         source_uid.get(),
+                        source,
                     );
                     renderers.push(cuemol_lwview::RenderLWRendererSnapshot {
                         name: "(simple)".to_string(),
@@ -21263,6 +21244,47 @@ impl DesktopAppState {
             }
             parse_script_selector(&expression, script_selection_scope(value, ctx))
         }
+        fn selector_in_script_scene(
+            env: &ScriptEnv,
+            source: &ScriptMol,
+            selector: &Selector,
+        ) -> Selector {
+            let Ok(selector) =
+                selection_support::resolve(selector, || &env.styles, source.scene_uid)
+            else {
+                return Selector::None;
+            };
+            let transform = env
+                .objects
+                .iter()
+                .find(|object| object.uid == source.uid)
+                .map_or(Matrix4::IDENTITY, |object| object.xform);
+            selector
+                .bind_with_context(&source.molecule, transform, |name| {
+                    let target = env.objects.iter().find(|object| {
+                        object.scene_uid == source.scene_uid && object.name == name
+                    })?;
+                    let molecule = env.molecules.iter().find(|entry| entry.uid == target.uid)?;
+                    Some((&molecule.molecule, target.xform))
+                })
+                .into_owned()
+        }
+        fn bind_script_selector(uid: u64, selector: Selector) -> JsResult<Selector> {
+            script_env::with(|env| {
+                env.molecules
+                    .iter()
+                    .find(|entry| entry.uid == uid)
+                    .map(|source| selector_in_script_scene(env, source, &selector))
+            })
+            .ok_or_else(|| script_error(format!("Molecule {uid} is not available")))
+        }
+        fn molecule_selector_from_script_value(
+            value: &JsValue,
+            uid: u64,
+            ctx: &mut Context,
+        ) -> JsResult<Selector> {
+            bind_script_selector(uid, selector_from_script_value(value, ctx)?)
+        }
         fn atom_proxy_position(value: &JsValue, ctx: &mut Context) -> JsResult<Vector4> {
             let position = value
                 .as_object()
@@ -22334,6 +22356,7 @@ impl DesktopAppState {
             let molecule = script_molecule(&target, ctx)?;
             let selection = object.get(js_string!("_sel"), ctx)?;
             let selector = selector_from_script_value(&selection, ctx)?;
+            let selector = bind_script_selector(molecule.uid, selector)?;
             Ok(Some((molecule, selector, iterator_cursor(this, ctx)?)))
         }
         fn iterator_type(this: &JsValue, ctx: &mut Context) -> String {
@@ -22666,6 +22689,7 @@ impl DesktopAppState {
             let molecule = script_molecule(&molecule_value, ctx)?;
             let selection_value = args.get(1).cloned().unwrap_or(JsValue::undefined());
             let selection = selector_from_script_value(&selection_value, ctx)?;
+            let selection = bind_script_selector(molecule.uid, selection)?;
             let mut ranges = cuemol_molstr::ResidRangeSet::new();
             ranges.from_selection(&molecule.molecule, &selection);
             set_resid_range_state(this, molecule.uid, &ranges, ctx)?;
@@ -22701,6 +22725,7 @@ impl DesktopAppState {
             let mut ranges = resid_range_state(this, &molecule.molecule, ctx)?;
             let selection_value = args.get(1).cloned().unwrap_or(JsValue::undefined());
             let selection = selector_from_script_value(&selection_value, ctx)?;
+            let selection = bind_script_selector(molecule.uid, selection)?;
             ranges.append(&molecule.molecule, &selection);
             set_resid_range_state(this, molecule.uid, &ranges, ctx)?;
             Ok(JsValue::undefined())
@@ -22715,6 +22740,7 @@ impl DesktopAppState {
             let mut ranges = resid_range_state(this, &molecule.molecule, ctx)?;
             let selection_value = args.get(1).cloned().unwrap_or(JsValue::undefined());
             let selection = selector_from_script_value(&selection_value, ctx)?;
+            let selection = bind_script_selector(molecule.uid, selection)?;
             ranges.remove(&molecule.molecule, &selection);
             set_resid_range_state(this, molecule.uid, &ranges, ctx)?;
             Ok(JsValue::undefined())
@@ -22871,17 +22897,12 @@ impl DesktopAppState {
         }
         fn selection_command_from_value(
             value: &JsValue,
+            uid: u64,
             ctx: &mut Context,
         ) -> JsResult<cuemol_molstr::SelCommand> {
-            let mut selection = cuemol_molstr::SelCommand::new();
-            let scope_id = script_selection_scope(value, ctx);
-            selection
-                .compile_named_result(
-                    &this_string_prop(value, "expression", ctx),
-                    &script_selection_registry(scope_id),
-                )
-                .map_err(|error| script_error(error.to_string()))?;
-            Ok(selection)
+            Ok(cuemol_molstr::SelCommand::from_selector(
+                molecule_selector_from_script_value(value, uid, ctx)?,
+            ))
         }
         fn js_sel_is_selected_mol(
             this: &JsValue,
@@ -22898,7 +22919,7 @@ impl DesktopAppState {
             })
             .ok_or_else(|| script_error(format!("Molecule {uid} is not available")))?;
             Ok(JsValue::new(
-                selection_command_from_value(this, ctx)?.is_selected_mol(&molecule),
+                selection_command_from_value(this, uid, ctx)?.is_selected_mol(&molecule),
             ))
         }
         fn js_sel_is_selected_chain(
@@ -22917,7 +22938,7 @@ impl DesktopAppState {
             })
             .ok_or_else(|| script_error(format!("Molecule {uid} is not available")))?;
             Ok(JsValue::new(
-                selection_command_from_value(this, ctx)?
+                selection_command_from_value(this, uid, ctx)?
                     .is_selected_chain_by_name(&molecule, &chain),
             ))
         }
@@ -22938,7 +22959,7 @@ impl DesktopAppState {
             })
             .ok_or_else(|| script_error(format!("Molecule {uid} is not available")))?;
             Ok(JsValue::new(
-                selection_command_from_value(this, ctx)?
+                selection_command_from_value(this, uid, ctx)?
                     .is_selected_resid_by_name(&molecule, &chain, &sindex)
                     .map_err(|error| script_error(error.to_string()))?,
             ))
@@ -22957,9 +22978,13 @@ impl DesktopAppState {
                     .map(|entry| entry.molecule.clone())
             })
             .ok_or_else(|| script_error(format!("Molecule {uid} is not available")))?;
-            let atom = script_atom(&target, ctx)?;
+            let serial = object_number_prop(&target, "id", ctx)? as i32;
+            let atom = molecule
+                .atom_by_serial(serial)
+                .ok_or_else(|| script_error("atom is unavailable"))?;
             Ok(JsValue::new(
-                selection_command_from_value(this, ctx)?.is_selected_in_molecule(&molecule, &atom),
+                selection_command_from_value(this, uid, ctx)?
+                    .is_selected_in_molecule(&molecule, atom),
             ))
         }
         fn make_sel_command(ctx: &mut Context) -> JsValue {
@@ -24446,6 +24471,7 @@ impl DesktopAppState {
             let molecule = script_molecule(&molecule_value, ctx)?;
             let selection_value = args.get(1).cloned().unwrap_or(JsValue::undefined());
             let selection = selector_from_script_value(&selection_value, ctx)?;
+            let selection = bind_script_selector(molecule.uid, selection)?;
             let density = color_arg(args, 2, 0.0, ctx)?;
             let probe_radius = color_arg(args, 3, 0.0, ctx)?;
             if !density.is_finite() || density <= 0.0 {
@@ -24490,6 +24516,7 @@ impl DesktopAppState {
             .ok_or_else(|| script_error("original molecule is unavailable"))?;
             let selection_value = iterator_object(this)?.get(js_string!("orig_sel"), ctx)?;
             let selection = selector_from_script_value(&selection_value, ctx)?;
+            let selection = bind_script_selector(molecule.uid, selection)?;
             let density = color_arg(args, 0, -1.0, ctx)?;
             let mut surface = molsurf_from_value(this, ctx)?;
             surface
@@ -33398,7 +33425,7 @@ impl DesktopAppState {
             let selector = args
                 .first()
                 .filter(|value| !value.is_null_or_undefined())
-                .map(|value| selector_from_script_value(value, ctx))
+                .map(|value| molecule_selector_from_script_value(value, uid, ctx))
                 .transpose()?;
             let size = script_env::with(|env| {
                 env.molecules
@@ -33471,7 +33498,7 @@ impl DesktopAppState {
             this: &JsValue,
             args: &[JsValue],
             ctx: &mut Context,
-            query: impl FnOnce(&cuemol_molstr::MolCoord, bool) -> Option<Vector4>,
+            query: impl FnOnce(&cuemol_molstr::MolCoord, Option<&Selector>) -> Option<Vector4>,
         ) -> JsResult<JsValue> {
             let uid = object_proxy_uid(this, ctx)?;
             let selected = args.first().is_some_and(JsValue::to_boolean);
@@ -33479,7 +33506,12 @@ impl DesktopAppState {
                 env.molecules
                     .iter()
                     .find(|molecule| molecule.uid == uid)
-                    .and_then(|molecule| query(&molecule.molecule, selected))
+                    .and_then(|molecule| {
+                        let selection = selected.then(|| {
+                            selector_in_script_scene(env, molecule, molecule.molecule.selection())
+                        });
+                        query(&molecule.molecule, selection.as_ref())
+                    })
             });
             Ok(value
                 .map(|value| make_vector(value, ctx))
@@ -33491,7 +33523,7 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             js_object_vector_query(this, args, ctx, |molecule, selected| {
-                molecule.get_center_pos(selected)
+                molecule.center_pos(selected)
             })
         }
         fn js_object_bound_min(
@@ -33500,7 +33532,7 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             js_object_vector_query(this, args, ctx, |molecule, selected| {
-                molecule.get_bound_box_min(selected)
+                molecule.bound_box_min(selected)
             })
         }
         fn js_object_bound_max(
@@ -33509,7 +33541,7 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             js_object_vector_query(this, args, ctx, |molecule, selected| {
-                molecule.get_bound_box_max(selected)
+                molecule.bound_box_max(selected)
             })
         }
         fn js_object_chain_candidates(
@@ -33558,7 +33590,7 @@ impl DesktopAppState {
             let selector = args
                 .get(1)
                 .filter(|value| !value.is_null_or_undefined())
-                .map(|value| selector_from_script_value(value, ctx))
+                .map(|value| molecule_selector_from_script_value(value, uid, ctx))
                 .transpose()?;
             with_script_molecule_mut(uid, |molecule| {
                 molecule.xform_by_mat(matrix, selector.as_ref());
@@ -33650,6 +33682,7 @@ impl DesktopAppState {
                 &args.get(1).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
+            let selector = bind_script_selector(source_uid, selector)?;
             let source = script_env::with(|env| {
                 env.molecules
                     .iter()
@@ -33667,12 +33700,15 @@ impl DesktopAppState {
             args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            let selector =
-                selector_from_script_value(args.first().unwrap_or(&JsValue::undefined()), ctx)?;
-            Ok(JsValue::new(with_script_molecule_mut(
-                object_proxy_uid(this, ctx)?,
-                |molecule| MolAnlManager::new().delete_atoms(molecule, &selector),
-            )?))
+            let uid = object_proxy_uid(this, ctx)?;
+            let selector = molecule_selector_from_script_value(
+                args.first().unwrap_or(&JsValue::undefined()),
+                uid,
+                ctx,
+            )?;
+            Ok(JsValue::new(with_script_molecule_mut(uid, |molecule| {
+                MolAnlManager::new().delete_atoms(molecule, &selector)
+            })?))
         }
         fn js_object_append_atom(
             this: &JsValue,
@@ -33766,7 +33802,7 @@ impl DesktopAppState {
             let selector = if kind == "selection" {
                 Some(
                     args.first()
-                        .map(|value| selector_from_script_value(value, ctx))
+                        .map(|value| molecule_selector_from_script_value(value, uid, ctx))
                         .transpose()?
                         .unwrap_or(Selector::All),
                 )
@@ -39053,6 +39089,7 @@ impl DesktopAppState {
                             .and_then(|object| {
                                 let molecule =
                                     env.molecules.iter().find(|m| m.uid == object.uid)?;
+                                let selector = selector_in_script_scene(env, molecule, &selector);
                                 let transform = map_inverse.mul_mat(object.xform);
                                 Some(
                                     molecule
@@ -44235,12 +44272,14 @@ impl DesktopAppState {
                 &args.get(1).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
+            let ref_sel = bind_script_selector(reference.uid, ref_sel)?;
             let moving =
                 script_world_molecule(&args.get(2).cloned().unwrap_or(JsValue::undefined()), ctx)?;
             let mov_sel = selector_from_script_value(
                 &args.get(3).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
+            let mov_sel = bind_script_selector(moving.uid, mov_sel)?;
             let pivot = args
                 .get(4)
                 .filter(|v| !v.is_null_or_undefined())
@@ -44330,12 +44369,14 @@ impl DesktopAppState {
                 &args.get(1).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
+            let reference_selection = bind_script_selector(reference.uid, reference_selection)?;
             let moving_value = args.get(2).cloned().unwrap_or(JsValue::undefined());
             let moving = script_world_molecule(&moving_value, ctx)?;
             let moving_selection = selector_from_script_value(
                 &args.get(3).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
+            let moving_selection = bind_script_selector(moving.uid, moving_selection)?;
             let use_property = args.get(4).is_some_and(JsValue::to_boolean);
             let matrix = MolAnlManager::new()
                 .superpose_ssm_matrix(
@@ -44359,12 +44400,14 @@ impl DesktopAppState {
                 &args.get(1).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
+            let reference_selection = bind_script_selector(reference.uid, reference_selection)?;
             let moving_value = args.get(2).cloned().unwrap_or(JsValue::undefined());
             let moving = script_world_molecule(&moving_value, ctx)?;
             let moving_selection = selector_from_script_value(
                 &args.get(3).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
+            let moving_selection = bind_script_selector(moving.uid, moving_selection)?;
             let use_property = args.get(4).is_some_and(JsValue::to_boolean);
             let matrix = MolAnlManager::new()
                 .superpose_lsq_matrix(
@@ -44416,12 +44459,14 @@ impl DesktopAppState {
                 &args.get(1).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
+            let reference_selection = bind_script_selector(reference.uid, reference_selection)?;
             let moving_value = args.get(2).cloned().unwrap_or(JsValue::undefined());
             let moving = script_world_molecule(&moving_value, ctx)?;
             let moving_selection = selector_from_script_value(
                 &args.get(3).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
+            let moving_selection = bind_script_selector(moving.uid, moving_selection)?;
             let rmsd = MolAnlManager::new()
                 .superpose_ssm_rmsd(
                     &reference.molecule,
@@ -44444,12 +44489,14 @@ impl DesktopAppState {
                 &args.get(1).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
+            let reference_selection = bind_script_selector(reference.uid, reference_selection)?;
             let moving_value = args.get(2).cloned().unwrap_or(JsValue::undefined());
             let moving = script_world_molecule(&moving_value, ctx)?;
             let moving_selection = selector_from_script_value(
                 &args.get(3).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
+            let moving_selection = bind_script_selector(moving.uid, moving_selection)?;
             let rmsd = MolAnlManager::new()
                 .calc_rmsd(
                     &reference.molecule,
@@ -44530,6 +44577,7 @@ impl DesktopAppState {
                 &args.get(2).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
+            let selector = bind_script_selector(source.uid, selector)?;
             let mut target_copy = target.molecule;
             let changed = MolAnlManager::new()
                 .copy_atoms(&mut target_copy, &source.molecule, &selector)
@@ -44550,6 +44598,7 @@ impl DesktopAppState {
                 &args.get(1).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
+            let selector = bind_script_selector(molecule.uid, selector)?;
             let mut copy = molecule.molecule;
             let changed = MolAnlManager::new().delete_atoms(&mut copy, &selector);
             if changed {
@@ -44568,6 +44617,7 @@ impl DesktopAppState {
                 &args.get(1).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
+            let selector = bind_script_selector(molecule.uid, selector)?;
             let name = argn(args, 2, ctx);
             let mut copy = molecule.molecule;
             let changed = MolAnlManager::new().change_chain_name(&mut copy, &selector, &name);
@@ -44588,6 +44638,7 @@ impl DesktopAppState {
                 &args.get(1).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
+            let selector = bind_script_selector(molecule.uid, selector)?;
             let shift_mode = args.get(2).is_some_and(JsValue::to_boolean);
             let value = args
                 .get(3)
@@ -44631,6 +44682,7 @@ impl DesktopAppState {
                 &args.get(1).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
+            let selector = bind_script_selector(molecule.uid, selector)?;
             Ok(JsString::from(MolAnlManager::new().calc_atom_contact_json(
                 &molecule.molecule,
                 &selector,
@@ -44652,10 +44704,12 @@ impl DesktopAppState {
                 &args.get(1).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
+            let selector1 = bind_script_selector(molecule.uid, selector1)?;
             let selector2 = selector_from_script_value(
                 &args.get(2).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
+            let selector2 = bind_script_selector(molecule.uid, selector2)?;
             Ok(JsString::from(MolAnlManager::new().calc_atom_contact2_json(
                 &molecule.molecule,
                 &selector1,
@@ -44678,12 +44732,14 @@ impl DesktopAppState {
                 &args.get(1).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
+            let selector1 = bind_script_selector(molecule1.uid, selector1)?;
             let molecule2 =
                 script_molecule(&args.get(2).cloned().unwrap_or(JsValue::undefined()), ctx)?;
             let selector2 = selector_from_script_value(
                 &args.get(3).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
+            let selector2 = bind_script_selector(molecule2.uid, selector2)?;
             Ok(JsString::from(MolAnlManager::new().calc_atom_contact3_json(
                 &molecule1.molecule,
                 &selector1,
@@ -47402,7 +47458,8 @@ impl DesktopAppState {
                 {
                     let mol = &entry.molecule;
                     let atoms = mol.atoms();
-                    for index in mol.select_indices(selector) {
+                    let selector = selector_in_script_scene(env, entry, selector);
+                    for index in mol.select_indices(&selector) {
                         if let Some(atom) = atoms.get(index) {
                             points.push(atom.position);
                         }
@@ -51430,7 +51487,7 @@ fn append_object_snapshot(
     scalar_maps: &BTreeMap<Uid, GuiDensityMapObject>,
     scene: &MolScene,
 ) {
-    let selected_indices = selection_support::indices(object, selector, || styles, style_scope_id);
+    let selected_indices = selection_support::indices(object, selector, || styles, scene);
     let selection_renderers = object
         .renderers()
         .iter()
@@ -51782,16 +51839,12 @@ fn append_object_renderer_snapshot(
         styles,
         style_scope_id,
     );
-    // Per-renderer `sel="..."`: restrict the atom/bond geometry to the renderer's
-    // own selection (e.g. a ballstick renderer scoped to a ligand). `*`/empty/all
-    // means no restriction; a parse failure falls back to drawing everything.
-    if let Some(sel) = renderer
-        .and_then(|renderer| renderer.qsc_attr("sel"))
-        .map(str::trim)
-        .filter(|sel| !sel.is_empty() && *sel != "*")
-    {
-        if let Ok(selector) = parse_selector_with_styles(sel, styles, style_scope_id) {
-            options.draw_indices = Some(object.mol().select_indices(&selector));
+    if let Some(renderer) = renderer {
+        if let Ok(selector) = selection_support::renderer_selector(object, renderer, styles, scene)
+        {
+            if !matches!(selector, Selector::All) {
+                options.draw_indices = Some(object.mol().select_indices(&selector));
+            }
         }
     }
     let renderer_coloring_type = renderer
@@ -51804,6 +51857,15 @@ fn append_object_renderer_snapshot(
             styles,
             style_scope_id,
         );
+    } else if object.coloring_type() == Some("PaintColoring")
+        || (object.coloring_type().is_none() && !object.paint_coloring().is_empty())
+    {
+        cuemol_molvis::apply_molecular_object_coloring(
+            &mut options,
+            object,
+            styles,
+            style_scope_id,
+        );
     } else {
         apply_object_coloring(
             &mut options,
@@ -51813,6 +51875,10 @@ fn append_object_renderer_snapshot(
             object.mol().default_color(),
         );
     }
+    if let Some(coloring) = &mut options.molecular_coloring {
+        coloring.bind_to_scene(object, scene);
+    }
+    let source_object = object;
     let transformed_object =
         if renderer_type != "atomintr" && object.xform_matrix() != Matrix4::IDENTITY {
             options.backbone_links = Some(std::sync::Arc::new(cuemol_molvis::mainchain_links(
@@ -52054,11 +52120,13 @@ fn append_object_renderer_snapshot(
         }
         ("dsurface" | "directsurf" | "dsurf2", Some(renderer)) => direct_surface_snapshot(
             object,
+            source_object,
             renderer,
             styles,
             style_scope_id,
             surface_potential,
             scalar_maps,
+            scene,
         ),
         ("ms2test", _) => {
             let mesh = cuemol_surface::Ms2TestRenderer::new().render_mesh(object.mol());
@@ -52439,11 +52507,13 @@ fn test_renderer_snapshot(
 
 fn direct_surface_snapshot(
     object: &MolObject,
+    source_object: &MolObject,
     renderer: &MolRenderer,
     styles: &StyleManager,
     style_scope_id: u64,
     surface_potential: Option<&DensityMap>,
     scalar_maps: &BTreeMap<Uid, GuiDensityMapObject>,
+    scene: &MolScene,
 ) -> RenderSceneSnapshot {
     let resolved = |name: &str| {
         renderer
@@ -52454,6 +52524,7 @@ fn direct_surface_snapshot(
         .filter(|value| !value.is_empty() && value != "*")
         .and_then(|value| parse_selector_with_styles(&value, styles, style_scope_id).ok())
         .unwrap_or(Selector::All);
+    let selector = selector.bind_to_scene(source_object, scene).into_owned();
     let mut surface_renderer = cuemol_surface::DirectSurfRenderer::new();
     surface_renderer.set_selection(selector.clone());
     if let Some(value) = resolved("detail").and_then(|value| value.parse().ok()) {
@@ -52592,6 +52663,9 @@ fn direct_surface_snapshot(
             styles,
             style_scope_id,
         );
+        if let Some(coloring) = &mut options.molecular_coloring {
+            coloring.bind_to_scene(source_object, scene);
+        }
         let colors = cuemol_molvis::resolve_atom_colors(object.mol(), &options);
         surface_mesh_render_mesh_with_colors(object, &selector, &mesh, &colors)
     });
@@ -52599,6 +52673,7 @@ fn direct_surface_snapshot(
         .filter(|value| !value.is_empty() && value != "*")
         .and_then(|value| parse_selector_with_styles(&value, styles, style_scope_id).ok())
     {
+        let show_selection = show_selection.bind_to_scene(source_object, scene);
         render_mesh = filter_surface_mesh_by_atom_selection(
             render_mesh,
             &mesh,
@@ -52799,6 +52874,7 @@ fn append_molecule_lw_hit_points(
     renderer: Option<&MolRenderer>,
     styles: &StyleManager,
     style_scope_id: u64,
+    scene: &MolScene,
 ) {
     let renderer_type = renderer.map(MolRenderer::renderer_type).unwrap_or("simple");
     let mainchain = matches!(
@@ -52814,21 +52890,13 @@ fn append_molecule_lw_hit_points(
         return;
     }
 
-    let parsed_selector = renderer
-        .and_then(|renderer| renderer.qsc_attr("sel"))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .and_then(|value| parse_selector_with_styles(value, styles, style_scope_id).ok());
-    let selector = parsed_selector
-        .as_ref()
-        .or_else(|| renderer.map(MolRenderer::selection));
+    let selector = renderer.and_then(|renderer| {
+        selection_support::renderer_selector(object, renderer, styles, scene).ok()
+    });
     let selected = object
         .mol()
-        .atoms()
-        .iter()
-        .enumerate()
-        .filter(|(_, atom)| selector.is_none_or(|selector| selector.matches(atom)))
-        .map(|(index, _)| index)
+        .select_indices(selector.as_ref().unwrap_or(&Selector::All))
+        .into_iter()
         .collect::<BTreeSet<_>>();
     let indices = if mainchain {
         let custom_pivot = renderer
@@ -53973,7 +54041,7 @@ fn selected_residue_atom_count(molecule: &MolCoord, selector: &Selector) -> usiz
     let selected = molecule
         .atoms()
         .iter()
-        .filter(|atom| selector.matches(atom))
+        .filter(|atom| selector.matches_in_molecule(atom, molecule))
         .map(|atom| ResidueKey::new(atom.chain_id.clone(), atom.res_id, atom.ins_code))
         .collect::<BTreeSet<_>>();
     molecule
@@ -59410,6 +59478,36 @@ end_header
         let scene = app.scene_manager().scene(scene_uid).unwrap();
         assert_eq!(scene.name(), "number_chain_atomintr1.qsc");
         assert!(!scene.objects().is_empty());
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn lightweight_conversion_keeps_hit_points_for_cross_molecule_selections() {
+        let mut app = DesktopAppState::new();
+        let source = app.new_scene("source", true).result_scene;
+        let molecule = cuemol_molstr::read_pdb_str("ATOM      1  CA  GLY A   1       0.000   0.000   0.000  1.00  0.00           C\nATOM      2  CA  GLY A   2       1.400   0.000   0.000  1.00  0.00           C\nEND\n").unwrap();
+        let scene = app.scene_manager_mut().scene_mut(source).unwrap();
+        let probe = scene.add_molecule("Probe", molecule.clone());
+        scene.add_molecule("Target", molecule);
+        let renderer = scene
+            .object_mut(probe)
+            .unwrap()
+            .add_renderer("trace", "atoms");
+        app.set_renderer_selection_text(probe, renderer, "aid 1 around 0.1 [Target]")
+            .unwrap();
+        let target = app.new_scene("lightweight", false).result_scene;
+        app.convert_scene_to_lw(source, target).unwrap();
+        let object = app
+            .scene_manager()
+            .scene(target)
+            .unwrap()
+            .loaded_lw_objects()
+            .iter()
+            .find(|object| object.name == "Probe")
+            .unwrap();
+        let data = cuemol_lwview::read_qdf_lwobj_bytes(&object.raw_data).unwrap();
+        assert_eq!(data.hit_data_len(), 1);
+        assert!(data.hit_data(0).unwrap().message().contains("CA"));
     }
 
     #[cfg(feature = "scripting")]

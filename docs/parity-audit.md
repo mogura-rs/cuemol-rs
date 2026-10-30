@@ -37,7 +37,7 @@ speedup from a single optimized stage or compare timings from different hosts.
 | Scripts and services | JavaScript/Python helpers, retained state, callbacks, errors, file arguments and asynchronous readers | Previous compatibility checks exist; shared workload comparison pending |
 | File and scene I/O | Reader options, saved cameras, source metadata, selections, linked/embedded data and cancellation | Embedded QDF/PDB secondary-structure defaults and topology transfers repaired; paired scene loading measured below; broader I/O comparison pending |
 | Navigation and cameras | Rotation, pan, zoom, fitting, clipping, bookmarks, visibility and screen coordinates | Previous numeric and interaction oracles exist; integrated comparison pending |
-| Selection and annotation | Expressions, residue ranges, lasso, named selections, labels and measurement modes | Sequence actions, selection pickers and the live Selection pane now share behavior across frontends; scene-scoped named selections, insertion codes and pivot centering repaired; cross-molecule distance expressions and broader annotation comparison remain pending |
+| Selection and annotation | Expressions, residue ranges, lasso, named selections, labels and measurement modes | Sequence actions, selection pickers and the live Selection pane now share behavior across frontends; scene-scoped names, insertion codes, pivot centering and cross-molecule distances repaired; broader annotation comparison remains pending |
 | Molecular editing | Merge/delete, chain/residue changes, secondary structure, transformations and undo/redo | Command coverage exists; dialog and edge-case comparison pending |
 | Analysis and surfaces | Alignment, interactions, surface creation/regeneration/cutting and electrostatics | Numerical/tool checks exist; dialog and performance comparison pending |
 | Viewport rendering | Molecular/map/surface representations, transparency, lighting, edges, fog, AA and AO | Ribbon widths, topology links, applied pivots and secondary-structure junctions repaired; remaining viewport effects and scene comparisons are pending |
@@ -635,8 +635,8 @@ source-text assertions for the former ten-entry native history and its private
 storage helpers were removed; the behavioral history test checks the shared
 100-entry limit and persistence.
 
-Cross-molecule distance expressions still require scene-aware evaluation and
-remain unresolved. The Rust bond-distance `neighbor`/`extend` extension is
+Cross-molecule distance expressions now use the scene-aware evaluator described
+below. The Rust bond-distance `neighbor`/`extend` extension is
 retained; the reference source parses these operators but returns no matches.
 An installed-reference probe also returned zero atoms for both operators on
 1CRN with `name CA` as the operand.
@@ -726,6 +726,87 @@ A second public review of `d7713d4` found no high-confidence defect. The two
 lower-confidence concerns were checked against the callees: the molecule setter
 retains the submitted expression exactly, and history-save warnings call the
 global error handler rather than the disposed pane's local handler.
+
+The next complete browser CI exposed a layout jump while a debounced atom
+count was pending. The pane now reserves the count row before the result arrives,
+keeping its builder buttons in place. A shared GUI regression failed with the
+old layout and passed after the repair. A separate OS-event regression showed
+that Escape could commit a selection field after the text widget had already
+released focus. Cancellation now recognizes that focus-loss frame and restores
+the committed value. Browser clicks also wait for the menu geometry to settle.
+Three affected selection scenarios passed three sequential repetitions each.
+
+## Cross-molecule distances
+
+`around` expressions can now select atoms near another molecule in the same
+scene. The inner expression is evaluated on that target, and both molecules'
+transforms are applied before the strict distance comparison. The published
+reference includes matching atoms when an explicit target names the source
+molecule itself, returns nothing for a missing target, and treats an empty
+target name as an ordinary within-molecule query. Fresh-process probes of
+CueMol 2.4.1.547 confirmed these cases, nested distance/residue operators and
+independently translated objects. A single retained reference process could
+reuse stale distance data after a transform, so those observations were not
+used as the expected results for changed coordinates.
+
+The shared evaluator prepares an operation-local index mask for scene-dependent
+expressions. It uses sparse spatial cells for larger target sets, and borrows
+untransformed ordinary expressions without preparing a mask. It never retains
+a result across edits. The mask follows atom order through transformed clones,
+so duplicate input serials cannot broaden a match. Rendering, paint colors,
+picking, sequence highlights, centering, exports, edits, surfaces, alignment,
+contact analysis and JavaScript selection helpers use the same scene context.
+Contact calculations also prepare each operand once before their pair loop.
+Saved molecular surfaces retain their original expression and rebind it when
+regenerated. Their molecule coloring and display filters use the bound mask as
+well. Lightweight conversion retains selected backbone hit points, and map
+boundaries resolve selections before converting world positions to map space.
+
+Distance operands previously used single precision. A 1.1-unit separation was
+therefore incorrectly included by `around 1.1`, while the reference excludes
+that boundary. Operands now retain double precision and preserve extra digits
+when an expression is serialized. Direct renderer-selection edits also update
+their saved expression; previously a stale `sel` attribute could disagree with
+the live selector. Named references retain valid expression syntax in that
+serialization. Rust's existing target syntax for `expand` remains an extension:
+the published reference rejects that syntax, so it is not claimed as parity.
+
+The affected shared run passed 793 tests with the reference fixture tree
+available. Eight command integration cases cover reference outputs, boundary
+precision, both contact paths, duplicate serials, rendering/picking/paint,
+surface/export/edit behavior and script updates after transforms. A separate
+spatial-grid test compares against a direct world-coordinate scan, including
+extreme and nonfinite coordinates. Native GUI unit checks passed 178 cases
+with one unrelated real-POV-Ray test ignored. An actual Linux window removed
+the two rendered atoms when the target moved, changed 20,711 viewport pixels,
+and restored the identical cropped image when the target returned. All 57
+affected browser and Tauri cases passed, including both viewport backends,
+rendered-pixel restoration and hit testing after a target moved. After the
+surface/map changes, all eight command integration cases and four rebuilt
+browser cases passed, including explicit backend assertions, analytic density
+surfaces and saved molecular-surface regeneration. Public-review and delivery
+results are recorded after their terminal checks.
+Live measurement-definition operands remain part of the annotation audit;
+these results do not establish their scene-aware selection behavior.
+
+The measurements below used the same ARM64 macOS host and two separately loaded
+copies of each input. Each condition ran in three sequential fresh processes
+with one cold and ten repeated compile/count operations. Every selected-atom
+count and order digest matched the reference. RSS includes both molecules,
+loading and the complete runtime; it is not selection-mask memory alone.
+
+| Input and expression | Reference cold / repeat (ms) | Rust cold / repeat (ms) | Reference / Rust peak RSS (MiB) |
+| --- | ---: | ---: | --- |
+| 4HHB, `name CA around 3.5 [Target]` | 2.526 / 2.105 | 1.398 / 1.373 | 73.17-74.63 / 12.97-13.53 |
+| 4HHB, `byres (name CA around 3.5 [Target])` | 6.018 / 2.821 | 1.578 / 1.530 | 76.05-76.98 / 13.03-13.11 |
+| 20,000 generated atoms, `name C1 around 3.5 [Target]` | 10.349 / 8.759 | 3.371 / 3.333 | 93.53-93.59 / 35.77-35.86 |
+| 20,000 generated atoms, `byres (name C1 around 3.5 [Target])` | 24.927 / 11.706 | 4.086 / 4.035 | 95.39-95.44 / 35.78-35.83 |
+
+These results measure selection queries, not frame rate or overall application
+performance. Add `--target-fixture input.pdb` to `benchmark-selection.py` to
+create the second molecule named `Target`; the original is named `Probe`.
+The report records both fixture hashes and checks target identity when a saved
+baseline is supplied. Generated inputs, reports and captures remain ignored.
 
 ## Clipboard comparison and repairs
 

@@ -11,10 +11,7 @@ pub(super) fn atom_count(
     item: &MoleculeSelection,
 ) -> Result<usize, String> {
     let selector = state
-        .parse_scene_selector(
-            state.active_scene().ok_or("No active scene")?,
-            &item.expression,
-        )
+        .parse_object_selector(item.id, &item.expression)
         .map_err(|e| e.to_string())?;
     Ok(state
         .scene_manager()

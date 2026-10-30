@@ -756,7 +756,13 @@ impl crate::DesktopAppState {
             .scene_manager()
             .scene_uid_for_object(object_uid)
             .ok_or_else(|| cuemol_core::CueMolError::not_found("molecule"))?;
-        self.parse_scene_selector(scene, selection)
+        let selector = self.parse_scene_selector(scene, selection)?;
+        let scene = self.scene_manager().scene(scene).unwrap();
+        let object = scene.object(object_uid).unwrap();
+        match selector.bind_to_scene(object, scene) {
+            std::borrow::Cow::Borrowed(_) => Ok(selector),
+            std::borrow::Cow::Owned(bound) => Ok(bound),
+        }
     }
 
     pub fn molecule_renderer_properties(

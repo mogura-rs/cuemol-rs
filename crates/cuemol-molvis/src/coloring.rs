@@ -164,6 +164,16 @@ impl Layer {
 }
 
 impl MolecularColoring {
+    pub fn bind_to_scene(&mut self, object: &MolObject, scene: &cuemol_molstr::MolScene) {
+        for layer in [&mut self.renderer, &mut self.object] {
+            for (selector, _) in &mut layer.paint {
+                if let std::borrow::Cow::Owned(bound) = selector.bind_to_scene(object, scene) {
+                    *selector = bound;
+                }
+            }
+        }
+    }
+
     pub(super) fn resolve(&self, molecule: &MolCoord) -> Vec<ColorSpec> {
         let mut colors = self.renderer.colors(molecule);
         if colors
@@ -182,6 +192,23 @@ impl MolecularColoring {
         }
         colors
     }
+}
+
+pub fn apply_molecular_object_coloring(
+    options: &mut MoleculeRenderOptions,
+    object: &MolObject,
+    styles: &StyleManager,
+    scope: u64,
+) {
+    let layer = Layer::new(
+        "SolidColoring",
+        color("$molcol", styles, scope),
+        &BTreeMap::new(),
+        &[],
+        styles,
+        scope,
+    );
+    set_coloring_layers(options, object, layer, styles, scope);
 }
 
 /// Resolve each renderer color through the object's scheme only for `$molcol`.

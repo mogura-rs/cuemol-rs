@@ -1,6 +1,7 @@
 use crate::molecule::{Atom, MolCoord};
 use cuemol_core::{Box3, CueMolError, IntRange, RangeSet, Result, Vector4};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::sync::Arc;
 
 mod batch;
 
@@ -33,7 +34,7 @@ pub enum Selector {
     Distance {
         op: DistanceOp,
         inner: Box<Selector>,
-        distance: f32,
+        distance: f64,
         molecule: Option<String>,
     },
     Unary {
@@ -47,6 +48,31 @@ pub enum Selector {
     /// saved selections via [`Selector::resolve_named`] (C++ `SelRefNode`).
     Ref(String),
     Hier(HierSelector),
+    /// An operation-local result bound to the source molecule's atom order.
+    /// Rebind the original expression after changing coordinates or atom order.
+    Prepared(Arc<PreparedSelection>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreparedSelection {
+    expression: Selector,
+    mask: Vec<bool>,
+}
+
+impl PreparedSelection {
+    fn matches(&self, atom: &Atom, molecule: &MolCoord) -> bool {
+        if self.mask.len() != molecule.atom_count() {
+            return false;
+        }
+        let Some(offset) = std::ptr::from_ref(atom)
+            .addr()
+            .checked_sub(molecule.atoms().as_ptr().addr())
+        else {
+            return false;
+        };
+        let size = std::mem::size_of::<Atom>();
+        offset.is_multiple_of(size) && self.mask.get(offset / size).copied().unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +141,14 @@ impl SelCommand {
         Self {
             selector: None,
             original: String::new(),
+            error_msg: String::new(),
+        }
+    }
+
+    pub fn from_selector(selector: Selector) -> Self {
+        Self {
+            original: selector.expression(),
+            selector: Some(selector),
             error_msg: String::new(),
         }
     }
@@ -690,6 +724,15 @@ impl Selector {
     }
 
     pub fn dump(&self) -> String {
+        self.format_expression(false)
+    }
+
+    pub fn expression(&self) -> String {
+        self.format_expression(true)
+    }
+
+    fn format_expression(&self, preserve_references: bool) -> String {
+        let nested = |selector: &Selector| selector.format_expression(preserve_references);
         match self {
             Selector::All => "*".to_string(),
             Selector::None => "!*".to_string(),
@@ -715,16 +758,34 @@ impl Selector {
             } => {
                 let mol = molecule
                     .as_ref()
-                    .map(|name| format!(" [\"{name}\"]"))
+                    .map(|name| {
+                        if preserve_references && name.contains('"') {
+                            if name.contains('\'') {
+                                format!(" [{name}]")
+                            } else {
+                                format!(" ['{name}']")
+                            }
+                        } else {
+                            format!(" [\"{name}\"]")
+                        }
+                    })
                     .unwrap_or_default();
-                format!("({}) {} {:.6}{mol}", inner.dump(), op.dump(), distance)
+                let fixed = format!("{distance:.6}");
+                let number = if fixed.parse::<f64>().ok() == Some(*distance) {
+                    fixed
+                } else {
+                    distance.to_string()
+                };
+                format!("({}) {} {number}{mol}", nested(inner), op.dump())
             }
-            Selector::Unary { op, inner } => format!("{} ({})", op.dump(), inner.dump()),
-            Selector::Not(inner) => format!("!({})", inner.dump()),
-            Selector::And(lhs, rhs) => format!("({}) and ({})", lhs.dump(), rhs.dump()),
-            Selector::Or(lhs, rhs) => format!("({}) or ({})", lhs.dump(), rhs.dump()),
+            Selector::Unary { op, inner } => format!("{} ({})", op.dump(), nested(inner)),
+            Selector::Not(inner) => format!("!({})", nested(inner)),
+            Selector::And(lhs, rhs) => format!("({}) and ({})", nested(lhs), nested(rhs)),
+            Selector::Or(lhs, rhs) => format!("({}) or ({})", nested(lhs), nested(rhs)),
+            Selector::Ref(name) if preserve_references => name.clone(),
             Selector::Ref(name) => format!("Ref({name})"),
             Selector::Hier(value) => value.dump(),
+            Selector::Prepared(value) => nested(&value.expression),
         }
     }
 
@@ -765,6 +826,7 @@ impl Selector {
             // `resolve_named`.
             Selector::Ref(_) => false,
             Selector::Hier(value) => value.matches(atom),
+            Selector::Prepared(_) => false,
         }
     }
 
@@ -782,7 +844,10 @@ impl Selector {
                 distance,
                 molecule: around_target,
             } => {
-                if around_target.is_some() {
+                if around_target
+                    .as_deref()
+                    .is_some_and(|name| !name.is_empty())
+                {
                     return false;
                 }
                 distance_selector_matches(molecule, atom, inner, *op, *distance)
@@ -803,6 +868,7 @@ impl Selector {
             Selector::Or(lhs, rhs) => {
                 lhs.matches_in_molecule(atom, molecule) || rhs.matches_in_molecule(atom, molecule)
             }
+            Selector::Prepared(value) => value.matches(atom, molecule),
             _ => self.matches(atom),
         }
     }
@@ -819,7 +885,7 @@ fn distance_selector_matches(
     atom: &Atom,
     inner: &Selector,
     op: DistanceOp,
-    distance: f32,
+    distance: f64,
 ) -> bool {
     if matches!(op, DistanceOp::Neighbor | DistanceOp::Extend) {
         return graph_selector_matches(molecule, atom, inner, op, distance);
@@ -843,7 +909,7 @@ fn graph_selector_matches(
     atom: &Atom,
     inner: &Selector,
     op: DistanceOp,
-    distance: f32,
+    distance: f64,
 ) -> bool {
     let Some(target_index) = atom_index(molecule, atom) else {
         return false;
@@ -1302,7 +1368,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_distance_payload(&mut self) -> Result<(f32, Option<String>)> {
+    fn parse_distance_payload(&mut self) -> Result<(f64, Option<String>)> {
         self.skip_ws();
         let leading_molecule = if self.peek_char() == Some('[') {
             Some(self.parse_molecule_name()?)
@@ -1322,7 +1388,7 @@ impl<'a> Parser<'a> {
             }
         }
         let distance = number
-            .parse::<f32>()
+            .parse::<f64>()
             .map_err(|_| CueMolError::parse("invalid distance"))?;
         self.skip_ws();
         let trailing_molecule = if self.peek_char() == Some('[') {

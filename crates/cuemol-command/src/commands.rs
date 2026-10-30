@@ -126,25 +126,24 @@ pub(crate) fn fit(
             .map(|o| o.uid)
             .collect()
     });
-    let selector = selection
-        .map(|s| state.parse_scene_selector(scene_uid, s))
-        .transpose()?;
     let objects = ids
         .into_iter()
         .map(|id| {
-            state
+            let object = state
                 .scene_manager()
                 .object(id)
-                .ok_or_else(|| CueMolError::not_found("molecule"))
+                .ok_or_else(|| CueMolError::not_found("molecule"))?;
+            let selector = state.parse_object_selector(
+                id,
+                selection.unwrap_or_else(|| object.mol().selection_text()),
+            )?;
+            Ok((object, selector))
         })
         .collect::<Result<Vec<_>>>()?;
-    let positions = objects.into_iter().flat_map(|object| {
-        let selection = selector
-            .as_ref()
-            .unwrap_or_else(|| object.mol().selection());
+    let positions = objects.into_iter().flat_map(|(object, selection)| {
         object
             .mol()
-            .select_indices(selection)
+            .select_indices(&selection)
             .into_iter()
             .map(move |index| {
                 let mut position = object.mol().atoms()[index].position;
@@ -293,7 +292,7 @@ pub fn call_tool(
         "count_selection" | "list_chains" | "list_residues" => {
             let object=state.scene_manager().object(uid(args,"objId")?).ok_or_else(||CueMolError::not_found("molecule"))?;
             match name {
-                "count_selection" => {let count=object.mol().select_indices(&state.parse_scene_selector(scene(state)?,text(args,"selection")?)?).len();Ok(json!({"valid":true,"atomCount":count,"count":count}))},
+                "count_selection" => {let count=object.mol().atom_sel_count(&state.parse_object_selector(object.uid(),text(args,"selection")?)?);Ok(json!({"valid":true,"atomCount":count,"count":count}))},
                 "list_chains" => Ok(json!({"chains":object.mol().chain_ids()})),
                 _ => {
                     let chain=text(args,"chain")?;let offset=integer(args,"offset",0)?;let limit=integer(args,"limit",100)?.min(1000);

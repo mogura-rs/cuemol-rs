@@ -1,10 +1,84 @@
-use super::{is_main_chain_atom, is_side_chain_atom, same_atom, DistanceOp, Selector, UnaryOp};
-use crate::{Atom, MolCoord};
-use cuemol_core::Vector4;
+use super::{
+    is_main_chain_atom, is_side_chain_atom, same_atom, DistanceOp, PreparedSelection, Selector,
+    UnaryOp,
+};
+use crate::{Atom, MolCoord, MolObject, MolScene};
+use cuemol_core::{Matrix4, Vector4};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
+
+#[derive(Clone, Copy)]
+struct SceneContext<'a, 'b> {
+    transform: Matrix4,
+    resolve: &'b dyn Fn(&str) -> Option<(&'a MolCoord, Matrix4)>,
+}
 
 impl Selector {
+    /// Evaluate scene-dependent distances once for an operation. The result also
+    /// applies to coordinate-transformed clones with the same atom order.
+    pub fn bind_to_scene(&self, object: &MolObject, scene: &MolScene) -> Cow<'_, Selector> {
+        self.bind_with_context(object.mol(), object.xform_matrix(), |name| {
+            scene
+                .object_by_name(name)
+                .map(|target| (target.mol(), target.xform_matrix()))
+        })
+    }
+
+    /// Bind against a scene snapshot without cloning its molecules.
+    pub fn bind_with_context<'a>(
+        &self,
+        molecule: &'a MolCoord,
+        transform: Matrix4,
+        resolve: impl Fn(&str) -> Option<(&'a MolCoord, Matrix4)>,
+    ) -> Cow<'_, Selector> {
+        if !self.needs_scene(transform != Matrix4::IDENTITY) {
+            return Cow::Borrowed(self);
+        }
+        let mask = self.batch_mask_with_context(
+            molecule,
+            Some(SceneContext {
+                transform,
+                resolve: &resolve,
+            }),
+        );
+        Cow::Owned(Self::Prepared(Arc::new(PreparedSelection {
+            expression: self.clone(),
+            mask,
+        })))
+    }
+
+    fn needs_scene(&self, transformed: bool) -> bool {
+        match self {
+            Self::Distance {
+                op,
+                inner,
+                molecule,
+                ..
+            } => {
+                molecule.as_deref().is_some_and(|name| !name.is_empty())
+                    || (transformed && matches!(op, DistanceOp::Around | DistanceOp::Expand))
+                    || inner.needs_scene(transformed)
+            }
+            Self::Unary { inner, .. } | Self::Not(inner) => inner.needs_scene(transformed),
+            Self::And(left, right) | Self::Or(left, right) => {
+                left.needs_scene(transformed) || right.needs_scene(transformed)
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn indices_in_molecule(&self, molecule: &MolCoord) -> Vec<usize> {
+        if let Self::Prepared(value) = self {
+            return value
+                .mask
+                .iter()
+                .enumerate()
+                .filter_map(|(i, selected)| {
+                    (*selected && value.mask.len() == molecule.atom_count()).then_some(i)
+                })
+                .collect();
+        }
         if self.needs_batch() {
             self.batch_mask(molecule)
                 .into_iter()
@@ -24,6 +98,13 @@ impl Selector {
     }
 
     pub(crate) fn count_in_molecule(&self, molecule: &MolCoord) -> usize {
+        if let Self::Prepared(value) = self {
+            return if value.mask.len() == molecule.atom_count() {
+                value.mask.iter().filter(|selected| **selected).count()
+            } else {
+                0
+            };
+        }
         if self.needs_batch() {
             self.batch_mask(molecule)
                 .into_iter()
@@ -51,22 +132,33 @@ impl Selector {
     }
 
     fn batch_mask(&self, molecule: &MolCoord) -> Vec<bool> {
+        self.batch_mask_with_context(molecule, None)
+    }
+
+    fn batch_mask_with_context(
+        &self,
+        molecule: &MolCoord,
+        context: Option<SceneContext<'_, '_>>,
+    ) -> Vec<bool> {
         let atoms = molecule.atoms();
         match self {
             Self::Not(inner) => {
-                let mut mask = inner.batch_mask(molecule);
+                let mut mask = inner.batch_mask_with_context(molecule, context);
                 for selected in &mut mask {
                     *selected = !*selected;
                 }
                 mask
             }
             Self::And(lhs, rhs) | Self::Or(lhs, rhs) => {
-                let mut mask = lhs.batch_mask(molecule);
+                let mut mask = lhs.batch_mask_with_context(molecule, context);
                 let intersect = matches!(self, Self::And(..));
                 if mask.iter().all(|value| *value != intersect) {
                     return mask;
                 }
-                for (left, right) in mask.iter_mut().zip(rhs.batch_mask(molecule)) {
+                for (left, right) in mask
+                    .iter_mut()
+                    .zip(rhs.batch_mask_with_context(molecule, context))
+                {
                     *left = if intersect {
                         *left && right
                     } else {
@@ -76,7 +168,7 @@ impl Selector {
                 mask
             }
             Self::Unary { op, inner } => {
-                let mut mask = inner.batch_mask(molecule);
+                let mut mask = inner.batch_mask_with_context(molecule, context);
                 if *op == UnaryOp::ByRes {
                     let residues: HashSet<_> = atoms
                         .iter()
@@ -105,16 +197,51 @@ impl Selector {
                 distance,
                 molecule: target,
             } => {
-                if target.is_some() {
-                    return vec![false; atoms.len()];
+                if let Some(name) = target.as_deref().filter(|name| !name.is_empty()) {
+                    let Some(context) = context else {
+                        return vec![false; atoms.len()];
+                    };
+                    let Some((target, transform)) = (context.resolve)(name) else {
+                        return vec![false; atoms.len()];
+                    };
+                    if matches!(op, DistanceOp::Neighbor | DistanceOp::Extend) {
+                        return vec![false; atoms.len()];
+                    }
+                    let selected = inner.batch_mask_with_context(
+                        target,
+                        Some(SceneContext {
+                            transform,
+                            ..context
+                        }),
+                    );
+                    return scene_distance_mask(
+                        (molecule, context.transform),
+                        (target, transform),
+                        selected,
+                        *op,
+                        *distance,
+                        true,
+                    );
                 }
-                let selected = inner.batch_mask(molecule);
+                let selected = inner.batch_mask_with_context(molecule, context);
                 if matches!(op, DistanceOp::Neighbor | DistanceOp::Extend) {
                     graph_mask(molecule, selected, *op, *distance)
+                } else if let Some(context) =
+                    context.filter(|ctx| ctx.transform != Matrix4::IDENTITY)
+                {
+                    scene_distance_mask(
+                        (molecule, context.transform),
+                        (molecule, context.transform),
+                        selected,
+                        *op,
+                        *distance,
+                        false,
+                    )
                 } else {
                     distance_mask(atoms, selected, *op, *distance)
                 }
             }
+            Self::Prepared(value) if value.mask.len() == atoms.len() => value.mask.clone(),
             _ => atoms
                 .iter()
                 .map(|atom| self.matches_in_molecule(atom, molecule))
@@ -123,9 +250,85 @@ impl Selector {
     }
 }
 
-fn distance_mask(atoms: &[Atom], mut mask: Vec<bool>, op: DistanceOp, distance: f32) -> Vec<bool> {
+fn scene_distance_mask(
+    (probe, probe_transform): (&MolCoord, Matrix4),
+    (target, target_transform): (&MolCoord, Matrix4),
+    selected: Vec<bool>,
+    op: DistanceOp,
+    distance: f64,
+    across: bool,
+) -> Vec<bool> {
+    let cutoff = distance.max(0.0);
+    let mut mask = if across {
+        vec![false; probe.atom_count()]
+    } else {
+        selected.clone()
+    };
+    let points: Vec<_> = target
+        .atoms()
+        .iter()
+        .zip(selected)
+        .filter(|(_, selected)| *selected)
+        .map(|(atom, _)| {
+            let mut position = atom.position;
+            target_transform.xform3d(&mut position);
+            (atom, position)
+        })
+        .collect();
+    let indexed = points.len() >= 16 && cutoff > 0.0 && cutoff.is_finite();
+    let mut grid = HashMap::<[i64; 3], Vec<usize>>::new();
+    if indexed {
+        for (index, (_, position)) in points.iter().enumerate() {
+            if let Some(key) = cell(*position, cutoff) {
+                grid.entry(key).or_default().push(index);
+            }
+        }
+    }
+    for (atom, selected_self) in probe.atoms().iter().zip(&mut mask) {
+        if *selected_self {
+            *selected_self = op == DistanceOp::Expand;
+            continue;
+        }
+        if cutoff == 0.0 {
+            continue;
+        }
+        let mut position = atom.position;
+        probe_transform.xform3d(&mut position);
+        let near = |(other, point): &(&Atom, Vector4)| {
+            (across || !same_atom(atom, other)) && (position - *point).length3d() < cutoff
+        };
+        if !indexed {
+            *selected_self = points.iter().any(near);
+            continue;
+        }
+        let Some(center) = cell(position, cutoff) else {
+            continue;
+        };
+        'neighbors: for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    let key = [
+                        center[0].saturating_add(dx),
+                        center[1].saturating_add(dy),
+                        center[2].saturating_add(dz),
+                    ];
+                    if grid
+                        .get(&key)
+                        .is_some_and(|bucket| bucket.iter().any(|index| near(&points[*index])))
+                    {
+                        *selected_self = true;
+                        break 'neighbors;
+                    }
+                }
+            }
+        }
+    }
+    mask
+}
+
+fn distance_mask(atoms: &[Atom], mut mask: Vec<bool>, op: DistanceOp, distance: f64) -> Vec<bool> {
     let include_inner = op == DistanceOp::Expand;
-    let cutoff = f64::from(distance.max(0.0));
+    let cutoff = distance.max(0.0);
     let selected: Vec<_> = atoms
         .iter()
         .zip(&mask)
@@ -199,7 +402,7 @@ fn graph_mask(
     molecule: &MolCoord,
     selected: Vec<bool>,
     op: DistanceOp,
-    distance: f32,
+    distance: f64,
 ) -> Vec<bool> {
     let atoms = molecule.atoms();
     let depth_limit = distance.max(0.0).ceil() as usize;
