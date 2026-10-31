@@ -149,6 +149,14 @@ The old browser joined all three strings into one command; the repaired browser
 passes that case and all six existing console cases. Local checks also pass all
 28 shared UI tests and 257 native GUI/shell tests.
 
+The following Windows run passed the console checks but stopped at the lock
+property. The failure image still showed the previous `name` filter, so the
+checkbox click targeted a text field. Shared egui probes retained the filter
+text for both batched clicks and batched Tab navigation. The OS check now waits
+for the filter's focus border, verifies its copied text, and waits for focus to
+leave after Tab before clicking a property. It retains the original property
+change and undo assertions; the failed click alone did not prove a lock defect.
+
 Generated archives and `dist/validation.json` remain local validation artifacts,
 not a published release. The release workflow now checks actual packaged windows
 on all five native targets. Local test results do not establish that those CI

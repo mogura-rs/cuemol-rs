@@ -516,11 +516,27 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             pyautogui.click(x + width - 194, y + 149)
 
             def inspector_filter(text):
+                def focused():
+                    image = capture().crop((width - 290, 164, width - 10, 184))
+                    return sum(b - r > 30 and g - r > 10 for r, g, b in image.getdata()) > 200
+
                 pyautogui.click(x + width - 150, y + 174)
+                wait_for(focused)
                 pyautogui.hotkey(primary, 'a')
                 pyautogui.write(text, interval=0.02)
+
+                def copied_filter():
+                    pyautogui.hotkey(primary, 'a')
+                    pyautogui.hotkey(primary, 'c')
+                    copied = clipboard_text()
+                    if copied != text:
+                        raise RuntimeError(f'The property filter copied {copied[:80]!r}, expected {text!r}')
+                    return True
+
+                wait_for(copied_filter)
+                capture(f'inspector-filter-{text}.png')
                 pyautogui.press('tab')
-                time.sleep(0.2)
+                wait_for(lambda: not focused())
 
             inspector_filter('name')
             capture('inspector-name-before.png')
@@ -775,6 +791,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                           inspector_derived_axes=True,
                           inspector_optional_value=True,
                           inspector_optional_input_acknowledged=True,
+                          inspector_filter_input_acknowledged=True,
                           inspector_font_choices=True,
                           inspector_selection_builder=True,
                           font_pixels=styled.histogram()[255])
