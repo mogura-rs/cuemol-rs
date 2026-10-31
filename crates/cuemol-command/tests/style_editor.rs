@@ -291,6 +291,204 @@ fn global_style_file_edits_keep_identity_and_failed_reload_preserves_content() {
 }
 
 #[test]
+fn global_style_file_links_remain_stable_after_switching_scene_directories() {
+    let first_dir = tempfile::tempdir().unwrap();
+    let second_dir = tempfile::tempdir().unwrap();
+    let mut state = DesktopAppState::new();
+    let first = state.new_scene("first", true).result_scene;
+    state
+        .scene_manager_mut()
+        .scene_mut(first)
+        .unwrap()
+        .set_base_path(first_dir.path().to_string_lossy());
+    let second = state.new_scene("second", true).result_scene;
+    state
+        .scene_manager_mut()
+        .scene_mut(second)
+        .unwrap()
+        .set_base_path(second_dir.path().to_string_lossy());
+    let target = state.find_style_target(Uid::new(0), "user").unwrap();
+    state.edit_style(target, XML).unwrap();
+    state.save_style_file(target, first, "global.xml").unwrap();
+    std::fs::write(
+        second_dir.path().join("global.xml"),
+        "<styles id=\"wrong\"/>",
+    )
+    .unwrap();
+    state.reload_style_file(target, second).unwrap();
+    assert_eq!(state.style_name(target).unwrap(), "user");
+    assert!(state.style_xml(target).unwrap().contains("keepcpk"));
+    assert_eq!(
+        state.style_summary(target).unwrap().source,
+        first_dir.path().join("global.xml").to_string_lossy()
+    );
+}
+
+#[test]
+fn global_style_reload_preserves_file_names_and_rejects_anonymous_files_atomically() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("global.xml");
+    let mut state = DesktopAppState::new();
+    let scene = state.new_scene("names", true).result_scene;
+    let target = state.find_style_target(Uid::new(0), "user").unwrap();
+    state.save_style_file(target, scene, &path).unwrap();
+    std::fs::write(&path, "<styles id=\" padded \"/>").unwrap();
+    state.reload_style_file(target, scene).unwrap();
+    assert_eq!(state.style_name(target).unwrap(), " padded ");
+    let before = state.clone();
+    std::fs::write(&path, "<styles/>").unwrap();
+    assert!(state.reload_style_file(target, scene).is_err());
+    assert!(state.same_undo_state(&before));
+}
+
+#[test]
+fn renderer_presets_preserve_the_scene_override_of_a_linked_style_name() {
+    let (_dir, mut state, scene, index) = fixture(false);
+    state
+        .scene_manager_mut()
+        .scene_mut(scene)
+        .unwrap()
+        .loaded_styles_mut()[index]
+        .node
+        .set_str_attr("id", "alias");
+    let target = state.find_style_target(scene, "alias").unwrap();
+    let object = state
+        .scene_manager_mut()
+        .scene_mut(scene)
+        .unwrap()
+        .add_molecule("probe", cuemol_molstr::MolCoord::new());
+    let renderer = state
+        .scene_manager_mut()
+        .object_mut(object)
+        .unwrap()
+        .add_renderer("cpk", "atoms");
+    state
+        .create_scene_renderer_style(scene, index, object, renderer, "new", false)
+        .unwrap();
+    assert_eq!(state.style_name(target).unwrap(), "alias");
+    let xml = state.style_xml(target).unwrap();
+    assert!(xml.contains("id=\"alias\""));
+    for entry in ["accent", "focus", "keepcpk", "newcpk"] {
+        assert!(xml.contains(entry), "missing {entry}");
+    }
+}
+
+#[test]
+fn scene_save_updates_writable_style_sources_or_embeds_the_current_content() {
+    for embed_all in [false, true] {
+        let (dir, mut state, scene, _) = fixture(false);
+        let target = state.find_style_target(scene, "linked").unwrap();
+        state
+            .edit_style(target, &XML.replace("name C1", "name O1"))
+            .unwrap();
+        let before = state.style_summary(target).unwrap();
+        let path = dir.path().join("edited.qsc");
+        state
+            .save_active_scene_qsc_with_options(
+                &path,
+                cuemol_desktop_core::GuiSceneSaveOptions {
+                    embed_all,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let source = std::fs::read_to_string(dir.path().join("linked.xml")).unwrap();
+        let summary = state.style_summary(target).unwrap();
+        if embed_all {
+            assert_eq!(source, XML);
+            assert!(summary.source.is_empty());
+            assert!(!summary.modified);
+        } else {
+            assert!(source.contains("name O1"));
+            assert_eq!(summary.source, before.source);
+            assert!(summary.modified);
+        }
+        let mut restored = DesktopAppState::new();
+        let restored_scene = restored.load_qsc_file(path).unwrap().unwrap();
+        let restored_target = restored
+            .find_style_target(restored_scene, "linked")
+            .unwrap();
+        let xml = restored.style_xml(restored_target).unwrap();
+        assert!(
+            xml.contains("name O1"),
+            "lost edited selection with embed_all={embed_all}"
+        );
+        assert!(xml.contains("accent"));
+        assert!(xml.contains("keepcpk"));
+    }
+}
+
+#[test]
+fn scene_style_source_write_failures_preserve_editable_state() {
+    let (dir, mut state, scene, _) = fixture(false);
+    let target = state.find_style_target(scene, "linked").unwrap();
+    state
+        .edit_style(target, &XML.replace("name C1", "name O1"))
+        .unwrap();
+    let path = dir.path().join("linked.xml");
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let before = state.clone();
+    let output = dir.path().join("failed.qsc");
+    assert!(state.save_active_scene_qsc(&output).is_err());
+    assert!(!output.exists());
+    assert!(state.same_undo_state(&before));
+}
+
+#[test]
+fn memory_scene_export_keeps_linked_style_edits_without_changing_live_links() {
+    let (dir, mut state, scene, _) = fixture(false);
+    let target = state.find_style_target(scene, "linked").unwrap();
+    state
+        .edit_style(target, &XML.replace("name C1", "name O1"))
+        .unwrap();
+    let before = state.style_summary(target).unwrap();
+    let bytes = state.active_scene_bytes().unwrap();
+    assert_eq!(state.style_summary(target).unwrap().source, before.source);
+    assert!(state.style_summary(target).unwrap().modified);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("linked.xml")).unwrap(),
+        XML
+    );
+    let mut restored = DesktopAppState::new();
+    restored.open_bytes("download.qsc", &bytes).unwrap();
+    let target = restored
+        .find_style_target(restored.active_scene().unwrap(), "linked")
+        .unwrap();
+    assert!(restored.style_xml(target).unwrap().contains("name O1"));
+    assert!(restored.style_summary(target).unwrap().source.is_empty());
+}
+
+#[test]
+fn embedding_a_scene_includes_unmodified_external_styles() {
+    let (dir, mut state, scene, _) = fixture(true);
+    let path = dir.path().join("portable.qsc");
+    state
+        .save_active_scene_qsc_with_options(
+            &path,
+            cuemol_desktop_core::GuiSceneSaveOptions {
+                embed_all: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    std::fs::remove_file(dir.path().join("linked.xml")).unwrap();
+    let mut restored = DesktopAppState::new();
+    let restored_scene = restored.load_qsc_file(path).unwrap().unwrap();
+    let target = restored
+        .find_style_target(restored_scene, "linked")
+        .unwrap();
+    assert!(restored.style_xml(target).unwrap().contains("keepcpk"));
+    assert!(restored.style_summary(target).unwrap().read_only);
+    assert!(
+        !state
+            .style_summary(state.find_style_target(scene, "linked").unwrap())
+            .unwrap()
+            .modified
+    );
+}
+
+#[test]
 fn style_worker_payload_round_trip_preserves_content_and_rejects_duplicate_import() {
     use cuemol_desktop_core::PreparedFile;
 

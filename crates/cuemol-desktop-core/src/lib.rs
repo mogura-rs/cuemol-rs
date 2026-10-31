@@ -3663,7 +3663,7 @@ impl DesktopAppState {
         &self,
         scene_uid: Uid,
         options: GuiSceneSaveOptions,
-    ) -> Result<(Vec<u8>, Vec<Uid>)> {
+    ) -> Result<(Vec<u8>, Vec<Uid>, style_edit::PreparedSceneStyles)> {
         let qsc = self.scene_qsc_with_named_camera_visibility(scene_uid)?;
         let (xml, suffix) = split_qsc_document(&qsc)?;
         let mut tree = parse_ldom2_xml(xml)?;
@@ -3684,6 +3684,17 @@ impl DesktopAppState {
             .scene_manager()
             .scene(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        let prepared_styles = self.prepare_scene_styles(scene_uid, options.embed_all)?;
+        for (node, style_node) in tree
+            .top_mut()
+            .children_mut()
+            .iter_mut()
+            .filter(|node| !node.is_attr() && node.tag_name() == "styles")
+            .zip(&prepared_styles.nodes)
+        {
+            *node = style_node.clone();
+            node.remove_child("modified");
+        }
         let mut embedded_objects = Vec::new();
         let mut omitted_chunks = BTreeSet::new();
         let mut used_nodes = BTreeSet::new();
@@ -3810,7 +3821,7 @@ impl DesktopAppState {
         let mut document =
             format!("{}\n\n{}", write_ldom2_xml(&tree), QSC_XML_END_MARKER).into_bytes();
         document.extend_from_slice(&rewrite_qsc_data_chunks(&chunks, &omitted_chunks, options)?);
-        Ok((document, embedded_objects))
+        Ok((document, embedded_objects, prepared_styles))
     }
 
     pub fn camera_visibility_entries(
@@ -14144,12 +14155,15 @@ impl DesktopAppState {
         self.sync_trajectory_qsc_nodes(scene_uid, options.embed_all, source_path.parent())?;
         self.sync_morph_qsc_nodes(scene_uid)?;
         self.sync_density_map_qsc_nodes(scene_uid)?;
-        let (document, embedded_objects) = self.scene_qsc_with_save_options(scene_uid, options)?;
+        let (document, embedded_objects, styles) =
+            self.scene_qsc_with_save_options(scene_uid, options)?;
+        styles.write_sources()?;
         fs::write(path, document)?;
         let scene = self
             .scene_manager_mut()
             .scene_mut(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        styles.apply(scene);
         for object_uid in embedded_objects {
             if let Some(object) = scene.object_mut(object_uid) {
                 object.force_embed();
@@ -47878,12 +47892,15 @@ impl DesktopAppState {
         self.sync_morph_qsc_nodes(scene_uid)?;
         self.sync_density_map_qsc_nodes(scene_uid)?;
         self.sync_trajectory_qsc_nodes(scene_uid, embed_all, Path::new(&path).parent())?;
-        let (document, _) = self.scene_qsc_with_save_options(scene_uid, options)?;
+        let (document, _, styles) = self.scene_qsc_with_save_options(scene_uid, options)?;
+        styles.write_sources()?;
         fs::write(path, document)?;
-        self.scene_manager_mut()
+        let scene = self
+            .scene_manager_mut()
             .scene_mut(scene_uid)
-            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?
-            .set_qsc_options(Some(qsc_save_options_node(options)))?;
+            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        styles.apply(scene);
+        scene.set_qsc_options(Some(qsc_save_options_node(options)))?;
         Ok(())
     }
 
@@ -72450,7 +72467,7 @@ attribute \"dep\" string \"positions\"
         ));
         app.save_active_scene_qsc(&path).unwrap();
         let qsc = std::fs::read_to_string(&path).unwrap();
-        assert!(qsc.contains("<styles id=\"custom\" readonly=\"true\" modified=\"true\">"));
+        assert!(qsc.contains("<styles id=\"custom\" readonly=\"true\">"));
         assert!(qsc.contains("id=\"Wide\""));
         let _ = std::fs::remove_file(path);
 

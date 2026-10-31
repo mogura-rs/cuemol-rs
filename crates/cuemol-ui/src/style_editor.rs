@@ -91,11 +91,23 @@ impl StyleEditor {
             .map_err(|error| error.to_string())?;
         let xml = state.style_xml(target).map_err(|error| error.to_string())?;
         let tree = parse_ldom2_xml(&xml).map_err(|error| error.to_string())?;
-        self.name = tree.top().str_attr("id").to_string();
-        self.stored_name = summary.name;
+        let name = tree.top().str_attr("id").to_string();
+        if self.name == self.stored_name {
+            self.name = name.clone();
+        }
+        self.stored_name = name;
         self.source = summary.source;
         self.read_only = summary.read_only;
         self.modified = summary.modified;
+        let mut dirty = BTreeMap::new();
+        for (tab, entries) in self.entries.iter().enumerate() {
+            for entry in entries {
+                let key = (tab, entry.name.clone());
+                if let Some(value) = self.edits.get(&key).filter(|value| **value != entry.value) {
+                    dirty.insert(key, value.clone());
+                }
+            }
+        }
         self.entries = Default::default();
         self.edits.clear();
         for node in tree.top().children().iter().filter(|node| !node.is_attr()) {
@@ -114,7 +126,9 @@ impl StyleEditor {
             } else {
                 node.value().to_string()
             };
-            self.edits.insert((tab, name.clone()), value.clone());
+            let key = (tab, name.clone());
+            let edit = dirty.remove(&key).unwrap_or_else(|| value.clone());
+            self.edits.insert(key, edit);
             self.entries[tab].push(Entry { name, value });
         }
         self.revision = Some(revision);
@@ -165,9 +179,11 @@ impl StyleEditor {
                     record(&mut self.rects, "Style name", &response);
                     let enter = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
                     let label = if self.target.is_none() { "Create" } else { "Rename" };
-                    let response = ui.add_enabled(valid && !self.name.trim().is_empty(), egui::Button::new(label));
+                    let enabled = valid && !self.name.trim().is_empty()
+                        && (self.target.is_none() || (self.name != self.stored_name && self.name.trim() != self.stored_name));
+                    let response = ui.add_enabled(enabled, egui::Button::new(label));
                     record(&mut self.rects, format!("Style {label}"), &response);
-                    if valid && (response.clicked() || enter) {
+                    if enabled && (response.clicked() || enter) {
                         action = Some(if self.target.is_none() {
                             Action::Command("create_style_set", json!({"sceneId":self.scene.get(),"name":self.name.trim()}))
                         } else { command("rename_style_set", json!({"name":self.name.trim()})) });
@@ -254,5 +270,36 @@ impl StyleEditor {
             });
         self.open &= open;
         action
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refresh_preserves_dirty_fields_and_updates_untouched_entries() {
+        let mut state = DesktopAppState::new();
+        let scene = state.new_scene("drafts", true).result_scene;
+        state.import_scene_style(scene,
+            r##"<styles id="palette"><color id="accent" value="#123456"/><sel id="focus" value="name C1"/></styles>"##,
+            false).unwrap();
+        let target = state.find_style_target(scene, "palette").unwrap();
+        let mut editor = StyleEditor::new(scene, Some(target));
+        editor.refresh(&state, 1).unwrap();
+        editor.name = "unfinished-name".into();
+        editor.edits.insert((1, "focus".into()), "name O1".into());
+        state.edit_style(target,
+            r##"<styles id="palette"><color id="accent" value="#abcdef"/><sel id="focus" value="name C1"/></styles>"##).unwrap();
+        editor.refresh(&state, 2).unwrap();
+        assert_eq!(editor.name, "unfinished-name");
+        assert_eq!(editor.edits[&(1, "focus".into())], "name O1");
+        assert_eq!(editor.edits[&(0, "accent".into())], "#abcdef");
+        assert_eq!(editor.stored_name, "palette");
+        state
+            .edit_style(target, "<styles id=\"palette\"/>")
+            .unwrap();
+        editor.refresh(&state, 3).unwrap();
+        assert!(editor.edits.is_empty());
     }
 }

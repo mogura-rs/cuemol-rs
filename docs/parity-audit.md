@@ -1441,7 +1441,7 @@ global sets and marks modified ones. Color, Selection and Styles tabs preserve
 structured renderer presets while changing or removing individual definitions.
 Global definitions also survive closing all scenes in the current process.
 Editors pass the runtime handle together with its scope, so an anonymous set
-and a set literally named `(anonymous)` remain distinct. Tree context actions
+and a set literally named `(anonymous)` remain distinct. Browser tree context actions
 use the same handle when changing read-only state or deleting a set. Content and read-only
 edits preserve the original name, including an empty name or surrounding spaces
 created by scripts. The command API returns both the raw name and display name;
@@ -1497,5 +1497,47 @@ and delivery results follow below.
 The measurement commit's CI passed all 173 browser cases with one skipped, but
 the 22.1-minute test run plus setup exhausted the former 25-minute job limit
 before artifact staging. The workflow budget is now 40 minutes with the same
-checks and one browser worker. Its replacement run must finish before Pages
-delivery can be claimed.
+checks and one browser worker. Replacement CI `41149721969` and Pages
+`41152014036` completed at `1bb9500`. All 38 public assets matched both the
+deployed manifest and the CI artifact. Four public WebGL/WebGPU measurement
+cases then passed, covering values, labels, pixels, reloading and arrow ends.
+
+The public Claude Code review of `813f489` identified follow-up concerns in
+file identity and editor state. It reviewed the published diff and selected
+source text without running tests. Five new regressions reproduced global
+relative-path retargeting after a scene switch, trimming of an external style
+name, loss of a scene-level name override during preset creation, loss of
+unsaved linked content during scene saving, and missing external styles in an
+embedded scene. Global file links now store resolved paths, external names
+retain their original whitespace, and edits use the canonical scene name.
+Anonymous external files remain invalid, matching the reference loader.
+
+The installed reference was also exercised through its actual scene writer.
+`Scene::stylesWriteTo` saves writable linked styles to their source files during
+a normal scene save; read-only sources are left alone. `embedAll` embeds the
+current definitions and removes their live source links. Rust now performs
+these operations for native and script scene saving. State metadata is applied
+after the writes succeed, and an external-source write error prevents the QSC
+write and preserves the editable state. The reference's same-source modified
+flag quirk remains unchanged. In-memory browser export embeds every style but
+does not overwrite files, relink the live set, or mark a download as saved.
+
+Three further regressions reproduced loss of pending text after a state update
+in the two egui editors and an extra native undo entry after Enter on an
+unchanged name. Refresh now merges dirty fields with the latest definitions;
+untouched entries update and deleted entries disappear. Empty or unchanged
+names do not dispatch a rename. The browser interaction cases type color,
+selection and name changes, change another style, and then apply the draft.
+
+The review's proposed blanket prohibition on global/read-only deletion does
+not match the reference service, which permits deletion independently of the
+read-only content flag. Remaining native deletion controls still need the
+same scope comparison. A separate reference probe confirmed that a named color
+alias retains its expression and follows later edits to its source color.
+Rust's solid-color-only style map predates this editor work and still needs
+that behavior; this review follow-up does not claim color-alias parity.
+
+The final follow-up run passed 475 shared application/command/UI tests, 185
+native GUI tests and six rebuilt WebGL/WebGPU interaction cases. The unrelated
+real-POV-Ray native case remained ignored. The focused file/editor suite passed
+19 cases, including failure-state preservation and browser-memory export.

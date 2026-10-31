@@ -3,7 +3,27 @@ use crate::{
     DesktopAppState, GuiStyleSummary, LDom2Node, LDom2Tree, LoadedStyle, Result, Uid,
 };
 use cuemol_qsys::StyleSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+pub(crate) struct PreparedSceneStyles {
+    pub nodes: Vec<LDom2Node>,
+    writes: Vec<(PathBuf, String)>,
+}
+
+impl PreparedSceneStyles {
+    pub fn write_sources(&self) -> Result<()> {
+        for (path, xml) in &self.writes {
+            std::fs::write(path, xml)?;
+        }
+        Ok(())
+    }
+
+    pub fn apply(self, scene: &mut cuemol_molstr::qsys::MolScene) {
+        for (style, node) in scene.loaded_styles_mut().iter_mut().zip(self.nodes) {
+            style.node = node;
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GuiStyleTarget {
@@ -47,6 +67,9 @@ pub(crate) fn document(style: &LoadedStyle) -> Result<LDom2Tree> {
         parse_ldom2_xml(&style.data)?
     };
     clean_document(&mut tree)?;
+    if let Some(id) = style.node.find_child("id").filter(|node| node.is_attr()) {
+        tree.top_mut().set_str_attr("id", id.value());
+    }
     Ok(tree)
 }
 
@@ -94,6 +117,54 @@ pub(crate) fn replace_content(
 }
 
 impl DesktopAppState {
+    pub(crate) fn prepare_scene_styles(
+        &self,
+        scene: Uid,
+        embed_all: bool,
+    ) -> Result<PreparedSceneStyles> {
+        let mut prepared = PreparedSceneStyles {
+            nodes: Vec::new(),
+            writes: Vec::new(),
+        };
+        let styles = self
+            .scene_manager()
+            .scene(scene)
+            .ok_or_else(|| CueMolError::not_found("scene"))?
+            .loaded_styles();
+        for style in styles {
+            let source = style.node.str_attr("src");
+            let mut node = if embed_all || source.is_empty() {
+                let mut node = document(style)?.top().clone();
+                for attr in style.node.children().iter().filter(|attr| {
+                    attr.is_attr() && !matches!(attr.tag_name(), "src" | "alt_src" | "modified")
+                }) {
+                    node.set_str_attr(attr.tag_name(), attr.value());
+                }
+                node
+            } else {
+                let path = crate::absolute_scene_path(
+                    &self.resolve_scene_path(scene, Path::new(source.as_str()))?,
+                )?;
+                let mut node = style.node.clone();
+                if !node.bool_attr("readonly") {
+                    prepared
+                        .writes
+                        .push((path.clone(), write_ldom2_xml(&document(style)?)));
+                    if source.as_str() != path.to_string_lossy() {
+                        node.remove_child("modified");
+                    }
+                }
+                node.set_str_attr("src", path.to_string_lossy());
+                node
+            };
+            if embed_all || source.is_empty() {
+                node.remove_child("modified");
+            }
+            prepared.nodes.push(node);
+        }
+        Ok(prepared)
+    }
+
     pub fn import_scene_style(&mut self, scene: Uid, xml: &str, read_only: bool) -> Result<usize> {
         let (node, data) = parse_import(xml)?;
         self.insert_imported_style(scene, node, data, read_only)
@@ -267,6 +338,10 @@ impl DesktopAppState {
         name: &str,
         read_only: bool,
     ) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(CueMolError::invalid_argument("style name is required"));
+        }
         let summary = self.style_summary(target)?;
         if read_only && !summary.read_only && summary.modified {
             return Err(CueMolError::invalid_argument(
@@ -312,10 +387,6 @@ impl DesktopAppState {
         xml: &str,
         edited: bool,
     ) -> Result<()> {
-        let name = if edited { name } else { name.trim() };
-        if name.is_empty() && !edited {
-            return Err(CueMolError::invalid_argument("style name is required"));
-        }
         let existing = self.script_styles.has_style_set(name, 0);
         if existing != 0 && existing != id {
             return Err(CueMolError::invalid_argument(format!(
@@ -349,11 +420,11 @@ impl DesktopAppState {
                 self.save_scene_style_file(scene_uid, summary.local_index.unwrap(), path)
             }
             GuiStyleTarget::Global(id) => {
-                let resolved = self.resolve_scene_path(scene, path)?;
-                std::fs::write(resolved, self.style_xml(target)?)?;
+                let resolved = crate::absolute_scene_path(&self.resolve_scene_path(scene, path)?)?;
+                std::fs::write(&resolved, self.style_xml(target)?)?;
                 let set = self.script_styles.get_style_set_mut(id).unwrap();
-                if set.source() != path.to_string_lossy() {
-                    set.set_source(path.to_string_lossy());
+                if set.source() != resolved.to_string_lossy() {
+                    set.set_source(resolved.to_string_lossy());
                     set.set_modified(false);
                 }
                 Ok(())
@@ -377,6 +448,11 @@ impl DesktopAppState {
                     self.resolve_scene_path(scene, Path::new(&summary.source))?,
                 )?;
                 let tree = parse_ldom2_xml(&data)?;
+                if tree.top().str_attr("id").is_empty() {
+                    return Err(CueMolError::invalid_argument(
+                        "external style XML must have an id",
+                    ));
+                }
                 self.replace_global_style(
                     id,
                     tree.top().str_attr("id").as_str(),

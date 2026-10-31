@@ -43,7 +43,7 @@ impl DesktopAppState {
         self.open_prepared(PreparedFile::parse(name, bytes)?)
     }
 
-    /// Embed all objects so downloaded scenes do not depend on local paths.
+    /// Embed all objects and styles so downloads do not depend on local paths.
     pub fn active_scene_bytes(&mut self) -> Result<Vec<u8>> {
         let scene_uid = self
             .active_scene()
@@ -51,7 +51,7 @@ impl DesktopAppState {
         self.sync_trajectory_qsc_nodes(scene_uid, true, None)?;
         self.sync_morph_qsc_nodes(scene_uid)?;
         self.sync_density_map_qsc_nodes(scene_uid)?;
-        let (document, _) = self.scene_qsc_with_save_options(
+        let (document, _, _) = self.scene_qsc_with_save_options(
             scene_uid,
             GuiSceneSaveOptions {
                 embed_all: true,

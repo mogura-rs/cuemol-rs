@@ -2841,6 +2841,7 @@ struct NativeStyleProperties {
     revision: u64,
     contents: NativeStyleSetContents,
     name: String,
+    stored_name: String,
     read_only: bool,
     xml: String,
     tab: NativeStyleEditorTab,
@@ -2874,6 +2875,31 @@ struct NativeStyleSetContents {
     colors: Vec<NativeStyleValueEntry>,
     selections: Vec<NativeStyleValueEntry>,
     styles: Vec<NativeStyleEntry>,
+}
+
+fn refresh_native_style_edits(
+    previous: &[NativeStyleValueEntry],
+    incoming: &[NativeStyleValueEntry],
+    edits: &mut std::collections::BTreeMap<String, String>,
+) {
+    let mut dirty = previous
+        .iter()
+        .filter_map(|entry| {
+            edits
+                .remove(&entry.name)
+                .filter(|value| value != &entry.value)
+                .map(|value| (entry.name.clone(), value))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    *edits = incoming
+        .iter()
+        .map(|entry| {
+            let value = dirty
+                .remove(&entry.name)
+                .unwrap_or_else(|| entry.value.clone());
+            (entry.name.clone(), value)
+        })
+        .collect();
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23987,6 +24013,7 @@ impl GuiApplication {
             revision: self.snapshot_revision,
             contents: NativeStyleSetContents::default(),
             xml: format!("<styles id=\"{name}\">\n</styles>\n"),
+            stored_name: name.clone(),
             name,
             read_only: false,
             tab: NativeStyleEditorTab::Color,
@@ -24473,6 +24500,7 @@ impl GuiApplication {
             },
             target: Some(summary.target),
             revision: self.snapshot_revision,
+            stored_name: name.clone(),
             name,
             read_only: summary.read_only,
             xml,
@@ -24605,7 +24633,9 @@ impl GuiApplication {
                 .show(ctx, |ui| {
                     ui.label("Name for new style:");
                     let response = ui.text_edit_singleline(&mut draft.name);
-                    if response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                    if !draft.name.trim().is_empty()
+                        && response.has_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter))
                     {
                         create = true;
                     }
@@ -24661,19 +24691,22 @@ impl GuiApplication {
                 Ok((summary, native_style_set_contents(&xml)?, xml, name))
             }) {
                 Ok((summary, contents, xml, name)) => {
-                    draft.name = name;
+                    if draft.name == draft.stored_name {
+                        draft.name = name.clone();
+                    }
+                    draft.stored_name = name;
                     draft.read_only = summary.read_only;
                     draft.xml = xml;
-                    draft.color_edits = contents
-                        .colors
-                        .iter()
-                        .map(|entry| (entry.name.clone(), entry.value.clone()))
-                        .collect();
-                    draft.selection_edits = contents
-                        .selections
-                        .iter()
-                        .map(|entry| (entry.name.clone(), entry.value.clone()))
-                        .collect();
+                    refresh_native_style_edits(
+                        &draft.contents.colors,
+                        &contents.colors,
+                        &mut draft.color_edits,
+                    );
+                    refresh_native_style_edits(
+                        &draft.contents.selections,
+                        &contents.selections,
+                        &mut draft.selection_edits,
+                    );
                     draft.contents = contents;
                     draft.revision = self.snapshot_revision;
                 }
@@ -24695,13 +24728,20 @@ impl GuiApplication {
             .min_width(460.0)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Name:");
-                    let response = ui.text_edit_singleline(&mut draft.name);
-                    rename = ui
-                        .add_enabled(!draft.name.trim().is_empty(), egui::Button::new("Rename"))
-                        .clicked()
-                        || (response.lost_focus()
-                            && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+                    let label = ui.label("Name:");
+                    let response = ui
+                        .text_edit_singleline(&mut draft.name)
+                        .labelled_by(label.id);
+                    let enabled = !draft.name.trim().is_empty()
+                        && draft.name != draft.stored_name
+                        && draft.name.trim() != draft.stored_name;
+                    let clicked = ui
+                        .add_enabled(enabled, egui::Button::new("Rename"))
+                        .clicked();
+                    rename = enabled
+                        && (clicked
+                            || (response.lost_focus()
+                                && ui.input(|input| input.key_pressed(egui::Key::Enter))));
                 });
                 if draft.read_only {
                     ui.label(egui::RichText::new("(read-only style set)").weak());
@@ -36451,6 +36491,66 @@ mod tests {
         assert!(!styles[0].data.contains("accent"));
         assert!(styles[1].data.contains("accent"));
         assert_eq!(styles[1].node.str_attr("id").as_str(), "original");
+    }
+
+    #[test]
+    fn native_style_editor_keeps_unapplied_fields_when_the_scene_changes() {
+        let mut app = GuiApplication::new();
+        let scene = app.state.active_scene().unwrap();
+        app.state.import_scene_style(scene,
+            r##"<styles id="palette"><color id="accent" value="#123456"/><sel id="focus" value="name C1"/></styles>"##,
+            false).unwrap();
+        let style_index = app
+            .state
+            .style_summaries(scene)
+            .iter()
+            .position(|style| style.name == "palette")
+            .unwrap();
+        app.open_style_properties(WorkspaceAuxSelection::Style {
+            scene_uid: scene,
+            style_index,
+        });
+        let draft = app.style_properties_draft.as_mut().unwrap();
+        draft.name = "unfinished-name".into();
+        draft
+            .selection_edits
+            .insert("focus".into(), "name O1".into());
+        app.state.create_scene_style(scene, "unrelated").unwrap();
+        app.rebuild_snapshot();
+        let mut harness = egui_kittest::Harness::new(|ctx| app.style_props_dialog(ctx));
+        harness.run();
+        drop(harness);
+        let draft = app.style_properties_draft.as_ref().unwrap();
+        assert_eq!(draft.name, "unfinished-name");
+        assert_eq!(draft.selection_edits["focus"], "name O1");
+        assert_eq!(draft.color_edits["accent"], "#123456");
+    }
+
+    #[test]
+    fn native_style_editor_enter_with_unchanged_name_does_not_add_undo() {
+        use egui_kittest::kittest::Queryable;
+
+        let mut app = GuiApplication::new();
+        let scene = app.state.active_scene().unwrap();
+        let style_index = app
+            .state
+            .style_summaries(scene)
+            .iter()
+            .position(|style| style.name == "user")
+            .unwrap();
+        app.open_style_properties(WorkspaceAuxSelection::Style {
+            scene_uid: scene,
+            style_index,
+        });
+        let mut harness = egui_kittest::Harness::new(|ctx| app.style_props_dialog(ctx));
+        harness.run();
+        harness.get_by_label("Name:").click();
+        harness.run();
+        harness.key_press(egui::Key::Enter);
+        harness.run();
+        drop(harness);
+        assert!(app.undo_stack.is_empty());
+        assert_eq!(app.style_properties_draft.as_ref().unwrap().name, "user");
     }
 
     #[test]
