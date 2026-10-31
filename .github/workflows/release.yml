@@ -80,7 +80,7 @@ jobs:
           key: tools-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ hashFiles('scripts/bundle-tools.py', 'scripts/bundle-oidn.py', 'scripts/bundle-povray.py', 'scripts/tool-requirements.txt') }}
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libsuitesparse-dev libopenblas-dev gfortran autoconf automake libboost-thread-dev libpng-dev libjpeg-dev libtiff-dev patchelf xvfb xauth xdotool xclip libegl1 libgl1-mesa-dri libvulkan1 mesa-vulkan-drivers
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev libsuitesparse-dev libopenblas-dev gfortran autoconf automake libboost-thread-dev libpng-dev libjpeg-dev libtiff-dev patchelf xvfb xauth xdotool xclip libegl1 libgl1-mesa-dri libvulkan1 mesa-vulkan-drivers
       - name: Install macOS source-build dependencies
         if: runner.os == 'macOS' && steps.tools.outputs.cache-hit != 'true'
         run: brew install suite-sparse openblas gettext libiconv libomp

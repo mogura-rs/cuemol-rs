@@ -111,6 +111,13 @@ Local validation passed all 20 UI tests, 257 desktop tests and nine browser
 selection executions. The new browser width assertion failed against the old
 CI artifact with a 230-to-246-pixel increase before passing on the repaired build.
 
+The first packaged ARM Linux window check then exposed a missing CI runtime:
+`libxkbcommon-x11.so` was absent, although packaging and the command-line checks
+had passed. The release and shared-test dependency lists now include
+`libxkbcommon-x11-0`, matching the existing installation instructions and the
+published-GUI workflow. This is a runner dependency fix; application code is
+unchanged from the sidebar repair.
+
 Generated archives and `dist/validation.json` remain local validation artifacts,
 not a published release. The release workflow now checks actual packaged windows
 on all five native targets. Local test results do not establish that those CI

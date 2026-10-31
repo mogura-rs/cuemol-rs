@@ -32,7 +32,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Install native GUI dependencies
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev
       - name: Test shared core and CLI
         run: cargo test --locked --workspace --exclude cuemol-desktop --exclude cuemol-web --features cuemol-desktop-core/scripting,cuemol-command/scripting,cuemol-cli/scripting
       - name: Test native interface
