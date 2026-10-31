@@ -1993,8 +1993,29 @@ impl Default for DesktopAppState {
 }
 
 impl DesktopAppState {
+    /// Restore state without reusing style identifiers already exposed to editors.
+    pub fn restore_snapshot(&mut self, mut snapshot: Self) {
+        snapshot
+            .script_styles
+            .preserve_allocated_ids_from(&self.script_styles);
+        *self = snapshot;
+    }
+
+    pub fn preserve_global_styles_from(&mut self, current: &Self) {
+        self.script_styles
+            .preserve_global_scope_from(&current.script_styles);
+    }
+
     /// Compare state restored by application undo, excluding transient caches and services.
     pub fn same_undo_state(&self, other: &Self) -> bool {
+        self.same_undo_state_with_global_styles(other, true)
+    }
+
+    pub fn same_scene_undo_state(&self, other: &Self) -> bool {
+        self.same_undo_state_with_global_styles(other, false)
+    }
+
+    fn same_undo_state_with_global_styles(&self, other: &Self, include_global: bool) -> bool {
         let same = self.active_scene == other.active_scene
             && self.scene_manager().scenes() == other.scene_manager().scenes()
             && self.command_manager.views() == other.command_manager.views()
@@ -2007,11 +2028,16 @@ impl DesktopAppState {
             && self.potential_scale == other.potential_scale;
         #[cfg(feature = "scripting")]
         let same = same
-            && self.build_script_styles() == other.build_script_styles()
+            && self
+                .build_script_styles()
+                .same_definition_state(&other.build_script_styles(), include_global)
             && self.script_view_input_config == other.script_view_input_config
             && self.script_scene_undo == other.script_scene_undo;
         #[cfg(not(feature = "scripting"))]
-        let same = same && self.script_styles == other.script_styles;
+        let same = same
+            && self
+                .script_styles
+                .same_definition_state(&other.script_styles, include_global);
         same
     }
 

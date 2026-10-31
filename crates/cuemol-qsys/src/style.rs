@@ -97,6 +97,17 @@ pub struct StyleInfo {
 }
 
 impl StyleSet {
+    fn same_definitions(&self, other: &Self) -> bool {
+        self.source == other.source
+            && self.name == other.name
+            && self.read_only == other.read_only
+            && self.modified == other.modified
+            && self.colors == other.colors
+            && self.strings == other.strings
+            && self.styles == other.styles
+            && self.materials == other.materials
+    }
+
     pub fn from_xml(uid: u64, name: impl Into<String>, xml: &str) -> cuemol_core::Result<Self> {
         let tree = parse_ldom2_xml(xml)?;
         if tree.top().tag_name() != "styles" {
@@ -463,12 +474,20 @@ impl StyleSet {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct StyleManager {
     default_dir: String,
     next_uid: u64,
     scopes: BTreeMap<u64, Vec<StyleSet>>,
     pending_events: Vec<(u64, String)>,
+}
+
+impl PartialEq for StyleManager {
+    fn eq(&self, other: &Self) -> bool {
+        self.default_dir == other.default_dir
+            && self.scopes == other.scopes
+            && self.pending_events == other.pending_events
+    }
 }
 
 impl Default for StyleManager {
@@ -483,6 +502,61 @@ impl Default for StyleManager {
 }
 
 impl StyleManager {
+    pub fn preserve_allocated_ids_from(&mut self, previous: &Self) {
+        self.next_uid = self.next_uid.max(previous.next_uid);
+    }
+
+    pub fn preserve_global_scope_from(&mut self, current: &Self) {
+        self.scopes.remove(&0);
+        if let Some(global) = current.scopes.get(&0) {
+            self.scopes.insert(0, global.clone());
+        }
+        self.pending_events.retain(|(scope, _)| *scope != 0);
+        self.pending_events.extend(
+            current
+                .pending_events
+                .iter()
+                .filter(|(scope, _)| *scope == 0)
+                .cloned(),
+        );
+        self.preserve_allocated_ids_from(current);
+    }
+
+    /// Local scripting IDs may be rebuilt from the same loaded scene styles.
+    pub fn same_definition_state(&self, other: &Self, include_global: bool) -> bool {
+        let included = |scope: &&u64| include_global || **scope != 0;
+        self.default_dir == other.default_dir
+            && self
+                .scopes
+                .keys()
+                .filter(included)
+                .eq(other.scopes.keys().filter(included))
+            && self
+                .scopes
+                .iter()
+                .filter(|(scope, _)| included(scope))
+                .all(|(scope, sets)| {
+                    let other_sets = &other.scopes[scope];
+                    if *scope == 0 {
+                        sets == other_sets
+                    } else {
+                        sets.len() == other_sets.len()
+                            && sets
+                                .iter()
+                                .zip(other_sets)
+                                .all(|(left, right)| left.same_definitions(right))
+                    }
+                })
+            && self
+                .pending_events
+                .iter()
+                .filter(|(scope, _)| include_global || *scope != 0)
+                .eq(other
+                    .pending_events
+                    .iter()
+                    .filter(|(scope, _)| include_global || *scope != 0))
+    }
+
     pub fn apply_scope_undo_changes(&mut self, scope: u64, from: &[StyleSet], to: &[StyleSet]) {
         cuemol_core::snapshot::apply_sequence_changes(
             self.scopes.entry(scope).or_default(),
@@ -1872,6 +1946,23 @@ fn escape_json(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn style_runtime_ids_are_not_reused_after_restoring_a_snapshot() {
+        let mut manager = super::StyleManager::new();
+        manager.create_style_set("user", 0);
+        let mut before = manager.clone();
+        let removed = manager.create_style_set("removed", 0);
+        before.preserve_allocated_ids_from(&manager);
+        manager = before;
+        let replacement = manager.create_style_set("replacement", 0);
+        assert_ne!(removed, replacement);
+        assert!(manager.get_style_set(removed).is_none());
+        assert_eq!(
+            manager.get_style_set(replacement).unwrap().name(),
+            "replacement"
+        );
+    }
+
     use super::*;
 
     #[test]

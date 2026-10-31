@@ -252,7 +252,7 @@ def main():
                 return len(values) == 4 and all(abs(actual - expected) <= 1 / 255
                     for actual, expected in zip(values, [0.2, 0.4, 0.6, 0.5]))
 
-            controls.click(control("AXButton", "Probe palette", prefix=True), double=True)
+            controls.click(control("AXButton", "Style set Probe palette (scene)"), double=True)
             field_value("Style set name", "Probe palette")
             controls.fill(control("AXTextField", "Color accent"), "rgba(0.2,0.4,0.6,0.5)")
             controls.click(control("AXButton", "Apply color accent"))
@@ -276,7 +276,7 @@ def main():
             wait_for(saved_style)
             capture("style-scene-saved.png")
             controls.click(control("AXButton", "Close"))
-            controls.click(control("AXButton", "user (global)"), double=True)
+            controls.click(control("AXButton", "Style set user (global)"), double=True)
             field_value("Style set name", "user")
             controls.fill(control("AXTextField", "New color name"), "native-accent")
             controls.click(control("AXButton", "Add"))
@@ -289,7 +289,7 @@ def main():
             field_value("Style set name", "Global palette")
             capture("style-global-renamed.png")
             controls.click(control("AXButton", "Close"))
-            control("AXButton", "Global palette", prefix=True)
+            control("AXButton", "Style set Global palette (global)")
             report.update(ok=True, window=bounds, label_pixels=before.histogram()[255],
                           updates_before_release=changes, drag_seconds=duration,
                           wheel_changed_label_pixels=True, console_multiline_undo=True,

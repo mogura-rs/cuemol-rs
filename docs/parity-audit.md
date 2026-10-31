@@ -1594,12 +1594,12 @@ style and sent a local array index that could point to a different style after
 insertion. Its new entry operations use shared color/selection/style commands,
 so they retain unrelated definitions changed after the dialog opened. Metadata
 changes fetch current state and do not replace the XML document. Combined
-metadata/content errors restore the original state; successful changes create
-one undo record and invalidate the viewport.
+metadata/content errors restore the original state. Successful scene-style
+changes create one undo record, and the frontend requests an updated viewport.
 
 The structured editor exposes name, scope, read-only and modified state, source,
-color text with alpha, opaque-color picking, named selections, style entries and
-file saving. It preserves unrelated drafts across tab and state changes, adopts
+color text with alpha, opaque-color picking, named selections, style-entry
+listing/deletion and file saving. It preserves unrelated drafts across tab and state changes, adopts
 canonical values after successful edits, and retains failed edits and addition
 names for retry. Read-only toggles preserve anonymous names. The model suite
 passed 163 cases with six existing integration cases ignored. The real DOM with
@@ -1609,3 +1609,46 @@ do not establish native webview integration. The macOS OS-input check now adds
 linked-style editing, external-file verification and global-style editing to
 its existing presented-pixel, rotation, wheel and console/undo checks; that
 extended native run is pending.
+
+The public `1b67187` review reproduced early saving while an entry edit was
+pending and a hidden `.xml` default name for an anonymous style. Save now waits
+behind accepted entry operations, and closing the editor does not discard
+already queued edits. Saving fetches the current raw name: an empty name uses
+`style.xml`, while the literal name `(anonymous)` keeps that name. Browser
+checks cover deferred edits, closing, persisted content and both filenames.
+
+The review also exposed incorrect scene-modification marks and runtime IDs in
+QAX records. Scene-style operations now mark their actual owner scene. Recorded
+entry operations use a unique scene-style name, omit session IDs and replay
+against the destination scene. Ambiguous names and global style edits are not
+recorded as replayable scene operations. Snapshot restoration preserves the
+style allocator's high-water mark, so a removed handle cannot silently target
+a subsequently created set. Comparisons of reconstructed local scripting
+styles use their definitions rather than transient IDs.
+
+An installed-reference probe confirmed that a global selection definition
+creates zero scene undo entries, while the same edit in a scene creates one.
+Native, Tauri and browser editors now follow that distinction. Scene Undo/Redo
+preserves later global-style changes; console checkpoints also distinguish
+visible changes from changes to scene history. Successful file saves remain
+external side effects: undoing a scene-style linkage change does not restore
+the previous file bytes.
+
+Other review questions were checked against the reference and callers. Add
+with an existing entry name replaces its value in the reference too, and
+modified styles cannot be made read-only. Combined content/locking requests
+retain that restriction and roll back on failure. Reload keeps runtime style
+identity. Copy and multiple-selection routing still use local array indices
+and remain under comparison; the stable-ID claim above covers the listed
+properties, file operations and deletion only.
+
+The first extended macOS run passed its earlier pixel/input checks but stopped
+before style editing because WebKit included decorative tree markers in the
+accessibility name. Style rows now provide explicit accessible names, and the
+OS-input check uses those names. Its fixture has an isolated configuration and
+cache; its native RGBA check allows the reference's 8-bit alpha rounding. The
+native rerun remains pending. The affected shared suite passed 618 tests, the
+native suite passed 186 with one pre-existing POV-Ray test ignored, and the
+Tauri model passed 166 with six existing integration tests ignored. The Tauri
+DOM suite passed 35 cases. With the rebuilt WASM, all 16 focused browser cases
+passed across style editing, WebGL/WebGPU scene history, console and Actions.

@@ -21,6 +21,50 @@ fn run(
 }
 
 #[test]
+fn scoped_style_records_replay_by_unique_scene_name_without_runtime_ids() {
+    let mut state = super::super::tests::state();
+    let original = state.active_scene().unwrap();
+    state.create_scene_style(original, "palette").unwrap();
+    let target = state.find_style_target(original, "palette").unwrap();
+    let record = Record::operation(
+        &state,
+        "define_color",
+        &json!({
+            "sceneId": original.get(), "scope":"scene", "styleId":target.runtime_id(),
+            "styleSet":"palette", "name":"accent", "color":"#123456",
+        }),
+    );
+    assert_eq!(record.entry_count(), 1);
+    let source = export(&[record]);
+    assert!(!source.contains("styleId"));
+    assert!(!source.contains("sceneId"));
+    let new_scene = state.new_scene("other", true).result_scene;
+    state.create_scene_style(new_scene, "palette").unwrap();
+    let new_target = state.find_style_target(new_scene, "palette").unwrap();
+    assert_ne!(target.runtime_id(), new_target.runtime_id());
+    run(
+        &mut Submission::library(&source, None, &[]).unwrap(),
+        &mut state,
+        &mut Session::default(),
+    )
+    .unwrap();
+    assert!(state.style_xml(new_target).unwrap().contains("#123456"));
+    assert!(!state.style_xml(target).unwrap().contains("accent"));
+    let global = state
+        .find_style_target(cuemol_core::Uid::new(0), "user")
+        .unwrap();
+    let record = Record::operation(
+        &state,
+        "define_color",
+        &json!({
+            "sceneId": new_scene.get(), "scope":"global", "styleId":global.runtime_id(),
+            "styleSet":"user", "name":"accent", "color":"#123456",
+        }),
+    );
+    assert_eq!(record.entry_count(), 0);
+}
+
+#[test]
 fn malformed_inspector_arguments_do_not_create_a_record() {
     let state = super::super::tests::state();
     for args in [serde_json::Value::Null, json!([]), json!("invalid")] {

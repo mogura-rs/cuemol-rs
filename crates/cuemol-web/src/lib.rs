@@ -516,7 +516,7 @@ impl App {
         self.navigation.cancel();
         let selection_history = self.state.selection_history();
         self.selection = snapshot.selection;
-        self.state = snapshot.state;
+        self.state.restore_snapshot(snapshot.state);
         self.state.restore_selection_history(&selection_history);
         self.camera = snapshot.camera;
         self.trajectories = snapshot.trajectories;
@@ -588,7 +588,7 @@ impl App {
             } else {
                 self.future.pop()
             };
-            if let Some(snapshot) = snapshot {
+            if let Some(mut snapshot) = snapshot {
                 let mut current = self.capture_history();
                 current.record = snapshot.record.clone();
                 if name == "undo" {
@@ -596,6 +596,7 @@ impl App {
                 } else {
                     self.history.push(current);
                 }
+                snapshot.state.preserve_global_styles_from(&self.state);
                 self.restore_history(snapshot);
             }
             return;
@@ -626,9 +627,14 @@ impl App {
                 let changed = before.as_ref().is_none_or(|before| {
                     before.camera != self.camera || !before.state.same_undo_state(&self.state)
                 });
-                if let Some(before) = before.filter(|_| changed) {
+                let history_changed = before.as_ref().is_some_and(|before| {
+                    before.camera != self.camera || !before.state.same_scene_undo_state(&self.state)
+                });
+                if changed && mutating {
                     self.navigation.cancel();
                     self.revision = self.revision.wrapping_add(1);
+                }
+                if let Some(before) = before.filter(|_| history_changed) {
                     self.history.push(before);
                     if self.history.len() > 12 {
                         self.history.remove(0);

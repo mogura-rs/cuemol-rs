@@ -122,14 +122,17 @@ impl App {
                     before.camera != self.camera || !before.state.same_undo_state(&self.state)
                 });
             if result.is_ok() && mutating && changed {
-                if let Some(undo) = undo.filter(|_| !self.agent.changed_scene) {
+                let history_changed = undo.as_ref().is_some_and(|undo| {
+                    undo.camera != self.camera || !undo.state.same_scene_undo_state(&self.state)
+                });
+                if let Some(undo) = undo.filter(|_| history_changed && !self.agent.changed_scene) {
                     self.history.push(undo);
                     self.future.clear();
                     if self.history.len() > 12 {
                         self.history.remove(0);
                     }
                 }
-                self.agent.changed_scene = true;
+                self.agent.changed_scene |= history_changed;
                 self.dirty = true;
                 self.revision = self.revision.wrapping_add(1);
                 self.agent.revision = self.revision;

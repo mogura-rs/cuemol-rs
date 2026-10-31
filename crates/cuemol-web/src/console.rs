@@ -162,8 +162,8 @@ impl App {
                 .checkpoint
                 .update(&self.state, &self.camera, &self.selection);
         self.console_session
-            .complete_record(changed && !result.is_null());
-        if changed && cuemol_command::tool_records_history(name) {
+            .complete_record(changed && run.checkpoint.scene_changed() && !result.is_null());
+        if changed && run.checkpoint.scene_changed() && cuemol_command::tool_records_history(name) {
             if let Some(mut before) = run.undo.take() {
                 before.record = self.console_session.action_record.clone();
                 self.history.push(before);

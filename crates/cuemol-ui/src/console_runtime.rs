@@ -51,6 +51,7 @@ pub struct ConsoleCheckpoint {
     state: DesktopAppState,
     camera: Camera,
     selection: String,
+    scene_changed: bool,
 }
 
 impl ConsoleCheckpoint {
@@ -59,17 +60,24 @@ impl ConsoleCheckpoint {
             state: state.clone(),
             camera: camera.clone(),
             selection: selection.into(),
+            scene_changed: false,
         }
     }
 
     pub fn update(&mut self, state: &DesktopAppState, camera: &Camera, selection: &str) -> bool {
-        let changed = !self.state.same_undo_state(state)
-            || !cuemol_command::console::same_camera_view(&self.camera, camera)
-            || self.selection != selection;
+        let scene_changed = !cuemol_command::console::same_camera_view(&self.camera, camera)
+            || self.selection != selection
+            || !self.state.same_scene_undo_state(state);
+        let changed = scene_changed || !self.state.same_undo_state(state);
         if changed {
             *self = Self::new(state, camera, selection);
         }
+        self.scene_changed = scene_changed;
         changed
+    }
+
+    pub fn scene_changed(&self) -> bool {
+        self.scene_changed
     }
 }
 

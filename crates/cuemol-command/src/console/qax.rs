@@ -252,6 +252,39 @@ impl Session {
             }
             normalized.as_object_mut()?.remove("cascadeGroupVisibility");
             &normalized
+        } else if matches!(
+            name,
+            "define_color"
+                | "define_selection"
+                | "remove_color"
+                | "remove_selection"
+                | "remove_style"
+        ) && !args["styleId"].is_null()
+        {
+            if args["scope"] != "scene" {
+                return None;
+            }
+            let scene = cuemol_core::Uid::new(args["sceneId"].as_u64()?);
+            let style_id = args["styleId"].as_u64()?;
+            let set_name = args["styleSet"].as_str()?;
+            let matching: Vec<_> = state
+                .style_summaries(scene)
+                .into_iter()
+                .filter(|summary| {
+                    summary.scene_uid == scene
+                        && state
+                            .style_name(summary.target)
+                            .is_ok_and(|name| name == set_name)
+                })
+                .collect();
+            if matching.len() != 1 || matching[0].target.runtime_id() != style_id {
+                return None;
+            }
+            normalized = args.clone();
+            for key in ["styleId", "sceneId"] {
+                normalized.as_object_mut()?.remove(key);
+            }
+            &normalized
         } else {
             args
         };

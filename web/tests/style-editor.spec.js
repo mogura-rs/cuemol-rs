@@ -1,4 +1,5 @@
 import {test, expect} from '@playwright/test';
+import {call} from './support.js';
 
 const status = page => page.evaluate(() => window.cuemol.status());
 const present = page => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
@@ -35,6 +36,30 @@ async function xmlDownload(download) {
 }
 
 for(const backend of ['webgl','webgpu']) {
+  test(`global style edits survive scene history in ${backend}`,async ({page}) => {
+    test.setTimeout(180000);
+    await ready(page,backend);
+    await call(page,'clear_undo');
+    await click(page,'Style global user',{clickCount:2});
+    await click(page,'Style tab Selection');
+    await fill(page,'Style new name','focus');
+    await fill(page,'Style new value','name C1');
+    await click(page,'Style add entry');
+    await expect.poll(async () => (await command(page,'get_style_set',{styleSet:'user',scope:'global'})).xml).toContain('name C1');
+    await click(page,'Style close');
+    await call(page,'undo');
+    expect((await command(page,'get_style_set',{styleSet:'user',scope:'global'})).xml).toContain('name C1');
+    await command(page,'create_style_set',{name:'local-palette'});
+    await command(page,'define_selection',{styleSet:'user',scope:'global',name:'focus',selection:'name O1'});
+    await call(page,'undo');
+    const exists=() => command(page,'execute_script',{source:"print(cuemol.getService('StyleManager').hasStyleSet('local-palette',scene.uid));"});
+    expect((await exists()).log).toBe('0\n');
+    expect((await command(page,'get_style_set',{styleSet:'user',scope:'global'})).xml).toContain('name O1');
+    await call(page,'redo');
+    expect(Number((await exists()).log)).toBeGreaterThan(0);
+    expect((await command(page,'get_style_set',{styleSet:'user',scope:'global'})).xml).toContain('name O1');
+  });
+
   test(`style file editor preserves definitions and camera in ${backend}`,async ({page},testInfo) => {
     test.setTimeout(180000);
     await ready(page,backend);

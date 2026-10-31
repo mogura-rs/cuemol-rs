@@ -108,6 +108,7 @@ async function openShell(page, storage = {}, options = {}) {
       }
       if (options.styles && command === 'save_style_file') {
         const style=styleFor(args.target);
+        window.__savedStyleXml=styleDocuments.get(style.styleId);
         if(style.source!==args.path)style.modified=false;
         style.source=args.path;
         return structuredClone(snapshot);
@@ -175,6 +176,7 @@ async function openShell(page, storage = {}, options = {}) {
       if (command === 'console_complete') return [{display: 'Probe', replacement: 'select Probe'}];
       if (command === 'inspector_request') {
         if(options.styles && args.tool==='style_edit') {
+          if(window.__holdStyleEdit)await window.__holdStyleEdit;
           const request=args.args, style=styleFor(request.target);
           if(window.__failStyleEdit){window.__failStyleEdit=false;throw new Error('Style edit rejected');}
           if(style.readOnly)throw new Error('Style is read-only');
@@ -323,6 +325,10 @@ async function openShell(page, storage = {}, options = {}) {
     }}};
     const backendInvoke=window.__TAURI__.core.invoke;
     window.__TAURI__.core.invoke=async(command,args)=>structuredClone(await backendInvoke(command,structuredClone(args)));
+    window.__TAURI__.dialog={save:async options=>{
+      window.__saveDialogOptions=options;
+      return options.defaultPath;
+    }};
   }, {storage, options});
   await page.goto('http://tauri.test/');
   await expect(page.locator('#status-text')).toHaveText('Ready');
@@ -413,6 +419,42 @@ test('Tauri style additions retain failed and unrelated pending names', async ({
   await expect(dialog.getByPlaceholder('New color name')).toBeEmpty();
   await dialog.getByRole('button',{name:'Selection',exact:true}).click();
   await expect(dialog.getByPlaceholder('New selection name')).toHaveValue('new-focus');
+  expect(errors).toEqual([]);
+});
+
+test('Tauri style save waits for accepted edits and close keeps queued edits', async ({page}) => {
+  const errors=await openShell(page,{}, {styles:true});
+  await page.locator('.style-node').filter({hasText:'user ↗ (global)'}).dblclick();
+  const dialog=page.locator('#reference-dialog');
+  await page.evaluate(()=>{window.__holdStyleEdit=new Promise(resolve=>{window.__releaseStyleEdit=resolve;});});
+  await dialog.getByLabel('Color accent',{exact:true}).fill('#abcdef');
+  await dialog.getByRole('button',{name:'Apply color accent',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='inspector_request'&&c.args.tool==='style_edit').length)).toBe(1);
+  await dialog.getByRole('button',{name:'Selection',exact:true}).click();
+  await dialog.getByLabel('Selection focus',{exact:true}).fill('name O1');
+  await dialog.getByRole('button',{name:'Apply selection focus',exact:true}).click();
+  await dialog.getByRole('button',{name:'Save style...',exact:true}).click();
+  expect(await page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='save_style_file'))).toHaveLength(0);
+  await dialog.getByRole('button',{name:'Close',exact:true}).last().click();
+  await expect(dialog).not.toBeVisible();
+  await page.evaluate(()=>window.__releaseStyleEdit());
+  await expect.poll(()=>page.evaluate(()=>window.__savedStyleXml||'')).toContain('#ABCDEF');
+  expect(await page.evaluate(()=>window.__savedStyleXml)).toContain('name O1');
+  expect(errors).toEqual([]);
+});
+
+test('Tauri anonymous style saves with a visible default filename', async ({page}) => {
+  const errors=await openShell(page,{}, {styles:true});
+  await page.locator('.style-node').filter({hasText:'(anonymous) (global)'}).first().dblclick();
+  const dialog=page.locator('#reference-dialog');
+  await dialog.getByRole('button',{name:'Save style...',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>window.__saveDialogOptions?.defaultPath)).toBe('style.xml');
+  await expect.poll(()=>page.evaluate(()=>window.__savedStyleXml||'')).toContain('id=""');
+  await dialog.getByRole('button',{name:'Close',exact:true}).last().click();
+  await page.locator('.style-node').filter({hasText:/^\(anonymous\) \(global\)$/}).dblclick();
+  await expect(dialog.getByLabel('Style set name')).toHaveValue('(anonymous)');
+  await dialog.getByRole('button',{name:'Save style...',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>window.__saveDialogOptions?.defaultPath)).toBe('(anonymous).xml');
   expect(errors).toEqual([]);
 });
 

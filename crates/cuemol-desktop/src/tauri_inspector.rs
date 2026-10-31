@@ -109,8 +109,11 @@ impl AppModel {
             "{} style entry {name}",
             if value.is_some() { "Edit" } else { "Remove" }
         );
-        if !before.desktop.same_undo_state(&self.desktop) {
-            self.push_undo(before);
+        if input.scene_uid != 0 && !before.desktop.same_scene_undo_state(&self.desktop) {
+            self.push_undo_for_scene(
+                before,
+                (input.scene_uid != 0).then_some(Uid::new(input.scene_uid)),
+            );
             if let Some(entry) = self.undo_stack.last_mut() {
                 entry.record = record;
             }

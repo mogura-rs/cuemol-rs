@@ -7867,6 +7867,10 @@ impl AppModel {
     }
 
     fn push_undo(&mut self, snapshot: AppModelUndo) {
+        self.push_undo_for_scene(snapshot, self.desktop.active_scene());
+    }
+
+    fn push_undo_for_scene(&mut self, snapshot: AppModelUndo, scene: Option<Uid>) {
         let description = if self.status.trim().is_empty() {
             "Edit".to_string()
         } else {
@@ -7880,14 +7884,16 @@ impl AppModel {
         if self.undo_stack.len() > 50 {
             self.undo_stack.remove(0);
         }
-        if let Some(scene_uid) = self.desktop.active_scene() {
+        if let Some(scene_uid) = scene {
             self.modified_scenes.insert(scene_uid);
         }
         self.redo_stack.clear();
     }
 
     fn push_script_undo(&mut self, snapshot: AppModelUndo) -> bool {
-        if snapshot.desktop.same_undo_state(&self.desktop) && snapshot.selection == self.selection {
+        if snapshot.desktop.same_scene_undo_state(&self.desktop)
+            && snapshot.selection == self.selection
+        {
             return false;
         }
         self.push_undo(snapshot);
@@ -7896,7 +7902,7 @@ impl AppModel {
 
     fn restore_undo(&mut self, snapshot: AppModelUndo) -> Result<(), String> {
         let selection_history = self.desktop.selection_history();
-        self.desktop = snapshot.desktop;
+        self.desktop.restore_snapshot(snapshot.desktop);
         if self.desktop.selection_history() != selection_history {
             self.desktop.restore_selection_history(&selection_history);
         }
@@ -7929,9 +7935,13 @@ impl AppModel {
         }
         let mut description = String::new();
         for _ in 0..count {
-            let entry = self.undo_stack.pop().expect("undo count is bounded");
+            let mut entry = self.undo_stack.pop().expect("undo count is bounded");
             let redo = self.capture_undo();
             description = entry.description.clone();
+            entry
+                .snapshot
+                .desktop
+                .preserve_global_styles_from(&self.desktop);
             self.restore_undo(entry.snapshot)?;
             self.redo_stack.push(AppModelUndoEntry {
                 record: entry.record,
@@ -7951,9 +7961,13 @@ impl AppModel {
         }
         let mut description = String::new();
         for _ in 0..count {
-            let entry = self.redo_stack.pop().expect("redo count is bounded");
+            let mut entry = self.redo_stack.pop().expect("redo count is bounded");
             let undo = self.capture_undo();
             description = entry.description.clone();
+            entry
+                .snapshot
+                .desktop
+                .preserve_global_styles_from(&self.desktop);
             self.restore_undo(entry.snapshot)?;
             self.undo_stack.push(AppModelUndoEntry {
                 record: entry.record,
@@ -10372,7 +10386,7 @@ fn handle_model_request(
             if model.desktop.active_scene() == Some(scene_uid) {
                 model.invalidate_snapshot(false);
             }
-            model.push_undo(undo);
+            model.push_undo_for_scene(undo, Some(scene_uid));
             debug_assert!(model
                 .desktop
                 .style_summaries(scene_uid)
@@ -10397,8 +10411,7 @@ fn handle_model_request(
             if model.desktop.active_scene() == Some(scene_uid) {
                 model.invalidate_snapshot(false);
             }
-            model.modified_scenes.insert(scene_uid);
-            model.push_undo(undo);
+            if target.scene_uid != 0 { model.push_undo_for_scene(undo, Some(scene_uid)); }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SaveStyleFile { target, path } => {
@@ -10410,7 +10423,7 @@ fn handle_model_request(
                 .save_style_file(resolved, scene_uid, &path)
                 .map_err(|error| error.to_string())?;
             model.status = format!("Saved style file {path}");
-            model.push_undo(undo);
+            if target.scene_uid != 0 { model.push_undo_for_scene(undo, Some(scene_uid)); }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::CreateRendererStyle(input) => {
@@ -10501,20 +10514,22 @@ fn handle_model_request(
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SetStyleProperties(properties) => {
+            let scene = (properties.target.scene_uid != 0)
+                .then_some(Uid::new(properties.target.scene_uid));
             let undo = model.capture_undo();
             if let Err(error) = model.set_style_properties(properties) {
                 model.restore_undo(undo)?;
                 return Err(error);
             }
-            if !undo.desktop.same_undo_state(&model.desktop) {
-                model.push_undo(undo);
+            if scene.is_some() && !undo.desktop.same_scene_undo_state(&model.desktop) {
+                model.push_undo_for_scene(undo, scene);
             }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::DestroyStyle { target } => {
             let undo = model.capture_undo();
             model.destroy_style(target)?;
-            model.push_undo(undo);
+            if target.scene_uid != 0 { model.push_undo_for_scene(undo, Some(Uid::new(target.scene_uid))); }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SetWorkspaceVisible { target, visible } => {
@@ -22575,6 +22590,19 @@ mod tests {
         handle_model_request(&mut model, request("#123456")).unwrap();
         let properties = model.style_properties(target).unwrap();
         assert!(properties.xml.contains("#123456"));
+        assert!(model.undo_stack.is_empty());
+        let local = StyleTargetInput::from(
+            model
+                .snapshot()
+                .styles
+                .iter()
+                .find(|style| style.scene_uid == scene.get() && style.name == "user")
+                .unwrap(),
+        );
+        handle_model_request(&mut model, ModelRequest::Inspector {
+            tool:"style_edit".into(),
+            args:serde_json::json!({"target":local,"kind":"selection","name":"local-focus","value":"name C1"}),
+        }).unwrap();
         assert_eq!(model.undo_stack.len(), 1);
         let resolved = model.style_target(target).unwrap();
         model
@@ -22604,9 +22632,133 @@ mod tests {
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         let restored = model.style_properties(target).unwrap().xml;
         assert!(restored.contains("name O1"));
-        assert!(restored.contains("#123456"));
+        assert!(restored.contains("0.5"));
+        assert!(!model
+            .style_properties(local)
+            .unwrap()
+            .xml
+            .contains("local-focus"));
         handle_model_request(&mut model, ModelRequest::Redo(0)).unwrap();
         assert!(model.style_properties(target).unwrap().xml.contains("0.5"));
+        assert!(model
+            .style_properties(local)
+            .unwrap()
+            .xml
+            .contains("local-focus"));
+    }
+
+    #[test]
+    fn style_edits_mark_the_target_scene_and_preserve_modified_state_through_undo() {
+        let mut model = model_without_gpu();
+        let original = model.desktop.active_scene().unwrap();
+        model
+            .desktop
+            .create_scene_style(original, "palette")
+            .unwrap();
+        let target = StyleTargetInput::from(
+            model
+                .snapshot()
+                .styles
+                .iter()
+                .find(|style| style.name == "palette")
+                .unwrap(),
+        );
+        let other = model.desktop.new_scene("other", true).result_scene;
+        model.modified_scenes.clear();
+        handle_model_request(&mut model, ModelRequest::Inspector {
+            tool: "style_edit".into(),
+            args: serde_json::json!({"target":target,"kind":"color","name":"accent","value":"#123456"}),
+        }).unwrap();
+        assert_eq!(model.modified_scenes, BTreeSet::from([original]));
+        assert_eq!(model.desktop.active_scene(), Some(other));
+        model.undo(0).unwrap();
+        assert!(model.modified_scenes.is_empty());
+        model.redo(0).unwrap();
+        assert_eq!(model.modified_scenes, BTreeSet::from([original]));
+        model.modified_scenes.clear();
+        let global = StyleTargetInput::from(
+            model
+                .snapshot()
+                .styles
+                .iter()
+                .find(|style| {
+                    style.owner_scene_uid == other.get()
+                        && style.scene_uid == 0
+                        && style.name == "user"
+                })
+                .unwrap(),
+        );
+        handle_model_request(&mut model, ModelRequest::Inspector {
+            tool: "style_edit".into(),
+            args: serde_json::json!({"target":global,"kind":"color","name":"accent","value":"#abcdef"}),
+        }).unwrap();
+        assert!(model.modified_scenes.is_empty());
+    }
+
+    #[test]
+    fn global_style_console_edits_do_not_consume_a_scene_history_step() {
+        use cuemol_command::console::Dialect;
+        let mut model = model_without_gpu();
+        let scene = model.desktop.active_scene().unwrap();
+        let source = |value: &str| {
+            format!(
+            "execute_script {}",
+            serde_json::json!(format!("var s=cuemol.getService('StyleManager');s.setStrData('sel','focus','{value}',0,s.hasStyleSet('user',0));"))
+        )
+        };
+        model
+            .start_console(&source("name C1"), Dialect::CueMol)
+            .unwrap();
+        assert_eq!(model.status, "Console executed", "{:?}", model.log_lines);
+        assert!(model.undo_stack.is_empty());
+        model
+            .start_console(
+                &format!("create_style_set palette; {}", source("name O1")),
+                Dialect::CueMol,
+            )
+            .unwrap();
+        assert_eq!(model.status, "Console executed", "{:?}", model.log_lines);
+        assert_eq!(model.undo_stack.len(), 1);
+        model.undo(0).unwrap();
+        assert!(model.desktop.find_style_target(scene, "palette").is_none());
+        let user = model
+            .desktop
+            .find_style_target(Uid::new(0), "user")
+            .unwrap();
+        assert!(model.desktop.style_xml(user).unwrap().contains("name O1"));
+    }
+
+    #[test]
+    fn style_editor_rejects_a_global_handle_after_rollback_and_new_creation() {
+        let mut model = model_without_gpu();
+        let scene = model.desktop.active_scene().unwrap();
+        model.desktop.create_scene_style(scene, "local").unwrap();
+        let before = model.capture_undo();
+        let original_state = model.desktop.clone();
+        model
+            .desktop
+            .run_script_js("cuemol.getService('StyleManager').createStyleSet('removed', 0);")
+            .unwrap();
+        let target = StyleTargetInput::from(
+            model
+                .snapshot()
+                .styles
+                .iter()
+                .find(|style| style.name == "removed")
+                .unwrap(),
+        );
+        model.restore_undo(before).unwrap();
+        assert!(model.desktop.same_undo_state(&original_state));
+        model
+            .desktop
+            .run_script_js("cuemol.getService('StyleManager').createStyleSet('replacement', 0);")
+            .unwrap();
+        assert!(model.style_target(target).is_err());
+        assert!(model
+            .snapshot()
+            .styles
+            .iter()
+            .any(|style| style.name == "replacement"));
     }
 
     #[test]

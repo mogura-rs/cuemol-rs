@@ -125,13 +125,13 @@ impl AppModel {
                 .checkpoint
                 .update(&self.desktop, &self.camera, &self.selection);
         self.console_session
-            .complete_record(changed && !result.is_null());
+            .complete_record(changed && run.checkpoint.scene_changed() && !result.is_null());
         if name == "save_scene" && !result.is_null() {
             if let Some(scene) = self.desktop.active_scene() {
                 self.modified_scenes.remove(&scene);
             }
         }
-        if changed && cuemol_command::tool_records_history(name) {
+        if changed && run.checkpoint.scene_changed() && cuemol_command::tool_records_history(name) {
             if let Some(before) = run.undo.take() {
                 self.status = "Console command".into();
                 self.push_undo(before);

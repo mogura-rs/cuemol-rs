@@ -4114,17 +4114,20 @@ async function showStyleProperties(style) {
     source.textContent = properties.source;
     source.hidden = !properties.source;
   };
-  const transact = (operation, completed = () => {}) => {
-    const task = pending.then(async () => {
-      if (closed) return false;
+  const enqueue = operation => {
+    if (closed) return Promise.resolve(false);
+    pending = pending.then(operation).catch(error => { showError(error); return false; });
+    return pending;
+  };
+  const transact = (operation, completed = () => {}) =>
+    enqueue(async () => {
       setBusy(true);
       const previousName = properties.name;
       try {
         const result = await operation();
         snapshot = result.snapshot || result;
         workspaceRendererStyleCache.clear();
-        selectedStyleIndex = activeStyles().findIndex(candidate => sameStyleTarget(candidate, target));
-        workspaceSelectionKind = "style";
+        selectWorkspaceStyle(target);
         renderShell();
         void renderViewport();
         await readProperties();
@@ -4135,12 +4138,9 @@ async function showStyleProperties(style) {
           updateHeader();
         }
         return true;
-      } catch (error) { showError(error); updateHeader(); return false; }
+      } catch (error) { showError(error); if (!closed) updateHeader(); return false; }
       finally { setBusy(false); }
     });
-    pending = task;
-    return task;
-  };
   const commitEntry = (kind, name, value, completed) => transact(async () => {
     const result = await invoke("inspector_request", {tool:"style_edit", args:{target, kind, name, value}});
     const key = `${kind}:${name}`;
@@ -4237,12 +4237,12 @@ async function showStyleProperties(style) {
   dialogContent.append(header,metadata,source,editor);
   renderEditor();
   updateHeader();
-  const save = button("Save style...", "", async () => {
+  const save = button("Save style...", "", () => enqueue(async () => {
     const scene = snapshot.scenes.find(scene => scene.uid === target.ownerSceneUid);
     if (!scene) return;
     await saveWorkspaceStyleFile(scene,{...properties,...target},!properties.source);
-    try { await readProperties(); updateHeader(); } catch (error) { showError(error); }
-  });
+    if (!closed) { await readProperties(); updateHeader(); }
+  }));
   const close = button("Close", "dialog-primary", () => referenceDialog.close());
   dialogActions(save,close);
   if (referenceDialog.showModal && !referenceDialog.open) referenceDialog.showModal();
@@ -10608,9 +10608,12 @@ async function loadWorkspaceStyleFile(scene) {
 }
 
 async function saveWorkspaceStyleFile(scene, style, saveAs) {
+  try {
+    style = await invoke("get_style_properties", {target:styleTarget(style)});
+  } catch (error) { showError(error); return; }
   let path = !saveAs ? style.source : "";
   if (!path) {
-    const baseName = style.name === "(anonymous)" ? "style" : style.name;
+    const baseName = style.name.trim() ? style.name : "style";
     path = await chooseOutputPath(`${baseName}.xml`, "Style file (*.xml)", ["xml"]);
   }
   if (!path) return;
@@ -10620,10 +10623,7 @@ async function saveWorkspaceStyleFile(scene, style, saveAs) {
       path,
     })
   ) {
-    selectedStyleIndex = activeStyles().findIndex(
-      (candidate) => sameStyleTarget(candidate, style),
-    );
-    workspaceSelectionKind = "style";
+    selectWorkspaceStyle(style);
     renderShell();
   }
 }
@@ -10636,11 +10636,14 @@ async function reloadWorkspaceStyleFile(scene, style) {
   ) {
     return;
   }
-  selectedStyleIndex = activeStyles().findIndex(
-    (candidate) => sameStyleTarget(candidate, style),
-  );
-  workspaceSelectionKind = "style";
+  selectWorkspaceStyle(style);
   renderShell();
+}
+
+function selectWorkspaceStyle(style) {
+  const index = activeStyles().findIndex(candidate => sameStyleTarget(candidate, style));
+  selectedStyleIndex = index >= 0 ? index : null;
+  workspaceSelectionKind = index >= 0 ? "style" : "styleRoot";
 }
 
 async function openNewStyleFlow() {
@@ -13497,6 +13500,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           }
         },
       );
+      styleRow.setAttribute("aria-label", `Style set ${style.name} (${style.sceneUid === 0 ? "global" : "scene"})`);
       if (styleTarget) styleRow.workspaceSelectionTarget = styleTarget;
       styleRow.addEventListener("dblclick", () => showStyleProperties(style));
       styleRow.addEventListener("contextmenu", (event) => {

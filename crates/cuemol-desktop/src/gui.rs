@@ -5304,10 +5304,13 @@ impl GuiApplication {
                 .as_ref()
                 .is_none_or(|before| !before.same_undo_state(&self.state) || camera_before != view);
             if result.is_ok() && mutating && changed {
-                if let Some(undo) = undo {
+                let history_changed = undo.as_ref().is_some_and(|undo| {
+                    !undo.state.same_scene_undo_state(&self.state) || camera_before != view
+                });
+                if let Some(undo) = undo.filter(|_| history_changed) {
                     self.push_undo_snapshot(undo);
                 }
-                self.agent.changed_scene = true;
+                self.agent.changed_scene |= history_changed;
                 camera.apply_qsys_camera(&view);
                 camera.read_view_options(&self.state);
                 let _ = self.state.set_active_view_camera(&view);
@@ -14739,7 +14742,7 @@ impl GuiApplication {
                 .checkpoint
                 .update(&self.state, &run.camera, &self.selection_text);
         self.console_session
-            .complete_record(changed && !value.is_null());
+            .complete_record(changed && run.checkpoint.scene_changed() && !value.is_null());
         if name == "save_scene" && !value.is_null() {
             if let Some(scene) = self.state.active_scene() {
                 self.modified_scenes.remove(&scene);
@@ -14748,7 +14751,7 @@ impl GuiApplication {
                 self.last_loaded_path = Some(PathBuf::from(path));
             }
         }
-        if changed && cuemol_command::tool_records_history(name) {
+        if changed && run.checkpoint.scene_changed() && cuemol_command::tool_records_history(name) {
             if let Some(mut before) = run.undo.take() {
                 before.record = self.console_session.action_record.clone();
                 self.push_undo_snapshot(before);
@@ -18434,7 +18437,7 @@ impl GuiApplication {
                         &self.superpose_moving_selection,
                         path,
                     ) {
-                        self.state = undo.state;
+                        self.state.restore_snapshot(undo.state);
                         self.set_error(error);
                         return;
                     }
@@ -19081,7 +19084,7 @@ impl GuiApplication {
                 ));
             }
             Err(error) => {
-                self.state = undo.state;
+                self.state.restore_snapshot(undo.state);
                 self.set_error(error);
             }
         }
@@ -19108,7 +19111,7 @@ impl GuiApplication {
                 }
             }
             Err(error) => {
-                self.state = undo.state;
+                self.state.restore_snapshot(undo.state);
                 self.set_error(error);
             }
         }
@@ -19147,7 +19150,7 @@ impl GuiApplication {
                 ));
             }
             Err(error) => {
-                self.state = undo.state;
+                self.state.restore_snapshot(undo.state);
                 self.set_error(error);
             }
         }
@@ -19182,7 +19185,7 @@ impl GuiApplication {
                 ));
             }
             Err(error) => {
-                self.state = undo.state;
+                self.state.restore_snapshot(undo.state);
                 self.set_error(error);
             }
         }
@@ -20926,7 +20929,7 @@ impl GuiApplication {
                 self.set_status(format!("Change rend group name: {name}"));
             }
             Err(error) => {
-                self.state = undo.state;
+                self.state.restore_snapshot(undo.state);
                 self.set_error(error);
             }
         }
@@ -23965,9 +23968,8 @@ impl GuiApplication {
         let undo = self.capture_undo();
         match self.state.save_style_file(summary.target, scene_uid, &path) {
             Ok(()) => {
-                self.push_undo_snapshot(undo);
                 if summary.local_index.is_some() {
-                    self.modified_scenes.insert(summary.scene_uid);
+                    self.push_undo_snapshot_for_scene(undo, Some(summary.scene_uid));
                 }
                 self.rebuild_snapshot();
                 self.set_status(format!("Saved style file {}", path.display()));
@@ -23987,9 +23989,8 @@ impl GuiApplication {
         let undo = self.capture_undo();
         match self.state.reload_style_file(summary.target, scene_uid) {
             Ok(()) => {
-                self.push_undo_snapshot(undo);
                 if summary.local_index.is_some() {
-                    self.modified_scenes.insert(summary.scene_uid);
+                    self.push_undo_snapshot_for_scene(undo, Some(summary.scene_uid));
                 }
                 self.rebuild_snapshot();
                 self.set_status(format!("Reloaded style file {}", summary.source));
@@ -24533,9 +24534,8 @@ impl GuiApplication {
         let undo = self.capture_undo();
         match self.state.set_style_read_only(summary.target, read_only) {
             Ok(()) => {
-                self.push_undo_snapshot(undo);
                 if summary.local_index.is_some() {
-                    self.modified_scenes.insert(summary.scene_uid);
+                    self.push_undo_snapshot_for_scene(undo, Some(summary.scene_uid));
                 }
                 self.rebuild_snapshot();
                 self.set_status(format!("Style read-only: {read_only}"));
@@ -24604,16 +24604,15 @@ impl GuiApplication {
                         format!("Removed style {name}")
                     }
                 };
-                self.push_undo_snapshot(undo);
                 if target.scope().get() != 0 {
-                    self.modified_scenes.insert(draft.scene_uid);
+                    self.push_undo_snapshot_for_scene(undo, Some(draft.scene_uid));
                 }
                 self.rebuild_snapshot();
                 draft.revision = self.snapshot_revision;
                 self.set_status(status);
             }
             Err(error) => {
-                self.state = undo.state;
+                self.state.restore_snapshot(undo.state);
                 self.set_error(error);
             }
         }
@@ -24672,7 +24671,7 @@ impl GuiApplication {
                         self.set_status(format!("Created style {}", draft.name.trim()));
                     }
                     Err(error) => {
-                        self.state = undo.state;
+                        self.state.restore_snapshot(undo.state);
                         self.set_error(error);
                         self.style_properties_draft = Some(draft);
                     }
@@ -24979,9 +24978,8 @@ impl GuiApplication {
                 .set_style_properties(target, &draft.name, draft.read_only)
             {
                 Ok(()) => {
-                    self.push_undo_snapshot(undo);
                     if target.scope().get() != 0 {
-                        self.modified_scenes.insert(draft.scene_uid);
+                        self.push_undo_snapshot_for_scene(undo, Some(draft.scene_uid));
                     }
                     self.rebuild_snapshot();
                     self.set_status(format!("Renamed style {}", draft.name.trim()));
@@ -28906,10 +28904,16 @@ impl GuiApplication {
     }
 
     fn push_undo_snapshot(&mut self, snapshot: GuiUndoSnapshot) {
-        if let Some(scene_uid) = self
-            .state
-            .active_scene()
-            .filter(|scene_uid| snapshot.state.scene_manager().scene(*scene_uid).is_some())
+        self.push_undo_snapshot_for_scene(snapshot, self.state.active_scene());
+    }
+
+    fn push_undo_snapshot_for_scene(
+        &mut self,
+        snapshot: GuiUndoSnapshot,
+        scene: Option<cuemol_core::Uid>,
+    ) {
+        if let Some(scene_uid) =
+            scene.filter(|scene_uid| snapshot.state.scene_manager().scene(*scene_uid).is_some())
         {
             self.modified_scenes.insert(scene_uid);
         }
@@ -28921,7 +28925,7 @@ impl GuiApplication {
     }
 
     fn push_script_undo_snapshot(&mut self, snapshot: GuiUndoSnapshot) -> bool {
-        if snapshot.state.same_undo_state(&self.state)
+        if snapshot.state.same_scene_undo_state(&self.state)
             && snapshot.selected_object == self.selected_object
             && snapshot.selected_renderer == self.selected_renderer
             && snapshot.workspace_aux_selection == self.workspace_aux_selection
@@ -28937,7 +28941,7 @@ impl GuiApplication {
 
     fn restore_gui_undo_state(&mut self, snapshot: GuiUndoSnapshot) {
         let selection_history = self.state.selection_history();
-        self.state = snapshot.state;
+        self.state.restore_snapshot(snapshot.state);
         self.state.restore_selection_history(&selection_history);
         self.selection_history = selection_history;
         self.animation_playing = false;
@@ -28965,7 +28969,7 @@ impl GuiApplication {
     }
 
     fn undo(&mut self, camera: &mut CameraController) {
-        let Some(snapshot) = self.undo_stack.pop() else {
+        let Some(mut snapshot) = self.undo_stack.pop() else {
             self.set_status("Nothing to undo");
             return;
         };
@@ -28974,13 +28978,14 @@ impl GuiApplication {
             redo.camera = Some(camera.to_qsys_camera("__current"));
         }
         redo.record = snapshot.record.clone();
+        snapshot.state.preserve_global_styles_from(&self.state);
         self.restore_undo_snapshot(snapshot, camera);
         self.redo_stack.push(redo);
         self.set_status("Undo");
     }
 
     fn redo(&mut self, camera: &mut CameraController) {
-        let Some(snapshot) = self.redo_stack.pop() else {
+        let Some(mut snapshot) = self.redo_stack.pop() else {
             self.set_status("Nothing to redo");
             return;
         };
@@ -28989,6 +28994,7 @@ impl GuiApplication {
             undo.camera = Some(camera.to_qsys_camera("__current"));
         }
         undo.record = snapshot.record.clone();
+        snapshot.state.preserve_global_styles_from(&self.state);
         self.restore_undo_snapshot(snapshot, camera);
         self.undo_stack.push(undo);
         self.set_status("Redo");
@@ -29427,7 +29433,7 @@ impl GuiApplication {
                 self.set_status("Renderer added");
             }
             Err(error) => {
-                self.state = undo.state;
+                self.state.restore_snapshot(undo.state);
                 self.set_error(error);
             }
         }
@@ -29516,7 +29522,7 @@ impl GuiApplication {
                 self.set_status(status);
             }
             Err(error) => {
-                self.state = undo.state;
+                self.state.restore_snapshot(undo.state);
                 self.set_error(error);
             }
         }
@@ -36554,6 +36560,58 @@ mod tests {
     }
 
     #[test]
+    fn native_global_style_edits_survive_scene_undo_and_do_not_add_history() {
+        let mut app = GuiApplication::new();
+        let scene = app.state.active_scene().unwrap();
+        let style_index = app
+            .state
+            .style_summaries(scene)
+            .iter()
+            .position(|style| style.scene_uid.get() == 0 && style.name == "user")
+            .unwrap();
+        app.open_style_properties(WorkspaceAuxSelection::Style {
+            scene_uid: scene,
+            style_index,
+        });
+        let mut draft = app.style_properties_draft.take().unwrap();
+        app.apply_native_style_mutation(
+            &mut draft,
+            NativeStyleMutation::SetColor {
+                name: "accent".into(),
+                value: "#123456".into(),
+            },
+        );
+        assert!(app.undo_stack.is_empty());
+        assert!(app.modified_scenes.is_empty());
+        let before = app.capture_undo();
+        app.state.create_scene_style(scene, "local").unwrap();
+        app.push_undo_snapshot(before);
+        app.apply_native_style_mutation(
+            &mut draft,
+            NativeStyleMutation::SetSelection {
+                name: "focus".into(),
+                value: "name C1".into(),
+            },
+        );
+        assert_eq!(app.undo_stack.len(), 1);
+        let mut camera = CameraController::default();
+        app.undo(&mut camera);
+        assert!(app.state.find_style_target(scene, "local").is_none());
+        assert!(app
+            .state
+            .style_xml(draft.target.unwrap())
+            .unwrap()
+            .contains("name C1"));
+        app.redo(&mut camera);
+        assert!(app.state.find_style_target(scene, "local").is_some());
+        assert!(app
+            .state
+            .style_xml(draft.target.unwrap())
+            .unwrap()
+            .contains("name C1"));
+    }
+
+    #[test]
     fn native_global_style_tree_opens_the_editor_with_the_property_button() {
         use egui_kittest::kittest::Queryable;
 
@@ -36641,7 +36699,7 @@ mod tests {
                 value: "#123456".into(),
             },
         );
-        assert_eq!(app.undo_stack.len(), 1);
+        assert!(app.undo_stack.is_empty());
         assert!(app
             .state
             .scene_manager()
@@ -36655,7 +36713,7 @@ mod tests {
             .unwrap()
             .contains("accent"));
         app.undo(&mut CameraController::default());
-        assert!(!app
+        assert!(app
             .state
             .style_xml(draft.target.unwrap())
             .unwrap()
