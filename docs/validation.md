@@ -159,6 +159,12 @@ change and undo assertions; the failed click alone did not prove a lock defect.
 The View numeric check now waits for the expected numeric clipboard value, since
 filter verification replaces the previous console text in the clipboard.
 
+Windows then reached the font-property check and exposed a decoding error in the
+test's MCP client. The Rust command writes UTF-8, but Python used the runner's
+CP1252 default and rejected a font name. The client now decodes UTF-8 explicitly.
+A subprocess probe with Japanese font names reproduces the failure under a
+simulated CP1252 default and preserves the names after the repair.
+
 Generated archives and `dist/validation.json` remain local validation artifacts,
 not a published release. The release workflow now checks actual packaged windows
 on all five native targets. Local test results do not establish that those CI

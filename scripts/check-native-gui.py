@@ -162,7 +162,7 @@ def main():
 
     def call(name, arguments=None, timeout=10):
         response = subprocess.run([str(binary), 'mcp', 'call', name, json.dumps(arguments or {})],
-                                  cwd=work, env=env, text=True, capture_output=True, timeout=timeout)
+                                  cwd=work, env=env, encoding='utf-8', capture_output=True, timeout=timeout)
         if response.returncode:
             raise RuntimeError(f'{name} failed: {response.stdout}\n{response.stderr}')
         outer = json.loads(response.stdout)
