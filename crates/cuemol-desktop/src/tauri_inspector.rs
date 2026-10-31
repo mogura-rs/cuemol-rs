@@ -3,6 +3,9 @@ use serde_json::{json, Value};
 
 impl AppModel {
     pub(super) fn inspector_request(&mut self, tool: &str, args: &Value) -> Result<Value, String> {
+        if tool == "style_edit" {
+            return self.style_edit_request(args);
+        }
         if tool == "selection_history" {
             return self.selection_history_request(args);
         }
@@ -56,6 +59,64 @@ impl AppModel {
             None
         };
         Ok(json!({"result":result,"snapshot":self.snapshot(),"history":history,"warning":warning}))
+    }
+
+    fn style_edit_request(&mut self, args: &Value) -> Result<Value, String> {
+        let input: StyleTargetInput =
+            serde_json::from_value(args["target"].clone()).map_err(|error| error.to_string())?;
+        let target = self.style_target(input)?;
+        let value = match args.get("value") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(value)) => Some(value.as_str()),
+            Some(_) => return Err("Style entry value must be a string".into()),
+        };
+        let tool = match (args["kind"].as_str(), value) {
+            (Some("color"), Some(_)) => "define_color",
+            (Some("color"), None) => "remove_color",
+            (Some("selection"), Some(_)) => "define_selection",
+            (Some("selection"), None) => "remove_selection",
+            (Some("style"), None) => "remove_style",
+            _ => return Err("Unsupported style entry operation".into()),
+        };
+        let name = args["name"].as_str().ok_or("Missing style entry name")?;
+        let mut command = json!({
+            "sceneId":input.owner_scene_uid,
+            "scope":if target.scope().get() == 0 { "global" } else { "scene" },
+            "styleId":target.runtime_id(),
+            "styleSet":self.desktop.style_name(target).map_err(|error|error.to_string())?,
+            "name":name,
+        });
+        if let Some(value) = value {
+            command[if tool == "define_color" {
+                "color"
+            } else {
+                "selection"
+            }] = json!(value);
+        }
+        self.stop_console();
+        let before = self.capture_undo();
+        let record =
+            cuemol_command::console::actions::Record::operation(&self.desktop, tool, &command);
+        let result =
+            match cuemol_command::call_tool(&mut self.desktop, &mut self.camera, tool, &command) {
+                Ok(value) => value,
+                Err(error) => {
+                    self.restore_undo(before)?;
+                    return Err(error.to_string());
+                }
+            };
+        self.status = format!(
+            "{} style entry {name}",
+            if value.is_some() { "Edit" } else { "Remove" }
+        );
+        if !before.desktop.same_undo_state(&self.desktop) {
+            self.push_undo(before);
+            if let Some(entry) = self.undo_stack.last_mut() {
+                entry.record = record;
+            }
+        }
+        self.invalidate_snapshot(false);
+        Ok(json!({"result":result,"snapshot":self.snapshot()}))
     }
 
     fn selection_history_request(&mut self, args: &Value) -> Result<Value, String> {

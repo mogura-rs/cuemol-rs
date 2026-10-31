@@ -3836,8 +3836,7 @@ async function rendererStyleCreateEditor(object, renderer) {
     }
     try {
       const properties = await invoke("get_style_properties", {
-        sceneUid: object.sceneUid,
-        localIndex,
+        target: styleTarget(styleSets.find(style => style.localIndex === localIndex)),
       });
       if (sequence !== requestSequence) return;
       const documentNode = new DOMParser().parseFromString(properties.xml, "application/xml");
@@ -4056,208 +4055,214 @@ async function showApplyRendererStyleDialog(object, renderer, styleOptions) {
   if (referenceDialog.showModal && !referenceDialog.open) referenceDialog.showModal();
 }
 
+function styleTarget(style) {
+  return {ownerSceneUid: style.ownerSceneUid, sceneUid: style.sceneUid, styleId: style.styleId};
+}
+
+function sameStyleTarget(left, right) {
+  return left.ownerSceneUid === right.ownerSceneUid && left.sceneUid === right.sceneUid && left.styleId === right.styleId;
+}
+
 async function showStyleProperties(style) {
-  if (!style || style.localIndex === null) {
-    showError("Global styles are read-only.");
-    return;
-  }
-  let properties;
-  try {
-    properties = await invoke("get_style_properties", {
-      sceneUid: style.sceneUid,
-      localIndex: style.localIndex,
-    });
-  } catch (error) {
-    showError(error);
-    return;
-  }
-  const documentNode = new DOMParser().parseFromString(properties.xml, "application/xml");
-  if (documentNode.querySelector("parsererror") || documentNode.documentElement.tagName !== "styles") {
-    showError("Style XML is invalid.");
-    return;
-  }
-  let activeTab = "color";
-  dialogTitle.textContent = `Style editor: ${properties.name}`;
+  if (!style) return;
+  const target = styleTarget(style);
+  let properties, documentNode;
+  const readProperties = async () => {
+    const latest = await invoke("get_style_properties", {target});
+    const parsed = new DOMParser().parseFromString(latest.xml, "application/xml");
+    if (parsed.querySelector("parsererror") || parsed.documentElement.tagName !== "styles") {
+      throw new Error("Style XML is invalid.");
+    }
+    properties = latest;
+    documentNode = parsed;
+  };
+  try { await readProperties(); } catch (error) { showError(error); return; }
+  let activeTab = "color", closed = false, pending = Promise.resolve();
+  const edits = new Map();
+  const newNames = new Map();
   dialogContent.replaceChildren();
   dialogFooter.hidden = false;
   referenceDialog.className = "reference-dialog style-set-editor-dialog has-actions";
-  const commit = async () => {
-    setBusy(true);
-    try {
-      snapshot = await invoke("set_style_properties", {
-        properties: {
-          sceneUid: properties.sceneUid,
-          localIndex: properties.localIndex,
-          name: properties.name,
-          readOnly: properties.readOnly,
-          xml: new XMLSerializer().serializeToString(documentNode),
-        },
-      });
-      workspaceRendererStyleCache.clear();
-      const styles = activeStyles();
-      selectedStyleIndex = styles.findIndex(
-        (candidate) =>
-          candidate.sceneUid === properties.sceneUid &&
-          candidate.localIndex === properties.localIndex,
-      );
-      workspaceSelectionKind = "style";
-      renderShell();
-      return true;
-    } catch (error) {
-      showError(error);
-      return false;
-    } finally {
-      setBusy(false);
-    }
-  };
-  const root = documentNode.documentElement;
-  const entries = (tagName) =>
-    [...root.children].filter((node) => node.tagName === tagName);
-  const removeEntry = async (node) => {
-    const parent = node.parentNode;
-    const next = node.nextSibling;
-    node.remove();
-    if (!(await commit())) parent.insertBefore(node, next);
-    renderEditor();
-  };
-  const addEntry = async (tagName, name, value) => {
-    const existing = entries(tagName).find((node) => node.getAttribute("id") === name);
-    if (existing) {
-      const before = existing.getAttribute("value") || "";
-      existing.setAttribute("value", value);
-      if (!(await commit())) existing.setAttribute("value", before);
-      renderEditor();
-      return;
-    }
-    const node = documentNode.createElement(tagName);
-    node.setAttribute("id", name);
-    node.setAttribute("value", value);
-    root.append(node);
-    if (!(await commit())) node.remove();
-    renderEditor();
-  };
+  referenceDialog.addEventListener("close", () => { closed = true; }, {once:true});
+  const nameInput = document.createElement("input");
+  nameInput.setAttribute("aria-label", "Style set name");
+  nameInput.value = properties.name;
+  const source = dialogParagraph("");
+  source.className = "dialog-note style-set-source";
+  const readOnly = document.createElement("input");
+  readOnly.type = "checkbox";
+  const readOnlyLabel = document.createElement("label");
+  readOnlyLabel.append(readOnly, "Read-only");
+  const scope = document.createElement("span");
+  const metadata = document.createElement("div");
+  metadata.className = "style-set-metadata";
+  metadata.append(scope, readOnlyLabel);
+  const header = document.createElement("div");
+  header.className = "style-set-name";
   const editor = document.createElement("div");
   editor.className = "style-set-editor";
   const tabs = document.createElement("div");
   tabs.className = "style-set-editor-tabs";
   const panel = document.createElement("div");
   panel.className = "style-set-editor-panel";
+  const updateHeader = () => {
+    dialogTitle.textContent = `Style editor: ${properties.name || "(anonymous)"}`;
+    rename.disabled = !nameInput.value.trim() || nameInput.value === properties.name || nameInput.value.trim() === properties.name;
+    readOnly.checked = properties.readOnly;
+    readOnly.disabled = !properties.readOnly && properties.modified;
+    scope.textContent = `${target.sceneUid === 0 ? "Global" : "Scene"} style set${properties.modified ? " · Modified" : ""}`;
+    source.textContent = properties.source;
+    source.hidden = !properties.source;
+  };
+  const transact = (operation, completed = () => {}) => {
+    const task = pending.then(async () => {
+      if (closed) return false;
+      setBusy(true);
+      const previousName = properties.name;
+      try {
+        const result = await operation();
+        snapshot = result.snapshot || result;
+        workspaceRendererStyleCache.clear();
+        selectedStyleIndex = activeStyles().findIndex(candidate => sameStyleTarget(candidate, target));
+        workspaceSelectionKind = "style";
+        renderShell();
+        void renderViewport();
+        await readProperties();
+        if (!closed) {
+          if (nameInput.value === previousName) nameInput.value = properties.name;
+          completed();
+          renderEditor();
+          updateHeader();
+        }
+        return true;
+      } catch (error) { showError(error); updateHeader(); return false; }
+      finally { setBusy(false); }
+    });
+    pending = task;
+    return task;
+  };
+  const commitEntry = (kind, name, value, completed) => transact(async () => {
+    const result = await invoke("inspector_request", {tool:"style_edit", args:{target, kind, name, value}});
+    const key = `${kind}:${name}`;
+    if (value === undefined || edits.get(key) === value) edits.delete(key);
+    return result;
+  }, completed);
+  const changeMetadata = update => {
+    const draft = nameInput.value;
+    return transact(async () => {
+      const latest = await invoke("get_style_properties", {target});
+      return invoke("set_style_properties", {properties:{...latest, ...update, editContent:false}});
+    }, () => {
+      if (update.name !== undefined && nameInput.value === draft) nameInput.value = properties.name;
+    });
+  };
+  const rename = button("Rename", "", () => {
+    if (!rename.disabled) void changeMetadata({name:nameInput.value.trim()});
+  });
+  nameInput.addEventListener("input", updateHeader);
+  nameInput.addEventListener("keydown", event => {
+    if (event.key === "Enter") { event.preventDefault(); rename.click(); }
+  });
+  readOnly.addEventListener("change", () => { void changeMetadata({readOnly:readOnly.checked}); });
+  header.append(nameInput, rename);
   const renderEditor = () => {
     tabs.replaceChildren();
-    for (const [id, label] of [["color", "Color"], ["selection", "Selection"], ["styles", "Styles"]]) {
-      const tab = button(label, id === activeTab ? "active" : "", () => {
-        activeTab = id;
-        renderEditor();
-      });
-      tabs.append(tab);
+    for (const [id, label] of [["color","Color"],["selection","Selection"],["style","Styles"]]) {
+      tabs.append(button(label, id === activeTab ? "active" : "", () => { activeTab=id; renderEditor(); }));
     }
     panel.replaceChildren();
     const list = document.createElement("div");
     list.className = "style-set-entry-list";
     list.setAttribute("role", "list");
-    const ro = properties.readOnly;
-    if (activeTab === "color") {
-      list.setAttribute("aria-label", "Named colors");
-      const colors = entries("color");
-      for (const color of colors) {
-        const row = document.createElement("div");
-        row.className = "style-set-entry-row";
-        const name = document.createElement("span");
-        name.textContent = color.getAttribute("id") || "";
+    list.setAttribute("aria-label", {color:"Named colors",selection:"Named selections",style:"Style entries"}[activeTab]);
+    const tag = activeTab === "selection" ? "sel" : activeTab;
+    const nodes = [...documentNode.documentElement.children].filter(node => node.tagName === tag);
+    for (const node of nodes) {
+      const kind = activeTab, name = node.getAttribute("id") || "", key = `${kind}:${name}`;
+      const row = document.createElement("div");
+      row.className = "style-set-entry-row";
+      const label = document.createElement("span");
+      label.textContent = name;
+      const controls = document.createElement("div");
+      controls.className = "style-set-value-controls";
+      if (kind === "style") {
+        controls.textContent = node.getAttribute("type") || "";
+      } else {
+        const stored = node.getAttribute("value") || node.textContent || "";
         const value = document.createElement("input");
-        value.type = "color";
-        const current = color.getAttribute("value") || "#ffffff";
-        value.value = /^#[0-9a-f]{6}$/i.test(current) ? current : "#ffffff";
-        value.disabled = ro;
-        value.addEventListener("change", async () => {
-          const before = color.getAttribute("value") || "";
-          color.setAttribute("value", value.value);
-          if (!(await commit())) color.setAttribute("value", before);
-        });
-        const remove = button("×", "style-set-remove", () => removeEntry(color));
-        remove.disabled = ro;
-        remove.setAttribute("aria-label", `Delete color ${name.textContent}`);
-        row.append(name, value, remove);
-        list.append(row);
-      }
-      if (!colors.length) list.append(dialogParagraph("(no named colors)"));
-      panel.append(list, styleSetAddRow("New color name", ro, (name) => addEntry("color", name, "#ffffff")));
-    } else if (activeTab === "selection") {
-      list.setAttribute("aria-label", "Named selections");
-      const selections = entries("sel");
-      for (const selection of selections) {
-        const row = document.createElement("div");
-        row.className = "style-set-entry-row";
-        const name = document.createElement("span");
-        name.textContent = selection.getAttribute("id") || "";
-        const value = document.createElement("input");
-        value.value = selection.getAttribute("value") || "";
-        value.disabled = ro;
-        const applyValue = async () => {
-          const before = selection.getAttribute("value") || "";
-          if (value.value === before) return;
-          selection.setAttribute("value", value.value);
-          if (!(await commit())) selection.setAttribute("value", before);
+        value.setAttribute("aria-label", `${kind === "color" ? "Color" : "Selection"} ${name}`);
+        value.value = edits.get(key) ?? stored;
+        value.disabled = properties.readOnly;
+        value.addEventListener("input", () => { edits.set(key, value.value); });
+        const apply = () => {
+          if (!properties.readOnly && value.value !== stored) void commitEntry(kind, name, value.value);
         };
-        value.addEventListener("blur", applyValue);
-        value.addEventListener("keydown", (event) => {
-          if (event.key === "Enter") value.blur();
+        value.addEventListener("keydown", event => {
+          if (event.key === "Enter") { event.preventDefault(); apply(); }
         });
-        const remove = button("×", "style-set-remove", () => removeEntry(selection));
-        remove.disabled = ro;
-        remove.setAttribute("aria-label", `Delete selection ${name.textContent}`);
-        row.append(name, value, remove);
-        list.append(row);
+        const applyButton = button("Apply", "", apply);
+        applyButton.disabled = properties.readOnly;
+        applyButton.setAttribute("aria-label", `Apply ${kind} ${name}`);
+        controls.append(value);
+        if (kind === "color" && /^#[0-9a-f]{6}$/i.test(value.value)) {
+          const picker = document.createElement("input");
+          picker.type = "color";
+          picker.value = value.value;
+          picker.disabled = properties.readOnly;
+          picker.setAttribute("aria-label", `Pick color ${name}`);
+          picker.addEventListener("change", () => { value.value=picker.value; edits.set(key,value.value); apply(); });
+          controls.append(picker);
+        }
+        controls.append(applyButton);
       }
-      if (!selections.length) list.append(dialogParagraph("(no named selections)"));
-      panel.append(list, styleSetAddRow("New selection name", ro, (name) => addEntry("sel", name, "*")));
-    } else {
-      list.setAttribute("aria-label", "Style entries");
-      const styles = entries("style");
-      for (const styleEntry of styles) {
-        const row = document.createElement("div");
-        row.className = "style-set-entry-row style-entry";
-        const name = document.createElement("span");
-        name.textContent = styleEntry.getAttribute("id") || "";
-        const type = document.createElement("span");
-        type.textContent = styleEntry.getAttribute("type") || "";
-        const remove = button("×", "style-set-remove", () => removeEntry(styleEntry));
-        remove.disabled = ro;
-        remove.setAttribute("aria-label", `Delete style ${name.textContent}`);
-        row.append(name, type, remove);
-        list.append(row);
-      }
-      if (!styles.length) list.append(dialogParagraph("(no style entries)"));
-      panel.append(list);
+      const remove = button("×", "style-set-remove", () => { void commitEntry(kind,name); });
+      remove.disabled = properties.readOnly;
+      remove.setAttribute("aria-label", `Delete ${kind} ${name}`);
+      row.append(label, controls, remove);
+      list.append(row);
+    }
+    if (!nodes.length) list.append(dialogParagraph("No entries"));
+    panel.append(list);
+    if (activeTab !== "style") {
+      const kind = activeTab;
+      panel.append(styleSetAddRow(`New ${kind} name`, properties.readOnly, name => {
+        const draft = newNames.get(kind);
+        return commitEntry(kind, name, kind === "color" ? "#ffffff" : "*", () => {
+          if (newNames.get(kind) === draft) newNames.delete(kind);
+        });
+      }, newNames.get(kind) || "", value => newNames.set(kind, value)));
     }
   };
-  if (properties.readOnly) {
-    const note = dialogParagraph("(read-only style set)");
-    note.className = "dialog-note";
-    dialogContent.append(note);
-  }
-  editor.append(tabs, panel);
-  dialogContent.append(editor);
+  editor.append(tabs,panel);
+  dialogContent.append(header,metadata,source,editor);
   renderEditor();
+  updateHeader();
+  const save = button("Save style...", "", async () => {
+    const scene = snapshot.scenes.find(scene => scene.uid === target.ownerSceneUid);
+    if (!scene) return;
+    await saveWorkspaceStyleFile(scene,{...properties,...target},!properties.source);
+    try { await readProperties(); updateHeader(); } catch (error) { showError(error); }
+  });
   const close = button("Close", "dialog-primary", () => referenceDialog.close());
-  dialogActions(close);
+  dialogActions(save,close);
   if (referenceDialog.showModal && !referenceDialog.open) referenceDialog.showModal();
 }
 
-function styleSetAddRow(placeholder, disabled, onAdd) {
+function styleSetAddRow(placeholder, disabled, onAdd, value, onInput) {
   const row = document.createElement("div");
   row.className = "style-set-add-row";
   const name = document.createElement("input");
   name.placeholder = placeholder;
   name.disabled = disabled;
+  name.value = value;
   const add = button("Add", "", () => {
     const value = name.value.trim();
     if (!value) return;
-    name.value = "";
-    onAdd(value);
+    void onAdd(value);
   });
-  add.disabled = true;
+  add.disabled = disabled || !name.value.trim();
   name.addEventListener("input", () => {
+    onInput(name.value);
     add.disabled = disabled || !name.value.trim();
   });
   row.append(name, add);
@@ -10556,12 +10561,11 @@ async function pasteWorkspaceStyle(scene) {
 }
 
 async function updateWorkspaceStyle(style, update) {
-  if (!invoke || !style || style.localIndex === null) return false;
+  if (!invoke || !style) return false;
   let properties;
   try {
     properties = await invoke("get_style_properties", {
-      sceneUid: style.sceneUid,
-      localIndex: style.localIndex,
+      target: styleTarget(style),
     });
   } catch (error) {
     showError(error);
@@ -10569,11 +10573,11 @@ async function updateWorkspaceStyle(style, update) {
   }
   return mutateWithoutViewport("set_style_properties", {
     properties: {
-      sceneUid: properties.sceneUid,
-      localIndex: properties.localIndex,
+      ...styleTarget(properties),
       name: update.name ?? properties.name,
       readOnly: update.readOnly ?? properties.readOnly,
       xml: properties.xml,
+      editContent: false,
     },
   });
 }
@@ -10612,13 +10616,12 @@ async function saveWorkspaceStyleFile(scene, style, saveAs) {
   if (!path) return;
   if (
     await mutateWithoutViewport("save_style_file", {
-      sceneUid: scene.uid,
-      localIndex: style.localIndex,
+      target: styleTarget(style),
       path,
     })
   ) {
     selectedStyleIndex = activeStyles().findIndex(
-      (candidate) => candidate.localIndex === style.localIndex,
+      (candidate) => sameStyleTarget(candidate, style),
     );
     workspaceSelectionKind = "style";
     renderShell();
@@ -10628,14 +10631,13 @@ async function saveWorkspaceStyleFile(scene, style, saveAs) {
 async function reloadWorkspaceStyleFile(scene, style) {
   if (
     !(await mutateWithoutViewport("reload_style_file", {
-      sceneUid: scene.uid,
-      localIndex: style.localIndex,
+      target: styleTarget(style),
     }))
   ) {
     return;
   }
   selectedStyleIndex = activeStyles().findIndex(
-    (candidate) => candidate.localIndex === style.localIndex,
+    (candidate) => sameStyleTarget(candidate, style),
   );
   workspaceSelectionKind = "style";
   renderShell();
@@ -10677,8 +10679,7 @@ async function deleteWorkspaceStyle(scene, style) {
   });
   if (!confirmed) return false;
   const changed = await mutateWithoutViewport("destroy_style", {
-    sceneUid: style.sceneUid,
-    localIndex: style.localIndex,
+    target: styleTarget(style),
   });
   if (!changed) return false;
   selectedStyleIndex = null;
@@ -10720,7 +10721,7 @@ function workspaceStyleContextItems(scene, style = null) {
     },
     {
       label: "Delete",
-      disabled: !style || style.localIndex === null,
+      disabled: !style,
       action: () => deleteWorkspaceStyle(scene, style),
     },
     null,
@@ -10738,7 +10739,7 @@ function workspaceStyleContextItems(scene, style = null) {
         },
         {
           label: "Save",
-          disabled: !style || style.localIndex === null,
+          disabled: !style,
           action: async () => {
             if (!(await activate())) return;
             await saveWorkspaceStyleFile(scene, style, false);
@@ -10746,7 +10747,7 @@ function workspaceStyleContextItems(scene, style = null) {
         },
         {
           label: "Save As...",
-          disabled: !style || style.localIndex === null,
+          disabled: !style,
           action: async () => {
             if (!(await activate())) return;
             await saveWorkspaceStyleFile(scene, style, true);
@@ -10760,7 +10761,6 @@ function workspaceStyleContextItems(scene, style = null) {
       checked: Boolean(style?.readOnly),
       disabled:
         !style ||
-        style.localIndex === null ||
         (!style.readOnly && Boolean(style.modified)),
       action: () => updateWorkspaceStyle(style, { readOnly: !style.readOnly }),
     },
@@ -12612,6 +12612,7 @@ function workspaceChromeRenderKey() {
     styles: (snapshot.styles || []).map((style) => [
       style.ownerSceneUid,
       style.sceneUid,
+      style.styleId,
       style.localIndex,
       style.name,
       style.source,
@@ -13465,9 +13466,9 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         style.localIndex === null
           ? null
           : workspaceSelectionTarget("style", scene.uid, style.localIndex);
-      const markers = `${style.readOnly || style.sceneUid === 0 ? " 🔒" : ""}${
+      const markers = `${style.readOnly ? " 🔒" : ""}${
         style.source ? " ↗" : ""
-      }`;
+      }${style.modified ? " *" : ""}${style.sceneUid === 0 ? " (global)" : ""}`;
       const styleRow = button(
         `${style.name}${markers}`,
         `tree-renderer style-node${
@@ -13497,9 +13498,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         },
       );
       if (styleTarget) styleRow.workspaceSelectionTarget = styleTarget;
-      if (style.localIndex !== null) {
-        styleRow.addEventListener("dblclick", () => showStyleProperties(style));
-      }
+      styleRow.addEventListener("dblclick", () => showStyleProperties(style));
       styleRow.addEventListener("contextmenu", (event) => {
         if (styleTarget && showWorkspaceMultipleContextMenu(event, styleTarget)) return;
         clearWorkspaceMultipleSelection();
@@ -13548,7 +13547,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
           : workspaceSelectionKind === "cameraRoot"
             ? true
           : workspaceSelectionKind === "style"
-            ? !selectedStyle() || selectedStyle().localIndex === null
+            ? !selectedStyle()
           : workspaceSelectionKind === "styleRoot"
             ? true
           : workspaceSelectionKind === "object"
@@ -13574,7 +13573,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
               : workspaceSelectionKind === "camera"
                 ? !selectedCamera()
               : workspaceSelectionKind === "style"
-                ? !selectedStyle() || selectedStyle().localIndex === null
+                ? !selectedStyle()
               : workspaceSelectionKind === "object"
                 ? !selectedObject()
                 : true;
@@ -17826,8 +17825,7 @@ async function handleAction(action, depth = 0) {
       }
       if (
         workspaceSelectionKind === "style" &&
-        selectedStyle() &&
-        selectedStyle().localIndex !== null
+        selectedStyle()
       ) {
         const style = selectedStyle();
         const scene = snapshot.scenes.find((candidate) => candidate.active);
@@ -17907,8 +17905,7 @@ workspaceProperties.addEventListener("click", async () => {
   }
   if (
     workspaceSelectionKind === "style" &&
-    selectedStyle() &&
-    selectedStyle().localIndex !== null
+    selectedStyle()
   ) {
     await showStyleProperties(selectedStyle());
   } else if (workspaceSelectionKind === "camera" && selectedCamera()) {

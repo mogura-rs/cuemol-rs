@@ -167,6 +167,7 @@ struct CameraVisibilityUpdateInput {
 struct StyleDto {
     owner_scene_uid: u64,
     scene_uid: u64,
+    style_id: u64,
     local_index: Option<usize>,
     name: String,
     source: String,
@@ -174,13 +175,33 @@ struct StyleDto {
     modified: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StyleTargetInput {
+    owner_scene_uid: u64,
+    scene_uid: u64,
+    style_id: u64,
+}
+
+impl From<&StyleDto> for StyleTargetInput {
+    fn from(style: &StyleDto) -> Self {
+        Self {
+            owner_scene_uid: style.owner_scene_uid,
+            scene_uid: style.scene_uid,
+            style_id: style.style_id,
+        }
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StylePropertiesDto {
-    scene_uid: u64,
-    local_index: usize,
+    #[serde(flatten)]
+    target: StyleTargetInput,
     name: String,
     read_only: bool,
+    modified: bool,
+    source: String,
     xml: String,
 }
 
@@ -510,11 +531,12 @@ impl From<RendererSetupInput> for crate::GuiRendererSetup {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StylePropertiesInput {
-    scene_uid: u64,
-    local_index: usize,
+    #[serde(flatten)]
+    target: StyleTargetInput,
     name: String,
     read_only: bool,
     xml: String,
+    edit_content: bool,
 }
 
 #[derive(Deserialize)]
@@ -1894,6 +1916,7 @@ impl AppModel {
                     .map(move |style| StyleDto {
                         owner_scene_uid: scene.uid.get(),
                         scene_uid: style.scene_uid.get(),
+                        style_id: style.target.runtime_id(),
                         local_index: style.local_index,
                         name: style.name,
                         source: style.source,
@@ -6970,54 +6993,82 @@ impl AppModel {
         Ok(())
     }
 
-    fn style_properties(
+    fn style_target(
         &self,
-        scene_uid: u64,
-        local_index: usize,
-    ) -> Result<StylePropertiesDto, String> {
-        let scene_uid = Uid::new(scene_uid);
-        let style = self
+        input: StyleTargetInput,
+    ) -> Result<cuemol_desktop_core::GuiStyleTarget, String> {
+        let scene = Uid::new(input.owner_scene_uid);
+        if self.desktop.scene_manager().scene(scene).is_none() {
+            return Err("The style's owner scene no longer exists".into());
+        }
+        self.desktop
+            .style_summaries(scene)
+            .into_iter()
+            .find(|style| {
+                style.target.runtime_id() == input.style_id
+                    && style.scene_uid.get() == input.scene_uid
+            })
+            .map(|style| style.target)
+            .ok_or_else(|| "The style set no longer exists in this scope".into())
+    }
+
+    fn style_properties(&self, input: StyleTargetInput) -> Result<StylePropertiesDto, String> {
+        let target = self.style_target(input)?;
+        let summary = self
             .desktop
-            .scene_manager()
-            .scene(scene_uid)
-            .and_then(|scene| scene.loaded_styles().get(local_index))
-            .ok_or_else(|| format!("style {local_index} not found"))?;
-        let name = style.node.str_attr("id").to_string();
+            .style_summary(target)
+            .map_err(|error| error.to_string())?;
         Ok(StylePropertiesDto {
-            scene_uid: scene_uid.get(),
-            local_index,
-            name: if name.is_empty() {
-                "(anonymous)".to_string()
-            } else {
-                name
-            },
-            read_only: style.node.str_attr("readonly").equals_ignore_case("true"),
-            xml: style.data.clone(),
+            target: input,
+            name: self
+                .desktop
+                .style_name(target)
+                .map_err(|error| error.to_string())?,
+            read_only: summary.read_only,
+            modified: summary.modified,
+            source: summary.source,
+            xml: self
+                .desktop
+                .style_xml(target)
+                .map_err(|error| error.to_string())?,
         })
     }
 
     fn set_style_properties(&mut self, input: StylePropertiesInput) -> Result<(), String> {
-        self.desktop
-            .update_scene_style(
-                Uid::new(input.scene_uid),
-                input.local_index,
-                &input.name,
-                input.read_only,
-                &input.xml,
-            )
+        let target = self.style_target(input.target)?;
+        let previous = self.style_properties(input.target)?;
+        if input.name != previous.name {
+            self.desktop
+                .set_style_properties(target, &input.name, previous.read_only)
+                .map_err(|error| error.to_string())?;
+        }
+        if input.read_only != previous.read_only {
+            self.desktop
+                .set_style_read_only(target, input.read_only)
+                .map_err(|error| error.to_string())?;
+        }
+        if input.edit_content {
+            self.desktop
+                .edit_style(target, &input.xml)
+                .map_err(|error| error.to_string())?;
+        }
+        let summary = self
+            .desktop
+            .style_summary(target)
             .map_err(|error| error.to_string())?;
-        self.status = format!("Saved style {}", input.name.trim());
+        self.status = format!("Saved style {}", summary.name);
         self.invalidate_snapshot(false);
         Ok(())
     }
 
-    fn destroy_style(&mut self, scene_uid: u64, local_index: usize) -> Result<(), String> {
+    fn destroy_style(&mut self, input: StyleTargetInput) -> Result<(), String> {
+        let target = self.style_target(input)?;
         if !self
             .desktop
-            .destroy_scene_style(Uid::new(scene_uid), local_index)
+            .delete_style(target)
             .map_err(|error| error.to_string())?
         {
-            return Err(format!("style {local_index} not found"));
+            return Err("Style set not found".into());
         }
         self.status = "Destroyed style".to_string();
         self.invalidate_snapshot(false);
@@ -7846,7 +7897,9 @@ impl AppModel {
     fn restore_undo(&mut self, snapshot: AppModelUndo) -> Result<(), String> {
         let selection_history = self.desktop.selection_history();
         self.desktop = snapshot.desktop;
-        self.desktop.restore_selection_history(&selection_history);
+        if self.desktop.selection_history() != selection_history {
+            self.desktop.restore_selection_history(&selection_history);
+        }
         self.camera = snapshot.camera;
         self.structure_revision = snapshot.structure_revision;
         self.selection = snapshot.selection;
@@ -8042,18 +8095,15 @@ enum ModelRequest {
         path: String,
     },
     ReloadStyleFile {
-        scene_uid: u64,
-        local_index: usize,
+        target: StyleTargetInput,
     },
     SaveStyleFile {
-        scene_uid: u64,
-        local_index: usize,
+        target: StyleTargetInput,
         path: String,
     },
     CreateRendererStyle(RendererStyleCreateInput),
     GetStyleProperties {
-        scene_uid: u64,
-        local_index: usize,
+        target: StyleTargetInput,
     },
     GetRendererStyleOptions {
         scene_uid: u64,
@@ -8074,8 +8124,7 @@ enum ModelRequest {
     },
     SetStyleProperties(StylePropertiesInput),
     DestroyStyle {
-        scene_uid: u64,
-        local_index: usize,
+        target: StyleTargetInput,
     },
     SetWorkspaceVisible {
         target: WorkspaceToggleInput,
@@ -10331,22 +10380,18 @@ fn handle_model_request(
                 .any(|style| style.local_index == Some(local_index)));
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
-        ModelRequest::ReloadStyleFile {
-            scene_uid,
-            local_index,
-        } => {
-            let scene_uid = Uid::new(scene_uid);
+        ModelRequest::ReloadStyleFile { target } => {
+            let scene_uid = Uid::new(target.owner_scene_uid);
+            let resolved = model.style_target(target)?;
             let undo = model.capture_undo();
             let source = model
                 .desktop
-                .style_summaries(scene_uid)
-                .into_iter()
-                .find(|style| style.local_index == Some(local_index))
-                .ok_or_else(|| format!("style {local_index} not found"))?
+                .style_summary(resolved)
+                .map_err(|error| error.to_string())?
                 .source;
             model
                 .desktop
-                .reload_scene_style_file(scene_uid, local_index)
+                .reload_style_file(resolved, scene_uid)
                 .map_err(|error| error.to_string())?;
             model.status = format!("Reloaded style file {source}");
             if model.desktop.active_scene() == Some(scene_uid) {
@@ -10356,16 +10401,13 @@ fn handle_model_request(
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
-        ModelRequest::SaveStyleFile {
-            scene_uid,
-            local_index,
-            path,
-        } => {
-            let scene_uid = Uid::new(scene_uid);
+        ModelRequest::SaveStyleFile { target, path } => {
+            let scene_uid = Uid::new(target.owner_scene_uid);
+            let resolved = model.style_target(target)?;
             let undo = model.capture_undo();
             model
                 .desktop
-                .save_scene_style_file(scene_uid, local_index, &path)
+                .save_style_file(resolved, scene_uid, &path)
                 .map_err(|error| error.to_string())?;
             model.status = format!("Saved style file {path}");
             model.push_undo(undo);
@@ -10377,11 +10419,8 @@ fn handle_model_request(
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
-        ModelRequest::GetStyleProperties {
-            scene_uid,
-            local_index,
-        } => Ok(ModelResponse::StyleProperties(
-            model.style_properties(scene_uid, local_index)?,
+        ModelRequest::GetStyleProperties { target } => Ok(ModelResponse::StyleProperties(
+            model.style_properties(target)?,
         )),
         ModelRequest::GetRendererStyleOptions {
             scene_uid,
@@ -10463,16 +10502,18 @@ fn handle_model_request(
         }
         ModelRequest::SetStyleProperties(properties) => {
             let undo = model.capture_undo();
-            model.set_style_properties(properties)?;
-            model.push_undo(undo);
+            if let Err(error) = model.set_style_properties(properties) {
+                model.restore_undo(undo)?;
+                return Err(error);
+            }
+            if !undo.desktop.same_undo_state(&model.desktop) {
+                model.push_undo(undo);
+            }
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
-        ModelRequest::DestroyStyle {
-            scene_uid,
-            local_index,
-        } => {
+        ModelRequest::DestroyStyle { target } => {
             let undo = model.capture_undo();
-            model.destroy_style(scene_uid, local_index)?;
+            model.destroy_style(target)?;
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -14239,33 +14280,24 @@ fn load_style_file(
 
 #[tauri::command]
 fn reload_style_file(
-    scene_uid: u64,
-    local_index: usize,
+    target: StyleTargetInput,
     state: State<'_, ManagedState>,
 ) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(
         &state,
-        ModelRequest::ReloadStyleFile {
-            scene_uid,
-            local_index,
-        },
+        ModelRequest::ReloadStyleFile { target },
     )?)
 }
 
 #[tauri::command]
 fn save_style_file(
-    scene_uid: u64,
-    local_index: usize,
+    target: StyleTargetInput,
     path: String,
     state: State<'_, ManagedState>,
 ) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(
         &state,
-        ModelRequest::SaveStyleFile {
-            scene_uid,
-            local_index,
-            path,
-        },
+        ModelRequest::SaveStyleFile { target, path },
     )?)
 }
 
@@ -14282,16 +14314,12 @@ fn create_renderer_style(
 
 #[tauri::command]
 fn get_style_properties(
-    scene_uid: u64,
-    local_index: usize,
+    target: StyleTargetInput,
     state: State<'_, ManagedState>,
 ) -> Result<StylePropertiesDto, String> {
     style_properties_response(request_model(
         &state,
-        ModelRequest::GetStyleProperties {
-            scene_uid,
-            local_index,
-        },
+        ModelRequest::GetStyleProperties { target },
     )?)
 }
 
@@ -14376,16 +14404,12 @@ fn set_style_properties(
 
 #[tauri::command]
 fn destroy_style(
-    scene_uid: u64,
-    local_index: usize,
+    target: StyleTargetInput,
     state: State<'_, ManagedState>,
 ) -> Result<AppSnapshot, String> {
     snapshot_response(request_model(
         &state,
-        ModelRequest::DestroyStyle {
-            scene_uid,
-            local_index,
-        },
+        ModelRequest::DestroyStyle { target },
     )?)
 }
 
@@ -19983,6 +20007,13 @@ mod tests {
         model.save_named_camera("camera_0", false).unwrap();
         model.create_named_style("first").unwrap();
         model.create_named_style("second").unwrap();
+        let previous_style_names = model
+            .snapshot()
+            .styles
+            .into_iter()
+            .filter(|style| style.owner_scene_uid == scene_uid.get() && style.local_index.is_some())
+            .map(|style| style.name)
+            .collect::<Vec<_>>();
         model.undo_stack.clear();
         model.redo_stack.clear();
 
@@ -20046,7 +20077,7 @@ mod tests {
                 })
                 .map(|style| style.name.as_str())
                 .collect::<Vec<_>>(),
-            ["first", "second"]
+            previous_style_names
         );
 
         model.undo_stack.clear();
@@ -22364,15 +22395,10 @@ mod tests {
         assert_eq!(local.name, "style_0");
         assert_eq!(local.scene_uid, scene_uid.get());
         let local_index = local.local_index.unwrap();
+        let target = StyleTargetInput::from(local);
 
-        let response = handle_model_request(
-            &mut model,
-            ModelRequest::GetStyleProperties {
-                scene_uid: scene_uid.get(),
-                local_index,
-            },
-        )
-        .unwrap();
+        let response =
+            handle_model_request(&mut model, ModelRequest::GetStyleProperties { target }).unwrap();
         let ModelResponse::StyleProperties(properties) = response else {
             panic!("expected style properties");
         };
@@ -22380,11 +22406,11 @@ mod tests {
         handle_model_request(
             &mut model,
             ModelRequest::SetStyleProperties(StylePropertiesInput {
-                scene_uid: scene_uid.get(),
-                local_index,
+                target,
                 name: "custom".to_string(),
-                read_only: true,
+                read_only: false,
                 xml: "<styles><style id=\"Wide\" width=\"3\"/></styles>".to_string(),
+                edit_content: true,
             }),
         )
         .unwrap();
@@ -22395,7 +22421,7 @@ mod tests {
             .find(|style| style.local_index == Some(local_index))
             .unwrap();
         assert_eq!(local.name, "custom");
-        assert!(local.read_only);
+        assert!(!local.read_only);
 
         let undo_count = model.undo_stack.len();
         let response = handle_model_request(
@@ -22462,14 +22488,7 @@ mod tests {
             .contains("Narrow"));
         assert_eq!(model.system_clipboard.kind(), Some("style"));
 
-        handle_model_request(
-            &mut model,
-            ModelRequest::DestroyStyle {
-                scene_uid: scene_uid.get(),
-                local_index,
-            },
-        )
-        .unwrap();
+        handle_model_request(&mut model, ModelRequest::DestroyStyle { target }).unwrap();
         assert!(model
             .snapshot()
             .styles
@@ -22481,6 +22500,154 @@ mod tests {
             .styles
             .iter()
             .any(|style| style.name == "custom"));
+    }
+
+    #[test]
+    fn style_editor_keeps_its_target_after_inserting_another_set() {
+        let mut model = model_without_gpu();
+        let scene_uid = model.desktop.active_scene().unwrap();
+        let index = model
+            .desktop
+            .create_scene_style(scene_uid, "original")
+            .unwrap();
+        let original = model
+            .desktop
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_styles()[index]
+            .runtime_id();
+        let properties = model
+            .style_properties(StyleTargetInput {
+                owner_scene_uid: scene_uid.get(),
+                scene_uid: scene_uid.get(),
+                style_id: original,
+            })
+            .unwrap();
+        model
+            .desktop
+            .create_scene_style(scene_uid, "inserted")
+            .unwrap();
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetStyleProperties(StylePropertiesInput {
+                target: properties.target,
+                name: "renamed".into(),
+                read_only: false,
+                xml: "<styles><sel id=\"focus\" value=\"name C1\"/></styles>".into(),
+                edit_content: true,
+            }),
+        )
+        .unwrap();
+        let styles = model
+            .desktop
+            .scene_manager()
+            .scene(scene_uid)
+            .unwrap()
+            .loaded_styles();
+        let original = styles
+            .iter()
+            .find(|style| style.runtime_id() == original)
+            .unwrap();
+        assert_eq!(original.node.str_attr("id").as_str(), "renamed");
+        assert!(original.data.contains("focus"));
+        assert_eq!(styles[0].node.str_attr("id").as_str(), "inserted");
+        assert!(!styles[0].data.contains("focus"));
+    }
+
+    #[test]
+    fn style_entry_requests_preserve_current_content_and_global_scope() {
+        let mut model = model_without_gpu();
+        let scene = model.desktop.active_scene().unwrap();
+        let target = StyleTargetInput::from(
+            model
+                .snapshot()
+                .styles
+                .iter()
+                .find(|style| style.scene_uid == 0 && style.name == "user")
+                .unwrap(),
+        );
+        model.desktop.create_scene_style(scene, "user").unwrap();
+        let request = |value| ModelRequest::Inspector {
+            tool: "style_edit".into(),
+            args: serde_json::json!({"target":target,"kind":"color","name":"accent","value":value}),
+        };
+        handle_model_request(&mut model, request("#123456")).unwrap();
+        let properties = model.style_properties(target).unwrap();
+        assert!(properties.xml.contains("#123456"));
+        assert_eq!(model.undo_stack.len(), 1);
+        let resolved = model.style_target(target).unwrap();
+        model
+            .desktop
+            .edit_style(
+                resolved,
+                &properties.xml.replace(
+                    "</styles>",
+                    "<sel id=\"focus\" value=\"name O1\"/></styles>",
+                ),
+            )
+            .unwrap();
+        handle_model_request(&mut model, request("rgba(0.2,0.4,0.6,0.5)")).unwrap();
+        assert!(model
+            .style_properties(target)
+            .unwrap()
+            .xml
+            .contains("name O1"));
+        assert!(!model
+            .desktop
+            .scene_manager()
+            .scene(scene)
+            .unwrap()
+            .loaded_styles()[0]
+            .data
+            .contains("accent"));
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        let restored = model.style_properties(target).unwrap().xml;
+        assert!(restored.contains("name O1"));
+        assert!(restored.contains("#123456"));
+        handle_model_request(&mut model, ModelRequest::Redo(0)).unwrap();
+        assert!(model.style_properties(target).unwrap().xml.contains("0.5"));
+    }
+
+    #[test]
+    fn style_requests_reject_deleted_handles_and_roll_back_combined_metadata_errors() {
+        let mut model = model_without_gpu();
+        let scene = model.desktop.active_scene().unwrap();
+        model.desktop.create_scene_style(scene, "original").unwrap();
+        let target = StyleTargetInput::from(
+            model
+                .snapshot()
+                .styles
+                .iter()
+                .find(|style| style.name == "original")
+                .unwrap(),
+        );
+        let before = model.desktop.clone();
+        assert!(handle_model_request(
+            &mut model,
+            ModelRequest::SetStyleProperties(StylePropertiesInput {
+                target,
+                name: "renamed".into(),
+                read_only: false,
+                xml: "<broken".into(),
+                edit_content: true,
+            })
+        )
+        .is_err());
+        assert!(model.desktop.same_undo_state(&before));
+        assert!(model.undo_stack.is_empty());
+        handle_model_request(&mut model, ModelRequest::DestroyStyle { target }).unwrap();
+        model
+            .desktop
+            .create_scene_style(scene, "replacement")
+            .unwrap();
+        let before = model.desktop.clone();
+        let undo_count = model.undo_stack.len();
+        assert!(handle_model_request(&mut model, ModelRequest::Inspector {
+            tool:"style_edit".into(), args:serde_json::json!({"target":target,"kind":"selection","name":"focus","value":"*"}),
+        }).is_err());
+        assert!(model.desktop.same_undo_state(&before));
+        assert_eq!(model.undo_stack.len(), undo_count);
     }
 
     #[test]
@@ -22516,12 +22683,12 @@ mod tests {
             .unwrap();
         assert!(loaded.read_only);
         let local_index = loaded.local_index.unwrap();
+        let target = StyleTargetInput::from(&loaded);
 
         handle_model_request(
             &mut model,
             ModelRequest::SaveStyleFile {
-                scene_uid: scene_uid.get(),
-                local_index,
+                target,
                 path: output_path.to_string_lossy().into_owned(),
             },
         )
@@ -22556,14 +22723,7 @@ mod tests {
             "<styles id=\"external\"><style id=\"Narrow\" width=\"1\"/></styles>",
         )
         .unwrap();
-        handle_model_request(
-            &mut model,
-            ModelRequest::ReloadStyleFile {
-                scene_uid: scene_uid.get(),
-                local_index,
-            },
-        )
-        .unwrap();
+        handle_model_request(&mut model, ModelRequest::ReloadStyleFile { target }).unwrap();
         assert_eq!(
             model.status,
             format!("Reloaded style file {}", input_path.to_string_lossy())

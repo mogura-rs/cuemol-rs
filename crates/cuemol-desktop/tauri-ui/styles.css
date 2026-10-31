@@ -2924,6 +2924,34 @@ body.resizing-bottom-panel {
   width: 100%;
 }
 
+.style-set-name,
+.style-set-metadata,
+.style-set-value-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.style-set-name,
+.style-set-metadata {
+  margin-bottom: 8px;
+}
+
+.style-set-name input,
+.style-set-value-controls input:not([type="color"]) {
+  flex: 1;
+  min-width: 0;
+}
+
+.style-set-value-controls input[type="color"] {
+  width: 32px;
+  padding: 0;
+}
+
+.style-set-source {
+  overflow-wrap: anywhere;
+}
+
 .style-set-remove {
   min-width: 26px;
   padding: 1px 5px;

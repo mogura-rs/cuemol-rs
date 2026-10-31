@@ -43,6 +43,26 @@ async function openShell(page, storage = {}, options = {}) {
       canUndo: false, canRedo: false, undoDescriptions: [], redoDescriptions: [], openedPaths: [],
       materialNames: [], logLines: [], status: 'Ready',
     };
+    const styleDocuments = new Map();
+    if (options.styles) {
+      snapshot.styles = [
+        {styleId:101,sceneUid:0,name:'user',localIndex:null},
+        {styleId:102,sceneUid:1,name:'user',localIndex:0},
+        {styleId:103,sceneUid:0,name:'(anonymous)',localIndex:null},
+        {styleId:104,sceneUid:0,name:'(anonymous)',localIndex:null},
+      ].map(style=>({ownerSceneUid:1,readOnly:false,modified:false,source:'',...style}));
+      for (const style of snapshot.styles) {
+        const name=style.styleId===103?'':style.name;
+        styleDocuments.set(style.styleId,`<styles id="${name}"><color id="accent" value="#123456"/><sel id="focus" value="name C1"/><style id="KeepCPK" type="renderer"/></styles>`);
+      }
+      snapshot.styles[0].source='user.xml';
+      window.__insertStyle=()=>snapshot.styles.splice(0,0,{ownerSceneUid:1,sceneUid:1,styleId:105,name:'inserted',localIndex:0,readOnly:false,modified:false,source:''});
+    }
+    const styleFor = target => {
+      const style=snapshot.styles.find(style=>style.styleId===target.styleId&&style.sceneUid===target.sceneUid&&style.ownerSceneUid===target.ownerSceneUid);
+      if(!style)throw new Error('Style target does not exist');
+      return style;
+    };
     if(options.selectionSecond)snapshot.objects.push({...molecule,uid:8,name:'Other',selection:''});
     const viewport = {
       image: null, width: 320, height: 240, center: [0, 0, 0], zoom: 10, distance: 100, slab: 50,
@@ -72,6 +92,26 @@ async function openShell(page, storage = {}, options = {}) {
       window.__shellCalls.push({command, args});
       if (command === 'get_initial_state') return {snapshot, viewport, preferences: {}, startupPathsPending: false};
       if (command === 'get_snapshot') return snapshot;
+      if (options.styles && command === 'get_style_properties') {
+        const style=styleFor(args.target), xml=styleDocuments.get(style.styleId);
+        const name=new DOMParser().parseFromString(xml,'application/xml').documentElement.getAttribute('id');
+        return {...style,name,xml};
+      }
+      if (options.styles && command === 'set_style_properties') {
+        const properties=args.properties, style=styleFor(properties);
+        if(properties.editContent)throw new Error('Editor must send entry changes, not a stale XML document');
+        style.name=properties.name||'(anonymous)';style.readOnly=properties.readOnly;
+        const doc=new DOMParser().parseFromString(styleDocuments.get(style.styleId),'application/xml');
+        doc.documentElement.setAttribute('id',properties.name);
+        styleDocuments.set(style.styleId,new XMLSerializer().serializeToString(doc));
+        return structuredClone(snapshot);
+      }
+      if (options.styles && command === 'save_style_file') {
+        const style=styleFor(args.target);
+        if(style.source!==args.path)style.modified=false;
+        style.source=args.path;
+        return structuredClone(snapshot);
+      }
       if (command === 'render_viewport') return viewport;
       if (command === 'update_camera') {
         if (args.action === 'zoom') viewport.zoom *= args.x;
@@ -134,6 +174,22 @@ async function openShell(page, storage = {}, options = {}) {
       }
       if (command === 'console_complete') return [{display: 'Probe', replacement: 'select Probe'}];
       if (command === 'inspector_request') {
+        if(options.styles && args.tool==='style_edit') {
+          const request=args.args, style=styleFor(request.target);
+          if(window.__failStyleEdit){window.__failStyleEdit=false;throw new Error('Style edit rejected');}
+          if(style.readOnly)throw new Error('Style is read-only');
+          const doc=new DOMParser().parseFromString(styleDocuments.get(style.styleId),'application/xml');
+          const tag=request.kind==='selection'?'sel':request.kind;
+          let node=[...doc.documentElement.children].find(node=>node.tagName===tag&&node.getAttribute('id')===request.name);
+          if(request.value===undefined){node?.remove();}
+          else {
+            if(!node){node=doc.createElement(tag);node.setAttribute('id',request.name);doc.documentElement.append(node);}
+            node.setAttribute('value',request.kind==='color' && /^#[0-9a-f]{6}$/i.test(request.value) ? request.value.toUpperCase() : request.value);
+          }
+          styleDocuments.set(style.styleId,new XMLSerializer().serializeToString(doc));
+          style.modified=true;
+          return {snapshot:structuredClone(snapshot),result:{ok:true}};
+        }
         if(args.tool==='selection_history') {
           if(args.args.action==='import')for(const value of args.args.entries){if(value.trim()&&!['*','none'].includes(value.trim())&&!selectionHistory.includes(value.trim()))selectionHistory.push(value.trim());}
           if(args.args.action==='remember')rememberSelection(args.args.expression);
@@ -273,6 +329,92 @@ async function openShell(page, storage = {}, options = {}) {
   await expect(page.locator('#error-alert-dialog')).not.toBeVisible();
   return errors;
 }
+
+test('Tauri style editor sends scoped entry changes and keeps other drafts', async ({page}, testInfo) => {
+  const errors=await openShell(page,{}, {styles:true});
+  await page.locator('.style-node').filter({hasText:'user ↗ (global)'}).dblclick();
+  const dialog=page.locator('#reference-dialog');
+  await expect(dialog.getByLabel('Style set name')).toHaveValue('user');
+  await expect(dialog.getByRole('button',{name:'Rename',exact:true})).toBeDisabled();
+  await dialog.getByLabel('Style set name').press('Enter');
+  expect(await page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='set_style_properties'))).toHaveLength(0);
+  await dialog.getByLabel('Color accent',{exact:true}).fill('rgba(0.2,0.4,0.6,0.5)');
+  await dialog.getByLabel('Style set name').fill(' unfinished ');
+  await page.evaluate(()=>window.__insertStyle());
+  await dialog.getByRole('button',{name:'Apply color accent',exact:true}).click();
+  await expect(dialog.getByLabel('Color accent',{exact:true})).toHaveValue('rgba(0.2,0.4,0.6,0.5)');
+  await expect(dialog.getByLabel('Style set name')).toHaveValue(' unfinished ');
+  await dialog.getByRole('button',{name:'Selection',exact:true}).click();
+  await dialog.getByLabel('Selection focus',{exact:true}).fill('name O1');
+  await dialog.getByRole('button',{name:'Apply selection focus',exact:true}).click();
+  await expect(dialog.getByLabel('Selection focus',{exact:true})).toHaveValue('name O1');
+  await dialog.getByRole('button',{name:'Rename',exact:true}).click();
+  await expect(page.locator('#dialog-title')).toContainText('unfinished');
+  await expect(dialog.getByLabel('Style set name')).toHaveValue('unfinished');
+  await dialog.getByRole('button',{name:'Save style...',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='save_style_file').length)).toBe(1);
+  const calls=await page.evaluate(()=>window.__shellCalls);
+  const edits=calls.filter(call=>call.command==='inspector_request'&&call.args.tool==='style_edit');
+  expect(edits.map(call=>call.args.args)).toEqual([
+    {target:{ownerSceneUid:1,sceneUid:0,styleId:101},kind:'color',name:'accent',value:'rgba(0.2,0.4,0.6,0.5)'},
+    {target:{ownerSceneUid:1,sceneUid:0,styleId:101},kind:'selection',name:'focus',value:'name O1'},
+  ]);
+  expect(calls.find(call=>call.command==='save_style_file').args).toEqual({target:{ownerSceneUid:1,sceneUid:0,styleId:101},path:'user.xml'});
+  await page.screenshot({path:testInfo.outputPath('tauri-style-editor.png')});
+  expect(errors).toEqual([]);
+});
+
+test('Tauri anonymous style editing preserves identity and failed drafts', async ({page}) => {
+  const errors=await openShell(page,{}, {styles:true});
+  await page.locator('.style-node').filter({hasText:'(anonymous) (global)'}).first().dblclick();
+  const dialog=page.locator('#reference-dialog');
+  await expect(dialog.getByLabel('Style set name')).toHaveValue('');
+  await dialog.getByLabel('Style set name').press('Enter');
+  expect(await page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='set_style_properties'))).toHaveLength(0);
+  await dialog.getByRole('checkbox',{name:'Read-only',exact:true}).check();
+  await expect(dialog.getByLabel('Color accent',{exact:true})).toBeDisabled();
+  await dialog.getByRole('checkbox',{name:'Read-only',exact:true}).uncheck();
+  await expect(dialog.getByLabel('Color accent',{exact:true})).toBeEnabled();
+  await dialog.getByLabel('Color accent',{exact:true}).fill('#abcdef');
+  await page.evaluate(()=>{window.__failStyleEdit=true;});
+  await dialog.getByRole('button',{name:'Apply color accent',exact:true}).click();
+  await expect(page.locator('#error-alert-dialog')).toContainText('Style edit rejected');
+  await page.locator('#error-alert-dialog').getByRole('button').last().click();
+  await expect(dialog.getByLabel('Color accent',{exact:true})).toHaveValue('#abcdef');
+  await dialog.getByRole('button',{name:'Apply color accent',exact:true}).click();
+  await expect(dialog.getByRole('checkbox',{name:'Read-only',exact:true})).toBeDisabled();
+  await expect(dialog.getByLabel('Color accent',{exact:true})).toHaveValue('#ABCDEF');
+  await expect(dialog.getByLabel('Style set name')).toHaveValue('');
+  const calls=await page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='inspector_request'&&call.args.tool==='style_edit'));
+  expect(calls).toHaveLength(2);
+  expect(calls.every(call=>call.args.args.target.styleId===103&&call.args.args.target.sceneUid===0)).toBe(true);
+  expect(errors).toEqual([]);
+});
+
+test('Tauri style additions retain failed and unrelated pending names', async ({page}) => {
+  const errors=await openShell(page,{}, {styles:true});
+  await page.locator('.style-node').filter({hasText:'user ↗ (global)'}).dblclick();
+  const dialog=page.locator('#reference-dialog');
+  await dialog.getByPlaceholder('New color name').fill('new-accent');
+  await dialog.getByLabel('Color accent',{exact:true}).fill('#abcdef');
+  await dialog.getByRole('button',{name:'Apply color accent',exact:true}).click();
+  await expect(dialog.getByPlaceholder('New color name')).toHaveValue('new-accent');
+  await dialog.getByRole('button',{name:'Selection',exact:true}).click();
+  await dialog.getByPlaceholder('New selection name').fill('new-focus');
+  await dialog.getByRole('button',{name:'Color',exact:true}).click();
+  await expect(dialog.getByPlaceholder('New color name')).toHaveValue('new-accent');
+  await page.evaluate(()=>{window.__failStyleEdit=true;});
+  await dialog.getByRole('button',{name:'Add',exact:true}).click();
+  await expect(page.locator('#error-alert-dialog')).toContainText('Style edit rejected');
+  await page.locator('#error-alert-dialog').getByRole('button').last().click();
+  await expect(dialog.getByPlaceholder('New color name')).toHaveValue('new-accent');
+  await dialog.getByRole('button',{name:'Add',exact:true}).click();
+  await expect(dialog.getByLabel('Color new-accent',{exact:true})).toHaveValue('#FFFFFF');
+  await expect(dialog.getByPlaceholder('New color name')).toBeEmpty();
+  await dialog.getByRole('button',{name:'Selection',exact:true}).click();
+  await expect(dialog.getByPlaceholder('New selection name')).toHaveValue('new-focus');
+  expect(errors).toEqual([]);
+});
 
 test('Tauri Edit clipboard routes tree, text and modal focus separately', async ({page}) => {
   const errors = await openShell(page, {}, {clipboard:true,shortcuts:true});

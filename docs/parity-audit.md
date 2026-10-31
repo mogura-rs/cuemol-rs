@@ -31,7 +31,7 @@ speedup from a single optimized stage or compare timings from different hosts.
 | --- | --- | --- |
 | Shell | Activities, menus, toolbar, tab order, docks, compact windows, themes and keyboard access | Application shortcuts, browser tab closing and menu access, shared history dropdowns, Tauri palette folding and tree/text clipboard routing repaired and checked; browser recent files and remaining pane controls are still under comparison |
 | Explorer and Inspector | Object/renderer/group hierarchy, selection, visibility, locking, drag/drop, context menus and property editors | Typed fields, nested properties, defaults/resets, group writes, Scene/View targets, quality presets, renderer pages, font choices and selection pickers repaired and checked below; remaining targets and live previews are under comparison |
-| Color and styles | Coloring modes, paint entries, palettes, property inheritance, style creation/apply/edit/save | Script/GUI state, scoped precedence, linked-file metadata and native/WASM editors repaired below; Tauri editor scope, user-style persistence and the remaining coloring controls are still under comparison |
+| Color and styles | Coloring modes, paint entries, palettes, property inheritance, style creation/apply/edit/save | Script/GUI state, scoped precedence, linked-file metadata and native/WASM/Tauri editors repaired below; the Tauri OS-input check, user-style persistence and remaining coloring controls are still under comparison |
 | Console | CueMol/PyMOL dialects, command arguments, completion, history, multiline input, IME and transaction behavior | Shared CueMol/PyMOL interpreters, completion, native QAX logging/replay and cancellable execution implemented; focused shared, browser and OS-input checks passed; affected regression checks, CI and Pages passed at `99b7c16`; public review repairs and release delivery are in progress |
 | Actions | History rows, operation inspection, QAX export, bundled/user macros and reusable actions | History selection, operation inspection, QAX export and bundled/user macro libraries are implemented in native, WASM and Tauri; CI, Pages and the macOS window check passed at `488ce9c`; review repairs passed affected checks and were published at `53100c5` |
 | Scripts and services | JavaScript/Python helpers, retained state, callbacks, errors, file arguments and asynchronous readers | Previous compatibility checks exist; shared workload comparison pending |
@@ -1580,3 +1580,25 @@ it resolves relative style sources against the original scene before output
 paths are calculated, and LDOM removal includes attribute nodes. The shared
 editor is currently called by the browser; the native egui editor has its own
 completion path.
+
+The Tauri style editor now uses the style's runtime identity and scope for
+properties, file operations and deletion. Previously it prohibited every global
+style and sent a local array index that could point to a different style after
+insertion. Its new entry operations use shared color/selection/style commands,
+so they retain unrelated definitions changed after the dialog opened. Metadata
+changes fetch current state and do not replace the XML document. Combined
+metadata/content errors restore the original state; successful changes create
+one undo record and invalidate the viewport.
+
+The structured editor exposes name, scope, read-only and modified state, source,
+color text with alpha, opaque-color picking, named selections, style entries and
+file saving. It preserves unrelated drafts across tab and state changes, adopts
+canonical values after successful edits, and retains failed edits and addition
+names for retry. Read-only toggles preserve anonymous names. The model suite
+passed 163 cases with six existing integration cases ignored. The real DOM with
+mocked IPC passed 33 cases, including scoped identities after insertion, alpha
+text, normalized renames/colors and failure/retry behavior. These DOM results
+do not establish native webview integration. The macOS OS-input check now adds
+linked-style editing, external-file verification and global-style editing to
+its existing presented-pixel, rotation, wheel and console/undo checks; that
+extended native run is pending.
