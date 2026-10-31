@@ -66,7 +66,7 @@ impl GuiTrajectoryFrames {
     }
 }
 
-fn relative_source(source: &str, base: Option<&Path>) -> String {
+pub(crate) fn relative_source(source: &str, base: Option<&Path>) -> String {
     let Some(base) = base else {
         return source.to_string();
     };

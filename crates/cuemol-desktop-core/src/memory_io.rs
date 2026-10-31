@@ -57,6 +57,7 @@ impl DesktopAppState {
                 embed_all: true,
                 ..Default::default()
             },
+            None,
         )?;
         Ok(document)
     }

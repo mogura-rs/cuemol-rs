@@ -16,6 +16,12 @@ struct Entry {
 }
 
 #[derive(Debug)]
+enum AppliedEdit {
+    Name,
+    Entry { key: (usize, String), new: bool },
+}
+
+#[derive(Debug)]
 pub struct StyleEditor {
     pub rects: BTreeMap<String, [f32; 4]>,
     pub open: bool,
@@ -32,6 +38,7 @@ pub struct StyleEditor {
     edits: BTreeMap<(usize, String), String>,
     new_name: String,
     new_value: String,
+    pending: Option<AppliedEdit>,
     error: Option<String>,
 }
 
@@ -65,18 +72,29 @@ impl StyleEditor {
             edits: BTreeMap::new(),
             new_name: String::new(),
             new_value: String::new(),
+            pending: None,
             error: None,
         }
     }
 
     pub fn completed(&mut self, state: &DesktopAppState, error: Option<String>) {
+        let pending = self.pending.take();
         if error.is_none() {
             if self.target.is_none() {
                 self.target = state.find_style_target(self.scene, self.name.trim());
             }
             self.revision = None;
-            self.new_name.clear();
-            self.new_value.clear();
+            match pending {
+                Some(AppliedEdit::Name) => self.name = self.stored_name.clone(),
+                Some(AppliedEdit::Entry { key, new }) => {
+                    self.edits.remove(&key);
+                    if new {
+                        self.new_name.clear();
+                        self.new_value.clear();
+                    }
+                }
+                None => {}
+            }
         }
         self.error = error;
     }
@@ -165,6 +183,7 @@ impl StyleEditor {
             Action::Command(name, args)
         };
         let mut action = None;
+        let mut adding_entry = false;
         let mut open = self.open;
         let title = if self.target.is_none() {
             "New Style".into()
@@ -252,6 +271,7 @@ impl StyleEditor {
                             let response = ui.add_enabled(writable && !self.new_name.trim().is_empty() && !self.new_value.trim().is_empty(), egui::Button::new("Add"));
                             record(&mut self.rects, "Style add entry", &response);
                             if response.clicked() {
+                                adding_entry = true;
                                 let mut args=json!({"name":self.new_name.trim()});
                                 args[if tab == 0 { "color" } else { "selection" }] = json!(self.new_value.trim());
                                 action=Some(command(if tab == 0 {"define_color"} else {"define_selection"},args));
@@ -269,6 +289,21 @@ impl StyleEditor {
                 if response.clicked() { self.open=false; }
             });
         self.open &= open;
+        self.pending = match &action {
+            Some(Action::Command("create_style_set" | "rename_style_set", _)) => {
+                Some(AppliedEdit::Name)
+            }
+            Some(Action::Command(command @ ("define_color" | "define_selection"), args)) => {
+                Some(AppliedEdit::Entry {
+                    key: (
+                        usize::from(*command == "define_selection"),
+                        args["name"].as_str().unwrap_or_default().to_string(),
+                    ),
+                    new: adding_entry,
+                })
+            }
+            _ => None,
+        };
         action
     }
 }
@@ -276,6 +311,59 @@ impl StyleEditor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_entry_refreshes_canonical_values_without_erasing_other_drafts() {
+        let mut state = DesktopAppState::new();
+        let scene = state.new_scene("drafts", true).result_scene;
+        state.import_scene_style(scene,
+            r##"<styles id="palette"><color id="accent" value="#123456"/><sel id="focus" value="name C1"/></styles>"##,
+            false).unwrap();
+        let target = state.find_style_target(scene, "palette").unwrap();
+        let mut editor = StyleEditor::new(scene, Some(target));
+        editor.refresh(&state, 1).unwrap();
+        editor.edits.insert((0, "accent".into()), "#22cc44".into());
+        editor.edits.insert((1, "focus".into()), "name O1".into());
+        editor.new_name = "future".into();
+        editor.new_value = "draft".into();
+        let edited = state
+            .style_xml(target)
+            .unwrap()
+            .replace("#123456", "#22CC44");
+        state.edit_style(target, &edited).unwrap();
+        editor.pending = Some(AppliedEdit::Entry {
+            key: (0, "accent".into()),
+            new: false,
+        });
+        editor.completed(&state, None);
+        editor.refresh(&state, 2).unwrap();
+        assert_eq!(editor.edits[&(0, "accent".into())], "#22CC44");
+        assert_eq!(editor.edits[&(1, "focus".into())], "name O1");
+        assert_eq!((&*editor.new_name, &*editor.new_value), ("future", "draft"));
+
+        state
+            .edit_style(target, &edited.replace("#22CC44", "#ABCDEF"))
+            .unwrap();
+        editor.refresh(&state, 3).unwrap();
+        assert_eq!(editor.edits[&(0, "accent".into())], "#ABCDEF");
+        editor.name = " renamed ".into();
+        state
+            .set_style_properties(target, " renamed ", false)
+            .unwrap();
+        editor.pending = Some(AppliedEdit::Name);
+        editor.completed(&state, None);
+        editor.refresh(&state, 4).unwrap();
+        assert_eq!(editor.name, "renamed");
+
+        editor.pending = Some(AppliedEdit::Entry {
+            key: (1, "focus".into()),
+            new: true,
+        });
+        editor.completed(&state, Some("invalid selection".into()));
+        editor.refresh(&state, 5).unwrap();
+        assert_eq!(editor.edits[&(1, "focus".into())], "name O1");
+        assert_eq!((&*editor.new_name, &*editor.new_value), ("future", "draft"));
+    }
 
     #[test]
     fn refresh_preserves_dirty_fields_and_updates_untouched_entries() {

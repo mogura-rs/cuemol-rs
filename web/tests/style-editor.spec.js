@@ -53,6 +53,9 @@ for(const backend of ['webgl','webgpu']) {
     await click(page,'Style apply 0 accent');
     await expect.poll(async () => (await command(page,'get_style_set',{styleSet:'palette'})).xml).toMatch(/#22CC44/i);
     expect((await command(page,'get_style_set',{styleSet:'inserted'})).xml).not.toContain('accent');
+    await command(page,'define_color',{styleSet:'palette',name:'accent',color:'#abcdef'});
+    await click(page,'Style apply 0 accent');
+    await expect.poll(async () => (await command(page,'get_style_set',{styleSet:'palette'})).xml).toContain('#ABCDEF');
     await click(page,'Style tab Selection');
     await fill(page,'Style value 1 focus','name O1');
     await command(page,'set_style_readonly',{styleSet:'inserted',readonly:true});

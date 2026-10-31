@@ -3663,6 +3663,7 @@ impl DesktopAppState {
         &self,
         scene_uid: Uid,
         options: GuiSceneSaveOptions,
+        output_base: Option<&Path>,
     ) -> Result<(Vec<u8>, Vec<Uid>, style_edit::PreparedSceneStyles)> {
         let qsc = self.scene_qsc_with_named_camera_visibility(scene_uid)?;
         let (xml, suffix) = split_qsc_document(&qsc)?;
@@ -3694,6 +3695,16 @@ impl DesktopAppState {
         {
             *node = style_node.clone();
             node.remove_child("modified");
+            let source = node.str_attr("src").to_string();
+            if !source.is_empty() {
+                let relative = trajectory_io::relative_source(&source, output_base);
+                node.set_str_attr("src", &relative);
+                if relative != source {
+                    node.set_str_attr("alt_src", source);
+                } else {
+                    node.remove_child("alt_src");
+                }
+            }
         }
         let mut embedded_objects = Vec::new();
         let mut omitted_chunks = BTreeSet::new();
@@ -14156,7 +14167,7 @@ impl DesktopAppState {
         self.sync_morph_qsc_nodes(scene_uid)?;
         self.sync_density_map_qsc_nodes(scene_uid)?;
         let (document, embedded_objects, styles) =
-            self.scene_qsc_with_save_options(scene_uid, options)?;
+            self.scene_qsc_with_save_options(scene_uid, options, source_path.parent())?;
         styles.write_sources()?;
         fs::write(path, document)?;
         let scene = self
@@ -47891,8 +47902,10 @@ impl DesktopAppState {
         .normalized();
         self.sync_morph_qsc_nodes(scene_uid)?;
         self.sync_density_map_qsc_nodes(scene_uid)?;
-        self.sync_trajectory_qsc_nodes(scene_uid, embed_all, Path::new(&path).parent())?;
-        let (document, _, styles) = self.scene_qsc_with_save_options(scene_uid, options)?;
+        let source_path = absolute_scene_path(Path::new(path))?;
+        self.sync_trajectory_qsc_nodes(scene_uid, embed_all, source_path.parent())?;
+        let (document, _, styles) =
+            self.scene_qsc_with_save_options(scene_uid, options, source_path.parent())?;
         styles.write_sources()?;
         fs::write(path, document)?;
         let scene = self
@@ -72506,7 +72519,16 @@ attribute \"dep\" string \"positions\"
             .find(|style| style.local_index.is_some())
             .unwrap();
         assert_eq!(reloaded_style.name, "custom");
-        assert_eq!(reloaded_style.source, style_path.to_string_lossy());
+        assert_eq!(
+            reloaded_style.source,
+            style_path.file_name().unwrap().to_string_lossy()
+        );
+        assert_eq!(
+            reloaded
+                .resolve_scene_path(reloaded_scene_uid, Path::new(&reloaded_style.source))
+                .unwrap(),
+            style_path,
+        );
         assert!(reloaded
             .scene_manager()
             .scene(reloaded_scene_uid)

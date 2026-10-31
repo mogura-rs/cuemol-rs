@@ -436,6 +436,92 @@ fn scene_style_source_write_failures_preserve_editable_state() {
 }
 
 #[test]
+fn saved_style_links_follow_the_scene_destination_and_survive_a_folder_move() {
+    check_portable_style_links(false);
+}
+
+#[test]
+#[cfg(feature = "scripting")]
+fn script_saved_style_links_follow_the_destination_and_survive_a_folder_move() {
+    check_portable_style_links(true);
+}
+
+fn check_portable_style_links(scripted: bool) {
+    for read_only in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let bundle = root.path().join("bundle");
+        let styles = bundle.join("styles");
+        let scenes = bundle.join("scenes");
+        std::fs::create_dir_all(&styles).unwrap();
+        std::fs::create_dir_all(&scenes).unwrap();
+        let source = styles.join("palette.xml");
+        std::fs::write(&source, XML).unwrap();
+        let mut state = DesktopAppState::new();
+        let scene = state.new_scene("portable", true).result_scene;
+        state
+            .load_scene_style_file(scene, &source, read_only)
+            .unwrap();
+        state
+            .save_active_scene_qsc(bundle.join("initial.qsc"))
+            .unwrap();
+
+        let mut state = DesktopAppState::new();
+        let scene = state
+            .load_qsc_file(bundle.join("initial.qsc"))
+            .unwrap()
+            .unwrap();
+        let target = state.find_style_target(scene, "linked").unwrap();
+        let destination = scenes.join("relocated.qsc");
+        if scripted {
+            #[cfg(feature = "scripting")]
+            state
+                .run_script_js(&format!(
+                    "var writer = cuemol.SceneXMLWriter(); writer.attach(cuemol.getScene()); \
+                 writer.path = {}; writer.embedAll = false; writer.write();",
+                    serde_json::to_string(&destination.to_string_lossy()).unwrap()
+                ))
+                .unwrap();
+        } else {
+            state.save_active_scene_qsc(&destination).unwrap();
+        }
+        let xml = std::fs::read_to_string(scenes.join("relocated.qsc")).unwrap();
+        let tree = cuemol_core::parse_ldom2_xml(
+            xml.split("========== End of XML ==========")
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        let node = tree
+            .top()
+            .children()
+            .iter()
+            .find(|node| node.tag_name() == "styles")
+            .unwrap();
+        assert_eq!(
+            std::path::Path::new(node.str_attr("src").as_str()),
+            std::path::Path::new("../styles/palette.xml")
+        );
+        assert_eq!(
+            std::path::Path::new(&state.style_summary(target).unwrap().source),
+            source
+        );
+
+        let moved = root.path().join("moved");
+        std::fs::rename(bundle, &moved).unwrap();
+        let mut restored = DesktopAppState::new();
+        let restored_scene = restored
+            .load_qsc_file(moved.join("scenes/relocated.qsc"))
+            .unwrap()
+            .unwrap();
+        let target = restored
+            .find_style_target(restored_scene, "linked")
+            .unwrap();
+        assert!(restored.style_xml(target).unwrap().contains("keepcpk"));
+        assert_eq!(restored.style_summary(target).unwrap().read_only, read_only);
+    }
+}
+
+#[test]
 fn memory_scene_export_keeps_linked_style_edits_without_changing_live_links() {
     let (dir, mut state, scene, _) = fixture(false);
     let target = state.find_style_target(scene, "linked").unwrap();

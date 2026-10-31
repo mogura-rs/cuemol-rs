@@ -1541,3 +1541,25 @@ The final follow-up run passed 475 shared application/command/UI tests, 185
 native GUI tests and six rebuilt WebGL/WebGPU interaction cases. The unrelated
 real-POV-Ray native case remained ignored. The focused file/editor suite passed
 19 cases, including failure-state preservation and browser-memory export.
+
+A second public review, against `9dac7ec`, found two follow-up cases that were
+reproduced before repair. Normal scene saving had serialized the resolved
+absolute style path, and an applied lowercase color remained a dirty browser
+draft after color canonicalization. The saved link now uses the destination
+scene directory as its base, with an absolute `alt_src` fallback as in the
+reference. Live links stay resolved so a later Save As cannot retarget them.
+Both native and script saves were checked by moving the complete scene/style
+folder and reloading writable and read-only sources. Browser completion now
+resets only the applied field; failed edits and other pending fields remain.
+The interaction regression applies a lowercase color, changes that color
+externally, and applies the displayed value again without reverting the change.
+
+The review also questioned unconditional source writes, anonymous-name toggles
+and positional style serialization. Reference `Scene::stylesWriteTo` explicitly
+writes every writable linked style, including unmodified ones. Rust reports a
+source-write failure instead of the reference's logged warning; multi-file
+saving is not atomic. Read-only toggles bypass rename validation, and the QSC
+writer emits one node per loaded style in the same order. The affected shared
+suite passed 478 cases after the portability repair, including 21 file/editor
+cases and the successful/failed completion lifecycle. All six rebuilt
+WebGL/WebGPU style interaction cases passed.
