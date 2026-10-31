@@ -3,7 +3,9 @@ use crate::{
     SysConfig,
 };
 use cuemol_core::{parse_ldom2_xml, LDom2Node};
-use cuemol_gfx::{parse_color, set_named_color_resolver, ColorPtr, NamedColorResolver, SolidColor};
+use cuemol_gfx::{
+    parse_color, set_named_color_resolver, ColorBase, ColorPtr, NamedColorResolver, SolidColor,
+};
 use std::collections::BTreeMap;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -109,15 +111,33 @@ impl StyleSet {
     }
 
     pub fn from_xml(uid: u64, name: impl Into<String>, xml: &str) -> cuemol_core::Result<Self> {
+        Self::from_xml_with_colors(uid, name, xml, |_| None)
+    }
+
+    pub fn from_xml_with_colors(
+        uid: u64,
+        name: impl Into<String>,
+        xml: &str,
+        colors: impl Fn(&str) -> Option<SolidColor>,
+    ) -> cuemol_core::Result<Self> {
         let tree = parse_ldom2_xml(xml)?;
-        if tree.top().tag_name() != "styles" {
+        Self::from_node_with_colors(uid, name, tree.top(), colors)
+    }
+
+    pub fn from_node_with_colors(
+        uid: u64,
+        name: impl Into<String>,
+        node: &LDom2Node,
+        colors: impl Fn(&str) -> Option<SolidColor>,
+    ) -> cuemol_core::Result<Self> {
+        if node.tag_name() != "styles" {
             return Err(cuemol_core::CueMolError::invalid_argument(
                 "style XML root must be <styles>",
             ));
         }
         let name = name.into();
         let mut set = Self::new(uid, &name);
-        populate_style_set_from_node(&mut set, tree.top());
+        populate_style_set_from_node(&mut set, node, colors)?;
         set.set_name(name);
         set.set_modified(false);
         Ok(set)
@@ -1158,7 +1178,9 @@ impl StyleManager {
         }
         let uid = self.alloc_uid();
         let mut set = StyleSet::new(uid, name);
-        populate_style_set_from_node(&mut set, tree.top());
+        populate_style_set_from_node(&mut set, tree.top(), |name| {
+            self.get_color(name, scope_id).cloned()
+        })?;
         set.set_source(path.to_string_lossy());
         set.set_read_only(read_only);
         set.set_modified(false);
@@ -1177,12 +1199,28 @@ impl StyleManager {
         let Ok(tree) = parse_ldom2_xml(xml) else {
             return INVALID_UID;
         };
-        if tree.top().tag_name() != "styles" {
+        self.load_style_set_from_node(scope_id, name, tree.top(), read_only)
+    }
+
+    pub fn load_style_set_from_node(
+        &mut self,
+        scope_id: u64,
+        name: impl Into<String>,
+        node: &LDom2Node,
+        read_only: bool,
+    ) -> u64 {
+        if node.tag_name() != "styles" {
             return INVALID_UID;
         }
         let uid = self.alloc_uid();
         let mut set = StyleSet::new(uid, name);
-        populate_style_set_from_node(&mut set, tree.top());
+        if populate_style_set_from_node(&mut set, node, |name| {
+            self.get_color(name, scope_id).cloned()
+        })
+        .is_err()
+        {
+            return INVALID_UID;
+        }
         set.set_read_only(read_only);
         set.set_modified(false);
         self.scopes.entry(scope_id).or_default().insert(0, set);
@@ -1194,13 +1232,20 @@ impl StyleManager {
     /// Returns its style-set UID. The presets it defines become resolvable via
     /// [`StyleManager::style_attr`]/[`StyleManager::resolve_style_attr`].
     pub fn load_builtin_default_styles(&mut self, scope_id: u64) -> u64 {
-        let uid = self.create_style_set("system", scope_id);
-        if let Some(set) = self.get_style_set_mut(uid) {
-            populate_style_set_from_xml(set, DEFAULT_STYLE_XML);
-            set.set_source("<builtin>/default_style.xml");
-            set.set_read_only(true);
-            set.set_modified(false);
+        if self.has_style_set("system", scope_id) != INVALID_UID {
+            return INVALID_UID;
         }
+        let uid = self.alloc_uid();
+        let Ok(mut set) =
+            StyleSet::from_xml_with_colors(uid, "system", DEFAULT_STYLE_XML, |name| {
+                self.get_color(name, scope_id).cloned()
+            })
+        else {
+            return INVALID_UID;
+        };
+        set.set_source("<builtin>/default_style.xml");
+        set.set_read_only(true);
+        self.scopes.entry(scope_id).or_default().push(set);
         uid
     }
 
@@ -1774,18 +1819,11 @@ fn decode_str_data_key(key: &str) -> Option<(&str, &str, &str)> {
     Some((database, category, id))
 }
 
-/// Parse an LDom2 style XML document (`<styles>`) into a [`StyleSet`], mirroring
-/// C++ `StyleFile::loadNodes`: styles, palette entries, material definitions,
-/// renderer settings, selection aliases, paths, and generic string data are all
-/// retained. Returns the number of styles registered, or zero for invalid XML.
-fn populate_style_set_from_xml(set: &mut StyleSet, xml: &str) -> usize {
-    let Ok(tree) = parse_ldom2_xml(xml) else {
-        return 0;
-    };
-    populate_style_set_from_node(set, tree.top())
-}
-
-fn populate_style_set_from_node(set: &mut StyleSet, root: &LDom2Node) -> usize {
+fn populate_style_set_from_node(
+    set: &mut StyleSet,
+    root: &LDom2Node,
+    colors: impl Fn(&str) -> Option<SolidColor>,
+) -> cuemol_core::Result<usize> {
     let root_id = root.str_attr("id").to_string();
     if !root_id.is_empty() {
         set.set_name(root_id);
@@ -1808,23 +1846,82 @@ fn populate_style_set_from_node(set: &mut StyleSet, root: &LDom2Node) -> usize {
                 // surfaces as the node value, not a child attribute.
                 let value = child.value().to_string();
                 if id.is_empty() || value.is_empty() {
-                    continue;
+                    return Err(cuemol_core::CueMolError::parse(
+                        "palette color requires id and value",
+                    ));
                 }
-                if let Some(rgba) = parse_color(&value).ok().and_then(|spec| spec.rgba8()) {
-                    let mut color = SolidColor::from(rgba);
-                    let material = child.str_attr("material").to_string();
-                    if !material.is_empty() {
-                        color.set_material(material);
-                    }
-                    set.set_color(id, color);
+                if set.has_color(&id) {
+                    return Err(cuemol_core::CueMolError::parse(format!(
+                        "color palette entry already defined: {id}"
+                    )));
                 }
+                let spec = parse_color(&value)?;
+                let mut color = if let ColorBase::Named(name) = &spec.base {
+                    let reference = set
+                        .get_color(name)
+                        .cloned()
+                        .or_else(|| colors(name))
+                        .ok_or_else(|| {
+                            cuemol_core::CueMolError::parse(format!(
+                                "undefined named color in style palette: {name}"
+                            ))
+                        })?;
+                    modified_palette_color(child, &reference)?
+                } else {
+                    spec.resolve(|_| None, None).ok_or_else(|| {
+                        cuemol_core::CueMolError::parse(
+                            "palette entry must resolve to a solid color",
+                        )
+                    })?
+                };
+                let material = child.str_attr("material").to_string();
+                if !material.is_empty() {
+                    color.set_material(material);
+                }
+                set.set_color(id, color);
             }
             "material" => load_material_node(set, child),
             "setting" => load_setting_node(set, child),
             _ => load_string_node(set, child),
         }
     }
-    style_count
+    Ok(style_count)
+}
+
+fn modified_palette_color(
+    node: &LDom2Node,
+    reference: &SolidColor,
+) -> cuemol_core::Result<SolidColor> {
+    let mut components = reference.hsba();
+    for (prefix, relative) in [("set", false), ("mod", true)] {
+        for (index, channel) in ["h", "s", "b", "a"].into_iter().enumerate() {
+            let key = format!("{prefix}_{channel}");
+            let text = node.str_attr(&key);
+            if text.is_empty() {
+                continue;
+            }
+            let mut value = text
+                .as_str()
+                .parse::<f64>()
+                .ok()
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| {
+                    cuemol_core::CueMolError::parse(format!("invalid palette modifier: {key}"))
+                })?;
+            if index == 0 {
+                value /= 360.0;
+            }
+            components[index] = if relative {
+                components[index] + value
+            } else {
+                value
+            };
+        }
+    }
+    let [h, s, b, a] = components;
+    let mut color = SolidColor::default();
+    color.set_hsba(h, s, b, a);
+    Ok(SolidColor::from_code(color.code()))
 }
 
 fn load_material_node(set: &mut StyleSet, node: &LDom2Node) {
@@ -2379,6 +2476,77 @@ mod tests {
 
         std::fs::remove_file(&source).ok();
         std::fs::remove_file(&saved).ok();
+    }
+
+    #[test]
+    fn palette_load_resolves_ordered_and_scoped_colors_to_fixed_values() {
+        let mut manager = StyleManager::new();
+        manager.load_builtin_default_styles(0);
+        let global = manager.create_style_set("global", 0);
+        manager.set_color("accent", SolidColor::from_code(0xff0000ff), 0, global);
+        let local = manager.create_style_set("local", 42);
+        manager.set_color("accent", SolidColor::from_code(0xff00ff00), 42, local);
+        let uid = manager.load_style_set_from_xml(
+            42,
+            "palette",
+            r##"<styles id="palette">
+              <color id="base" value="#123456"/>
+              <color id="copy" value="base"/>
+              <color id="scoped" value="accent"/>
+              <color id="global" value="red"/>
+              <color id="modified" value="red" mod_h="120" set_a="0.25"/>
+              <color id="inline" value="red{alpha:0.25;mod_h:120}"/>
+            </styles>"##,
+            false,
+        );
+        assert_ne!(uid, INVALID_UID);
+        for (name, expected) in [
+            ("copy", 0xff123456),
+            ("scoped", 0xff00ff00),
+            ("global", 0xffff0000),
+            ("modified", 0x4000ff00),
+            ("inline", 0xffff0000),
+        ] {
+            assert_eq!(
+                manager.get_color2(name, 42, uid).map(SolidColor::code),
+                Some(expected),
+                "{name}"
+            );
+        }
+        manager.set_color("accent", SolidColor::from_code(0xffff0000), 42, local);
+        assert_eq!(manager.get_color("scoped", 42).unwrap().code(), 0xff00ff00);
+        let xml = manager.get_style_set(uid).unwrap().to_xml();
+        let mut restored = StyleManager::new();
+        let restored_uid = restored.load_style_set_from_xml(43, "palette", &xml, false);
+        assert_ne!(restored_uid, INVALID_UID);
+        assert_eq!(
+            restored.get_color("modified", 43).unwrap().code(),
+            0x4000ff00
+        );
+        assert_eq!(restored.get_color("copy", 43).unwrap().code(), 0xff123456);
+    }
+
+    #[test]
+    fn palette_errors_do_not_register_partial_style_sets() {
+        let mut manager = StyleManager::new();
+        manager.load_builtin_default_styles(0);
+        let before = manager.clone();
+        for entries in [
+            r##"<color id="forward" value="later"/><color id="later" value="#123456"/>"##,
+            r##"<color id="missing" value="undefined-accent"/>"##,
+            r##"<color id="same" value="#123456"/><color id="SAME" value="#654321"/>"##,
+            r##"<color id="bad" value="not(a,color)"/>"##,
+            r##"<color id="bad" value="red" mod_h="oops"/>"##,
+            r##"<color value="#123456"/>"##,
+        ] {
+            let xml = format!("<styles id=\"invalid\">{entries}</styles>");
+            assert_eq!(
+                manager.load_style_set_from_xml(42, "invalid", &xml, false),
+                INVALID_UID,
+                "{entries}"
+            );
+            assert_eq!(manager, before);
+        }
     }
 
     #[test]

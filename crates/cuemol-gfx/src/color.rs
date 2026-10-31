@@ -253,6 +253,11 @@ impl SolidColor {
         }
     }
 
+    pub fn hsba(&self) -> [f64; 4] {
+        let (h, s, b) = rgb_to_hsb_unit(self.fr(), self.fg(), self.fb());
+        [h, s, b, self.fa()]
+    }
+
     pub fn script_string(&self) -> String {
         if self.a() == 255 {
             if self.mode == SolidColorMode::Hsb {

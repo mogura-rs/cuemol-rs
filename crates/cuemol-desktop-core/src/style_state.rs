@@ -66,7 +66,11 @@ impl DesktopAppState {
                             .map(StyleSet::uid)
                     })
                     .unwrap_or(0);
-                let Ok(mut set) = StyleSet::from_xml(uid, &name, &loaded.data) else {
+                let Ok(mut set) =
+                    StyleSet::from_xml_with_colors(uid, &name, &loaded.data, |name| {
+                        styles.get_color(name, scope).cloned()
+                    })
+                else {
                     continue;
                 };
                 set.set_source(loaded.node.str_attr("src").to_string());

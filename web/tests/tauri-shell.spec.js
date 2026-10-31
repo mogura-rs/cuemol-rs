@@ -353,12 +353,15 @@ async function openShell(page, storage = {}, options = {}) {
   return errors;
 }
 
-test('Tauri style rows open with a double click at native input speed', async ({page}) => {
+test('Tauri style rows open on double click with their own scope', async ({page}) => {
   const errors = await openShell(page, {}, {styles:true});
   for (const scope of ['scene', 'global']) {
     await page.getByRole('button', {name:`Style set user (${scope})`, exact:true}).dblclick({delay:120});
     await expect(page.locator('#reference-dialog').getByLabel('Style set name')).toHaveValue('user');
+    expect(await page.evaluate(() => window.__shellCalls.filter(call => call.command === 'get_style_properties').at(-1).args.target))
+      .toEqual({ownerSceneUid:1,sceneUid:scope==='scene'?1:0,styleId:scope==='scene'?102:101});
     await page.locator('#reference-dialog').getByRole('button', {name:'Close', exact:true}).last().click();
+    await expect(page.locator('#reference-dialog')).not.toBeVisible();
   }
   expect(errors).toEqual([]);
 });

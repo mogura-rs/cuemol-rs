@@ -31,7 +31,7 @@ speedup from a single optimized stage or compare timings from different hosts.
 | --- | --- | --- |
 | Shell | Activities, menus, toolbar, tab order, docks, compact windows, themes and keyboard access | Application shortcuts, browser tab closing and menu access, shared history dropdowns, Tauri palette folding and tree/text clipboard routing repaired and checked; browser recent files and remaining pane controls are still under comparison |
 | Explorer and Inspector | Object/renderer/group hierarchy, selection, visibility, locking, drag/drop, context menus and property editors | Typed fields, nested properties, defaults/resets, group writes, Scene/View targets, quality presets, renderer pages, font choices and selection pickers repaired and checked below; remaining targets and live previews are under comparison |
-| Color and styles | Coloring modes, paint entries, palettes, property inheritance, style creation/apply/edit/save | Script/GUI state, scoped precedence, linked-file metadata and native/WASM/Tauri editors repaired below; the Tauri OS-input check, user-style persistence and remaining coloring controls are still under comparison |
+| Color and styles | Coloring modes, paint entries, palettes, property inheritance, style creation/apply/edit/save | Script/GUI state, scoped precedence, linked-file metadata, XML palette resolution and native/WASM/Tauri editors repaired below; the Tauri OS-input check passed at `b1153f7`, while runtime aliases, user-style persistence and remaining coloring controls are still under comparison |
 | Console | CueMol/PyMOL dialects, command arguments, completion, history, multiline input, IME and transaction behavior | Shared CueMol/PyMOL interpreters, completion, native QAX logging/replay and cancellable execution implemented; focused shared, browser and OS-input checks passed; affected regression checks, CI and Pages passed at `99b7c16`; public review repairs and release delivery are in progress |
 | Actions | History rows, operation inspection, QAX export, bundled/user macros and reusable actions | History selection, operation inspection, QAX export and bundled/user macro libraries are implemented in native, WASM and Tauri; CI, Pages and the macOS window check passed at `488ce9c`; review repairs passed affected checks and were published at `53100c5` |
 | Scripts and services | JavaScript/Python helpers, retained state, callbacks, errors, file arguments and asynchronous readers | Previous compatibility checks exist; shared workload comparison pending |
@@ -1696,6 +1696,55 @@ The macOS check at `a156fbc` passed its model tests and the existing viewport an
 console input stages, then stopped before opening the style editor. The
 PyAutoGUI macOS backend emits repeated single-click events without a native
 double-click count. The check now sends Quartz events with click counts one and
-two. A Chromium DOM check with a 120 ms interval opened both scene and global
+two. A Chromium DOM check with a 120 ms press duration opened both scene and global
 editors, and the full Tauri DOM suite passed 39 cases. The corrected macOS input
 check still requires a fresh run.
+
+The public review of the input-check repair corrected the DOM timing
+description: Playwright's delay is the press duration, not the gap between
+clicks. The test also verifies the requested scope ID and dialog closure. This
+DOM case checks the editor interaction, while the native runner checks Quartz
+event delivery. The script already imports `time`, and the earlier console
+input stage focuses the application before the style clicks.
+
+### Palette file loading
+
+The installed reference distinguishes palette files from runtime named colors.
+Its XML loader resolves each palette entry once, using earlier entries in that
+file, then scene definitions and global definitions. Later changes to the source
+color leave the imported value unchanged. Forward references, unknown names and
+duplicate names fail to load. XML `set_h/s/b/a` and `mod_h/s/b/a` attributes apply
+to the resolved value, while modifiers inside a named value's braces are ignored
+by this loader. Saving emits the resolved solid colors. Runtime `NamedColor`
+objects instead retain their expression and original scope; this separate
+behavior has not yet been repaired.
+
+Rust previously discarded named palette entries in the style service and could
+resolve imported scene entries again after their source changed. Palette loading
+now validates the complete document and stores resolved colors before registering
+it. Native QSC loading, the shared worker result, direct imports, linked-file
+loads/reloads and content edits use the same conversion. A failed import, edit
+or linked-file reload preserves the existing styles. Modifier attributes are
+removed after conversion, so subsequent saves cannot apply them twice.
+
+The shared suites passed 682 cases, the native GUI model passed 189 with one
+pre-existing integration case ignored, and the Tauri model passed 167 with six
+existing integration cases ignored. The loader regressions check scoped and
+ordered references, fixed values after source edits, modifier conversion,
+serialization, native/worker QSC loading and failed reload state. The Tauri DOM
+scope-and-closure check also passed after the review correction.
+
+The rebuilt WASM passed 17 focused WebGL/WebGPU, console and Actions cases. The
+remaining Actions case completed its assertions but failed while closing its
+trace because a concurrent DOM run removed the shared output directory. That
+case passed when rerun alone with a separate output directory. Both new palette
+cases use actual browser file input and worker loading, then change the original
+color and verify the retained values and serialized XML.
+
+The corrected macOS OS-input run `41157770791` completed successfully at
+`b1153f7`. Its exact-source artifact contains the presented-pixel, drag, wheel,
+multiline console/undo and scoped style-editing results. The saved external XML
+contains the renamed set, edited half-alpha color and named selection. Captured
+native windows also show the scene and global editors after those operations.
+That revision predates the palette-loading repair; it establishes native input
+and editor integration for the preceding style changes.

@@ -4426,7 +4426,8 @@ impl DesktopAppState {
     ) -> Result<usize> {
         let resolved_path = self.resolve_scene_path(scene_uid, path.as_ref())?;
         let data = fs::read_to_string(&resolved_path)?;
-        let tree = parse_ldom2_xml(&data)?;
+        let tree = self.normalized_style_document(scene_uid, &data)?;
+        let data = write_ldom2_xml(&tree);
         if tree.top().tag_name() != "styles" {
             return Err(CueMolError::invalid_argument(
                 "style XML root must be <styles>",
@@ -4515,7 +4516,8 @@ impl DesktopAppState {
         }
         let resolved_path = self.resolve_scene_path(scene_uid, Path::new(&source))?;
         let data = fs::read_to_string(resolved_path)?;
-        let tree = parse_ldom2_xml(&data)?;
+        let tree = self.normalized_style_document(scene_uid, &data)?;
+        let data = write_ldom2_xml(&tree);
         if tree.top().tag_name() != "styles" {
             return Err(CueMolError::invalid_argument(
                 "style XML root must be <styles>",
@@ -4697,12 +4699,7 @@ impl DesktopAppState {
         if name.is_empty() {
             return Err(CueMolError::invalid_argument("style name is required"));
         }
-        let mut tree = parse_ldom2_xml(xml)?;
-        if tree.top().tag_name() != "styles" {
-            return Err(CueMolError::invalid_argument(
-                "style XML root must be <styles>",
-            ));
-        }
+        let mut tree = self.normalized_style_document(scene_uid, xml)?;
         let scene = self
             .scene_manager_mut()
             .scene_mut(scene_uid)
@@ -12766,6 +12763,7 @@ impl DesktopAppState {
         scene_uid: Uid,
         mut prepared_maps: Option<std::collections::VecDeque<DensityMap>>,
     ) -> Result<()> {
+        self.normalize_loaded_scene_styles(scene_uid)?;
         let styles = self
             .scene_manager()
             .scene(scene_uid)
@@ -72446,6 +72444,135 @@ attribute \"dep\" string \"positions\"
         assert!(qsc.contains("locked=\"true\""));
         assert!(qsc.contains("style=\"ThickSimple,DefaultCPKColoring\""));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn imported_palette_colors_stay_fixed_after_the_source_changes() {
+        let mut app = DesktopAppState::new();
+        let scene = app.new_scene("palette", true).result_scene;
+        let source = app
+            .import_scene_style(
+                scene,
+                r##"<styles id="source"><color id="accent" value="#00ff00"/></styles>"##,
+                false,
+            )
+            .unwrap();
+        let derived = app.import_scene_style(scene,
+            r##"<styles id="derived"><color id="copy" value="accent"/><color id="shifted" value="red" mod_h="120" set_a="0.25"/></styles>"##, false).unwrap();
+        assert_eq!(
+            app.resolve_style_color(scene, "copy").unwrap().code(),
+            0xff00ff00
+        );
+        app.edit_scene_style(
+            scene,
+            source,
+            r##"<styles id="source"><color id="accent" value="#ff0000"/></styles>"##,
+        )
+        .unwrap();
+        assert_eq!(
+            app.resolve_style_color(scene, "copy").unwrap().code(),
+            0xff00ff00
+        );
+        assert_eq!(
+            app.resolve_style_color(scene, "shifted").unwrap().code(),
+            0x4000ff00
+        );
+        let before = app
+            .scene_manager()
+            .scene(scene)
+            .unwrap()
+            .loaded_styles()
+            .to_vec();
+        let invalid =
+            r##"<styles id="invalid"><color id="bad" value="undefined-accent"/></styles>"##;
+        assert!(app.import_scene_style(scene, invalid, false).is_err());
+        assert!(app.edit_scene_style(scene, derived, invalid).is_err());
+        assert_eq!(
+            app.scene_manager().scene(scene).unwrap().loaded_styles(),
+            before
+        );
+        let xml = &app.scene_manager().scene(scene).unwrap().loaded_styles()[derived].data;
+        assert!(!xml.contains("value=\"accent\""));
+        assert!(!xml.contains("mod_h="));
+        assert!(xml.contains("#00FF00"));
+    }
+
+    #[test]
+    fn qsc_and_external_palettes_resolve_colors_once_and_reject_bad_reloads() {
+        let directory =
+            std::env::temp_dir().join(format!("cuemol-palette-import-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("palette.qsc");
+        let input = br##"<scene>
+          <styles id="source"><color id="accent" value="#00ff00"/></styles>
+          <styles id="derived"><color id="copy" value="accent"/></styles>
+        </scene>"##;
+        std::fs::write(&path, input).unwrap();
+        for prepared in [false, true] {
+            let mut app = DesktopAppState::new();
+            let scene = if prepared {
+                let file = PreparedFile::parse("palette.qsc", input).unwrap();
+                match app.open_prepared(file).unwrap() {
+                    GuiLoadedPath::Scene { scene_uid } => scene_uid,
+                    _ => panic!("expected a loaded scene"),
+                }
+            } else {
+                app.load_qsc_file(&path).unwrap().unwrap()
+            };
+            assert_eq!(
+                app.resolve_style_color(scene, "copy").unwrap().code(),
+                0xff00ff00
+            );
+            app.edit_scene_style(
+                scene,
+                0,
+                r##"<styles id="source"><color id="accent" value="#0000ff"/></styles>"##,
+            )
+            .unwrap();
+            assert_eq!(
+                app.resolve_style_color(scene, "copy").unwrap().code(),
+                0xff00ff00
+            );
+            let external = directory.join(if prepared { "worker.xml" } else { "native.xml" });
+            std::fs::write(
+                &external,
+                r##"<styles id="external"><color id="from_file" value="accent"/></styles>"##,
+            )
+            .unwrap();
+            let index = app.load_scene_style_file(scene, &external, true).unwrap();
+            assert_eq!(
+                app.resolve_style_color(scene, "from_file").unwrap().code(),
+                0xff0000ff
+            );
+            let before = app
+                .scene_manager()
+                .scene(scene)
+                .unwrap()
+                .loaded_styles()
+                .to_vec();
+            std::fs::write(
+                &external,
+                r##"<styles id="external"><color id="bad" value="undefined-accent"/></styles>"##,
+            )
+            .unwrap();
+            assert!(app.reload_scene_style_file(scene, index).is_err());
+            assert_eq!(
+                app.scene_manager().scene(scene).unwrap().loaded_styles(),
+                before
+            );
+            std::fs::write(&external, r##"<styles id="external"><color id="from_file" value="red" set_a="0.25"/></styles>"##).unwrap();
+            app.reload_scene_style_file(scene, index).unwrap();
+            assert_eq!(
+                app.resolve_style_color(scene, "from_file").unwrap().code(),
+                0x40ff0000
+            );
+            assert!(
+                !app.scene_manager().scene(scene).unwrap().loaded_styles()[index]
+                    .node
+                    .bool_attr("modified")
+            );
+        }
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

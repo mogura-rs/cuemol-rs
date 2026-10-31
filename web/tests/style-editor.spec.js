@@ -36,6 +36,24 @@ async function xmlDownload(download) {
 }
 
 for(const backend of ['webgl','webgpu']) {
+  test(`imported named palette colors remain fixed in ${backend}`, async ({page}) => {
+    await ready(page,backend);
+    await command(page,'create_style_set',{name:'source'});
+    await command(page,'define_color',{styleSet:'source',name:'accent',color:'#00ff00'});
+    const xml='<styles id="imported"><color id="copy" value="accent"/><color id="shifted" value="red" mod_h="120" set_a="0.25"/></styles>';
+    await page.locator('#styles').setInputFiles({name:'palette.xml',mimeType:'application/xml',buffer:Buffer.from(xml)});
+    await expect.poll(async () => (await status(page)).ui.rects['Style readonly']).toBeTruthy();
+    await expect.poll(async () => (await status(page)).loading).toBe(false);
+    const imported=await command(page,'get_style_set',{styleSet:'imported'});
+    expect(imported.xml).not.toContain('value="accent"');
+    expect(imported.xml).not.toContain('mod_h=');
+    expect(imported.xml).toContain('#00FF00');
+    await command(page,'define_color',{styleSet:'source',name:'accent',color:'#ff0000'});
+    const colors=await command(page,'execute_script',{source:"var palette=cuemol.getService('StyleManager'); var copy=palette.getColor('copy',scene.uid), shifted=palette.getColor('shifted',scene.uid); print([copy.r(),copy.g(),copy.b(),copy.a()].join(',')); print([shifted.r(),shifted.g(),shifted.b(),shifted.a()].join(','));"});
+    expect(colors.log).toBe('0,255,0,255\n0,255,0,64\n');
+    expect((await command(page,'get_style_set',{styleSet:'imported'})).xml).toBe(imported.xml);
+  });
+
   test(`global style edits survive scene history in ${backend}`,async ({page}) => {
     test.setTimeout(180000);
     await ready(page,backend);

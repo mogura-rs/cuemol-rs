@@ -2,7 +2,7 @@ use crate::{
     clear_xml_formatting_whitespace, parse_ldom2_xml, write_ldom2_xml, CueMolError,
     DesktopAppState, GuiStyleSummary, LDom2Node, LDom2Tree, LoadedStyle, Result, Uid,
 };
-use cuemol_qsys::StyleSet;
+use cuemol_qsys::{StyleManager, StyleSet};
 use std::path::{Path, PathBuf};
 
 pub(crate) struct PreparedSceneStyles {
@@ -82,6 +82,42 @@ pub(crate) fn parse_import(xml: &str) -> Result<(LDom2Node, String)> {
     Ok((tree.top().clone(), write_ldom2_xml(&tree)))
 }
 
+fn normalize_palette(styles: &StyleManager, scope: u64, mut tree: LDom2Tree) -> Result<LDom2Tree> {
+    let set = StyleSet::from_node_with_colors(0, "", tree.top(), |name| {
+        styles.get_color(name, scope).cloned()
+    })?;
+    for node in tree
+        .top_mut()
+        .children_mut()
+        .iter_mut()
+        .filter(|node| !node.is_attr() && node.tag_name() == "color")
+    {
+        let color = set
+            .get_color(node.str_attr("id").as_str())
+            .ok_or_else(|| CueMolError::parse("palette color was not parsed"))?;
+        node.set_value(color.script_string());
+        node.retain_children(|child| {
+            !child.is_attr()
+                || !matches!(
+                    child.tag_name(),
+                    "set_h"
+                        | "set_s"
+                        | "set_b"
+                        | "set_a"
+                        | "mod_h"
+                        | "mod_s"
+                        | "mod_b"
+                        | "mod_a"
+                        | "material"
+                )
+        });
+        if !color.material().is_empty() {
+            node.set_str_attr("material", color.material());
+        }
+    }
+    Ok(tree)
+}
+
 pub(crate) fn replace_content(
     style: &mut LoadedStyle,
     mut tree: LDom2Tree,
@@ -117,6 +153,57 @@ pub(crate) fn replace_content(
 }
 
 impl DesktopAppState {
+    pub(crate) fn normalized_style_document(&self, scene: Uid, xml: &str) -> Result<LDom2Tree> {
+        let scene_state = self
+            .scene_manager()
+            .scene(scene)
+            .ok_or_else(|| CueMolError::not_found("scene"))?;
+        normalize_palette(
+            &self.scene_styles_in_scope(scene_state, scene.get()),
+            scene.get(),
+            parse_ldom2_xml(xml)?,
+        )
+    }
+
+    pub(crate) fn normalize_loaded_scene_styles(&mut self, scene: Uid) -> Result<()> {
+        let mut styles = self.global_styles();
+        let loaded = self
+            .scene_manager()
+            .scene(scene)
+            .ok_or_else(|| CueMolError::not_found("scene"))?
+            .loaded_styles();
+        let mut replacements = Vec::with_capacity(loaded.len());
+        for (index, style) in loaded.iter().enumerate() {
+            let tree = normalize_palette(&styles, scene.get(), document(style)?)?;
+            let data = write_ldom2_xml(&tree);
+            let name = if tree.top().str_attr("id").is_empty() {
+                format!("scene-style-{index}")
+            } else {
+                tree.top().str_attr("id").to_string()
+            };
+            if styles.load_style_set_from_node(scene.get(), name, tree.top(), false) == 0 {
+                return Err(CueMolError::parse("loaded scene style is invalid"));
+            }
+            replacements.push((tree, data));
+        }
+        let loaded = self
+            .scene_manager_mut()
+            .scene_mut(scene)
+            .unwrap()
+            .loaded_styles_mut();
+        for (style, (tree, data)) in loaded.iter_mut().zip(replacements) {
+            if style.node.str_attr("src").is_empty() {
+                let mut node = tree.top().clone();
+                for attribute in style.node.children().iter().filter(|node| node.is_attr()) {
+                    node.set_str_attr(attribute.tag_name(), attribute.value());
+                }
+                style.node = node;
+            }
+            style.data = data;
+        }
+        Ok(())
+    }
+
     pub(crate) fn prepare_scene_styles(
         &self,
         scene: Uid,
@@ -173,11 +260,14 @@ impl DesktopAppState {
     pub(crate) fn insert_imported_style(
         &mut self,
         scene: Uid,
-        mut node: LDom2Node,
+        node: LDom2Node,
         data: String,
         read_only: bool,
     ) -> Result<usize> {
         let name = node.str_attr("id").to_string();
+        let tree = self.normalized_style_document(scene, &data)?;
+        let mut node = tree.top().clone();
+        let data = write_ldom2_xml(&tree);
         let scene = self
             .scene_manager_mut()
             .scene_mut(scene)
@@ -399,7 +489,9 @@ impl DesktopAppState {
             .iter()
             .find(|set| set.uid() == id)
             .ok_or_else(|| CueMolError::not_found("global style set"))?;
-        let mut replacement = StyleSet::from_xml(id, name, xml)?;
+        let mut replacement = StyleSet::from_xml_with_colors(id, name, xml, |key| {
+            self.script_styles.get_color(key, 0).cloned()
+        })?;
         replacement.set_source(old.source());
         replacement.set_read_only(read_only);
         replacement.set_modified(edited || old.modified());
@@ -481,6 +573,7 @@ impl DesktopAppState {
 
     /// Apply a content edit while retaining the style's file link and identity.
     pub fn edit_scene_style(&mut self, scene: Uid, index: usize, xml: &str) -> Result<()> {
+        let mut tree = self.normalized_style_document(scene, xml)?;
         let style = self
             .scene_manager_mut()
             .scene_mut(scene)
@@ -489,7 +582,6 @@ impl DesktopAppState {
         if style.node.str_attr("readonly").equals_ignore_case("true") {
             return Err(CueMolError::invalid_argument("style set is read-only"));
         }
-        let mut tree = parse_ldom2_xml(xml)?;
         tree.top_mut()
             .set_str_attr("id", style.node.str_attr("id").as_str());
         replace_content(style, tree, false, true)

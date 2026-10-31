@@ -382,7 +382,7 @@ mod tests {
         editor.refresh(&state, 2).unwrap();
         assert_eq!(editor.name, "unfinished-name");
         assert_eq!(editor.edits[&(1, "focus".into())], "name O1");
-        assert_eq!(editor.edits[&(0, "accent".into())], "#abcdef");
+        assert_eq!(editor.edits[&(0, "accent".into())], "#ABCDEF");
         assert_eq!(editor.stored_name, "palette");
         state
             .edit_style(target, "<styles id=\"palette\"/>")
