@@ -113,6 +113,15 @@ class Distributions(unittest.TestCase):
         self.assertIn('rebuild first', result.stderr)
         self.assertFalse(output.exists())
 
+    def test_python_package_binary_cannot_replace_the_release_build(self):
+        target = release.TARGETS[0]
+        info = self.native_info(target) | {
+            'features': ['gui', 'scripting'], 'web_commit': None,
+            'web_dirty': None, 'web_manifest_sha256': None,
+        }
+        with self.assertRaisesRegex(ValueError, 'lacks application features'):
+            validate(info, target, COMMIT)
+
     def test_dirty_browser_cannot_be_released(self):
         source = self.web / 'pkg/source-build.json'
         source.write_text(json.dumps({'commit': COMMIT, 'dirty': True}))

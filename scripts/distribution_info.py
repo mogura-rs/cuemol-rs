@@ -10,10 +10,12 @@ def validate(info, target, revision, web_sha256=None):
         raise ValueError('Expected a full source commit')
     if info.get('commit') != revision or info.get('target') != target:
         raise ValueError('Native binary was built from another source or target')
-    if info.get('dirty') is not False or info.get('web_dirty') is not False:
-        raise ValueError('Release binaries require clean native and browser sources')
+    if info.get('dirty') is not False:
+        raise ValueError('Release binaries require clean native sources')
     if not {'gui', 'bundled-web', 'scripting'}.issubset(info.get('features', [])):
         raise ValueError('Release binary lacks application features')
+    if info.get('web_dirty') is not False:
+        raise ValueError('Release binaries require clean browser sources')
     if info.get('web_commit') != revision:
         raise ValueError('Embedded browser was built from another source')
     digest = info.get('web_manifest_sha256', '')

@@ -127,6 +127,9 @@ release checks verify executable hashes and require identical CLI/app binaries
 and the same browser manifest across all platforms.
 Each native release binary also runs Python helper imports, live-scene queries,
 selected PDB output and persistent interpreter checks before packaging.
+The pip source-install check runs before the final application build because
+maturin writes its GUI-only binary to the same Cargo target output. The final
+build restores the bundled-browser features before validation and packaging.
 Intel macOS has a longer timeout for builds without a populated cache.
 A version tag publishes eight archives and checksums
 only after every target succeeds. Failed uploads leave a draft that can be

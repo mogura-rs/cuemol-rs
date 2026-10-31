@@ -87,6 +87,14 @@ compares executable hashes, CLI/app identity and embedded browser manifests
 across the platform matrix. These checks verify provenance and integrity; they
 do not establish functional equivalence with every C++ feature.
 
+The first live release run at `e71088f` caught a pipeline error on both Linux
+targets: the pip source-install check overwrote the completed release executable
+with its GUI-only build. Local inspection confirmed that the target executable
+had no `bundled-web` feature and null browser metadata, while the archive made
+before pip retained both. The workflow now runs pip validation before the final
+application build. Distribution validation rejects this feature loss explicitly;
+it does not relax the source or browser checks.
+
 Generated archives and `dist/validation.json` remain local validation artifacts,
 not a published release. The release workflow now checks actual packaged windows
 on all five native targets. Local test results do not establish that those CI

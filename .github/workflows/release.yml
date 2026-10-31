@@ -99,6 +99,14 @@ jobs:
       - name: Verify browser artifact
         shell: bash
         run: uv run --no-project python scripts/prepare-web-dist.py --verify .cache/web-artifact --revision "$GITHUB_SHA"
+      - name: Verify Python source installation
+        shell: bash
+        env:
+          CARGO_BUILD_TARGET: ${{ matrix.target }}
+        run: |
+          uv venv .cache/python-package
+          uv pip install --python .cache/python-package --no-cache .
+          uv run --no-project python scripts/check-python-package.py --environment .cache/python-package
       - name: Build application with browser assets
         env:
           CUEMOL_WEB_DIR: ${{ github.workspace }}/.cache/web-artifact
@@ -132,14 +140,6 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: scripts/test-install.sh "target/$TARGET/release/cuemol"
-      - name: Verify Python source installation
-        shell: bash
-        env:
-          CARGO_BUILD_TARGET: ${{ matrix.target }}
-        run: |
-          uv venv .cache/python-package
-          uv pip install --python .cache/python-package --no-cache .
-          uv run --no-project python scripts/check-python-package.py --environment .cache/python-package
       - name: Test Windows installer and self-upgrade
         if: runner.os == 'Windows'
         shell: pwsh
