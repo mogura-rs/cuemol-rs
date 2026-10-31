@@ -136,6 +136,19 @@ checks the copied numeric text before and after typing. It also verifies that
 the draft remains uncommitted until Enter. These checks establish the actual
 input target and preserve the existing property-value and undo assertions.
 
+The next Windows run stopped earlier in the console. Its log contained
+`close_logu` followed by `ndo`: Enter and the next command's first character
+arrived in one frame. The shared editor consumed Enter before TextEdit processed
+the remaining characters. A deterministic egui regression reproduced that
+command corruption. Both frontends now partition raw input around console
+action keys before egui processes it, retaining the remaining events in order
+for subsequent frames. Regressions cover successive submissions, trailing draft
+text, history edits, Shift+Enter and IME confirmation. A browser regression sends
+two submissions and another draft synchronously through DOM input events.
+The old browser joined all three strings into one command; the repaired browser
+passes that case and all six existing console cases. Local checks also pass all
+28 shared UI tests and 257 native GUI/shell tests.
+
 Generated archives and `dist/validation.json` remain local validation artifacts,
 not a published release. The release workflow now checks actual packaged windows
 on all five native targets. Local test results do not establish that those CI

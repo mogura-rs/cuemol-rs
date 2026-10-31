@@ -1274,6 +1274,10 @@ impl App {
     }
 }
 impl eframe::App for App {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        self.console.prepare_input(ctx, input);
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.clipboard_focus.begin_frame(ctx);
         self.events(ctx);

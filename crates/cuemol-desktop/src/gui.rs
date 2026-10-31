@@ -633,7 +633,8 @@ impl NativeRunner {
                 needs_redraw = true;
             }
             WindowEvent::RedrawRequested => {
-                let raw_input = egui_state.take_egui_input(window.as_ref());
+                let mut raw_input = egui_state.take_egui_input(window.as_ref());
+                app.console.prepare_input(&self.egui_ctx, &mut raw_input);
                 let mut full_output = self.egui_ctx.run(raw_input, |ctx| {
                     app.ui(ctx, &mut gpu.camera);
                 });

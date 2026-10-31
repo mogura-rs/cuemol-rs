@@ -93,6 +93,34 @@ test('Console completes molecule names, recalls history, and submits multiline i
   expect((await status(page)).scene.objects[0].name).toBe('probe');
 });
 
+test('Console preserves submissions and the next draft within one browser event batch', async ({page}) => {
+  await setup(page);
+  await input(page, 'rename probe, renamed');
+  await page.evaluate(() => {
+    const target = document.activeElement;
+    if (!(target instanceof HTMLInputElement)) throw new Error('Console text input is not focused');
+    const enter = () => {
+      target.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', code:'Enter', bubbles:true}));
+      target.dispatchEvent(new KeyboardEvent('keyup', {key:'Enter', code:'Enter', bubbles:true}));
+    };
+    const text = value => {
+      target.value = value;
+      target.dispatchEvent(new InputEvent('input', {data:value, inputType:'insertText', bubbles:true}));
+    };
+    enter();
+    text('undo');
+    enter();
+    text('redo');
+  });
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('cuemol.console.history'))))
+    .toEqual(['rename probe, renamed', 'undo']);
+  await expect.poll(async () => (await status(page)).scene.objects[0].name).toBe('probe');
+  await page.keyboard.press('Enter');
+  await expect.poll(async () => (await status(page)).scene.objects[0].name).toBe('renamed');
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('cuemol.console.history'))))
+    .toEqual(['rename probe, renamed', 'undo', 'redo']);
+});
+
 test('Console waits for an IME commit before running a command', async ({page, browserName}) => {
   test.skip(browserName !== 'chromium', 'Chromium exposes the browser IME protocol.');
   await setup(page);
