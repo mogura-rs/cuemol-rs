@@ -51,12 +51,18 @@ async function openShell(page, storage = {}, options = {}) {
         {styleId:103,sceneUid:0,name:'(anonymous)',localIndex:null},
         {styleId:104,sceneUid:0,name:'(anonymous)',localIndex:null},
       ].map(style=>({ownerSceneUid:1,readOnly:false,modified:false,source:'',...style}));
+      if(options.styleMultiple)snapshot.styles.push({ownerSceneUid:1,sceneUid:1,styleId:105,name:'second',localIndex:1,readOnly:false,modified:false,source:''});
       for (const style of snapshot.styles) {
         const name=style.styleId===103?'':style.name;
         styleDocuments.set(style.styleId,`<styles id="${name}"><color id="accent" value="#123456"/><sel id="focus" value="name C1"/><style id="KeepCPK" type="renderer"/></styles>`);
       }
       snapshot.styles[0].source='user.xml';
-      window.__insertStyle=()=>snapshot.styles.splice(0,0,{ownerSceneUid:1,sceneUid:1,styleId:105,name:'inserted',localIndex:0,readOnly:false,modified:false,source:''});
+      window.__insertStyle=()=>{
+        const styleId=Math.max(...snapshot.styles.map(style=>style.styleId))+1;
+        for(const style of snapshot.styles)if(style.localIndex!==null)style.localIndex+=1;
+        styleDocuments.set(styleId,'<styles id="inserted"/>');
+        snapshot.styles.splice(0,0,{ownerSceneUid:1,sceneUid:1,styleId,name:'inserted',localIndex:0,readOnly:false,modified:false,source:''});
+      };
     }
     const styleFor = target => {
       const style=snapshot.styles.find(style=>style.styleId===target.styleId&&style.sceneUid===target.sceneUid&&style.ownerSceneUid===target.ownerSceneUid);
@@ -92,6 +98,17 @@ async function openShell(page, storage = {}, options = {}) {
       window.__shellCalls.push({command, args});
       if (command === 'get_initial_state') return {snapshot, viewport, preferences: {}, startupPathsPending: false};
       if (command === 'get_snapshot') return snapshot;
+      if (options.styles && command === 'copy_workspace_style') {
+        if(window.__holdStyleCopy)await window.__holdStyleCopy;
+        const style=styleFor(args.input);
+        window.__copiedStyleXml=styleDocuments.get(style.styleId);
+        return `Copied style ${style.name}`;
+      }
+      if (options.styles && command === 'delete_workspace_items') {
+        const styles=args.targets.map(target=>styleFor({ownerSceneUid:target.sceneUid,sceneUid:target.sceneUid,styleId:target.styleId}));
+        snapshot.styles=snapshot.styles.filter(style=>!styles.includes(style));
+        return structuredClone(snapshot);
+      }
       if (options.styles && command === 'get_style_properties') {
         const style=styleFor(args.target), xml=styleDocuments.get(style.styleId);
         const name=new DOMParser().parseFromString(xml,'application/xml').documentElement.getAttribute('id');
@@ -455,6 +472,60 @@ test('Tauri anonymous style saves with a visible default filename', async ({page
   await expect(dialog.getByLabel('Style set name')).toHaveValue('(anonymous)');
   await dialog.getByRole('button',{name:'Save style...',exact:true}).click();
   await expect.poll(()=>page.evaluate(()=>window.__saveDialogOptions?.defaultPath)).toBe('(anonymous).xml');
+  expect(errors).toEqual([]);
+});
+
+test('Tauri queued style work preserves a later selection across insertion', async ({page}) => {
+  const errors=await openShell(page,{}, {styles:true});
+  await page.getByRole('button',{name:'Style set user (global)',exact:true}).dblclick();
+  const dialog=page.locator('#reference-dialog');
+  await page.evaluate(()=>{window.__holdStyleEdit=new Promise(resolve=>{window.__releaseStyleEdit=resolve;});});
+  await dialog.getByLabel('Color accent',{exact:true}).fill('#abcdef');
+  await dialog.getByRole('button',{name:'Apply color accent',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='inspector_request'&&c.args.tool==='style_edit').length)).toBe(1);
+  await dialog.getByRole('button',{name:'Save style...',exact:true}).click();
+  await dialog.getByRole('button',{name:'Close',exact:true}).last().click();
+  const selected=page.getByRole('button',{name:'Style set user (scene)',exact:true});
+  await selected.focus();
+  await selected.press('Enter');
+  await page.evaluate(()=>{window.__insertStyle();window.__releaseStyleEdit();});
+  await expect.poll(()=>page.evaluate(()=>window.__savedStyleXml||'')).toContain('#ABCDEF');
+  await expect(selected).toHaveClass(/active/);
+  await page.locator('#workspace-properties').click();
+  await expect(dialog.getByLabel('Style set name')).toHaveValue('user');
+  await expect(dialog.locator('.style-set-metadata')).toContainText('Scene style set');
+  expect(errors).toEqual([]);
+});
+
+test('Tauri style copy resolves its target after an insertion', async ({page}) => {
+  const errors=await openShell(page,{}, {styles:true});
+  await page.evaluate(()=>{window.__holdStyleCopy=new Promise(resolve=>{window.__releaseStyleCopy=resolve;});});
+  await page.getByRole('button',{name:'Style set user (scene)',exact:true}).click({button:'right'});
+  await page.locator('.workspace-context-menu').getByRole('menuitem',{name:'Copy',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>window.__shellCalls.some(c=>c.command==='copy_workspace_style'))).toBe(true);
+  await page.evaluate(()=>{window.__insertStyle();window.__releaseStyleCopy();});
+  await expect.poll(()=>page.evaluate(()=>window.__copiedStyleXml||'')).toContain('id="user"');
+  expect(await page.evaluate(()=>window.__shellCalls.find(c=>c.command==='copy_workspace_style').args)).toEqual({input:{ownerSceneUid:1,sceneUid:1,styleId:102}});
+  expect(errors).toEqual([]);
+});
+
+test('Tauri multiple style deletion retains identities during confirmation', async ({page}) => {
+  const errors=await openShell(page,{}, {styles:true,styleMultiple:true});
+  await page.getByRole('button',{name:'Style set user (scene)',exact:true}).click();
+  await page.getByRole('button',{name:'Style set second (scene)',exact:true}).click({modifiers:['ControlOrMeta']});
+  await page.locator('#workspace-delete').click();
+  const confirmation=page.locator('#confirmation-dialog');
+  await expect(confirmation).toContainText('Delete style: user');
+  await page.evaluate(()=>window.__insertStyle());
+  await confirmation.getByRole('button',{name:'Delete',exact:true}).click();
+  await expect(confirmation).toContainText('Delete style: second');
+  await confirmation.getByRole('button',{name:'Delete',exact:true}).click();
+  await expect(page.getByRole('button',{name:'Style set inserted (scene)',exact:true})).toBeVisible();
+  await expect(page.getByRole('button',{name:'Style set user (scene)',exact:true})).toHaveCount(0);
+  await expect(page.getByRole('button',{name:'Style set second (scene)',exact:true})).toHaveCount(0);
+  const targets=await page.evaluate(()=>window.__shellCalls.find(c=>c.command==='delete_workspace_items').args.targets);
+  expect(targets.map(target=>target.styleId)).toEqual([102,105]);
+  expect(targets.every(target=>target.localIndex===undefined)).toBe(true);
   expect(errors).toEqual([]);
 });
 

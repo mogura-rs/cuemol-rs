@@ -205,7 +205,7 @@ let selectedSurfaceRendererUid = null;
 let selectedLwObjectUid = null;
 let selectedLwRendererUid = null;
 let selectedCameraName = null;
-let selectedStyleIndex = null;
+let selectedStyleTarget = null;
 let workspaceSelectionKind = "object";
 let workspaceMultipleSelection = [];
 let workspaceSelectionAnchor = null;
@@ -4127,7 +4127,7 @@ async function showStyleProperties(style) {
         const result = await operation();
         snapshot = result.snapshot || result;
         workspaceRendererStyleCache.clear();
-        selectWorkspaceStyle(target);
+        if (!closed) selectWorkspaceStyle(target);
         renderShell();
         void renderViewport();
         await readProperties();
@@ -4240,7 +4240,7 @@ async function showStyleProperties(style) {
   const save = button("Save style...", "", () => enqueue(async () => {
     const scene = snapshot.scenes.find(scene => scene.uid === target.ownerSceneUid);
     if (!scene) return;
-    await saveWorkspaceStyleFile(scene,{...properties,...target},!properties.source);
+    await saveWorkspaceStyleFile(scene,{...properties,...target},!properties.source,() => !closed);
     if (!closed) { await readProperties(); updateHeader(); }
   }));
   const close = button("Close", "dialog-primary", () => referenceDialog.close());
@@ -9785,7 +9785,7 @@ function activeStyles() {
 }
 
 function selectedStyle() {
-  return selectedStyleIndex === null ? null : activeStyles()[selectedStyleIndex] || null;
+  return selectedStyleTarget === null ? null : activeStyles().find(style => sameStyleTarget(style, selectedStyleTarget)) || null;
 }
 
 function selectedObject() {
@@ -10536,7 +10536,7 @@ async function copyWorkspaceStyle(sceneUid, style) {
   setBusy(true);
   try {
     const status = await invoke("copy_workspace_style", {
-      input: { sceneUid, localIndex: style.localIndex },
+      input: styleTarget(style),
     });
     snapshot.status = status;
     renderStatusAndLog();
@@ -10550,12 +10550,13 @@ async function copyWorkspaceStyle(sceneUid, style) {
 }
 
 async function pasteWorkspaceStyle(scene) {
-  const previous = new Set((snapshot.styles || []).filter(style => style.ownerSceneUid === scene.uid).map(style => style.localIndex));
+  const previous = new Set((snapshot.styles || []).filter(style => style.ownerSceneUid === scene.uid).map(style => style.styleId));
   const changed = await mutate("paste_workspace_style", {input:{sceneUid:scene.uid,replace:false}}, () => {}, Boolean(scene.active));
   if (!changed) return;
   if (scene.active) {
-    selectedStyleIndex = activeStyles().findIndex(style => style.localIndex !== null && !previous.has(style.localIndex));
-    workspaceSelectionKind = "style";
+    const pasted = activeStyles().find(style => style.localIndex !== null && !previous.has(style.styleId));
+    selectedStyleTarget = pasted ? styleTarget(pasted) : null;
+    workspaceSelectionKind = pasted ? "style" : "styleRoot";
   }
   renderShell();
 }
@@ -10602,12 +10603,12 @@ async function loadWorkspaceStyleFile(scene) {
   const loaded = activeStyles().find(
     (style) => style.localIndex !== null && !previous.has(style.name),
   );
-  selectedStyleIndex = loaded ? activeStyles().indexOf(loaded) : null;
+  selectedStyleTarget = loaded ? styleTarget(loaded) : null;
   workspaceSelectionKind = loaded ? "style" : "styleRoot";
   renderShell();
 }
 
-async function saveWorkspaceStyleFile(scene, style, saveAs) {
+async function saveWorkspaceStyleFile(scene, style, saveAs, shouldSelect = () => true) {
   try {
     style = await invoke("get_style_properties", {target:styleTarget(style)});
   } catch (error) { showError(error); return; }
@@ -10623,7 +10624,7 @@ async function saveWorkspaceStyleFile(scene, style, saveAs) {
       path,
     })
   ) {
-    selectWorkspaceStyle(style);
+    if (shouldSelect()) selectWorkspaceStyle(style);
     renderShell();
   }
 }
@@ -10641,9 +10642,9 @@ async function reloadWorkspaceStyleFile(scene, style) {
 }
 
 function selectWorkspaceStyle(style) {
-  const index = activeStyles().findIndex(candidate => sameStyleTarget(candidate, style));
-  selectedStyleIndex = index >= 0 ? index : null;
-  workspaceSelectionKind = index >= 0 ? "style" : "styleRoot";
+  const selected = activeStyles().find(candidate => sameStyleTarget(candidate, style));
+  selectedStyleTarget = selected ? styleTarget(selected) : null;
+  workspaceSelectionKind = selected ? "style" : "styleRoot";
 }
 
 async function openNewStyleFlow() {
@@ -10663,10 +10664,9 @@ async function openNewStyleFlow() {
   if (name === null) return false;
   const changed = await mutateWithoutViewport("create_style", { name }, () => {});
   if (!changed) return false;
-  selectedStyleIndex = activeStyles().findIndex(
-    (style) => style.localIndex !== null && style.name === name,
-  );
-  workspaceSelectionKind = "style";
+  const created = activeStyles().find(style => style.localIndex !== null && style.name === name.trim());
+  selectedStyleTarget = created ? styleTarget(created) : null;
+  workspaceSelectionKind = created ? "style" : "styleRoot";
   renderShell();
   return true;
 }
@@ -10685,7 +10685,7 @@ async function deleteWorkspaceStyle(scene, style) {
     target: styleTarget(style),
   });
   if (!changed) return false;
-  selectedStyleIndex = null;
+  selectedStyleTarget = null;
   workspaceSelectionKind = "styleRoot";
   renderShell();
   return true;
@@ -12139,7 +12139,7 @@ function workspaceCommandTarget(target) {
       objectUid: 0,
       rendererUid: null,
       sceneUid: target.objectUid,
-      localIndex: target.rendererUid,
+      styleId: target.rendererUid,
     };
   }
   return {
@@ -12159,7 +12159,7 @@ function currentWorkspaceSelectionTarget() {
   if (workspaceSelectionKind === "style") {
     const style = selectedStyle();
     return style && style.localIndex !== null
-      ? workspaceSelectionTarget("style", style.ownerSceneUid, style.localIndex)
+      ? workspaceSelectionTarget("style", style.ownerSceneUid, style.styleId)
       : null;
   }
   const target = selectedWorkspaceTarget();
@@ -12190,7 +12190,7 @@ function applyWorkspaceSelectionTarget(target) {
   selectedLwObjectUid = null;
   selectedLwRendererUid = null;
   selectedCameraName = null;
-  selectedStyleIndex = null;
+  selectedStyleTarget = null;
   workspaceSelectionKind = target.selectionKind;
   switch (target.selectionKind) {
     case "object":
@@ -12226,11 +12226,10 @@ function applyWorkspaceSelectionTarget(target) {
       selectedCameraName = target.rendererUid;
       break;
     case "style": {
-      const index = activeStyles().findIndex(
-        (style) =>
-          style.ownerSceneUid === target.objectUid && style.localIndex === target.rendererUid,
+      const selected = activeStyles().find(
+        style => style.ownerSceneUid === target.objectUid && style.sceneUid === target.objectUid && style.styleId === target.rendererUid,
       );
-      selectedStyleIndex = index >= 0 ? index : null;
+      selectedStyleTarget = selected ? styleTarget(selected) : null;
       break;
     }
   }
@@ -12324,7 +12323,7 @@ function workspaceTargetExists(target) {
   if (target.kind === "style") {
     return (snapshot?.styles || []).some(
       (style) =>
-        style.ownerSceneUid === target.objectUid && style.localIndex === target.rendererUid,
+        style.ownerSceneUid === target.objectUid && style.sceneUid === target.objectUid && style.styleId === target.rendererUid,
     );
   }
   const objects = [
@@ -12386,7 +12385,7 @@ async function deleteWorkspaceMultipleItems(targets) {
       const style = (snapshot.styles || []).find(
         (candidate) =>
           candidate.ownerSceneUid === target.objectUid &&
-          candidate.localIndex === target.rendererUid,
+          candidate.sceneUid === target.objectUid && candidate.styleId === target.rendererUid,
       );
       if (style) {
         confirmation = {
@@ -12441,7 +12440,7 @@ function normalizeSelection() {
     workspaceSelectionKind = "cameraRoot";
   }
   if (workspaceSelectionKind === "style" && !selectedStyle()) {
-    selectedStyleIndex = null;
+    selectedStyleTarget = null;
     workspaceSelectionKind = "styleRoot";
   }
   if (["densityMap", "densityRenderer"].includes(workspaceSelectionKind)) {
@@ -12545,7 +12544,7 @@ function workspaceChromeRenderKey() {
       selectedLwObjectUid,
       selectedLwRendererUid,
       selectedCameraName,
-      selectedStyleIndex,
+      selectedStyleTarget,
     ],
     scenes: snapshot.scenes.map((scene) => [
       scene.uid,
@@ -12672,7 +12671,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         selectedSurfaceUid = null;
         selectedSurfaceRendererUid = null;
         selectedCameraName = null;
-        selectedStyleIndex = null;
+        selectedStyleTarget = null;
         if (!scene.active) {
           await mutate("activate_scene", { sceneUid: scene.uid });
         } else if (alreadySelected && !sceneIsRenaming) {
@@ -12697,7 +12696,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       selectedSurfaceUid = null;
       selectedSurfaceRendererUid = null;
       selectedCameraName = null;
-      selectedStyleIndex = null;
+      selectedStyleTarget = null;
       showWorkspaceContextMenu(event, workspaceSceneContextItems(scene));
     });
     if (sceneIsRenaming) sceneRow.append(workspaceInlineRenameInput("scene", scene));
@@ -13446,7 +13445,7 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
       async () => {
         clearWorkspaceMultipleSelection();
         workspaceSelectionKind = "styleRoot";
-        selectedStyleIndex = null;
+        selectedStyleTarget = null;
         if (!scene.active) {
           await mutate("activate_scene", { sceneUid: scene.uid });
         } else {
@@ -13460,39 +13459,39 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
     styleRoot.addEventListener("contextmenu", (event) => {
       clearWorkspaceMultipleSelection();
       workspaceSelectionKind = "styleRoot";
-      selectedStyleIndex = null;
+      selectedStyleTarget = null;
       showWorkspaceContextMenu(event, workspaceStyleContextItems(scene));
     });
     sceneTree.append(styleRoot);
-    sceneStyles.forEach((style, styleIndex) => {
-      const styleTarget =
+    sceneStyles.forEach(style => {
+      const treeTarget =
         style.localIndex === null
           ? null
-          : workspaceSelectionTarget("style", scene.uid, style.localIndex);
+          : workspaceSelectionTarget("style", scene.uid, style.styleId);
       const markers = `${style.readOnly ? " 🔒" : ""}${
         style.source ? " ↗" : ""
       }${style.modified ? " *" : ""}${style.sceneUid === 0 ? " (global)" : ""}`;
       const styleRow = button(
         `${style.name}${markers}`,
         `tree-renderer style-node${
-          (styleTarget
+          (treeTarget
             ? workspaceTargetIsSelected(
-                styleTarget,
+                treeTarget,
                 scene.active &&
                   workspaceSelectionKind === "style" &&
-                  styleIndex === selectedStyleIndex,
+                  selectedStyleTarget && sameStyleTarget(style, selectedStyleTarget),
               )
             : scene.active &&
               workspaceSelectionKind === "style" &&
-              styleIndex === selectedStyleIndex)
+              selectedStyleTarget && sameStyleTarget(style, selectedStyleTarget))
             ? " active"
             : ""
         }`,
         async (event) => {
-          if (styleTarget && selectWorkspaceTreeTarget(event, styleTarget)) return;
+          if (treeTarget && selectWorkspaceTreeTarget(event, treeTarget)) return;
           clearWorkspaceMultipleSelection();
           workspaceSelectionKind = "style";
-          selectedStyleIndex = styleIndex;
+          selectedStyleTarget = styleTarget(style);
           if (!scene.active) {
             await mutate("activate_scene", { sceneUid: scene.uid });
           } else {
@@ -13501,13 +13500,13 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
         },
       );
       styleRow.setAttribute("aria-label", `Style set ${style.name} (${style.sceneUid === 0 ? "global" : "scene"})`);
-      if (styleTarget) styleRow.workspaceSelectionTarget = styleTarget;
+      if (treeTarget) styleRow.workspaceSelectionTarget = treeTarget;
       styleRow.addEventListener("dblclick", () => showStyleProperties(style));
       styleRow.addEventListener("contextmenu", (event) => {
-        if (styleTarget && showWorkspaceMultipleContextMenu(event, styleTarget)) return;
+        if (treeTarget && showWorkspaceMultipleContextMenu(event, treeTarget)) return;
         clearWorkspaceMultipleSelection();
         workspaceSelectionKind = "style";
-        selectedStyleIndex = styleIndex;
+        selectedStyleTarget = styleTarget(style);
         showWorkspaceContextMenu(event, workspaceStyleContextItems(scene, style));
       });
       sceneTree.append(styleRow);

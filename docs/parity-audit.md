@@ -1638,9 +1638,8 @@ Other review questions were checked against the reference and callers. Add
 with an existing entry name replaces its value in the reference too, and
 modified styles cannot be made read-only. Combined content/locking requests
 retain that restriction and roll back on failure. Reload keeps runtime style
-identity. Copy and multiple-selection routing still use local array indices
-and remain under comparison; the stable-ID claim above covers the listed
-properties, file operations and deletion only.
+identity. Copy and multiple-selection routing still used local array indices
+at that revision; the subsequent repair is recorded below.
 
 The first extended macOS run passed its earlier pixel/input checks but stopped
 before style editing because WebKit included decorative tree markers in the
@@ -1652,3 +1651,35 @@ native suite passed 186 with one pre-existing POV-Ray test ignored, and the
 Tauri model passed 166 with six existing integration tests ignored. The Tauri
 DOM suite passed 35 cases. With the rebuilt WASM, all 16 focused browser cases
 passed across style editing, WebGL/WebGPU scene history, console and Actions.
+
+Native workspace selections and deletion confirmations now retain scoped
+runtime identities. Previously, inserting a style before a selected row could
+open or delete the inserted style instead. Both single and multiple selection
+reproduced the error before this repair. Clipboard routing resolves the current
+local position from the selected identity only when performing the operation.
+Tauri selection, copying and multiple deletion also carry runtime IDs through
+IPC. Removed targets fail without changing another style at the old position.
+Multiple deletions mark their actual owner scenes instead of an unrelated
+active scene, and undo restores the selected styles.
+
+The public `a156fbc` follow-up review raised a delayed-selection concern. A
+keyboard selection made after closing a pending editor did jump back when the
+edit or queued save completed. The regression includes an intervening style
+insertion; completion now retains the later selection. The affected native
+suite passed 189 tests with one pre-existing test ignored, and the Tauri model
+passed 167 with six existing integration tests ignored. The DOM suite passed
+36 cases, followed by two additional copy/deletion identity cases.
+
+The other follow-up questions did not reproduce defects: serialized style
+properties flatten their target fields, style scopes use a sorted map, and
+the questioned creation/loading paths create scene-local sets. QAX entries
+intentionally resolve a unique style name in the replay destination rather
+than retaining the original session's scene ID. File saves retain their
+documented external side effects.
+
+Reference menu restrictions were checked separately from the service API.
+The published tag disables Copy, Delete, Save, Save As and Read-only for global
+style context rows, although its services accept scoped global operations.
+The Rust frontends still have additional metadata/editor controls and differ
+in some of those menu gates. Those UI differences and user-style persistence
+remain under comparison; service compatibility does not establish menu parity.

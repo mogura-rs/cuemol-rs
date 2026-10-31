@@ -101,13 +101,14 @@ impl GuiApplication {
             },
             NativeWorkspaceTarget::Style {
                 scene_uid,
-                style_index,
+                style_target,
             } => Target::Style {
                 scene: scene_uid,
                 index: self
                     .state
                     .style_summaries(scene_uid)
-                    .get(style_index)?
+                    .iter()
+                    .find(|style| style.target == style_target)?
                     .local_index?,
             },
         })
@@ -352,15 +353,16 @@ impl GuiApplication {
                 }
             }
             GuiPastedNode::Style { index, .. } => {
-                if let Some(style_index) = self
+                if let Some(style_target) = self
                     .state
                     .style_summaries(scene)
                     .iter()
-                    .position(|style| style.local_index == Some(index))
+                    .find(|style| style.local_index == Some(index))
+                    .map(|style| style.target)
                 {
                     self.apply_workspace_target(NativeWorkspaceTarget::Style {
                         scene_uid: scene,
-                        style_index,
+                        style_target,
                     });
                 }
             }

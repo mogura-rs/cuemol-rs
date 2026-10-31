@@ -1259,7 +1259,7 @@ struct NativeCameraDeleteDraft {
 #[derive(Debug, Clone)]
 struct NativeStyleDeleteDraft {
     scene_uid: cuemol_core::Uid,
-    local_index: usize,
+    style_target: cuemol_desktop_core::GuiStyleTarget,
     name: String,
 }
 
@@ -2756,7 +2756,7 @@ enum NativeWorkspaceTarget {
     },
     Style {
         scene_uid: cuemol_core::Uid,
-        style_index: usize,
+        style_target: cuemol_desktop_core::GuiStyleTarget,
     },
 }
 
@@ -2809,7 +2809,7 @@ enum WorkspaceAuxSelection {
     },
     Style {
         scene_uid: cuemol_core::Uid,
-        style_index: usize,
+        style_target: cuemol_desktop_core::GuiStyleTarget,
     },
     DensityMap {
         scene_uid: cuemol_core::Uid,
@@ -6438,17 +6438,18 @@ impl GuiApplication {
             }
             WorkspaceAuxSelection::Style {
                 scene_uid,
-                style_index,
+                style_target,
             } => {
                 if self
                     .state
                     .style_summaries(scene_uid)
-                    .get(style_index)
+                    .iter()
+                    .find(|style| style.target == style_target)
                     .is_some_and(|style| style.local_index.is_some())
                 {
                     return Some(NativeWorkspaceTarget::Style {
                         scene_uid,
-                        style_index,
+                        style_target,
                     });
                 }
                 return None;
@@ -6552,11 +6553,11 @@ impl GuiApplication {
             }
             NativeWorkspaceTarget::Style {
                 scene_uid,
-                style_index,
+                style_target,
             } => {
                 self.workspace_aux_selection = Some(WorkspaceAuxSelection::Style {
                     scene_uid,
-                    style_index,
+                    style_target,
                 });
             }
         }
@@ -6833,11 +6834,10 @@ impl GuiApplication {
                 self.state
                     .style_summaries(scene.uid)
                     .iter()
-                    .enumerate()
-                    .filter_map(|(style_index, style)| {
+                    .filter_map(|style| {
                         style.local_index.map(|_| NativeWorkspaceTarget::Style {
                             scene_uid: scene.uid,
-                            style_index,
+                            style_target: style.target,
                         })
                     }),
             );
@@ -7719,16 +7719,16 @@ impl GuiApplication {
                     ui.add_enabled(false, egui::Button::new("Edit..."));
                 });
                 ui.indent(format!("style-root-{}", scene.uid.get()), |ui| {
-                    for (style_index, summary) in styles.iter().enumerate() {
+                    for summary in &styles {
                         ui.push_id(summary.target, |ui| {
                             let selection = WorkspaceAuxSelection::Style {
                                 scene_uid: scene.uid,
-                                style_index,
+                                style_target: summary.target,
                             };
                             let target =
                                 summary.local_index.map(|_| NativeWorkspaceTarget::Style {
                                     scene_uid: scene.uid,
-                                    style_index,
+                                    style_target: summary.target,
                                 });
                             let single_selected = self.selected_object.is_none()
                                 && self.workspace_aux_selection == Some(selection);
@@ -9537,7 +9537,7 @@ impl GuiApplication {
             .try_for_each(|target| self.set_workspace_target_visible(target, visible));
         match result {
             Ok(()) => {
-                self.push_undo_snapshot(undo);
+                self.push_undo_snapshot_for_scene(undo, None);
                 self.modified_scenes.extend(
                     targets
                         .iter()
@@ -9613,12 +9613,13 @@ impl GuiApplication {
             }
             NativeWorkspaceTarget::Style {
                 scene_uid,
-                style_index,
+                style_target,
             } => {
                 let local_index = self
                     .state
                     .style_summaries(scene_uid)
-                    .get(style_index)
+                    .iter()
+                    .find(|style| style.target == style_target)
                     .and_then(|style| style.local_index)
                     .ok_or_else(|| CueMolError::NotFound("Workspace style".to_string()))?;
                 self.state.destroy_scene_style(scene_uid, local_index)
@@ -9655,11 +9656,12 @@ impl GuiApplication {
                     }),
                 NativeWorkspaceTarget::Style {
                     scene_uid,
-                    style_index,
+                    style_target,
                 } => self
                     .state
                     .style_summaries(scene_uid)
-                    .get(style_index)
+                    .iter()
+                    .find(|style| style.target == style_target)
                     .filter(|style| style.local_index.is_some())
                     .map(|style| NativeWorkspaceDeleteConfirmation {
                         target,
@@ -9711,20 +9713,6 @@ impl GuiApplication {
         }
         targets.sort_by(|left, right| match (left, right) {
             (
-                NativeWorkspaceTarget::Style {
-                    scene_uid: left_scene,
-                    style_index: left_index,
-                },
-                NativeWorkspaceTarget::Style {
-                    scene_uid: right_scene,
-                    style_index: right_index,
-                },
-            ) => left_scene
-                .cmp(right_scene)
-                .then_with(|| right_index.cmp(left_index)),
-            (NativeWorkspaceTarget::Style { .. }, _) => std::cmp::Ordering::Less,
-            (_, NativeWorkspaceTarget::Style { .. }) => std::cmp::Ordering::Greater,
-            (
                 NativeWorkspaceTarget::Camera {
                     scene_uid: left_scene,
                     camera_index: left_index,
@@ -9745,7 +9733,7 @@ impl GuiApplication {
             .try_for_each(|target| self.destroy_workspace_target(target));
         match result {
             Ok(()) => {
-                self.push_undo_snapshot(undo);
+                self.push_undo_snapshot_for_scene(undo, None);
                 self.modified_scenes.extend(
                     targets
                         .iter()
@@ -23874,7 +23862,7 @@ impl GuiApplication {
     ) -> Option<crate::GuiStyleSummary> {
         let WorkspaceAuxSelection::Style {
             scene_uid,
-            style_index,
+            style_target,
         } = selection
         else {
             return None;
@@ -23882,7 +23870,7 @@ impl GuiApplication {
         self.state
             .style_summaries(scene_uid)
             .into_iter()
-            .nth(style_index)
+            .find(|style| style.target == style_target)
     }
 
     fn copy_workspace_style_to_clipboard(
@@ -23921,17 +23909,18 @@ impl GuiApplication {
                     self.push_undo_snapshot(undo);
                     self.modified_scenes.insert(scene_uid);
                     self.rebuild_snapshot();
-                    let style_index = self
+                    let style_target = self
                         .state
                         .style_summaries(scene_uid)
                         .iter()
-                        .position(|style| style.local_index == Some(local_index))
-                        .expect("the loaded style was just inserted");
+                        .find(|style| style.local_index == Some(local_index))
+                        .map(|style| style.target)
+                        .expect("the style exists");
                     self.selected_object = None;
                     self.selected_renderer = None;
                     self.workspace_aux_selection = Some(WorkspaceAuxSelection::Style {
                         scene_uid,
-                        style_index,
+                        style_target,
                     });
                     self.set_status(format!("Loaded style file {}", path.display()));
                 }
@@ -24657,15 +24646,16 @@ impl GuiApplication {
                     Ok(local_index) => {
                         self.push_undo_snapshot(undo);
                         self.modified_scenes.insert(draft.scene_uid);
-                        let style_index = self
+                        let style_target = self
                             .state
                             .style_summaries(draft.scene_uid)
                             .iter()
-                            .position(|style| style.local_index == Some(local_index))
-                            .unwrap_or(0);
+                            .find(|style| style.local_index == Some(local_index))
+                            .map(|style| style.target)
+                            .expect("the style exists");
                         self.workspace_aux_selection = Some(WorkspaceAuxSelection::Style {
                             scene_uid: draft.scene_uid,
-                            style_index,
+                            style_target,
                         });
                         self.rebuild_snapshot();
                         self.set_status(format!("Created style {}", draft.name.trim()));
@@ -27704,22 +27694,17 @@ impl GuiApplication {
                 });
             });
         if confirm {
-            let style_index = self
-                .state
-                .style_summaries(draft.scene_uid)
-                .iter()
-                .position(|style| style.local_index == Some(draft.local_index));
-            if let Some(style_index) = style_index {
-                self.delete_aux_selection(WorkspaceAuxSelection::Style {
-                    scene_uid: draft.scene_uid,
-                    style_index,
-                });
-            } else {
-                self.set_status("Style not found");
-            }
+            self.confirm_style_delete(draft);
         } else if open && !cancel {
             self.style_delete_draft = Some(draft);
         }
+    }
+
+    fn confirm_style_delete(&mut self, draft: NativeStyleDeleteDraft) {
+        self.delete_aux_selection(WorkspaceAuxSelection::Style {
+            scene_uid: draft.scene_uid,
+            style_target: draft.style_target,
+        });
     }
 
     fn multiple_delete_dialog(&mut self, ctx: &egui::Context) {
@@ -29882,13 +29867,13 @@ impl GuiApplication {
                     self.set_status("Style not found");
                     return;
                 };
-                let Some(local_index) = summary.local_index else {
+                if summary.local_index.is_none() {
                     self.set_status("Global styles cannot be deleted");
                     return;
-                };
+                }
                 self.style_delete_draft = Some(NativeStyleDeleteDraft {
                     scene_uid: summary.scene_uid,
-                    local_index,
+                    style_target: summary.target,
                     name: summary.name,
                 });
                 return;
@@ -36469,15 +36454,16 @@ mod tests {
         let mut app = GuiApplication::new();
         let scene = app.state.active_scene().unwrap();
         let original = app.state.create_scene_style(scene, "original").unwrap();
-        let style_index = app
+        let style_target = app
             .state
             .style_summaries(scene)
             .iter()
-            .position(|style| style.local_index == Some(original))
-            .unwrap();
+            .find(|style| style.local_index == Some(original))
+            .map(|style| style.target)
+            .expect("the style exists");
         app.open_style_properties(WorkspaceAuxSelection::Style {
             scene_uid: scene,
-            style_index,
+            style_target,
         });
         let mut draft = app.style_properties_draft.take().unwrap();
         app.state.create_scene_style(scene, "inserted").unwrap();
@@ -36506,15 +36492,16 @@ mod tests {
         app.state.import_scene_style(scene,
             r##"<styles id="palette"><color id="accent" value="#123456"/><sel id="focus" value="name C1"/></styles>"##,
             false).unwrap();
-        let style_index = app
+        let style_target = app
             .state
             .style_summaries(scene)
             .iter()
-            .position(|style| style.name == "palette")
-            .unwrap();
+            .find(|style| style.name == "palette")
+            .map(|style| style.target)
+            .expect("the style exists");
         app.open_style_properties(WorkspaceAuxSelection::Style {
             scene_uid: scene,
-            style_index,
+            style_target,
         });
         let draft = app.style_properties_draft.as_mut().unwrap();
         draft.name = "unfinished-name".into();
@@ -36538,15 +36525,16 @@ mod tests {
 
         let mut app = GuiApplication::new();
         let scene = app.state.active_scene().unwrap();
-        let style_index = app
+        let style_target = app
             .state
             .style_summaries(scene)
             .iter()
-            .position(|style| style.name == "user")
-            .unwrap();
+            .find(|style| style.name == "user")
+            .map(|style| style.target)
+            .expect("the style exists");
         app.open_style_properties(WorkspaceAuxSelection::Style {
             scene_uid: scene,
-            style_index,
+            style_target,
         });
         let mut harness = egui_kittest::Harness::new(|ctx| app.style_props_dialog(ctx));
         harness.run();
@@ -36563,15 +36551,16 @@ mod tests {
     fn native_global_style_edits_survive_scene_undo_and_do_not_add_history() {
         let mut app = GuiApplication::new();
         let scene = app.state.active_scene().unwrap();
-        let style_index = app
+        let style_target = app
             .state
             .style_summaries(scene)
             .iter()
-            .position(|style| style.scene_uid.get() == 0 && style.name == "user")
-            .unwrap();
+            .find(|style| style.scene_uid.get() == 0 && style.name == "user")
+            .map(|style| style.target)
+            .expect("the style exists");
         app.open_style_properties(WorkspaceAuxSelection::Style {
             scene_uid: scene,
-            style_index,
+            style_target,
         });
         let mut draft = app.style_properties_draft.take().unwrap();
         app.apply_native_style_mutation(
@@ -36677,15 +36666,16 @@ mod tests {
     fn native_style_editor_can_edit_a_global_user_set() {
         let mut app = GuiApplication::new();
         let scene = app.state.active_scene().unwrap();
-        let style_index = app
+        let style_target = app
             .state
             .style_summaries(scene)
             .iter()
-            .position(|style| style.local_index.is_none() && style.name == "user")
-            .unwrap();
+            .find(|style| style.local_index.is_none() && style.name == "user")
+            .map(|style| style.target)
+            .expect("the style exists");
         app.open_style_properties(WorkspaceAuxSelection::Style {
             scene_uid: scene,
-            style_index,
+            style_target,
         });
         let mut draft = app
             .style_properties_draft
@@ -36734,15 +36724,16 @@ mod tests {
                 "<styles><color id=\"accent\" value=\"#112233\"/></styles>",
             )
             .unwrap();
-        let style_index = app
+        let style_target = app
             .state
             .style_summaries(scene_uid)
             .iter()
-            .position(|style| style.local_index == Some(local_index))
-            .unwrap();
+            .find(|style| style.local_index == Some(local_index))
+            .map(|style| style.target)
+            .expect("the style exists");
         app.open_style_properties(WorkspaceAuxSelection::Style {
             scene_uid,
-            style_index,
+            style_target,
         });
         let mut draft = app.style_properties_draft.take().unwrap();
 
@@ -37170,14 +37161,14 @@ mod tests {
         }
         app.state.create_scene_style(scene_uid, "style_0").unwrap();
         app.state.create_scene_style(scene_uid, "style_1").unwrap();
-        let style_indices = app
+        let style_targets = app
             .state
             .style_summaries(scene_uid)
             .iter()
             .enumerate()
-            .filter_map(|(index, style)| style.local_index.map(|_| index))
+            .filter_map(|(_, style)| style.local_index.map(|_| style.target))
             .collect::<Vec<_>>();
-        assert_eq!(style_indices.len(), 2);
+        assert_eq!(style_targets.len(), 2);
 
         let camera_0 = NativeWorkspaceTarget::Camera {
             scene_uid,
@@ -37189,11 +37180,11 @@ mod tests {
         };
         let style_0 = NativeWorkspaceTarget::Style {
             scene_uid,
-            style_index: style_indices[0],
+            style_target: style_targets[0],
         };
         let style_1 = NativeWorkspaceTarget::Style {
             scene_uid,
-            style_index: style_indices[1],
+            style_target: style_targets[1],
         };
         app.apply_workspace_target(camera_0);
         assert!(app.select_workspace_target(style_0, true));
@@ -37301,19 +37292,98 @@ mod tests {
     }
 
     #[test]
+    fn native_workspace_style_selection_survives_insertion() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        app.state.create_scene_style(scene_uid, "original").unwrap();
+        let selection = WorkspaceAuxSelection::Style {
+            scene_uid,
+            style_target: app.state.find_style_target(scene_uid, "original").unwrap(),
+        };
+        assert_eq!(
+            app.style_summary_for_selection(selection).unwrap().name,
+            "original"
+        );
+        app.workspace_aux_selection = Some(selection);
+        app.state.create_scene_style(scene_uid, "inserted").unwrap();
+        app.open_style_properties(selection);
+        assert_eq!(
+            app.style_properties_draft.as_ref().unwrap().name,
+            "original"
+        );
+        app.delete_aux_selection(selection);
+        assert!(app.state.find_style_target(scene_uid, "original").is_none());
+        assert!(app.state.find_style_target(scene_uid, "inserted").is_some());
+    }
+
+    #[test]
+    fn native_workspace_style_multiple_selection_survives_insertion() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        app.state.create_scene_style(scene_uid, "first").unwrap();
+        app.state.create_scene_style(scene_uid, "second").unwrap();
+        app.workspace_multiple_selection = vec![
+            NativeWorkspaceTarget::Style {
+                scene_uid,
+                style_target: app.state.find_style_target(scene_uid, "first").unwrap(),
+            },
+            NativeWorkspaceTarget::Style {
+                scene_uid,
+                style_target: app.state.find_style_target(scene_uid, "second").unwrap(),
+            },
+        ];
+        app.state.create_scene_style(scene_uid, "inserted").unwrap();
+        let other = app.state.new_scene("other", true).result_scene;
+        app.request_delete_workspace_targets();
+        app.advance_multiple_delete_confirmation(true);
+        app.advance_multiple_delete_confirmation(true);
+        assert!(app.state.find_style_target(scene_uid, "first").is_none());
+        assert!(app.state.find_style_target(scene_uid, "second").is_none());
+        assert!(app.state.find_style_target(scene_uid, "inserted").is_some());
+        assert!(app.modified_scenes.contains(&scene_uid));
+        assert!(!app.modified_scenes.contains(&other));
+    }
+
+    #[test]
+    fn native_style_delete_confirmation_keeps_its_identity() {
+        let mut app = GuiApplication::new();
+        let scene_uid = app.state.active_scene().unwrap();
+        app.state.create_scene_style(scene_uid, "original").unwrap();
+        let selection = WorkspaceAuxSelection::Style {
+            scene_uid,
+            style_target: app.state.find_style_target(scene_uid, "original").unwrap(),
+        };
+        app.request_delete_aux_selection(selection);
+        let draft = app.style_delete_draft.take().unwrap();
+        app.state.create_scene_style(scene_uid, "inserted").unwrap();
+        app.confirm_style_delete(draft.clone());
+        assert!(app.state.find_style_target(scene_uid, "original").is_none());
+        assert!(app.state.find_style_target(scene_uid, "inserted").is_some());
+        app.state
+            .create_scene_style(scene_uid, "replacement")
+            .unwrap();
+        let before = app.state.clone();
+        app.confirm_style_delete(draft);
+        assert_eq!(app.status, "Style not found");
+        assert!(app.state.same_undo_state(&before));
+        assert_eq!(app.undo_stack.len(), 1);
+    }
+
+    #[test]
     fn native_workspace_style_select_delete_and_undo() {
         let mut app = GuiApplication::new();
         let scene_uid = app.state.active_scene().unwrap();
         let local_index = app.state.create_scene_style(scene_uid, "style_0").unwrap();
-        let style_index = app
+        let style_target = app
             .state
             .style_summaries(scene_uid)
             .iter()
-            .position(|style| style.local_index == Some(local_index))
-            .unwrap();
+            .find(|style| style.local_index == Some(local_index))
+            .map(|style| style.target)
+            .expect("the style exists");
         let selection = WorkspaceAuxSelection::Style {
             scene_uid,
-            style_index,
+            style_target,
         };
         app.open_style_properties(selection);
         assert_eq!(app.style_properties_draft.as_ref().unwrap().name, "style_0");
@@ -37384,7 +37454,7 @@ mod tests {
         app.request_delete_aux_selection(selection);
         let delete = app.style_delete_draft.take().unwrap();
         assert_eq!(delete.scene_uid, scene_uid);
-        assert_eq!(delete.local_index, local_index);
+        assert_eq!(delete.style_target, style_target);
         assert_eq!(delete.name, "style_0");
         app.delete_aux_selection(selection);
         assert!(app

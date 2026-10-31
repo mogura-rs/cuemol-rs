@@ -1191,7 +1191,7 @@ struct WorkspaceDeleteInput {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
-    local_index: Option<usize>,
+    style_id: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -1371,13 +1371,6 @@ struct WorkspaceCameraRenameInput {
     scene_uid: u64,
     old_name: String,
     new_name: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WorkspaceStyleCopyInput {
-    scene_uid: u64,
-    local_index: usize,
 }
 
 #[derive(Deserialize)]
@@ -3378,6 +3371,23 @@ impl AppModel {
         Ok(())
     }
 
+    fn workspace_delete_scene(&self, target: &WorkspaceDeleteInput) -> Option<Uid> {
+        if matches!(target.kind.as_str(), "camera" | "style") {
+            return target.scene_uid.map(Uid::new);
+        }
+        let object = Uid::new(target.object_uid);
+        self.desktop
+            .scene_manager()
+            .scene_uid_for_object(object)
+            .or_else(|| {
+                self.desktop
+                    .density_map_summary(object)
+                    .map(|map| map.scene_uid)
+            })
+            .or_else(|| self.desktop.scene_manager().scene_uid_for_surface(object))
+            .or_else(|| self.desktop.scene_manager().scene_uid_for_lw_object(object))
+    }
+
     fn delete_workspace_item(&mut self, target: WorkspaceDeleteInput) -> Result<(), String> {
         let object_uid = Uid::new(target.object_uid);
         let auxiliary_group_target = target.kind == "rendererGroup"
@@ -3627,15 +3637,18 @@ impl AppModel {
                         .scene_uid
                         .ok_or_else(|| "scene UID is required".to_string())?,
                 );
-                let local_index = target
-                    .local_index
-                    .ok_or_else(|| "local style index is required".to_string())?;
+                let style_id = target
+                    .style_id
+                    .ok_or_else(|| "style ID is required".to_string())?;
                 if !self
                     .desktop
-                    .destroy_scene_style(scene_uid, local_index)
+                    .delete_style(cuemol_desktop_core::GuiStyleTarget::Scene {
+                        scene_uid,
+                        runtime_id: style_id,
+                    })
                     .map_err(|error| error.to_string())?
                 {
-                    return Err(format!("style {local_index} not found"));
+                    return Err(format!("style {style_id} not found"));
                 }
                 self.status = "Destroyed style".to_string();
                 self.invalidate_snapshot(false);
@@ -3662,19 +3675,7 @@ impl AppModel {
             "object" | "densityMap" | "surface" | "lwObject" => 4,
             _ => 5,
         };
-        targets.sort_by(|left, right| {
-            let rank = delete_rank(left).cmp(&delete_rank(right));
-            if rank != std::cmp::Ordering::Equal {
-                return rank;
-            }
-            match left.kind.as_str() {
-                "style" => left
-                    .scene_uid
-                    .cmp(&right.scene_uid)
-                    .then_with(|| right.local_index.cmp(&left.local_index)),
-                _ => std::cmp::Ordering::Equal,
-            }
-        });
+        targets.sort_by_key(delete_rank);
         for target in targets {
             self.delete_workspace_item(target)?;
         }
@@ -4168,10 +4169,18 @@ impl AppModel {
         Ok(())
     }
 
-    fn copy_workspace_style(&mut self, input: WorkspaceStyleCopyInput) -> Result<String, String> {
+    fn copy_workspace_style(&mut self, input: StyleTargetInput) -> Result<String, String> {
+        let target = self.style_target(input)?;
+        let summary = self
+            .desktop
+            .style_summary(target)
+            .map_err(|error| error.to_string())?;
+        let local_index = summary
+            .local_index
+            .ok_or_else(|| "global styles cannot be copied".to_string())?;
         let clipboard = self
             .desktop
-            .copy_workspace_style(Uid::new(input.scene_uid), input.local_index)
+            .copy_workspace_style(summary.scene_uid, local_index)
             .map_err(|error| error.to_string())?;
         let name = clipboard.name();
         self.system_clipboard
@@ -8175,7 +8184,7 @@ enum ModelRequest {
     CopyWorkspaceCamera(WorkspaceCameraCopyInput),
     PasteWorkspaceCamera(WorkspaceCameraPasteInput),
     RenameWorkspaceCamera(WorkspaceCameraRenameInput),
-    CopyWorkspaceStyle(WorkspaceStyleCopyInput),
+    CopyWorkspaceStyle(StyleTargetInput),
     PasteWorkspaceStyle(WorkspaceStylePasteInput),
     CreateWorkspaceRendererGroup(WorkspaceRendererGroupInput),
     RenameWorkspaceRendererGroup(WorkspaceRendererGroupInput),
@@ -10556,15 +10565,20 @@ fn handle_model_request(
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::DeleteWorkspaceItem(target) => {
+            let scene_uid = model.workspace_delete_scene(&target);
             let undo = model.capture_undo();
             model.delete_workspace_item(target)?;
-            model.push_undo(undo);
+            model.push_undo_for_scene(undo, scene_uid);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::DeleteWorkspaceItems(targets) => {
+            let scenes: Vec<_> = targets.iter().filter_map(|target| model.workspace_delete_scene(target)).collect();
             let undo = model.capture_undo();
             match model.delete_workspace_items(targets) {
-                Ok(()) => model.push_undo(undo),
+                Ok(()) => {
+                    model.push_undo_for_scene(undo, None);
+                    model.modified_scenes.extend(scenes);
+                }
                 Err(error) => {
                     model.restore_undo(undo)?;
                     return Err(error);
@@ -14738,7 +14752,7 @@ fn rename_workspace_camera(
 
 #[tauri::command]
 fn copy_workspace_style(
-    input: WorkspaceStyleCopyInput,
+    input: StyleTargetInput,
     state: State<'_, ManagedState>,
 ) -> Result<String, String> {
     message_response(request_model(
@@ -19314,7 +19328,7 @@ mod tests {
                 renderer_uid: Some(group_uid.get()),
                 scene_uid: None,
                 name: None,
-                local_index: None,
+                style_id: None,
             }),
         )
         .unwrap();
@@ -19895,7 +19909,7 @@ mod tests {
                 renderer_uid: target.renderer_uid,
                 scene_uid: None,
                 name: None,
-                local_index: None,
+                style_id: None,
             })
             .collect();
         let response = handle_model_request(
@@ -19981,7 +19995,7 @@ mod tests {
                     renderer_uid: None,
                     scene_uid: None,
                     name: None,
-                    local_index: None,
+                    style_id: None,
                 },
                 WorkspaceDeleteInput {
                     kind: "rendererGroup".to_string(),
@@ -19989,7 +20003,7 @@ mod tests {
                     renderer_uid: Some(group_uid.get()),
                     scene_uid: None,
                     name: None,
-                    local_index: None,
+                    style_id: None,
                 },
                 WorkspaceDeleteInput {
                     kind: "renderer".to_string(),
@@ -19997,7 +20011,7 @@ mod tests {
                     renderer_uid: Some(child_uid.get()),
                     scene_uid: None,
                     name: None,
-                    local_index: None,
+                    style_id: None,
                 },
             ]),
         )
@@ -20022,6 +20036,13 @@ mod tests {
         model.save_named_camera("camera_0", false).unwrap();
         model.create_named_style("first").unwrap();
         model.create_named_style("second").unwrap();
+        let style_ids = ["first", "second"].map(|name| {
+            model
+                .desktop
+                .find_style_target(scene_uid, name)
+                .unwrap()
+                .runtime_id()
+        });
         let previous_style_names = model
             .snapshot()
             .styles
@@ -20041,7 +20062,7 @@ mod tests {
                     renderer_uid: None,
                     scene_uid: Some(scene_uid.get()),
                     name: None,
-                    local_index: Some(0),
+                    style_id: Some(style_ids[0]),
                 },
                 WorkspaceDeleteInput {
                     kind: "camera".to_string(),
@@ -20049,7 +20070,7 @@ mod tests {
                     renderer_uid: None,
                     scene_uid: Some(scene_uid.get()),
                     name: Some("camera_0".to_string()),
-                    local_index: None,
+                    style_id: None,
                 },
                 WorkspaceDeleteInput {
                     kind: "style".to_string(),
@@ -20057,7 +20078,7 @@ mod tests {
                     renderer_uid: None,
                     scene_uid: Some(scene_uid.get()),
                     name: None,
-                    local_index: Some(1),
+                    style_id: Some(style_ids[1]),
                 },
             ]),
         )
@@ -21790,7 +21811,7 @@ mod tests {
                 renderer_uid: Some(pasted_group_uid),
                 scene_uid: None,
                 name: None,
-                local_index: None,
+                style_id: None,
             }),
         )
         .unwrap();
@@ -21803,7 +21824,7 @@ mod tests {
                 renderer_uid: Some(group_uid),
                 scene_uid: None,
                 name: None,
-                local_index: None,
+                style_id: None,
             }),
         )
         .unwrap();
@@ -22064,7 +22085,7 @@ mod tests {
                 renderer_uid: Some(renderer_uid.get()),
                 scene_uid: None,
                 name: None,
-                local_index: None,
+                style_id: None,
             }),
         )
         .unwrap();
@@ -22082,7 +22103,7 @@ mod tests {
                 renderer_uid: None,
                 scene_uid: None,
                 name: None,
-                local_index: None,
+                style_id: None,
             }),
         )
         .unwrap();
@@ -22439,14 +22460,8 @@ mod tests {
         assert!(!local.read_only);
 
         let undo_count = model.undo_stack.len();
-        let response = handle_model_request(
-            &mut model,
-            ModelRequest::CopyWorkspaceStyle(WorkspaceStyleCopyInput {
-                scene_uid: scene_uid.get(),
-                local_index,
-            }),
-        )
-        .unwrap();
+        let response =
+            handle_model_request(&mut model, ModelRequest::CopyWorkspaceStyle(target)).unwrap();
         let ModelResponse::Message(message) = response else {
             panic!("expected copy status message");
         };
@@ -22515,6 +22530,61 @@ mod tests {
             .styles
             .iter()
             .any(|style| style.name == "custom"));
+    }
+
+    #[test]
+    fn workspace_style_copy_and_multiple_delete_resolve_stable_ids() {
+        let mut model = model_without_gpu();
+        let scene = model.desktop.active_scene().unwrap();
+        model.create_named_style("first").unwrap();
+        model.create_named_style("second").unwrap();
+        let targets = ["first", "second"].map(|name| StyleTargetInput {
+            owner_scene_uid: scene.get(),
+            scene_uid: scene.get(),
+            style_id: model
+                .desktop
+                .find_style_target(scene, name)
+                .unwrap()
+                .runtime_id(),
+        });
+        model.create_named_style("inserted").unwrap();
+        let other = model.desktop.new_scene("other", true).result_scene;
+        let copy =
+            handle_model_request(&mut model, ModelRequest::CopyWorkspaceStyle(targets[0])).unwrap();
+        assert!(matches!(copy, ModelResponse::Message(message) if message == "Copied style first"));
+        let delete = |target: StyleTargetInput| WorkspaceDeleteInput {
+            kind: "style".into(),
+            object_uid: 0,
+            renderer_uid: None,
+            scene_uid: Some(target.scene_uid),
+            name: None,
+            style_id: Some(target.style_id),
+        };
+        handle_model_request(
+            &mut model,
+            ModelRequest::DeleteWorkspaceItems(targets.map(delete).into()),
+        )
+        .unwrap();
+        assert!(model.desktop.find_style_target(scene, "first").is_none());
+        assert!(model.desktop.find_style_target(scene, "second").is_none());
+        assert!(model.desktop.find_style_target(scene, "inserted").is_some());
+        assert!(model.modified_scenes.contains(&scene));
+        assert!(!model.modified_scenes.contains(&other));
+        let before = model.desktop.clone();
+        assert!(
+            handle_model_request(&mut model, ModelRequest::CopyWorkspaceStyle(targets[0])).is_err()
+        );
+        assert!(handle_model_request(
+            &mut model,
+            ModelRequest::DeleteWorkspaceItems(vec![delete(targets[0])])
+        )
+        .is_err());
+        assert!(model.desktop.same_undo_state(&before));
+        assert_eq!(model.undo_stack.len(), 1);
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        for name in ["first", "second", "inserted"] {
+            assert!(model.desktop.find_style_target(scene, name).is_some());
+        }
     }
 
     #[test]
@@ -23007,7 +23077,7 @@ mod tests {
                 renderer_uid: Some(renderer_uid.get()),
                 scene_uid: None,
                 name: None,
-                local_index: None,
+                style_id: None,
             }),
         )
         .unwrap();
@@ -23022,7 +23092,7 @@ mod tests {
                 renderer_uid: None,
                 scene_uid: None,
                 name: None,
-                local_index: None,
+                style_id: None,
             }),
         )
         .unwrap();
@@ -23050,7 +23120,7 @@ mod tests {
                 renderer_uid: Some(density_renderer_uid.get()),
                 scene_uid: None,
                 name: None,
-                local_index: None,
+                style_id: None,
             }),
         )
         .unwrap();
@@ -23067,7 +23137,7 @@ mod tests {
                 renderer_uid: None,
                 scene_uid: None,
                 name: None,
-                local_index: None,
+                style_id: None,
             }),
         )
         .unwrap();
@@ -23101,7 +23171,7 @@ mod tests {
                 renderer_uid: Some(surface_renderer_uid),
                 scene_uid: None,
                 name: None,
-                local_index: None,
+                style_id: None,
             }),
         )
         .unwrap();
@@ -23116,7 +23186,7 @@ mod tests {
                 renderer_uid: None,
                 scene_uid: None,
                 name: None,
-                local_index: None,
+                style_id: None,
             }),
         )
         .unwrap();
