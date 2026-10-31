@@ -118,6 +118,17 @@ had passed. The release and shared-test dependency lists now include
 published-GUI workflow. This is a runner dependency fix; application code is
 unchanged from the sidebar repair.
 
+The same packaged-window run exposed incorrect test coordinates on Windows and
+macOS. The test clicked the scene row instead of the molecule row because it
+included the native title bar in its origin. It now obtains the client area from
+the platform and verifies its requested dimensions while retaining the outer
+window containment check. At small heights, it scrolls the Selection pane before
+clicking controls below the fold and measures the actual scroll displacement
+from the tab pixels. These are test repairs; the failed clicks did not establish
+an application clipboard defect.
+The repaired Linux check passes the full input/Inspector sequence at 1024 by
+768 and 944 by 561 client pixels, plus the Selection sequence at 944 by 608.
+
 Generated archives and `dist/validation.json` remain local validation artifacts,
 not a published release. The release workflow now checks actual packaged windows
 on all five native targets. Local test results do not establish that those CI

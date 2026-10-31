@@ -14,7 +14,7 @@ import sys
 import time
 
 import pyautogui
-from PIL import Image, ImageChops, ImageGrab
+from PIL import Image, ImageChops, ImageGrab, ImageStat
 
 
 class ApplicationExited(Exception):
@@ -43,7 +43,7 @@ def desktop_work_area():
     return [0, 0, screen.width, screen.height]
 
 
-def window_bounds(pid):
+def window_bounds(pid, content=False):
     if sys.platform == 'darwin':
         import AppKit
         import Quartz
@@ -54,12 +54,23 @@ def window_bounds(pid):
         for window in Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly, 0):
             if window.get('kCGWindowOwnerPID') == pid and window.get('kCGWindowLayer') == 0:
                 bounds = window['kCGWindowBounds']
-                return [int(bounds[key]) for key in ('X', 'Y', 'Width', 'Height')]
+                x, y, width, height = [int(bounds[key]) for key in ('X', 'Y', 'Width', 'Height')]
+                if content:
+                    style = (AppKit.NSWindowStyleMaskTitled | AppKit.NSWindowStyleMaskClosable
+                             | AppKit.NSWindowStyleMaskMiniaturizable | AppKit.NSWindowStyleMaskResizable)
+                    rect = AppKit.NSWindow.contentRectForFrameRect_styleMask_(
+                        AppKit.NSMakeRect(0, 0, width, height), style)
+                    return [round(x + rect.origin.x),
+                            round(y + height - rect.origin.y - rect.size.height),
+                            round(rect.size.width), round(rect.size.height)]
+                return [x, y, width, height]
     elif sys.platform == 'win32':
         from ctypes import wintypes
         user = ctypes.WinDLL('user32', use_last_error=True)
         user.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
         user.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        user.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        user.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
         user.IsWindowVisible.argtypes = [wintypes.HWND]
         user.SetForegroundWindow.argtypes = [wintypes.HWND]
         result = []
@@ -74,7 +85,14 @@ def window_bounds(pid):
                 if user.GetWindowRect(handle, ctypes.byref(rect)):
                     if rect.right - rect.left > 300 and rect.bottom - rect.top > 200:
                         user.SetForegroundWindow(handle)
-                        result.append([rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top])
+                        if content:
+                            origin = wintypes.POINT()
+                            if not (user.GetClientRect(handle, ctypes.byref(rect))
+                                    and user.ClientToScreen(handle, ctypes.byref(origin))):
+                                return True
+                            result.append([origin.x, origin.y, rect.right, rect.bottom])
+                        else:
+                            result.append([rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top])
             return True
 
         user.EnumWindows(visit, 0)
@@ -166,11 +184,16 @@ def main():
 
             state = wait_for(loaded, timeout=90)
             bounds = wait_for(lambda: window_bounds(process.pid))
-            x, y, width, height = bounds
-            if (x < available_x or y < available_y
-                    or x + width > available_x + available_width
-                    or y + height > available_y + available_height):
+            outer_x, outer_y, outer_width, outer_height = bounds
+            if (outer_x < available_x or outer_y < available_y
+                    or outer_x + outer_width > available_x + available_width
+                    or outer_y + outer_height > available_y + available_height):
                 raise RuntimeError(f'The application window {bounds} exceeds the desktop work area')
+            client = wait_for(lambda: window_bounds(process.pid, content=True))
+            x, y, width, height = client
+            if [width, height] != [window_width, window_height]:
+                raise RuntimeError(f'The client area {client} differs from the requested size')
+            report.update(window=bounds, client=client)
             time.sleep(0.5)
 
             def capture(name=None):
@@ -278,9 +301,27 @@ def main():
                 time.sleep(0.3)
                 pyautogui.click(x + 195, y + 596 + dy)
                 time.sleep(0.2)
-                pyautogui.click(x + 100, y + 659 + dy)
+                capture('selection-pane-term.png')
+                scroll_offset = 0
+                if 687 + dy >= height - 24:
+                    pyautogui.moveTo(x + 275, y + height - 60)
+                    time.sleep(0.2)
+                    tab_top = round(596 + dy) - 8
+                    marker = capture().crop((179, tab_top, 209, tab_top + 16))
+                    pyautogui.scroll(-2)
+                    time.sleep(0.5)
+                    scrolled = capture('selection-pane-scrolled.png')
+                    scores = []
+                    for offset in range(-min(160, tab_top), 0):
+                        candidate = scrolled.crop((179, tab_top + offset, 209, tab_top + offset + 16))
+                        difference = ImageStat.Stat(ImageChops.difference(marker, candidate))
+                        scores.append((sum(difference.mean) / 3, offset))
+                    score, scroll_offset = min(scores)
+                    if score > 2:
+                        raise RuntimeError('The Selection tab could not be located after scrolling')
+                pyautogui.click(x + 100, y + 659 + dy + scroll_offset)
                 pyautogui.write('A')
-                pyautogui.click(x + 120, y + 687 + dy)
+                pyautogui.click(x + 120, y + 687 + dy + scroll_offset)
                 wait_for(lambda: selection() == "'A'.*.*")
                 if call('count_selection', {'objId': object_id, 'selection': selection()})['count'] != 3:
                     raise RuntimeError('The live selection builder did not select the fixture chain')
