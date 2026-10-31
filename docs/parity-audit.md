@@ -1683,3 +1683,19 @@ style context rows, although its services accept scoped global operations.
 The Rust frontends still have additional metadata/editor controls and differ
 in some of those menu gates. Those UI differences and user-style persistence
 remain under comparison; service compatibility does not establish menu parity.
+
+The public `8eeb1c6` identity review found no further functional defect. Its
+formatting concern did not reproduce with `cargo fmt --all --check`. Loaded
+style identities use a process-wide atomic counter, so restoring a scene undo
+snapshot does not reuse deleted identities. The remaining workspace IPC
+builders use `styleId`, and auxiliary renderer groups retain their owner object
+for scene modification tracking. Editor reload is a context-menu operation;
+it is not one of the editor's queued actions.
+
+The macOS check at `a156fbc` passed its model tests and the existing viewport and
+console input stages, then stopped before opening the style editor. The
+PyAutoGUI macOS backend emits repeated single-click events without a native
+double-click count. The check now sends Quartz events with click counts one and
+two. A Chromium DOM check with a 120 ms interval opened both scene and global
+editors, and the full Tauri DOM suite passed 39 cases. The corrected macOS input
+check still requires a fresh run.

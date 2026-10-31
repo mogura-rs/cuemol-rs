@@ -353,6 +353,16 @@ async function openShell(page, storage = {}, options = {}) {
   return errors;
 }
 
+test('Tauri style rows open with a double click at native input speed', async ({page}) => {
+  const errors = await openShell(page, {}, {styles:true});
+  for (const scope of ['scene', 'global']) {
+    await page.getByRole('button', {name:`Style set user (${scope})`, exact:true}).dblclick({delay:120});
+    await expect(page.locator('#reference-dialog').getByLabel('Style set name')).toHaveValue('user');
+    await page.locator('#reference-dialog').getByRole('button', {name:'Close', exact:true}).last().click();
+  }
+  expect(errors).toEqual([]);
+});
+
 test('Tauri style editor sends scoped entry changes and keeps other drafts', async ({page}, testInfo) => {
   const errors=await openShell(page,{}, {styles:true});
   await page.locator('.style-node').filter({hasText:'user ↗ (global)'}).dblclick();

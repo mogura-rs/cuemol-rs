@@ -65,8 +65,18 @@ class MacControls:
         valid_size, size = self.ax.AXValueGetValue(size, self.ax.kAXValueCGSizeType, None)
         if not valid_point or not valid_size or size.width <= 0 or size.height <= 0:
             raise RuntimeError("The accessibility control has no clickable bounds")
-        pyautogui.click(point.x + size.width / 2, point.y + size.height / 2,
-                        clicks=2 if double else 1, interval=0.12)
+        x, y = point.x + size.width / 2, point.y + size.height / 2
+        if not double:
+            pyautogui.click(x, y)
+            return
+        import Quartz
+        pyautogui.moveTo(x, y)
+        for count in (1, 2):
+            for kind in (Quartz.kCGEventLeftMouseDown, Quartz.kCGEventLeftMouseUp):
+                event = Quartz.CGEventCreateMouseEvent(None, kind, (x, y), Quartz.kCGMouseButtonLeft)
+                Quartz.CGEventSetIntegerValueField(event, Quartz.kCGMouseEventClickState, count)
+                Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+            time.sleep(0.12)
 
     def fill(self, element, value):
         self.click(element)
