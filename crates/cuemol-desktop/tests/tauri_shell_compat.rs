@@ -1282,27 +1282,26 @@ fn renderer_edit_style_uses_the_ordered_style_list_dialog() {
 #[test]
 fn style_set_editor_uses_live_structured_tabs() {
     for label in [
-        "Style editor: ${properties.name}",
+        "Style editor: ${properties.name || \"(anonymous)\"}",
         "Color",
         "Selection",
         "Styles",
         "Named colors",
         "Named selections",
         "Style entries",
-        "(no named colors)",
-        "(no named selections)",
-        "(no style entries)",
-        "(read-only style set)",
-        "New color name",
-        "New selection name",
+        "No entries",
+        "value.disabled = properties.readOnly",
+        "New ${kind} name",
     ] {
         assert!(
             JS.contains(label),
             "missing structured style editor behavior {label}"
         );
     }
-    assert!(JS.contains("new XMLSerializer().serializeToString(documentNode)"));
-    assert!(JS.contains("snapshot = await invoke(\"set_style_properties\""));
+    assert!(JS.contains("tool:\"style_edit\", args:{target, kind, name, value}"));
+    assert!(JS.contains(
+        "invoke(\"set_style_properties\", {properties:{...latest, ...update, editContent:false}})"
+    ));
     assert!(CSS.contains(".reference-dialog.style-set-editor-dialog"));
     assert!(!JS.contains("xmlTitle.textContent = \"Style XML\""));
     assert!(NATIVE_GUI_RS.contains("enum NativeStyleEditorTab"));
@@ -2087,7 +2086,7 @@ fn tauri_workspace_context_menu_matches_selection_presets() {
     assert!(JS.contains("workspaceStyleContextItems"));
     assert!(JS.contains("label: \"Style file\""));
     assert!(JS.contains("function loadWorkspaceStyleFile(scene)"));
-    assert!(JS.contains("function saveWorkspaceStyleFile(scene, style, saveAs)"));
+    assert!(JS.contains("function saveWorkspaceStyleFile(scene, style, saveAs,"));
     assert!(JS.contains("function reloadWorkspaceStyleFile(scene, style)"));
     assert!(JS.contains("name: \"Style file (*.xml)\""));
     assert!(JS.contains("mutate(\"load_style_file\""));
@@ -2517,7 +2516,7 @@ fn tauri_workspace_multiple_selection_matches_reference_actions() {
     assert!(JS.contains("workspaceSelectionTarget(\"camera\""));
     assert!(JS.contains("workspaceSelectionTarget(\"style\""));
     assert!(JS.contains("sceneUid: target.objectUid"));
-    assert!(JS.contains("localIndex: target.rendererUid"));
+    assert!(JS.contains("styleId: target.rendererUid"));
     assert!(JS.contains("rendererGroup: \"object\""));
     for kind in ["densityRenderer", "surfaceRenderer", "lwRenderer"] {
         assert!(JS.contains(&format!("{kind}:")));

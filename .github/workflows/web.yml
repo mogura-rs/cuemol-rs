@@ -38,6 +38,43 @@ jobs:
         run: uv run --no-project python scripts/prepare-web-tools.py
       - name: Build browser application
         run: cargo run --locked -p cuemol-cli -- web build
+      - name: Stage portable browser assets
+        run: uv run --no-project python scripts/prepare-web-dist.py --revision "$GITHUB_SHA"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: web-assets
+          path: dist/web/
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v7
+        with:
+          name: web-test-server
+          path: target/debug/cuemol
+          if-no-files-found: error
+          compression-level: 1
+          retention-days: 1
+  browser:
+    needs: web
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: web-assets
+          path: web/
+      - uses: actions/download-artifact@v8
+        with:
+          name: web-test-server
+          path: target/debug/
+      - name: Prepare prebuilt server
+        run: chmod +x target/debug/cuemol
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
@@ -53,18 +90,13 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: Test browser application
         working-directory: web
-        run: npm test
-      - name: Stage portable browser assets
-        run: uv run --no-project python scripts/prepare-web-dist.py --revision "$GITHUB_SHA"
-      - uses: actions/upload-artifact@v7
-        with:
-          name: web-assets
-          path: dist/web/
-          if-no-files-found: error
-          retention-days: 14
+        env:
+          CUEMOL_WEB_TEST_PREBUILT: '1'
+          SHARD: ${{ matrix.shard }}
+        run: npm test -- --shard="$SHARD/4"
       - uses: actions/upload-artifact@v7
         if: failure()
         with:
-          name: browser-test-results
+          name: browser-test-results-${{ matrix.shard }}
           path: web/test-results/
           retention-days: 7

@@ -36020,10 +36020,10 @@ mod tests {
         fs::remove_file(path).unwrap();
 
         let undo_len = app.undo_stack.len();
-        properties.edge_color = "not-a-color".to_string();
+        properties.edge_color = "not(a,color)".to_string();
         assert_eq!(
             app.apply_renderer_properties(&properties),
-            Err("invalid edge color: not-a-color".to_string())
+            Err("invalid edge color: not(a,color)".to_string())
         );
         assert_eq!(app.undo_stack.len(), undo_len);
     }

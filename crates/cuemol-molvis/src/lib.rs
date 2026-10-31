@@ -6126,14 +6126,23 @@ fn resolve_color_name(name: &str, styles: &StyleManager) -> Option<[f32; 4]> {
             c.a as f32 / 255.0,
         ]
     };
-    if let Some(color) = styles.get_color(name, DEFAULT_STYLE_SCOPE) {
+    if let Some(color) = styles
+        .resolve_color(name, DEFAULT_STYLE_SCOPE)
+        .ok()
+        .flatten()
+    {
         return Some(to_rgba(color.rgba8()));
     }
     cuemol_gfx::parse_color(name)
         .ok()
         .and_then(|spec| {
             spec.resolve(
-                |name| styles.get_color(name, DEFAULT_STYLE_SCOPE).cloned(),
+                |name| {
+                    styles
+                        .resolve_color(name, DEFAULT_STYLE_SCOPE)
+                        .ok()
+                        .flatten()
+                },
                 None,
             )
         })
@@ -7677,23 +7686,23 @@ pub fn ring_meshes_snapshot_with_coloring(
             match value.name.as_str() {
                 "alpha" => {
                     if let Some(alpha) = value.value.as_number() {
-                        modifier.set_alpha(f64::from(alpha));
+                        modifier.set_alpha(alpha);
                     }
                 }
                 "material" => modifier.set_material(value.value.as_text()),
                 "mod_h" => {
                     if let Some(amount) = value.value.as_number() {
-                        modifier.set_mod_h(f64::from(amount));
+                        modifier.set_mod_h(amount);
                     }
                 }
                 "mod_s" => {
                     if let Some(amount) = value.value.as_number() {
-                        modifier.set_mod_s(f64::from(amount));
+                        modifier.set_mod_s(amount);
                     }
                 }
                 "mod_b" => {
                     if let Some(amount) = value.value.as_number() {
-                        modifier.set_mod_b(f64::from(amount));
+                        modifier.set_mod_b(amount);
                     }
                 }
                 _ => {}

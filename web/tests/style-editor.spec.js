@@ -36,6 +36,34 @@ async function xmlDownload(download) {
 }
 
 for(const backend of ['webgl','webgpu']) {
+  test(`style editor keeps live color references in ${backend}`, async ({page}) => {
+    await ready(page,backend);
+    await command(page,'create_style_set',{name:'aliases'});
+    await command(page,'define_color',{styleSet:'aliases',name:'accent',color:'#ff0000'});
+    await click(page,'Style scene aliases',{clickCount:2});
+    await fill(page,'Style new name','copy');
+    await fill(page,'Style new value','accent{alpha:0.25;mod_b:-0.5}');
+    await click(page,'Style add entry');
+    await expect.poll(async () => (await command(page,'get_style_set',{styleSet:'aliases'})).xml).toContain('accent{alpha:0.25;mod_b:-0.5}');
+    await click(page,'Style tab Selection');
+    await fill(page,'Style new name','focus');
+    await fill(page,'Style new value','name C1');
+    await click(page,'Style add entry');
+    await expect.poll(async () => (await command(page,'get_style_set',{styleSet:'aliases'})).xml).toContain('name C1');
+    await fill(page,'Style name','renamed');
+    await click(page,'Style Rename');
+    await expect.poll(async () => (await status(page)).ui.rects['Style scene renamed']).toBeTruthy();
+    await command(page,'define_color',{styleSet:'renamed',name:'accent',color:'#00ff00'});
+    const color=await command(page,'execute_script',{source:"var c=cuemol.getService('StyleManager').getColor('copy',scene.uid); print(c.toString()); print([c.r(),c.g(),c.b(),c.a()].join(','));"});
+    expect(color.log).toBe('accent{alpha:0.25;mod_b:-0.5}\n0,128,0,64\n');
+    await click(page,'Style tab Color');
+    await expect.poll(async () => (await status(page)).ui.rects['Style value 0 copy']).toBeTruthy();
+    await click(page,'Style close');
+    const xml=(await command(page,'get_style_set',{styleSet:'renamed'})).xml;
+    expect(xml).toContain('accent{alpha:0.25;mod_b:-0.5}');
+    expect(xml).toContain('name C1');
+  });
+
   test(`imported named palette colors remain fixed in ${backend}`, async ({page}) => {
     await ready(page,backend);
     await command(page,'create_style_set',{name:'source'});

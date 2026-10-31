@@ -2,7 +2,7 @@ use crate::{
     clear_xml_formatting_whitespace, parse_ldom2_xml, write_ldom2_xml, CueMolError,
     DesktopAppState, GuiStyleSummary, LDom2Node, LDom2Tree, LoadedStyle, Result, Uid,
 };
-use cuemol_qsys::{StyleManager, StyleSet};
+use cuemol_qsys::{StyleColor, StyleManager, StyleSet};
 use std::path::{Path, PathBuf};
 
 pub(crate) struct PreparedSceneStyles {
@@ -82,10 +82,18 @@ pub(crate) fn parse_import(xml: &str) -> Result<(LDom2Node, String)> {
     Ok((tree.top().clone(), write_ldom2_xml(&tree)))
 }
 
-fn normalize_palette(styles: &StyleManager, scope: u64, mut tree: LDom2Tree) -> Result<LDom2Tree> {
-    let set = StyleSet::from_node_with_colors(0, "", tree.top(), |name| {
-        styles.get_color(name, scope).cloned()
-    })?;
+fn normalize_palette(
+    styles: &StyleManager,
+    scope: u64,
+    mut tree: LDom2Tree,
+    previous: Option<&StyleSet>,
+) -> Result<LDom2Tree> {
+    let colors = |name: &str| styles.resolve_color(name, scope).ok().flatten();
+    let set = if let Some(previous) = previous {
+        StyleSet::from_node_editing(0, "", tree.top(), previous, colors)?
+    } else {
+        StyleSet::from_node_with_colors(0, "", tree.top(), colors)?
+    };
     for node in tree
         .top_mut()
         .children_mut()
@@ -162,11 +170,41 @@ impl DesktopAppState {
             &self.scene_styles_in_scope(scene_state, scene.get()),
             scene.get(),
             parse_ldom2_xml(xml)?,
+            None,
+        )
+    }
+
+    pub(crate) fn normalized_style_edit_document(
+        &self,
+        scene: Uid,
+        index: usize,
+        xml: &str,
+    ) -> Result<LDom2Tree> {
+        let styles = self.build_script_styles();
+        let loaded = self
+            .scene_manager()
+            .scene(scene)
+            .and_then(|scene| scene.loaded_styles().get(index))
+            .ok_or_else(|| CueMolError::not_found("scene style"))?;
+        let uid = self
+            .script_style_bindings
+            .get(&scene.get())
+            .and_then(|bindings| bindings.get(&loaded.runtime_id()))
+            .copied()
+            .unwrap_or_else(|| {
+                styles.has_style_set(loaded.node.str_attr("id").as_str(), scene.get())
+            });
+        normalize_palette(
+            &styles,
+            scene.get(),
+            parse_ldom2_xml(xml)?,
+            styles.get_style_set(uid),
         )
     }
 
     pub(crate) fn normalize_loaded_scene_styles(&mut self, scene: Uid) -> Result<()> {
-        let mut styles = self.global_styles();
+        let mut styles = self.build_script_styles();
+        styles.clear_scope(scene.get());
         let loaded = self
             .scene_manager()
             .scene(scene)
@@ -174,7 +212,7 @@ impl DesktopAppState {
             .loaded_styles();
         let mut replacements = Vec::with_capacity(loaded.len());
         for (index, style) in loaded.iter().enumerate() {
-            let tree = normalize_palette(&styles, scene.get(), document(style)?)?;
+            let tree = normalize_palette(&styles, scene.get(), document(style)?, None)?;
             let data = write_ldom2_xml(&tree);
             let name = if tree.top().str_attr("id").is_empty() {
                 format!("scene-style-{index}")
@@ -292,21 +330,11 @@ impl DesktopAppState {
         scope: Uid,
         expression: &str,
     ) -> Result<cuemol_gfx::SolidColor> {
-        let styles = if scope.get() == 0 {
-            self.global_styles()
-        } else {
-            let scene = self
-                .scene_manager()
-                .scene(scope)
-                .ok_or_else(|| CueMolError::not_found("scene"))?;
-            self.scene_styles_in_scope(scene, scope.get())
-        };
-        if let Some(color) = styles.get_color(expression.trim(), scope.get()) {
-            return Ok(color.clone());
+        if scope.get() != 0 && self.scene_manager().scene(scope).is_none() {
+            return Err(CueMolError::not_found("scene"));
         }
-        cuemol_gfx::parse_color(expression)?
-            .resolve(|name| styles.get_color(name, scope.get()).cloned(), None)
-            .ok_or_else(|| CueMolError::invalid_argument(format!("unresolved color: {expression}")))
+        self.build_script_styles()
+            .resolve_color_value(&StyleColor::from_expression(expression, scope.get())?)
     }
 
     pub fn find_style_target(&self, scene: Uid, name: &str) -> Option<GuiStyleTarget> {
@@ -438,19 +466,136 @@ impl DesktopAppState {
                 "modified styles cannot be made read-only",
             ));
         }
-        let xml = self.style_xml(target)?;
-        match target {
-            GuiStyleTarget::Global(id) => {
-                self.replace_global_style(id, name, read_only, &xml, false)
-            }
-            GuiStyleTarget::Scene { scene_uid, .. } => self.update_scene_style(
-                scene_uid,
-                summary.local_index.unwrap(),
-                name,
-                read_only,
-                &xml,
-            ),
+        let mut styles = self.build_script_styles();
+        let id = self.runtime_style_set_id(&styles, target)?;
+        if styles
+            .style_sets(target.scope().get())
+            .iter()
+            .any(|set| set.uid() != id && set.name() == name)
+        {
+            return Err(CueMolError::invalid_argument(format!(
+                "style already exists: {name}"
+            )));
         }
+        let set = styles.get_style_set_mut(id).unwrap();
+        set.set_name(name);
+        set.set_read_only(read_only);
+        set.set_modified(summary.modified);
+        match target {
+            GuiStyleTarget::Global(_) => {}
+            GuiStyleTarget::Scene { scene_uid, .. } => {
+                let mut tree = parse_ldom2_xml(&self.style_xml(target)?)?;
+                tree.top_mut().set_str_attr("id", name);
+                let style = &mut self
+                    .scene_manager_mut()
+                    .scene_mut(scene_uid)
+                    .unwrap()
+                    .loaded_styles_mut()[summary.local_index.unwrap()];
+                replace_content(style, tree, read_only, false)?;
+            }
+        }
+        self.script_styles = styles;
+        self.remember_script_style_bindings();
+        Ok(())
+    }
+
+    pub fn edit_style_entry(
+        &mut self,
+        target: GuiStyleTarget,
+        category: &str,
+        name: &str,
+        value: Option<&str>,
+    ) -> Result<()> {
+        let summary = self.style_summary(target)?;
+        if summary.read_only {
+            return Err(CueMolError::invalid_argument("style set is read-only"));
+        }
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(CueMolError::invalid_argument(
+                "style entry name is required",
+            ));
+        }
+        if !matches!((category, value), ("color" | "sel", _) | ("style", None)) {
+            return Err(CueMolError::invalid_argument(
+                "unsupported style entry operation",
+            ));
+        }
+        let mut styles = self.build_script_styles();
+        let id = self.runtime_style_set_id(&styles, target)?;
+        let color = if category == "color" {
+            value
+                .map(|value| StyleColor::from_expression(value, target.scope().get()))
+                .transpose()?
+        } else {
+            None
+        };
+        let mut tree = parse_ldom2_xml(&self.style_xml(target)?)?;
+        tree.top_mut().retain_children(|node| {
+            node.is_attr()
+                || node.tag_name() != category
+                || if category == "color" {
+                    !node.str_attr("id").as_str().eq_ignore_ascii_case(name)
+                } else {
+                    node.str_attr("id").as_str() != name
+                }
+        });
+        if let Some(value) = value {
+            let mut node = LDom2Node::new();
+            node.set_tag_name(category);
+            node.set_str_attr(
+                "id",
+                if category == "color" {
+                    name.to_ascii_lowercase()
+                } else {
+                    name.to_string()
+                },
+            );
+            node.set_value(
+                color
+                    .as_ref()
+                    .map(StyleColor::script_string)
+                    .as_deref()
+                    .unwrap_or(value),
+            );
+            if let Some(color) = color.as_ref().filter(|color| !color.material().is_empty()) {
+                node.set_str_attr("material", color.material());
+            }
+            tree.top_mut().append_child_node(node);
+        }
+        let set = styles.get_style_set_mut(id).unwrap();
+        match (category, value) {
+            ("color", Some(_)) => {
+                set.set_color(name, color.unwrap());
+            }
+            ("color", None) => {
+                set.remove_color(name);
+            }
+            ("sel", Some(value)) => {
+                set.set_str_data("sel", name, value);
+            }
+            ("sel", None) => {
+                set.remove_str_data("sel", name);
+            }
+            ("style", None) => {
+                set.remove_style(name);
+            }
+            _ => unreachable!(),
+        }
+        if category == "color" {
+            styles.invalidate_color_cache();
+        }
+        if let GuiStyleTarget::Scene { scene_uid, .. } = target {
+            let style = &mut self
+                .scene_manager_mut()
+                .scene_mut(scene_uid)
+                .unwrap()
+                .loaded_styles_mut()[summary.local_index.unwrap()];
+            replace_content(style, tree, false, true)?;
+        }
+        self.script_styles = styles;
+        self.remember_script_style_bindings();
+        Ok(())
     }
 
     pub fn edit_style(&mut self, target: GuiStyleTarget, xml: &str) -> Result<()> {
@@ -489,13 +634,18 @@ impl DesktopAppState {
             .iter()
             .find(|set| set.uid() == id)
             .ok_or_else(|| CueMolError::not_found("global style set"))?;
-        let mut replacement = StyleSet::from_xml_with_colors(id, name, xml, |key| {
-            self.script_styles.get_color(key, 0).cloned()
-        })?;
+        let tree = parse_ldom2_xml(xml)?;
+        let colors = |key: &str| self.script_styles.resolve_color(key, 0).ok().flatten();
+        let mut replacement = if edited {
+            StyleSet::from_node_editing(id, name, tree.top(), old, colors)?
+        } else {
+            StyleSet::from_node_with_colors(id, name, tree.top(), colors)?
+        };
         replacement.set_source(old.source());
         replacement.set_read_only(read_only);
         replacement.set_modified(edited || old.modified());
         *self.script_styles.get_style_set_mut(id).unwrap() = replacement;
+        self.script_styles.invalidate_color_cache();
         Ok(())
     }
 
@@ -573,7 +723,7 @@ impl DesktopAppState {
 
     /// Apply a content edit while retaining the style's file link and identity.
     pub fn edit_scene_style(&mut self, scene: Uid, index: usize, xml: &str) -> Result<()> {
-        let mut tree = self.normalized_style_document(scene, xml)?;
+        let mut tree = self.normalized_style_edit_document(scene, index, xml)?;
         let style = self
             .scene_manager_mut()
             .scene_mut(scene)

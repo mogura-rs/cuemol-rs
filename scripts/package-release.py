@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tarfile
 import zipfile
+from distribution_info import inspect_binary
 
 root = Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
@@ -21,13 +22,17 @@ if not binary.is_file() or not (tools / 'SOURCES.json').is_file():
     raise SystemExit('Build the native application and tools bundle first.')
 dist = root / 'dist'
 dist.mkdir(exist_ok=True)
+revision = os.environ.get('GITHUB_SHA') or subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
+if subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip() != revision:
+    raise SystemExit('Checkout does not match the requested source commit.')
+if subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=normal'], cwd=root):
+    raise SystemExit('Commit source changes and rebuild before release packaging.')
+info = inspect_binary(binary, args.target, revision)
 package = root / '.cache/package' / args.target
 shutil.rmtree(package, ignore_errors=True)
 package.mkdir(parents=True)
 shutil.copy2(binary, package / binary.name)
-revision = os.environ.get('GITHUB_SHA') or subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
-version = subprocess.check_output([str(binary), '--version'], text=True).strip().removeprefix('cuemol ')
-(package / 'build-info.json').write_text(json.dumps({'commit': revision, 'target': args.target, 'version': version}, indent=2) + '\n')
+(package / 'build-info.json').write_text(json.dumps(info, indent=2) + '\n')
 shutil.copytree(tools, package / 'cuemol-tools')
 licenses = package / 'cuemol-tools/licenses'
 shutil.copy2(root / 'crates/cuemol-molanl/vendor/usalign/LICENSE', licenses / 'USalign.txt')

@@ -320,6 +320,12 @@ Put startup JavaScript in `startup.js`; it runs before command-line files open.
 Configuration inspection does not execute startup scripts. Download caches use
 `$XDG_CACHE_HOME/cuemol` or `~/.cache/cuemol`, with `CUEMOL_CACHE_DIR` as an override.
 
+Saved TSV files begin with `# cuemol-config-v2`. Keys and values preserve empty
+values and whitespace; backslashes, tabs, line endings and hash marks use `\\`,
+`\t`, `\n`, `\r` and `\#` escapes. Keys beginning with `#` remain readable.
+Older files without the header remain readable with their original
+`\n` escape convention. Invalid files leave existing preferences unchanged.
+
 For example, save the following as `startup.js` in the directory printed by
 `cuemol config path`:
 

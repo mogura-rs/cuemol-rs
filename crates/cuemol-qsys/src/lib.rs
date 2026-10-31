@@ -67,7 +67,8 @@ pub use renderer_factory::{RendererFactory, RendererInstance};
 pub use scalar_object::{ScalarHistogram, ScalarObject};
 pub use scene::{AAMethod, AnimMgrHandle, Scene, SceneManager};
 pub use style::{
-    AutoStyleContext, AutoStyleCtxt, StyleInfo, StyleManager, StyleNamedColorResolver, StyleSet,
+    AutoStyleContext, AutoStyleCtxt, StyleColor, StyleInfo, StyleManager, StyleNamedColorResolver,
+    StyleSet,
 };
 pub use style_sheet::{reset_property_to_style, StyleEvent, StyleSheet, StyleSupports};
 pub use sys_config::{SysConfig, SysConfigSection};

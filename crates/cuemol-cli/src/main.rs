@@ -1,4 +1,6 @@
 mod agent;
+#[path = "../build_support.rs"]
+mod build_support;
 mod export;
 mod external_tools;
 mod runtime;
@@ -47,6 +49,17 @@ fn run() -> Result<(), String> {
         "gui" => launch_gui(args.map(std::path::PathBuf::from).collect()),
         "--version" | "-V" => {
             println!("cuemol {}", cuemol_command::update::current_version());
+            Ok(())
+        }
+        "--build-info" => {
+            if args.next().is_some() {
+                return Err("Usage: cuemol --build-info".into());
+            }
+            let mut info: serde_json::Value =
+                serde_json::from_str(include_str!(concat!(env!("OUT_DIR"), "/build-info.json")))
+                    .map_err(|error| error.to_string())?;
+            info["version"] = cuemol_command::update::current_version().into();
+            println!("{info}");
             Ok(())
         }
         "self-upgrade" => {
@@ -845,6 +858,7 @@ fn print_usage() {
     eprintln!("Usage:");
     eprintln!("  cuemol skill [--help]   Print the agent skill as Markdown");
     eprintln!("  cuemol self-upgrade [--check]");
+    eprintln!("  cuemol --build-info   Print compiled source and feature metadata as JSON");
     eprintln!("  cuemol tools list | path NAME | run NAME [ARG ...] | bundle [--out DIR]");
     eprintln!("  cuemol [file ...]");
     eprintln!("  cuemol gui [file ...]");

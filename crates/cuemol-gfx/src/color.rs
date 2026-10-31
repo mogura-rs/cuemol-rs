@@ -18,12 +18,12 @@ pub struct ColorModifier {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ColorModifierValue {
-    Number(f32),
+    Number(f64),
     Text(String),
 }
 
 impl ColorModifierValue {
-    pub fn as_number(&self) -> Option<f32> {
+    pub fn as_number(&self) -> Option<f64> {
         match self {
             Self::Number(value) => Some(*value),
             Self::Text(_) => None,
@@ -665,8 +665,12 @@ impl NamedColor {
         let referenced = self.resolved_reference();
         let mut base = SolidColor::from_code(referenced.code());
         base.set_material(referenced.material());
+        self.modify_color(&base)
+    }
+
+    pub fn modify_color(&self, base: &SolidColor) -> SolidColor {
         apply_color_overrides(
-            base,
+            base.clone(),
             self.material.clone(),
             self.alpha,
             self.mod_h,
@@ -1213,7 +1217,6 @@ impl ColorSpec {
                 .iter()
                 .find(|m| m.name == name)
                 .and_then(|m| m.value.as_number())
-                .map(f64::from)
                 .unwrap_or(default)
         };
         let material = self
@@ -1249,7 +1252,7 @@ impl ColorSpec {
         for modifier in &self.modifiers {
             if modifier.name == "alpha" {
                 if let Some(value) = modifier.value.as_number() {
-                    rgba.a = alpha_to_u8(value);
+                    rgba.a = unit_to_u8(value);
                 }
             }
         }
@@ -1332,22 +1335,22 @@ fn color_modifier_string(
     ignore_alpha: bool,
 ) -> String {
     let mut parts = Vec::new();
-    if !material.is_empty() {
-        parts.push(format!("material: {material}"));
-    }
     if !ignore_alpha && alpha >= -0.01 {
-        parts.push(format!("alpha: {}", format_real(alpha)));
+        parts.push(format!("alpha:{}", format_real(alpha)));
     }
-    if mod_h.abs() >= 1.0e-4 {
-        parts.push(format!("mod_h: {}", format_real(mod_h)));
-    }
-    if mod_s.abs() >= 1.0e-4 {
-        parts.push(format!("mod_s: {}", format_real(mod_s)));
+    if !material.is_empty() {
+        parts.push(format!("material:{material}"));
     }
     if mod_b.abs() >= 1.0e-4 {
-        parts.push(format!("mod_b: {}", format_real(mod_b)));
+        parts.push(format!("mod_b:{}", format_real(mod_b)));
     }
-    parts.join("; ")
+    if mod_h.abs() >= 1.0e-4 {
+        parts.push(format!("mod_h:{}", format_real(mod_h)));
+    }
+    if mod_s.abs() >= 1.0e-4 {
+        parts.push(format!("mod_s:{}", format_real(mod_s)));
+    }
+    parts.join(";")
 }
 
 fn blend_channel(v1: u8, v2: u8, rho: f64) -> u8 {
@@ -1438,7 +1441,7 @@ fn parse_color_base(input: &str) -> Result<ColorBase> {
         return Err(CueMolError::parse("invalid color function"));
     }
 
-    if is_identifier(input) {
+    if is_color_name(input) {
         return Ok(ColorBase::Named(input.to_string()));
     }
 
@@ -1493,7 +1496,22 @@ fn parse_number_list(input: &str, expected_count: usize) -> Result<Vec<f32>> {
 
 fn parse_modifiers(input: &str) -> Result<Vec<ColorModifier>> {
     let mut modifiers = Vec::new();
-    for part in input.split(';') {
+    let mut quoted = false;
+    let mut parts = Vec::new();
+    let mut start = 0;
+    for (index, ch) in input.char_indices() {
+        if ch == '\'' {
+            quoted = !quoted;
+        } else if ch == ';' && !quoted {
+            parts.push(&input[start..index]);
+            start = index + 1;
+        }
+    }
+    if quoted {
+        return Err(CueMolError::parse("unterminated color modifier string"));
+    }
+    parts.push(&input[start..]);
+    for part in parts {
         let part = part.trim();
         if part.is_empty() {
             continue;
@@ -1518,15 +1536,31 @@ fn parse_modifier_value(name: &str, value: &str) -> Result<ColorModifierValue> {
     if value.is_empty() {
         return Err(CueMolError::parse("invalid color modifier value"));
     }
-    if let Ok(number) = value.parse::<f32>() {
-        return Ok(ColorModifierValue::Number(number));
-    }
-    if name == "material"
-        && value
+    let quoted = value
+        .strip_prefix('\'')
+        .and_then(|value| value.strip_suffix('\''));
+    let text = quoted.unwrap_or(value);
+    let token = quoted.is_some()
+        || text
             .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-    {
-        return Ok(ColorModifierValue::Text(value.to_string()));
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            && text
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '+' | '-'))
+        || text.contains('.') && text.parse::<f64>().is_ok();
+    if token {
+        if name == "material" {
+            return Ok(ColorModifierValue::Text(text.to_string()));
+        }
+        if let Ok(number) = text.parse::<f64>() {
+            if number.is_finite() {
+                return Ok(ColorModifierValue::Number(number));
+            }
+        }
+        if !matches!(name, "alpha" | "mod_h" | "mod_s" | "mod_b") {
+            return Ok(ColorModifierValue::Text(text.to_string()));
+        }
     }
     Err(CueMolError::parse("invalid color modifier value"))
 }
@@ -1540,6 +1574,24 @@ fn is_identifier(value: &str) -> bool {
         return false;
     }
     chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+fn is_color_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphanumeric() || first == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '+' | '-'))
+        && !(value.chars().all(|ch| ch.is_ascii_digit())
+            && (value.len() == 1 || !value.starts_with('0')))
+        && !value
+            .strip_prefix("0x")
+            .is_some_and(|hex| !hex.is_empty() && hex.chars().all(|ch| ch.is_ascii_hexdigit()))
+        && !matches!(
+            value,
+            "rgb" | "RGB" | "rgba" | "RGBA" | "hsb" | "HSB" | "hsba" | "HSBA"
+        )
 }
 
 fn color_component_to_u8(value: f32) -> u8 {
@@ -1563,55 +1615,40 @@ fn alpha_to_u8(value: f32) -> u8 {
 }
 
 fn hsb_to_rgba(h: f32, s: f32, v: f32, a: f32) -> Rgba8 {
-    let h = h.rem_euclid(360.0) / 60.0;
-    let c = v * s;
-    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
-    let m = v - c;
-    let (r, g, b) = if h < 1.0 {
-        (c, x, 0.0)
-    } else if h < 2.0 {
-        (x, c, 0.0)
-    } else if h < 3.0 {
-        (0.0, c, x)
-    } else if h < 4.0 {
-        (0.0, x, c)
-    } else if h < 5.0 {
-        (x, 0.0, c)
-    } else {
-        (c, 0.0, x)
-    };
-    Rgba8 {
-        r: alpha_to_u8(r + m),
-        g: alpha_to_u8(g + m),
-        b: alpha_to_u8(b + m),
-        a: alpha_to_u8(a),
-    }
+    hsb_unit_to_rgba(
+        f64::from(h) / 360.0,
+        f64::from(s),
+        f64::from(v),
+        f64::from(a),
+    )
 }
 
 fn hsb_unit_to_rgba(h: f64, s: f64, v: f64, a: f64) -> Rgba8 {
-    let h = h.rem_euclid(1.0) * 6.0;
+    // The reference's floating-point HSB conversion keeps a signed remainder.
+    let h = (h % 1.0) * 6.0;
     let s = s.clamp(0.0, 1.0);
     let v = v.clamp(0.0, 1.0);
-    let c = v * s;
-    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
-    let m = v - c;
-    let (r, g, b) = if h < 1.0 {
-        (c, x, 0.0)
-    } else if h < 2.0 {
-        (x, c, 0.0)
-    } else if h < 3.0 {
-        (0.0, c, x)
-    } else if h < 4.0 {
-        (0.0, x, c)
-    } else if h < 5.0 {
-        (x, 0.0, c)
+    let (r, g, b) = if s < 1.0e-4 {
+        (v, v, v)
     } else {
-        (c, 0.0, x)
+        let segment = h.floor();
+        let fraction = h - segment;
+        let p = v * (1.0 - s);
+        let q = v * (1.0 - s * fraction);
+        let t = v * (1.0 - s * (1.0 - fraction));
+        match segment as i32 {
+            0 => (v, t, p),
+            1 => (q, v, p),
+            2 => (p, v, t),
+            3 => (p, q, v),
+            4 => (t, p, v),
+            _ => (v, p, q),
+        }
     };
     Rgba8 {
-        r: unit_to_u8(r + m),
-        g: unit_to_u8(g + m),
-        b: unit_to_u8(b + m),
+        r: unit_to_u8(r),
+        g: unit_to_u8(g),
+        b: unit_to_u8(b),
         a: unit_to_u8(a),
     }
 }
@@ -1709,6 +1746,9 @@ mod tests {
         for color in [
             "red",
             "color_1",
+            "undefined-accent",
+            "1accent+lighter",
+            "01",
             " red",
             "#fff",
             "#AbC",
@@ -1758,9 +1798,33 @@ mod tests {
             "red{alpha: 0.5",
             "red{alpha: opaque}",
             "Rgb(255, 0, 0)",
+            "123",
+            "0xdead",
+            "RGB",
         ] {
             assert!(parse_color(color).is_err(), "{color}");
         }
+    }
+
+    #[test]
+    fn raw_hsb_negative_hues_follow_the_reference_float_conversion() {
+        assert_eq!(
+            SolidColor::create_raw_hsb(-1.0 / 3.0, 1.0, 1.0, 1.0).code(),
+            0xffff00ff
+        );
+        assert_eq!(
+            parse_color("hsb(-120,1,1)").unwrap().rgba8(),
+            Some(Rgba8 {
+                r: 255,
+                g: 0,
+                b: 255,
+                a: 255
+            })
+        );
+        assert_eq!(
+            SolidColor::create_raw_hsb(0.0, 0.00009, 1.0, 1.0).code(),
+            0xffffffff
+        );
     }
 
     #[test]

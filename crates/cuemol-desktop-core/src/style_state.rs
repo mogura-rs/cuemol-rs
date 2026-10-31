@@ -1,7 +1,5 @@
-#[cfg(feature = "scripting")]
 use crate::{parse_ldom2_xml, write_ldom2_xml, LoadedStyle, Result};
-use crate::{DesktopAppState, MolScene, StyleManager};
-#[cfg(feature = "scripting")]
+use crate::{CueMolError, DesktopAppState, GuiStyleTarget, MolScene, StyleManager};
 use cuemol_qsys::StyleSet;
 
 fn loaded_name(style: &cuemol_molstr::LoadedStyle, index: usize) -> String {
@@ -14,20 +12,52 @@ fn loaded_name(style: &cuemol_molstr::LoadedStyle, index: usize) -> String {
 }
 
 impl DesktopAppState {
+    pub(crate) fn runtime_style_set_id(
+        &self,
+        styles: &StyleManager,
+        target: GuiStyleTarget,
+    ) -> Result<u64> {
+        let scope = target.scope().get();
+        let uid = match target {
+            GuiStyleTarget::Global(id) => id,
+            GuiStyleTarget::Scene {
+                scene_uid,
+                runtime_id,
+            } => {
+                let (index, loaded) = self
+                    .scene_manager()
+                    .scene(scene_uid)
+                    .and_then(|scene| {
+                        scene
+                            .loaded_styles()
+                            .iter()
+                            .enumerate()
+                            .find(|(_, loaded)| loaded.runtime_id() == runtime_id)
+                    })
+                    .ok_or_else(|| CueMolError::not_found("scene style"))?;
+                self.script_style_bindings
+                    .get(&scope)
+                    .and_then(|bindings| bindings.get(&runtime_id))
+                    .copied()
+                    .unwrap_or_else(|| styles.has_style_set(&loaded_name(loaded, index), scope))
+            }
+        };
+        styles
+            .style_sets(scope)
+            .iter()
+            .find(|set| set.uid() == uid)
+            .map(StyleSet::uid)
+            .ok_or_else(|| CueMolError::not_found("style set"))
+    }
+
     pub(crate) fn global_styles(&self) -> StyleManager {
         self.script_styles.global_scope()
     }
 
     pub(crate) fn scene_styles_in_scope(&self, scene: &MolScene, scope: u64) -> StyleManager {
-        let mut styles = self.global_styles();
-        for (index, loaded) in scene.loaded_styles().iter().enumerate() {
-            let read_only = loaded.node.str_attr("readonly").equals_ignore_case("true");
-            styles.load_style_set_from_xml(
-                scope,
-                loaded_name(loaded, index),
-                &loaded.data,
-                read_only,
-            );
+        let mut styles = self.build_script_styles();
+        if scope == 0 {
+            styles.project_scene_scope(scene.uid().get());
         }
         styles
     }
@@ -36,17 +66,21 @@ impl DesktopAppState {
         self.scene_styles_in_scope(scene, cuemol_molvis::DEFAULT_STYLE_SCOPE)
     }
 
-    #[cfg(feature = "scripting")]
     pub(crate) fn build_script_styles(&self) -> StyleManager {
         let mut styles = self.script_styles.clone();
         for scene in self.scene_manager().scenes() {
             let scope = scene.uid().get();
             let previous = styles.style_sets(scope).to_vec();
-            if let Some(bindings) = self.script_style_bindings.get(&scope) {
-                for uid in bindings.values() {
-                    styles.destroy_style_set(scope, *uid);
-                }
-            }
+            let mut rebuilt = previous
+                .iter()
+                .filter(|set| {
+                    !self
+                        .script_style_bindings
+                        .get(&scope)
+                        .is_some_and(|bindings| bindings.values().any(|uid| *uid == set.uid()))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
             for (index, loaded) in scene.loaded_styles().iter().enumerate() {
                 let name = loaded_name(loaded, index);
                 let uid = self
@@ -66,27 +100,43 @@ impl DesktopAppState {
                             .map(StyleSet::uid)
                     })
                     .unwrap_or(0);
-                let Ok(mut set) =
-                    StyleSet::from_xml_with_colors(uid, &name, &loaded.data, |name| {
-                        styles.get_color(name, scope).cloned()
-                    })
-                else {
-                    continue;
+                let old = previous.iter().find(|set| set.uid() == uid);
+                let mut set = if let Some(old) = old.filter(|old| old.to_xml() == loaded.data) {
+                    old.clone()
+                } else {
+                    let Ok(tree) = parse_ldom2_xml(&loaded.data) else {
+                        continue;
+                    };
+                    let colors = |name: &str| styles.resolve_color(name, scope).ok().flatten();
+                    let parsed = if let Some(old) = old {
+                        StyleSet::from_node_editing(uid, &name, tree.top(), old, colors)
+                    } else {
+                        StyleSet::from_node_with_colors(uid, &name, tree.top(), colors)
+                    };
+                    let Ok(set) = parsed else {
+                        continue;
+                    };
+                    set
                 };
+                if set.name() != name {
+                    set.set_name(&name);
+                }
                 set.set_source(loaded.node.str_attr("src").to_string());
                 set.set_read_only(loaded.node.str_attr("readonly").equals_ignore_case("true"));
                 set.set_modified(loaded.node.str_attr("modified").equals_ignore_case("true"));
-                let existing = styles.has_style_set(&name, scope);
-                if existing != 0 {
-                    styles.destroy_style_set(scope, existing);
-                }
-                styles.register_style_set(set, 0, scope);
+                rebuilt.retain(|set| set.name() != name);
+                rebuilt.insert(0, set);
+                styles.replace_scope_style_sets(scope, rebuilt.clone());
+                rebuilt = styles.style_sets(scope).to_vec();
             }
+            styles.replace_scope_style_sets(scope, rebuilt);
+        }
+        if !styles.same_definition_state(&self.script_styles, true) {
+            styles.invalidate_color_cache();
         }
         styles
     }
 
-    #[cfg(feature = "scripting")]
     pub(crate) fn sync_script_styles(&mut self, previous: &StyleManager) -> Result<()> {
         for scene_uid in self.scene_manager().scene_uids() {
             let scope = scene_uid.get();
@@ -182,7 +232,6 @@ impl DesktopAppState {
         Ok(())
     }
 
-    #[cfg(feature = "scripting")]
     pub(crate) fn remember_script_style_bindings(&mut self) {
         self.script_style_bindings = self
             .scene_manager()

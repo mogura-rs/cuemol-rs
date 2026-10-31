@@ -5,6 +5,94 @@ results are historical. Generated inputs and logs stay in the ignored checkout
 cache. The current repairs and their limits appear in the completion audit;
 passing tests do not establish equivalence for every parameter combination.
 
+## Configuration, palette and distribution follow-up
+
+This follow-up preserves the distinction between palette-file colors
+and live named-color references. XML imports resolve colors in the source scope
+once; interactive definitions retain their references and modifiers. Tests cover
+local shadowing, global edits across scene undo, and rejected palette loads that
+leave existing scenes unchanged. Existing palette changes were retained during
+this follow-up.
+
+Configuration serialization now preserves empty values, leading/trailing spaces,
+literal backslashes, tabs and line endings. Native files and browser storage use
+the same versioned TSV encoding. Legacy files remain readable. Parsing completes
+before applying any entry, so a malformed later row cannot partially change
+preferences. CLI tests also confirm that reading preferences does not execute
+`startup.js`.
+
+A second review reproduced another loss: keys beginning with `#`, and a
+whitespace-only key with an empty value, disappeared on reload. The decoder now
+distinguishes versioned data rows from comments and blank lines. The encoder
+escapes hash marks, and old unescaped versioned keys remain readable. Native
+file, browser-text and CLI regression checks pass. The browser settings test
+also checks that unrelated keys survive a settings edit.
+The rebuilt browser passes all nine focused WebGL/WebGPU, palette and persisted
+input checks, including the added configuration regression.
+
+The native browser server now streams filesystem assets and embedded gzip data.
+It no longer allocates the whole asset for a HEAD request or makes a temporary
+decompressed copy for an uncompressed embedded response. On x86-64 Linux, three
+sequential debug-build measurements of HEAD requests for a 128 MiB sparse file
+gave these medians:
+
+| Measurement | Before | After |
+| --- | ---: | ---: |
+| Process peak RSS | 144.81 MiB | 16.63 MiB |
+| HEAD response time | 94.96 ms | 1.08 ms |
+
+These measurements compare the Rust server before and after the change; they do
+not measure browser rendering or establish a speedup over C++ CueMol. The Linux
+regression bounds additional peak RSS below 32 MiB for that request. Separate
+checks retain concurrent request handling and both embedded transfer encodings.
+
+Browser CI now builds WASM and its native test server once, then distributes all
+193 tests across four jobs with one worker each. Test discovery verified that
+the shards contain no missing or duplicate tests. Workflow validation passes,
+but the new GitHub Actions wall time has not yet been measured.
+
+The headless workspace passes 1,597 tests. The native GUI and shell suites pass
+257 tests; their one optional POV-Ray test also passes separately with the
+bundled executable. A real Linux window passes mouse rotation, zoom, slab,
+centering, selection, undo, text input and Inspector checks. The independent C++
+input oracle compares 3,862 camera states. All five backbone oracle tests pass
+with the distributed 2.4.1 style configuration, including geometry, colors,
+triangle winding and atom ownership. Using the newer source style file instead
+produces the expected DefaultRibbon dimension mismatch; it is a different
+appearance baseline. The reference checkout remains unchanged.
+
+Before the second review, all 193 Chromium tests passed in 21.2 minutes locally.
+After the first configuration repair, the rebuilt, installed binary passed nine
+focused browser checks for
+WebGL/WebGPU palette references, global-style undo and persisted input settings.
+The installed native window also passes the OS input and pixel checks. The Unix
+installer, self-upgrade rollback tests and a fresh pip source installation pass.
+Outside the checkout, the packaged command exposes 146 MCP tools, returns its
+offline skill, runs startup scripts, and preserves configuration values.
+
+That Linux archive contained the rebuilt native application and browser
+assets. All 38 embedded assets matched their manifest hashes in both gzip and
+identity responses, and HEAD requests return no body. Bundled Python helpers,
+OIDN and POV-Ray rendering, and the APBS calculation pass from the installation;
+PDB2PQR and FFmpeg also start from their installed bundle. The APBS output has
+35,937 finite potential samples. Distribution staging and rejection checks pass
+11 cases.
+
+The second review also found that packaging assigned the current commit to
+an executable without checking when it was built. Native binaries now expose
+compiled source and feature metadata through `--build-info`. Browser builds
+record their source state before staging. Packaging rejects dirty or mismatched
+sources, and embedding verifies browser asset hashes. Final release validation
+compares executable hashes, CLI/app identity and embedded browser manifests
+across the platform matrix. These checks verify provenance and integrity; they
+do not establish functional equivalence with every C++ feature.
+
+Generated archives and `dist/validation.json` remain local validation artifacts,
+not a published release. The release workflow now checks actual packaged windows
+on all five native targets. Local test results do not establish that those CI
+jobs or the optional Tauri runtime passed; their results must be checked for the
+specific pushed commit. The sharded CI wall time also requires a completed run.
+
 ## Render interface and image-export performance
 
 The shell was compared with the distributed CueMol 2.4.1 application. Activity
@@ -2366,3 +2454,5 @@ during this work are collected here; the read-only reference itself was not edit
 | Usage and an earlier validation entry described molecule-order colors as the CueMol default. | Distributed CueMol secondary-structure colors are the default; the newer source palette remains an explicit scene-style option. |
 | Usage described the initial nucleic representation as cartoon. | It now uses the reference `nucl` renderer, including its base representation. |
 | DefaultRibbon comments and checks used the newer source's section dimensions. | The bundled default styles now match the distributed CueMol 2.4.1 dimensions; explicit renderer properties still override styles. |
+| The style constant comment claimed the bundled XML was vendored verbatim. | Its geometry defaults follow the distributed 2.4.1 styles, while newer molecule palettes remain optional. |
+| The CI description said browser tests ran in one job. | Browser tests use four shards over one shared WASM build and native test server. |

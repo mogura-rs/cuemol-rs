@@ -110,10 +110,21 @@ npm test
 The development/test profiles omit debug information. Native release builds
 avoid LTO, while the browser uses a separate size-oriented profile. CI caches
 Cargo, wasm-bindgen, Emscripten, scientific kernels and Chromium. Shared and
-native interface tests run once; browser tests run once against the shared web
-build. Release jobs reuse that browser artifact and cache platform tool bundles
+native interface tests run once. Browser tests split across four jobs, each
+using one worker and the same web artifact. The build job also supplies the
+native test server, so browser jobs do not compile Rust. Local runs remain
+sequential; use `npm test -- --shard=1/4` to reproduce one shard. Set
+`CUEMOL_WEB_TEST_PREBUILT=1` to serve with an existing `target/debug/cuemol`.
+Release and Pages jobs wait for all browser shards to pass before delivery.
+Release jobs reuse that browser artifact and cache platform tool bundles
 for five native targets. Completed tool bundles are saved before application
 compilation, and Cargo dependencies are retained after failed release jobs.
+`cuemol --build-info` reports the compiled source commit, dirty state, target,
+features and embedded browser manifest checksum. Release packaging requires
+clean native and browser builds from the requested commit. Rebuild after
+committing; staging cannot assign a new commit to older browser assets. Final
+release checks verify executable hashes and require identical CLI/app binaries
+and the same browser manifest across all platforms.
 Each native release binary also runs Python helper imports, live-scene queries,
 selected PDB output and persistent interpreter checks before packaging.
 Intel macOS has a longer timeout for builds without a populated cache.

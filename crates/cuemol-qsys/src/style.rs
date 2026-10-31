@@ -4,7 +4,8 @@ use crate::{
 };
 use cuemol_core::{parse_ldom2_xml, LDom2Node};
 use cuemol_gfx::{
-    parse_color, set_named_color_resolver, ColorBase, ColorPtr, NamedColorResolver, SolidColor,
+    parse_color, set_named_color_resolver, ColorBase, ColorPtr, MolColorRef, NamedColor,
+    NamedColorResolver, SolidColor,
 };
 use std::collections::BTreeMap;
 use std::sync::{
@@ -12,9 +13,8 @@ use std::sync::{
     Arc, Mutex, RwLock,
 };
 
-/// Bundled default style sheet (C++ `data/default_style.xml`): named renderer
-/// style presets (`DefaultBallStick`/`DefaultCPK`/…) plus the X11 named-colour
-/// table. Vendored verbatim and parsed once via [`parse_ldom2_xml`].
+/// Bundled renderer presets and named colors. Geometry defaults follow the
+/// distributed CueMol 2.4.1 styles; newer molecule palettes remain opt-in.
 const DEFAULT_STYLE_XML: &str = include_str!("../data/default_style.xml");
 
 pub const MATERIAL_AMBIENT: usize = 0;
@@ -79,13 +79,100 @@ impl StyleMaterial {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum StyleColor {
+    Solid(SolidColor),
+    Named(NamedColor),
+    Molecule(MolColorRef),
+}
+
+impl From<SolidColor> for StyleColor {
+    fn from(value: SolidColor) -> Self {
+        Self::Solid(value)
+    }
+}
+
+impl StyleColor {
+    pub fn from_expression(expression: &str, scope: u64) -> cuemol_core::Result<Self> {
+        let spec = parse_color(expression)?;
+        let number = |key: &str, default| {
+            spec.modifiers
+                .iter()
+                .find(|modifier| modifier.name == key)
+                .and_then(|modifier| modifier.value.as_number())
+                .unwrap_or(default)
+        };
+        let material = spec
+            .modifiers
+            .iter()
+            .find(|modifier| modifier.name == "material")
+            .map(|modifier| modifier.value.as_text())
+            .unwrap_or("");
+        match &spec.base {
+            ColorBase::Named(name) => {
+                let mut color = NamedColor::from_name_in_context(name, scope);
+                color.set_material(material);
+                color.set_alpha(number("alpha", -1.0));
+                color.set_mod_h(number("mod_h", 0.0));
+                color.set_mod_s(number("mod_s", 0.0));
+                color.set_mod_b(number("mod_b", 0.0));
+                Ok(Self::Named(color))
+            }
+            ColorBase::MolColor(_) => {
+                let mut color = MolColorRef::new();
+                color.set_material(material);
+                color.set_alpha(number("alpha", -1.0));
+                color.set_mod_h(number("mod_h", 0.0));
+                color.set_mod_s(number("mod_s", 0.0));
+                color.set_mod_b(number("mod_b", 0.0));
+                Ok(Self::Molecule(color))
+            }
+            _ => spec
+                .resolve(|_| None, None)
+                .map(Self::Solid)
+                .ok_or_else(|| cuemol_core::CueMolError::parse("invalid solid color")),
+        }
+    }
+
+    pub fn as_solid(&self) -> Option<&SolidColor> {
+        match self {
+            Self::Solid(color) => Some(color),
+            _ => None,
+        }
+    }
+
+    pub fn script_string(&self) -> String {
+        match self {
+            Self::Solid(color) => color.script_string(),
+            Self::Named(color) => color.to_color_string(),
+            Self::Molecule(color) => color.to_color_string(),
+        }
+    }
+
+    pub fn material(&self) -> &str {
+        match self {
+            Self::Solid(color) => color.material(),
+            Self::Named(color) => color.material(),
+            Self::Molecule(color) => color.material(),
+        }
+    }
+
+    fn color_ptr(&self) -> ColorPtr {
+        match self {
+            Self::Solid(color) => Arc::new(color.clone()),
+            Self::Named(color) => Arc::new(color.clone()),
+            Self::Molecule(color) => Arc::new(color.clone()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct StyleSet {
     uid: u64,
     source: String,
     name: String,
     read_only: bool,
     modified: bool,
-    colors: Arc<BTreeMap<String, SolidColor>>,
+    colors: Arc<BTreeMap<String, StyleColor>>,
     strings: Arc<BTreeMap<String, String>>,
     styles: Arc<BTreeMap<String, LDom2Node>>,
     materials: Arc<BTreeMap<String, StyleMaterial>>,
@@ -140,6 +227,56 @@ impl StyleSet {
         populate_style_set_from_node(&mut set, node, colors)?;
         set.set_name(name);
         set.set_modified(false);
+        Ok(set)
+    }
+
+    pub fn from_node_editing(
+        uid: u64,
+        name: impl Into<String>,
+        node: &LDom2Node,
+        previous: &StyleSet,
+        colors: impl Fn(&str) -> Option<SolidColor>,
+    ) -> cuemol_core::Result<Self> {
+        let mut document = node.clone();
+        let mut seen = std::collections::BTreeSet::new();
+        for entry in node
+            .children()
+            .iter()
+            .filter(|node| !node.is_attr() && node.tag_name() == "color")
+        {
+            let name = entry.str_attr("id");
+            if !seen.insert(canonical_key(name.as_str())) {
+                return Err(cuemol_core::CueMolError::parse(format!(
+                    "color palette entry already defined: {name}"
+                )));
+            }
+        }
+        let mut preserved = BTreeMap::new();
+        document.retain_children(|node| {
+            if node.is_attr() || node.tag_name() != "color" {
+                return true;
+            }
+            let name = node.str_attr("id").to_string();
+            let Some(color) = previous
+                .get_color(&name)
+                .filter(|color| color.as_solid().is_none())
+            else {
+                return true;
+            };
+            let unchanged = node.value() == color.script_string()
+                && [
+                    "set_h", "set_s", "set_b", "set_a", "mod_h", "mod_s", "mod_b", "mod_a",
+                ]
+                .into_iter()
+                .all(|key| node.str_attr(key).is_empty())
+                && node.str_attr("material").as_str() == color.material();
+            if unchanged {
+                preserved.insert(canonical_key(&name), color.clone());
+            }
+            !unchanged
+        });
+        let mut set = Self::from_node_with_colors(uid, name, &document, colors)?;
+        Arc::make_mut(&mut set.colors).extend(preserved);
         Ok(set)
     }
 
@@ -258,7 +395,7 @@ impl StyleSet {
         self.modified = value;
     }
 
-    pub fn get_color(&self, name: &str) -> Option<&SolidColor> {
+    pub fn get_color(&self, name: &str) -> Option<&StyleColor> {
         self.colors.get(&canonical_key(name))
     }
 
@@ -266,12 +403,12 @@ impl StyleSet {
         self.get_color(name).is_some()
     }
 
-    pub fn set_color(&mut self, name: impl AsRef<str>, color: SolidColor) -> bool {
+    pub fn set_color(&mut self, name: impl AsRef<str>, color: impl Into<StyleColor>) -> bool {
         if self.read_only {
             return false;
         }
         let inserted = Arc::make_mut(&mut self.colors)
-            .insert(canonical_key(name.as_ref()), color)
+            .insert(canonical_key(name.as_ref()), color.into())
             .is_none();
         self.modified = true;
         inserted
@@ -500,6 +637,9 @@ pub struct StyleManager {
     next_uid: u64,
     scopes: BTreeMap<u64, Vec<StyleSet>>,
     pending_events: Vec<(u64, String)>,
+    color_generation: u64,
+    color_reference_scopes: Option<Arc<StyleManager>>,
+    projected_scene_scope: Option<u64>,
 }
 
 impl PartialEq for StyleManager {
@@ -517,6 +657,9 @@ impl Default for StyleManager {
             next_uid: 1,
             scopes: BTreeMap::new(),
             pending_events: Vec::new(),
+            color_generation: next_color_generation(),
+            color_reference_scopes: None,
+            projected_scene_scope: None,
         }
     }
 }
@@ -540,6 +683,7 @@ impl StyleManager {
                 .cloned(),
         );
         self.preserve_allocated_ids_from(current);
+        self.invalidate_color_cache();
     }
 
     /// Local scripting IDs may be rebuilt from the same loaded scene styles.
@@ -587,6 +731,7 @@ impl StyleManager {
         );
         self.pending_events
             .retain(|(event_scope, _)| *event_scope != scope);
+        self.invalidate_color_cache();
     }
 
     pub fn new() -> Self {
@@ -625,13 +770,18 @@ impl StyleManager {
     }
 
     pub fn destroy_style_set(&mut self, scope_id: u64, style_set_id: u64) -> bool {
-        self.take_style_set(scope_id, style_set_id).is_some()
+        let removed = self.take_style_set(scope_id, style_set_id).is_some();
+        if removed {
+            self.queue_color_event(scope_id);
+        }
+        removed
     }
 
     pub fn clear_scope(&mut self, scope_id: u64) {
         self.scopes.remove(&scope_id);
         self.pending_events
             .retain(|(event_scope, _)| *event_scope != scope_id);
+        self.invalidate_color_cache();
     }
 
     /// Remove and return a style set and its insertion index for undo/redo.
@@ -668,6 +818,7 @@ impl StyleManager {
         } else {
             sets.insert(before as usize, set);
         }
+        self.queue_color_event(scope_id);
         true
     }
 
@@ -689,6 +840,32 @@ impl StyleManager {
         self.scopes.get(&scope_id).map(Vec::as_slice).unwrap_or(&[])
     }
 
+    pub fn replace_scope_style_sets(&mut self, scope: u64, mut sets: Vec<StyleSet>) {
+        for set in &mut sets {
+            if set.uid() == INVALID_UID {
+                set.set_uid(self.alloc_uid());
+            } else {
+                self.next_uid = self.next_uid.max(set.uid() + 1);
+            }
+        }
+        if sets.is_empty() {
+            self.scopes.remove(&scope);
+        } else {
+            self.scopes.insert(scope, sets);
+        }
+    }
+
+    pub fn project_scene_scope(&mut self, scope: u64) {
+        if scope == 0 {
+            return;
+        }
+        // Viewport presets use scope zero; retained colors keep their original context.
+        self.color_reference_scopes = Some(Arc::new(self.clone()));
+        self.projected_scene_scope = Some(scope);
+        let local = self.style_sets(scope).to_vec();
+        self.scopes.entry(0).or_default().splice(0..0, local);
+    }
+
     pub fn global_scope(&self) -> Self {
         Self {
             default_dir: self.default_dir.clone(),
@@ -704,6 +881,9 @@ impl StyleManager {
                 .filter(|(scope, _)| *scope == 0)
                 .cloned()
                 .collect(),
+            color_generation: self.color_generation,
+            color_reference_scopes: None,
+            projected_scene_scope: None,
         }
     }
 
@@ -731,7 +911,7 @@ impl StyleManager {
         self.style_sets_json(scope_id)
     }
 
-    pub fn get_color(&self, name: &str, scope_id: u64) -> Option<&SolidColor> {
+    pub fn get_color(&self, name: &str, scope_id: u64) -> Option<&StyleColor> {
         if let Some(color) = self
             .scopes
             .get(&scope_id)
@@ -751,12 +931,12 @@ impl StyleManager {
             .find_map(|set| set.get_color(name))
     }
 
-    pub fn get_color_from_set(&self, name: &str, style_set_id: u64) -> Option<&SolidColor> {
+    pub fn get_color_from_set(&self, name: &str, style_set_id: u64) -> Option<&StyleColor> {
         self.get_style_set(style_set_id)
             .and_then(|set| set.get_color(name))
     }
 
-    pub fn get_color2(&self, name: &str, scope_id: u64, style_set_id: u64) -> Option<&SolidColor> {
+    pub fn get_color2(&self, name: &str, scope_id: u64, style_set_id: u64) -> Option<&StyleColor> {
         self.scopes
             .get(&scope_id)?
             .iter()
@@ -767,17 +947,29 @@ impl StyleManager {
     pub fn set_color(
         &mut self,
         key: impl AsRef<str>,
-        value: SolidColor,
-        _scope_id: u64,
+        value: impl Into<StyleColor>,
+        scope_id: u64,
         style_set_id: u64,
     ) -> bool {
-        self.get_style_set_mut(style_set_id)
-            .is_some_and(|set| set.set_color(key, value))
+        let Some(set) = self.get_style_set_mut(style_set_id) else {
+            return false;
+        };
+        if set.read_only() {
+            return false;
+        }
+        let inserted = set.set_color(key, value);
+        self.queue_color_event(scope_id);
+        inserted
     }
 
-    pub fn remove_color(&mut self, key: &str, _scope_id: u64, style_set_id: u64) -> bool {
-        self.get_style_set_mut(style_set_id)
-            .is_some_and(|set| set.remove_color(key))
+    pub fn remove_color(&mut self, key: &str, scope_id: u64, style_set_id: u64) -> bool {
+        let removed = self
+            .get_style_set_mut(style_set_id)
+            .is_some_and(|set| set.remove_color(key));
+        if removed {
+            self.queue_color_event(scope_id);
+        }
+        removed
     }
 
     pub fn color_names(&self, scope_id: u64) -> Vec<String> {
@@ -1101,13 +1293,50 @@ impl StyleManager {
     }
 
     pub fn compile_color(&self, rep: &str, scope_id: u64) -> SolidColor {
-        if let Some(color) = self.get_color(rep.trim(), scope_id) {
-            return color.clone();
-        }
-        parse_color(rep)
+        let scope_id = if scope_id == 0 {
+            self.projected_scene_scope.unwrap_or(0)
+        } else {
+            scope_id
+        };
+        StyleColor::from_expression(rep, scope_id)
             .ok()
-            .and_then(|spec| spec.resolve(|name| self.get_color(name, scope_id).cloned(), None))
+            .and_then(|color| self.resolve_color_value(&color).ok())
             .unwrap_or_default()
+    }
+
+    pub fn resolve_color(
+        &self,
+        name: &str,
+        scope_id: u64,
+    ) -> cuemol_core::Result<Option<SolidColor>> {
+        self.get_color(name, scope_id)
+            .map(|color| self.resolve_color_value(color))
+            .transpose()
+    }
+
+    pub fn resolve_color_value(&self, value: &StyleColor) -> cuemol_core::Result<SolidColor> {
+        match value {
+            StyleColor::Solid(color) => Ok(color.clone()),
+            StyleColor::Molecule(color) => {
+                let mut result = SolidColor::from_code(color.code());
+                result.set_material(color.material());
+                Ok(result)
+            }
+            StyleColor::Named(color) => {
+                let references = self.color_reference_scopes.as_deref().unwrap_or(self);
+                let base = match references.get_color(color.name(), color.context_id()) {
+                    Some(StyleColor::Named(_)) => {
+                        return Err(cuemol_core::CueMolError::invalid_argument(format!(
+                            "Cannot resolve named color {} (cyclic reference)",
+                            color.name()
+                        )));
+                    }
+                    Some(other) => self.resolve_color_value(other)?,
+                    None => SolidColor::from_rgba(0.5, 0.5, 0.5, 0.5),
+                };
+                Ok(color.modify_color(&base))
+            }
+        }
     }
 
     pub fn save_style_set_to_file(
@@ -1179,7 +1408,7 @@ impl StyleManager {
         let uid = self.alloc_uid();
         let mut set = StyleSet::new(uid, name);
         populate_style_set_from_node(&mut set, tree.top(), |name| {
-            self.get_color(name, scope_id).cloned()
+            self.resolve_color(name, scope_id).ok().flatten()
         })?;
         set.set_source(path.to_string_lossy());
         set.set_read_only(read_only);
@@ -1215,7 +1444,7 @@ impl StyleManager {
         let uid = self.alloc_uid();
         let mut set = StyleSet::new(uid, name);
         if populate_style_set_from_node(&mut set, node, |name| {
-            self.get_color(name, scope_id).cloned()
+            self.resolve_color(name, scope_id).ok().flatten()
         })
         .is_err()
         {
@@ -1238,7 +1467,7 @@ impl StyleManager {
         let uid = self.alloc_uid();
         let Ok(mut set) =
             StyleSet::from_xml_with_colors(uid, "system", DEFAULT_STYLE_XML, |name| {
-                self.get_color(name, scope_id).cloned()
+                self.resolve_color(name, scope_id).ok().flatten()
             })
         else {
             return INVALID_UID;
@@ -1455,7 +1684,32 @@ impl StyleManager {
     }
 
     pub fn fire_pending_events(&mut self) {
+        if self
+            .pending_events
+            .iter()
+            .any(|(_, name)| name == ">color" || name.is_empty())
+        {
+            self.invalidate_color_cache();
+        }
         self.pending_events.clear();
+    }
+
+    pub fn color_generation(&self) -> u64 {
+        self.color_generation
+    }
+
+    pub fn invalidate_color_cache(&mut self) {
+        self.color_generation = next_color_generation();
+    }
+
+    fn queue_color_event(&mut self, scope: u64) {
+        if !self
+            .pending_events
+            .iter()
+            .any(|(owner, name)| *owner == scope && name == ">color")
+        {
+            self.pending_events.push((scope, ">color".to_string()));
+        }
     }
 
     fn find_in_scope<T>(
@@ -1475,6 +1729,11 @@ impl StyleManager {
         self.next_uid += 1;
         uid
     }
+}
+
+fn next_color_generation() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 #[derive(Debug)]
@@ -1535,8 +1794,7 @@ impl NamedColorResolver for StyleNamedColorResolver {
         self.with_manager(|manager| {
             manager
                 .get_color(name, context_id)
-                .cloned()
-                .map(|color| Arc::new(color) as ColorPtr)
+                .map(StyleColor::color_ptr)
         })
     }
 
@@ -1859,6 +2117,7 @@ fn populate_style_set_from_node(
                 let mut color = if let ColorBase::Named(name) = &spec.base {
                     let reference = set
                         .get_color(name)
+                        .and_then(StyleColor::as_solid)
                         .cloned()
                         .or_else(|| colors(name))
                         .ok_or_else(|| {
@@ -2063,6 +2322,107 @@ mod tests {
     use super::*;
 
     #[test]
+    fn color_expressions_keep_modifier_precision_and_material_text() {
+        for (input, expected, material) in [
+            ("red{alpha:0.6;mod_b:-0.1}", "red{alpha:0.6;mod_b:-0.1}", ""),
+            ("red{material:123}", "red{material:123}", "123"),
+            ("red{material:glass-1}", "red{material:glass-1}", "glass-1"),
+            (
+                "red{material:'glass 123'}",
+                "red{material:glass 123}",
+                "glass 123",
+            ),
+            (
+                "red{material:'glass;matte'}",
+                "red{material:glass;matte}",
+                "glass;matte",
+            ),
+            ("red{alpha:0.25;alpha:0.75}", "red{alpha:0.25}", ""),
+            ("red{bogus:1}", "red", ""),
+        ] {
+            let color = StyleColor::from_expression(input, 0).unwrap();
+            assert_eq!(color.script_string(), expected, "{input}");
+            assert_eq!(color.material(), material, "{input}");
+        }
+        assert!(StyleColor::from_expression("red{mod_h:-120}", 0).is_err());
+        assert!(StyleColor::from_expression("red{mod_h:-120.0}", 0).is_ok());
+    }
+
+    #[test]
+    fn retained_style_colors_resolve_their_original_scope_without_chaining() {
+        let mut manager = StyleManager::new();
+        let global = manager.create_style_set("global", 0);
+        let source = manager.create_style_set("source", 42);
+        let destination = manager.create_style_set("destination", 43);
+        manager.set_color("accent", SolidColor::from_code(0xffff0000), 0, global);
+        manager.set_color("accent", SolidColor::from_code(0xff00ff00), 42, source);
+        manager.set_color("accent", SolidColor::from_code(0xff0000ff), 43, destination);
+        manager.set_color(
+            "imported",
+            StyleColor::from_expression("accent", 42).unwrap(),
+            43,
+            destination,
+        );
+        manager.set_color(
+            "global-copy",
+            StyleColor::from_expression("accent", 0).unwrap(),
+            43,
+            destination,
+        );
+        assert_eq!(
+            manager
+                .resolve_color("imported", 43)
+                .unwrap()
+                .unwrap()
+                .code(),
+            0xff00ff00
+        );
+        assert_eq!(
+            manager.get_color("imported", 43).unwrap().script_string(),
+            "accent"
+        );
+        assert!(manager
+            .resolve_color_value(&StyleColor::from_expression("imported", 43).unwrap())
+            .is_err());
+        let snapshot = manager.clone();
+        manager.set_color("accent", SolidColor::from_code(0xff123456), 42, source);
+        assert_eq!(
+            manager
+                .resolve_color("imported", 43)
+                .unwrap()
+                .unwrap()
+                .code(),
+            0xff123456
+        );
+        assert_eq!(
+            snapshot
+                .resolve_color("imported", 43)
+                .unwrap()
+                .unwrap()
+                .code(),
+            0xff00ff00
+        );
+        manager.project_scene_scope(43);
+        assert_eq!(manager.compile_color("accent", 0).code(), 0xff0000ff);
+        assert_eq!(
+            manager
+                .resolve_color("global-copy", 0)
+                .unwrap()
+                .unwrap()
+                .code(),
+            0xffff0000
+        );
+        assert_eq!(
+            manager
+                .resolve_color("imported", 0)
+                .unwrap()
+                .unwrap()
+                .code(),
+            0xff123456
+        );
+    }
+
+    #[test]
     fn style_set_color_string_and_style_tables_match_reference_contract() {
         let mut set = StyleSet::new(7, "Default");
         assert_eq!(set.uid(), 7);
@@ -2186,6 +2546,7 @@ mod tests {
         assert_eq!(manager.get_str_data("sel", "all", 10), "*");
         assert_eq!(manager.str_data_defs_json("sel", 10), "[\"all\"]");
 
+        manager.fire_pending_events();
         manager.set_style_value(10, "Default", "Ribbon.line_width", "1.5");
         assert_eq!(manager.pending_event_count(), 1);
         assert_eq!(
@@ -2246,6 +2607,7 @@ mod tests {
         assert!((127..=128).contains(&tinted.g));
         assert!((127..=128).contains(&tinted.b));
         assert!((127..=128).contains(&tinted.a));
+        manager.fire_pending_events();
         manager.set_style_value(42, "local", "Renderer.width", "2");
         assert_eq!(manager.pending_event_count(), 1);
 
@@ -2508,22 +2870,86 @@ mod tests {
             ("inline", 0xffff0000),
         ] {
             assert_eq!(
-                manager.get_color2(name, 42, uid).map(SolidColor::code),
+                manager
+                    .get_color2(name, 42, uid)
+                    .and_then(StyleColor::as_solid)
+                    .map(SolidColor::code),
                 Some(expected),
                 "{name}"
             );
         }
         manager.set_color("accent", SolidColor::from_code(0xffff0000), 42, local);
-        assert_eq!(manager.get_color("scoped", 42).unwrap().code(), 0xff00ff00);
+        assert_eq!(
+            manager.resolve_color("scoped", 42).unwrap().unwrap().code(),
+            0xff00ff00
+        );
         let xml = manager.get_style_set(uid).unwrap().to_xml();
         let mut restored = StyleManager::new();
         let restored_uid = restored.load_style_set_from_xml(43, "palette", &xml, false);
         assert_ne!(restored_uid, INVALID_UID);
         assert_eq!(
-            restored.get_color("modified", 43).unwrap().code(),
+            restored
+                .resolve_color("modified", 43)
+                .unwrap()
+                .unwrap()
+                .code(),
             0x4000ff00
         );
-        assert_eq!(restored.get_color("copy", 43).unwrap().code(), 0xff123456);
+        assert_eq!(
+            restored.resolve_color("copy", 43).unwrap().unwrap().code(),
+            0xff123456
+        );
+    }
+
+    #[test]
+    fn palette_modifiers_and_copies_match_reference_edge_values() {
+        let mut manager = StyleManager::new();
+        manager.load_builtin_default_styles(0);
+        let mut xml = String::from(
+            r##"<styles id="edges">
+            <color id="base" value="#123456" material="shiny"/>
+            <color id="copy" value="base"/>
+            <color id="explicit" value="base" material="matte"/>
+            <color id="negative_hue" value="red" mod_h="-120"/>
+            <color id="large_hue" value="blue" mod_h="240"/>
+            <color id="clamped" value="red" mod_s="0.5" mod_b="0.5" set_a="2"/>
+            <color id="negative_alpha" value="red" set_a="-1"/>
+        "##,
+        );
+        for index in 0..256_u32 {
+            let [r, g, b, a] = [index, index * 37 % 256, index * 113 % 256, index * 19 % 256];
+            xml.push_str(&format!("<color id=\"base{index}\" value=\"rgba({},{},{},{})\"/><color id=\"copy{index}\" value=\"base{index}\"/>", f64::from(r) / 255.0, f64::from(g) / 255.0, f64::from(b) / 255.0, f64::from(a) / 255.0));
+        }
+        xml.push_str("</styles>");
+        let id = manager.load_style_set_from_xml(42, "edges", &xml, false);
+        assert_ne!(id, INVALID_UID);
+        for (name, code, material) in [
+            ("base", 0xff123456, "shiny"),
+            ("copy", 0xff123456, ""),
+            ("explicit", 0xff123456, "matte"),
+            ("negative_hue", 0xffff00ff, ""),
+            ("large_hue", 0xff00ff00, ""),
+            ("clamped", 0xffff0000, ""),
+            ("negative_alpha", 0x00ff0000, ""),
+        ] {
+            let color = manager.resolve_color(name, 42).unwrap().unwrap();
+            assert_eq!((color.code(), color.material()), (code, material), "{name}");
+        }
+        for index in 0..256_u32 {
+            let expected = ((index * 19 % 256) << 24)
+                | (index << 16)
+                | ((index * 37 % 256) << 8)
+                | (index * 113 % 256);
+            assert_eq!(
+                manager
+                    .resolve_color(&format!("copy{index}"), 42)
+                    .unwrap()
+                    .unwrap()
+                    .code(),
+                expected,
+                "sample {index}"
+            );
+        }
     }
 
     #[test]

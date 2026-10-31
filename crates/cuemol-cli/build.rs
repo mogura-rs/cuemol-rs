@@ -1,6 +1,70 @@
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+mod build_support;
+
+fn record_build() {
+    let root = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../..");
+    for item in ["HEAD", "index", "packed-refs"] {
+        if let Some(path) = build_support::git(&root, &["rev-parse", "--git-path", item]) {
+            let path = root.join(path);
+            if path.exists() {
+                println!("cargo:rerun-if-changed={}", path.display());
+            }
+        }
+    }
+    if let Some(reference) = build_support::git(&root, &["symbolic-ref", "--quiet", "HEAD"]) {
+        if let Some(path) = build_support::git(&root, &["rev-parse", "--git-path", &reference]) {
+            let path = root.join(path);
+            if path.exists() {
+                println!("cargo:rerun-if-changed={}", path.display());
+            }
+        }
+    }
+    if let Some(files) = build_support::git(&root, &["ls-files", "-z"]) {
+        for name in files.split('\0').filter(|name| !name.is_empty()) {
+            println!("cargo:rerun-if-changed={}", root.join(name).display());
+        }
+    }
+    println!("cargo:rerun-if-changed=build_support.rs");
+    let mut info = build_support::source_info(&root);
+    info["target"] = std::env::var("TARGET").unwrap().into();
+    info["features"] = ["gui", "bundled-web", "scripting"]
+        .into_iter()
+        .filter(|name| {
+            std::env::var_os(format!(
+                "CARGO_FEATURE_{}",
+                name.replace('-', "_").to_uppercase()
+            ))
+            .is_some()
+        })
+        .collect::<Vec<_>>()
+        .into();
+    info["web_commit"] = serde_json::Value::Null;
+    info["web_dirty"] = serde_json::Value::Null;
+    info["web_manifest_sha256"] = serde_json::Value::Null;
+    if std::env::var_os("CARGO_FEATURE_BUNDLED_WEB").is_some() {
+        let web = std::env::var_os("CUEMOL_WEB_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| root.join("web"));
+        if let Ok(bytes) = std::fs::read(web.join("pkg/source-build.json")) {
+            let source: serde_json::Value =
+                serde_json::from_slice(&bytes).expect("Invalid browser source metadata");
+            info["web_commit"] = source["commit"].clone();
+            info["web_dirty"] = source["dirty"].clone();
+        }
+        if let Ok(bytes) = std::fs::read(web.join("build-info.json")) {
+            info["web_manifest_sha256"] = format!("{:x}", Sha256::digest(bytes)).into();
+        }
+    }
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    std::fs::write(
+        out.join("build-info.json"),
+        serde_json::to_vec(&info).unwrap(),
+    )
+    .unwrap();
+}
 
 fn collect_assets(root: &Path, directory: &Path, names: &mut BTreeSet<String>) {
     println!("cargo:rerun-if-changed={}", directory.display());
@@ -41,6 +105,7 @@ fn mime(name: &str) -> &'static str {
 
 fn main() {
     println!("cargo:rerun-if-env-changed=CUEMOL_WEB_DIR");
+    record_build();
     if std::env::var_os("CARGO_FEATURE_BUNDLED_WEB").is_none() {
         return;
     }
@@ -56,16 +121,15 @@ fn main() {
     let manifest = root.join("build-info.json");
     println!("cargo:rerun-if-changed={}", manifest.display());
     let mut assets = BTreeSet::new();
+    let mut checksums = serde_json::Map::new();
     if manifest.is_file() {
         let data: serde_json::Value = serde_json::from_slice(&std::fs::read(&manifest).unwrap())
             .expect("Invalid browser distribution manifest");
-        assets.extend(
-            data["files"]
-                .as_object()
-                .expect("Manifest files are missing")
-                .keys()
-                .cloned(),
-        );
+        checksums = data["files"]
+            .as_object()
+            .expect("Manifest files are missing")
+            .clone();
+        assets.extend(checksums.keys().cloned());
         assets.insert("build-info.json".into());
     } else {
         assets.extend(
@@ -116,6 +180,13 @@ fn main() {
         println!("cargo:rerun-if-changed={}", path.display());
         let bytes = std::fs::read(path)
             .expect("Build the web assets with cuemol web build before enabling bundled-web");
+        if let Some(expected) = checksums.get(&name) {
+            assert_eq!(
+                expected.as_str(),
+                Some(format!("{:x}", Sha256::digest(&bytes)).as_str()),
+                "Browser checksum mismatch: {name}"
+            );
+        }
         let output = out.join(format!("web-{index}.gz"));
         let mut gzip = flate2::write::GzEncoder::new(
             std::fs::File::create(&output).unwrap(),

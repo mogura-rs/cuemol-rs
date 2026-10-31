@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise portable artifact staging, integrity failures and the release matrix."""
 import importlib.util
+import hashlib
 import io
 import json
 import os
@@ -11,6 +12,7 @@ import tarfile
 import tempfile
 import unittest
 import zipfile
+from distribution_info import validate
 
 
 def load(name):
@@ -36,9 +38,19 @@ class Distributions(unittest.TestCase):
         for name in web_dist.REQUIRED:
             path = self.web / name
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(b'\0asm\1\0\0\0' if path.suffix == '.wasm' else b'fixture')
+            if name == 'pkg/source-build.json':
+                path.write_text(json.dumps({'commit': COMMIT, 'dirty': False}))
+            else:
+                path.write_bytes(b'\0asm\1\0\0\0' if path.suffix == '.wasm' else b'fixture')
             files[name] = web_dist.digest(path)
-        (self.web / 'build-info.json').write_text(json.dumps({'commit': COMMIT, 'files': files}))
+        (self.web / 'build-info.json').write_text(json.dumps({'commit': COMMIT, 'dirty': False, 'files': files}))
+
+    def native_info(self, target):
+        return {'commit': COMMIT, 'target': target, 'dirty': False,
+                'features': ['gui', 'bundled-web', 'scripting'],
+                'web_commit': COMMIT, 'web_dirty': False,
+                'web_manifest_sha256': web_dist.digest(self.web / 'build-info.json'),
+                'binary_sha256': hashlib.sha256(b'binary').hexdigest()}
 
     def matrix(self):
         directory = self.root / 'dist'
@@ -48,7 +60,7 @@ class Distributions(unittest.TestCase):
             entries = {
                 'cuemol.exe' if windows else 'cuemol': b'binary',
                 'cuemol-tools/SOURCES.json': b'[]',
-                'build-info.json': json.dumps({'commit': COMMIT, 'target': target}).encode(),
+                'build-info.json': json.dumps(self.native_info(target)).encode(),
             }
             if windows:
                 with zipfile.ZipFile(directory / f'cuemol-{target}.zip', 'w') as archive:
@@ -78,6 +90,61 @@ class Distributions(unittest.TestCase):
         (self.web / 'local-settings.json').write_text('{}')
         with self.assertRaises(ValueError):
             web_dist.verify(self.web, COMMIT)
+
+    def test_native_build_metadata_rejects_incomplete_or_stale_binaries(self):
+        target = release.TARGETS[0]
+        for change in [
+            {'commit': '2' * 40}, {'dirty': True}, {'dirty': None},
+            {'features': ['scripting']}, {'web_dirty': True},
+            {'web_commit': '2' * 40}, {'web_manifest_sha256': None},
+            {'web_manifest_sha256': '2' * 64},
+        ]:
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                validate(self.native_info(target) | change, target, COMMIT,
+                         web_dist.digest(self.web / 'build-info.json'))
+
+    def test_staging_cannot_relabel_an_old_browser_build(self):
+        output = self.root / 'staged'
+        result = subprocess.run(['uv', 'run', '--no-project', 'python',
+                                 str(Path(web_dist.__file__)), '--source', str(self.web),
+                                 '--out', str(output), '--revision', '2' * 40],
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('rebuild first', result.stderr)
+        self.assertFalse(output.exists())
+
+    def test_dirty_browser_cannot_be_released(self):
+        source = self.web / 'pkg/source-build.json'
+        source.write_text(json.dumps({'commit': COMMIT, 'dirty': True}))
+        manifest = json.loads((self.web / 'build-info.json').read_text())
+        manifest['dirty'] = True
+        manifest['files']['pkg/source-build.json'] = web_dist.digest(source)
+        (self.web / 'build-info.json').write_text(json.dumps(manifest))
+        with self.assertRaises(ValueError):
+            web_dist.verify(self.web, COMMIT)
+        self.assertTrue(web_dist.verify(self.web)['dirty'])
+
+    def test_corrupted_native_binary_blocks_release(self):
+        directory = self.matrix()
+        target = 'x86_64-pc-windows-msvc'
+        with zipfile.ZipFile(directory / f'cuemol-{target}.zip', 'w') as archive:
+            archive.writestr('cuemol.exe', b'different-binary')
+            archive.writestr('cuemol-tools/SOURCES.json', b'[]')
+            archive.writestr('build-info.json', json.dumps(self.native_info(target)))
+        with self.assertRaisesRegex(ValueError, 'different native binary'):
+            release.prepare(directory, self.web, COMMIT)
+        self.assertFalse((directory / 'SHA256SUMS').exists())
+
+    def test_changed_app_binary_with_matching_metadata_blocks_release(self):
+        directory = self.matrix()
+        target = 'aarch64-apple-darwin'
+        with zipfile.ZipFile(directory / f'cuemol-rs-{target}.zip', 'w') as archive:
+            archive.writestr('cuemol-rs.app/Contents/MacOS/cuemol-rs', b'different-binary')
+            archive.writestr('cuemol-rs.app/Contents/Resources/build-info.json',
+                            json.dumps(self.native_info(target)))
+        with self.assertRaisesRegex(ValueError, 'different application binary'):
+            release.prepare(directory, self.web, COMMIT)
+        self.assertFalse((directory / 'SHA256SUMS').exists())
 
     def test_complete_matrix_has_eight_checksummed_archives(self):
         directory = self.matrix()

@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::Cursor;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -38,6 +38,7 @@ fn source_root() -> Result<PathBuf> {
 }
 fn build(args: &[String]) -> Result<()> {
     let root = source_root()?;
+    let source = crate::build_support::source_info(&root);
     let mut profile = "web";
     let mut out = root.join("web");
     let mut rest = args.iter();
@@ -198,6 +199,13 @@ fn build(args: &[String]) -> Result<()> {
         std::fs::copy(root.join("licenses").join(name), licenses.join(name))
             .map_err(|e| e.to_string())?;
     }
+    if source != crate::build_support::source_info(&root) {
+        return Err(
+            "Source checkout changed during the browser build; rebuild before packaging.".into(),
+        );
+    }
+    std::fs::write(out.join("pkg/source-build.json"), source.to_string())
+        .map_err(|error| error.to_string())?;
     println!("Built {}", out.display());
     Ok(())
 }
@@ -327,29 +335,26 @@ fn serve_request(request: tiny_http::Request, directory: Option<&Path>) {
         std::fs::canonicalize(path)
             .ok()
             .filter(|p| p.starts_with(dir) && p.is_file())
-            .and_then(|path| std::fs::read(path).ok())
-            .map(|bytes| (mime(name), bytes, false))
+            .and_then(|path| std::fs::File::open(path).ok())
+            .map(|file| {
+                (
+                    mime(name),
+                    tiny_http::Response::from_file(file).boxed(),
+                    false,
+                )
+            })
     } else {
         BUNDLED_WEB
             .iter()
             .find(|(path, _, _)| *path == name)
-            .and_then(|(_, mime, compressed)| {
-                if wants_gzip {
-                    Some((*mime, compressed.to_vec(), true))
-                } else {
-                    let mut bytes = Vec::new();
-                    flate2::read::GzDecoder::new(*compressed)
-                        .read_to_end(&mut bytes)
-                        .ok()
-                        .map(|_| (*mime, bytes, false))
-                }
+            .map(|(_, mime, compressed)| {
+                (*mime, bundled_response(compressed, wants_gzip), wants_gzip)
             })
     };
-    let Some((mime, bytes, gzip)) = asset else {
+    let Some((mime, mut response, gzip)) = asset else {
         let _ = request.respond(tiny_http::Response::empty(404));
         return;
     };
-    let mut response = tiny_http::Response::from_data(bytes);
     for (key, value) in [
         ("Content-Type", mime),
         ("Cache-Control", "no-cache"),
@@ -362,4 +367,48 @@ fn serve_request(request: tiny_http::Request, directory: Option<&Path>) {
         response.add_header(tiny_http::Header::from_bytes("Content-Encoding", "gzip").unwrap());
     }
     let _ = request.respond(response);
+}
+
+fn bundled_response(compressed: &'static [u8], gzip: bool) -> tiny_http::ResponseBox {
+    if gzip {
+        tiny_http::Response::new(
+            tiny_http::StatusCode(200),
+            Vec::new(),
+            Cursor::new(compressed),
+            Some(compressed.len()),
+            None,
+        )
+        .boxed()
+    } else {
+        tiny_http::Response::new(
+            tiny_http::StatusCode(200),
+            Vec::new(),
+            flate2::read::GzDecoder::new(compressed),
+            None,
+            None,
+        )
+        .boxed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    #[test]
+    fn bundled_assets_stream_both_transfer_encodings() {
+        let original = b"\0asm\x01\0\0\0".repeat(32_768);
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(&original).unwrap();
+        let compressed: &'static [u8] = Box::leak(encoder.finish().unwrap().into_boxed_slice());
+        for gzip in [false, true] {
+            let mut body = Vec::new();
+            bundled_response(compressed, gzip)
+                .into_reader()
+                .read_to_end(&mut body)
+                .unwrap();
+            assert_eq!(body, if gzip { compressed } else { &original });
+        }
+    }
 }

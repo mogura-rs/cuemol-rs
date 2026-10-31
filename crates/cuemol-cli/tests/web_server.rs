@@ -77,6 +77,46 @@ fn a_slow_asset_download_does_not_block_other_requests() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn head_requests_do_not_load_large_assets_into_memory() {
+    let work = tempfile::tempdir().unwrap();
+    std::fs::File::create(work.path().join("large.wasm"))
+        .unwrap()
+        .set_len(128 * 1024 * 1024)
+        .unwrap();
+    let (server, address) =
+        start_server(&mut Command::new(env!("CARGO_BIN_EXE_cuemol")), work.path());
+    let peak_rss = || {
+        std::fs::read_to_string(format!("/proc/{}/status", server.0.id()))
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("VmHWM:"))
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+    };
+    let before = peak_rss();
+    let mut client = TcpStream::connect(&address).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    client
+        .write_all(b"HEAD /large.wasm HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut response = String::new();
+    client.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200"));
+    assert!(response.ends_with("\r\n\r\n"));
+    assert!(
+        peak_rss().saturating_sub(before) < 32 * 1024,
+        "HEAD allocated a large asset before sending its headers"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn a_connection_burst_is_served_before_keep_alive_clients_disconnect() {
     let work = tempfile::tempdir().unwrap();
     let body = b"export const ready = true;";

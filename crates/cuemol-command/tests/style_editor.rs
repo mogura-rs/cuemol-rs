@@ -291,6 +291,46 @@ fn global_style_file_edits_keep_identity_and_failed_reload_preserves_content() {
 }
 
 #[test]
+#[cfg(feature = "scripting")]
+fn runtime_color_aliases_survive_editor_commands_and_metadata_changes() {
+    for global in [false, true] {
+        let mut state = DesktopAppState::new();
+        let scene = state.new_scene("palette", true).result_scene;
+        let name = if global { "user" } else { "palette" };
+        if !global {
+            state.create_scene_style(scene, name).unwrap();
+        }
+        let scope = if global { "global" } else { "scene" };
+        let scope_id = if global { 0 } else { scene.get() };
+        let target = state.find_style_target(Uid::new(scope_id), name).unwrap();
+        let mut camera = Camera::new();
+        for (name, color) in [("accent", "#ff0000"), ("copy", "accent")] {
+            call_tool(&mut state, &mut camera, "define_color", &json!({"styleSet":if global { "user" } else { "palette" }, "scope":scope, "name":name, "color":color})).unwrap();
+        }
+        state
+            .set_style_properties(target, "renamed", false)
+            .unwrap();
+        let xml = state.style_xml(target).unwrap().replace(
+            "</styles>",
+            "<sel id=\"focus\" value=\"name C1\"/></styles>",
+        );
+        state.edit_style(target, &xml).unwrap();
+        call_tool(
+            &mut state,
+            &mut camera,
+            "define_color",
+            &json!({"styleSet":"renamed", "scope":scope, "name":"accent", "color":"#00ff00"}),
+        )
+        .unwrap();
+        let log = state.run_script_js(&format!("var c=cuemol.getService('StyleManager').getColor('copy',{scope_id}); print(c.toString()); print([c.r(),c.g(),c.b(),c.a()].join(','));")).unwrap().0;
+        assert_eq!(log, "accent\n0,255,0,255\n", "global={global}");
+        let xml = state.style_xml(target).unwrap();
+        assert!(xml.contains("value=\"accent\""));
+        assert!(xml.contains("name C1"));
+    }
+}
+
+#[test]
 fn global_style_file_links_remain_stable_after_switching_scene_directories() {
     let first_dir = tempfile::tempdir().unwrap();
     let second_dir = tempfile::tempdir().unwrap();

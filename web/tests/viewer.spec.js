@@ -716,6 +716,9 @@ test('saved trackpad input pans, pinches and survives a reload',async({page})=>{
 });
 
 test('input settings capture their own events and persist across reloads',async({page})=>{
+  await page.addInitScript(()=>{
+    if(!localStorage.getItem('cuemol.config'))localStorage.setItem('cuemol.config','# cuemol-config-v2\n#theme\tcustom-value\n \t');
+  });
   await ready(page);await load(page,'settings.pdb',Buffer.from(structure));
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().scene.objects.length)).toBe(1);
   await call(page,'set_view',{zoom:50,slab:50,distance:200,center:[0,0,0]});
@@ -728,6 +731,9 @@ test('input settings capture their own events and persist across reloads',async(
   await clickRect('Tools menu');await clickRect('Settings');
   await clickRect('Input device');await clickRect('input:view_input:device:trackpad');
   await expect.poll(()=>page.evaluate(()=>localStorage.getItem('cuemol.config'))).toContain('view_input:device\ttrackpad');
+  const saved=await page.evaluate(()=>localStorage.getItem('cuemol.config'));
+  expect(saved).toContain('\\#theme\tcustom-value');
+  expect(saved).toContain('\n \t');
   const before=(await page.evaluate(()=>window.cuemol.status())).view;
   const field=await page.evaluate(()=>window.cuemol.status().ui.rects['Input device']);
   await page.mouse.move(field[0]+field[2]/2,field[1]+field[3]/2);await page.mouse.wheel(0,120);

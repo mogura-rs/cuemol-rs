@@ -1,5 +1,6 @@
 mod animation;
 mod clipboard;
+mod config_io;
 pub use clipboard::GuiClipboardPayload;
 mod selection_support;
 mod sequence;
@@ -707,7 +708,6 @@ pub struct DesktopAppState {
     /// out by near-atom potential spikes. `Some(s)` clamps the gradient to `mid ± s`.
     potential_scale: Option<f64>,
     script_styles: StyleManager,
-    #[cfg(feature = "scripting")]
     script_style_bindings: BTreeMap<u64, BTreeMap<u64, u64>>,
     #[cfg(feature = "scripting")]
     script_services: script_services::Identity,
@@ -1976,7 +1976,6 @@ impl Default for DesktopAppState {
             surface_potential: None,
             potential_scale: None,
             script_styles: default_desktop_style_manager(),
-            #[cfg(feature = "scripting")]
             script_style_bindings: BTreeMap::new(),
             #[cfg(feature = "scripting")]
             script_services: script_services::Identity::default(),
@@ -2716,22 +2715,12 @@ impl DesktopAppState {
     }
 
     pub fn save_config_file(&self, path: impl AsRef<Path>) -> Result<()> {
-        let output = self
-            .config_entries()
-            .into_iter()
-            .map(|entry| format!("{}\t{}", entry.key, entry.value.replace('\n', "\\n")))
-            .collect::<Vec<_>>()
-            .join("\n");
-        fs::write(path, output)?;
+        fs::write(path, self.config_text())?;
         Ok(())
     }
 
     pub fn config_text(&self) -> String {
-        self.config_entries()
-            .into_iter()
-            .map(|entry| format!("{}\t{}", entry.key, entry.value.replace('\n', "\\n")))
-            .collect::<Vec<_>>()
-            .join("\n")
+        config_io::encode(self.config_entries())
     }
 
     pub fn load_config_file(&mut self, path: impl AsRef<Path>) -> Result<usize> {
@@ -2740,19 +2729,10 @@ impl DesktopAppState {
     }
 
     pub fn load_config_text(&mut self, input: &str) -> Result<usize> {
-        let mut count = 0;
-        for line in input.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
-            }
-            let Some((key, value)) = trimmed.split_once('\t') else {
-                return Err(CueMolError::parse(format!(
-                    "invalid config line: {trimmed}"
-                )));
-            };
-            self.put_config_value(key.trim(), value.replace("\\n", "\n"));
-            count += 1;
+        let entries = config_io::decode(input)?;
+        let count = entries.len();
+        for entry in entries {
+            self.put_config_value(&entry.key, entry.value);
         }
         Ok(count)
     }
@@ -4699,7 +4679,7 @@ impl DesktopAppState {
         if name.is_empty() {
             return Err(CueMolError::invalid_argument("style name is required"));
         }
-        let mut tree = self.normalized_style_document(scene_uid, xml)?;
+        let mut tree = self.normalized_style_edit_document(scene_uid, local_index, xml)?;
         let scene = self
             .scene_manager_mut()
             .scene_mut(scene_uid)
@@ -8386,10 +8366,10 @@ impl DesktopAppState {
             .retain(|uid, _| !object_uids.contains(uid));
         self.density_maps
             .retain(|_, map| map.scene_uid != scene_uid);
+        self.script_styles.clear_scope(scene_uid.get());
+        self.script_style_bindings.remove(&scene_uid.get());
         #[cfg(feature = "scripting")]
         {
-            self.script_styles.clear_scope(scene_uid.get());
-            self.script_style_bindings.remove(&scene_uid.get());
             self.script_scene_undo.remove(&scene_uid.get());
         }
         if self.active_scene == Some(scene_uid) {
@@ -8408,9 +8388,9 @@ impl DesktopAppState {
         self.trajectories.clear();
         self.surface_potential = None;
         self.script_styles = self.script_styles.global_scope();
+        self.script_style_bindings.clear();
         #[cfg(feature = "scripting")]
         {
-            self.script_style_bindings.clear();
             self.script_scene_undo.clear();
         }
     }
@@ -12574,7 +12554,12 @@ impl DesktopAppState {
     }
 
     pub fn load_qsc_file(&mut self, path: impl AsRef<Path>) -> Result<Option<Uid>> {
-        self.load_qsc_file_into(path.as_ref(), None)
+        let previous = self.clone();
+        let result = self.load_qsc_file_into(path.as_ref(), None);
+        if result.is_err() {
+            *self = previous;
+        }
+        result
     }
 
     /// Open a scene-reader file into `target_scene`, or create a scene when no
@@ -14756,8 +14741,9 @@ impl DesktopAppState {
                 |name| {
                     styles
                         .get_or_init(|| self.scene_styles(scene))
-                        .get_color(name, scene.uid().get())
-                        .cloned()
+                        .resolve_color(name, scene.uid().get())
+                        .ok()
+                        .flatten()
                 },
                 None,
             )
@@ -19937,12 +19923,88 @@ impl DesktopAppState {
             value: &JsValue,
             ctx: &mut Context,
         ) -> JsResult<cuemol_gfx::SolidColor> {
+            if this_string_prop(value, "_class", ctx) == "NamedColor" {
+                let cuemol_qsys::StyleColor::Named(reference) =
+                    reference_color_from_value(value, ctx)?
+                else {
+                    unreachable!();
+                };
+                let object = value.as_object().unwrap();
+                let generation = script_env::with(|env| env.styles.color_generation());
+                let cached_generation = object_number_prop(value, "_cache_generation", ctx)? as u64;
+                let cached_name = this_string_prop(value, "_cached_name", ctx);
+                let cached_scope = object_number_prop(value, "_cached_scope", ctx)? as u64;
+                let base = if cached_generation == generation
+                    && cached_name == reference.name()
+                    && cached_scope == reference.context_id()
+                {
+                    let mut color = cuemol_gfx::SolidColor::from_code(object_number_prop(
+                        value,
+                        "_reference_code",
+                        ctx,
+                    )?
+                        as u32);
+                    color.set_material(this_string_prop(value, "_reference_material", ctx));
+                    color
+                } else {
+                    let base = script_env::with(|env| {
+                        match env
+                            .styles
+                            .get_color(reference.name(), reference.context_id())
+                        {
+                            Some(cuemol_qsys::StyleColor::Named(_)) => {
+                                Err(CueMolError::invalid_argument(format!(
+                                    "Cannot resolve named color {} (cyclic reference)",
+                                    reference.name()
+                                )))
+                            }
+                            Some(other) => env.styles.resolve_color_value(other),
+                            None => Ok(cuemol_gfx::SolidColor::from_rgba(0.5, 0.5, 0.5, 0.5)),
+                        }
+                    })
+                    .map_err(|error| script_error(error.to_string()))?;
+                    object.set(
+                        js_string!("_reference_code"),
+                        f64::from(base.code()),
+                        true,
+                        ctx,
+                    )?;
+                    object.set(
+                        js_string!("_reference_material"),
+                        JsString::from(base.material()),
+                        true,
+                        ctx,
+                    )?;
+                    object.set(
+                        js_string!("_cached_name"),
+                        JsString::from(reference.name()),
+                        true,
+                        ctx,
+                    )?;
+                    object.set(
+                        js_string!("_cached_scope"),
+                        reference.context_id() as f64,
+                        true,
+                        ctx,
+                    )?;
+                    object.set(
+                        js_string!("_cache_generation"),
+                        generation as f64,
+                        true,
+                        ctx,
+                    )?;
+                    base
+                };
+                return Ok(reference.modify_color(&base));
+            }
             let code = value
                 .as_object()
                 .ok_or_else(|| script_error("Color argument is not an object"))?
                 .get(js_string!("_code"), ctx)?
                 .to_number(ctx)?;
-            Ok(cuemol_gfx::SolidColor::from_code(code as u32))
+            let mut color = cuemol_gfx::SolidColor::from_code(code as u32);
+            color.set_material(this_string_prop(value, "material", ctx));
+            Ok(color)
         }
         fn set_color(
             this: &JsValue,
@@ -20201,7 +20263,11 @@ impl DesktopAppState {
                     f64::from(value.code()),
                     Attribute::all(),
                 )
-                .property(js_string!("material"), js_string!(""), Attribute::all())
+                .property(
+                    js_string!("material"),
+                    JsString::from(value.material()),
+                    Attribute::all(),
+                )
                 .accessor(
                     js_string!("code"),
                     Some(code_getter),
@@ -20316,50 +20382,13 @@ impl DesktopAppState {
             _args: &[JsValue],
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
-            let class_name = this_string_prop(this, "_class", ctx);
-            let mut text = if class_name == "MolColorRef" {
-                "$molcol".to_string()
-            } else {
-                this_string_prop(this, "name", ctx)
-            };
-            let material = this_string_prop(this, "material", ctx);
-            let alpha = object_number_prop(this, "alpha", ctx)?;
-            let mod_h = object_number_prop(this, "mod_h", ctx)?;
-            let mod_s = object_number_prop(this, "mod_s", ctx)?;
-            let mod_b = object_number_prop(this, "mod_b", ctx)?;
-            let mut modifiers = Vec::new();
-            if !material.is_empty() {
-                modifiers.push(format!("material={material}"));
-            }
-            if alpha >= -0.01 {
-                modifiers.push(format!("alpha={alpha}"));
-            }
-            if mod_h.abs() >= 1.0e-4 {
-                modifiers.push(format!("mod_h={mod_h}"));
-            }
-            if mod_s.abs() >= 1.0e-4 {
-                modifiers.push(format!("mod_s={mod_s}"));
-            }
-            if mod_b.abs() >= 1.0e-4 {
-                modifiers.push(format!("mod_b={mod_b}"));
-            }
-            if !modifiers.is_empty() {
-                text.push('{');
-                text.push_str(&modifiers.join(","));
-                text.push('}');
-            }
-            Ok(JsString::from(text).into())
+            Ok(JsString::from(reference_color_from_value(this, ctx)?.script_string()).into())
         }
         fn make_color_reference(class_name: &str, name: &str, ctx: &mut Context) -> JsValue {
-            let code = if class_name == "MolColorRef" {
+            let code: u32 = if class_name == "MolColorRef" {
                 0x7f7f_7f7f
             } else {
-                resolve_script_color(name).map_or(0, |rgba| {
-                    (u32::from(rgba.a) << 24)
-                        | (u32::from(rgba.r) << 16)
-                        | (u32::from(rgba.g) << 8)
-                        | u32::from(rgba.b)
-                })
+                0x8080_8080
             };
             ObjectInitializer::new(ctx)
                 .property(
@@ -20373,6 +20402,10 @@ impl DesktopAppState {
                     Attribute::all(),
                 )
                 .property(js_string!("_code"), f64::from(code), Attribute::all())
+                .property(js_string!("_color_scope"), 0.0, Attribute::all())
+                .property(js_string!("_cache_generation"), 0.0, Attribute::all())
+                .property(js_string!("_cached_name"), js_string!(""), Attribute::all())
+                .property(js_string!("_cached_scope"), 0.0, Attribute::all())
                 .property(js_string!("name"), JsString::from(name), Attribute::all())
                 .property(js_string!("material"), js_string!(""), Attribute::all())
                 .property(js_string!("alpha"), -1.0, Attribute::all())
@@ -20420,6 +20453,82 @@ impl DesktopAppState {
                 )
                 .build()
                 .into()
+        }
+
+        fn reference_color_from_value(
+            value: &JsValue,
+            ctx: &mut Context,
+        ) -> JsResult<cuemol_qsys::StyleColor> {
+            let material = this_string_prop(value, "material", ctx);
+            let alpha = object_number_prop(value, "alpha", ctx)?;
+            let mod_h = object_number_prop(value, "mod_h", ctx)?;
+            let mod_s = object_number_prop(value, "mod_s", ctx)?;
+            let mod_b = object_number_prop(value, "mod_b", ctx)?;
+            if this_string_prop(value, "_class", ctx) == "MolColorRef" {
+                let mut color = cuemol_gfx::MolColorRef::new();
+                color.set_material(material);
+                color.set_alpha(alpha);
+                color.set_mod_h(mod_h);
+                color.set_mod_s(mod_s);
+                color.set_mod_b(mod_b);
+                Ok(cuemol_qsys::StyleColor::Molecule(color))
+            } else {
+                let mut color = cuemol_gfx::NamedColor::from_name_in_context(
+                    this_string_prop(value, "name", ctx),
+                    object_number_prop(value, "_color_scope", ctx)? as u64,
+                );
+                color.set_material(material);
+                color.set_alpha(alpha);
+                color.set_mod_h(mod_h);
+                color.set_mod_s(mod_s);
+                color.set_mod_b(mod_b);
+                Ok(cuemol_qsys::StyleColor::Named(color))
+            }
+        }
+
+        fn make_style_color(
+            value: cuemol_qsys::StyleColor,
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let (value, material, alpha, mod_h, mod_s, mod_b) = match value {
+                cuemol_qsys::StyleColor::Solid(color) => return Ok(make_color(color, ctx)),
+                cuemol_qsys::StyleColor::Named(color) => {
+                    let value = make_color_reference("NamedColor", color.name(), ctx);
+                    value.as_object().unwrap().set(
+                        js_string!("_color_scope"),
+                        color.context_id() as f64,
+                        true,
+                        ctx,
+                    )?;
+                    (
+                        value,
+                        color.material().to_string(),
+                        color.alpha(),
+                        color.mod_h(),
+                        color.mod_s(),
+                        color.mod_b(),
+                    )
+                }
+                cuemol_qsys::StyleColor::Molecule(color) => (
+                    make_color_reference("MolColorRef", "", ctx),
+                    color.material().to_string(),
+                    color.alpha(),
+                    color.mod_h(),
+                    color.mod_s(),
+                    color.mod_b(),
+                ),
+            };
+            let object = value.as_object().unwrap();
+            object.set(js_string!("material"), JsString::from(material), true, ctx)?;
+            for (key, value) in [
+                ("alpha", alpha),
+                ("mod_h", mod_h),
+                ("mod_s", mod_s),
+                ("mod_b", mod_b),
+            ] {
+                object.set(JsString::from(key), value, true, ctx)?;
+            }
+            Ok(value)
         }
         fn gradient_from_value(
             value: &JsValue,
@@ -31999,8 +32108,10 @@ impl DesktopAppState {
                 return Ok(JsValue::null());
             }
             let scope_id = color_arg(args, 1, 0.0, ctx)? as u64;
-            let color = script_env::with(|env| env.styles.compile_color(&spec, scope_id));
-            Ok(make_color(color, ctx))
+            match cuemol_qsys::StyleColor::from_expression(&spec, scope_id) {
+                Ok(color) => make_style_color(color, ctx),
+                Err(_) => Ok(JsValue::null()),
+            }
         }
         // --- structural queries (read the pre-built read-only snapshot) ---
         fn js_get_object_names(
@@ -44842,9 +44953,7 @@ impl DesktopAppState {
                 .ok_or_else(|| script_error("color value is not an object"))?;
             let code = object.get(js_string!("_code"), ctx)?;
             if !code.is_undefined() {
-                return Ok(cuemol_gfx::SolidColor::from_code(
-                    code.to_number(ctx)? as u32
-                ));
+                return color_from_value(value, ctx);
             }
             let channel = |name: &str, default: u8, ctx: &mut Context| -> JsResult<u8> {
                 let value = object.get(JsString::from(name), ctx)?;
@@ -44860,6 +44969,15 @@ impl DesktopAppState {
                 channel("b", 0, ctx)?,
                 channel("a", 255, ctx)?,
             ))
+        }
+        fn style_color_from_script_value(
+            value: &JsValue,
+            ctx: &mut Context,
+        ) -> JsResult<cuemol_qsys::StyleColor> {
+            match this_string_prop(value, "_class", ctx).as_str() {
+                "NamedColor" | "MolColorRef" => reference_color_from_value(value, ctx),
+                _ => solid_color_from_script_value(value, ctx).map(cuemol_qsys::StyleColor::Solid),
+            }
         }
         fn js_style_set_uid(
             this: &JsValue,
@@ -44971,9 +45089,10 @@ impl DesktopAppState {
                     .and_then(|set| set.get_color(&name))
                     .cloned()
             });
-            Ok(color
-                .map(|value| make_color(value, ctx))
-                .unwrap_or_else(JsValue::null))
+            color
+                .map(|value| make_style_color(value, ctx))
+                .transpose()
+                .map(|value| value.unwrap_or_else(JsValue::null))
         }
         fn js_style_set_has_color(
             this: &JsValue,
@@ -44995,7 +45114,7 @@ impl DesktopAppState {
         ) -> JsResult<JsValue> {
             let uid = style_set_uid(this, ctx)?;
             let name = arg0(args, ctx);
-            let color = solid_color_from_script_value(
+            let color = style_color_from_script_value(
                 &args.get(1).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
@@ -45430,9 +45549,10 @@ impl DesktopAppState {
             let name = arg0(args, ctx);
             let scope = color_arg(args, 1, 0.0, ctx)? as u64;
             let color = script_env::with(|env| env.styles.get_color(&name, scope).cloned());
-            Ok(color
-                .map(|value| make_color(value, ctx))
-                .unwrap_or_else(JsValue::null))
+            color
+                .map(|value| make_style_color(value, ctx))
+                .transpose()
+                .map(|value| value.unwrap_or_else(JsValue::null))
         }
         fn js_style_get_color2(
             _this: &JsValue,
@@ -45444,9 +45564,10 @@ impl DesktopAppState {
             let set_uid = color_arg(args, 2, 0.0, ctx)? as u64;
             let color =
                 script_env::with(|env| env.styles.get_color2(&name, scope, set_uid).cloned());
-            Ok(color
-                .map(|value| make_color(value, ctx))
-                .unwrap_or_else(JsValue::null))
+            color
+                .map(|value| make_style_color(value, ctx))
+                .transpose()
+                .map(|value| value.unwrap_or_else(JsValue::null))
         }
         fn js_style_set_color(
             _this: &JsValue,
@@ -45454,7 +45575,7 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let key = arg0(args, ctx);
-            let color = solid_color_from_script_value(
+            let color = style_color_from_script_value(
                 &args.get(1).cloned().unwrap_or(JsValue::undefined()),
                 ctx,
             )?;
@@ -45483,8 +45604,10 @@ impl DesktopAppState {
         ) -> JsResult<JsValue> {
             let representation = arg0(args, ctx);
             let scope = color_arg(args, 1, 0.0, ctx)? as u64;
-            let color = script_env::with(|env| env.styles.compile_color(&representation, scope));
-            Ok(make_color(color, ctx))
+            match cuemol_qsys::StyleColor::from_expression(&representation, scope) {
+                Ok(color) => make_style_color(color, ctx),
+                Err(_) => Ok(JsValue::null()),
+            }
         }
         fn js_style_color_defs(
             _this: &JsValue,
@@ -50309,8 +50432,10 @@ fn resolve_script_color_with_styles(
     scope_id: u64,
 ) -> Option<cuemol_gfx::Rgba8> {
     styles
-        .get_color(spec.trim(), scope_id)
-        .map(cuemol_gfx::SolidColor::rgba8)
+        .resolve_color(spec.trim(), scope_id)
+        .ok()
+        .flatten()
+        .map(|color| color.rgba8())
         .or_else(|| resolve_script_color(spec))
 }
 
@@ -53074,7 +53199,9 @@ fn density_renderer_configs(
                 _ => "Green".to_string(),
             });
             let color = styles
-                .get_color(&color_value, DEFAULT_STYLE_SCOPE)
+                .resolve_color(&color_value, DEFAULT_STYLE_SCOPE)
+                .ok()
+                .flatten()
                 .map(|color| {
                     let rgba = color.rgba8();
                     cuemol_gfx::ColorSpec {
@@ -53296,7 +53423,9 @@ fn density_multi_gradient(
 
 fn resolve_qsc_color(value: &str, styles: &StyleManager) -> Option<cuemol_gfx::Rgba8> {
     styles
-        .get_color(value, DEFAULT_STYLE_SCOPE)
+        .resolve_color(value, DEFAULT_STYLE_SCOPE)
+        .ok()
+        .flatten()
         .map(|color| color.rgba8())
         .or_else(|| cuemol_gfx::parse_color(value).ok()?.rgba8())
         .or_else(|| {
@@ -55342,7 +55471,9 @@ fn density_renderer_from_script(
         .get("color")
         .and_then(|value| {
             styles
-                .get_color(value, style_scope_id)
+                .resolve_color(value, style_scope_id)
+                .ok()
+                .flatten()
                 .map(|color| {
                     let rgba = color.rgba8();
                     cuemol_gfx::ColorSpec {
@@ -56351,7 +56482,7 @@ pub fn atoms_in_screen_rect(
 fn scene_background_color(scene: &MolScene, styles: &StyleManager) -> Result<[f32; 4]> {
     let value = scene.scene_attribute("bgcolor").unwrap_or("black");
     let color = styles
-        .get_color(value, scene.uid().get())
+        .resolve_color(value, scene.uid().get())?
         .map(|c| c.rgba8())
         .or_else(|| resolve_qsc_color(value, &styles))
         .ok_or_else(|| CueMolError::invalid_argument("unresolved background color"))?;
@@ -58771,7 +58902,7 @@ end_header
             log,
             "image=TextImgBuf:A:sans:2:2:10:40\n\
              named=NamedColor:255:0:matte:0.1:true\n\
-             molref=127:127:127:127:0.5:$molcol{alpha=0.5}\n\
+             molref=127:127:127:127:0.5:$molcol{alpha:0.5}\n\
              gradient=true:255:255:0.25:true\n"
         );
     }
@@ -62973,12 +63104,13 @@ end_header
         let (log, _) = app
             .run_script_js(&format!(
                 "var styles = cuemol.getService('StyleManager'); \
+                 var color = cuemol.makeColor('accent', {first}); \
                  print('switched=' + styles.getStrData('sel', 'focus', {first}) + ':' + \
-                       cuemol.makeColor('accent', {first}).toString());",
+                       color.toString() + ':' + [color.r(), color.g(), color.b()].join(','));",
                 first = first.get(),
             ))
             .unwrap();
-        assert!(log.contains("switched=name CA:#112233"));
+        assert!(log.contains("switched=name CA:accent:17,34,51"));
 
         assert!(app.destroy_scene(first));
         assert_eq!(app.active_scene(), Some(second));
@@ -64001,7 +64133,7 @@ end_header
         assert!(log.contains("red=255,0,0,255"), "named red → RGBA: {log:?}");
         assert!(log.contains("green=0,255,0"), "hex #00ff00 → RGB: {log:?}");
         assert!(
-            log.contains("scoped=Color:255:SelCommand:focus"),
+            log.contains("scoped=NamedColor:255:SelCommand:focus"),
             "scoped colour and selector resolve: {log:?}"
         );
         assert!(
@@ -72495,6 +72627,108 @@ attribute \"dep\" string \"positions\"
         assert!(!xml.contains("value=\"accent\""));
         assert!(!xml.contains("mod_h="));
         assert!(xml.contains("#00FF00"));
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_color_aliases_keep_their_source_scope_across_submissions() {
+        let mut app = DesktopAppState::new();
+        let source = app.new_scene("source", true).result_scene;
+        let destination = app.new_scene("destination", false).result_scene;
+        let (log, _) = app
+            .run_script_js(&format!(
+                r##"
+                var palette = cuemol.getService('StyleManager');
+                var sourceScope = {}, destinationScope = {};
+                var sourceSet = palette.createStyleSet('source', sourceScope);
+                var destinationSet = palette.createStyleSet('destination', destinationScope);
+                palette.setColor('accent', cuemol.makeColor('#ff0000'), sourceScope, sourceSet);
+                palette.setColor('accent', cuemol.makeColor('#0000ff'), destinationScope, destinationSet);
+                palette.firePendingEvents();
+                var retained = palette.compileColor('accent', sourceScope);
+                palette.setColor('imported', retained, destinationScope, destinationSet);
+                palette.setColor('alias', retained, sourceScope, sourceSet);
+                palette.firePendingEvents();
+                function rgba(color) {{ return [color.r(), color.g(), color.b(), color.a()].join(','); }}
+                print(retained.toString());
+                print(rgba(palette.getColor('imported', destinationScope)));
+                print(rgba(palette.compileColor('undefined-accent', sourceScope)));
+                var modified = palette.compileColor('accent{{alpha:0.25;mod_b:-0.5}}', sourceScope);
+                print(rgba(modified));
+                "##,
+                source.get(),
+                destination.get()
+            ))
+            .unwrap();
+        assert_eq!(log, "accent\n255,0,0,255\n128,128,128,128\n128,0,0,64\n");
+        let (log, _) = app
+            .run_script_js(&format!(
+                r##"
+                var palette = cuemol.getService('StyleManager');
+                var sourceScope = {}, destinationScope = {};
+                var sourceSet = palette.hasStyleSet('source', sourceScope);
+                var retained = palette.getColor('alias', sourceScope);
+                var modified = palette.compileColor('accent{{alpha:0.25;mod_b:-0.5}}', sourceScope);
+                function rgba(color) {{ return [color.r(), color.g(), color.b(), color.a()].join(','); }}
+                palette.setColor('accent', cuemol.makeColor('#00ff00'), sourceScope, sourceSet);
+                palette.firePendingEvents();
+                print(rgba(retained));
+                print(rgba(palette.getColor('imported', destinationScope)));
+                print(palette.getColor2('alias', sourceScope, sourceSet).toString());
+                print(rgba(palette.getStyleSet(sourceSet).getColor('alias')));
+                print(rgba(modified));
+                var chained = palette.compileColor('alias', sourceScope);
+                try {{ chained.r(); print('unexpected-success'); }}
+                catch (error) {{ print(String(error).includes('cyclic reference')); }}
+                print(palette.compileColor('not(a,color)', sourceScope) === null);
+                "##,
+                source.get(),
+                destination.get(),
+            ))
+            .unwrap();
+        assert_eq!(
+            log,
+            "0,255,0,255\n0,255,0,255\naccent\n0,255,0,255\n0,128,0,64\ntrue\ntrue\n"
+        );
+        let loaded = app
+            .scene_manager()
+            .scene(destination)
+            .unwrap()
+            .loaded_styles();
+        assert!(loaded
+            .iter()
+            .any(|style| style.data.contains("value=\"accent\"")));
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_named_color_cache_changes_only_after_color_notifications() {
+        let mut app = DesktopAppState::new();
+        app.ensure_active_scene();
+        let (log, _) = app
+            .run_script_js(
+                r##"
+                var manager = cuemol.getService('StyleManager');
+                var id = manager.createStyleSet('cache', scene.uid);
+                var set = manager.getStyleSet(id);
+                set.setColor('accent', cuemol.makeColor('#ff0000'));
+                manager.firePendingEvents();
+                var retained = manager.compileColor('accent', scene.uid);
+                print(retained.r());
+                set.setColor('accent', cuemol.makeColor('#00ff00'));
+                manager.firePendingEvents();
+                print(retained.r());
+                print(manager.compileColor('accent', scene.uid).g());
+                manager.setColor('accent', cuemol.makeColor('#0000ff'), scene.uid, id);
+                print(retained.r());
+                manager.firePendingEvents();
+                print(retained.b());
+                retained.mod_h = 120;
+                print(retained.r());
+                "##,
+            )
+            .unwrap();
+        assert_eq!(log, "255\n255\n255\n255\n255\n255\n");
     }
 
     #[test]

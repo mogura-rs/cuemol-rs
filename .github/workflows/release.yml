@@ -80,7 +80,7 @@ jobs:
           key: tools-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ hashFiles('scripts/bundle-tools.py', 'scripts/bundle-oidn.py', 'scripts/bundle-povray.py', 'scripts/tool-requirements.txt') }}
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libsuitesparse-dev libopenblas-dev gfortran autoconf automake libboost-thread-dev libpng-dev libjpeg-dev libtiff-dev patchelf
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libsuitesparse-dev libopenblas-dev gfortran autoconf automake libboost-thread-dev libpng-dev libjpeg-dev libtiff-dev patchelf xvfb xauth xdotool xclip libegl1 libgl1-mesa-dri libvulkan1 mesa-vulkan-drivers
       - name: Install macOS source-build dependencies
         if: runner.os == 'macOS' && steps.tools.outputs.cache-hit != 'true'
         run: brew install suite-sparse openblas gettext libiconv libomp
@@ -146,6 +146,27 @@ jobs:
         run: scripts/test-install.ps1 -Binary target/${{ matrix.target }}/release/cuemol.exe
       - name: Package distributions
         run: uv run --no-project python scripts/package-release.py --target ${{ matrix.target }}
+      - name: Check packaged window pixels and OS input
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          extension=''
+          if [ "$RUNNER_OS" = Windows ]; then extension=.exe; fi
+          binary=".cache/package/$TARGET/cuemol$extension"
+          if [ "$RUNNER_OS" = macOS ]; then binary=".cache/package/$TARGET/cuemol-rs.app/Contents/MacOS/cuemol-rs"; fi
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a -s '-screen 0 1440x1080x24' uv run --python 3.13 scripts/check-native-gui.py --binary "$binary" --out .cache/release-gui-check
+          else
+            uv run --python 3.13 scripts/check-native-gui.py --binary "$binary" --out .cache/release-gui-check
+          fi
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: native-gui-check-${{ matrix.target }}
+          path: .cache/release-gui-check
+          if-no-files-found: ignore
+          retention-days: 7
       - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.target }}

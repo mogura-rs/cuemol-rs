@@ -11,6 +11,7 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parent.parent
 REQUIRED = (
+    'pkg/source-build.json',
     'pkg/logo.png', 'index.html', 'kernels.js', 'oidn.js', 'input.js', 'loader.js', 'loader-worker.js', 'pkg/cuemol_web.js',
     'pkg/cuemol_web_bg.wasm', 'pkg/cuemol_web_loader.js', 'pkg/cuemol_web_loader_bg.wasm',
     'pkg/kernels/usalign.js', 'pkg/kernels/usalign.wasm',
@@ -38,6 +39,11 @@ def verify(directory, revision=None):
     manifest = json.loads((directory / 'build-info.json').read_text())
     if revision and manifest['commit'] != revision:
         raise ValueError('Browser artifact does not match the requested commit')
+    source = json.loads((directory / 'pkg/source-build.json').read_text())
+    if source.get('commit') != manifest['commit'] or source.get('dirty') != manifest.get('dirty'):
+        raise ValueError('Browser source metadata differs from the artifact manifest')
+    if revision and source.get('dirty') is not False:
+        raise ValueError('Release browser assets require clean sources')
     for name in REQUIRED:
         if name not in manifest['files']:
             raise ValueError(f'Missing browser asset: {name}')
@@ -80,6 +86,16 @@ def main():
     for name in REQUIRED:
         if not (source / name).is_file():
             raise ValueError(f'Build browser assets first: missing {name}')
+    build = json.loads((source / 'pkg/source-build.json').read_text())
+    if build.get('commit') != revision:
+        raise ValueError('Browser build does not match the requested commit; rebuild first')
+    if args.revision and build.get('dirty') is not False:
+        raise ValueError('Release browser assets require clean sources')
+    current_commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+    current_dirty = bool(subprocess.check_output(
+        ['git', 'status', '--porcelain', '--untracked-files=normal'], cwd=ROOT))
+    if current_commit != build['commit'] or current_dirty != build['dirty']:
+        raise ValueError('Source checkout changed since the browser build; rebuild first')
     if output.exists():
         shutil.rmtree(output)
     output.mkdir(parents=True)
@@ -88,12 +104,13 @@ def main():
     shutil.copytree(source / 'pkg', output / 'pkg')
     manifest = {
         'commit': revision,
+        'dirty': build['dirty'],
         'repository': os.environ.get('GITHUB_REPOSITORY', ''),
         'files': {p.relative_to(output).as_posix(): digest(p)
                   for p in sorted(output.rglob('*')) if p.is_file()},
     }
     (output / 'build-info.json').write_text(json.dumps(manifest, indent=2) + '\n')
-    verify(output, revision)
+    verify(output, args.revision)
     print(f"Staged {len(manifest['files'])} browser assets from {revision}")
 
 

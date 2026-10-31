@@ -29,6 +29,22 @@ fn offline_skill_and_preferences_do_not_execute_startup() {
         assert!(output.stderr.is_empty(), "{output:?}");
     }
     assert_eq!(run(&["config", "get", "gui:theme"]).stdout, b"dark\n");
+    for (key, value) in [
+        ("probe:value", ""),
+        ("probe:value", r"models\new\test.pdb"),
+        ("probe:value", "  selection  "),
+        ("probe:value", "first\r\nsecond\t"),
+        ("#theme", "custom-value"),
+        (" #theme", ""),
+        (" ", ""),
+    ] {
+        let saved = run(&["config", "set", key, value]);
+        assert!(saved.status.success(), "{saved:?}");
+        let loaded = run(&["config", "get", key]);
+        assert!(loaded.status.success(), "{loaded:?}");
+        assert_eq!(loaded.stdout, format!("{value}\n").as_bytes());
+        assert!(saved.stderr.is_empty() && loaded.stderr.is_empty());
+    }
     assert!(!run(&["skill", "unexpected"]).status.success());
     let script = run(&["-c", "print(scene.name);"]);
     assert!(script.status.success(), "{script:?}");

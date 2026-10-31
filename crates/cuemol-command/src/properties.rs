@@ -3,9 +3,7 @@ use crate::{
     console::resolve_property_reference,
     nodes,
 };
-use cuemol_core::{
-    parse_ldom2_xml, write_ldom2_xml, CueMolError, LDom2Node, Matrix4, Quat, Result, Uid, Vector4,
-};
+use cuemol_core::{CueMolError, Matrix4, Quat, Result, Uid, Vector4};
 use cuemol_desktop_core::{DesktopAppState, GuiWorkspaceObjectKind};
 use cuemol_qsys::{Camera, View};
 use serde_json::{json, Value};
@@ -1346,7 +1344,6 @@ fn styles(state: &mut DesktopAppState, name: &str, args: &Value) -> Result<Value
     if summary.read_only {
         return Err(CueMolError::invalid_argument("style set is read-only"));
     }
-    let mut tree = parse_ldom2_xml(&state.style_xml(target)?)?;
     let tag = match name {
         "define_color" | "remove_color" => "color",
         "define_selection" | "remove_selection" => "sel",
@@ -1358,25 +1355,16 @@ fn styles(state: &mut DesktopAppState, name: &str, args: &Value) -> Result<Value
             "style entry name is required",
         ));
     }
-    tree.top_mut()
-        .retain_children(|n| n.tag_name() != tag || n.str_attr("id").as_str() != entry);
-    if name == "define_color" || name == "define_selection" {
+    let value = if name == "define_color" || name == "define_selection" {
         let value = text(args, if tag == "color" { "color" } else { "selection" })?;
-        let value = if tag == "color" {
-            state
-                .resolve_style_color(target.scope(), value)?
-                .script_string()
-        } else {
+        if tag == "sel" {
             state.parse_scene_selector(sid, value)?;
-            value.to_string()
-        };
-        let mut node = LDom2Node::new();
-        node.set_tag_name(tag);
-        node.set_str_attr("id", entry);
-        node.set_value(&value);
-        tree.top_mut().append_child_node(node);
-    }
-    state.edit_style(target, &write_ldom2_xml(&tree))?;
+        }
+        Some(value)
+    } else {
+        None
+    };
+    state.edit_style_entry(target, tag, entry, value)?;
     Ok(json!({"styleSet":set,"name":entry}))
 }
 

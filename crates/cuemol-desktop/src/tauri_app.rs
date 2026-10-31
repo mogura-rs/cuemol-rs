@@ -23770,7 +23770,7 @@ mod tests {
                     object_uid: object_uid.get(),
                     renderer_uid: Some(renderer_uid.get()),
                     coloring_type: Some("CPKColoring".to_string()),
-                    attrs: BTreeMap::from([("col_C".to_string(), "not-a-color".to_string())]),
+                    attrs: BTreeMap::from([("col_C".to_string(), "not(a,color)".to_string())]),
                     paint_entries: Vec::new(),
                     gradient_entries: Vec::new(),
                     default_color: None,
