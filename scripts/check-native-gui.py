@@ -648,11 +648,31 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             inspector_filter('loopsize2')
             def loop_size():
                 return call('get_prop', {'path': f'#{loops_id}.loopsize2'})['value']
+            def optional_editor():
+                return capture().crop((width - 160, 214, width - 36, 237))
+            def copied_number(expected):
+                pyautogui.hotkey(primary, 'a')
+                pyautogui.hotkey(primary, 'c')
+                text = clipboard_text()
+                try:
+                    matches = float(text) == expected
+                except ValueError:
+                    matches = False
+                if not matches:
+                    raise RuntimeError(f'The numeric editor copied {text[:80]!r}, expected {expected}')
+                return True
+            disabled_editor = optional_editor()
             pyautogui.click(x + width - 174, y + 225)
             wait_for(lambda: loop_size() == '2')
+            wait_for(lambda: ImageChops.difference(disabled_editor, optional_editor()).getbbox())
+            capture('inspector-optional-enabled.png')
             pyautogui.doubleClick(x + width - 100, y + 225, interval=0.1)
-            pyautogui.hotkey(primary, 'a')
-            pyautogui.write('3.4')
+            wait_for(lambda: copied_number(2.0))
+            pyautogui.write('3.4', interval=0.1)
+            wait_for(lambda: copied_number(3.4))
+            capture('inspector-optional-draft.png')
+            if loop_size() != '2':
+                raise RuntimeError('The optional numeric draft changed the property before commit')
             pyautogui.press('enter')
             wait_for(lambda: loop_size() == '3.4')
             pyautogui.click(x + width - 174, y + 225)
@@ -754,6 +774,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                           inspector_text_draft=True,
                           inspector_derived_axes=True,
                           inspector_optional_value=True,
+                          inspector_optional_input_acknowledged=True,
                           inspector_font_choices=True,
                           inspector_selection_builder=True,
                           font_pixels=styled.histogram()[255])

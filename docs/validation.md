@@ -129,6 +129,13 @@ an application clipboard defect.
 The repaired Linux check passes the full input/Inspector sequence at 1024 by
 768 and 944 by 561 client pixels, plus the Selection sequence at 944 by 608.
 
+Windows subsequently stopped while entering an optional numeric value. The
+failure image showed the control disabled, but the test had checked only the
+model value before typing. It now waits for the control pixels to change and
+checks the copied numeric text before and after typing. It also verifies that
+the draft remains uncommitted until Enter. These checks establish the actual
+input target and preserve the existing property-value and undo assertions.
+
 Generated archives and `dist/validation.json` remain local validation artifacts,
 not a published release. The release workflow now checks actual packaged windows
 on all five native targets. Local test results do not establish that those CI
