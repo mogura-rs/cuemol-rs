@@ -156,6 +156,8 @@ text for both batched clicks and batched Tab navigation. The OS check now waits
 for the filter's focus border, verifies its copied text, and waits for focus to
 leave after Tab before clicking a property. It retains the original property
 change and undo assertions; the failed click alone did not prove a lock defect.
+The View numeric check now waits for the expected numeric clipboard value, since
+filter verification replaces the previous console text in the clipboard.
 
 Generated archives and `dist/validation.json` remain local validation artifacts,
 not a published release. The release workflow now checks actual packaged windows

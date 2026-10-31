@@ -593,9 +593,13 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             pyautogui.doubleClick(x + width - 100, y + 225, interval=0.1)
             pyautogui.hotkey(primary, 'a')
             pyautogui.hotkey(primary, 'c')
-            wait_for(lambda: clipboard_text() != command)
-            if abs(float(clipboard_text()) - inspector_zoom) > 0.01:
-                raise RuntimeError('The View inspector retained an old zoom value')
+            def copied_zoom():
+                text = clipboard_text()
+                try:
+                    return abs(float(text) - inspector_zoom) <= 0.01
+                except ValueError:
+                    return False
+            wait_for(copied_zoom)
             pyautogui.write('37.25', interval=0.1)
             pyautogui.moveTo(x + width * 0.6, y + height * 0.4)
             pyautogui.scroll(-2)
