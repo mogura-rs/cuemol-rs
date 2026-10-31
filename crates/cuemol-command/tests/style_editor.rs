@@ -501,10 +501,7 @@ fn check_portable_style_links(scripted: bool) {
             .iter()
             .find(|node| node.tag_name() == "styles")
             .unwrap();
-        assert_eq!(
-            std::path::Path::new(node.str_attr("src").as_str()),
-            std::path::Path::new("../styles/palette.xml")
-        );
+        assert_eq!(node.str_attr("src").as_str(), "../styles/palette.xml");
         assert_eq!(
             std::path::Path::new(&state.style_summary(target).unwrap().source),
             source

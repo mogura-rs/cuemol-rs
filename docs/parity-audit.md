@@ -1580,3 +1580,10 @@ it resolves relative style sources against the original scene before output
 paths are calculated, and LDOM removal includes attribute nodes. The shared
 editor is currently called by the browser; the native egui editor has its own
 completion path.
+
+The final path review also caught a Windows representation change: a
+cross-volume fallback had reused the filesystem's verbatim canonical path.
+That fallback now retains the original absolute representation, while relative
+references use forward slashes on every platform. The file tests check the
+serialized text as well as reloading it. Cross-volume Windows presentation has
+not been exercised in this local run.

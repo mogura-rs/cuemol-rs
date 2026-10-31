@@ -95,16 +95,15 @@ pub(crate) fn relative_source(source: &str, base: Option<&Path>) -> String {
         .take_while(|(a, b)| a == b)
         .count();
     if common == 0 {
-        return absolute.to_string_lossy().into_owned();
+        return crate::absolute_scene_path(Path::new(source))
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| source.to_string());
     }
-    let mut result = PathBuf::new();
-    for _ in common..origin.len() {
-        result.push("..");
-    }
+    let mut result = vec!["..".to_string(); origin.len() - common];
     for component in &target[common..] {
-        result.push(component.as_os_str());
+        result.push(component.as_os_str().to_string_lossy().into_owned());
     }
-    result.to_string_lossy().into_owned()
+    result.join("/")
 }
 
 fn reader_type(format: &str) -> &'static str {
