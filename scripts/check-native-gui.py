@@ -748,8 +748,14 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                 return call('get_prop', {'path': f'#{builder_id}.sel'})['value']
             initial_selection = renderer_selection()
             call('clear_undo')
+            wait_for(lambda: window_bounds(process.pid))
             pyautogui.click(x + width - 47, y + 225)
-            time.sleep(0.2)
+
+            def selection_popup_visible():
+                image = capture().crop((width - 340, 245, width - 315, 290))
+                return sum(min(pixel) > 20 for pixel in image.getdata()) > image.width * image.height * 0.8
+
+            wait_for(selection_popup_visible)
             capture('inspector-selection-open.png')
             pyautogui.click(x + width - 215, y + 272)
             time.sleep(0.2)
@@ -797,6 +803,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                           inspector_optional_input_acknowledged=True,
                           inspector_filter_input_acknowledged=True,
                           inspector_font_choices=True,
+                          inspector_selection_popup_acknowledged=True,
                           inspector_selection_builder=True,
                           font_pixels=styled.histogram()[255])
             print(json.dumps(report), flush=True)

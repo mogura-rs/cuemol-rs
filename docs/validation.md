@@ -165,6 +165,13 @@ CP1252 default and rejected a font name. The client now decodes UTF-8 explicitly
 A subprocess probe with Japanese font names reproduces the failure under a
 simulated CP1252 default and preserves the names after the repair.
 
+The next Windows run reached the selection picker, but its captures showed no
+popup before subsequent clicks. The driver had waited a fixed 0.2 seconds.
+Pausing the local application for 0.8 seconds at the opening click reproduces
+the missing popup and failed selection commit. The driver now brings the window
+forward and waits for the popup pixels before using its controls. The same
+delayed-frame run then passes, including the final selection and undo checks.
+
 Generated archives and `dist/validation.json` remain local validation artifacts,
 not a published release. The release workflow now checks actual packaged windows
 on all five native targets. Local test results do not establish that those CI
