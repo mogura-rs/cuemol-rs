@@ -1581,6 +1581,13 @@ paths are calculated, and LDOM removal includes attribute nodes. The shared
 editor is currently called by the browser; the native egui editor has its own
 completion path.
 
+The final path review also caught a Windows representation change: a
+cross-volume fallback had reused the filesystem's verbatim canonical path.
+That fallback now retains the original absolute representation, while relative
+references use forward slashes on every platform. The file tests check the
+serialized text as well as reloading it. Cross-volume Windows presentation has
+not been exercised in this local run.
+
 The Tauri style editor now uses the style's runtime identity and scope for
 properties, file operations and deletion. Previously it prohibited every global
 style and sent a local array index that could point to a different style after
