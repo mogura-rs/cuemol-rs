@@ -1784,6 +1784,7 @@ dependencies = [
  "cuemol-command",
  "cuemol-core",
  "cuemol-desktop-core",
+ "cuemol-gfx",
  "cuemol-qsys",
  "cuemol-render",
  "egui",

@@ -7,6 +7,7 @@ mod loading;
 mod navigation;
 use cuemol_command::navigation::{AtomHit, Navigation, Tool as ViewportTool};
 mod panels;
+mod styles;
 mod trajectory;
 mod tritium;
 use base64::Engine;
@@ -242,6 +243,7 @@ struct App {
     sequence_panel: cuemol_ui::sequence::SequencePanel,
     actions_panel: cuemol_ui::actions::ActionsPanel,
     selection_pane: cuemol_ui::selection_pane::SelectionPane,
+    style_editor: Option<cuemol_ui::style_editor::StyleEditor>,
     console: cuemol_ui::console::ConsoleEditor,
     console_session: cuemol_command::console::Session,
     console_run: Option<console::ConsoleExecution>,
@@ -409,6 +411,7 @@ impl App {
             sequence_panel: cuemol_ui::sequence::SequencePanel::default(),
             actions_panel: cuemol_ui::actions::ActionsPanel::with_files(actions::read_library()),
             selection_pane: cuemol_ui::selection_pane::SelectionPane::default(),
+            style_editor: None,
             console: {
                 let mut editor = cuemol_ui::console::ConsoleEditor::default();
                 if let Some(history) = storage
@@ -1290,6 +1293,7 @@ impl eframe::App for App {
             ctx.request_repaint();
         }
         self.shell(ctx);
+        self.style_dialog(ctx);
         if let Some(intent) = self.actions_panel.dialogs(ctx, &self.state) {
             self.apply_action_intent(intent);
         }

@@ -15,14 +15,7 @@ fn loaded_name(style: &cuemol_molstr::LoadedStyle, index: usize) -> String {
 
 impl DesktopAppState {
     pub(crate) fn global_styles(&self) -> StyleManager {
-        #[cfg(feature = "scripting")]
-        {
-            self.script_styles.global_scope()
-        }
-        #[cfg(not(feature = "scripting"))]
-        {
-            cuemol_molvis::default_style_manager()
-        }
+        self.script_styles.global_scope()
     }
 
     pub(crate) fn scene_styles_in_scope(&self, scene: &MolScene, scope: u64) -> StyleManager {

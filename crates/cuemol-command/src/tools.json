@@ -4680,6 +4680,23 @@
             "null"
           ],
           "description": "Name of the style set to keep it in (the scene's own before a global one; made in the scene when there is none). Null uses the set named \"default\"."
+        },
+        "sceneId": {
+          "type": "integer",
+          "description": "Scene to edit. Omit for the active scene."
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "scene",
+            "global"
+          ],
+          "description": "Restrict the style set to this scope. Omit to prefer a scene set over a global set."
+        },
+        "styleId": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Runtime handle returned as id by get_style_set. Requires scope and takes precedence over styleSet."
         }
       },
       "required": [
@@ -5149,6 +5166,10 @@
         "name": {
           "type": "string",
           "description": "Name of the new set; not one the scene has."
+        },
+        "sceneId": {
+          "type": "integer",
+          "description": "Scene to edit. Omit for the active scene."
         }
       },
       "required": [
@@ -5171,6 +5192,23 @@
         "styleSet": {
           "type": "string",
           "description": "Name of the style set (the scene's own before a global one)."
+        },
+        "sceneId": {
+          "type": "integer",
+          "description": "Scene to edit. Omit for the active scene."
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "scene",
+            "global"
+          ],
+          "description": "Restrict the style set to this scope. Omit to prefer a scene set over a global set."
+        },
+        "styleId": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Runtime handle returned as id by get_style_set. Requires scope and takes precedence over styleSet."
         }
       },
       "required": [
@@ -5186,7 +5224,7 @@
   },
   {
     "name": "set_style_readonly",
-    "description": "Make a scene's style set read only, or writable again. A changed set cannot be made read only.",
+    "description": "Make a style set read only, or writable again. A changed set cannot be made read only.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -5197,6 +5235,23 @@
         "readonly": {
           "type": "boolean",
           "description": "True makes it read only."
+        },
+        "sceneId": {
+          "type": "integer",
+          "description": "Scene to edit. Omit for the active scene."
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "scene",
+            "global"
+          ],
+          "description": "Restrict the style set to this scope. Omit to prefer a scene set over a global set."
+        },
+        "styleId": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Runtime handle returned as id by get_style_set. Requires scope and takes precedence over styleSet."
         }
       },
       "required": [
@@ -5220,6 +5275,10 @@
         "path": {
           "type": "string",
           "description": "The style file (.xml)."
+        },
+        "sceneId": {
+          "type": "integer",
+          "description": "Scene to edit. Omit for the active scene."
         }
       },
       "required": [
@@ -5249,6 +5308,23 @@
             "null"
           ],
           "description": "Where to write it (.xml). Null uses its source file."
+        },
+        "sceneId": {
+          "type": "integer",
+          "description": "Scene to edit. Omit for the active scene."
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "scene",
+            "global"
+          ],
+          "description": "Restrict the style set to this scope. Omit to prefer a scene set over a global set."
+        },
+        "styleId": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Runtime handle returned as id by get_style_set. Requires scope and takes precedence over styleSet."
         }
       },
       "required": [
@@ -5282,6 +5358,23 @@
             "null"
           ],
           "description": "The style set to keep it in (the scene's own before a global one; made in the scene when there is none). Null uses the set named \"default\"."
+        },
+        "sceneId": {
+          "type": "integer",
+          "description": "Scene to edit. Omit for the active scene."
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "scene",
+            "global"
+          ],
+          "description": "Restrict the style set to this scope. Omit to prefer a scene set over a global set."
+        },
+        "styleId": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Runtime handle returned as id by get_style_set. Requires scope and takes precedence over styleSet."
         }
       },
       "required": [
@@ -5309,6 +5402,23 @@
         "name": {
           "type": "string",
           "description": "The colour's name."
+        },
+        "sceneId": {
+          "type": "integer",
+          "description": "Scene to edit. Omit for the active scene."
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "scene",
+            "global"
+          ],
+          "description": "Restrict the style set to this scope. Omit to prefer a scene set over a global set."
+        },
+        "styleId": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Runtime handle returned as id by get_style_set. Requires scope and takes precedence over styleSet."
         }
       },
       "required": [
@@ -5336,6 +5446,23 @@
         "name": {
           "type": "string",
           "description": "The named selection's name."
+        },
+        "sceneId": {
+          "type": "integer",
+          "description": "Scene to edit. Omit for the active scene."
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "scene",
+            "global"
+          ],
+          "description": "Restrict the style set to this scope. Omit to prefer a scene set over a global set."
+        },
+        "styleId": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Runtime handle returned as id by get_style_set. Requires scope and takes precedence over styleSet."
         }
       },
       "required": [
@@ -5363,11 +5490,171 @@
         "name": {
           "type": "string",
           "description": "The style's name."
+        },
+        "sceneId": {
+          "type": "integer",
+          "description": "Scene to edit. Omit for the active scene."
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "scene",
+            "global"
+          ],
+          "description": "Restrict the style set to this scope. Omit to prefer a scene set over a global set."
+        },
+        "styleId": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Runtime handle returned as id by get_style_set. Requires scope and takes precedence over styleSet."
         }
       },
       "required": [
         "styleSet",
         "name"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "rename_style_set",
+    "description": "Rename an existing style set.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "styleSet": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "sceneId": {
+          "type": "integer",
+          "description": "Scene to use. Omit for the active scene."
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "scene",
+            "global"
+          ],
+          "description": "Restrict the style set to this scope. Omit to prefer a scene set over a global set."
+        },
+        "styleId": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Runtime handle returned as id by get_style_set. Requires scope and takes precedence over styleSet."
+        }
+      },
+      "required": [
+        "styleSet",
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "reload_style_file",
+    "description": "Reload a linked style set from its source file.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "styleSet": {
+          "type": "string"
+        },
+        "sceneId": {
+          "type": "integer",
+          "description": "Scene to use. Omit for the active scene."
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "scene",
+            "global"
+          ],
+          "description": "Restrict the style set to this scope. Omit to prefer a scene set over a global set."
+        },
+        "styleId": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Runtime handle returned as id by get_style_set. Requires scope and takes precedence over styleSet."
+        }
+      },
+      "required": [
+        "styleSet"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "get_style_set",
+    "description": "Read style metadata and its complete XML definitions.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "styleSet": {
+          "type": "string"
+        },
+        "sceneId": {
+          "type": "integer",
+          "description": "Scene to use. Omit for the active scene."
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "scene",
+            "global"
+          ],
+          "description": "Restrict the style set to this scope. Omit to prefer a scene set over a global set."
+        },
+        "styleId": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Runtime handle returned as id by get_style_set. Requires scope and takes precedence over styleSet."
+        }
+      },
+      "required": [
+        "styleSet"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "import_style_xml",
+    "description": "Import XML as an embedded read-only style set in the scene.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "xml": {
+          "type": "string"
+        },
+        "sceneId": {
+          "type": "integer",
+          "description": "Scene to use. Omit for the active scene."
+        }
+      },
+      "required": [
+        "xml"
       ],
       "additionalProperties": false
     },

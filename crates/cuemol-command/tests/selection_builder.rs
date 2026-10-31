@@ -261,6 +261,14 @@ fn pane_definitions_use_writable_scene_styles_and_preserve_locked_sets() {
         selection::evaluate(&state, Some(id), "carbon").count,
         Some(1)
     );
+    let saved = tempfile::tempdir().unwrap();
+    call_tool(
+        &mut state,
+        &mut camera,
+        "save_style_file",
+        &json!({"styleSet":"default_0","path":saved.path().join("selections.xml")}),
+    )
+    .unwrap();
     call_tool(
         &mut state,
         &mut camera,

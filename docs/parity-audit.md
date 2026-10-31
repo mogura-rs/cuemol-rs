@@ -31,7 +31,7 @@ speedup from a single optimized stage or compare timings from different hosts.
 | --- | --- | --- |
 | Shell | Activities, menus, toolbar, tab order, docks, compact windows, themes and keyboard access | Application shortcuts, browser tab closing and menu access, shared history dropdowns, Tauri palette folding and tree/text clipboard routing repaired and checked; browser recent files and remaining pane controls are still under comparison |
 | Explorer and Inspector | Object/renderer/group hierarchy, selection, visibility, locking, drag/drop, context menus and property editors | Typed fields, nested properties, defaults/resets, group writes, Scene/View targets, quality presets, renderer pages, font choices and selection pickers repaired and checked below; remaining targets and live previews are under comparison |
-| Color and styles | Coloring modes, paint entries, palettes, property inheritance, style creation/apply/edit/save | Script/GUI style state, scoped selection/color precedence, file loading/saving and retained handles reconciled below; complete editor comparison remains pending |
+| Color and styles | Coloring modes, paint entries, palettes, property inheritance, style creation/apply/edit/save | Script/GUI state, scoped precedence, linked-file metadata and native/WASM editors repaired below; Tauri editor scope, user-style persistence and the remaining coloring controls are still under comparison |
 | Console | CueMol/PyMOL dialects, command arguments, completion, history, multiline input, IME and transaction behavior | Shared CueMol/PyMOL interpreters, completion, native QAX logging/replay and cancellable execution implemented; focused shared, browser and OS-input checks passed; affected regression checks, CI and Pages passed at `99b7c16`; public review repairs and release delivery are in progress |
 | Actions | History rows, operation inspection, QAX export, bundled/user macros and reusable actions | History selection, operation inspection, QAX export and bundled/user macro libraries are implemented in native, WASM and Tauri; CI, Pages and the macOS window check passed at `488ce9c`; review repairs passed affected checks and were published at `53100c5` |
 | Scripts and services | JavaScript/Python helpers, retained state, callbacks, errors, file arguments and asynchronous readers | Previous compatibility checks exist; shared workload comparison pending |
@@ -1413,3 +1413,89 @@ and all application measurement consumers use the scene resolver. Script append
 and rendering also share the same parser for empty operands. The fancy-segment
 comment was corrected to describe only the first arm. Terminal CI and delivery
 are recorded after completion.
+
+## Style editor metadata and scope
+
+The GUI content-edit path had removed a linked style's source and cleared its
+modified flag. Saving a new renderer preset into a linked style also discarded
+the existing definitions because it read only the reference node. The shared
+edit path now retains the file link, runtime identity and unrelated definitions.
+Only content changes mark the style modified; changing its name or unlocking
+it preserves the previous flag. A content edit that sets the same value still
+marks it modified, matching the reference setter.
+
+An installed-reference probe checked load, unlock, rename, selection edit,
+same-path save, new-path save and a repeated same-value edit. CueMol 2.4.1.547
+retains the source throughout these edits. Saving to the same source leaves its
+modified flag set, while choosing a new source clears it. Rust follows this
+behavior. The reference GUI refuses to lock an already modified style, so the
+selection-pane regression now saves its edited set before locking it. Script
+property assignment remains a separate compatibility path.
+
+Native and browser editors now address a style by its runtime identity and
+scope, keeping an open editor attached when another set is inserted or a local
+set shadows a global name. The native global sets had been forced read-only in
+the summary and blocked at the editor entry points. They now use the real flag;
+double-click and the Property button open their editor. The tree distinguishes
+global sets and marks modified ones. Color, Selection and Styles tabs preserve
+structured renderer presets while changing or removing individual definitions.
+Global definitions also survive closing all scenes in the current process.
+Editors pass the runtime handle together with its scope, so an anonymous set
+and a set literally named `(anonymous)` remain distinct. Tree context actions
+use the same handle when changing read-only state or deleting a set. Content and read-only
+edits preserve the original name, including an empty name or surrounding spaces
+created by scripts. The command API returns both the raw name and display name;
+using a runtime handle without an explicit scope is rejected.
+The bundled system set retains its existing read-only default, unlike the
+reference's filesystem-backed system sheet. Its internal resource marker is
+not a file destination: Save asks for a real output path and Reload is disabled
+until that link exists. This packaging difference is explicit; the in-memory
+user set is editable in both implementations.
+
+The browser imports XML through the existing parser worker and transfers the
+parsed document in the versioned payload. Importing a style keeps the current
+camera and selected object, rejects duplicate names and opens the editor with
+the reference's read-only import default. Saving downloads a portable XML file
+without source or editor metadata. A download does not relink a browser file
+or claim that the original local file was overwritten.
+
+The native color picker previously serialized premultiplied RGB as straight
+RGB, darkening colors with partial alpha. It now converts back to straight
+channels and uses the color parser's script format. The parser also rejects
+malformed multibyte color input without slicing through a UTF-8 character.
+Both editors cache parsed entries until their state revision changes and draw
+only the visible rows. This removes repeated XML parsing and off-screen row
+creation; whole-application timing and memory improvements are not inferred
+from this structural change.
+
+Focused checks cover linked-file preservation, failed writes/reloads, global
+scope, editor identity, color alpha, worker transfer and duplicate import. The
+browser import/edit/save/reimport and global-shadowing cases passed twice in
+each backend, eight runs in total. Initial automation exposed a missing wait
+between canvas input frames; the tests now wait for presentation after focus
+and text entry. Broader regression, native window, review and delivery results
+are recorded after completion.
+
+The broad shared run passed 727 tests, and the browser regression passed 39
+cases spanning Inspector, asynchronous loading, measurement, selections and
+style edits. After the identity follow-up, all 37 affected command cases and
+182 native GUI cases passed; the unrelated real-POV-Ray case remained ignored.
+The Linux window check used OS mouse and keyboard events to open a global set,
+add and edit colors and selections, introduce a local name shadow, rename the
+original set and undo/redo that rename. MCP reads confirmed the resulting scope
+and definitions. The new native Property-button regression also exercises the
+editor entry point through the rendered UI. Six browser cases passed after the
+identity repair. Additional context checks then reproduced a widget-ID collision
+between identical display names: the native accessibility tree exposed one row
+instead of two, and the browser could not open the intended context menu.
+Both trees now scope widgets by runtime identity. All 183 native cases passed
+after that repair, and six rebuilt-browser cases passed, including separate
+context-menu unlock, edit and deletion for identical display names. Canvas
+automation waits for a presented hover state before clicking. Public review
+and delivery results follow below.
+
+The measurement commit's CI passed all 173 browser cases with one skipped, but
+the 22.1-minute test run plus setup exhausted the former 25-minute job limit
+before artifact staging. The workflow budget is now 40 minutes with the same
+checks and one browser worker. Its replacement run must finish before Pages
+delivery can be claimed.

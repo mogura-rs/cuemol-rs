@@ -32,6 +32,10 @@ enum PreparedContents {
         source: Vec<u8>,
         renderer_ids: Vec<i32>,
     },
+    Style {
+        node: LDom2Node,
+        data: String,
+    },
 }
 
 impl PreparedFile {
@@ -46,15 +50,22 @@ impl PreparedFile {
         }
     }
 
+    pub fn style_name(&self) -> Option<String> {
+        match &self.contents {
+            PreparedContents::Style { node, .. } => Some(node.str_attr("id").to_string()),
+            _ => None,
+        }
+    }
+
     /// The transfer protocol is private to matching application builds.
     pub fn encode(&self) -> Result<Vec<u8>> {
-        postcard::to_extend(self, b"CMPL\x03".to_vec())
+        postcard::to_extend(self, b"CMPL\x04".to_vec())
             .map_err(|error| CueMolError::parse(error.to_string()))
     }
 
     pub fn decode(data: &[u8]) -> Result<Self> {
         let data = data
-            .strip_prefix(b"CMPL\x03")
+            .strip_prefix(b"CMPL\x04")
             .ok_or_else(|| CueMolError::parse("unsupported prepared-file version"))?;
         let (value, remaining) = postcard::take_from_bytes(data)
             .map_err(|error| CueMolError::parse(error.to_string()))?;
@@ -123,6 +134,12 @@ impl PreparedFile {
 
     fn parse_object(extension: &str, bytes: &[u8]) -> Result<PreparedContents> {
         use cuemol_molstr::{ContentVerdict, HandlerSniffer};
+        if extension == "xml" {
+            let text = std::str::from_utf8(bytes)
+                .map_err(|error| CueMolError::parse(error.to_string()))?;
+            let (node, data) = style_edit::parse_import(text)?;
+            return Ok(PreparedContents::Style { node, data });
+        }
         let sniff = |kind| cuemol_molstr::stream::sniff_bytes(bytes, kind) == ContentVerdict::Yes;
         let format = match extension {
             "qdf" => [
@@ -231,6 +248,11 @@ impl DesktopAppState {
     pub fn open_prepared(&mut self, file: PreparedFile) -> Result<GuiLoadedPath> {
         let PreparedFile { name, contents } = file;
         match contents {
+            PreparedContents::Style { node, data } => {
+                let scene_uid = self.ensure_active_scene();
+                self.insert_imported_style(scene_uid, node, data, true)?;
+                Ok(GuiLoadedPath::Scene { scene_uid })
+            }
             PreparedContents::Molecule(data) => {
                 let molecule = data.into_molecule()?;
                 let scene_uid = self.ensure_active_scene();

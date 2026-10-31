@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 cuemol-core = { workspace = true, optional = true }
+cuemol-gfx = { workspace = true, optional = true }
 cuemol-render.workspace = true
 cuemol-agent = { workspace = true, optional = true }
 cuemol-command = { workspace = true, optional = true }
@@ -24,4 +25,4 @@ wasm-bindgen-futures = "0.4"
 [features]
 default = []
 console-runtime = ["cuemol-command/scripting", "dep:cuemol-agent", "dep:cuemol-command", "dep:cuemol-desktop-core", "dep:cuemol-qsys", "dep:serde_json", "dep:base64"]
-egui = ["console-runtime", "dep:cuemol-core", "dep:egui-phosphor", "dep:egui", "dep:zeroize", "dep:image"]
+egui = ["console-runtime", "dep:cuemol-core", "dep:cuemol-gfx", "dep:egui-phosphor", "dep:egui", "dep:zeroize", "dep:image"]

@@ -225,6 +225,8 @@ impl App {
         let source = file
             .scene_source()
             .map(|source| (file.name().to_string(), source));
+        let style_name = file.style_name();
+        let previous_selection = self.selected;
         let before = self.capture_history();
         match self.state.open_prepared(file) {
             Ok(loaded) => {
@@ -241,6 +243,7 @@ impl App {
                 }
                 self.selected = match loaded {
                     GuiLoadedPath::Object { object_uid, .. } => Some(object_uid),
+                    _ if style_name.is_some() => previous_selection,
                     _ => None,
                 };
                 self.dirty = true;
@@ -252,7 +255,13 @@ impl App {
                         break;
                     }
                 }
-                if matches!(loaded, GuiLoadedPath::Scene { .. })
+                if let Some(style_name) = style_name {
+                    let target = self
+                        .state
+                        .active_scene()
+                        .and_then(|scene| self.state.find_style_target(scene, &style_name));
+                    self.open_style_editor(target);
+                } else if matches!(loaded, GuiLoadedPath::Scene { .. })
                     && [".qsc", ".qsl", ".pse"]
                         .iter()
                         .any(|suffix| filename.ends_with(suffix))

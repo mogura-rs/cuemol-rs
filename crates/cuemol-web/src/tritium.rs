@@ -993,6 +993,7 @@ impl App {
                 if let Some(id)=self.selected {self.call("create_renderer",json!({"objId":id.get(),"rendererType":self.representation,"selection":if self.selection.is_empty(){"*"}else{&self.selection}}));}
             }
         });
+        self.style_tree(ui);
         self.clipboard_focus
             .region(cuemol_ui::clipboard::Scope::Tree, ui);
     }

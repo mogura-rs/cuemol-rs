@@ -41,6 +41,9 @@ pub mod selection;
 pub mod selection_pane;
 
 #[cfg(feature = "egui")]
+pub mod style_editor;
+
+#[cfg(feature = "egui")]
 pub mod actions;
 #[cfg(feature = "egui")]
 pub mod console;

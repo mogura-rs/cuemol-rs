@@ -1,6 +1,6 @@
 use crate::{CueMolError, LString, Result};
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LDom2Node {
     tag_name: String,
     value: String,

@@ -2837,7 +2837,9 @@ enum NativeSymmetryTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NativeStyleProperties {
     scene_uid: cuemol_core::Uid,
-    local_index: Option<usize>,
+    target: Option<cuemol_desktop_core::GuiStyleTarget>,
+    revision: u64,
+    contents: NativeStyleSetContents,
     name: String,
     read_only: bool,
     xml: String,
@@ -2971,34 +2973,15 @@ fn mutate_native_style_xml(xml: &str, mutation: &NativeStyleMutation) -> Result<
 }
 
 fn native_style_color(value: &str) -> Option<egui::Color32> {
-    let hex = value.trim().strip_prefix('#')?;
-    let (red, green, blue, alpha) = match hex.len() {
-        6 => (
-            u8::from_str_radix(&hex[0..2], 16).ok()?,
-            u8::from_str_radix(&hex[2..4], 16).ok()?,
-            u8::from_str_radix(&hex[4..6], 16).ok()?,
-            255,
-        ),
-        8 => (
-            u8::from_str_radix(&hex[0..2], 16).ok()?,
-            u8::from_str_radix(&hex[2..4], 16).ok()?,
-            u8::from_str_radix(&hex[4..6], 16).ok()?,
-            u8::from_str_radix(&hex[6..8], 16).ok()?,
-        ),
-        _ => return None,
-    };
+    let color = cuemol_gfx::parse_color(value).ok()?.rgba8()?;
     Some(egui::Color32::from_rgba_unmultiplied(
-        red, green, blue, alpha,
+        color.r, color.g, color.b, color.a,
     ))
 }
 
 fn native_style_color_string(color: egui::Color32) -> String {
-    let [red, green, blue, alpha] = color.to_array();
-    if alpha == 255 {
-        format!("#{red:02x}{green:02x}{blue:02x}")
-    } else {
-        format!("#{red:02x}{green:02x}{blue:02x}{alpha:02x}")
-    }
+    let [red, green, blue, alpha] = color.to_srgba_unmultiplied();
+    cuemol_gfx::SolidColor::from_rgba_u8(red, green, blue, alpha).script_string()
 }
 
 fn parse_densitymap_center(value: &str) -> Option<Vec3> {
@@ -7708,157 +7691,159 @@ impl GuiApplication {
                 });
                 ui.indent(format!("style-root-{}", scene.uid.get()), |ui| {
                     for (style_index, summary) in styles.iter().enumerate() {
-                        let selection = WorkspaceAuxSelection::Style {
-                            scene_uid: scene.uid,
-                            style_index,
-                        };
-                        let target = summary.local_index.map(|_| NativeWorkspaceTarget::Style {
-                            scene_uid: scene.uid,
-                            style_index,
-                        });
-                        let single_selected = self.selected_object.is_none()
-                            && self.workspace_aux_selection == Some(selection);
-                        let selected = target.map_or(single_selected, |target| {
-                            self.workspace_target_selected(target, single_selected)
-                        });
-                        let read_only = summary.read_only || summary.scene_uid.get() == 0;
-                        let response = cuemol_ui::shell::tree_row(
-                            ui,
-                            &summary.name,
-                            if read_only {
-                                cuemol_ui::shell::Icon::Lock
+                        ui.push_id(summary.target, |ui| {
+                            let selection = WorkspaceAuxSelection::Style {
+                                scene_uid: scene.uid,
+                                style_index,
+                            };
+                            let target =
+                                summary.local_index.map(|_| NativeWorkspaceTarget::Style {
+                                    scene_uid: scene.uid,
+                                    style_index,
+                                });
+                            let single_selected = self.selected_object.is_none()
+                                && self.workspace_aux_selection == Some(selection);
+                            let selected = target.map_or(single_selected, |target| {
+                                self.workspace_target_selected(target, single_selected)
+                            });
+                            let read_only = summary.read_only;
+                            let label = format!(
+                                "{}{}{}",
+                                summary.name,
+                                if summary.scene_uid.get() == 0 {
+                                    " (global)"
+                                } else {
+                                    ""
+                                },
+                                if summary.modified { " *" } else { "" },
+                            );
+                            let response = cuemol_ui::shell::tree_row(
+                                ui,
+                                &label,
+                                if read_only {
+                                    cuemol_ui::shell::Icon::Lock
+                                } else {
+                                    cuemol_ui::shell::Icon::Color
+                                },
+                                selected,
+                                None,
+                                None,
+                            )
+                            .on_hover_text(if read_only {
+                                "Read-only style"
                             } else {
-                                cuemol_ui::shell::Icon::Color
-                            },
-                            selected,
-                            None,
-                            None,
-                        )
-                        .on_hover_text(if read_only {
-                            "Read-only style"
-                        } else {
-                            "Editable style"
-                        });
-                        if response.clicked() {
-                            self.activate_workspace_scene(scene.uid, camera);
-                            let (multiple, range) =
-                                ui.input(|input| (input.modifiers.command, input.modifiers.shift));
-                            if target.is_none_or(|target| {
-                                !self
-                                    .select_workspace_target_with_modifiers(target, multiple, range)
-                            }) {
+                                "Editable style"
+                            });
+                            if response.clicked() {
+                                self.activate_workspace_scene(scene.uid, camera);
+                                let (multiple, range) = ui.input(|input| {
+                                    (input.modifiers.command, input.modifiers.shift)
+                                });
+                                if target.is_none_or(|target| {
+                                    !self.select_workspace_target_with_modifiers(
+                                        target, multiple, range,
+                                    )
+                                }) {
+                                    self.workspace_multiple_selection.clear();
+                                    self.selected_object = None;
+                                    self.selected_renderer = None;
+                                    self.workspace_aux_selection = Some(selection);
+                                }
+                            }
+                            if response.double_clicked() {
+                                self.open_style_properties(selection);
+                            }
+                            response.context_menu(|ui| {
+                                if target.is_some_and(|target| {
+                                    self.workspace_multiple_selection.contains(&target)
+                                }) {
+                                    self.workspace_multiple_context_menu(ui);
+                                    return;
+                                }
                                 self.workspace_multiple_selection.clear();
-                                self.selected_object = None;
-                                self.selected_renderer = None;
-                                self.workspace_aux_selection = Some(selection);
-                            }
-                        }
-                        if response.double_clicked() && summary.local_index.is_some() {
-                            self.open_style_properties(selection);
-                        }
-                        response.context_menu(|ui| {
-                            if target.is_some_and(|target| {
-                                self.workspace_multiple_selection.contains(&target)
-                            }) {
-                                self.workspace_multiple_context_menu(ui);
-                                return;
-                            }
-                            self.workspace_multiple_selection.clear();
-                            if ui.button("New Style...").clicked() {
-                                self.open_new_style_properties(scene.uid);
-                                ui.close();
-                            }
-                            if ui
-                                .add_enabled(
-                                    summary.local_index.is_some(),
-                                    egui::Button::new("Copy"),
-                                )
-                                .clicked()
-                            {
-                                self.copy_workspace_style_to_clipboard(
-                                    scene.uid,
-                                    summary.local_index.expect("local style was enabled"),
-                                );
-                                ui.close();
-                            }
-                            if ui
-                                .add_enabled(
-                                    self.clipboard_has_kind("style"),
-                                    egui::Button::new("Paste"),
-                                )
-                                .clicked()
-                            {
-                                self.request_paste_workspace_style(scene.uid);
-                                ui.close();
-                            }
-                            if ui
-                                .add_enabled(
-                                    summary.local_index.is_some(),
-                                    egui::Button::new("Delete"),
-                                )
-                                .clicked()
-                            {
-                                self.request_delete_aux_selection(selection);
-                                ui.close();
-                            }
-                            ui.separator();
-                            ui.menu_button("Style file", |ui| {
-                                if ui.button("Load ...").clicked() {
-                                    self.choose_load_workspace_style_file(scene.uid, camera);
-                                    ui.close();
-                                }
-                                if ui
-                                    .add_enabled(
-                                        summary.local_index.is_some() && !summary.source.is_empty(),
-                                        egui::Button::new("Reload"),
-                                    )
-                                    .clicked()
-                                {
-                                    self.reload_workspace_style_file(selection);
+                                if ui.button("New Style...").clicked() {
+                                    self.open_new_style_properties(scene.uid);
                                     ui.close();
                                 }
                                 if ui
                                     .add_enabled(
                                         summary.local_index.is_some(),
-                                        egui::Button::new("Save"),
+                                        egui::Button::new("Copy"),
                                     )
                                     .clicked()
                                 {
-                                    self.choose_save_workspace_style_file(selection, false);
+                                    self.copy_workspace_style_to_clipboard(
+                                        scene.uid,
+                                        summary.local_index.expect("local style was enabled"),
+                                    );
+                                    ui.close();
+                                }
+                                if ui
+                                    .add_enabled(
+                                        self.clipboard_has_kind("style"),
+                                        egui::Button::new("Paste"),
+                                    )
+                                    .clicked()
+                                {
+                                    self.request_paste_workspace_style(scene.uid);
                                     ui.close();
                                 }
                                 if ui
                                     .add_enabled(
                                         summary.local_index.is_some(),
-                                        egui::Button::new("Save As..."),
+                                        egui::Button::new("Delete"),
                                     )
                                     .clicked()
                                 {
-                                    self.choose_save_workspace_style_file(selection, true);
+                                    self.request_delete_aux_selection(selection);
+                                    ui.close();
+                                }
+                                ui.separator();
+                                ui.menu_button("Style file", |ui| {
+                                    if ui.button("Load ...").clicked() {
+                                        self.choose_load_workspace_style_file(scene.uid, camera);
+                                        ui.close();
+                                    }
+                                    if ui
+                                        .add_enabled(
+                                            !summary.source.is_empty(),
+                                            egui::Button::new("Reload"),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.reload_workspace_style_file(selection);
+                                        ui.close();
+                                    }
+                                    if ui.button("Save").clicked() {
+                                        self.choose_save_workspace_style_file(selection, false);
+                                        ui.close();
+                                    }
+                                    if ui.button("Save As...").clicked() {
+                                        self.choose_save_workspace_style_file(selection, true);
+                                        ui.close();
+                                    }
+                                });
+                                ui.separator();
+                                let mut read_only = summary.read_only;
+                                if ui
+                                    .add_enabled(
+                                        summary.read_only || !summary.modified,
+                                        egui::Checkbox::new(&mut read_only, "Read-only"),
+                                    )
+                                    .changed()
+                                {
+                                    self.set_workspace_style_read_only(selection, read_only);
+                                    ui.close();
+                                }
+                                if ui.button("Rename...").clicked() {
+                                    self.open_style_properties(selection);
+                                    ui.close();
+                                }
+                                if ui.button("Edit...").clicked() {
+                                    self.open_style_properties(selection);
                                     ui.close();
                                 }
                             });
-                            ui.separator();
-                            let mut read_only = summary.read_only;
-                            if ui
-                                .add_enabled(
-                                    summary.local_index.is_some()
-                                        && (summary.read_only || !summary.modified),
-                                    egui::Checkbox::new(&mut read_only, "Read-only"),
-                                )
-                                .changed()
-                            {
-                                self.set_workspace_style_read_only(selection, read_only);
-                                ui.close();
-                            }
-                            if ui.button("Rename...").clicked() {
-                                self.open_style_properties(selection);
-                                ui.close();
-                            }
-                            if ui.button("Edit...").clicked() {
-                                self.open_style_properties(selection);
-                                ui.close();
-                            }
                         });
                     }
                 });
@@ -7957,9 +7942,9 @@ impl GuiApplication {
                 && self
                     .workspace_aux_selection
                     .is_none_or(|selection| match selection {
-                        WorkspaceAuxSelection::Style { .. } => self
-                            .style_summary_for_selection(selection)
-                            .is_some_and(|style| style.local_index.is_some()),
+                        WorkspaceAuxSelection::Style { .. } => {
+                            self.style_summary_for_selection(selection).is_some()
+                        }
                         _ => true,
                     });
             if ui
@@ -23935,8 +23920,7 @@ impl GuiApplication {
             self.set_status("Style not found");
             return;
         };
-        let Some(local_index) = summary.local_index else {
-            self.set_status("Global styles cannot be saved here");
+        let WorkspaceAuxSelection::Style { scene_uid, .. } = selection else {
             return;
         };
         let path = if !save_as && !summary.source.is_empty() {
@@ -23953,13 +23937,13 @@ impl GuiApplication {
             return;
         };
         let undo = self.capture_undo();
-        match self
-            .state
-            .save_scene_style_file(summary.scene_uid, local_index, &path)
-        {
+        match self.state.save_style_file(summary.target, scene_uid, &path) {
             Ok(()) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(summary.scene_uid);
+                if summary.local_index.is_some() {
+                    self.modified_scenes.insert(summary.scene_uid);
+                }
+                self.rebuild_snapshot();
                 self.set_status(format!("Saved style file {}", path.display()));
             }
             Err(error) => self.set_status(format!("Style file error: {error}")),
@@ -23971,21 +23955,17 @@ impl GuiApplication {
             self.set_status("Style not found");
             return;
         };
-        let Some(local_index) = summary.local_index else {
-            self.set_status("Global styles cannot be reloaded here");
+        let WorkspaceAuxSelection::Style { scene_uid, .. } = selection else {
             return;
         };
         let undo = self.capture_undo();
-        match self
-            .state
-            .reload_scene_style_file(summary.scene_uid, local_index)
-        {
+        match self.state.reload_style_file(summary.target, scene_uid) {
             Ok(()) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(summary.scene_uid);
-                if self.state.active_scene() == Some(summary.scene_uid) {
-                    self.rebuild_snapshot();
+                if summary.local_index.is_some() {
+                    self.modified_scenes.insert(summary.scene_uid);
                 }
+                self.rebuild_snapshot();
                 self.set_status(format!("Reloaded style file {}", summary.source));
             }
             Err(error) => self.set_status(format!("Style file error: {error}")),
@@ -24003,7 +23983,9 @@ impl GuiApplication {
         };
         self.style_properties_draft = Some(NativeStyleProperties {
             scene_uid,
-            local_index: None,
+            target: None,
+            revision: self.snapshot_revision,
+            contents: NativeStyleSetContents::default(),
             xml: format!("<styles id=\"{name}\">\n</styles>\n"),
             name,
             read_only: false,
@@ -24466,20 +24448,18 @@ impl GuiApplication {
             self.set_status("Style not found");
             return;
         };
-        let Some(local_index) = summary.local_index else {
-            self.set_status("Global styles are read-only");
-            return;
-        };
-        let Some(style) = self
+        let (name, xml) = match self
             .state
-            .scene_manager()
-            .scene(summary.scene_uid)
-            .and_then(|scene| scene.loaded_styles().get(local_index))
-        else {
-            self.set_status("Style not found");
-            return;
+            .style_name(summary.target)
+            .and_then(|name| self.state.style_xml(summary.target).map(|xml| (name, xml)))
+        {
+            Ok(value) => value,
+            Err(error) => {
+                self.set_error(error);
+                return;
+            }
         };
-        let contents = match native_style_set_contents(&style.data) {
+        let contents = match native_style_set_contents(&xml) {
             Ok(contents) => contents,
             Err(error) => {
                 self.set_error(error);
@@ -24487,24 +24467,29 @@ impl GuiApplication {
             }
         };
         self.style_properties_draft = Some(NativeStyleProperties {
-            scene_uid: summary.scene_uid,
-            local_index: Some(local_index),
-            name: summary.name,
+            scene_uid: match selection {
+                WorkspaceAuxSelection::Style { scene_uid, .. } => scene_uid,
+                _ => unreachable!(),
+            },
+            target: Some(summary.target),
+            revision: self.snapshot_revision,
+            name,
             read_only: summary.read_only,
-            xml: style.data.clone(),
+            xml,
             tab: NativeStyleEditorTab::Color,
             new_color_name: String::new(),
             new_selection_name: String::new(),
             color_edits: contents
                 .colors
-                .into_iter()
-                .map(|entry| (entry.name, entry.value))
+                .iter()
+                .map(|entry| (entry.name.clone(), entry.value.clone()))
                 .collect(),
             selection_edits: contents
                 .selections
-                .into_iter()
-                .map(|entry| (entry.name, entry.value))
+                .iter()
+                .map(|entry| (entry.name.clone(), entry.value.clone()))
                 .collect(),
+            contents,
         });
     }
 
@@ -24513,35 +24498,17 @@ impl GuiApplication {
             self.set_status("Style not found");
             return;
         };
-        let Some(local_index) = summary.local_index else {
-            self.set_status("Global styles are read-only");
-            return;
-        };
         if read_only && summary.modified {
             self.set_status("Modified styles cannot be made read-only");
             return;
         }
-        let Some(xml) = self
-            .state
-            .scene_manager()
-            .scene(summary.scene_uid)
-            .and_then(|scene| scene.loaded_styles().get(local_index))
-            .map(|style| style.data.clone())
-        else {
-            self.set_status("Style not found");
-            return;
-        };
         let undo = self.capture_undo();
-        match self.state.update_scene_style(
-            summary.scene_uid,
-            local_index,
-            &summary.name,
-            read_only,
-            &xml,
-        ) {
+        match self.state.set_style_read_only(summary.target, read_only) {
             Ok(()) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(summary.scene_uid);
+                if summary.local_index.is_some() {
+                    self.modified_scenes.insert(summary.scene_uid);
+                }
                 self.rebuild_snapshot();
                 self.set_status(format!("Style read-only: {read_only}"));
             }
@@ -24558,9 +24525,23 @@ impl GuiApplication {
             self.set_status("Style set is read-only");
             return;
         }
-        let Some(local_index) = draft.local_index else {
+        let Some(target) = draft.target else {
             self.set_status("Create the style set before editing it");
             return;
+        };
+        let mutation = if let NativeStyleMutation::SetColor { name, value } = mutation {
+            match self.state.resolve_style_color(target.scope(), &value) {
+                Ok(color) => NativeStyleMutation::SetColor {
+                    name,
+                    value: color.script_string(),
+                },
+                Err(error) => {
+                    self.set_error(error);
+                    return;
+                }
+            }
+        } else {
+            mutation
         };
         let xml = match mutate_native_style_xml(&draft.xml, &mutation) {
             Ok(xml) => xml,
@@ -24570,18 +24551,10 @@ impl GuiApplication {
             }
         };
         let undo = self.capture_undo();
-        match self
-            .state
-            .update_scene_style(draft.scene_uid, local_index, &draft.name, false, &xml)
-        {
+        match self.state.edit_style(target, &xml) {
             Ok(()) => {
-                draft.xml = self
-                    .state
-                    .scene_manager()
-                    .scene(draft.scene_uid)
-                    .and_then(|scene| scene.loaded_styles().get(local_index))
-                    .map(|style| style.data.clone())
-                    .unwrap_or(xml);
+                draft.xml = self.state.style_xml(target).unwrap_or(xml);
+                draft.contents = native_style_set_contents(&draft.xml).unwrap_or_default();
                 let status = match &mutation {
                     NativeStyleMutation::SetColor { name, value } => {
                         draft.color_edits.insert(name.clone(), value.clone());
@@ -24604,8 +24577,11 @@ impl GuiApplication {
                     }
                 };
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(draft.scene_uid);
+                if target.scope().get() != 0 {
+                    self.modified_scenes.insert(draft.scene_uid);
+                }
                 self.rebuild_snapshot();
+                draft.revision = self.snapshot_revision;
                 self.set_status(status);
             }
             Err(error) => {
@@ -24619,7 +24595,7 @@ impl GuiApplication {
         let Some(mut draft) = self.style_properties_draft.take() else {
             return;
         };
-        if draft.local_index.is_none() {
+        if draft.target.is_none() {
             let mut create = false;
             let mut cancel = false;
             egui::Window::new("New Style")
@@ -24677,21 +24653,56 @@ impl GuiApplication {
             return;
         }
 
-        let contents = match native_style_set_contents(&draft.xml) {
-            Ok(contents) => contents,
-            Err(error) => {
-                self.set_error(error);
-                return;
+        if draft.revision != self.snapshot_revision {
+            let target = draft.target.unwrap();
+            match self.state.style_summary(target).and_then(|summary| {
+                let xml = self.state.style_xml(target)?;
+                let name = self.state.style_name(target)?;
+                Ok((summary, native_style_set_contents(&xml)?, xml, name))
+            }) {
+                Ok((summary, contents, xml, name)) => {
+                    draft.name = name;
+                    draft.read_only = summary.read_only;
+                    draft.xml = xml;
+                    draft.color_edits = contents
+                        .colors
+                        .iter()
+                        .map(|entry| (entry.name.clone(), entry.value.clone()))
+                        .collect();
+                    draft.selection_edits = contents
+                        .selections
+                        .iter()
+                        .map(|entry| (entry.name.clone(), entry.value.clone()))
+                        .collect();
+                    draft.contents = contents;
+                    draft.revision = self.snapshot_revision;
+                }
+                Err(error) => {
+                    self.set_error(error);
+                    return;
+                }
             }
-        };
+        }
+        let contents = &draft.contents;
         let mut close = false;
         let mut mutation = None;
+        let mut rename = false;
         egui::Window::new(format!("Style editor: {}", draft.name))
+            .id(egui::Id::new("style-editor"))
             .collapsible(false)
             .resizable(true)
             .default_width(500.0)
             .min_width(460.0)
             .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Name:");
+                    let response = ui.text_edit_singleline(&mut draft.name);
+                    rename = ui
+                        .add_enabled(!draft.name.trim().is_empty(), egui::Button::new("Rename"))
+                        .clicked()
+                        || (response.lost_focus()
+                            && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+                });
                 if draft.read_only {
                     ui.label(egui::RichText::new("(read-only style set)").weak());
                 }
@@ -24709,15 +24720,17 @@ impl GuiApplication {
                 match draft.tab {
                     NativeStyleEditorTab::Color => {
                         ui.label("Named colors");
-                        egui::ScrollArea::vertical()
-                            .max_height(260.0)
-                            .show(ui, |ui| {
+                        egui::ScrollArea::vertical().max_height(260.0).show_rows(
+                            ui,
+                            ui.spacing().interact_size.y,
+                            contents.colors.len(),
+                            |ui, range| {
                                 if contents.colors.is_empty() {
                                     ui.label(
                                         egui::RichText::new("(no named colors)").italics().weak(),
                                     );
                                 }
-                                for entry in &contents.colors {
+                                for entry in &contents.colors[range] {
                                     ui.horizontal(|ui| {
                                         ui.add_sized([120.0, 20.0], egui::Label::new(&entry.name));
                                         let mut value = draft
@@ -24771,7 +24784,8 @@ impl GuiApplication {
                                         }
                                     });
                                 }
-                            });
+                            },
+                        );
                         ui.horizontal(|ui| {
                             ui.add_enabled(
                                 !draft.read_only,
@@ -24795,9 +24809,11 @@ impl GuiApplication {
                     }
                     NativeStyleEditorTab::Selection => {
                         ui.label("Named selections");
-                        egui::ScrollArea::vertical()
-                            .max_height(260.0)
-                            .show(ui, |ui| {
+                        egui::ScrollArea::vertical().max_height(260.0).show_rows(
+                            ui,
+                            ui.spacing().interact_size.y,
+                            contents.selections.len(),
+                            |ui, range| {
                                 if contents.selections.is_empty() {
                                     ui.label(
                                         egui::RichText::new("(no named selections)")
@@ -24805,7 +24821,7 @@ impl GuiApplication {
                                             .weak(),
                                     );
                                 }
-                                for entry in &contents.selections {
+                                for entry in &contents.selections[range] {
                                     ui.horizontal(|ui| {
                                         ui.add_sized([120.0, 20.0], egui::Label::new(&entry.name));
                                         let mut value = draft
@@ -24843,7 +24859,8 @@ impl GuiApplication {
                                         }
                                     });
                                 }
-                            });
+                            },
+                        );
                         ui.horizontal(|ui| {
                             ui.add_enabled(
                                 !draft.read_only,
@@ -24867,15 +24884,17 @@ impl GuiApplication {
                     }
                     NativeStyleEditorTab::Styles => {
                         ui.label("Style entries");
-                        egui::ScrollArea::vertical()
-                            .max_height(260.0)
-                            .show(ui, |ui| {
+                        egui::ScrollArea::vertical().max_height(260.0).show_rows(
+                            ui,
+                            ui.spacing().interact_size.y,
+                            contents.styles.len(),
+                            |ui, range| {
                                 if contents.styles.is_empty() {
                                     ui.label(
                                         egui::RichText::new("(no style entries)").italics().weak(),
                                     );
                                 }
-                                for entry in &contents.styles {
+                                for entry in &contents.styles[range] {
                                     ui.horizontal(|ui| {
                                         ui.label(&entry.name);
                                         ui.with_layout(
@@ -24900,7 +24919,8 @@ impl GuiApplication {
                                         );
                                     });
                                 }
-                            });
+                            },
+                        );
                     }
                 }
 
@@ -24911,6 +24931,24 @@ impl GuiApplication {
                     }
                 });
             });
+        if rename {
+            let undo = self.capture_undo();
+            let target = draft.target.unwrap();
+            match self
+                .state
+                .set_style_properties(target, &draft.name, draft.read_only)
+            {
+                Ok(()) => {
+                    self.push_undo_snapshot(undo);
+                    if target.scope().get() != 0 {
+                        self.modified_scenes.insert(draft.scene_uid);
+                    }
+                    self.rebuild_snapshot();
+                    self.set_status(format!("Renamed style {}", draft.name.trim()));
+                }
+                Err(error) => self.set_error(error),
+            }
+        }
         if let Some(mutation) = mutation {
             self.apply_native_style_mutation(&mut draft, mutation);
         }
@@ -36358,6 +36396,173 @@ mod tests {
     }
 
     #[test]
+    fn native_style_color_picker_preserves_rgb_when_alpha_is_partial() {
+        assert!(native_style_color("#赤赤").is_none());
+        let expected = [100_u8, 150, 200, 128];
+        let color = egui::Color32::from_rgba_unmultiplied(
+            expected[0],
+            expected[1],
+            expected[2],
+            expected[3],
+        );
+        let restored = cuemol_gfx::parse_color(&native_style_color_string(color))
+            .unwrap()
+            .rgba8()
+            .unwrap();
+        assert!(native_style_color(&native_style_color_string(color)).is_some());
+        for (actual, expected) in [restored.r, restored.g, restored.b, restored.a]
+            .into_iter()
+            .zip(expected)
+        {
+            assert!(actual.abs_diff(expected) <= 1, "{actual} != {expected}");
+        }
+    }
+
+    #[test]
+    fn native_style_editor_keeps_its_target_after_another_style_is_inserted() {
+        let mut app = GuiApplication::new();
+        let scene = app.state.active_scene().unwrap();
+        let original = app.state.create_scene_style(scene, "original").unwrap();
+        let style_index = app
+            .state
+            .style_summaries(scene)
+            .iter()
+            .position(|style| style.local_index == Some(original))
+            .unwrap();
+        app.open_style_properties(WorkspaceAuxSelection::Style {
+            scene_uid: scene,
+            style_index,
+        });
+        let mut draft = app.style_properties_draft.take().unwrap();
+        app.state.create_scene_style(scene, "inserted").unwrap();
+        app.apply_native_style_mutation(
+            &mut draft,
+            NativeStyleMutation::SetColor {
+                name: "accent".into(),
+                value: "#123456".into(),
+            },
+        );
+        let styles = app
+            .state
+            .scene_manager()
+            .scene(scene)
+            .unwrap()
+            .loaded_styles();
+        assert!(!styles[0].data.contains("accent"));
+        assert!(styles[1].data.contains("accent"));
+        assert_eq!(styles[1].node.str_attr("id").as_str(), "original");
+    }
+
+    #[test]
+    fn native_global_style_tree_opens_the_editor_with_the_property_button() {
+        use egui_kittest::kittest::Queryable;
+
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1100., 850.))
+            .build(|ctx| app.ui(ctx, &mut camera));
+        harness.run();
+        harness.get_by_label("user (global)").click();
+        harness.run();
+        harness.get_by_label("Property").click();
+        harness.run();
+        assert!(harness.query_by_label("Named colors").is_some());
+        drop(harness);
+        let draft = app.style_properties_draft.as_ref().unwrap();
+        assert_eq!(draft.name, "user");
+        assert!(!draft.read_only);
+        assert_eq!(draft.target.unwrap().scope().get(), 0);
+    }
+
+    #[test]
+    fn native_style_tree_distinguishes_identical_display_names() {
+        use egui_kittest::kittest::Queryable;
+
+        let mut app = GuiApplication::new();
+        app.state
+            .run_script_js(
+                "var styles = cuemol.getService('StyleManager');
+                 styles.createStyleSet('', 0);
+                 styles.createStyleSet('(anonymous)', 0);",
+            )
+            .unwrap();
+        let scene = app.state.active_scene().unwrap();
+        let targets = app
+            .state
+            .style_summaries(scene)
+            .into_iter()
+            .filter(|style| style.name == "(anonymous)")
+            .map(|style| style.target)
+            .collect::<Vec<_>>();
+        assert_eq!(targets.len(), 2);
+        let mut camera = CameraController::default();
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1100., 850.))
+            .build(|ctx| app.ui(ctx, &mut camera));
+        harness.run();
+        assert_eq!(harness.get_all_by_label("(anonymous) (global)").count(), 2);
+        harness
+            .get_all_by_label("(anonymous) (global)")
+            .next()
+            .unwrap()
+            .click_secondary();
+        harness.run();
+        harness.get_by_label("Read-only").click();
+        harness.run();
+        drop(harness);
+        assert!(app.state.style_summary(targets[0]).unwrap().read_only);
+        assert!(!app.state.style_summary(targets[1]).unwrap().read_only);
+    }
+
+    #[test]
+    fn native_style_editor_can_edit_a_global_user_set() {
+        let mut app = GuiApplication::new();
+        let scene = app.state.active_scene().unwrap();
+        let style_index = app
+            .state
+            .style_summaries(scene)
+            .iter()
+            .position(|style| style.local_index.is_none() && style.name == "user")
+            .unwrap();
+        app.open_style_properties(WorkspaceAuxSelection::Style {
+            scene_uid: scene,
+            style_index,
+        });
+        let mut draft = app
+            .style_properties_draft
+            .take()
+            .expect("global style editor");
+        assert!(!draft.read_only);
+        app.apply_native_style_mutation(
+            &mut draft,
+            NativeStyleMutation::SetColor {
+                name: "accent".into(),
+                value: "#123456".into(),
+            },
+        );
+        assert_eq!(app.undo_stack.len(), 1);
+        assert!(app
+            .state
+            .scene_manager()
+            .scene(scene)
+            .unwrap()
+            .loaded_styles()
+            .is_empty());
+        assert!(app
+            .state
+            .style_xml(draft.target.unwrap())
+            .unwrap()
+            .contains("accent"));
+        app.undo(&mut CameraController::default());
+        assert!(!app
+            .state
+            .style_xml(draft.target.unwrap())
+            .unwrap()
+            .contains("accent"));
+    }
+
+    #[test]
     fn native_style_set_live_edits_are_undoable_and_respect_read_only() {
         let mut app = GuiApplication::new();
         let scene_uid = app.state.active_scene().unwrap();
@@ -36391,10 +36596,9 @@ mod tests {
             },
         );
         assert_eq!(app.undo_stack.len(), 1);
-        assert_eq!(
-            native_style_set_contents(&draft.xml).unwrap().colors[0].value,
-            "#abcdef"
-        );
+        assert!(native_style_set_contents(&draft.xml).unwrap().colors[0]
+            .value
+            .eq_ignore_ascii_case("#abcdef"));
 
         let before_read_only_attempt = draft.xml.clone();
         draft.read_only = true;

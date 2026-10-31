@@ -4,8 +4,7 @@ use crate::{
     nodes,
 };
 use cuemol_core::{
-    parse_ldom2_xml, write_ldom2_xml, CueMolError, LDom2Node, LDom2Tree, Matrix4, Quat, Result,
-    Uid, Vector4,
+    parse_ldom2_xml, write_ldom2_xml, CueMolError, LDom2Node, Matrix4, Quat, Result, Uid, Vector4,
 };
 use cuemol_desktop_core::{DesktopAppState, GuiWorkspaceObjectKind};
 use cuemol_qsys::{Camera, View};
@@ -38,7 +37,8 @@ pub fn call_tool(
         | "set_prop" | "get_prop" | "reset_prop" => properties(state, camera, name, args),
         "create_style_set" | "delete_style_set" | "set_style_readonly" | "load_style_file"
         | "save_style_file" | "define_color" | "define_selection" | "remove_color"
-        | "remove_selection" | "remove_style" => styles(state, name, args),
+        | "remove_selection" | "remove_style" | "rename_style_set" | "reload_style_file"
+        | "get_style_set" | "import_style_xml" => styles(state, name, args),
         "focus_node" => {
             let id = uid(args, "nodeId")?;
             let object = if args["nodeType"] == "object" {
@@ -1246,85 +1246,137 @@ fn set_object_property(
     Ok(())
 }
 
-fn style_index(state: &DesktopAppState, name: &str) -> Result<usize> {
-    let s = state.scene_manager().scene(scene(state)?).unwrap();
-    s.loaded_styles()
-        .iter()
-        .position(|style| style.node.str_attr("id").as_str() == name)
-        .ok_or_else(|| CueMolError::not_found(format!("scene style set {name}")))
-}
 fn styles(state: &mut DesktopAppState, name: &str, args: &Value) -> Result<Value> {
-    let sid = scene(state)?;
+    let sid = match args["sceneId"].as_u64() {
+        Some(id) => Uid::new(id),
+        None => scene(state)?,
+    };
+    if state.scene_manager().scene(sid).is_none() {
+        return Err(CueMolError::not_found("scene"));
+    }
     if name == "create_style_set" {
         return Ok(json!({"index":state.create_scene_style(sid,text(args,"name")?)?}));
     }
     if name == "load_style_file" {
         return Ok(json!({"index":state.load_scene_style_file(sid,text(args,"path")?,true)?}));
     }
-    let set = args["styleSet"].as_str().unwrap_or("default");
-    let index = if name == "define_color" || name == "define_selection" {
-        style_index(state, set).or_else(|_| state.create_scene_style(sid, set))?
-    } else {
-        style_index(state, set)?
-    };
-    if name == "delete_style_set" {
-        return Ok(json!({"removed":state.destroy_scene_style(sid,index)?}));
+    if name == "import_style_xml" {
+        return Ok(json!({"index":state.import_scene_style(sid, text(args,"xml")?, true)?}));
     }
-    let style = state.scene_manager().scene(sid).unwrap().loaded_styles()[index].clone();
+    let set = args["styleSet"].as_str().unwrap_or("default");
+    let scope = args["scope"].as_str();
+    let lookup = |state: &DesktopAppState| {
+        state
+            .find_style_target(
+                if scope == Some("global") {
+                    Uid::new(0)
+                } else {
+                    sid
+                },
+                set,
+            )
+            .filter(|target| scope != Some("scene") || target.scope() == sid)
+    };
+    let target = if !args["styleId"].is_null() {
+        let id = args["styleId"]
+            .as_u64()
+            .ok_or_else(|| CueMolError::invalid_argument("styleId must be an unsigned integer"))?;
+        let target_scope = match scope {
+            Some("global") => Uid::new(0),
+            Some("scene") => sid,
+            _ => {
+                return Err(CueMolError::invalid_argument(
+                    "styleId requires scope: scene or global",
+                ))
+            }
+        };
+        state
+            .style_summaries(sid)
+            .into_iter()
+            .find(|summary| {
+                summary.target.runtime_id() == id && summary.target.scope() == target_scope
+            })
+            .map(|summary| summary.target)
+    } else {
+        lookup(state).or_else(|| {
+            if (name == "define_color" || name == "define_selection") && scope != Some("global") {
+                state.create_scene_style(sid, set).ok()?;
+                lookup(state)
+            } else {
+                None
+            }
+        })
+    }
+    .ok_or_else(|| CueMolError::not_found(format!("style set {set}")))?;
+    if name == "delete_style_set" {
+        return Ok(json!({"removed":state.delete_style(target)?}));
+    }
+    let summary = state.style_summary(target)?;
+    if name == "get_style_set" {
+        return Ok(
+            json!({"id":target.runtime_id(),"name":state.style_name(target)?,"displayName":summary.name,"scope":summary.scene_uid.get(),"readonly":summary.read_only,"modified":summary.modified,"source":summary.source,"xml":state.style_xml(target)?}),
+        );
+    }
+    if name == "rename_style_set" {
+        let new_name = text(args, "name")?;
+        state.set_style_properties(target, new_name, summary.read_only)?;
+        return Ok(json!({"name":new_name.trim()}));
+    }
+    if name == "reload_style_file" {
+        state.reload_style_file(target, sid)?;
+        return Ok(json!({"name":state.style_summary(target)?.name}));
+    }
     if name == "save_style_file" {
         let path = args["path"]
             .as_str()
             .map(str::to_owned)
-            .unwrap_or_else(|| style.node.str_attr("src").to_string());
+            .unwrap_or_else(|| summary.source.clone());
         if path.is_empty() {
             return Err(CueMolError::invalid_argument(
                 "style has no source file; specify path",
             ));
         }
-        state.save_scene_style_file(sid, index, &path)?;
+        state.save_style_file(target, sid, &path)?;
         return Ok(json!({"path":path}));
     }
-    let mut tree = if style.node.children().iter().any(|n| !n.is_attr()) {
-        LDom2Tree::from(style.node.clone())
-    } else {
-        parse_ldom2_xml(&style.data)?
-    };
-    let readonly = tree.top().str_attr("readonly").as_str() == "true";
     if name == "set_style_readonly" {
-        state.update_scene_style(
-            sid,
-            index,
-            set,
-            args["readonly"] == true,
-            &write_ldom2_xml(&tree),
-        )?;
+        state.set_style_read_only(target, args["readonly"] == true)?;
         return Ok(json!({"readonly":args["readonly"]}));
     }
-    if readonly {
+    if summary.read_only {
         return Err(CueMolError::invalid_argument("style set is read-only"));
     }
+    let mut tree = parse_ldom2_xml(&state.style_xml(target)?)?;
     let tag = match name {
         "define_color" | "remove_color" => "color",
         "define_selection" | "remove_selection" => "sel",
         _ => "style",
     };
-    let entry = text(args, "name")?;
+    let entry = text(args, "name")?.trim();
+    if entry.is_empty() {
+        return Err(CueMolError::invalid_argument(
+            "style entry name is required",
+        ));
+    }
     tree.top_mut()
         .retain_children(|n| n.tag_name() != tag || n.str_attr("id").as_str() != entry);
     if name == "define_color" || name == "define_selection" {
         let value = text(args, if tag == "color" { "color" } else { "selection" })?;
-        if tag == "color" {
-            cuemol_gfx::parse_color(value)?;
+        let value = if tag == "color" {
+            state
+                .resolve_style_color(target.scope(), value)?
+                .script_string()
         } else {
             state.parse_scene_selector(sid, value)?;
-        }
+            value.to_string()
+        };
         let mut node = LDom2Node::new();
         node.set_tag_name(tag);
         node.set_str_attr("id", entry);
-        node.set_value(value);
+        node.set_value(&value);
         tree.top_mut().append_child_node(node);
     }
-    state.update_scene_style(sid, index, set, false, &write_ldom2_xml(&tree))?;
+    state.edit_style(target, &write_ldom2_xml(&tree))?;
     Ok(json!({"styleSet":set,"name":entry}))
 }
 

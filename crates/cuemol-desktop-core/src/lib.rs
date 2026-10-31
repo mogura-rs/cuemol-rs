@@ -3,9 +3,11 @@ mod clipboard;
 pub use clipboard::GuiClipboardPayload;
 mod selection_support;
 mod sequence;
+mod style_edit;
 mod style_state;
 pub use selection_support::MAX_SELECTION_HISTORY;
 pub use sequence::{sequence_residue_number, GuiSequenceLayout};
+pub use style_edit::GuiStyleTarget;
 mod command_support;
 mod property_access;
 #[cfg(feature = "scripting")]
@@ -704,7 +706,6 @@ pub struct DesktopAppState {
     /// robust auto default (2·rmsd), which — unlike the field min/max — is not washed
     /// out by near-atom potential spikes. `Some(s)` clamps the gradient to `mid ± s`.
     potential_scale: Option<f64>,
-    #[cfg(feature = "scripting")]
     script_styles: StyleManager,
     #[cfg(feature = "scripting")]
     script_style_bindings: BTreeMap<u64, BTreeMap<u64, u64>>,
@@ -809,6 +810,7 @@ pub struct GuiCameraVisibilityEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuiStyleSummary {
+    pub target: GuiStyleTarget,
     pub scene_uid: Uid,
     pub local_index: Option<usize>,
     pub name: String,
@@ -1945,7 +1947,6 @@ pub enum GuiLoadedPath {
     Map { scene_uid: Uid, map_uid: Uid },
 }
 
-#[cfg(feature = "scripting")]
 fn default_desktop_style_manager() -> StyleManager {
     let mut styles = cuemol_molvis::default_style_manager();
     styles.load_style_set_from_xml(DEFAULT_STYLE_SCOPE, "user", "<styles/>", false);
@@ -1974,7 +1975,6 @@ impl Default for DesktopAppState {
             next_trajectory_block_uid: 5_000_000_000,
             surface_potential: None,
             potential_scale: None,
-            #[cfg(feature = "scripting")]
             script_styles: default_desktop_style_manager(),
             #[cfg(feature = "scripting")]
             script_style_bindings: BTreeMap::new(),
@@ -2010,6 +2010,8 @@ impl DesktopAppState {
             && self.build_script_styles() == other.build_script_styles()
             && self.script_view_input_config == other.script_view_input_config
             && self.script_scene_undo == other.script_scene_undo;
+        #[cfg(not(feature = "scripting"))]
+        let same = same && self.script_styles == other.script_styles;
         same
     }
 
@@ -4247,21 +4249,12 @@ impl DesktopAppState {
     }
 
     pub fn style_summaries(&self, scene_uid: Uid) -> Vec<GuiStyleSummary> {
-        #[cfg(feature = "scripting")]
         let global = &self.script_styles;
-        #[cfg(not(feature = "scripting"))]
-        let global = {
-            static GLOBAL_STYLES: OnceLock<StyleManager> = OnceLock::new();
-            GLOBAL_STYLES.get_or_init(|| {
-                let mut styles = cuemol_molvis::default_style_manager();
-                styles.load_style_set_from_xml(DEFAULT_STYLE_SCOPE, "user", "<styles/>", false);
-                styles
-            })
-        };
         let mut summaries = global
             .style_sets(DEFAULT_STYLE_SCOPE)
             .iter()
             .map(|set| GuiStyleSummary {
+                target: GuiStyleTarget::Global(set.uid()),
                 scene_uid: Uid::new(0),
                 local_index: None,
                 name: if set.name().is_empty() {
@@ -4269,8 +4262,12 @@ impl DesktopAppState {
                 } else {
                     set.name().into()
                 },
-                source: set.source().into(),
-                read_only: true,
+                source: if set.source().starts_with("<builtin>/") {
+                    String::new()
+                } else {
+                    set.source().into()
+                },
+                read_only: set.read_only(),
                 modified: set.modified(),
             })
             .collect::<Vec<_>>();
@@ -4279,6 +4276,10 @@ impl DesktopAppState {
                 |(local_index, style)| {
                     let id = style.node.str_attr("id").to_string();
                     GuiStyleSummary {
+                        target: GuiStyleTarget::Scene {
+                            scene_uid,
+                            runtime_id: style.runtime_id(),
+                        },
                         scene_uid,
                         local_index: Some(local_index),
                         name: if id.is_empty() {
@@ -4426,34 +4427,19 @@ impl DesktopAppState {
             .and_then(|scene| scene.loaded_styles().get(local_index))
             .cloned()
             .ok_or_else(|| CueMolError::NotFound(format!("style {local_index}")))?;
-        let has_inline_data = style.node.children().iter().any(|child| !child.is_attr());
-        let mut tree = if has_inline_data {
-            LDom2Tree::from(style.node.clone())
-        } else {
-            parse_ldom2_xml(&style.data)?
-        };
-        if tree.top().tag_name() != "styles" {
-            return Err(CueMolError::invalid_argument(
-                "style XML root must be <styles>",
-            ));
-        }
+        let mut tree = style_edit::document(&style)?;
         let name = style.node.str_attr("id").to_string();
         tree.top_mut().set_str_attr("id", &name);
-        for attr in ["src", "alt_src", "readonly", "modified"] {
-            tree.top_mut().remove_child(attr);
-        }
-        clear_xml_formatting_whitespace(tree.top_mut());
         let data = write_ldom2_xml(&tree);
         fs::write(&resolved_path, &data)?;
 
-        let read_only = style.node.str_attr("readonly").equals_ignore_case("true");
-        let mut node = LDom2Node::new();
-        node.set_tag_name("styles");
-        node.set_str_attr("id", name);
-        node.set_str_attr("src", path.to_string_lossy());
-        if read_only {
-            node.set_str_attr("readonly", "true");
+        let mut node = style.node.clone();
+        node.retain_children(LDom2Node::is_attr);
+        if node.str_attr("src").as_str() != path.to_string_lossy() {
+            node.remove_child("modified");
+            node.remove_child("alt_src");
         }
+        node.set_str_attr("src", path.to_string_lossy());
         let style = self
             .scene_manager_mut()
             .scene_mut(scene_uid)
@@ -4624,7 +4610,8 @@ impl DesktopAppState {
         if style.node.str_attr("readonly").equals_ignore_case("true") {
             return Err(CueMolError::invalid_argument("style set is read-only"));
         }
-        let style_exists = style.node.children().iter().any(|child| {
+        let mut tree = style_edit::document(style)?;
+        let style_exists = tree.top().children().iter().any(|child| {
             !child.is_attr()
                 && child.tag_name() == "style"
                 && child
@@ -4637,7 +4624,7 @@ impl DesktopAppState {
                 "style already exists: {style_name}"
             )));
         }
-        style.node.retain_children(|child| {
+        tree.top_mut().retain_children(|child| {
             child.is_attr()
                 || child.tag_name() != "style"
                 || !child
@@ -4645,9 +4632,8 @@ impl DesktopAppState {
                     .as_str()
                     .eq_ignore_ascii_case(&style_name)
         });
-        style.node.append_child_node(style_node);
-        style.node.set_str_attr("modified", "true");
-        style.data = write_ldom2_xml(&LDom2Tree::from(style.node.clone()));
+        tree.top_mut().append_child_node(style_node);
+        style_edit::replace_content(style, tree, false, true)?;
         Ok(style_name)
     }
 
@@ -4686,20 +4672,11 @@ impl DesktopAppState {
             )));
         }
         tree.top_mut().set_str_attr("id", name);
-        if read_only {
-            tree.top_mut().set_str_attr("readonly", "true");
-        } else {
-            tree.top_mut().remove_child("readonly");
-        }
-        tree.top_mut().remove_child("src");
-        tree.top_mut().remove_child("modified");
-        let data = write_ldom2_xml(&tree);
         let style = scene
             .loaded_styles_mut()
             .get_mut(local_index)
             .ok_or_else(|| CueMolError::NotFound(format!("style {local_index}")))?;
-        style.node = tree.top().clone();
-        style.data = data;
+        style_edit::replace_content(style, tree, read_only, false)?;
         Ok(())
     }
 
@@ -8385,9 +8362,9 @@ impl DesktopAppState {
         self.density_maps.clear();
         self.trajectories.clear();
         self.surface_potential = None;
+        self.script_styles = self.script_styles.global_scope();
         #[cfg(feature = "scripting")]
         {
-            self.script_styles = default_desktop_style_manager();
             self.script_style_bindings.clear();
             self.script_scene_undo.clear();
         }
@@ -72473,7 +72450,7 @@ attribute \"dep\" string \"positions\"
         ));
         app.save_active_scene_qsc(&path).unwrap();
         let qsc = std::fs::read_to_string(&path).unwrap();
-        assert!(qsc.contains("<styles id=\"custom\" readonly=\"true\">"));
+        assert!(qsc.contains("<styles id=\"custom\" readonly=\"true\" modified=\"true\">"));
         assert!(qsc.contains("id=\"Wide\""));
         let _ = std::fs::remove_file(path);
 
