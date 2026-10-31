@@ -66,15 +66,26 @@ impl GuiTrajectoryFrames {
     }
 }
 
+fn reference_path(path: &Path, directory: bool) -> Option<PathBuf> {
+    let absolute = crate::absolute_scene_path(path).ok()?;
+    if directory {
+        absolute.canonicalize().ok()
+    } else {
+        absolute
+            .parent()
+            .zip(absolute.file_name())
+            .and_then(|(parent, name)| parent.canonicalize().ok().map(|parent| parent.join(name)))
+    }
+}
+
 pub(crate) fn relative_source(source: &str, base: Option<&Path>) -> String {
     let Some(base) = base else {
         return source.to_string();
     };
-    let path = Path::new(source);
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir().unwrap_or_default().join(path)
+    let Some((absolute, base)) =
+        reference_path(Path::new(source), false).zip(reference_path(base, true))
+    else {
+        return source.to_string();
     };
     let target = absolute.components().collect::<Vec<_>>();
     let origin = base.components().collect::<Vec<_>>();
@@ -84,7 +95,7 @@ pub(crate) fn relative_source(source: &str, base: Option<&Path>) -> String {
         .take_while(|(a, b)| a == b)
         .count();
     if common == 0 {
-        return source.to_string();
+        return absolute.to_string_lossy().into_owned();
     }
     let mut result = PathBuf::new();
     for _ in common..origin.len() {

@@ -447,7 +447,7 @@ fn script_saved_style_links_follow_the_destination_and_survive_a_folder_move() {
 }
 
 fn check_portable_style_links(scripted: bool) {
-    for read_only in [false, true] {
+    for (read_only, parent_path) in [(false, false), (true, false), (false, true), (true, true)] {
         let root = tempfile::tempdir().unwrap();
         let bundle = root.path().join("bundle");
         let styles = bundle.join("styles");
@@ -471,7 +471,11 @@ fn check_portable_style_links(scripted: bool) {
             .unwrap()
             .unwrap();
         let target = state.find_style_target(scene, "linked").unwrap();
-        let destination = scenes.join("relocated.qsc");
+        let destination = scenes.join(if parent_path {
+            "../scenes/relocated.qsc"
+        } else {
+            "relocated.qsc"
+        });
         if scripted {
             #[cfg(feature = "scripting")]
             state
@@ -519,6 +523,42 @@ fn check_portable_style_links(scripted: bool) {
         assert!(restored.style_xml(target).unwrap().contains("keepcpk"));
         assert_eq!(restored.style_summary(target).unwrap().read_only, read_only);
     }
+}
+
+#[test]
+#[cfg(unix)]
+fn scene_style_links_respect_symlink_parents_and_keep_file_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    let bundle = root.path().join("bundle");
+    let styles = bundle.join("styles");
+    std::fs::create_dir_all(&styles).unwrap();
+    std::fs::create_dir_all(bundle.join("scenes/nested")).unwrap();
+    std::fs::create_dir_all(bundle.join("elsewhere")).unwrap();
+    std::fs::write(styles.join("palette.xml"), XML).unwrap();
+    symlink("palette.xml", styles.join("palette-link.xml")).unwrap();
+    symlink("../scenes/nested", bundle.join("elsewhere/linked-dir")).unwrap();
+    let mut state = DesktopAppState::new();
+    let scene = state.new_scene("symlinks", true).result_scene;
+    state
+        .load_scene_style_file(scene, styles.join("palette-link.xml"), false)
+        .unwrap();
+    state
+        .save_active_scene_qsc(bundle.join("elsewhere/linked-dir/../relocated.qsc"))
+        .unwrap();
+    let xml = std::fs::read_to_string(bundle.join("scenes/relocated.qsc")).unwrap();
+    assert!(xml.contains("src=\"../styles/palette-link.xml\""));
+    assert!(styles.join("palette-link.xml").is_symlink());
+    let moved = root.path().join("moved");
+    std::fs::rename(bundle, &moved).unwrap();
+    let mut restored = DesktopAppState::new();
+    let scene = restored
+        .load_qsc_file(moved.join("scenes/relocated.qsc"))
+        .unwrap()
+        .unwrap();
+    let target = restored.find_style_target(scene, "linked").unwrap();
+    assert!(restored.style_xml(target).unwrap().contains("keepcpk"));
 }
 
 #[test]

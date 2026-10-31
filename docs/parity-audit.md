@@ -1547,7 +1547,9 @@ reproduced before repair. Normal scene saving had serialized the resolved
 absolute style path, and an applied lowercase color remained a dirty browser
 draft after color canonicalization. The saved link now uses the destination
 scene directory as its base, with an absolute `alt_src` fallback as in the
-reference. Live links stay resolved so a later Save As cannot retarget them.
+reference. Saving resolves live links before changing the scene directory, so
+a later Save As cannot retarget them. A freshly loaded QSC may retain relative
+source metadata until that save.
 Both native and script saves were checked by moving the complete scene/style
 folder and reloading writable and read-only sources. Browser completion now
 resets only the applied field; failed edits and other pending fields remain.
@@ -1563,3 +1565,18 @@ writer emits one node per loaded style in the same order. The affected shared
 suite passed 478 cases after the portability repair, including 21 file/editor
 cases and the successful/failed completion lifecycle. All six rebuilt
 WebGL/WebGPU style interaction cases passed.
+
+The public `8b17eb0` review then identified a boundary case in the pre-existing
+relative-path helper. Native and script saves both reproduced an incorrect
+link when the destination contained `..`. Path comparison now resolves the
+source parent and destination directory through the filesystem; the final
+source filename stays intact, including a file symlink. If either directory
+cannot be resolved, the original source remains unchanged. Tests cover ordinary
+paths, parent components, a directory symlink followed by `..`, and moving the
+complete bundle afterward. The 478 shared cases passed after the helper repair;
+the focused file/editor suite then passed 22 cases, including the Unix symlink
+case. The other review questions were checked against the preparation stage:
+it resolves relative style sources against the original scene before output
+paths are calculated, and LDOM removal includes attribute nodes. The shared
+editor is currently called by the browser; the native egui editor has its own
+completion path.
