@@ -762,21 +762,36 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
 
             wait_for(selection_popup_visible)
             capture('inspector-selection-open.png')
+
+            def light_pixels(box):
+                return sum(min(pixel) > 100 for pixel in capture().crop(box).getdata())
+
             pyautogui.click(x + width - 215, y + 272)
-            time.sleep(0.2)
+            wait_for(lambda: light_pixels((width - 244, 303, width - 232, 314)) > 10)
             pyautogui.click(x + width - 280, y + 309)
-            time.sleep(0.2)
+            wait_for(lambda: light_pixels((width - 330, 430, width - 250, 500)) > 50)
             capture('inspector-selection-keywords.png')
-            pyautogui.click(x + width - 280, y + 415)
-            time.sleep(0.2)
+            pyautogui.moveTo(x + width - 280, y + 415, duration=0.2)
+            wait_for(lambda: min(capture().getpixel((width - 335, 415))) > 42)
+            pyautogui.click()
+            wait_for(lambda: light_pixels((width - 72, 329, width - 42, 350)) > 15)
+            capture('inspector-selection-chain.png')
             pyautogui.click(x + width - 250, y + 335)
-            pyautogui.write('A')
-            pyautogui.click(x + width - 275, y + 362)
-            time.sleep(0.2)
+            pyautogui.write('A', interval=0.1)
+            pyautogui.hotkey(primary, 'a')
+            pyautogui.hotkey(primary, 'c')
+            wait_for(lambda: clipboard_text() == 'A')
+            selection_box = (width - 185, 216, width - 65, 233)
+            unapplied = capture().crop(selection_box)
+            wait_for(lambda: window_bounds(process.pid))
+            pyautogui.click(x + width - 275, y + 362, duration=0.2)
+            wait_for(lambda: ImageChops.difference(unapplied, capture().crop(selection_box)).getbbox())
             capture('inspector-selection-draft.png')
             if renderer_selection() != initial_selection:
                 raise RuntimeError('A selection-builder draft changed the renderer before commit')
-            pyautogui.click(x + width * 0.5, y + height * 0.5)
+            wait_for(lambda: window_bounds(process.pid))
+            pyautogui.click(x + width * 0.5, y + height * 0.5, duration=0.2)
+            wait_for(lambda: not selection_popup_visible())
             wait_for(lambda: renderer_selection() == "chain 'A'")
             capture('inspector-selection-applied.png')
             pyautogui.hotkey(primary, 'z')
@@ -809,6 +824,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                           inspector_filter_input_acknowledged=True,
                           inspector_font_choices=True,
                           inspector_selection_popup_acknowledged=True,
+                          inspector_selection_keyword_acknowledged=True,
                           inspector_selection_builder=True,
                           font_pixels=styled.histogram()[255])
             print(json.dumps(report), flush=True)

@@ -180,6 +180,14 @@ The test now converts notches to those units on Windows and keeps the existing
 step count on Linux and macOS. A probe of the pinned backend reproduces the old
 two-unit input and confirms the corrected 240-unit input for two notches.
 
+Another Windows run exposed the same timing assumption inside the selection
+popup: the keyword remained `hier` after the driver tried to choose `chain`.
+Delaying the keyword menu frame by 0.8 seconds reproduces that failure locally.
+The driver now confirms the term controls, menu and hovered row before clicking,
+then checks the changed input layout, copied value and displayed draft. It also
+restores foreground focus before dismissing the popup and checks that it closes.
+The complete local window test passes with the same injected menu delay.
+
 Generated archives and `dist/validation.json` remain local validation artifacts,
 not a published release. The release workflow now checks actual packaged windows
 on all five native targets. Local test results do not establish that those CI
