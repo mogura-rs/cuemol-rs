@@ -36,7 +36,7 @@ jobs:
       - name: Test shared core and CLI
         run: cargo test --locked --workspace --exclude cuemol-desktop --exclude cuemol-web --features cuemol-desktop-core/scripting,cuemol-command/scripting,cuemol-cli/scripting
       - name: Test native interface
-        run: cargo test --locked -p cuemol-desktop --features egui-gui
+        run: cargo test --locked -p cuemol-desktop -p cuemol-ui --features cuemol-desktop/egui-gui,cuemol-ui/egui
       - name: Test installer and self-upgrade
         run: |
           cargo build --locked -p cuemol-cli

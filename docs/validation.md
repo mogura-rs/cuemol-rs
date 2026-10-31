@@ -95,6 +95,22 @@ before pip retained both. The workflow now runs pip validation before the final
 application build. Distribution validation rejects this feature loss explicitly;
 it does not relax the source or browser checks.
 
+The next live browser run exposed continuous Selection sidebar growth. Trace
+samples showed the value field gaining eight pixels per frame until the sidebar
+reached its maximum width. The shared term editor had treated a text field's
+inner width as its total allocation. Its outer size is now bounded, and the
+candidate button's space follows the active theme. A deterministic egui check
+failed at 268 pixels before the fix for a 260-pixel sidebar. The regression
+checks five term layouts over 40 frames with both default and application
+spacing; the browser also checks that choosing an atom-name term preserves the
+pane width. The existing stability timeout remains unchanged.
+CI previously built the UI crate only as a dependency when enabling egui, so
+its gated unit tests did not run. The native-interface job now selects that
+crate explicitly and runs its 20 tests as well as the desktop suite.
+Local validation passed all 20 UI tests, 257 desktop tests and nine browser
+selection executions. The new browser width assertion failed against the old
+CI artifact with a 230-to-246-pixel increase before passing on the repaired build.
+
 Generated archives and `dist/validation.json` remain local validation artifacts,
 not a published release. The release workflow now checks actual packaged windows
 on all five native targets. Local test results do not establish that those CI

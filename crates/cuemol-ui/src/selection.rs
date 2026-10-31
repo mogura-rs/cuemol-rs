@@ -274,7 +274,12 @@ impl Builder {
                                     .and_then(|kind| self.candidates.get(kind));
                                 let width = (ui.available_width()
                                     - if values.is_some_and(|v| !v.is_empty()) {
-                                        34.
+                                        let spacing = ui.spacing();
+                                        (spacing.icon_width
+                                            + spacing.icon_spacing
+                                            + 2. * spacing.button_padding.x)
+                                            .max(24.)
+                                            + spacing.item_spacing.x
                                     } else {
                                         0.
                                     })
@@ -430,7 +435,8 @@ fn text(
     hint: &str,
     width: f32,
 ) -> bool {
-    let response = ui.add(
+    let response = ui.add_sized(
+        egui::vec2(width, 0.),
         egui::TextEdit::singleline(value)
             .id_salt(("selection-term", key))
             .hint_text(hint)
@@ -466,5 +472,57 @@ fn record(
             name.into(),
             [rect.min.x, rect.min.y, rect.width(), rect.height()],
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn term_controls_do_not_expand_the_sidebar_across_frames() {
+        let mut state = DesktopAppState::new();
+        state.new_scene("selection", true);
+        state.open_bytes("selection.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let molecule = state.active_object_summaries()[0].uid;
+        for (themed, keyword) in [false, true].into_iter().flat_map(|themed| {
+            ["hierarchical", "name", "bfac", "rprop", "resi"].map(|keyword| (themed, keyword))
+        }) {
+            let context = egui::Context::default();
+            if themed {
+                crate::shell::theme(&context, false);
+            }
+            let mut builder = Builder::for_molecule();
+            builder.tab = 2;
+            builder.draft.set_keyword(keyword);
+            for frame in 0..40 {
+                let mut width = 0.;
+                let _ = context.run(
+                    egui::RawInput {
+                        time: Some(frame as f64 / 60.),
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(1280., 900.),
+                        )),
+                        ..Default::default()
+                    },
+                    |context| {
+                        width = egui::SidePanel::left("selection")
+                            .default_width(260.)
+                            .width_range(180.0..=620.)
+                            .show(context, |ui| {
+                                builder.show(ui, &state, Some(molecule), 0, "");
+                            })
+                            .response
+                            .rect
+                            .width();
+                    },
+                );
+                assert!(
+                    width <= 260.5,
+                    "{keyword}, themed {themed}, frame {frame}: width {width}"
+                );
+            }
+        }
     }
 }

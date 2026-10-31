@@ -196,12 +196,14 @@ test('Selection pane applies live builder choices and preserves hand edits acros
   await expect.poll(()=>prop(page,object.id,'sel')).toBe('pane_carbon');
   expect((await command(page,'count_selection',{objId:object.id,selection:'pane_carbon'})).count).toBe(1);
   await page.screenshot({path:testInfo.outputPath('selection-pane-named.png')});
+  const paneWidth=(await status(page)).ui.rects['Selection expression'][2];
   await choose('Selection tab Term');
   await choose('Selection keyword');
   const [x,y,w,h]=(await status(page)).ui.rects['Selection keyword hierarchical'];
   await page.mouse.move(x+w/2,y+h/2);await page.mouse.wheel(0,160);
   await settleRect(page,'Selection keyword name',false);
   await choose('Selection keyword name');
+  expect((await status(page)).ui.rects['Selection expression'][2]).toBeCloseTo(paneWidth,0);
   await type('Selection value','O1');
   await choose('Selection Add');
   await expect.poll(()=>prop(page,object.id,'sel')).toBe('(pane_carbon) or (name O1)');
