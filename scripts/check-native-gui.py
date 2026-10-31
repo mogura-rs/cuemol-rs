@@ -133,6 +133,11 @@ def clipboard_text():
     return subprocess.check_output(command, text=True, timeout=5).rstrip('\r\n')
 
 
+def scroll_steps(steps):
+    # PyAutoGUI 0.9.54 forwards raw Windows wheel units.
+    pyautogui.scroll(steps * 120 if sys.platform == 'win32' else steps)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, required=True)
@@ -308,7 +313,7 @@ def main():
                     time.sleep(0.2)
                     tab_top = round(596 + dy) - 8
                     marker = capture().crop((179, tab_top, 209, tab_top + 16))
-                    pyautogui.scroll(-2)
+                    scroll_steps(-2)
                     time.sleep(0.5)
                     scrolled = capture('selection-pane-scrolled.png')
                     scores = []
@@ -345,7 +350,7 @@ def main():
             changed = sum(max(pixel) > 12 for pixel in difference.getdata())
             if changed < 50:
                 raise RuntimeError(f'Mouse rotation changed state but only {changed} screen pixels')
-            pyautogui.scroll(3)
+            scroll_steps(3)
             zoomed = wait_for(lambda: (view if (view := call('get_view'))['zoom'] != rotated['zoom'] else None))
             capture('zoomed.png')
             colored = sum(max(pixel) - min(pixel) > 70 and max(pixel) > 100 for pixel in after_image.getdata())
@@ -588,7 +593,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             inspector_filter('zoom')
             before_inspector_zoom = call('get_view')['zoom']
             pyautogui.moveTo(x + width * 0.6, y + height * 0.4)
-            pyautogui.scroll(2)
+            scroll_steps(2)
             inspector_zoom = wait_for(lambda: zoom if (zoom := call('get_view')['zoom']) != before_inspector_zoom else None)
             pyautogui.doubleClick(x + width - 100, y + 225, interval=0.1)
             pyautogui.hotkey(primary, 'a')
@@ -602,7 +607,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             wait_for(copied_zoom)
             pyautogui.write('37.25', interval=0.1)
             pyautogui.moveTo(x + width * 0.6, y + height * 0.4)
-            pyautogui.scroll(-2)
+            scroll_steps(-2)
             wait_for(lambda: call('get_view')['zoom'] != inspector_zoom)
             pyautogui.hotkey(primary, 'a')
             pyautogui.hotkey(primary, 'c')
@@ -614,7 +619,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             pyautogui.hotkey(primary, 'a')
             pyautogui.write('Orbit view', interval=0.02)
             pyautogui.moveTo(x + width * 0.6, y + height * 0.4)
-            pyautogui.scroll(2)
+            scroll_steps(2)
             wait_for(lambda: abs(call('get_view')['zoom'] - 37.25) > 0.01)
             pyautogui.hotkey(primary, 'a')
             pyautogui.hotkey(primary, 'c')

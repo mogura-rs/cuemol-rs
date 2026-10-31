@@ -172,6 +172,14 @@ the missing popup and failed selection commit. The driver now brings the window
 forward and waits for the popup pixels before using its controls. The same
 delayed-frame run then passes, including the final selection and undo checks.
 
+Windows subsequently passed the popup checks but barely moved the Selection
+pane on a wheel event. PyAutoGUI 0.9.54 forwards its scroll argument as raw
+Windows wheel data, while one notch is
+[120 units](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-mouse_event).
+The test now converts notches to those units on Windows and keeps the existing
+step count on Linux and macOS. A probe of the pinned backend reproduces the old
+two-unit input and confirms the corrected 240-unit input for two notches.
+
 Generated archives and `dist/validation.json` remain local validation artifacts,
 not a published release. The release workflow now checks actual packaged windows
 on all five native targets. Local test results do not establish that those CI
