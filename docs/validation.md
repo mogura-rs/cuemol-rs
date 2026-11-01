@@ -51,6 +51,15 @@ viewport test with movement, press and release in one egui frame also passed.
 This isolates a missing input acknowledgement in the probe; the Windows event
 ordering itself was not captured.
 
+A later Windows probe timed out after moving from the Inspector to the viewport
+and sending a wheel event. Delaying that movement by 0.8 seconds reproduced the
+same zoom assertion failure on the unchanged Linux binary. The driver now
+observes a toolbar hover transition before and after each pointer move that
+precedes scrolling or dragging. This confirms delivery without changing text
+focus. The full window check passes with delays on all three Inspector-to-viewport
+wheel transitions, including the numeric and text draft assertions. Actual
+Windows event ordering remains outside this controlled comparison.
+
 Run the scene-state C++ comparison with:
 
 ```sh

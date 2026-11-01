@@ -209,6 +209,15 @@ def main():
 
             activity_highlight = capture().getpixel((4, 88))
 
+            def move_pointer_and_wait(local_x, local_y):
+                # Observe pointer delivery without changing keyboard focus.
+                marker = (124, 32, 154, 56)
+                normal = capture().crop(marker)
+                pyautogui.moveTo(x + 138, y + 43)
+                wait_for(lambda: ImageChops.difference(normal, capture().crop(marker)).getbbox())
+                pyautogui.moveTo(x + local_x, y + local_y)
+                wait_for(lambda: ImageChops.difference(normal, capture().crop(marker)).getbbox() is None)
+
             if args.cross_selection_only:
                 probe = state['objects'][0]
                 target = call('load_file', {'path': str(fixture)})['objectId']
@@ -321,8 +330,7 @@ def main():
                 capture('selection-pane-term.png')
                 scroll_offset = 0
                 if 687 + dy >= height - 24:
-                    pyautogui.moveTo(x + 275, y + height - 60)
-                    time.sleep(0.2)
+                    move_pointer_and_wait(275, height - 60)
                     tab_top = round(596 + dy) - 8
                     marker = capture().crop((179, tab_top, 209, tab_top + 16))
                     scroll_steps(-2)
@@ -356,7 +364,7 @@ def main():
 
             before_image = capture('before.png')
             before = call('get_view')
-            pyautogui.moveTo(x + width * 0.58, y + height * 0.43)
+            move_pointer_and_wait(width * 0.58, height * 0.43)
             pyautogui.dragRel(80, 35, duration=0.5, button='left')
             rotated = wait_for(lambda: (view if (view := call('get_view'))['rotation'] != before['rotation'] else None))
             after_image = capture('rotated.png')
@@ -371,7 +379,7 @@ def main():
             if colored < 100:
                 raise RuntimeError(f'The window contains too few colored pixels: {colored}')
 
-            pyautogui.moveTo(x + width * 0.58, y + height * 0.43)
+            move_pointer_and_wait(width * 0.58, height * 0.43)
             pyautogui.keyDown('shift')
             try:
                 pyautogui.dragRel(80, 0, duration=0.5, button='left')
@@ -614,7 +622,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             wait_for_inspector_target(previous_inspector)
             inspector_filter('zoom')
             before_inspector_zoom = call('get_view')['zoom']
-            pyautogui.moveTo(x + width * 0.6, y + height * 0.4)
+            move_pointer_and_wait(width * 0.6, height * 0.4)
             scroll_steps(2)
             inspector_zoom = wait_for(lambda: zoom if (zoom := call('get_view')['zoom']) != before_inspector_zoom else None)
             pyautogui.doubleClick(x + width - 100, y + 225, interval=0.1)
@@ -628,7 +636,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                     return False
             wait_for(copied_zoom)
             pyautogui.write('37.25', interval=0.1)
-            pyautogui.moveTo(x + width * 0.6, y + height * 0.4)
+            move_pointer_and_wait(width * 0.6, height * 0.4)
             scroll_steps(-2)
             wait_for(lambda: call('get_view')['zoom'] != inspector_zoom)
             pyautogui.hotkey(primary, 'a')
@@ -640,7 +648,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             pyautogui.click(x + width - 100, y + 225)
             pyautogui.hotkey(primary, 'a')
             pyautogui.write('Orbit view', interval=0.02)
-            pyautogui.moveTo(x + width * 0.6, y + height * 0.4)
+            move_pointer_and_wait(width * 0.6, height * 0.4)
             scroll_steps(2)
             wait_for(lambda: abs(call('get_view')['zoom'] - 37.25) > 0.01)
             pyautogui.hotkey(primary, 'a')
@@ -840,6 +848,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                           shell_shortcuts=True,
                           inspector_text_undo=True, inspector_boolean_reset=True,
                           inspector_scene_target=True, inspector_view_navigation=True,
+                          pointer_transition_acknowledged=True,
                           inspector_numeric_draft=True,
                           inspector_text_draft=True,
                           inspector_derived_axes=True,
