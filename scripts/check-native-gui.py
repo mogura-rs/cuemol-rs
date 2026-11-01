@@ -534,6 +534,12 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             time.sleep(0.2)
             pyautogui.click(x + width - 194, y + 149)
 
+            def inspector_heading():
+                return capture().crop((width - 292, 96, width - 10, 135))
+
+            def wait_for_inspector_target(previous):
+                wait_for(lambda: ImageChops.difference(previous, inspector_heading()).getbbox())
+
             def inspector_filter(text):
                 def focused():
                     image = capture().crop((width - 290, 164, width - 10, 184))
@@ -587,8 +593,9 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             wait_for(lambda: call('get_prop', {'path': locked_path})['value'] == 'false')
             capture('inspector-reset.png')
 
+            previous_inspector = inspector_heading()
             pyautogui.click(x + 145, y + 140)
-            time.sleep(0.2)
+            wait_for_inspector_target(previous_inspector)
             inspector_filter('name')
             pyautogui.click(x + width - 100, y + 225)
             pyautogui.hotkey(primary, 'a')
@@ -599,11 +606,12 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                 raise RuntimeError('The Scene inspector edited the selected object')
             capture('inspector-scene.png')
 
+            previous_inspector = inspector_heading()
             pyautogui.click(x + 180, y + 13)
             time.sleep(0.2)
             capture('inspector-view-menu.png')
             pyautogui.click(x + 240, y + 228)
-            time.sleep(0.2)
+            wait_for_inspector_target(previous_inspector)
             inspector_filter('zoom')
             before_inspector_zoom = call('get_view')['zoom']
             pyautogui.moveTo(x + width * 0.6, y + height * 0.4)
@@ -836,6 +844,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                           inspector_optional_value=True,
                           inspector_optional_input_acknowledged=True,
                           inspector_filter_input_acknowledged=True,
+                          inspector_target_input_acknowledged=True,
                           inspector_font_choices=True,
                           inspector_selection_popup_acknowledged=True,
                           inspector_selection_keyword_acknowledged=True,

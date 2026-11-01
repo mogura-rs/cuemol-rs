@@ -2598,3 +2598,10 @@ through the clipboard before proceeding. Delaying the initial pane frame by
 1.5 seconds reproduced the Center timeout with the previous driver. The same
 binary passed the focused pane check and the full native window check with
 the corrected driver and the same delay.
+
+Another Windows check requested filter focus while the Inspector target was
+changing from an object to the scene. The driver now waits for the displayed
+target heading to change before filtering Scene or View properties. A
+1.5-second delay reproduced editing the old object with the previous driver;
+the corrected driver passed the full window check with that delay and preserved
+the assertion that scene edits must not rename the selected molecule.
