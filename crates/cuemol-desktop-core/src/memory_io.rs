@@ -1,6 +1,18 @@
 use super::*;
 
 impl DesktopAppState {
+    /// Accept an initiated embedded download; browsers cannot confirm a disk write.
+    pub fn complete_embedded_scene_save(&mut self, scene_uid: Uid) -> Result<()> {
+        let styles = self.prepare_scene_styles(scene_uid, true)?;
+        styles.apply(
+            self.scene_manager_mut()
+                .scene_mut(scene_uid)
+                .ok_or_else(|| CueMolError::not_found("scene"))?,
+        );
+        self.clear_scene_modified(scene_uid);
+        Ok(())
+    }
+
     pub fn configure_loaded_bytes(
         &mut self,
         loaded: &GuiLoadedPath,
@@ -48,18 +60,17 @@ impl DesktopAppState {
         let scene_uid = self
             .active_scene()
             .ok_or_else(|| CueMolError::not_found("scene"))?;
-        self.sync_trajectory_qsc_nodes(scene_uid, true, None)?;
-        self.sync_morph_qsc_nodes(scene_uid)?;
-        self.sync_density_map_qsc_nodes(scene_uid)?;
-        let (document, _, _) = self.scene_qsc_with_save_options(
-            scene_uid,
-            GuiSceneSaveOptions {
-                embed_all: true,
-                ..Default::default()
-            },
-            None,
-        )?;
-        Ok(document)
+        Ok(self
+            .prepare_scene_save(
+                scene_uid,
+                GuiSceneSaveOptions {
+                    embed_all: true,
+                    ..Default::default()
+                },
+                None,
+                None,
+            )?
+            .document)
     }
 
     /// Split an embedded scene around an external trajectory payload for Blob-based export.

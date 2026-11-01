@@ -126,6 +126,7 @@ impl App {
                     undo.camera != self.camera || !undo.state.same_scene_undo_state(&self.state)
                 });
                 if let Some(undo) = undo.filter(|_| history_changed && !self.agent.changed_scene) {
+                    self.state.mark_scene_changes_since(&undo.state);
                     self.history.push(undo);
                     self.future.clear();
                     if self.history.len() > 12 {

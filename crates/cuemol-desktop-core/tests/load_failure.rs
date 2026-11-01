@@ -94,3 +94,23 @@ fn failed_renderer_setup_does_not_insert_a_molecule_or_scene() {
         );
     }
 }
+
+#[test]
+fn failed_scene_save_preserves_morph_metadata_and_edit_history() {
+    let mut app = DesktopAppState::new();
+    let GuiLoadedPath::Object { object_uid, .. } = app.open_bytes("atoms.pdb", PDB).unwrap() else {
+        panic!("expected molecule");
+    };
+    app.initialize_morph_object(object_uid).unwrap();
+    let scene = app.active_scene().unwrap();
+    app.mark_scene_modified(scene);
+    let before = app.clone();
+    let directory = tempfile::tempdir().unwrap();
+    assert!(app.save_active_scene_qsc(directory.path()).is_err());
+    assert!(app.same_undo_state(&before));
+    assert!(app.scene_is_modified(scene));
+    let exported = app.active_scene_bytes().unwrap();
+    assert!(!exported.is_empty());
+    assert!(app.same_undo_state(&before));
+    assert!(app.scene_is_modified(scene));
+}

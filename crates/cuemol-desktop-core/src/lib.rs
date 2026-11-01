@@ -671,8 +671,16 @@ impl GuiTrajectoryData {
     }
 }
 
+struct PreparedSceneSave {
+    scene: MolScene,
+    document: Vec<u8>,
+    embedded_objects: Vec<Uid>,
+    styles: style_edit::PreparedSceneStyles,
+}
+
 #[derive(Debug, Clone)]
 pub struct DesktopAppState {
+    modified_scenes: BTreeSet<Uid>,
     command_manager: MolCommandManager,
     stream_manager: StreamManager,
     config: cuemol_qsys::SysConfig,
@@ -1956,6 +1964,7 @@ fn default_desktop_style_manager() -> StyleManager {
 impl Default for DesktopAppState {
     fn default() -> Self {
         Self {
+            modified_scenes: BTreeSet::new(),
             command_manager: MolCommandManager::new(),
             stream_manager: StreamManager::new(),
             config: default_desktop_config(),
@@ -1992,6 +2001,101 @@ impl Default for DesktopAppState {
 }
 
 impl DesktopAppState {
+    pub fn mark_scene_modified(&mut self, scene: Uid) {
+        if self.scene_manager().scene(scene).is_some() {
+            self.modified_scenes.insert(scene);
+        }
+    }
+
+    pub fn mark_scenes_modified(&mut self, scenes: impl IntoIterator<Item = Uid>) {
+        for scene in scenes {
+            self.mark_scene_modified(scene);
+        }
+    }
+
+    /// Clear edit history without discarding unsaved scene style definitions.
+    pub fn clear_scene_modified(&mut self, scene: Uid) {
+        self.modified_scenes.remove(&scene);
+        #[cfg(feature = "scripting")]
+        self.script_scene_clear_undo(scene);
+    }
+
+    pub fn clear_all_scene_modified(&mut self) {
+        let scenes = self
+            .scene_manager()
+            .scenes()
+            .iter()
+            .map(MolScene::uid)
+            .collect::<Vec<_>>();
+        for scene in scenes {
+            self.clear_scene_modified(scene);
+        }
+    }
+
+    pub fn scene_is_modified(&self, scene: Uid) -> bool {
+        let Some(document) = self.scene_manager().scene(scene) else {
+            return false;
+        };
+        #[cfg(feature = "scripting")]
+        if self
+            .script_scene_undo
+            .get(&scene.get())
+            .is_some_and(|history| !history.undo.is_empty())
+        {
+            return true;
+        }
+        self.modified_scenes.contains(&scene)
+            || document
+                .loaded_styles()
+                .iter()
+                .any(|style| style.node.bool_attr("modified"))
+    }
+
+    pub fn modified_scene_uids(&self) -> BTreeSet<Uid> {
+        self.scene_manager()
+            .scenes()
+            .iter()
+            .map(MolScene::uid)
+            .filter(|scene| self.scene_is_modified(*scene))
+            .collect()
+    }
+
+    /// Record document changes at the owning application's undo boundary.
+    pub fn mark_scene_changes_since(&mut self, previous: &Self) {
+        let changed = self
+            .scene_manager()
+            .scenes()
+            .iter()
+            .filter_map(|scene| {
+                let uid = scene.uid();
+                let before = previous.scene_manager().scene(uid);
+                if before.is_none() && self.scene_is_just_created(uid) {
+                    return None;
+                }
+                if before != Some(scene)
+                    || self
+                        .density_maps
+                        .iter()
+                        .filter(|(_, map)| map.scene_uid == uid)
+                        .ne(previous
+                            .density_maps
+                            .iter()
+                            .filter(|(_, map)| map.scene_uid == uid))
+                    || scene.objects().iter().any(|object| {
+                        self.morphs.get(&object.uid()) != previous.morphs.get(&object.uid())
+                            || self.trajectories.get(&object.uid())
+                                != previous.trajectories.get(&object.uid())
+                    })
+                {
+                    Some(uid)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        self.mark_scenes_modified(changed);
+    }
+
     /// Restore state without reusing style identifiers already exposed to editors.
     pub fn restore_snapshot(&mut self, mut snapshot: Self) {
         snapshot
@@ -8369,6 +8473,7 @@ impl DesktopAppState {
         if !self.command_manager.destroy_scene_command(scene_uid) {
             return false;
         }
+        self.modified_scenes.remove(&scene_uid);
         self.animation_runtimes.remove(&scene_uid);
         self.animation_players.remove(&scene_uid);
         self.morphs.retain(|uid, _| !object_uids.contains(uid));
@@ -8390,6 +8495,7 @@ impl DesktopAppState {
 
     pub fn destroy_all_scenes(&mut self) {
         self.command_manager.destroy_all_scenes_command();
+        self.modified_scenes.clear();
         self.animation_runtimes.clear();
         self.animation_players.clear();
         self.active_scene = None;
@@ -12645,7 +12751,12 @@ impl DesktopAppState {
         let Some(scene) = self.scene_manager().scene(scene_uid) else {
             return false;
         };
-        scene.source().is_empty()
+        !self.scene_is_modified(scene_uid)
+            && !self
+                .density_maps
+                .values()
+                .any(|map| map.scene_uid == scene_uid)
+            && scene.source().is_empty()
             && scene.objects().is_empty()
             && scene.cameras().is_empty()
             && scene.loaded_surfaces().is_empty()
@@ -14192,15 +14303,7 @@ impl DesktopAppState {
     }
 
     pub fn save_active_scene_qsc(&mut self, path: impl AsRef<Path>) -> Result<()> {
-        let scene_uid = self
-            .active_scene
-            .ok_or_else(|| CueMolError::invalid_argument("no active scene"))?;
-        let options = self
-            .scene_manager()
-            .scene(scene_uid)
-            .map(scene_qsc_save_options)
-            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
-        self.save_active_scene_qsc_with_options(path, options)
+        self.save_active_scene_qsc_impl(path.as_ref(), None, None)
     }
 
     pub fn save_active_scene_qsc_with_options(
@@ -14208,23 +14311,50 @@ impl DesktopAppState {
         path: impl AsRef<Path>,
         options: GuiSceneSaveOptions,
     ) -> Result<()> {
-        let path = path.as_ref();
+        self.save_active_scene_qsc_impl(path.as_ref(), Some(options), None)
+    }
+
+    /// Persist the current camera only when the scene write succeeds.
+    pub fn save_active_scene_qsc_with_camera(
+        &mut self,
+        path: impl AsRef<Path>,
+        camera: cuemol_qsys::Camera,
+        options: Option<GuiSceneSaveOptions>,
+    ) -> Result<()> {
+        self.save_active_scene_qsc_impl(path.as_ref(), options, Some(camera))
+    }
+
+    fn save_active_scene_qsc_impl(
+        &mut self,
+        path: &Path,
+        options: Option<GuiSceneSaveOptions>,
+        camera: Option<cuemol_qsys::Camera>,
+    ) -> Result<()> {
         let source_path = absolute_scene_path(path)?;
         let scene_uid = self
             .active_scene
             .ok_or_else(|| CueMolError::invalid_argument("no active scene"))?;
-        let options = options.normalized();
-        self.sync_trajectory_qsc_nodes(scene_uid, options.embed_all, source_path.parent())?;
-        self.sync_morph_qsc_nodes(scene_uid)?;
-        self.sync_density_map_qsc_nodes(scene_uid)?;
-        let (document, embedded_objects, styles) =
-            self.scene_qsc_with_save_options(scene_uid, options, source_path.parent())?;
+        let options = options
+            .unwrap_or_else(|| {
+                self.scene_manager()
+                    .scene(scene_uid)
+                    .map(scene_qsc_save_options)
+                    .unwrap_or_default()
+            })
+            .normalized();
+        let PreparedSceneSave {
+            scene: staged,
+            document,
+            embedded_objects,
+            styles,
+        } = self.prepare_scene_save(scene_uid, options, source_path.parent(), camera.as_ref())?;
         styles.write_sources()?;
         fs::write(path, document)?;
         let scene = self
             .scene_manager_mut()
             .scene_mut(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        *scene = staged;
         styles.apply(scene);
         for object_uid in embedded_objects {
             if let Some(object) = scene.object_mut(object_uid) {
@@ -14246,7 +14376,52 @@ impl DesktopAppState {
                 .unwrap_or_else(|| Path::new("."))
                 .to_string_lossy(),
         );
+        if let Some(camera) = camera.filter(|_| self.active_view_summary().is_some()) {
+            self.set_active_view_camera(&camera)?;
+        }
+        self.clear_scene_modified(scene_uid);
         Ok(())
+    }
+
+    fn prepare_scene_save(
+        &mut self,
+        scene_uid: Uid,
+        options: GuiSceneSaveOptions,
+        output_base: Option<&Path>,
+        camera: Option<&cuemol_qsys::Camera>,
+    ) -> Result<PreparedSceneSave> {
+        let original = self
+            .scene_manager()
+            .scene(scene_uid)
+            .ok_or_else(|| CueMolError::not_found("scene"))?
+            .clone();
+        let prepared = (|| {
+            if let Some(camera) = camera {
+                let mut saved = camera.clone();
+                saved.set_name("__current");
+                self.scene_manager_mut()
+                    .scene_mut(scene_uid)
+                    .unwrap()
+                    .set_camera(saved);
+            }
+            self.sync_trajectory_qsc_nodes(scene_uid, options.embed_all, output_base)?;
+            self.sync_morph_qsc_nodes(scene_uid)?;
+            self.sync_density_map_qsc_nodes(scene_uid)?;
+            self.scene_qsc_with_save_options(scene_uid, options, output_base)
+        })();
+        let scene = std::mem::replace(
+            self.scene_manager_mut()
+                .scene_mut(scene_uid)
+                .expect("save scene remains live"),
+            original,
+        );
+        let (document, embedded_objects, styles) = prepared?;
+        Ok(PreparedSceneSave {
+            scene,
+            document,
+            embedded_objects,
+            styles,
+        })
     }
 
     fn sync_morph_qsc_nodes(&mut self, scene_uid: Uid) -> Result<()> {
@@ -40935,7 +41110,9 @@ impl DesktopAppState {
             }
             Ok(match property {
                 SceneProperty::Modified => {
-                    JsValue::new(scene_attr_bool_for(scene_uid, "_script_modified", false))
+                    JsValue::new(with_flushed_script_app(ctx, None, |app| {
+                        app.scene_is_modified(Uid::new(scene_uid))
+                    })?)
                 }
                 SceneProperty::Name => JsString::from(script_env::with(|env| {
                     if scene_uid == env.scene_uid {
@@ -41154,14 +41331,9 @@ impl DesktopAppState {
             script_env::with_mut(|env| {
                 if scene_uid == env.scene_uid {
                     env.scene_attributes.insert(name.to_string(), value.clone());
-                    env.scene_attributes
-                        .insert("_script_modified".to_string(), "true".to_string());
                 }
                 if let Some(scene) = env.scenes.iter_mut().find(|scene| scene.uid == scene_uid) {
                     scene.attributes.insert(name.to_string(), value.clone());
-                    scene
-                        .attributes
-                        .insert("_script_modified".to_string(), "true".to_string());
                 }
             });
             script_cmds::push(ScriptCmd::SetSceneAttribute {
@@ -41188,14 +41360,9 @@ impl DesktopAppState {
             script_env::with_mut(|env| {
                 if scene_uid == env.scene_uid {
                     env.scene_name = name.clone();
-                    env.scene_attributes
-                        .insert("_script_modified".to_string(), "true".to_string());
                 }
                 if let Some(scene) = env.scenes.iter_mut().find(|scene| scene.uid == scene_uid) {
                     scene.name = name.clone();
-                    scene
-                        .attributes
-                        .insert("_script_modified".to_string(), "true".to_string());
                 }
             });
             script_cmds::push(ScriptCmd::RenameScene {
@@ -41217,22 +41384,19 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let scene_uid = scene_proxy_uid(this, ctx)?;
-            Ok(JsValue::new(script_env::with(|env| {
-                env.objects
-                    .iter()
-                    .all(|object| object.scene_uid != scene_uid)
-                    && env
-                        .scenes
-                        .iter()
-                        .find(|scene| scene.uid == scene_uid)
-                        .is_some_and(|scene| {
-                            scene.cameras.is_empty()
-                                && !scene
-                                    .attributes
-                                    .get("_script_modified")
-                                    .is_some_and(|value| qsc_bool(value))
-                        })
-            })))
+            Ok(JsValue::new(with_flushed_script_app(ctx, None, |app| {
+                let uid = Uid::new(scene_uid);
+                !app.scene_is_modified(uid)
+                    && !app.density_maps.values().any(|map| map.scene_uid == uid)
+                    && app.scene_manager().scene(uid).is_some_and(|scene| {
+                        scene.objects().is_empty()
+                            && scene.cameras().is_empty()
+                            && scene.loaded_surfaces().is_empty()
+                            && scene.loaded_density_maps().is_empty()
+                            && scene.loaded_lw_objects().is_empty()
+                            && scene.loaded_qsc_objects().is_empty()
+                    })
+            })?))
         }
         fn js_scene_get_uid(
             this: &JsValue,
@@ -41493,13 +41657,6 @@ impl DesktopAppState {
                         .set(&path, &text)
                         .map_err(|error| script_error(error.to_string()))?;
                     let settings = settings.clone();
-                    scene
-                        .attributes
-                        .insert("_script_modified".into(), "true".into());
-                    if env.scene_uid == sid {
-                        env.scene_attributes
-                            .insert("_script_modified".into(), "true".into());
-                    }
                     Ok::<_, boa_engine::JsError>(settings)
                 })?;
                 script_cmds::push(ScriptCmd::SetSceneAppData {
@@ -48089,18 +48246,20 @@ impl DesktopAppState {
             base64,
         }
         .normalized();
-        self.sync_morph_qsc_nodes(scene_uid)?;
-        self.sync_density_map_qsc_nodes(scene_uid)?;
         let source_path = absolute_scene_path(Path::new(path))?;
-        self.sync_trajectory_qsc_nodes(scene_uid, embed_all, source_path.parent())?;
-        let (document, _, styles) =
-            self.scene_qsc_with_save_options(scene_uid, options, source_path.parent())?;
+        let PreparedSceneSave {
+            scene: staged,
+            document,
+            styles,
+            ..
+        } = self.prepare_scene_save(scene_uid, options, source_path.parent(), None)?;
         styles.write_sources()?;
         fs::write(path, document)?;
         let scene = self
             .scene_manager_mut()
             .scene_mut(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+        *scene = staged;
         styles.apply(scene);
         scene.set_qsc_options(Some(qsc_save_options_node(options)))?;
         Ok(())
@@ -49454,13 +49613,11 @@ impl DesktopAppState {
                         } else {
                             scene.app_data_mut().remove(&id);
                         }
-                        scene.set_scene_attribute("_script_modified", "true");
                     }
                 }
                 ScriptCmd::SetSceneAttribute { uid, name, value } => {
                     if let Some(scene) = self.scene_manager_mut().scene_mut(Uid::new(uid)) {
                         scene.set_scene_attribute(name, value);
-                        scene.set_scene_attribute("_script_modified", "true");
                     }
                 }
                 ScriptCmd::ConvertToLWScene {
@@ -49703,6 +49860,7 @@ impl DesktopAppState {
 
     #[cfg(feature = "scripting")]
     fn script_scene_clear_undo(&mut self, scene_uid: Uid) {
+        self.modified_scenes.remove(&scene_uid);
         if self.scene_manager().scene(scene_uid).is_none() {
             return;
         }
@@ -61163,7 +61321,7 @@ end_header
             ))
             .expect("Scene script runs");
         assert!(
-            log.contains("sceneApi=after:true:true:7.5:none:4:2:") && log.contains(":true:1:255"),
+            log.contains("sceneApi=after:false:true:7.5:none:4:2:") && log.contains(":true:1:255"),
             "Scene API log: {log:?}"
         );
 

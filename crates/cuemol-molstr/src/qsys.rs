@@ -2659,6 +2659,7 @@ impl MolScene {
         self.animation_node = animation_node;
         self.loaded_styles = loaded_styles;
         self.scene_attributes = scene_attributes;
+        self.scene_attributes.remove("_script_modified");
         self.scene_extension_nodes = scene_extension_nodes;
         self.app_data.clear();
         for node in stream
@@ -3048,6 +3049,9 @@ impl MolScene {
         output.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\n");
         output.push_str("<scene");
         for (name, value) in &self.scene_attributes {
+            if name == "_script_modified" {
+                continue;
+            }
             output.push_str(&format!(" {name}=\"{}\"", escape_xml(value)));
         }
         output.push_str(">\n");

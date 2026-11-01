@@ -38,7 +38,7 @@ impl App {
     }
 
     fn request_close_tab(&mut self, id: Uid) {
-        if !self.state.scene_is_just_created(id) {
+        if self.state.scene_is_modified(id) {
             self.pending_close = Some(id);
         } else {
             self.close_tab(id);
@@ -583,6 +583,15 @@ impl App {
             });
     }
     fn save_scene_download(&mut self) -> bool {
+        let before = self.state.clone();
+        if self.try_save_scene_download() {
+            return true;
+        }
+        self.state.restore_snapshot(before);
+        false
+    }
+
+    fn try_save_scene_download(&mut self) -> bool {
         if let Err(error) = self.state.set_active_view_camera(&self.camera) {
             self.message = error.to_string();
             return false;
@@ -622,6 +631,12 @@ impl App {
         if let Err(error) = result {
             self.message = error;
             return false;
+        }
+        if let Some(scene) = self.state.active_scene() {
+            if let Err(error) = self.state.complete_embedded_scene_save(scene) {
+                self.message = error.to_string();
+                return false;
+            }
         }
         self.history.clear();
         self.future.clear();

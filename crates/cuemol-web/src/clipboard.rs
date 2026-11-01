@@ -215,6 +215,7 @@ impl App {
                 );
                 self.navigation.cancel();
                 self.revision = self.revision.wrapping_add(1);
+                self.state.mark_scene_changes_since(&before.state);
                 self.history.push(before);
                 if self.history.len() > 12 {
                     self.history.remove(0);

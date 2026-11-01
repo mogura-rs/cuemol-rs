@@ -791,10 +791,7 @@ pub(crate) fn node_property_values(
                     "activeViewID",
                     s.active_view_uid().map_or(0, Uid::get).to_string(),
                 ),
-                (
-                    "modified",
-                    (s.scene_attribute("_script_modified") == Some("true")).to_string(),
-                ),
+                ("modified", state.scene_is_modified(sid).to_string()),
             ] {
                 v.insert(key.into(), value);
             }

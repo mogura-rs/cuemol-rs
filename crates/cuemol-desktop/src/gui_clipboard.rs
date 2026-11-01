@@ -227,7 +227,7 @@ impl GuiApplication {
                 }
             }
             self.push_undo_snapshot(undo);
-            self.modified_scenes.extend(scenes);
+            self.state.mark_scenes_modified(scenes);
             self.selected_object = None;
             self.selected_renderer = None;
             self.workspace_aux_selection = None;
@@ -286,7 +286,7 @@ impl GuiApplication {
             return;
         }
         self.push_undo_snapshot(undo);
-        self.modified_scenes.insert(scene);
+        self.state.mark_scene_modified(scene);
         self.workspace_multiple_selection.clear();
         match result {
             GuiPastedNode::Object(id) => {

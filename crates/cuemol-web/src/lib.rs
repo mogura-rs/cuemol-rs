@@ -602,6 +602,7 @@ impl App {
             return;
         }
         if name == "clear_undo" {
+            self.state.clear_all_scene_modified();
             self.history.clear();
             self.future.clear();
             self.message = "Undo history cleared.".into();
@@ -635,6 +636,7 @@ impl App {
                     self.revision = self.revision.wrapping_add(1);
                 }
                 if let Some(before) = before.filter(|_| history_changed) {
+                    self.state.mark_scene_changes_since(&before.state);
                     self.history.push(before);
                     if self.history.len() > 12 {
                         self.history.remove(0);
@@ -712,6 +714,7 @@ impl App {
                     });
                     if result.is_ok() {
                         if let Some(undo) = undo {
+                            self.state.mark_scene_changes_since(&undo.state);
                             self.history.push(undo);
                             self.future.clear();
                             if self.history.len() > 12 {
@@ -821,6 +824,9 @@ impl App {
                         }
                         self.frame = 0;
                         self.dirty = true;
+                    }
+                    if let Some(scene) = self.state.scene_manager().scene_uid_for_object(id) {
+                        self.state.mark_scene_modified(scene);
                     }
                     self.message = format!("Indexed {added} frames; {} frames across all blocks. Coordinates are read one frame at a time.", previous.0 + added);
                 }

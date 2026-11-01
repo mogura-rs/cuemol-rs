@@ -233,6 +233,9 @@ impl App {
                 self.source_scene = self.state.active_scene();
                 self.navigation.cancel();
                 self.revision = self.revision.wrapping_add(1);
+                if source.is_none() {
+                    self.state.mark_scene_changes_since(&before.state);
+                }
                 self.history.push(before);
                 if self.history.len() > 12 {
                     self.history.remove(0);

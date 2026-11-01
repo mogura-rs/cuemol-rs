@@ -220,6 +220,7 @@ impl Protocol {
         if name == "clear_undo" {
             self.undo.clear();
             self.redo.clear();
+            state.clear_all_scene_modified();
             return Ok(json!({"cleared":true}));
         }
         if name == "undo" || name == "redo" {
@@ -243,9 +244,24 @@ impl Protocol {
         .then(|| (state.clone(), camera.clone()));
         match call_tool(state, camera, name, args) {
             Ok(value) => {
+                if name == "save_scene" {
+                    self.undo.clear();
+                    self.redo.clear();
+                }
                 if let Some(before) = before.filter(|(previous, view)| {
                     self.record_history && (view != camera || !previous.same_undo_state(state))
                 }) {
+                    state.mark_scene_changes_since(&before.0);
+                    if name == "load_file" && value.get("objectId").is_none() {
+                        if let Some(scene) = state.active_scene().filter(|uid| {
+                            state
+                                .scene_manager()
+                                .scene(*uid)
+                                .is_some_and(|scene| scene.source_type() == "qsc_xml")
+                        }) {
+                            state.clear_scene_modified(scene);
+                        }
+                    }
                     if self.undo.len() == 20 {
                         self.undo.remove(0);
                     }

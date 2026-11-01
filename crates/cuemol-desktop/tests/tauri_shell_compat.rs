@@ -977,7 +977,7 @@ fn tauri_save_and_save_as_use_distinct_reference_flows() {
     assert!(JS.contains("base64: advanced && base64.checked"));
     assert!(CSS.contains(".reference-dialog.scene-options-dialog"));
     assert!(NATIVE_GUI_RS.contains("fn scene_save_options_dialog"));
-    assert!(TAURI_APP_RS.contains("save_active_scene_qsc_with_options"));
+    assert!(TAURI_APP_RS.contains("save_active_scene_qsc_with_camera"));
 }
 
 #[test]

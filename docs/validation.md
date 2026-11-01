@@ -5,6 +5,58 @@ results are historical. Generated inputs and logs stay in the ignored checkout
 cache. The current repairs and their limits appear in the completion audit;
 passing tests do not establish equivalence for every parameter combination.
 
+## Scene saved state and optional execution follow-up
+
+Scene status is now shared by commands, scripts and all three frontends.
+The C++ scene oracle checks nine transitions: creation, an untracked edit,
+a pending transaction, commit, undo, redo, clear, rollback and an empty
+transaction. The reference reports untracked and pending edits as unmodified;
+committed history or a modified scene-local style makes the scene modified.
+Global style definitions remain outside a scene's saved state. The previously
+documented same-source style-save behavior is preserved.
+
+The initial regressions reproduced missing status changes after command and
+script object edits, and a script flag that survived successful scene saving.
+The runtime flag no longer enters saved QSC data. Frontend history records the
+scenes actually edited by a script, including a non-active scene. Undo and redo
+restore that status, and clearing history retains unsaved local style changes.
+
+Failed native scene writes previously retained prepared Morph metadata or a
+new current-camera entry. The common writer now prepares a scene separately
+and applies it only after successful output. Script writers and embedded byte
+exports use the same preparation boundary. Byte export itself does not change
+document status. A browser download failure restores scene and camera state;
+an initiated download clears history and embedded style flags. Browsers cannot
+confirm that the download was finally written to disk.
+
+The scene-export fixture lookup now resolves its default from the crate
+directory. Previously it skipped despite the sibling reference fixture being
+present. The optional Tauri animation export test now constructs its own
+molecule, and the macOS workflow explicitly executes the five optional GPU
+tests with a supplied profile input. Their execution results are recorded
+separately from the ordinary model suite.
+
+Run the scene-state C++ comparison with:
+
+```sh
+uv run --no-project python scripts/check-reference-scene-state.py \
+  --build-dir .cache/reference-build \
+  --config .cache/reference-prefix/share/sysconfig.xml
+```
+
+The reference build and configuration are optional local inputs. Ordinary
+tests explicitly report a skipped oracle when they are unavailable; the
+comparison helper requires both inputs and fails if execution fails.
+
+The executed C++ checks include 136 camera fits/orientations, 651 label formats,
+3,862 input camera states, 80 CCP4/MRC inputs, five continuous-potential cases,
+25 map-level states, 21 regions, 15 LOD budgets, cube-cap counts and areas,
+27 direct-surface configurations, all five backbone/spline tests, and 15 volume
+transfer tables of 256 colors each. Backbone checks use the distributed 2.4.1
+style configuration. The 1CRN scene-export check also executes with its fixture
+present, and the real bundled POV-Ray test passes explicitly. These are finite
+comparisons with the unchanged reference checkout.
+
 ## Configuration, palette and distribution follow-up
 
 This follow-up preserves the distinction between palette-file colors
@@ -2586,8 +2638,8 @@ cargo test --locked -p cuemol-desktop-core --test load_failure
 cargo test --locked -p cuemol-mdtools --test malformed_input
 ```
 
-The broader saved-state tracking difference described in `parity-audit.md`
-remains outside these repairs. This audit does not establish complete feature
+That audit left saved-state tracking outside its repairs; the follow-up above
+addresses that difference. This audit does not establish complete feature
 parity or the absence of all defects. Generated validation records identify
 the tested revision and the executed shared, native, browser and package checks.
 

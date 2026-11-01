@@ -1713,7 +1713,7 @@ struct GuiApplication {
     recent_paths: Vec<PathBuf>,
     undo_stack: Vec<GuiUndoSnapshot>,
     redo_stack: Vec<GuiUndoSnapshot>,
-    modified_scenes: std::collections::BTreeSet<cuemol_core::Uid>,
+
     status: String,
     log_lines: Vec<String>,
     selection_history: Vec<String>,
@@ -1730,7 +1730,6 @@ struct GuiUndoSnapshot {
     workspace_multiple_selection: Vec<NativeWorkspaceTarget>,
     selection_text: String,
     last_loaded_path: Option<PathBuf>,
-    modified_scenes: std::collections::BTreeSet<cuemol_core::Uid>,
 }
 
 #[derive(Debug)]
@@ -5175,7 +5174,7 @@ impl GuiApplication {
             recent_paths,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            modified_scenes: std::collections::BTreeSet::new(),
+
             status: "Ready".to_string(),
             log_lines: Vec::new(),
             selection_history,
@@ -5465,7 +5464,7 @@ impl GuiApplication {
         }
         if self.state.sync_auto_symmetry_center(view_center) {
             if let Some(scene_uid) = self.state.active_scene() {
-                self.modified_scenes.insert(scene_uid);
+                self.state.mark_scene_modified(scene_uid);
             }
             self.rebuild_snapshot();
         }
@@ -8075,7 +8074,7 @@ impl GuiApplication {
         ) {
             Ok(true) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(scene_uid);
+                self.state.mark_scene_modified(scene_uid);
                 self.set_status("Move object");
             }
             Ok(false) => {}
@@ -9360,7 +9359,7 @@ impl GuiApplication {
         ) {
             Ok(_) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(scene_uid);
+                self.state.mark_scene_modified(scene_uid);
                 self.rebuild_snapshot();
                 self.set_status(if component == "coloring" {
                     "Change coloring style"
@@ -9386,7 +9385,7 @@ impl GuiApplication {
         {
             Ok(()) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(scene_uid);
+                self.state.mark_scene_modified(scene_uid);
                 self.rebuild_snapshot();
                 self.set_status("Change coloring");
             }
@@ -9408,7 +9407,7 @@ impl GuiApplication {
         {
             Ok(()) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(scene_uid);
+                self.state.mark_scene_modified(scene_uid);
                 self.rebuild_snapshot();
                 self.set_status("Insert paint entry");
             }
@@ -9426,7 +9425,7 @@ impl GuiApplication {
         match self.state.insert_object_paint_entry(object_uid, color) {
             Ok(()) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(scene_uid);
+                self.state.mark_scene_modified(scene_uid);
                 self.rebuild_snapshot();
                 self.set_status("Insert object paint entry");
             }
@@ -9539,7 +9538,7 @@ impl GuiApplication {
         match result {
             Ok(()) => {
                 self.push_undo_snapshot_for_scene(undo, None);
-                self.modified_scenes.extend(
+                self.state.mark_scenes_modified(
                     targets
                         .iter()
                         .copied()
@@ -9735,7 +9734,7 @@ impl GuiApplication {
         match result {
             Ok(()) => {
                 self.push_undo_snapshot_for_scene(undo, None);
-                self.modified_scenes.extend(
+                self.state.mark_scenes_modified(
                     targets
                         .iter()
                         .copied()
@@ -9825,7 +9824,7 @@ impl GuiApplication {
                     None
                 };
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(scene_uid);
+                self.state.mark_scene_modified(scene_uid);
                 self.selected_object = auxiliary_selection.is_none().then_some(object_uid);
                 self.selected_renderer = auxiliary_selection.is_none().then_some(new_uid);
                 self.workspace_aux_selection = auxiliary_selection;
@@ -9897,7 +9896,7 @@ impl GuiApplication {
         {
             Ok(()) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(scene_uid);
+                self.state.mark_scene_modified(scene_uid);
                 self.rebuild_snapshot();
                 self.set_status("Change renderer selection");
             }
@@ -9938,7 +9937,7 @@ impl GuiApplication {
         {
             Ok(true) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(scene_uid);
+                self.state.mark_scene_modified(scene_uid);
                 if renderer_uids.len() == 1 {
                     self.set_status("Move renderer");
                 } else {
@@ -9965,7 +9964,7 @@ impl GuiApplication {
             .set_renderer_group_collapsed(owner.uid(), renderer_uid, collapsed)
         {
             Ok(()) => {
-                self.modified_scenes.insert(scene_uid);
+                self.state.mark_scene_modified(scene_uid);
                 self.set_status(if collapsed {
                     "Collapse renderer group"
                 } else {
@@ -12188,7 +12187,7 @@ impl GuiApplication {
                         .scene_manager()
                         .scene_uid_for_object(draft.object_uid)
                     {
-                        self.modified_scenes.insert(scene_uid);
+                        self.state.mark_scene_modified(scene_uid);
                     }
                     self.rebuild_snapshot();
                     self.set_status("Changed symmetry information");
@@ -12365,7 +12364,7 @@ impl GuiApplication {
                 self.push_undo_snapshot(undo);
                 if let Some(scene_uid) = self.state.scene_manager().scene_uid_for_object(object_uid)
                 {
-                    self.modified_scenes.insert(scene_uid);
+                    self.state.mark_scene_modified(scene_uid);
                 }
                 self.rebuild_snapshot();
                 self.set_status("Symmetry molecules shown");
@@ -12395,7 +12394,7 @@ impl GuiApplication {
                         if let Some(scene_uid) =
                             self.state.scene_manager().scene_uid_for_object(object_uid)
                         {
-                            self.modified_scenes.insert(scene_uid);
+                            self.state.mark_scene_modified(scene_uid);
                         }
                         self.rebuild_snapshot();
                         self.set_status("Unit cell shown");
@@ -12737,7 +12736,7 @@ impl GuiApplication {
         ) {
             Ok(()) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(map.scene_uid);
+                self.state.mark_scene_modified(map.scene_uid);
                 self.rebuild_snapshot();
                 self.set_status("Density map redrawn");
             }
@@ -12760,7 +12759,7 @@ impl GuiApplication {
         match self.state.add_density_renderer(map_uid, "*unitcell") {
             Ok(_) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(map.scene_uid);
+                self.state.mark_scene_modified(map.scene_uid);
                 self.rebuild_snapshot();
                 self.set_status("Unit cell shown");
             }
@@ -14734,7 +14733,7 @@ impl GuiApplication {
             .complete_record(changed && run.checkpoint.scene_changed() && !value.is_null());
         if name == "save_scene" && !value.is_null() {
             if let Some(scene) = self.state.active_scene() {
-                self.modified_scenes.remove(&scene);
+                self.state.clear_scene_modified(scene);
             }
             if let Some(path) = args["path"].as_str() {
                 self.last_loaded_path = Some(PathBuf::from(path));
@@ -17352,7 +17351,7 @@ impl GuiApplication {
             && self
                 .state
                 .active_scene()
-                .is_some_and(|scene_uid| !self.modified_scenes.contains(&scene_uid))
+                .is_some_and(|scene_uid| !self.state.scene_is_modified(scene_uid))
     }
 
     fn open_scene_current_path(&mut self, camera: &mut CameraController) {
@@ -17378,9 +17377,9 @@ impl GuiApplication {
             Ok(scene_uid) => {
                 self.push_undo_snapshot(undo);
                 if self.state.active_scene_source_path().is_some() {
-                    self.modified_scenes.remove(&scene_uid);
+                    self.state.clear_scene_modified(scene_uid);
                 } else {
-                    self.modified_scenes.insert(scene_uid);
+                    self.state.mark_scene_modified(scene_uid);
                 }
                 self.selected_object = None;
                 self.selected_renderer = None;
@@ -17436,7 +17435,7 @@ impl GuiApplication {
         match self.state.open_path(&path) {
             Ok(GuiLoadedPath::Scene { scene_uid }) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.remove(&scene_uid);
+                self.state.clear_scene_modified(scene_uid);
                 self.selected_object = None;
                 self.selected_renderer = None;
                 self.workspace_aux_selection = None;
@@ -17475,7 +17474,7 @@ impl GuiApplication {
                 object_uid,
             }) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(scene_uid);
+                self.state.mark_scene_modified(scene_uid);
                 self.selected_object = Some(object_uid);
                 self.selected_renderer = None;
                 self.workspace_aux_selection = None;
@@ -17493,7 +17492,7 @@ impl GuiApplication {
             }
             Ok(GuiLoadedPath::Map { scene_uid, map_uid }) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(scene_uid);
+                self.state.mark_scene_modified(scene_uid);
                 self.selected_object = None;
                 self.selected_renderer = None;
                 self.workspace_aux_selection = Some(WorkspaceAuxSelection::DensityMap {
@@ -17560,7 +17559,7 @@ impl GuiApplication {
                 object_uid,
             }) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(scene_uid);
+                self.state.mark_scene_modified(scene_uid);
                 self.selected_object = Some(object_uid);
                 self.selected_renderer = None;
                 self.workspace_aux_selection = None;
@@ -17575,7 +17574,7 @@ impl GuiApplication {
             }
             Ok(GuiLoadedPath::Map { scene_uid, map_uid }) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(scene_uid);
+                self.state.mark_scene_modified(scene_uid);
                 self.selected_object = None;
                 self.selected_renderer = None;
                 self.workspace_aux_selection = Some(WorkspaceAuxSelection::DensityMap {
@@ -17596,7 +17595,7 @@ impl GuiApplication {
                 if target == crate::GuiFileRendererTarget::Surface =>
             {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(scene_uid);
+                self.state.mark_scene_modified(scene_uid);
                 self.selected_object = None;
                 self.selected_renderer = None;
                 self.workspace_aux_selection =
@@ -17640,7 +17639,7 @@ impl GuiApplication {
         let scene = self.state.active_scene_summary();
         if scene
             .as_ref()
-            .is_some_and(|scene| self.modified_scenes.contains(&scene.uid))
+            .is_some_and(|scene| self.state.scene_is_modified(scene.uid))
         {
             self.reload_scene_draft = scene.map(|scene| NativeReloadSceneDraft {
                 scene_name: scene.name,
@@ -17659,7 +17658,7 @@ impl GuiApplication {
         match self.state.reload_active_scene_qsc() {
             Ok(scene_uid) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.remove(&scene_uid);
+                self.state.clear_scene_modified(scene_uid);
                 self.selected_object = None;
                 self.selected_renderer = None;
                 self.workspace_aux_selection = None;
@@ -17807,7 +17806,7 @@ impl GuiApplication {
             .state
             .scene_summaries()
             .iter()
-            .any(|scene| self.modified_scenes.contains(&scene.uid));
+            .any(|scene| self.state.scene_is_modified(scene.uid));
         self.exit_confirmation = has_modified_scene;
         self.exit_ready = !has_modified_scene;
     }
@@ -17817,11 +17816,7 @@ impl GuiApplication {
             .state
             .scene_summaries()
             .into_iter()
-            .filter_map(|scene| {
-                self.modified_scenes
-                    .contains(&scene.uid)
-                    .then_some(scene.uid)
-            })
+            .filter_map(|scene| self.state.scene_is_modified(scene.uid).then_some(scene.uid))
             .collect::<Vec<_>>();
         for scene_uid in scene_uids {
             self.activate_workspace_scene(scene_uid, camera);
@@ -17841,7 +17836,7 @@ impl GuiApplication {
                 return false;
             };
             self.save_current_scene_to_path(camera, &path);
-            if self.modified_scenes.contains(&scene_uid) {
+            if self.state.scene_is_modified(scene_uid) {
                 return false;
             }
         }
@@ -17859,7 +17854,7 @@ impl GuiApplication {
             .into_iter()
             .filter(|view| view.scene_uid == scene.uid)
             .count();
-        if view_count == 1 && self.modified_scenes.contains(&scene.uid) {
+        if view_count == 1 && self.state.scene_is_modified(scene.uid) {
             self.close_tab_draft = Some(NativeCloseTabDraft {
                 scene_name: scene.name,
             });
@@ -17877,7 +17872,7 @@ impl GuiApplication {
                 if let Some(scene_uid) = closed_scene
                     .filter(|scene_uid| self.state.scene_manager().scene(*scene_uid).is_none())
                 {
-                    self.modified_scenes.remove(&scene_uid);
+                    self.state.clear_scene_modified(scene_uid);
                 }
                 self.selected_object = None;
                 self.selected_renderer = None;
@@ -17896,7 +17891,7 @@ impl GuiApplication {
             Ok(None) => {
                 self.push_undo_snapshot(undo);
                 if let Some(scene_uid) = closed_scene {
-                    self.modified_scenes.remove(&scene_uid);
+                    self.state.clear_scene_modified(scene_uid);
                 }
                 self.selected_object = None;
                 self.selected_renderer = None;
@@ -17918,7 +17913,7 @@ impl GuiApplication {
         let saved = self
             .state
             .active_scene()
-            .is_some_and(|scene_uid| !self.modified_scenes.contains(&scene_uid));
+            .is_some_and(|scene_uid| !self.state.scene_is_modified(scene_uid));
         if saved {
             self.close_after_scene_save = false;
             self.close_current_tab_unchecked(camera);
@@ -17951,21 +17946,11 @@ impl GuiApplication {
         path: &Path,
         options: Option<crate::GuiSceneSaveOptions>,
     ) {
-        let saved_camera = camera.to_qsys_camera("__current");
-        if self.state.active_view_summary().is_some() {
-            if let Err(error) = self.state.set_active_view_camera(&saved_camera) {
-                self.set_error(error);
-                return;
-            }
-        }
-        if let Err(error) = self.state.set_active_scene_camera(saved_camera) {
-            self.set_error(error);
-            return;
-        }
-        let result = match options {
-            Some(options) => self.state.save_active_scene_qsc_with_options(path, options),
-            None => self.state.save_active_scene_qsc(path),
-        };
+        let result = self.state.save_active_scene_qsc_with_camera(
+            path,
+            camera.to_qsys_camera("__current"),
+            options,
+        );
         match result {
             Ok(()) => {
                 self.save_path = path.to_string_lossy().into_owned();
@@ -17974,7 +17959,7 @@ impl GuiApplication {
                 self.undo_stack.clear();
                 self.redo_stack.clear();
                 if let Some(scene_uid) = self.state.active_scene() {
-                    self.modified_scenes.remove(&scene_uid);
+                    self.state.clear_scene_modified(scene_uid);
                 }
                 self.set_status(format!("Saved {}", path.display()));
             }
@@ -18700,7 +18685,7 @@ impl GuiApplication {
         ) {
             Ok(surface_uid) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(scene_uid);
+                self.state.mark_scene_modified(scene_uid);
                 self.selected_object = None;
                 self.selected_renderer = None;
                 self.workspace_aux_selection = Some(WorkspaceAuxSelection::Surface {
@@ -18995,7 +18980,7 @@ impl GuiApplication {
                             self.push_undo_snapshot(undo);
                         }
 
-                        self.modified_scenes.insert(scene_uid);
+                        self.state.mark_scene_modified(scene_uid);
                         self.selected_object = None;
                         self.selected_renderer = None;
                         self.workspace_aux_selection = Some(WorkspaceAuxSelection::DensityMap {
@@ -19063,7 +19048,7 @@ impl GuiApplication {
             Ok(summary) => {
                 self.push_undo_snapshot(undo);
                 if let Some(scene_uid) = scene_uid {
-                    self.modified_scenes.insert(scene_uid);
+                    self.state.mark_scene_modified(scene_uid);
                 }
                 self.morph_selected_frame = Some(inserted_index);
                 self.rebuild_snapshot();
@@ -19090,7 +19075,7 @@ impl GuiApplication {
                 if changed {
                     self.push_undo_snapshot(undo);
                     if let Some(scene_uid) = scene_uid {
-                        self.modified_scenes.insert(scene_uid);
+                        self.state.mark_scene_modified(scene_uid);
                     }
                     self.rebuild_snapshot();
                     self.set_status(format!(
@@ -19129,7 +19114,7 @@ impl GuiApplication {
             Ok(summary) => {
                 self.push_undo_snapshot(undo);
                 if let Some(scene_uid) = scene_uid {
-                    self.modified_scenes.insert(scene_uid);
+                    self.state.mark_scene_modified(scene_uid);
                 }
                 self.morph_selected_frame = Some(inserted_index);
                 self.rebuild_snapshot();
@@ -19160,7 +19145,7 @@ impl GuiApplication {
             Ok(summary) => {
                 self.push_undo_snapshot(undo);
                 if let Some(scene_uid) = scene_uid {
-                    self.modified_scenes.insert(scene_uid);
+                    self.state.mark_scene_modified(scene_uid);
                 }
                 self.morph_selected_frame = if summary.frame_count == 0 {
                     None
@@ -20029,7 +20014,7 @@ impl GuiApplication {
             ) {
                 Ok(count) => {
                     self.push_undo_snapshot(undo);
-                    self.modified_scenes.insert(draft.scene_uid);
+                    self.state.mark_scene_modified(draft.scene_uid);
                     self.set_status(format!(
                         "Change visflags of {}: {count} item(s)",
                         draft.camera_name
@@ -20864,7 +20849,7 @@ impl GuiApplication {
             }
         }
         self.push_undo_snapshot(undo);
-        self.modified_scenes.insert(scene_uid);
+        self.state.mark_scene_modified(scene_uid);
         self.rebuild_snapshot();
         self.set_status("Object properties updated");
         Ok(())
@@ -20912,7 +20897,7 @@ impl GuiApplication {
             Ok(()) => {
                 self.push_undo_snapshot(undo);
                 if let Some(scene_uid) = scene_uid {
-                    self.modified_scenes.insert(scene_uid);
+                    self.state.mark_scene_modified(scene_uid);
                 }
                 self.rebuild_snapshot();
                 self.set_status(format!("Change rend group name: {name}"));
@@ -22609,7 +22594,7 @@ impl GuiApplication {
                     )
                     .map_err(|error| error.to_string())?;
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(scene_uid);
+                self.state.mark_scene_modified(scene_uid);
                 self.rebuild_snapshot();
                 self.set_status("Renderer properties updated");
                 Ok(())
@@ -22655,7 +22640,7 @@ impl GuiApplication {
             )
             .map_err(|error| error.to_string())?;
         self.push_undo_snapshot(undo);
-        self.modified_scenes.insert(scene_uid);
+        self.state.mark_scene_modified(scene_uid);
         self.selected_object = None;
         self.selected_renderer = None;
         self.workspace_aux_selection = Some(match draft.owner {
@@ -22792,7 +22777,7 @@ impl GuiApplication {
             )?;
         }
         self.push_undo_snapshot(undo);
-        self.modified_scenes.insert(scene_uid);
+        self.state.mark_scene_modified(scene_uid);
         self.selected_object = Some(object_uid);
         self.selected_renderer = Some(draft.renderer_uid);
         self.workspace_aux_selection = None;
@@ -22851,7 +22836,7 @@ impl GuiApplication {
             .set_density_renderer_styles(map_uid, draft.renderer_uid, draft.style.trim())
             .map_err(|error| error.to_string())?;
         self.push_undo_snapshot(undo);
-        self.modified_scenes.insert(scene_uid);
+        self.state.mark_scene_modified(scene_uid);
         self.selected_object = None;
         self.selected_renderer = None;
         self.workspace_aux_selection = Some(WorkspaceAuxSelection::DensityMap {
@@ -22905,7 +22890,7 @@ impl GuiApplication {
             .set_surface_renderer_styles(surface_uid, draft.renderer_uid, draft.style.trim())
             .map_err(|error| error.to_string())?;
         self.push_undo_snapshot(undo);
-        self.modified_scenes.insert(scene_uid);
+        self.state.mark_scene_modified(scene_uid);
         self.selected_object = None;
         self.selected_renderer = None;
         self.workspace_aux_selection = Some(WorkspaceAuxSelection::Surface {
@@ -23378,7 +23363,7 @@ impl GuiApplication {
         set_native_scene_attr_default(scene, "icc_filename", &draft.icc_filename, "");
         set_native_scene_attr_default(scene, "icc_intent", &draft.icc_intent, "perceptual");
         self.push_undo_snapshot(undo);
-        self.modified_scenes.insert(scene_uid);
+        self.state.mark_scene_modified(scene_uid);
         if self.state.active_scene() == Some(scene_uid) {
             self.background = runtime_background;
             self.color_proofing = draft.use_color_proof;
@@ -23421,7 +23406,7 @@ impl GuiApplication {
         };
         set_native_scene_attr_default(scene, "bgcolor", value, "black");
         self.push_undo_snapshot(undo);
-        self.modified_scenes.insert(scene_uid);
+        self.state.mark_scene_modified(scene_uid);
         self.background = background;
         self.set_status(format!("Background set to {value}"));
     }
@@ -23443,7 +23428,7 @@ impl GuiApplication {
             "false",
         );
         self.push_undo_snapshot(undo);
-        self.modified_scenes.insert(scene_uid);
+        self.state.mark_scene_modified(scene_uid);
         self.rebuild_snapshot();
         self.set_status(format!("Color proofing: {}", self.color_proofing));
     }
@@ -23542,7 +23527,7 @@ impl GuiApplication {
             return Err(error.to_string());
         }
         self.push_undo_snapshot(undo);
-        self.modified_scenes.insert(draft.scene_uid);
+        self.state.mark_scene_modified(draft.scene_uid);
         self.rebuild_snapshot();
         let camera_index = self
             .state
@@ -23581,7 +23566,7 @@ impl GuiApplication {
             .save_scene_camera(scene_uid, camera.to_qsys_camera(name), false)
             .map_err(|error| error.to_string())?;
         self.push_undo_snapshot(undo);
-        self.modified_scenes.insert(scene_uid);
+        self.state.mark_scene_modified(scene_uid);
         let camera_index = self
             .state
             .camera_summaries(scene_uid)
@@ -23648,7 +23633,7 @@ impl GuiApplication {
         {
             Ok(count) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(scene_uid);
+                self.state.mark_scene_modified(scene_uid);
                 self.set_status(format!("Clear visibility flags in {name}: {count} item(s)"));
             }
             Err(error) => self.set_status(format!("Camera visibility error: {error}")),
@@ -23690,7 +23675,7 @@ impl GuiApplication {
                 camera.apply_qsys_camera(&saved);
                 if let Some(undo) = undo {
                     self.push_undo_snapshot(undo);
-                    self.modified_scenes.insert(summary.scene_uid);
+                    self.state.mark_scene_modified(summary.scene_uid);
                     self.rebuild_snapshot();
                 }
                 self.set_status(format!("Loaded camera {}", summary.name));
@@ -23733,7 +23718,7 @@ impl GuiApplication {
         ) {
             Ok(()) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(summary.scene_uid);
+                self.state.mark_scene_modified(summary.scene_uid);
                 self.set_status(format!("Saved camera {}", summary.name));
             }
             Err(error) => self.set_status(format!("Camera save error: {error}")),
@@ -23765,7 +23750,7 @@ impl GuiApplication {
                 Ok(saved) => {
                     camera.apply_qsys_camera(&saved);
                     self.push_undo_snapshot(undo);
-                    self.modified_scenes.insert(scene_uid);
+                    self.state.mark_scene_modified(scene_uid);
                     self.rebuild_snapshot();
                     let camera_index = self
                         .state
@@ -23799,7 +23784,7 @@ impl GuiApplication {
         {
             Ok(()) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(summary.scene_uid);
+                self.state.mark_scene_modified(summary.scene_uid);
                 self.set_status(format!("Reload camera file {}", summary.name));
             }
             Err(error) => self.set_status(format!("Camera file error: {error}")),
@@ -23833,7 +23818,7 @@ impl GuiApplication {
         {
             Ok(()) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(summary.scene_uid);
+                self.state.mark_scene_modified(summary.scene_uid);
                 self.set_status(format!("Save camera file {}", summary.name));
             }
             Err(error) => self.set_status(format!("Camera file error: {error}")),
@@ -23908,7 +23893,7 @@ impl GuiApplication {
             match self.state.load_scene_style_file(scene_uid, &path, true) {
                 Ok(local_index) => {
                     self.push_undo_snapshot(undo);
-                    self.modified_scenes.insert(scene_uid);
+                    self.state.mark_scene_modified(scene_uid);
                     self.rebuild_snapshot();
                     let style_target = self
                         .state
@@ -24104,7 +24089,7 @@ impl GuiApplication {
             .set_workspace_renderer_styles(draft.object_uid, draft.renderer_uid, &styles)
             .map_err(|error| error.to_string())?;
         self.push_undo_snapshot(undo);
-        self.modified_scenes.insert(draft.scene_uid);
+        self.state.mark_scene_modified(draft.scene_uid);
         self.rebuild_snapshot();
         Ok(true)
     }
@@ -24330,7 +24315,7 @@ impl GuiApplication {
             )
             .map_err(|error| error.to_string())?;
         self.push_undo_snapshot(undo);
-        self.modified_scenes.insert(draft.scene_uid);
+        self.state.mark_scene_modified(draft.scene_uid);
         self.rebuild_snapshot();
         Ok(style_name)
     }
@@ -24646,7 +24631,7 @@ impl GuiApplication {
                 match self.state.create_scene_style(draft.scene_uid, &draft.name) {
                     Ok(local_index) => {
                         self.push_undo_snapshot(undo);
-                        self.modified_scenes.insert(draft.scene_uid);
+                        self.state.mark_scene_modified(draft.scene_uid);
                         let style_target = self
                             .state
                             .style_summaries(draft.scene_uid)
@@ -25078,7 +25063,7 @@ impl GuiApplication {
                             .save_scene_camera(scene_uid, saved, false)
                             .map_err(|error| error.to_string())?;
                         self.push_undo_snapshot(undo);
-                        self.modified_scenes.insert(scene_uid);
+                        self.state.mark_scene_modified(scene_uid);
                         let camera_index = self
                             .state
                             .camera_summaries(scene_uid)
@@ -27799,7 +27784,7 @@ impl GuiApplication {
             .state
             .scene_summaries()
             .into_iter()
-            .filter(|scene| self.modified_scenes.contains(&scene.uid))
+            .filter(|scene| self.state.scene_is_modified(scene.uid))
             .collect::<Vec<_>>();
         if modified_scenes.is_empty() {
             self.exit_confirmation = false;
@@ -28152,7 +28137,7 @@ impl GuiApplication {
             ) {
                 Ok(removed) if removed > 0 => {
                     self.push_undo_snapshot(undo);
-                    self.modified_scenes.insert(draft.scene_uid);
+                    self.state.mark_scene_modified(draft.scene_uid);
                     self.rebuild_snapshot();
                     self.set_status(format!("Removed {removed} interaction(s)"));
                 }
@@ -28764,7 +28749,7 @@ impl GuiApplication {
         ) {
             Ok(summary) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(scene_uid);
+                self.state.mark_scene_modified(scene_uid);
                 self.selected_object = Some(summary.object_uid);
                 self.selected_renderer = None;
                 self.workspace_aux_selection = None;
@@ -28807,7 +28792,7 @@ impl GuiApplication {
         {
             Ok((scene_uid, object_uid)) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(scene_uid);
+                self.state.mark_scene_modified(scene_uid);
                 self.selected_object = Some(object_uid);
                 self.selected_renderer = None;
                 self.workspace_aux_selection = None;
@@ -28885,7 +28870,6 @@ impl GuiApplication {
             workspace_multiple_selection: self.workspace_multiple_selection.clone(),
             selection_text: self.selection_text.clone(),
             last_loaded_path: self.last_loaded_path.clone(),
-            modified_scenes: self.modified_scenes.clone(),
         }
     }
 
@@ -28901,7 +28885,7 @@ impl GuiApplication {
         if let Some(scene_uid) =
             scene.filter(|scene_uid| snapshot.state.scene_manager().scene(*scene_uid).is_some())
         {
-            self.modified_scenes.insert(scene_uid);
+            self.state.mark_scene_modified(scene_uid);
         }
         self.undo_stack.push(snapshot);
         if self.undo_stack.len() > 50 {
@@ -28921,7 +28905,13 @@ impl GuiApplication {
         {
             return false;
         }
-        self.push_undo_snapshot(snapshot);
+        self.state.mark_scene_changes_since(&snapshot.state);
+        if snapshot.selection_text != self.selection_text {
+            if let Some(scene) = self.state.active_scene() {
+                self.state.mark_scene_modified(scene);
+            }
+        }
+        self.push_undo_snapshot_for_scene(snapshot, None);
         true
     }
 
@@ -28940,7 +28930,6 @@ impl GuiApplication {
         self.workspace_multiple_selection = snapshot.workspace_multiple_selection;
         self.selection_text = snapshot.selection_text;
         self.last_loaded_path = snapshot.last_loaded_path;
-        self.modified_scenes = snapshot.modified_scenes;
         self.sync_active_scene_properties();
         self.rebuild_snapshot();
     }
@@ -29440,7 +29429,7 @@ impl GuiApplication {
             Ok(()) => {
                 self.push_undo_snapshot(undo);
                 if let Some(scene_uid) = scene_uid {
-                    self.modified_scenes.insert(scene_uid);
+                    self.state.mark_scene_modified(scene_uid);
                 }
                 self.rebuild_snapshot();
                 self.set_status(format!("Renderer visibility: {visible}"));
@@ -29502,7 +29491,7 @@ impl GuiApplication {
             Ok(()) => {
                 self.push_undo_snapshot(undo);
                 if let Some(scene_uid) = scene_uid {
-                    self.modified_scenes.insert(scene_uid);
+                    self.state.mark_scene_modified(scene_uid);
                 }
                 self.rebuild_snapshot();
                 self.set_status(status);
@@ -29550,7 +29539,7 @@ impl GuiApplication {
             .set_workspace_object_collapsed(owner.uid(), collapsed)
         {
             Ok(()) => {
-                self.modified_scenes.insert(scene_uid);
+                self.state.mark_scene_modified(scene_uid);
                 self.set_status(if collapsed {
                     "Collapse object"
                 } else {
@@ -29642,7 +29631,7 @@ impl GuiApplication {
             Ok(()) => {
                 self.push_undo_snapshot(undo);
                 if let Some(scene_uid) = scene_uid {
-                    self.modified_scenes.insert(scene_uid);
+                    self.state.mark_scene_modified(scene_uid);
                 }
                 self.rebuild_snapshot();
                 self.set_status(format!("Renderer group visibility: {visible}"));
@@ -29700,7 +29689,7 @@ impl GuiApplication {
         {
             Ok(()) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(map.scene_uid);
+                self.state.mark_scene_modified(map.scene_uid);
                 self.rebuild_snapshot();
                 self.set_status(format!("Density map visibility: {visible}"));
             }
@@ -29726,7 +29715,7 @@ impl GuiApplication {
             Ok(()) => {
                 self.push_undo_snapshot(undo);
                 if let Some(scene_uid) = scene_uid {
-                    self.modified_scenes.insert(scene_uid);
+                    self.state.mark_scene_modified(scene_uid);
                 }
                 self.rebuild_snapshot();
                 self.set_status(format!("Density renderer visibility: {visible}"));
@@ -29749,7 +29738,7 @@ impl GuiApplication {
         ) {
             Ok(()) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(surface.scene_uid);
+                self.state.mark_scene_modified(surface.scene_uid);
                 self.rebuild_snapshot();
                 self.set_status(format!("Surface visibility: {visible}"));
             }
@@ -29775,7 +29764,7 @@ impl GuiApplication {
             Ok(()) => {
                 self.push_undo_snapshot(undo);
                 if let Some(scene_uid) = scene_uid {
-                    self.modified_scenes.insert(scene_uid);
+                    self.state.mark_scene_modified(scene_uid);
                 }
                 self.rebuild_snapshot();
                 self.set_status(format!("Surface renderer visibility: {visible}"));
@@ -29802,7 +29791,7 @@ impl GuiApplication {
             Ok(()) => {
                 self.push_undo_snapshot(undo);
                 if let Some(scene_uid) = scene_uid {
-                    self.modified_scenes.insert(scene_uid);
+                    self.state.mark_scene_modified(scene_uid);
                 }
                 self.rebuild_snapshot();
                 self.set_status(format!("LWRenderer visibility: {visible}"));
@@ -29911,7 +29900,7 @@ impl GuiApplication {
                 Ok(true) => {
                     self.push_undo_snapshot(undo);
                     if let Some(scene_uid) = scene_uid {
-                        self.modified_scenes.insert(scene_uid);
+                        self.state.mark_scene_modified(scene_uid);
                     }
                     self.workspace_aux_selection = scene_uid.map(|scene_uid| match owner {
                         NativePropertyObject::Molecule(_) => {
@@ -29958,7 +29947,7 @@ impl GuiApplication {
                 match self.state.destroy_scene_camera(scene_uid, &summary.name) {
                     Ok(true) => {
                         self.push_undo_snapshot(undo);
-                        self.modified_scenes.insert(scene_uid);
+                        self.state.mark_scene_modified(scene_uid);
                         self.workspace_aux_selection =
                             Some(WorkspaceAuxSelection::CameraRoot { scene_uid });
                         self.set_status(format!("Destroyed camera {}", summary.name));
@@ -29981,7 +29970,7 @@ impl GuiApplication {
                 match self.state.destroy_scene_style(scene_uid, local_index) {
                     Ok(true) => {
                         self.push_undo_snapshot(undo);
-                        self.modified_scenes.insert(scene_uid);
+                        self.state.mark_scene_modified(scene_uid);
                         self.workspace_aux_selection =
                             Some(WorkspaceAuxSelection::StyleRoot { scene_uid });
                         self.rebuild_snapshot();
@@ -30015,7 +30004,7 @@ impl GuiApplication {
                 match self.state.destroy_density_renderer(map_uid, renderer_uid) {
                     Ok(true) => {
                         self.push_undo_snapshot(undo);
-                        self.modified_scenes.insert(scene_uid);
+                        self.state.mark_scene_modified(scene_uid);
                         self.workspace_aux_selection = Some(WorkspaceAuxSelection::DensityMap {
                             scene_uid,
                             map_uid,
@@ -30040,7 +30029,7 @@ impl GuiApplication {
                 {
                     Ok(true) => {
                         self.push_undo_snapshot(undo);
-                        self.modified_scenes.insert(scene_uid);
+                        self.state.mark_scene_modified(scene_uid);
                         self.workspace_aux_selection = Some(WorkspaceAuxSelection::Surface {
                             scene_uid,
                             surface_uid,
@@ -30062,7 +30051,7 @@ impl GuiApplication {
                 match self.state.destroy_lw_renderer(object_uid, renderer_uid) {
                     Ok(true) => {
                         self.push_undo_snapshot(undo);
-                        self.modified_scenes.insert(scene_uid);
+                        self.state.mark_scene_modified(scene_uid);
                         self.workspace_aux_selection = Some(WorkspaceAuxSelection::Lightweight {
                             scene_uid,
                             object_uid,
@@ -30100,7 +30089,7 @@ impl GuiApplication {
                     .map(|surface| surface.name)
                     .unwrap_or_else(|| surface_uid.get().to_string());
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(scene_uid);
+                self.state.mark_scene_modified(scene_uid);
                 self.selected_object = None;
                 self.selected_renderer = None;
                 self.workspace_aux_selection = Some(WorkspaceAuxSelection::Surface {
@@ -30148,7 +30137,7 @@ impl GuiApplication {
         {
             Ok(triangle_count) => {
                 self.push_undo_snapshot(undo);
-                self.modified_scenes.insert(draft.scene_uid);
+                self.state.mark_scene_modified(draft.scene_uid);
                 self.rebuild_snapshot();
                 self.set_status(format!("Regenerated surface: {triangle_count} triangle(s)"));
             }
@@ -30187,7 +30176,7 @@ impl GuiApplication {
             Ok(true) => {
                 self.push_undo_snapshot(undo);
                 if let Some(scene_uid) = scene_uid {
-                    self.modified_scenes.insert(scene_uid);
+                    self.state.mark_scene_modified(scene_uid);
                 }
                 self.selected_object = None;
                 self.selected_renderer = None;
@@ -30219,7 +30208,7 @@ impl GuiApplication {
             Ok(true) => {
                 self.push_undo_snapshot(undo);
                 if let Some(scene_uid) = scene_uid {
-                    self.modified_scenes.insert(scene_uid);
+                    self.state.mark_scene_modified(scene_uid);
                 }
                 if self.selected_renderer == Some(renderer_uid) {
                     self.selected_renderer = None;
@@ -34370,7 +34359,7 @@ mod tests {
         assert_eq!(app.state.view_summaries().len(), 1);
         assert!(app.close_tab_draft.is_none());
 
-        app.modified_scenes.insert(scene_uid);
+        app.state.mark_scene_modified(scene_uid);
         app.close_current_scene(&mut camera);
         assert_eq!(
             app.close_tab_draft.as_ref().unwrap().scene_name,
@@ -34393,7 +34382,7 @@ mod tests {
 
         app.exit_ready = false;
         let scene_uid = app.state.active_scene().unwrap();
-        app.modified_scenes.insert(scene_uid);
+        app.state.mark_scene_modified(scene_uid);
         app.request_application_exit();
         assert!(!app.exit_ready);
         assert!(app.exit_confirmation);
@@ -34404,10 +34393,49 @@ mod tests {
             std::thread::current().name().unwrap_or("test")
         ));
         app.save_current_scene_to_path(&camera, &path);
-        app.modified_scenes.insert(scene_uid);
+        app.state.mark_scene_modified(scene_uid);
         assert!(app.save_modified_scenes_for_exit(&mut camera));
-        assert!(!app.modified_scenes.contains(&scene_uid));
+        assert!(!app.state.scene_is_modified(scene_uid));
         fs::remove_file(path).expect("remove exit-save scene");
+    }
+
+    #[test]
+    fn script_edits_of_another_scene_share_close_and_undo_status() {
+        let mut app = GuiApplication::new();
+        let edited = app.state.active_scene().unwrap();
+        let active = app.state.new_scene("other", true).result_scene;
+        let before = app.capture_script_undo();
+        app.state
+            .run_script_js(&format!(
+                "cuemol.getScene({}).setName('edited');",
+                edited.get()
+            ))
+            .unwrap();
+        assert!(app.push_script_undo_snapshot(before));
+        assert!(app.state.scene_is_modified(edited));
+        assert!(!app.state.scene_is_modified(active));
+        app.request_application_exit();
+        assert!(app.exit_confirmation);
+        let mut camera = CameraController::default();
+        app.undo(&mut camera);
+        assert!(!app.state.scene_is_modified(edited));
+        app.redo(&mut camera);
+        assert!(app.state.scene_is_modified(edited));
+        assert!(!app.state.scene_is_modified(active));
+    }
+
+    #[test]
+    fn failed_scene_save_keeps_the_native_camera_and_scene() {
+        let mut app = GuiApplication::new();
+        let camera = CameraController::default();
+        let before = app.state.clone();
+        let destination = std::env::temp_dir();
+        app.save_current_scene_to_path(&camera, &destination);
+        assert!(app.state.same_undo_state(&before));
+        assert_eq!(
+            app.state.modified_scene_uids(),
+            before.modified_scene_uids()
+        );
     }
 
     #[test]
@@ -35295,7 +35323,7 @@ mod tests {
         assert_eq!(app.state.scene_summaries().len(), 1);
         assert_eq!(app.state.active_scene(), Some(empty_scene_uid));
         assert_eq!(app.last_loaded_path.as_deref(), Some(first_path.as_path()));
-        assert!(!app.modified_scenes.contains(&empty_scene_uid));
+        assert!(!app.state.scene_is_modified(empty_scene_uid));
 
         app.open_path = second_path.to_string_lossy().into_owned();
         app.request_open_recent_path(&mut camera);
@@ -35349,7 +35377,7 @@ mod tests {
         assert!(scene.source().is_empty());
         assert!(scene.source_type().is_empty());
         assert!(scene.base_path().is_empty());
-        assert!(app.modified_scenes.contains(&empty_scene_uid));
+        assert!(app.state.scene_is_modified(empty_scene_uid));
         assert!(!app.state.active_object_summaries().is_empty());
     }
 
@@ -35825,7 +35853,7 @@ mod tests {
         app.undo(&mut camera);
         assert_eq!(app.background, SceneBackground::Black);
         assert!(!app.color_proofing);
-        assert!(app.modified_scenes.is_empty());
+        assert!(app.state.modified_scene_uids().is_empty());
         app.redo(&mut camera);
         assert_eq!(
             app.background,
@@ -35838,8 +35866,8 @@ mod tests {
         );
         assert!(app.color_proofing);
         assert!(app
-            .modified_scenes
-            .contains(&cuemol_core::Uid::new(properties.uid)));
+            .state
+            .scene_is_modified(cuemol_core::Uid::new(properties.uid)));
 
         let path = std::env::temp_dir().join(format!(
             "cuemol-native-scene-properties-{}.qsc",
@@ -35851,7 +35879,7 @@ mod tests {
         assert!(qsc.contains("aoEnabled=\"true\""));
         assert!(qsc.contains("icc_intent=\"relative_colorimetric\""));
         assert!(app.undo_stack.is_empty());
-        assert!(app.modified_scenes.is_empty());
+        assert!(app.state.modified_scene_uids().is_empty());
         fs::remove_file(path).unwrap();
 
         properties.ao_radius = 0.0;
@@ -35886,7 +35914,7 @@ mod tests {
         assert_eq!(object.name(), "renamed molecule");
         assert!(!object.is_visible());
         assert!(object.is_ui_locked());
-        assert!(app.modified_scenes.contains(&scene_uid));
+        assert!(app.state.scene_is_modified(scene_uid));
 
         let mut camera = CameraController::default();
         app.undo(&mut camera);
@@ -35991,7 +36019,7 @@ mod tests {
         assert_eq!(renderer.qsc_attr("alpha"), Some("0.6"));
         assert_eq!(renderer.qsc_attr("bondw"), Some("0.42"));
         assert_eq!(renderer.qsc_attr("ringcolor"), Some("#abcdef"));
-        assert!(app.modified_scenes.contains(&scene_uid));
+        assert!(app.state.scene_is_modified(scene_uid));
 
         let mut camera = CameraController::default();
         app.undo(&mut camera);
@@ -36372,7 +36400,7 @@ mod tests {
         assert_eq!(app.state.camera_summaries(scene_uid)[0].visibility_count, 0);
         app.undo(&mut camera);
         assert_eq!(app.state.camera_summaries(scene_uid)[0].visibility_count, 1);
-        assert!(app.modified_scenes.contains(&scene_uid));
+        assert!(app.state.scene_is_modified(scene_uid));
     }
 
     #[test]
@@ -36572,7 +36600,7 @@ mod tests {
             },
         );
         assert!(app.undo_stack.is_empty());
-        assert!(app.modified_scenes.is_empty());
+        assert!(app.state.modified_scene_uids().is_empty());
         let before = app.capture_undo();
         app.state.create_scene_style(scene, "local").unwrap();
         app.push_undo_snapshot(before);
@@ -36813,7 +36841,7 @@ mod tests {
         let mut camera = CameraController::default();
         app.undo(&mut camera);
         assert!(!app.state.renderer_summaries(object_uid)[0].locked);
-        assert!(app.modified_scenes.contains(&scene_uid));
+        assert!(app.state.scene_is_modified(scene_uid));
     }
 
     #[test]
@@ -37341,8 +37369,8 @@ mod tests {
         assert!(app.state.find_style_target(scene_uid, "first").is_none());
         assert!(app.state.find_style_target(scene_uid, "second").is_none());
         assert!(app.state.find_style_target(scene_uid, "inserted").is_some());
-        assert!(app.modified_scenes.contains(&scene_uid));
-        assert!(!app.modified_scenes.contains(&other));
+        assert!(app.state.scene_is_modified(scene_uid));
+        assert!(!app.state.scene_is_modified(other));
     }
 
     #[test]
@@ -40507,8 +40535,8 @@ mod tests {
         assert!(output.is_file());
         assert!(app.undo_stack.is_empty() && app.redo_stack.is_empty());
         assert!(!app
-            .modified_scenes
-            .contains(&app.state.active_scene().unwrap()));
+            .state
+            .scene_is_modified(app.state.active_scene().unwrap()));
     }
 
     #[test]
@@ -41519,7 +41547,7 @@ mod tests {
     fn read_only_scripts_preserve_native_undo_and_modified_state() {
         let mut app = GuiApplication::new();
         let mut camera = CameraController::default();
-        let modified = app.modified_scenes.clone();
+        let modified = app.state.modified_scene_uids();
         let revision = app.snapshot_revision;
         for source in ["print(1);", "throw new Error('probe');"] {
             app.console.dialect = cuemol_command::console::Dialect::JavaScript;
@@ -41527,7 +41555,7 @@ mod tests {
             app.execute_console_input();
         }
         assert!(app.undo_stack.is_empty());
-        assert_eq!(app.modified_scenes, modified);
+        assert_eq!(app.state.modified_scene_uids(), modified);
         assert_eq!(app.snapshot_revision, revision);
         app.console.dialect = cuemol_command::console::Dialect::JavaScript;
         app.console.source = "scene.setName('edited');".into();

@@ -227,7 +227,7 @@ This is a source comparison; screen checks are recorded separately.
 | --- | --- | --- |
 | Explorer, View, Selection, Crystal, Actions | All five built-in activities are present | Individual pane controls still require comparison |
 | New Tab, Open File, Save As, Open Scene, Reload Scene, Save Scene, Render, Undo, Redo | Toolbar buttons and history dropdowns are present in all three frontends | Native/WASM dropdowns now support jumping several steps; broader history limits still need comparison |
-| Save current view, Close Tab, scene save variants | Menu access is present in all three frontends; WASM tabs now have close buttons and a save/discard/cancel dialog | Browser downloads cannot confirm that a user saved the file to disk; unmodified-scene tracking still differs |
+| Save current view, Close Tab, scene save variants | Menu access is present in all three frontends; shared scene status now controls saved-state queries and close confirmation | Browser downloads cannot confirm that a user saved the file to disk |
 | Cut, Copy, Paste, Select All | Edit menus route tree, camera and text operations; native clipboard payloads are shared across processes, and browser clipboard access is asynchronous | Paint and Actions routing still needs complete native/WASM comparison; browser tree multi-selection remains under comparison |
 | Molecular editing and analysis dialogs | All frontends have named menu entries; WASM opens the corresponding shared command form | Specialized form layout still needs comparison |
 | Scene background/proofing/properties and view projection/center marker/properties | Shared commands, property controls and browser menu entries exist | Integrated screen comparison remains |
@@ -337,9 +337,10 @@ preserves redo. View writes remain outside scene history.
 Scene metadata now uses the actual object, renderer and view identities,
 including maps, surfaces and lightweight objects. Writing an active identity
 checks scene membership. A request for a Scene/View target that is no longer
-active fails before applying a change. Scene `modified` currently reflects the
-scripting flag; reconciliation with the frontends' saved-state tracking remains
-part of the I/O audit.
+active fails before applying a change. Scene `modified` now reads shared edit
+history and scene-local style state. Native, browser and Tauri history snapshots
+carry that same state, and scripts query it after applying pending commands.
+The former script-only flag is neither produced nor restored from QSC files.
 
 View fields refresh after camera movement or viewport resizing without requiring
 a scene edit. Two real browser probes exposed different draft failures: a

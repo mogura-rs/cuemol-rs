@@ -17,10 +17,12 @@ const SPHERE_TRIS: usize = 8 * 12 * 2; // RINGS * SEGS * 2
 const CYL_TRIS: usize = 10 * 2; // SEGS * 2
 
 fn ref_data_path(name: &str) -> std::path::PathBuf {
-    let base = std::env::var("CUEMOL2_REF_DIR").unwrap_or_else(|_| "../cuemol2".to_string());
-    std::path::Path::new(&base)
-        .join("tests/test_data")
-        .join(name)
+    let base = std::env::var_os("CUEMOL2_REF_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../cuemol2")
+        });
+    base.join("tests/test_data").join(name)
 }
 
 #[test]

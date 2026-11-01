@@ -34,6 +34,18 @@ jobs:
       - name: Test the tagged Tauri model
         working-directory: .cache/tauri-source
         run: cargo test --locked -p cuemol-desktop --features tauri-gui --lib
+      - name: Test optional Tauri GPU paths
+        working-directory: .cache/tauri-source
+        run: |
+          uv run --no-project python scripts/bundle-oidn.py
+          mkdir -p .cache
+          cat > .cache/tauri-profile.pdb <<'PDB'
+          HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C
+          HETATM    2  O1  LIG A   1       1.400   0.000   0.000  1.00 10.00           O
+          END
+          PDB
+          export CUEMOL_UI_PROFILE_FILE="$PWD/.cache/tauri-profile.pdb"
+          cargo test --locked -p cuemol-desktop --features tauri-gui --lib tauri_app::tests:: -- --ignored --nocapture --test-threads=1
       - name: Check presented pixels and OS input
         run: |
           mkdir -p .cache/tauri-gui-check

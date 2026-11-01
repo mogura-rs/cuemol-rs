@@ -128,7 +128,7 @@ impl AppModel {
             .complete_record(changed && run.checkpoint.scene_changed() && !result.is_null());
         if name == "save_scene" && !result.is_null() {
             if let Some(scene) = self.desktop.active_scene() {
-                self.modified_scenes.remove(&scene);
+                self.desktop.clear_scene_modified(scene);
             }
         }
         if changed && run.checkpoint.scene_changed() && cuemol_command::tool_records_history(name) {

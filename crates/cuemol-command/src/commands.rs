@@ -216,7 +216,7 @@ pub fn call_tool(
 ) -> Result<Value> {
     crate::protocol::validate_args(name, args).map_err(CueMolError::invalid_argument)?;
     match name {
-        "clear_undo" => Ok(json!({"cleared":true})),
+        "clear_undo" => {state.clear_all_scene_modified();Ok(json!({"cleared":true}))},
         "list_scenes" => Ok(json!(state.scene_summaries().into_iter().map(|s| json!({"sceneId":s.uid.get(),"name":s.name,"active":s.active,"objects":s.object_count,"tabs":1})).collect::<Vec<_>>())),
         "create_scene" => {
             let made=state.new_scene(args["name"].as_str().unwrap_or("Untitled"),true);

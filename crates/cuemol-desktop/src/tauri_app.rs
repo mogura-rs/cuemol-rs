@@ -1594,7 +1594,7 @@ struct AppModel {
     swap_stereo_eyes: bool,
     opened_paths: Vec<String>,
     structure_revision: u64,
-    modified_scenes: BTreeSet<Uid>,
+
     undo_stack: Vec<AppModelUndoEntry>,
     redo_stack: Vec<AppModelUndoEntry>,
     apbs_job: Option<TauriApbsJob>,
@@ -1685,7 +1685,6 @@ struct AppModelUndo {
     trans_mms: bool,
     rot_mms: bool,
     swap_stereo_eyes: bool,
-    modified_scenes: BTreeSet<Uid>,
 }
 
 #[derive(Clone)]
@@ -1792,7 +1791,7 @@ impl AppModel {
             swap_stereo_eyes: false,
             opened_paths: Vec::new(),
             structure_revision: 1,
-            modified_scenes: BTreeSet::new(),
+
             system_clipboard: Default::default(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -1839,7 +1838,7 @@ impl AppModel {
                     source: scene.source().to_string(),
                     source_type: scene.source_type().to_string(),
                     base_path: scene.base_path().to_string(),
-                    modified: self.modified_scenes.contains(&summary.uid),
+                    modified: self.desktop.scene_is_modified(summary.uid),
                     object_count: summary.object_count,
                     map_count: summary.map_count,
                     active: summary.active,
@@ -3754,7 +3753,7 @@ impl AppModel {
         self.desktop
             .set_workspace_object_collapsed(object_uid, input.collapsed)
             .map_err(|error| error.to_string())?;
-        self.modified_scenes.insert(scene_uid);
+        self.desktop.mark_scene_modified(scene_uid);
         self.status = if input.collapsed {
             "Collapse object".to_string()
         } else {
@@ -3779,7 +3778,7 @@ impl AppModel {
         self.desktop
             .set_renderer_group_collapsed(object_uid, renderer_uid, input.collapsed)
             .map_err(|error| error.to_string())?;
-        self.modified_scenes.insert(scene_uid);
+        self.desktop.mark_scene_modified(scene_uid);
         self.status = if input.collapsed {
             "Collapse renderer group".to_string()
         } else {
@@ -4264,7 +4263,7 @@ impl AppModel {
             self.status = "No compatible clipboard items".to_string();
             return Ok(result);
         }
-        self.modified_scenes.insert(scene);
+        self.desktop.mark_scene_modified(scene);
         self.status = match &result {
             crate::GuiPastedNode::Camera(name) => format!("Pasted camera {name}"),
             crate::GuiPastedNode::Style { name, .. } => format!("Pasted style {name}"),
@@ -6228,7 +6227,7 @@ impl AppModel {
     fn rebuild_snapshot(&mut self, refit: bool) -> Result<(), String> {
         if self.desktop.sync_auto_symmetry_center(self.camera.center()) {
             if let Some(scene_uid) = self.desktop.active_scene() {
-                self.modified_scenes.insert(scene_uid);
+                self.desktop.mark_scene_modified(scene_uid);
             }
         }
         let mut snapshot = self
@@ -6318,7 +6317,7 @@ impl AppModel {
             && self
                 .desktop
                 .active_scene()
-                .is_some_and(|scene_uid| !self.modified_scenes.contains(&scene_uid))
+                .is_some_and(|scene_uid| !self.desktop.scene_is_modified(scene_uid))
     }
 
     fn open_scene(&mut self, path: String) -> Result<(), String> {
@@ -6350,9 +6349,9 @@ impl AppModel {
         self.undo_stack.clear();
         self.redo_stack.clear();
         if self.desktop.active_scene_source_path().is_some() {
-            self.modified_scenes.remove(&scene_uid);
+            self.desktop.clear_scene_modified(scene_uid);
         } else {
-            self.modified_scenes.insert(scene_uid);
+            self.desktop.mark_scene_modified(scene_uid);
         }
         self.touch_structure_details();
         self.invalidate_snapshot(saved_camera.is_none());
@@ -7871,7 +7870,6 @@ impl AppModel {
             trans_mms: self.trans_mms,
             rot_mms: self.rot_mms,
             swap_stereo_eyes: self.swap_stereo_eyes,
-            modified_scenes: self.modified_scenes.clone(),
         }
     }
 
@@ -7894,7 +7892,7 @@ impl AppModel {
             self.undo_stack.remove(0);
         }
         if let Some(scene_uid) = scene {
-            self.modified_scenes.insert(scene_uid);
+            self.desktop.mark_scene_modified(scene_uid);
         }
         self.redo_stack.clear();
     }
@@ -7905,7 +7903,13 @@ impl AppModel {
         {
             return false;
         }
-        self.push_undo(snapshot);
+        self.desktop.mark_scene_changes_since(&snapshot.desktop);
+        if snapshot.selection != self.selection {
+            if let Some(scene) = self.desktop.active_scene() {
+                self.desktop.mark_scene_modified(scene);
+            }
+        }
+        self.push_undo_for_scene(snapshot, None);
         true
     }
 
@@ -7928,7 +7932,6 @@ impl AppModel {
         self.trans_mms = snapshot.trans_mms;
         self.rot_mms = snapshot.rot_mms;
         self.swap_stereo_eyes = snapshot.swap_stereo_eyes;
-        self.modified_scenes = snapshot.modified_scenes;
         self.animation_playing = false;
         self.animation_start_camera = None;
         self.animation_started_from_ui = false;
@@ -9805,7 +9808,7 @@ fn apply_open_paths(model: &mut AppModel, paths: Vec<String>) -> Result<(), Stri
         model.undo_stack.clear();
         model.redo_stack.clear();
         if let Some(scene_uid) = model.desktop.active_scene() {
-            model.modified_scenes.remove(&scene_uid);
+            model.desktop.clear_scene_modified(scene_uid);
         }
     } else {
         model.push_undo(undo);
@@ -10083,7 +10086,7 @@ fn handle_model_request(
                 .scene_uid;
             let undo = model.capture_undo();
             model.set_density_renderer_properties(properties)?;
-            model.modified_scenes.insert(scene_uid);
+            model.desktop.mark_scene_modified(scene_uid);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
@@ -10132,7 +10135,7 @@ fn handle_model_request(
                 .desktop
                 .set_density_renderer_center(map_uid, renderer_uid, center)
                 .map_err(|error| error.to_string())?;
-            model.modified_scenes.insert(scene_uid);
+            model.desktop.mark_scene_modified(scene_uid);
             model.status = "Density map redrawn".to_string();
             model.invalidate_snapshot(false);
             model.push_undo(undo);
@@ -10361,7 +10364,7 @@ fn handle_model_request(
                 .desktop
                 .set_scene_camera_visibility_settings(scene_uid, &input.name, &settings)
                 .map_err(|error| error.to_string())?;
-            model.modified_scenes.insert(scene_uid);
+            model.desktop.mark_scene_modified(scene_uid);
             model.status = format!("Change visflags of {}: {count} item(s)", input.name);
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
@@ -10373,7 +10376,7 @@ fn handle_model_request(
                 .desktop
                 .clear_scene_camera_visibility_settings(scene_uid, &name)
                 .map_err(|error| error.to_string())?;
-            model.modified_scenes.insert(scene_uid);
+            model.desktop.mark_scene_modified(scene_uid);
             model.status = format!("Clear visibility flags in {name}: {count} item(s)");
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
@@ -10515,7 +10518,7 @@ fn handle_model_request(
                 .remove_atom_intr_defs(Uid::new(object_uid), Uid::new(renderer_uid), &ids)
                 .map_err(|error| error.to_string())?;
             if removed > 0 {
-                model.modified_scenes.insert(scene_uid);
+                model.desktop.mark_scene_modified(scene_uid);
                 model.status = format!("Removed {removed} interaction(s)");
                 model.invalidate_snapshot(false);
                 model.push_undo(undo);
@@ -10577,7 +10580,7 @@ fn handle_model_request(
             match model.delete_workspace_items(targets) {
                 Ok(()) => {
                     model.push_undo_for_scene(undo, None);
-                    model.modified_scenes.extend(scenes);
+                    model.desktop.mark_scenes_modified(scenes);
                 }
                 Err(error) => {
                     model.restore_undo(undo)?;
@@ -10938,7 +10941,7 @@ fn handle_model_request(
             model.undo_stack.clear();
             model.redo_stack.clear();
             if let Some(scene_uid) = model.desktop.active_scene() {
-                model.modified_scenes.remove(&scene_uid);
+                model.desktop.clear_scene_modified(scene_uid);
             }
             model.sync_active_scene_properties();
             model.invalidate_snapshot(true);
@@ -10970,7 +10973,7 @@ fn handle_model_request(
                 .desktop
                 .create_molecule_from_smiles(&endpoint, &smiles, &renderer_setup)
                 .map_err(|error| error.to_string())?;
-            model.modified_scenes.insert(scene_uid);
+            model.desktop.mark_scene_modified(scene_uid);
             model.status = format!("Created molecule {object_name} from SMILES");
             model.invalidate_snapshot(recenter);
             model.push_undo(undo);
@@ -11244,7 +11247,7 @@ fn handle_model_request(
             if let Some(scene_uid) = closed_scene
                 .filter(|scene_uid| model.desktop.scene_manager().scene(*scene_uid).is_none())
             {
-                model.modified_scenes.remove(&scene_uid);
+                model.desktop.clear_scene_modified(scene_uid);
             }
             model.touch_structure_details();
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
@@ -11843,7 +11846,7 @@ fn handle_model_request(
                     space_group_number,
                 )
                 .map_err(|error| error.to_string())?;
-            model.modified_scenes.insert(scene_uid);
+            model.desktop.mark_scene_modified(scene_uid);
             model.status = "Changed symmetry information".to_string();
             model.invalidate_snapshot(false);
             model.push_undo(undo);
@@ -11861,7 +11864,7 @@ fn handle_model_request(
                 .desktop
                 .show_molecule_symmetry(object_uid, extent, model.camera.center())
                 .map_err(|error| error.to_string())?;
-            model.modified_scenes.insert(scene_uid);
+            model.desktop.mark_scene_modified(scene_uid);
             model.status = "Symmetry molecules shown".to_string();
             model.invalidate_snapshot(false);
             model.push_undo(undo);
@@ -11918,7 +11921,7 @@ fn handle_model_request(
                     .map_err(|error| error.to_string())?,
                 _ => unreachable!("the target kind was validated above"),
             }
-            model.modified_scenes.insert(scene_uid);
+            model.desktop.mark_scene_modified(scene_uid);
             model.status = "Unit cell shown".to_string();
             model.invalidate_snapshot(false);
             model.push_undo(undo);
@@ -13317,7 +13320,6 @@ fn handle_model_request(
             )))
         }
         ModelRequest::SaveScene { path, options } => {
-            model.persist_camera()?;
             let path_buf = PathBuf::from(&path);
             let save_in_place = model
                 .desktop
@@ -13330,17 +13332,14 @@ fn handle_model_request(
                         .push(format!("WARNING: Cannot create backup file, {error}"));
                 }
             }
-            match options {
-                Some(options) => model
-                    .desktop
-                    .save_active_scene_qsc_with_options(&path_buf, options),
-                None => model.desktop.save_active_scene_qsc(&path_buf),
-            }
-            .map_err(|error| error.to_string())?;
+            model.desktop.save_active_scene_qsc_with_camera(
+                &path_buf, model.camera.clone(), options,
+            ).map_err(|error| error.to_string())?;
+            model.store_view_options();
             model.undo_stack.clear();
             model.redo_stack.clear();
             if let Some(scene_uid) = model.desktop.active_scene() {
-                model.modified_scenes.remove(&scene_uid);
+                model.desktop.clear_scene_modified(scene_uid);
             }
             model.status = format!("Scene file: [{path}] is saved.");
             model.log_lines.push(model.status.clone());
@@ -17190,7 +17189,7 @@ mod tests {
             swap_stereo_eyes: false,
             opened_paths: Vec::new(),
             structure_revision: 1,
-            modified_scenes: BTreeSet::new(),
+
             system_clipboard: Default::default(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -17431,6 +17430,8 @@ mod tests {
         use std::time::Instant;
         let path = std::env::var("CUEMOL_UI_PROFILE_FILE").expect("CUEMOL_UI_PROFILE_FILE");
         let mut model = model_without_gpu();
+        model.renderer = shared_scene_renderer();
+        assert!(model.renderer.is_some(), "a GPU adapter is required");
         model.open_paths(vec![path]).unwrap();
         let warmup = model.render(1280, 720);
         assert!(warmup.image.is_some(), "GPU viewport must render");
@@ -19108,8 +19109,8 @@ mod tests {
             vec![1]
         );
         assert!(model
-            .modified_scenes
-            .contains(&model.desktop.active_scene().unwrap()));
+            .desktop
+            .scene_is_modified(model.desktop.active_scene().unwrap()));
 
         model.undo(0).unwrap();
         assert_eq!(
@@ -19809,7 +19810,7 @@ mod tests {
     #[test]
     fn incompatible_clipboard_renderers_do_not_mark_the_scene_modified() {
         let (mut model, object_uid, _) = model_with_renderer();
-        model.modified_scenes.clear();
+        model.desktop.clear_all_scene_modified();
         let before = model.desktop.clone();
         model
             .system_clipboard
@@ -19828,7 +19829,7 @@ mod tests {
         )
         .unwrap();
         assert!(model.desktop.same_undo_state(&before));
-        assert!(model.modified_scenes.is_empty());
+        assert!(model.desktop.modified_scene_uids().is_empty());
         assert!(model.undo_stack.is_empty());
         assert_eq!(model.status, "No compatible clipboard items");
     }
@@ -21211,7 +21212,7 @@ mod tests {
             .set_scene_attribute("marker", "dirty");
         handle_model_request(&mut model, ModelRequest::SetBackground("white".to_string())).unwrap();
         let undo_count = model.undo_stack.len();
-        assert!(model.modified_scenes.contains(&scene_uid));
+        assert!(model.desktop.scene_is_modified(scene_uid));
         fs::write(&path, b"not a QSC file").unwrap();
 
         assert!(handle_model_request(&mut model, ModelRequest::ReloadScene).is_err());
@@ -21473,7 +21474,7 @@ mod tests {
             "(3,4,5)"
         );
         assert_eq!(snapshot.status, "Density map redrawn");
-        assert!(model.modified_scenes.contains(&scene_uid));
+        assert!(model.desktop.scene_is_modified(scene_uid));
         let undo_count = snapshot.undo_descriptions.len();
         handle_model_request(
             &mut model,
@@ -22402,7 +22403,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(model.snapshot().cameras[0].visibility_count, 1);
-        assert!(model.modified_scenes.contains(&scene_uid));
+        assert!(model.desktop.scene_is_modified(scene_uid));
 
         handle_model_request(
             &mut model,
@@ -22568,8 +22569,8 @@ mod tests {
         assert!(model.desktop.find_style_target(scene, "first").is_none());
         assert!(model.desktop.find_style_target(scene, "second").is_none());
         assert!(model.desktop.find_style_target(scene, "inserted").is_some());
-        assert!(model.modified_scenes.contains(&scene));
-        assert!(!model.modified_scenes.contains(&other));
+        assert!(model.desktop.scene_is_modified(scene));
+        assert!(!model.desktop.scene_is_modified(other));
         let before = model.desktop.clone();
         assert!(
             handle_model_request(&mut model, ModelRequest::CopyWorkspaceStyle(targets[0])).is_err()
@@ -22734,18 +22735,24 @@ mod tests {
                 .unwrap(),
         );
         let other = model.desktop.new_scene("other", true).result_scene;
-        model.modified_scenes.clear();
+        model.desktop.clear_all_scene_modified();
         handle_model_request(&mut model, ModelRequest::Inspector {
             tool: "style_edit".into(),
             args: serde_json::json!({"target":target,"kind":"color","name":"accent","value":"#123456"}),
         }).unwrap();
-        assert_eq!(model.modified_scenes, BTreeSet::from([original]));
+        assert_eq!(
+            model.desktop.modified_scene_uids(),
+            BTreeSet::from([original])
+        );
         assert_eq!(model.desktop.active_scene(), Some(other));
         model.undo(0).unwrap();
-        assert!(model.modified_scenes.is_empty());
+        assert!(model.desktop.modified_scene_uids().is_empty());
         model.redo(0).unwrap();
-        assert_eq!(model.modified_scenes, BTreeSet::from([original]));
-        model.modified_scenes.clear();
+        assert_eq!(
+            model.desktop.modified_scene_uids(),
+            BTreeSet::from([original])
+        );
+        model.desktop.clear_all_scene_modified();
         let global = StyleTargetInput::from(
             model
                 .snapshot()
@@ -22762,7 +22769,10 @@ mod tests {
             tool: "style_edit".into(),
             args: serde_json::json!({"target":global,"kind":"color","name":"accent","value":"#abcdef"}),
         }).unwrap();
-        assert!(model.modified_scenes.is_empty());
+        assert_eq!(
+            model.desktop.modified_scene_uids(),
+            BTreeSet::from([original])
+        );
     }
 
     #[test]
@@ -24821,8 +24831,8 @@ mod tests {
         assert_eq!(snapshot.status, "Changed symmetry information");
         assert_eq!(snapshot.crystals[0].space_group_number, Some(195));
         assert_eq!(snapshot.crystals[0].lattice, "CUBIC");
-        assert!(model.modified_scenes.contains(
-            &model
+        assert!(model.desktop.scene_is_modified(
+            model
                 .desktop
                 .scene_manager()
                 .scene_uid_for_object(Uid::new(first))
@@ -25745,12 +25755,12 @@ mod tests {
     #[test]
     fn read_only_scripts_preserve_tauri_undo_and_modified_state() {
         let mut model = model_without_gpu();
-        let modified = model.modified_scenes.clone();
+        let modified = model.desktop.modified_scene_uids();
         for source in ["print(1);", "throw new Error('probe');"] {
             handle_model_request(&mut model, ModelRequest::ExecuteScript(source.into())).unwrap();
         }
         assert!(model.undo_stack.is_empty());
-        assert_eq!(model.modified_scenes, modified);
+        assert_eq!(model.desktop.modified_scene_uids(), modified);
         handle_model_request(
             &mut model,
             ModelRequest::ExecuteScript("scene.setName('edited');".into()),
@@ -25785,8 +25795,67 @@ mod tests {
         assert!(error.is_err());
         assert!(before.desktop.same_undo_state(&model.desktop));
         assert_eq!(before.camera, model.camera);
-        assert_eq!(before.modified_scenes, model.modified_scenes);
+        assert_eq!(
+            before.desktop.modified_scene_uids(),
+            model.desktop.modified_scene_uids()
+        );
         assert_eq!(model.undo_stack.len(), 1);
+    }
+
+    #[test]
+    fn scripts_mark_the_edited_scene_in_tauri_snapshots() {
+        let mut model = model_without_gpu();
+        let edited = model.desktop.active_scene().unwrap();
+        let active = model.desktop.new_scene("other", true).result_scene;
+        handle_model_request(
+            &mut model,
+            ModelRequest::ExecuteScript(format!(
+                "cuemol.getScene({}).setName('edited');",
+                edited.get()
+            )),
+        )
+        .unwrap();
+        let snapshot = model.snapshot();
+        assert!(
+            snapshot
+                .scenes
+                .iter()
+                .find(|scene| scene.uid == edited.get())
+                .unwrap()
+                .modified
+        );
+        assert!(
+            !snapshot
+                .scenes
+                .iter()
+                .find(|scene| scene.uid == active.get())
+                .unwrap()
+                .modified
+        );
+        model.undo(0).unwrap();
+        assert!(!model.desktop.scene_is_modified(edited));
+        model.redo(0).unwrap();
+        assert!(model.desktop.scene_is_modified(edited));
+        assert!(!model.desktop.scene_is_modified(active));
+    }
+
+    #[test]
+    fn failed_scene_save_keeps_the_tauri_camera_and_scene() {
+        let mut model = model_without_gpu();
+        let before = model.desktop.clone();
+        let result = handle_model_request(
+            &mut model,
+            ModelRequest::SaveScene {
+                path: std::env::temp_dir().to_string_lossy().into_owned(),
+                options: None,
+            },
+        );
+        assert!(result.is_err());
+        assert!(model.desktop.same_undo_state(&before));
+        assert_eq!(
+            model.desktop.modified_scene_uids(),
+            before.modified_scene_uids()
+        );
     }
 
     #[test]
@@ -26200,16 +26269,13 @@ mod tests {
     #[test]
     #[ignore = "requires a GPU adapter"]
     fn animation_rendering_writes_numbered_png_frames() {
-        let root = option_env!("CUEMOL2_REF_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../cuemol2"));
-        let pdb = root.join("tests/test_data/1CRN.pdb");
-        if !pdb.exists() {
-            return;
-        }
         let output_dir =
             std::env::temp_dir().join(format!("cuemol-tauri-animation-{}", std::process::id()));
-        let mut model = AppModel::new(vec![pdb]);
+        let mut model = model_without_gpu();
+        model.desktop.open_bytes("animation.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        model.renderer = shared_scene_renderer();
+        assert!(model.renderer.is_some(), "a GPU adapter is required");
+        model.invalidate_snapshot(true);
         assert!(model.render_snapshot.is_none());
         let viewport = model.render(64, 64);
         assert!(model.renderer.is_some());
