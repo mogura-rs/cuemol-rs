@@ -356,12 +356,18 @@ def main():
                 wait_for(lambda: ImageChops.difference(named_content, capture().crop(content_box)).getbbox())
                 capture('selection-pane-term.png')
                 scroll_offset = 0
-                if 687 + dy >= height - 24:
+                scroll_required = 687 + dy >= height - 24
+                scroll_stable_seconds = None
+                if scroll_required:
                     move_pointer_and_wait(275, height - 60)
                     tab_top = round(596 + dy) - 8
                     marker = capture().crop((179, tab_top, 209, tab_top + 16))
                     scroll_steps(-2)
-                    def moved_tab():
+                    last_offset = None
+                    stable_since = time.monotonic()
+
+                    def settled_tab():
+                        nonlocal last_offset, stable_since
                         scrolled = capture()
                         scores = []
                         for offset in range(-min(160, tab_top), -4):
@@ -369,8 +375,17 @@ def main():
                             difference = ImageStat.Stat(ImageChops.difference(marker, candidate))
                             scores.append((sum(difference.mean) / 3, offset))
                         score, offset = min(scores)
-                        return (offset, scrolled) if score <= 2 else None
-                    scroll_offset, scrolled = wait_for(moved_tab)
+                        if score > 2:
+                            last_offset = None
+                            return None
+                        if offset != last_offset:
+                            last_offset = offset
+                            stable_since = time.monotonic()
+                            return None
+                        stable_seconds = time.monotonic() - stable_since
+                        return (offset, scrolled, stable_seconds) if stable_seconds >= 0.6 else None
+
+                    scroll_offset, scrolled, scroll_stable_seconds = wait_for(settled_tab)
                     scrolled.save(work / 'selection-pane-scrolled.png')
                 click_at(x + 100, y + 659 + dy + scroll_offset)
                 wait_for(lambda: input_focused((66, round(649 + dy + scroll_offset), 295, round(670 + dy + scroll_offset))))
@@ -388,6 +403,9 @@ def main():
                         'selection_pane_input_acknowledged': True,
                         'selection_pane_definition_acknowledged': True,
                         'selection_pane_term_acknowledged': True,
+                        'selection_pane_scroll': {'required': scroll_required,
+                                                  'offset': scroll_offset,
+                                                  'stable_seconds': scroll_stable_seconds},
                         'selection_pane_undo': True, 'selection_pane_named': True,
                         'selection_pane_live_builder': True}
 

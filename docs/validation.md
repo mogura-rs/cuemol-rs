@@ -73,6 +73,15 @@ checks use the unchanged Linux CI binary; they do not capture the original
 Windows event ordering. The model, clipboard, undo and draft assertions remain
 in place.
 
+The next Windows run passed the definition check but measured the Selection
+pane while it was still scrolling. Its saved measurement and failure screenshot
+place the same tab 55 pixels apart. The driver now requires the tab position to
+remain unchanged for 0.6 seconds before using it for input coordinates. Splitting
+the wheel input into two events 0.35 seconds apart reproduced a stale-coordinate
+failure with the previous driver. The corrected full window check passes with
+this condition and the eleven earlier injected delays. Its result records whether
+scrolling was needed, the measured offset and the observed stable duration.
+
 Run the scene-state C++ comparison with:
 
 ```sh
