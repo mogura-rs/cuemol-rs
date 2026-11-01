@@ -42,6 +42,15 @@ models reused a previous model's picking geometry. A GPU probe confirmed that
 the original hover coordinate hits the CPK sphere with fresh geometry; the
 hover assertions retain that coordinate and the unchanged-scene check.
 
+The Windows window probe later observed the selection popup close while switching
+to its Term tab. The driver now moves the pointer and waits for the tab's hover
+pixels before pressing the button. Delaying pointer movement by 0.8 seconds on
+the unchanged Linux CI binary reproduced the same timeout with the old driver;
+the corrected driver passed the complete window check under that delay. A small
+viewport test with movement, press and release in one egui frame also passed.
+This isolates a missing input acknowledgement in the probe; the Windows event
+ordering itself was not captured.
+
 Run the scene-state C++ comparison with:
 
 ```sh

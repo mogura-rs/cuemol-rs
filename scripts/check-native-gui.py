@@ -788,7 +788,9 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             def light_pixels(box):
                 return sum(min(pixel) > 100 for pixel in capture().crop(box).getdata())
 
-            pyautogui.click(x + width - 215, y + 272)
+            pyautogui.moveTo(x + width - 215, y + 272, duration=0.2)
+            wait_for(lambda: min(capture().getpixel((width - 230, 265))) > 42)
+            pyautogui.click()
             wait_for(lambda: light_pixels((width - 244, 303, width - 232, 314)) > 10)
             pyautogui.click(x + width - 280, y + 309)
             wait_for(lambda: light_pixels((width - 330, 430, width - 250, 500)) > 50)
@@ -847,6 +849,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                           inspector_target_input_acknowledged=True,
                           inspector_font_choices=True,
                           inspector_selection_popup_acknowledged=True,
+                          inspector_selection_pointer_acknowledged=True,
                           inspector_selection_keyword_acknowledged=True,
                           inspector_selection_builder=True,
                           font_pixels=styled.histogram()[255])
