@@ -207,6 +207,8 @@ def main():
                     image.save(work / name)
                 return image
 
+            activity_highlight = capture().getpixel((4, 88))
+
             if args.cross_selection_only:
                 probe = state['objects'][0]
                 target = call('load_file', {'path': str(fixture)})['objectId']
@@ -265,16 +267,26 @@ def main():
                     pyautogui.click(x + 120, y + 512 + dy)
                     pyautogui.hotkey(primary, 'a')
                     pyautogui.write(text, interval=0.02)
+                    pyautogui.hotkey(primary, 'a')
+                    pyautogui.hotkey(primary, 'c')
+                    wait_for(lambda: clipboard_text() == text)
+
+                def activity_selected(position):
+                    return capture().getpixel((4, position)) == activity_highlight
 
                 call('set_mol_selection', {'objId': object_id, 'selection': 'name O1'})
                 call('center_view', {'objId': object_id, 'selection': 'name O1', 'zoom': False})
                 expected_center = call('get_view')['center']
                 call('set_view', {'center': [40, 50, 60]})
                 pyautogui.click(x + 22, y + 176)
-                time.sleep(0.3)
+                wait_for(lambda: activity_selected(176))
                 input_text('name C1')
+                capture('selection-pane-draft.png')
                 pyautogui.click(x + 22, y + 88)
+                wait_for(lambda: activity_selected(88))
                 pyautogui.click(x + 22, y + 176)
+                wait_for(lambda: activity_selected(176))
+                capture('selection-pane-returned.png')
                 pyautogui.click(x + 112, y + 540 + dy)
                 wait_for(lambda: call('get_view')['center'] == expected_center)
                 if selection() != 'name O1':
@@ -332,6 +344,8 @@ def main():
                     raise RuntimeError('The live selection builder did not select the fixture chain')
                 capture('selection-pane-builder.png')
                 return {'selection_pane_drafts': True, 'selection_pane_center': True,
+                        'selection_pane_activity_acknowledged': True,
+                        'selection_pane_input_acknowledged': True,
                         'selection_pane_undo': True, 'selection_pane_named': True,
                         'selection_pane_live_builder': True}
 

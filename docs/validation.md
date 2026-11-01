@@ -2590,3 +2590,11 @@ The broader saved-state tracking difference described in `parity-audit.md`
 remains outside these repairs. This audit does not establish complete feature
 parity or the absence of all defects. Generated validation records identify
 the tested revision and the executed shared, native, browser and package checks.
+
+A subsequent Windows package check timed out waiting for Center while the
+Selection pane was not visible. The OS driver now waits for the selected
+activity highlight and confirms draft text
+through the clipboard before proceeding. Delaying the initial pane frame by
+1.5 seconds reproduced the Center timeout with the previous driver. The same
+binary passed the focused pane check and the full native window check with
+the corrected driver and the same delay.
