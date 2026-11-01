@@ -7861,20 +7861,22 @@ impl DesktopAppState {
             .and_then(|data| data.source_atom_count)
             .unwrap_or(atom_count);
         let block = self.read_trajectory_block(path.as_ref(), nevery, expected)?;
-        let block = self
-            .trajectories
-            .entry(object_uid)
-            .or_default()
-            .prepare_block(block, atom_count)?;
-        let was_empty = self.trajectory_len(object_uid) == 0;
-        self.trajectories
-            .entry(object_uid)
-            .or_default()
-            .blocks
-            .push(block);
-        self.trajectories.get_mut(&object_uid).unwrap().initialized = true;
+        let previous = self.trajectories.get(&object_uid).cloned();
+        let mut trajectory = previous.clone().unwrap_or_default();
+        let block = trajectory.prepare_block(block, atom_count)?;
+        let was_empty = trajectory.frame_count() == 0;
+        trajectory.blocks.push(block);
+        trajectory.initialized = true;
+        self.trajectories.insert(object_uid, trajectory);
         if was_empty {
-            self.apply_trajectory_frame(object_uid, 0)?;
+            if let Err(error) = self.apply_trajectory_frame(object_uid, 0) {
+                if let Some(previous) = previous {
+                    self.trajectories.insert(object_uid, previous);
+                } else {
+                    self.trajectories.remove(&object_uid);
+                }
+                return Err(error);
+            }
         }
         let trajectory = self
             .trajectories
@@ -7908,13 +7910,17 @@ impl DesktopAppState {
                 "trajectory block index out of range",
             ));
         }
+        let previous = trajectory.clone();
         trajectory.blocks.remove(index);
         trajectory.current_frame = trajectory
             .current_frame
             .min(trajectory.frame_count().saturating_sub(1));
         let current_frame = trajectory.current_frame;
         if trajectory.frame_count() > 0 {
-            self.apply_trajectory_frame(object_uid, current_frame)?;
+            if let Err(error) = self.apply_trajectory_frame(object_uid, current_frame) {
+                self.trajectories.insert(object_uid, previous);
+                return Err(error);
+            }
         }
         let trajectory = self
             .trajectories
@@ -7944,10 +7950,14 @@ impl DesktopAppState {
             ));
         }
         if from != to {
+            let previous = trajectory.clone();
             let block = trajectory.blocks.remove(from);
             trajectory.blocks.insert(to, block);
             let current_frame = trajectory.current_frame;
-            self.apply_trajectory_frame(object_uid, current_frame)?;
+            if let Err(error) = self.apply_trajectory_frame(object_uid, current_frame) {
+                self.trajectories.insert(object_uid, previous);
+                return Err(error);
+            }
         }
         let trajectory = self
             .trajectories
@@ -12908,6 +12918,19 @@ impl DesktopAppState {
         path: &Path,
         format: &'static str,
     ) -> Result<GuiLoadedPath> {
+        let previous = self.clone();
+        let result = self.open_path_with_format_inner(path, format);
+        if result.is_err() {
+            *self = previous;
+        }
+        result
+    }
+
+    fn open_path_with_format_inner(
+        &mut self,
+        path: &Path,
+        format: &'static str,
+    ) -> Result<GuiLoadedPath> {
         if is_scene_format(format) {
             let scene_uid = self
                 .load_qsc_file(path)?
@@ -13230,7 +13253,26 @@ impl DesktopAppState {
         namd_coor_reader_options: Option<&GuiNamdCoorReaderOptions>,
         setup: &GuiRendererSetup,
     ) -> Result<GuiLoadedPath> {
-        let path = path.as_ref();
+        let previous = self.clone();
+        let result = self.open_molecule_path_with_setup_inner(
+            path.as_ref(),
+            reader_options,
+            namd_coor_reader_options,
+            setup,
+        );
+        if result.is_err() {
+            *self = previous;
+        }
+        result
+    }
+
+    fn open_molecule_path_with_setup_inner(
+        &mut self,
+        path: &Path,
+        reader_options: Option<&GuiMoleculeReaderOptions>,
+        namd_coor_reader_options: Option<&GuiNamdCoorReaderOptions>,
+        setup: &GuiRendererSetup,
+    ) -> Result<GuiLoadedPath> {
         let format = guess_path_format(path, &self.stream_manager)?;
         if !format_supports_molecule_renderer_setup(format) {
             return Err(CueMolError::invalid_argument(
@@ -13304,7 +13346,7 @@ impl DesktopAppState {
             )?;
             (scene_uid, object_uid)
         } else {
-            let loaded = self.open_path_with_format(path, format)?;
+            let loaded = self.open_path_with_format_inner(path, format)?;
             let GuiLoadedPath::Object {
                 scene_uid,
                 object_uid,

@@ -1,7 +1,7 @@
 use crate::commands::{fit, loaded_result};
-use cuemol_core::{CueMolError, Result, Uid};
+use cuemol_core::{CueMolError, Result};
 use cuemol_desktop_core::{DesktopAppState, GuiLoadedPath, GuiRendererSetup};
-use cuemol_qsys::{Camera, View};
+use cuemol_qsys::Camera;
 use serde_json::{json, Value};
 
 #[derive(Debug, Clone)]
@@ -162,11 +162,7 @@ pub fn load_fetched(
             selection: args["selection"].as_str().map(str::to_string),
             recenter: args["centerView"] != false,
         };
-        state.configure_loaded_bytes(
-            &loaded,
-            &setup,
-            (args["mapCenterPolicy"] == "view").then(|| camera.center()),
-        )?;
+        state.configure_loaded_bytes(&loaded, &setup, None)?;
         match loaded {
             GuiLoadedPath::Object { object_uid, .. } if setup.recenter => fit(
                 state,
@@ -175,12 +171,8 @@ pub fn load_fetched(
                 args["selection"].as_str(),
                 true,
             )?,
-            GuiLoadedPath::Map { scene_uid, map_uid } if setup.recenter => {
-                let mut view = View::new(Uid::new(1), scene_uid);
-                view.set_camera(camera);
-                view.set_view_size(800, 600);
-                state.fit_density_map_view(map_uid, &mut view)?;
-                *camera = view.camera();
+            GuiLoadedPath::Map { map_uid, .. } => {
+                crate::file_commands::apply_map_center_policy(state, camera, map_uid, args)?;
             }
             GuiLoadedPath::Scene { .. } => *camera = state.active_view_camera().unwrap_or_default(),
             _ => {}

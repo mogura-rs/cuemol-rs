@@ -2557,3 +2557,36 @@ during this work are collected here; the read-only reference itself was not edit
 | DefaultRibbon comments and checks used the newer source's section dimensions. | The bundled default styles now match the distributed CueMol 2.4.1 dimensions; explicit renderer properties still override styles. |
 | The style constant comment claimed the bundled XML was vendored verbatim. | Its geometry defaults follow the distributed 2.4.1 styles, while newer molecule palettes remain optional. |
 | The CI description said browser tests ran in one job. | Browser tests use four shards over one shared WASM build and native test server. |
+| Map loading advertised `setMapCenter`, `moveViewCenter` and `auto`, while dispatch recognized only `view`. | Local and downloaded maps share the reference policy: crystallographic maps draw around the current view, EM maps fit the view, and explicit policies override that choice. `centerView=false` preserves the view. |
+| The CCP4 command described keeping every nth grid point but resampled an already loaded map. | The command passes the stride to the reader, preserving its validation, sampled statistics and grid placement. |
+| File-loading guidance described applying state only after success. | Native file and renderer-setup failures now restore the previous state, including a scene created during the failed operation. |
+| Reader APIs return `Result`, but malformed GRO, PSF and AMBER counts or delimiters could panic or be ignored. | These malformed inputs return parse errors, and count fields do not trigger eager allocation. |
+
+## Additional input and state audit
+
+The previous green application and distribution checks did not cover several
+failure paths. New regressions reproduced map-policy and sampled-statistics
+errors, failed trajectory edits that retained changed block order, failed file
+loads that left an empty scene, and failed renderer setup that retained a new
+molecule. Separate malformed-input cases reproduced five parser panics and a
+PSF bond-count error that was silently ignored.
+
+The command regressions exercise both file and memory loading, the map-kind
+default, disabled recentering, and an embedded QSC save/reload after sampling.
+The trajectory regression truncates an already indexed file, then verifies
+that failed removal, reordering and frame selection preserve block metadata
+and molecular coordinates. Rollback copies trajectory metadata while retaining
+the shared frame sources. Ordinary frame playback does not take a new snapshot.
+
+Run these focused cases with:
+
+```sh
+cargo test --locked -p cuemol-command --test map_loading
+cargo test --locked -p cuemol-desktop-core --test load_failure
+cargo test --locked -p cuemol-mdtools --test malformed_input
+```
+
+The broader saved-state tracking difference described in `parity-audit.md`
+remains outside these repairs. This audit does not establish complete feature
+parity or the absence of all defects. Generated validation records identify
+the tested revision and the executed shared, native, browser and package checks.

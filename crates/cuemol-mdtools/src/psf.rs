@@ -77,7 +77,7 @@ pub fn read_psf_str(input: &str) -> Result<MolCoord> {
         atom_index += 1;
     }
 
-    if let Ok((bond_count_line, bond_count)) = find_section_count(&lines, "NBOND") {
+    if let Some((bond_count_line, bond_count)) = optional_section_count(&lines, "NBOND")? {
         add_psf_bonds(
             &lines,
             bond_count_line,
@@ -115,6 +115,11 @@ pub fn sniff_psf_content(input: &str) -> cuemol_molstr::ContentVerdict {
 }
 
 fn find_section_count(lines: &[&str], marker: &str) -> Result<(usize, usize)> {
+    optional_section_count(lines, marker)?
+        .ok_or_else(|| CueMolError::parse(format!("missing PSF {marker} section")))
+}
+
+fn optional_section_count(lines: &[&str], marker: &str) -> Result<Option<(usize, usize)>> {
     for (index, line) in lines.iter().enumerate() {
         let Some((prefix, comment)) = line.split_once('!') else {
             continue;
@@ -132,9 +137,9 @@ fn find_section_count(lines: &[&str], marker: &str) -> Result<(usize, usize)> {
             .ok_or_else(|| CueMolError::parse(format!("missing PSF {marker} count")))?
             .parse::<usize>()
             .map_err(|_| CueMolError::parse(format!("invalid PSF {marker} count")))?;
-        return Ok((index, count));
+        return Ok(Some((index, count)));
     }
-    Err(CueMolError::parse(format!("missing PSF {marker} section")))
+    Ok(None)
 }
 
 fn parse_atom_line(line: &str, atom_index: usize) -> Result<Atom> {
@@ -184,12 +189,14 @@ fn add_psf_bonds(
     serial_to_index: &BTreeMap<i32, usize>,
     molecule: &mut MolCoord,
 ) -> Result<()> {
-    let required_values = bond_count * 2;
+    let required_values = bond_count
+        .checked_mul(2)
+        .ok_or_else(|| CueMolError::parse("PSF bond count overflow"))?;
     if required_values == 0 {
         return Ok(());
     }
 
-    let mut values = Vec::with_capacity(required_values);
+    let mut values = Vec::new();
     for line in lines.iter().skip(count_line + 1) {
         if values.len() >= required_values {
             break;

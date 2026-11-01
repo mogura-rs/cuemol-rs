@@ -78,7 +78,7 @@ pub fn read_gro_frame_str(input: &str) -> Result<GroFrame> {
         .trim()
         .parse::<usize>()
         .map_err(|_| CueMolError::parse("invalid GRO atom count"))?;
-    if lines.len() < 2 + atom_count {
+    if atom_count > lines.len() - 2 {
         return Err(CueMolError::parse("GRO atom count exceeds atom lines"));
     }
 

@@ -1,4 +1,4 @@
-use crate::commands::{fit, loaded_result, scene, text};
+use crate::commands::{fit, loaded_result, text};
 use cuemol_core::{CueMolError, Result, Uid};
 use cuemol_desktop_core::{
     DesktopAppState, GuiDensityMapReaderOptions, GuiFileRendererTarget, GuiLoadedPath,
@@ -41,6 +41,7 @@ pub fn load_file(
     args: &Value,
 ) -> Result<Value> {
     let path = text(args, "path")?;
+    map_center_policy(args)?;
     if let Some(reader) = args["reader"].as_str() {
         let mut options = args.clone();
         options.as_object_mut().unwrap().remove("path");
@@ -97,6 +98,10 @@ pub fn load_file(
     if let Some(reader) = &mut options.density_map_reader_options {
         match reader {
             GuiDensityMapReaderOptions::Ccp4(reader) => {
+                reader.subsample = crate::commands::integer(args, "subsample", 1)?;
+                if reader.subsample == 0 {
+                    return Err(CueMolError::invalid_argument("subsample must be positive"));
+                }
                 if let Some(v) = args["normalize"].as_bool() {
                     reader.normalize = v;
                 }
@@ -161,21 +166,16 @@ pub fn load_file(
             &setup,
         )?,
         GuiFileRendererTarget::DensityMap => {
-            let center = (args["mapCenterPolicy"] == "view").then(|| camera.center());
             let loaded = state.open_density_map_path_with_renderer_setup(
                 path,
                 options.density_map_reader_options.as_ref(),
-                center,
+                None,
                 &setup,
             )?;
             if let GuiLoadedPath::Map { map_uid, .. } = &loaded {
-                let stride = crate::commands::integer(args, "subsample", 1)?;
-                if stride == 0 {
-                    return Err(CueMolError::invalid_argument("subsample must be positive"));
-                }
                 state.set_density_map_sampling(
                     *map_uid,
-                    stride,
+                    1,
                     args["mapType"].as_str().unwrap_or("auto"),
                 )?;
             }
@@ -205,15 +205,47 @@ pub fn load_file(
             )?;
         }
     } else if let GuiLoadedPath::Map { map_uid, .. } = &loaded {
-        if setup.recenter {
-            let mut view = View::new(Uid::new(1), scene(state)?);
-            view.set_camera(camera);
-            view.set_view_size(800, 600);
-            state.fit_density_map_view(*map_uid, &mut view)?;
-            *camera = view.camera().clone();
-        }
+        apply_map_center_policy(state, camera, *map_uid, args)?;
     }
     Ok(loaded_result(loaded))
+}
+
+fn map_center_policy(args: &Value) -> Result<&str> {
+    let policy = args["mapCenterPolicy"].as_str().unwrap_or("auto");
+    if matches!(policy, "auto" | "moveViewCenter" | "setMapCenter" | "view") {
+        Ok(policy)
+    } else {
+        Err(CueMolError::invalid_argument("invalid map center policy"))
+    }
+}
+
+pub(crate) fn apply_map_center_policy(
+    state: &mut DesktopAppState,
+    camera: &mut Camera,
+    map_uid: Uid,
+    args: &Value,
+) -> Result<()> {
+    let move_view = match map_center_policy(args)? {
+        "auto" => state
+            .density_map_kind(map_uid)
+            .is_some_and(|(_, kind)| kind == "em"),
+        "moveViewCenter" => true,
+        _ => false,
+    } && args["centerView"] != false;
+    let summary = state
+        .density_map_summary(map_uid)
+        .ok_or_else(|| CueMolError::not_found("density map"))?;
+    if move_view {
+        let mut view = View::new(Uid::new(1), summary.scene_uid);
+        view.set_camera(camera);
+        view.set_view_size(800, 600);
+        state.fit_density_map_view(map_uid, &mut view)?;
+        *camera = view.camera();
+    }
+    for renderer in summary.renderers {
+        state.set_density_renderer_center(map_uid, renderer.uid, camera.center())?;
+    }
+    Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]

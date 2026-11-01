@@ -212,7 +212,9 @@ pub fn read_amber_restart_str(input: &str) -> Result<AmberRestart> {
     }
 
     let reals = parse_restart_reals(lines)?;
-    let coord_count = natom * 3;
+    let coord_count = natom
+        .checked_mul(3)
+        .ok_or_else(|| CueMolError::parse("AMBER restart atom count overflow"))?;
     if reals.len() < coord_count {
         return Err(CueMolError::parse(
             "AMBER restart coordinate block is truncated",
@@ -551,7 +553,9 @@ fn parse_fort_format(line: &str) -> Result<FortFormat> {
     let end = line
         .rfind(')')
         .ok_or_else(|| CueMolError::parse("malformed AMBER FORMAT"))?;
-    let spec = &line[start + 1..end];
+    let spec = line
+        .get(start + 1..end)
+        .ok_or_else(|| CueMolError::parse("malformed AMBER FORMAT"))?;
     let mut chars = spec.trim().chars().peekable();
     while matches!(chars.peek(), Some(ch) if ch.is_ascii_digit()) {
         chars.next();
@@ -659,11 +663,11 @@ fn parse_strings(section: &PrmtopSection, count: usize) -> Result<Vec<String>> {
 }
 
 fn parse_fixed_tokens(section: &PrmtopSection, count: usize) -> Result<Vec<String>> {
-    let mut tokens = Vec::with_capacity(count);
+    let mut tokens = Vec::new();
     for line in &section.lines {
         let mut pos = 0;
         while pos < line.len() && tokens.len() < count {
-            let end = (pos + section.format.width).min(line.len());
+            let end = pos.saturating_add(section.format.width).min(line.len());
             let token = fixed_ascii(line, pos, end)
                 .ok_or_else(|| CueMolError::parse("invalid AMBER fixed-width field"))?
                 .trim()
@@ -671,7 +675,7 @@ fn parse_fixed_tokens(section: &PrmtopSection, count: usize) -> Result<Vec<Strin
             if !token.is_empty() || section.format.kind == 'A' {
                 tokens.push(token);
             }
-            pos += section.format.width;
+            pos = end;
         }
         if tokens.len() == count {
             break;
@@ -694,11 +698,11 @@ fn positive_count(value: i32, message: &'static str) -> Result<usize> {
 fn build_atom_residue_map(natom: usize, residue_pointers: &[i32]) -> Result<Vec<usize>> {
     let mut atom_to_res = vec![0_usize; natom];
     for residue_index in 0..residue_pointers.len() {
-        let begin = residue_pointers[residue_index] - 1;
+        let begin = i64::from(residue_pointers[residue_index]) - 1;
         let end = residue_pointers
             .get(residue_index + 1)
-            .map(|value| value - 1)
-            .unwrap_or(natom as i32);
+            .map(|value| i64::from(*value) - 1)
+            .unwrap_or(natom as i64);
         if begin < 0 || end <= begin || end as usize > natom {
             return Err(CueMolError::parse("inconsistent AMBER RESIDUE_POINTER"));
         }
@@ -752,7 +756,10 @@ fn add_amber_bonds(
     if count == 0 {
         return Ok(());
     }
-    let ints = parse_required_ints(sections, flag, count * 3)?;
+    let value_count = count
+        .checked_mul(3)
+        .ok_or_else(|| CueMolError::parse("AMBER bond count overflow"))?;
+    let ints = parse_required_ints(sections, flag, value_count)?;
     for bond_index in 0..count {
         let atom1 = ints[bond_index * 3] / 3;
         let atom2 = ints[bond_index * 3 + 1] / 3;
