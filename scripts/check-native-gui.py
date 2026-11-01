@@ -218,6 +218,18 @@ def main():
                 pyautogui.moveTo(x + local_x, y + local_y)
                 wait_for(lambda: ImageChops.difference(normal, capture().crop(marker)).getbbox() is None)
 
+            def click_at(screen_x, screen_y):
+                move_pointer_and_wait(screen_x - x, screen_y - y)
+                pyautogui.click()
+
+            def double_click_at(screen_x, screen_y, interval):
+                move_pointer_and_wait(screen_x - x, screen_y - y)
+                pyautogui.doubleClick(interval=interval)
+
+            def input_focused(box):
+                pixels = capture().crop(box).getdata()
+                return sum(b - r > 30 and g - r > 10 for r, g, b in pixels) > 100
+
             if args.cross_selection_only:
                 probe = state['objects'][0]
                 target = call('load_file', {'path': str(fixture)})['objectId']
@@ -273,7 +285,8 @@ def main():
                     return call('get_prop', {'path': f'#{object_id}.sel'})['value']
 
                 def input_text(text):
-                    pyautogui.click(x + 120, y + 512 + dy)
+                    click_at(x + 120, y + 512 + dy)
+                    wait_for(lambda: input_focused((66, round(502 + dy), 295, round(523 + dy))))
                     pyautogui.hotkey(primary, 'a')
                     pyautogui.write(text, interval=0.02)
                     pyautogui.hotkey(primary, 'a')
@@ -287,35 +300,48 @@ def main():
                 call('center_view', {'objId': object_id, 'selection': 'name O1', 'zoom': False})
                 expected_center = call('get_view')['center']
                 call('set_view', {'center': [40, 50, 60]})
-                pyautogui.click(x + 22, y + 176)
+                click_at(x + 22, y + 176)
                 wait_for(lambda: activity_selected(176))
                 input_text('name C1')
                 capture('selection-pane-draft.png')
-                pyautogui.click(x + 22, y + 88)
+                click_at(x + 22, y + 88)
                 wait_for(lambda: activity_selected(88))
-                pyautogui.click(x + 22, y + 176)
+                click_at(x + 22, y + 176)
                 wait_for(lambda: activity_selected(176))
                 capture('selection-pane-returned.png')
-                pyautogui.click(x + 112, y + 540 + dy)
+                click_at(x + 112, y + 540 + dy)
                 wait_for(lambda: call('get_view')['center'] == expected_center)
                 if selection() != 'name O1':
                     raise RuntimeError('Center applied an uncommitted selection draft')
-                pyautogui.click(x + 80, y + 540 + dy)
+                click_at(x + 80, y + 540 + dy)
                 wait_for(lambda: selection() == 'name C1')
                 pyautogui.hotkey(primary, 'z')
                 wait_for(lambda: selection() == 'name O1')
                 pyautogui.hotkey(primary, 'shift', 'z')
                 wait_for(lambda: selection() == 'name C1')
                 capture('selection-pane-applied.png')
-                pyautogui.click(x + 144, y + 540 + dy)
+                click_at(x + 144, y + 540 + dy)
                 wait_for(lambda: selection() == '')
                 input_text('name C1')
-                pyautogui.click(x + 176, y + 540 + dy)
-                time.sleep(0.2)
-                pyautogui.click(x + 250, y + 569 + dy)
+                definition_box = (354, round(564 + dy), 358, round(600 + dy))
+                before_definition = capture().crop(definition_box)
+
+                def definition_visible():
+                    image = ImageChops.difference(before_definition, capture().crop(definition_box))
+                    return sum(max(pixel) > 5 for pixel in image.getdata()) > image.width * image.height * 0.4
+
+                click_at(x + 176, y + 540 + dy)
+                wait_for(definition_visible)
+                capture('selection-definition-open.png')
+                click_at(x + 250, y + 569 + dy)
+                wait_for(lambda: input_focused((169, round(559 + dy), 348, round(580 + dy))))
                 pyautogui.write('os_carbon', interval=0.03)
+                pyautogui.hotkey(primary, 'a')
+                pyautogui.hotkey(primary, 'c')
+                wait_for(lambda: clipboard_text() == 'os_carbon')
                 pyautogui.press('enter')
                 wait_for(lambda: 'os_carbon' in call('get_scene_state')['namedSelections'])
+                wait_for(lambda: not definition_visible())
                 if call('count_selection', {'objId': object_id, 'selection': 'os_carbon'})['count'] != 1:
                     raise RuntimeError('The named selection does not match its definition')
                 if selection() != '':
@@ -324,9 +350,10 @@ def main():
                 pyautogui.press('enter')
                 wait_for(lambda: selection() == 'os_carbon')
                 capture('selection-pane-named.png')
-                time.sleep(0.3)
-                pyautogui.click(x + 195, y + 596 + dy)
-                time.sleep(0.2)
+                content_box = (66, round(620 + dy), 295, height - 25)
+                named_content = capture().crop(content_box)
+                click_at(x + 195, y + 596 + dy)
+                wait_for(lambda: ImageChops.difference(named_content, capture().crop(content_box)).getbbox())
                 capture('selection-pane-term.png')
                 scroll_offset = 0
                 if 687 + dy >= height - 24:
@@ -334,19 +361,24 @@ def main():
                     tab_top = round(596 + dy) - 8
                     marker = capture().crop((179, tab_top, 209, tab_top + 16))
                     scroll_steps(-2)
-                    time.sleep(0.5)
-                    scrolled = capture('selection-pane-scrolled.png')
-                    scores = []
-                    for offset in range(-min(160, tab_top), 0):
-                        candidate = scrolled.crop((179, tab_top + offset, 209, tab_top + offset + 16))
-                        difference = ImageStat.Stat(ImageChops.difference(marker, candidate))
-                        scores.append((sum(difference.mean) / 3, offset))
-                    score, scroll_offset = min(scores)
-                    if score > 2:
-                        raise RuntimeError('The Selection tab could not be located after scrolling')
-                pyautogui.click(x + 100, y + 659 + dy + scroll_offset)
+                    def moved_tab():
+                        scrolled = capture()
+                        scores = []
+                        for offset in range(-min(160, tab_top), -4):
+                            candidate = scrolled.crop((179, tab_top + offset, 209, tab_top + offset + 16))
+                            difference = ImageStat.Stat(ImageChops.difference(marker, candidate))
+                            scores.append((sum(difference.mean) / 3, offset))
+                        score, offset = min(scores)
+                        return (offset, scrolled) if score <= 2 else None
+                    scroll_offset, scrolled = wait_for(moved_tab)
+                    scrolled.save(work / 'selection-pane-scrolled.png')
+                click_at(x + 100, y + 659 + dy + scroll_offset)
+                wait_for(lambda: input_focused((66, round(649 + dy + scroll_offset), 295, round(670 + dy + scroll_offset))))
                 pyautogui.write('A')
-                pyautogui.click(x + 120, y + 687 + dy + scroll_offset)
+                pyautogui.hotkey(primary, 'a')
+                pyautogui.hotkey(primary, 'c')
+                wait_for(lambda: clipboard_text() == 'A')
+                click_at(x + 120, y + 687 + dy + scroll_offset)
                 wait_for(lambda: selection() == "'A'.*.*")
                 if call('count_selection', {'objId': object_id, 'selection': selection()})['count'] != 3:
                     raise RuntimeError('The live selection builder did not select the fixture chain')
@@ -354,6 +386,8 @@ def main():
                 return {'selection_pane_drafts': True, 'selection_pane_center': True,
                         'selection_pane_activity_acknowledged': True,
                         'selection_pane_input_acknowledged': True,
+                        'selection_pane_definition_acknowledged': True,
+                        'selection_pane_term_acknowledged': True,
                         'selection_pane_undo': True, 'selection_pane_named': True,
                         'selection_pane_live_builder': True}
 
@@ -462,7 +496,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             atoms = [line for line in exported if line.startswith(('ATOM  ', 'HETATM'))]
             if len(atoms) != 1 or atoms[0][12:16].strip() != 'O1':
                 raise RuntimeError('Python helper selection did not export exactly the oxygen atom')
-            pyautogui.click(x + width * 0.52, y + height - 36)
+            click_at(x + width * 0.52, y + height - 36)
             qax = work / 'console-actions.qax'
             qax.unlink(missing_ok=True)
             pyautogui.write('open_log console-actions.qax', interval=0.015)
@@ -490,7 +524,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             pyautogui.press('enter')
             wait_for(lambda: call('get_scene_state')['objects'][0]['name'] == 'console-probe')
             capture('console-multiline.png')
-            pyautogui.click(x + width * 0.7, y + height * 0.4)
+            click_at(x + width * 0.7, y + height * 0.4)
             primary = 'command' if sys.platform == 'darwin' else 'ctrl'
             pyautogui.hotkey(primary, 'shift', 'z')
             wait_for(lambda: call('get_scene_state')['objects'][0]['name'] == 'final')
@@ -498,7 +532,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             wait_for(lambda: call('get_scene_state')['objects'][0]['name'] == 'console-probe')
 
             original = call('get_scene_state')['objects'][0]
-            pyautogui.click(x + 145, y + 164)
+            click_at(x + 145, y + 164)
             pyautogui.hotkey(primary, 'c')
             pyautogui.hotkey(primary, 'x')
             wait_for(lambda: not call('get_scene_state')['objects'])
@@ -512,7 +546,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             pyautogui.hotkey(primary, 'z')
             wait_for(lambda: call('get_scene_state')['objects'][0]['id'] == original['id'])
 
-            pyautogui.click(x + width * 0.52, y + height - 36)
+            click_at(x + width * 0.52, y + height - 36)
             command = 'rename console-probe, clipboard-probe'
             pyautogui.write(command, interval=0.015)
             pyautogui.hotkey(primary, 'a')
@@ -525,7 +559,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             pyautogui.write('undo', interval=0.015)
             pyautogui.press('enter')
             wait_for(lambda: call('get_scene_state')['objects'][0]['name'] == 'console-probe')
-            pyautogui.click(x + width * 0.7, y + height * 0.4)
+            click_at(x + width * 0.7, y + height * 0.4)
 
             def palette_collapsed():
                 settings = dict(line.split('\t', 1) for line in (config / 'config.tsv').read_text().splitlines() if '\t' in line)
@@ -538,9 +572,8 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             pyautogui.hotkey(primary, 'shift', 'p')
             wait_for(lambda: palette_collapsed() == initial_palette)
 
-            pyautogui.click(x + 145, y + 164)
-            time.sleep(0.2)
-            pyautogui.click(x + width - 194, y + 149)
+            click_at(x + 145, y + 164)
+            click_at(x + width - 194, y + 149)
 
             def inspector_heading():
                 return capture().crop((width - 292, 96, width - 10, 135))
@@ -553,7 +586,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                     image = capture().crop((width - 290, 164, width - 10, 184))
                     return sum(b - r > 30 and g - r > 10 for r, g, b in image.getdata()) > 200
 
-                pyautogui.click(x + width - 150, y + 174)
+                click_at(x + width - 150, y + 174)
                 wait_for(focused)
                 pyautogui.hotkey(primary, 'a')
                 pyautogui.write(text, interval=0.02)
@@ -573,13 +606,13 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
 
             inspector_filter('name')
             capture('inspector-name-before.png')
-            pyautogui.click(x + width - 100, y + 225)
+            click_at(x + width - 100, y + 225)
             pyautogui.hotkey(primary, 'a')
             pyautogui.write('inspector-probe', interval=0.02)
             pyautogui.press('enter')
             wait_for(lambda: call('get_scene_state')['objects'][0]['name'] == 'inspector-probe')
             capture('inspector-name.png')
-            pyautogui.click(x + width * 0.6, y + height * 0.4)
+            click_at(x + width * 0.6, y + height * 0.4)
             pyautogui.hotkey(primary, 'z')
             wait_for(lambda: call('get_scene_state')['objects'][0]['name'] == 'console-probe')
             pyautogui.hotkey(primary, 'shift', 'z')
@@ -588,13 +621,13 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             wait_for(lambda: call('get_scene_state')['objects'][0]['name'] == 'console-probe')
 
             inspector_filter('locked')
-            pyautogui.click(x + width - 168, y + 225)
+            click_at(x + width - 168, y + 225)
             locked_path = f"#{original['id']}.locked"
             wait_for(lambda: call('get_prop', {'path': locked_path})['value'] == 'true')
             capture('inspector-locked.png')
-            pyautogui.click(x + width - 20, y + 225)
+            click_at(x + width - 20, y + 225)
             wait_for(lambda: call('get_prop', {'path': locked_path})['value'] == 'false')
-            pyautogui.click(x + width * 0.6, y + height * 0.4)
+            click_at(x + width * 0.6, y + height * 0.4)
             pyautogui.hotkey(primary, 'z')
             wait_for(lambda: call('get_prop', {'path': locked_path})['value'] == 'true')
             pyautogui.hotkey(primary, 'shift', 'z')
@@ -602,10 +635,10 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             capture('inspector-reset.png')
 
             previous_inspector = inspector_heading()
-            pyautogui.click(x + 145, y + 140)
+            click_at(x + 145, y + 140)
             wait_for_inspector_target(previous_inspector)
             inspector_filter('name')
-            pyautogui.click(x + width - 100, y + 225)
+            click_at(x + width - 100, y + 225)
             pyautogui.hotkey(primary, 'a')
             pyautogui.write('Inspector scene', interval=0.02)
             pyautogui.press('enter')
@@ -615,17 +648,19 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             capture('inspector-scene.png')
 
             previous_inspector = inspector_heading()
-            pyautogui.click(x + 180, y + 13)
-            time.sleep(0.2)
+            view_menu_box = (172, 25, 330, 245)
+            before_view_menu = capture().crop(view_menu_box)
+            click_at(x + 180, y + 13)
+            wait_for(lambda: ImageChops.difference(before_view_menu, capture().crop(view_menu_box)).getbbox())
             capture('inspector-view-menu.png')
-            pyautogui.click(x + 240, y + 228)
+            click_at(x + 240, y + 228)
             wait_for_inspector_target(previous_inspector)
             inspector_filter('zoom')
             before_inspector_zoom = call('get_view')['zoom']
             move_pointer_and_wait(width * 0.6, height * 0.4)
             scroll_steps(2)
             inspector_zoom = wait_for(lambda: zoom if (zoom := call('get_view')['zoom']) != before_inspector_zoom else None)
-            pyautogui.doubleClick(x + width - 100, y + 225, interval=0.1)
+            double_click_at(x + width - 100, y + 225, interval=0.1)
             pyautogui.hotkey(primary, 'a')
             pyautogui.hotkey(primary, 'c')
             def copied_zoom():
@@ -645,7 +680,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             pyautogui.press('enter')
             wait_for(lambda: abs(call('get_view')['zoom'] - 37.25) < 0.001)
             inspector_filter('name')
-            pyautogui.click(x + width - 100, y + 225)
+            click_at(x + width - 100, y + 225)
             pyautogui.hotkey(primary, 'a')
             pyautogui.write('Orbit view', interval=0.02)
             move_pointer_and_wait(width * 0.6, height * 0.4)
@@ -664,13 +699,12 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                    'axes.section.width=1;axes.section.tuber=0.5;')
             axes_id = next(renderer['id'] for renderer in call('get_scene_state')['objects'][0]['renderers']
                            if renderer['name'] == 'Tube axes')
-            pyautogui.click(x + 175, y + 188)
-            time.sleep(0.2)
-            pyautogui.click(x + width - 255, y + 149)
+            click_at(x + 175, y + 188)
+            click_at(x + width - 255, y + 149)
             inspector_filter('section.width')
             capture('inspector-axes-before.png')
             call('clear_undo')
-            pyautogui.doubleClick(x + width - 100, y + 225, interval=0.1)
+            double_click_at(x + width - 100, y + 225, interval=0.1)
             pyautogui.hotkey(primary, 'a')
             pyautogui.write('2')
             pyautogui.press('enter')
@@ -678,7 +712,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                 return call('get_prop', {'path': f'#{axes_id}.section.{key}'})['value']
             wait_for(lambda: axis('width') == '2' and axis('tuber') == '0.25')
             inspector_filter('section.tuber')
-            pyautogui.doubleClick(x + width - 100, y + 225, interval=0.1)
+            double_click_at(x + width - 100, y + 225, interval=0.1)
             pyautogui.hotkey(primary, 'a')
             pyautogui.hotkey(primary, 'c')
             def copied_axis():
@@ -687,7 +721,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                 except ValueError:
                     return False
             wait_for(copied_axis)
-            pyautogui.click(x + width * 0.6, y + height * 0.4)
+            click_at(x + width * 0.6, y + height * 0.4)
             pyautogui.hotkey(primary, 'z')
             wait_for(lambda: axis('width') == '1' and axis('tuber') == '0.5')
             pyautogui.hotkey(primary, 'shift', 'z')
@@ -698,8 +732,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                    'var loops=obj.createRenderer("disorder");loops.name="Optional loops";')
             loops_id = next(renderer['id'] for renderer in call('get_scene_state')['objects'][0]['renderers']
                             if renderer['name'] == 'Optional loops')
-            pyautogui.click(x + 175, y + 188)
-            time.sleep(0.2)
+            click_at(x + 175, y + 188)
             inspector_filter('loopsize2')
             def loop_size():
                 return call('get_prop', {'path': f'#{loops_id}.loopsize2'})['value']
@@ -717,11 +750,11 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                     raise RuntimeError(f'The numeric editor copied {text[:80]!r}, expected {expected}')
                 return True
             disabled_editor = optional_editor()
-            pyautogui.click(x + width - 174, y + 225)
+            click_at(x + width - 174, y + 225)
             wait_for(lambda: loop_size() == '2')
             wait_for(lambda: ImageChops.difference(disabled_editor, optional_editor()).getbbox())
             capture('inspector-optional-enabled.png')
-            pyautogui.doubleClick(x + width - 100, y + 225, interval=0.1)
+            double_click_at(x + width - 100, y + 225, interval=0.1)
             wait_for(lambda: copied_number(2.0))
             pyautogui.write('3.4', interval=0.1)
             wait_for(lambda: copied_number(3.4))
@@ -730,11 +763,11 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                 raise RuntimeError('The optional numeric draft changed the property before commit')
             pyautogui.press('enter')
             wait_for(lambda: loop_size() == '3.4')
-            pyautogui.click(x + width - 174, y + 225)
+            click_at(x + width - 174, y + 225)
             wait_for(lambda: loop_size() == '-1')
-            pyautogui.click(x + width - 174, y + 225)
+            click_at(x + width - 174, y + 225)
             wait_for(lambda: loop_size() == '3.4')
-            pyautogui.click(x + width * 0.6, y + height * 0.4)
+            click_at(x + width * 0.6, y + height * 0.4)
             pyautogui.hotkey(primary, 'z')
             wait_for(lambda: loop_size() == '-1')
             pyautogui.hotkey(primary, 'shift', 'z')
@@ -747,23 +780,25 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                    'labels.setLabel(2,"iiiiWW");labels.label_on_top=true;')
             labels_id = next(renderer['id'] for renderer in call('get_scene_state')['objects'][0]['renderers']
                              if renderer['name'] == 'Font choices')
-            pyautogui.click(x + 175, y + 188)
-            time.sleep(0.2)
+            click_at(x + 175, y + 188)
             inspector_filter('font_name')
-            pyautogui.click(x + width - 100, y + 225)
-            time.sleep(0.2)
+            font_menu_box = (width - 185, 243, width - 34, 325)
+            before_font_menu = capture().crop(font_menu_box)
+            click_at(x + width - 100, y + 225)
+            wait_for(lambda: ImageChops.difference(before_font_menu, capture().crop(font_menu_box)).getbbox())
             capture('inspector-font-options.png')
             pyautogui.press('escape')
+            wait_for(lambda: ImageChops.difference(before_font_menu, capture().crop(font_menu_box)).getbbox() is None)
             def label_font():
                 return call('get_prop', {'path': f'#{labels_id}.font_name'})['value']
             if label_font() != 'Ubuntu':
                 raise RuntimeError('Closing the font picker changed its value')
-            pyautogui.click(x + width - 100, y + 225)
-            time.sleep(0.2)
-            pyautogui.click(x + width - 100, y + 304)
+            click_at(x + width - 100, y + 225)
+            wait_for(lambda: ImageChops.difference(before_font_menu, capture().crop(font_menu_box)).getbbox())
+            click_at(x + width - 100, y + 304)
             wait_for(lambda: label_font() == 'monospace')
             capture('inspector-font-selected.png')
-            pyautogui.click(x + width * 0.6, y + height * 0.4)
+            click_at(x + width * 0.6, y + height * 0.4)
             pyautogui.hotkey(primary, 'z')
             wait_for(lambda: label_font() == 'Ubuntu')
             pyautogui.hotkey(primary, 'shift', 'z')
@@ -776,15 +811,14 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                    'var builder=obj.createRenderer("tube");builder.name="Selection builder";')
             builder_id = next(renderer['id'] for renderer in call('get_scene_state')['objects'][0]['renderers']
                               if renderer['name'] == 'Selection builder')
-            pyautogui.click(x + 175, y + 188)
-            time.sleep(0.2)
+            click_at(x + 175, y + 188)
             inspector_filter('sel')
             def renderer_selection():
                 return call('get_prop', {'path': f'#{builder_id}.sel'})['value']
             initial_selection = renderer_selection()
             call('clear_undo')
             wait_for(lambda: window_bounds(process.pid))
-            pyautogui.click(x + width - 47, y + 225)
+            click_at(x + width - 47, y + 225)
 
             def selection_popup_visible():
                 image = capture().crop((width - 340, 245, width - 315, 290))
@@ -800,7 +834,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             wait_for(lambda: min(capture().getpixel((width - 230, 265))) > 42)
             pyautogui.click()
             wait_for(lambda: light_pixels((width - 244, 303, width - 232, 314)) > 10)
-            pyautogui.click(x + width - 280, y + 309)
+            click_at(x + width - 280, y + 309)
             wait_for(lambda: light_pixels((width - 330, 430, width - 250, 500)) > 50)
             capture('inspector-selection-keywords.png')
             pyautogui.moveTo(x + width - 280, y + 415, duration=0.2)
@@ -808,7 +842,8 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             pyautogui.click()
             wait_for(lambda: light_pixels((width - 72, 329, width - 42, 350)) > 15)
             capture('inspector-selection-chain.png')
-            pyautogui.click(x + width - 250, y + 335)
+            click_at(x + width - 250, y + 335)
+            wait_for(lambda: input_focused((width - 345, 333, width - 73, 357)))
             pyautogui.write('A', interval=0.1)
             pyautogui.hotkey(primary, 'a')
             pyautogui.hotkey(primary, 'c')
@@ -816,13 +851,13 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
             selection_box = (width - 185, 216, width - 65, 233)
             unapplied = capture().crop(selection_box)
             wait_for(lambda: window_bounds(process.pid))
-            pyautogui.click(x + width - 275, y + 362, duration=0.2)
+            click_at(x + width - 275, y + 362)
             wait_for(lambda: ImageChops.difference(unapplied, capture().crop(selection_box)).getbbox())
             capture('inspector-selection-draft.png')
             if renderer_selection() != initial_selection:
                 raise RuntimeError('A selection-builder draft changed the renderer before commit')
             wait_for(lambda: window_bounds(process.pid))
-            pyautogui.click(x + width * 0.5, y + height * 0.5, duration=0.2)
+            click_at(x + width * 0.5, y + height * 0.5)
             wait_for(lambda: not selection_popup_visible())
             wait_for(lambda: renderer_selection() == "chain 'A'")
             capture('inspector-selection-applied.png')
@@ -857,6 +892,7 @@ fileio.saveObject(molecule, 'python helper output.pdb', 'pdb',
                           inspector_filter_input_acknowledged=True,
                           inspector_target_input_acknowledged=True,
                           inspector_font_choices=True,
+                          inspector_menu_transitions_acknowledged=True,
                           inspector_selection_popup_acknowledged=True,
                           inspector_selection_pointer_acknowledged=True,
                           inspector_selection_keyword_acknowledged=True,

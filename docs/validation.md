@@ -60,6 +60,19 @@ focus. The full window check passes with delays on all three Inspector-to-viewpo
 wheel transitions, including the numeric and text draft assertions. Actual
 Windows event ordering remains outside this controlled comparison.
 
+A subsequent Windows check opened the named-selection definition popup but
+reached its assertion with an empty name field. Delaying that popup by 1.2
+seconds reproduced the same missing-name timeout with the previous driver.
+The driver now waits for the popup border, input focus and clipboard contents
+before submitting the name. Coordinate clicks also acknowledge pointer
+delivery, while menu, tab and scrolling transitions wait for displayed changes.
+The corrected full window check passes at both 944 by 608 and 1024 by 768
+client sizes with eleven injected delays per run: seven menu or tab clicks
+delayed by 1.2 seconds and four pointer moves delayed by 0.8 seconds. These
+checks use the unchanged Linux CI binary; they do not capture the original
+Windows event ordering. The model, clipboard, undo and draft assertions remain
+in place.
+
 Run the scene-state C++ comparison with:
 
 ```sh
