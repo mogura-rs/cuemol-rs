@@ -17345,7 +17345,7 @@ mod tests {
             .add_density_renderer(uid, "gpu_mapvol")
             .unwrap();
         model.invalidate_snapshot(true);
-        model.renderer = shared_scene_renderer();
+        model.renderer = SceneRenderer::new().map(Arc::new);
         assert!(
             model.renderer.is_some(),
             "a GPU adapter is required for this test"
@@ -17380,7 +17380,7 @@ mod tests {
     fn tauri_center_marks_render_empty_scenes_and_keep_logical_hidpi_size() {
         let mut model = model_without_gpu();
         model.background = "#3366b3".into();
-        model.renderer = shared_scene_renderer();
+        model.renderer = SceneRenderer::new().map(Arc::new);
         assert!(model.renderer.is_some(), "a GPU adapter is required");
         for ratio in [1., 2.] {
             model.view_pixel_ratio = ratio;
@@ -17430,7 +17430,7 @@ mod tests {
         use std::time::Instant;
         let path = std::env::var("CUEMOL_UI_PROFILE_FILE").expect("CUEMOL_UI_PROFILE_FILE");
         let mut model = model_without_gpu();
-        model.renderer = shared_scene_renderer();
+        model.renderer = SceneRenderer::new().map(Arc::new);
         assert!(model.renderer.is_some(), "a GPU adapter is required");
         model.open_paths(vec![path]).unwrap();
         let warmup = model.render(1280, 720);
@@ -26273,7 +26273,7 @@ mod tests {
             std::env::temp_dir().join(format!("cuemol-tauri-animation-{}", std::process::id()));
         let mut model = model_without_gpu();
         model.desktop.open_bytes("animation.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
-        model.renderer = shared_scene_renderer();
+        model.renderer = SceneRenderer::new().map(Arc::new);
         assert!(model.renderer.is_some(), "a GPU adapter is required");
         model.invalidate_snapshot(true);
         assert!(model.render_snapshot.is_none());
@@ -26358,7 +26358,7 @@ mod tests {
         model.camera.set_zoom(10.);
         model.camera.set_cam_dist(40.);
         model.camera.set_slab_depth(20.);
-        model.renderer = shared_scene_renderer();
+        model.renderer = SceneRenderer::new().map(Arc::new);
         assert!(
             model.renderer.is_some(),
             "a GPU adapter is required for this test"

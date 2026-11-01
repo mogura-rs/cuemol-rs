@@ -36,6 +36,12 @@ molecule, and the macOS workflow explicitly executes the five optional GPU
 tests with a supplied profile input. Their execution results are recorded
 separately from the ordinary model suite.
 
+Those GPU tests create separate renderers because each test model starts its
+snapshot revision from zero. Sharing the application's renderer across test
+models reused a previous model's picking geometry. A GPU probe confirmed that
+the original hover coordinate hits the CPK sphere with fresh geometry; the
+hover assertions retain that coordinate and the unchanged-scene check.
+
 Run the scene-state C++ comparison with:
 
 ```sh
