@@ -26,8 +26,12 @@ impl GuiApplication {
             );
         }
         self.density_panel.rects.clear();
+        self.symmetry_panel.rects.clear();
         if self.show_workspace {
             self.tritium_sidebar(ctx, camera);
+        }
+        for (tool, args) in self.symmetry_panel.dialog(ctx, &self.state) {
+            self.tritium_command(tool, args, camera);
         }
         if self.density_panel.rects.is_empty() {
             for (tool, args) in self.density_panel.cancel() {

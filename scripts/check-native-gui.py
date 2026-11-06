@@ -147,6 +147,7 @@ def main():
     parser.add_argument('--current-features-only', action='store_true')
     parser.add_argument('--inspector-preview-only', action='store_true')
     parser.add_argument('--animation-timeline-only', action='store_true')
+    parser.add_argument('--symmetry-only', action='store_true')
     args = parser.parse_args()
     binary, work = args.binary.resolve(), args.out.resolve()
     work.mkdir(parents=True, exist_ok=True)
@@ -168,6 +169,9 @@ def main():
     if args.animation_timeline_only:
         with (config / 'config.tsv').open('a') as stream:
             stream.write('bottom_panel:tab\tanimation\nbottom_panel:visible\ttrue\nbottom_panel:height\t300\n')
+    if args.symmetry_only:
+        with (config / 'config.tsv').open('a') as stream:
+            stream.write('layout:activity\tcrystal\n')
     env = {key: value for key, value in os.environ.items() if not key.startswith('CUEMOL_')}
     env.update(CUEMOL_CONFIG_DIR=str(config), CUEMOL_CACHE_DIR=str(work / 'cache'))
 
@@ -235,6 +239,49 @@ def main():
             def input_focused(box):
                 pixels = capture().crop(box).getdata()
                 return sum(b - r > 30 and g - r > 10 for r, g, b in pixels) > 100
+
+            if args.symmetry_only:
+                primary = 'command' if sys.platform == 'darwin' else 'ctrl'
+                object_id = state['objects'][0]['id']
+                call('set_symmetry', {'objId': object_id, 'a': 20, 'b': 30, 'c': 40,
+                                      'alpha': 90, 'beta': 90, 'gamma': 90, 'spaceGroup': 19})
+                call('set_view', {'center': [10, 15, 20], 'zoom': 80, 'distance': 200, 'slab': 100})
+                call('clear_undo')
+                view = call('get_view')
+
+                def renderers(kind):
+                    return [renderer for obj in call('get_scene_state')['objects'] if obj['id'] == object_id
+                            for renderer in obj['renderers'] if renderer['type'] == kind]
+
+                capture('symmetry-start.png')
+                click_at(x + 240, y + 231)
+                wait_for(lambda: len(renderers('*unitcell')) == 1)
+                click_at(x + 240, y + 231)
+                pyautogui.hotkey(primary, 'z')
+                wait_for(lambda: not renderers('*unitcell'))
+                before = capture().crop((300, 150, width - 30, height - 100))
+                click_at(x + 103, y + 231)
+                wait_for(lambda: ImageChops.difference(before, capture().crop((300, 150, width - 30, height - 100))).getbbox())
+                capture('symmetry-dialog.png')
+                pyautogui.press('escape')
+                pyautogui.hotkey(primary, 'shift', 'z')
+                wait_for(lambda: len(renderers('*unitcell')) == 1)
+                click_at(x + 172, y + 231)
+                time.sleep(0.2)
+                capture('symmetry-extents.png')
+                pyautogui.click(x + 172, y + 285)
+                wait_for(lambda: len(renderers('*symm')) == 1)
+                renderer = renderers('*symm')[0]['id']
+                if call('get_prop', {'path': f'#{renderer}.extent'})['value'] != '50':
+                    raise RuntimeError('The symmetry menu did not select the 50 Å extent')
+                if call('get_view') != view:
+                    raise RuntimeError('The symmetry panel changed the camera')
+                capture('symmetry-final.png')
+                report.update(ok=True, symmetry_cell=True, symmetry_single_undo=True,
+                              symmetry_modal_cancel=True, symmetry_cancel_preserves_redo=True,
+                              symmetry_extent=50, symmetry_preserves_view=True)
+                print(json.dumps(report), flush=True)
+                return
 
             if args.animation_timeline_only:
                 primary = 'command' if sys.platform == 'darwin' else 'ctrl'

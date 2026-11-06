@@ -209,6 +209,24 @@ participate. Symmetry and other renderers without GPU hit names retain their
 CPU picking fallback. The GPU ID buffer uses half the viewport resolution;
 cached geometry and asynchronous readback avoid rebuilding it on pointer motion.
 
+### Crystal symmetry
+
+The Crystal activity's Symmetry pane selects a molecule or density map and
+shows its crystal system, space group and cell parameters. Change opens the
+molecule's crystal editor; a molecule without crystal data first asks to create
+it. New cells start at 1 Å with right angles. Restrict by symmetry derives the
+dependent cell parameters from the selected crystal system and space group.
+Turning the restriction off restores the unconstrained input values.
+Cancel leaves the molecule unchanged, and accepting an unchanged edit keeps
+redo history. Switching scenes or removing the target closes the shared editor.
+
+Symm mol displays neighboring molecules within 20, 50, 100 or 200 Å of the view
+center, or packs the home unit cell. Finite extents follow later view-center
+changes. Unit cell adds the cell box for either a molecule or map and reuses an
+existing cell renderer. These actions preserve the camera. Maps expose the
+readout and Unit cell action; molecular symmetry edits remain disabled for maps.
+The native and browser frontends share the pane and editor.
+
 ### Density maps and volumes
 
 CCP4/MRC density maps support header inspection, strict grid subsampling and

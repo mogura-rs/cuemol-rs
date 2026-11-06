@@ -83,7 +83,7 @@ pub fn call_tool(
             Ok(json!({"objectId":args["objId"]}))
         }
         "show_unit_cell" => {
-            Ok(json!({"rendererId":state.show_molecule_unit_cell(uid(args,"objId")?)?.get()}))
+            Ok(json!({"rendererId":state.show_object_unit_cell(uid(args,"objId")?)?.get()}))
         }
         "show_symmetry" => {
             let id = uid(args, "objId")?;

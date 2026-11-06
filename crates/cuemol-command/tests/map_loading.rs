@@ -40,6 +40,66 @@ fn initial_state() -> (DesktopAppState, Camera) {
 }
 
 #[test]
+fn symmetry_unit_cell_supports_maps_and_reuses_the_existing_renderer() {
+    let (mut state, mut camera) = initial_state();
+    let before = camera.clone();
+    let plan = prepare_fetch("fetch_url", &json!({"url":"https://example.test/map", "reader":"ccp4map", "mapCenterPolicy":"setMapCenter"})).unwrap();
+    load_fetched(&mut state, &mut camera, &plan, &map_bytes(false)).unwrap();
+    let map = state.active_density_map_summaries()[0].uid;
+    let first = call_tool(
+        &mut state,
+        &mut camera,
+        "show_unit_cell",
+        &json!({"objId":map.get()}),
+    )
+    .unwrap();
+    let saved = state.clone();
+    let second = call_tool(
+        &mut state,
+        &mut camera,
+        "show_unit_cell",
+        &json!({"objId":map.get()}),
+    )
+    .unwrap();
+    assert_eq!(first, second);
+    assert!(saved.same_undo_state(&state));
+    assert_eq!(camera, before);
+    assert_eq!(
+        state
+            .density_map_summary(map)
+            .unwrap()
+            .renderers
+            .iter()
+            .filter(|renderer| renderer.renderer_type == "*unitcell")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn symmetry_rejects_zero_cell_angles_without_replacing_existing_crystal_data() {
+    let (mut state, mut camera) = initial_state();
+    let scene = state.active_scene().unwrap();
+    let object = state
+        .scene_manager_mut()
+        .scene_mut(scene)
+        .unwrap()
+        .add_molecule("cell", Default::default());
+    let args = json!({"objId":object.get(),"a":20.,"b":30.,"c":40.,"alpha":90.,"beta":90.,"gamma":90.,"spaceGroup":19});
+    call_tool(&mut state, &mut camera, "set_symmetry", &args).unwrap();
+    for key in ["alpha", "beta", "gamma"] {
+        let before = state.clone();
+        let mut invalid = args.clone();
+        invalid[key] = json!(0.);
+        assert!(
+            call_tool(&mut state, &mut camera, "set_symmetry", &invalid).is_err(),
+            "zero {key} was accepted"
+        );
+        assert!(before.same_undo_state(&state));
+    }
+}
+
+#[test]
 fn local_map_center_policy_preserves_view_and_centers_renderer() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("density.map");

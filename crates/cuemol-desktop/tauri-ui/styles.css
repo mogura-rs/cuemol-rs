@@ -1516,13 +1516,14 @@ body.resizing-side-panel-height {
 
 .symmetry-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
 }
 
 .symmetry-actions > button,
 .symmetry-menu {
   min-width: 0;
-  flex: 1 1 0;
+  flex: 1 1 70px;
 }
 
 .symmetry-actions > button,
@@ -1536,10 +1537,12 @@ body.resizing-side-panel-height {
   color: var(--text-primary);
   font: inherit;
   text-align: center;
+  white-space: nowrap;
 }
 
 .symmetry-menu {
   position: relative;
+  flex-grow: 1.15;
 }
 
 .symmetry-menu > summary {

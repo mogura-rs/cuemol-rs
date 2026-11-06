@@ -7110,6 +7110,32 @@ impl DesktopAppState {
         })
     }
 
+    /// Find or create a unit-cell renderer for a molecule or density map.
+    pub fn show_object_unit_cell(&mut self, object_uid: Uid) -> Result<Uid> {
+        if self.scene_manager().object(object_uid).is_some() {
+            return self.show_molecule_unit_cell(object_uid);
+        }
+        let cell = self
+            .density_crystal_summary(object_uid)
+            .ok_or_else(|| CueMolError::not_found("crystallographic object"))?;
+        if ![cell.a, cell.b, cell.c]
+            .into_iter()
+            .all(|value| value.is_finite() && value >= 0.1)
+        {
+            return Err(CueMolError::invalid_argument(
+                "the crystal cell dimensions are too small",
+            ));
+        }
+        if let Some(renderer) = self.density_map_summary(object_uid).and_then(|map| {
+            map.renderers.into_iter().find(|renderer| {
+                matches!(renderer.renderer_type.as_str(), "*unitcell" | "unitcell")
+            })
+        }) {
+            return Ok(renderer.uid);
+        }
+        self.add_density_renderer(object_uid, "*unitcell")
+    }
+
     /// Find or create CueMol2's internal unit-cell renderer for a molecule.
     pub fn show_molecule_unit_cell(&mut self, object_uid: Uid) -> Result<Uid> {
         let cell = self.crystal_summary(object_uid).ok_or_else(|| {
@@ -7283,9 +7309,12 @@ impl DesktopAppState {
             || a <= 0.0
             || b <= 0.0
             || c <= 0.0
-            || !(0.0..180.0).contains(&alpha)
-            || !(0.0..180.0).contains(&beta)
-            || !(0.0..180.0).contains(&gamma)
+            || alpha <= 0.0
+            || alpha >= 180.0
+            || beta <= 0.0
+            || beta >= 180.0
+            || gamma <= 0.0
+            || gamma >= 180.0
         {
             return Err(CueMolError::invalid_argument(
                 "crystal cell dimensions or angles are invalid",

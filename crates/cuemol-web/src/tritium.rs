@@ -186,7 +186,12 @@ impl App {
             }
         }
         self.density_panel.rects.clear();
+        self.symmetry_panel.rects.clear();
         self.shell_sidebar(ctx);
+        for (tool, args) in self.symmetry_panel.dialog(ctx, &self.state) {
+            self.call(tool, args);
+        }
+        self.ui_rects.extend(self.symmetry_panel.rects.clone());
         if self.density_panel.rects.is_empty() {
             for (tool, args) in self.density_panel.cancel() {
                 self.call(tool, args);
@@ -819,16 +824,13 @@ impl App {
                                         Activity::View => self.camera_list(ui),
                                         Activity::Selection => self.structure_tree(ui),
                                         Activity::Crystal => {
-                                            self.object_picker(ui);
-                                            for (label, tool) in [
-                                                ("Symmetry settings…", "set_symmetry"),
-                                                ("Show symmetry mates…", "show_symmetry"),
-                                            ] {
-                                                let button = ui.button(label);
-                                                self.record_ui_rect(label, &button);
-                                                if button.clicked() {
-                                                    self.select_tool(tool);
-                                                }
+                                            let changes = self.symmetry_panel.show(
+                                                ui,
+                                                &self.state,
+                                                self.selected,
+                                            );
+                                            for (tool, args) in changes {
+                                                self.call(tool, args);
                                             }
                                         }
                                         Activity::Actions => {

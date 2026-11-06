@@ -11936,19 +11936,7 @@ fn handle_model_request(
                 return Ok(ModelResponse::Snapshot(Box::new(model.snapshot())));
             }
             let undo = model.capture_undo();
-            match target_kind.as_str() {
-                "molecule" => model
-                    .desktop
-                    .show_molecule_unit_cell(object_uid)
-                    .map(|_| ())
-                    .map_err(|error| error.to_string())?,
-                "density" => model
-                    .desktop
-                    .add_density_renderer(object_uid, "*unitcell")
-                    .map(|_| ())
-                    .map_err(|error| error.to_string())?,
-                _ => unreachable!("the target kind was validated above"),
-            }
+            model.desktop.show_object_unit_cell(object_uid).map_err(|error| error.to_string())?;
             model.desktop.mark_scene_modified(scene_uid);
             model.status = "Unit cell shown".to_string();
             model.invalidate_snapshot(false);

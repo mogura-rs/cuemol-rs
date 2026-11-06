@@ -50,6 +50,7 @@ async function openShell(page, storage = {}, options = {}) {
       const densityRenderer={...renderer,uid:11,name:'Contour',rendererType:'contour',specific};
       snapshot.densityMaps=[{uid:10,sceneUid:1,name:'Density',source:'density.dx',sourceType:'dx',className:'ElePotMap',uiOrder:1,uiCollapsed:false,visible:true,locked:false,counts:[9,9,9],starts:[0,0,0],intervals:[9,9,9],origin:[0,0,0],spacing:[1,1,1],minimum:0,maximum:1,mean:0.1,rmsd:0.16,renderers:[densityRenderer,{...densityRenderer,uid:12,name:'Other',specific:{...specific},alpha:0.5}]}];
     }
+    if(options.symmetry && snapshot.densityMaps[0])snapshot.densityMaps[0].crystal={objectUid:10,a:8,b:8,c:8,alpha:90,beta:90,gamma:90,lattice:'TRICLINIC',spaceGroupName:'P 1',spaceGroupNumber:1};
     if(options.brokenAnimation) {
       snapshot.animationResolveError='"child" is relative to "missing", which does not exist';
       snapshot.animationObjects=[{uid:20,index:0,relativeStart:0,timeRefName:'missing',disabled:false,quadric:0,name:'child',typeName:'NoopAnimObj',start:0,end:1,duration:1,resolveError:snapshot.animationResolveError}];
@@ -164,6 +165,16 @@ async function openShell(page, storage = {}, options = {}) {
         if (args.action === 'zoom') viewport.zoom *= args.x;
         return {...viewport, width: args.width, height: args.height};
       }
+      if(options.symmetry && command==='get_space_groups') {
+        if(options.symmetryDelayed && args.lattice==='MONOCLINIC')await new Promise(resolve=>window.__releaseSpaceGroups=resolve);
+        return JSON.stringify(({TRICLINIC:[{id:1,cname:'P 1'}],MONOCLINIC:[{id:3,cname:'P 2'}],CUBIC:[{id:195,cname:'P 2 3'}],HEXAGONAL:[{id:168,cname:'P 6'}],TRIGONAL:[{id:146,cname:'R 3'}]})[args.lattice]||[]);
+      }
+      if(options.symmetry && command==='change_crystal_info') {
+        const crystal={...args,lattice:args.spaceGroupNumber===195?'CUBIC':'TRICLINIC',spaceGroupName:args.spaceGroupNumber===195?'P 2 3':'P 1'};
+        snapshot.crystals=snapshot.crystals.filter(item=>item.objectUid!==args.objectUid);snapshot.crystals.push(crystal);
+        snapshot.canUndo=true;return structuredClone(snapshot);
+      }
+      if(options.symmetry && command==='show_symmetry_molecules')return structuredClone(snapshot);
       if (command === 'pick_atom' || command === 'select_screen_rect') return {snapshot, viewport};
       if (command === 'hover_at_screen') return {...viewport, image: null};
       if (command === 'get_molecule_details') return {structureKey: 'initial', sequenceKey: snapshot.sequenceKey, structureObjectUid: 3, structure: [], sequence, sequenceLayout};
@@ -1835,5 +1846,68 @@ test('Tauri animation resets only declared defaults and keeps generic field type
   await expect(page.getByLabel('Animation property rend',{exact:true})).toHaveValue('target');
   await page.evaluate(async()=>{snapshot=await invoke('undo',{index:0});renderShell();});
   await expect(quadric).toHaveValue('0.2');await expect(reset).toBeEnabled();
+  expect(errors).toEqual([]);
+});
+
+test('Tauri symmetry uses reference cell defaults, constraints and unchanged-edit handling',async({page},testInfo)=>{
+  const errors=await openShell(page,{}, {symmetry:true,density:'xtal'});
+  await page.getByRole('button',{name:'Crystal',exact:true}).click();
+  const pane=page.locator('#symmetry-content');
+  const toggle=page.locator('[data-panel-name="Symmetry"] [data-panel-toggle]');
+  await expect(toggle).toHaveAttribute('aria-expanded','true');
+  await toggle.click();await expect(pane).not.toBeVisible();
+  await toggle.click();await expect(pane).toBeVisible();
+  expect((await pane.locator('summary').boundingBox()).height).toBeLessThanOrEqual(26);
+  await expect(pane.getByRole('button',{name:'Unit cell',exact:true})).toBeDisabled();
+  await pane.getByRole('button',{name:'Change ...',exact:true}).click();
+  await page.getByRole('button',{name:'OK',exact:true}).click();
+  const dialog=page.locator('#reference-dialog');
+  await expect(dialog.getByLabel('a (Å)',{exact:true})).toHaveValue('1');
+  await dialog.getByLabel('a (Å)',{exact:true}).fill('42');
+  await dialog.getByLabel('b (Å)',{exact:true}).fill('25');
+  await dialog.getByLabel('Crystal system',{exact:true}).selectOption('CUBIC');
+  await expect(dialog.getByLabel('Space Group Number',{exact:true})).toHaveValue('195');
+  await dialog.getByLabel('Restrict by symmetry',{exact:true}).check();
+  await expect(dialog.getByLabel('b (Å)',{exact:true})).toHaveValue('42');
+  await expect(dialog.getByLabel('c (Å)',{exact:true})).toBeDisabled();
+  await dialog.getByLabel('Restrict by symmetry',{exact:true}).uncheck();
+  await expect(dialog.getByLabel('b (Å)',{exact:true})).toHaveValue('25');
+  await dialog.getByLabel('Restrict by symmetry',{exact:true}).check();
+  await dialog.getByRole('button',{name:'OK',exact:true}).click();
+  await expect(dialog).not.toBeVisible();
+  const writes=()=>page.evaluate(()=>window.__shellCalls.filter(item=>item.command==='change_crystal_info'));
+  expect((await writes()).map(item=>item.args)).toEqual([{objectUid:3,a:42,b:42,c:42,alpha:90,beta:90,gamma:90,spaceGroupNumber:195}]);
+  await expect(pane).toContainText('Cubic');
+  await pane.getByRole('button',{name:'Change ...',exact:true}).click();
+  await dialog.getByRole('button',{name:'OK',exact:true}).click();
+  expect(await writes()).toHaveLength(1);
+  await pane.locator('summary').click();
+  await pane.getByRole('button',{name:'50 Å',exact:true}).click();
+  expect(await page.evaluate(()=>window.__shellCalls.find(item=>item.command==='show_symmetry_molecules').args)).toEqual({objectUid:3,extent:50});
+  await pane.locator('.symmetry-target').selectOption('density:10');
+  await expect(pane.getByRole('button',{name:'Change ...',exact:true})).toBeDisabled();
+  await expect(pane.locator('summary')).toHaveAttribute('aria-disabled','true');
+  await expect(pane.getByRole('button',{name:'Unit cell',exact:true})).toBeEnabled();
+  await pane.getByRole('button',{name:'Unit cell',exact:true}).click();
+  expect(await page.evaluate(()=>window.__shellCalls.filter(item=>item.command==='show_unit_cell').at(-1).args)).toEqual({targetKind:'density',objectUid:10});
+  await page.screenshot({path:testInfo.outputPath('tauri-symmetry.png')});
+  expect(errors).toEqual([]);
+});
+
+test('Tauri symmetry ignores stale space-group responses',async({page})=>{
+  const errors=await openShell(page,{}, {symmetry:true,symmetryDelayed:true});
+  await page.getByRole('button',{name:'Crystal',exact:true}).click();
+  await page.locator('#symmetry-content').getByRole('button',{name:'Change ...',exact:true}).click();
+  await page.getByRole('button',{name:'OK',exact:true}).click();
+  const dialog=page.locator('#reference-dialog');
+  const lattice=dialog.getByLabel('Crystal system',{exact:true});
+  await lattice.selectOption('MONOCLINIC');
+  await expect.poll(()=>page.evaluate(()=>typeof window.__releaseSpaceGroups)).toBe('function');
+  await lattice.selectOption('CUBIC');
+  await expect(dialog.getByLabel('Space Group Number',{exact:true})).toHaveValue('195');
+  await page.evaluate(()=>window.__releaseSpaceGroups());
+  await expect(dialog.getByLabel('Space Group Number',{exact:true})).toHaveValue('195');
+  await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
+  expect(await page.evaluate(()=>window.__shellCalls.filter(item=>item.command==='change_crystal_info'))).toEqual([]);
   expect(errors).toEqual([]);
 });

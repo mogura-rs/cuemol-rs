@@ -1,5 +1,42 @@
 # Validation evidence
 
+## Shared crystal-symmetry controls
+
+The browser's former command shortcuts now use the same Symmetry pane and cell
+editor as the native window. Molecule/map selection, fixed-decimal crystal
+readouts, the extent menu and unit-cell action follow the current reference.
+The editor applies all seven crystal-system restrictions, including the
+rhombohedral case, and uses the current reference's 1 Å initial cell. Scene
+changes and target removal discard its draft. Unchanged acceptance and Cancel
+do not add undo entries or discard redo.
+
+The shared unit-cell command now accepts density maps as its existing catalog
+description promised; previously its implementation only accepted molecules.
+Repeated calls reuse the renderer without changing the scene or camera. A
+separate reproducer showed that zero cell angles were accepted. They now fail
+before replacing crystal data, consistent with the editor's positive-angle
+validation. Tauri's cell editor also rejects stale space-group responses,
+retains the selected scene/object, provides Cancel, and skips unchanged edits.
+Dialog selects now have explicit accessible names.
+Focused reproducers also showed that applying a lattice restriction overwrote
+the unconstrained draft. The editors now derive the displayed values separately,
+so turning the restriction off restores the original inputs before acceptance.
+The Symmetry panel's initial disclosure state and single-line action labels
+also match its visible contents.
+
+The shared UI passed four focused checks, including actual mouse events through
+creation, cancellation and renderer actions. All nine map-command checks passed,
+including map unit-cell reuse and zero-angle rollback. The native GUI suite
+passed 197 checks; the new shared-panel interaction check proves that repeated
+cell display is one undo entry and an unchanged modal edit retains redo. The
+macOS Tauri model passed 172 checks with five optional cases ignored. All 53
+Tauri shell checks passed, including delayed space-group replies. WebGL and
+WebGPU passed all four new symmetry cases and both adjacent density-pane cases.
+The Linux OS-input probe passed unit-cell creation/reuse, one-step undo, modal
+cancellation preserving redo, the 50 Å extent menu and camera preservation.
+Native, browser and Tauri screenshots were inspected. The affected crystal
+summary regression also ran against the reference fixture and passed.
+
 ## Animation property metadata and reset state
 
 The animation model now retains declared defaults separately from explicit
