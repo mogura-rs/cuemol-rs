@@ -348,7 +348,8 @@ Python libraries are not bundled. Native `povrender.PovRender` supports still
 images, animation frames, transparent-layer blending and the reference render
 options. The legacy `povrender.render(scene, output, ...)` function is also
 available. Both use `cuemol tools render-pov` and the packaged POV-Ray executable;
-no Python image library is required. A failed render leaves an existing output
+no Python image library is required. Pixel-label export uses the GUI-enabled
+native build shipped in releases. A failed render leaves an existing output
 file intact. For example, run the following through `PythonBridge`:
 
 ```python

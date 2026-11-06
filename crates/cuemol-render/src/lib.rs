@@ -229,6 +229,7 @@ pub struct RenderTransparencyGroup {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PovPixelImage {
     position: Vector4,
+    corners: Option<[Vector4; 4]>,
     color: [u8; 4],
     pixels: PixelBuffer,
 }
@@ -237,9 +238,15 @@ impl PovPixelImage {
     pub fn new(position: Vector4, color: [u8; 4], pixels: PixelBuffer) -> Self {
         Self {
             position,
+            corners: None,
             color,
             pixels,
         }
+    }
+
+    pub fn with_corners(mut self, corners: [Vector4; 4]) -> Self {
+        self.corners = Some(corners);
+        self
     }
 
     pub fn position(&self) -> Vector4 {
@@ -1968,30 +1975,44 @@ fn append_pov_pixel_mesh(output: &mut String, image: &PovPixelImage, path: &str)
     let position = image.position;
     output.push_str("\n// Pixel image\nmesh2 {\n");
     output.push_str("  vertex_vectors { 4,\n");
-    writeln!(
-        output,
-        "    <{:.6},{:.6},{:.6}>,",
-        position.x, position.y, position.z
-    )
-    .unwrap();
-    writeln!(
-        output,
-        "    <{:.6},{:.6},{:.6}> + _camera_right*{width}*_zoomx/image_width,",
-        position.x, position.y, position.z
-    )
-    .unwrap();
-    writeln!(
+    if let Some(corners) = &image.corners {
+        for (index, point) in corners.iter().enumerate() {
+            writeln!(
+                output,
+                "    <{:.8},{:.8},{:.8}>{}",
+                point.x,
+                point.y,
+                point.z,
+                if index == 3 { "" } else { "," }
+            )
+            .unwrap();
+        }
+    } else {
+        writeln!(
+            output,
+            "    <{:.6},{:.6},{:.6}>,",
+            position.x, position.y, position.z
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "    <{:.6},{:.6},{:.6}> + _camera_right*{width}*_zoomx/image_width,",
+            position.x, position.y, position.z
+        )
+        .unwrap();
+        writeln!(
         output,
         "    <{:.6},{:.6},{:.6}> + (_camera_right*{width} + _camera_up*{height})*_zoomx/image_width,",
         position.x, position.y, position.z
     )
     .unwrap();
-    writeln!(
-        output,
-        "    <{:.6},{:.6},{:.6}> + _camera_up*{height}*_zoomx/image_width",
-        position.x, position.y, position.z
-    )
-    .unwrap();
+        writeln!(
+            output,
+            "    <{:.6},{:.6},{:.6}> + _camera_up*{height}*_zoomx/image_width",
+            position.x, position.y, position.z
+        )
+        .unwrap();
+    }
     output.push_str("  }\n");
     output.push_str("  uv_vectors { 4, <0,0>, <1,0>, <1,1>, <0,1> }\n");
     output.push_str("  texture_list { 1, texture {\n");

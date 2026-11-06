@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Read;
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -449,21 +449,25 @@ fn run_single_pov_process_with_poll(
 
 fn read_post_blend_groups(path: &Path) -> Result<Vec<u8>, String> {
     const PREFIX: &str = "// CueMol post-blend groups:";
-    let source = fs::read_to_string(path)
+    let file = fs::File::open(path)
         .map_err(|error| format!("failed to read POV-Ray input {}: {error}", path.display()))?;
-    let Some(line) = source.lines().find(|line| line.starts_with(PREFIX)) else {
-        return Ok(Vec::new());
-    };
-    line[PREFIX.len()..]
-        .split_whitespace()
-        .map(|value| {
-            value
-                .parse::<u8>()
-                .ok()
-                .filter(|value| *value < 10)
-                .ok_or_else(|| format!("invalid POV-Ray post-blend group: {value}"))
-        })
-        .collect()
+    for line in BufReader::new(file).lines() {
+        let line = line.map_err(|error| error.to_string())?;
+        let Some(groups) = line.strip_prefix(PREFIX) else {
+            continue;
+        };
+        return groups
+            .split_whitespace()
+            .map(|value| {
+                value
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|value| *value < 10)
+                    .ok_or_else(|| format!("invalid POV-Ray post-blend group: {value}"))
+            })
+            .collect();
+    }
+    Ok(Vec::new())
 }
 
 fn pov_pass_path(output_path: &Path, suffix: &str) -> PathBuf {
@@ -475,6 +479,87 @@ fn pov_pass_path(output_path: &Path, suffix: &str) -> PathBuf {
 }
 
 fn blend_pov_passes(
+    background_path: &Path,
+    layers: &[(&Path, f64)],
+    output_path: &Path,
+) -> Result<(), String> {
+    let read = |path: &Path| {
+        let file = fs::File::open(path).map_err(|error| error.to_string())?;
+        png::Decoder::new(BufReader::new(file))
+            .read_info()
+            .map_err(|error| format!("failed to read POV-Ray image {}: {error}", path.display()))
+    };
+    let mut background = read(background_path)?;
+    let mut readers = layers
+        .iter()
+        .map(|(path, _)| read(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let info = background.info();
+    let dimensions = (info.width, info.height);
+    let color = info.color_type;
+    if info.bit_depth != png::BitDepth::Eight
+        || !matches!(color, png::ColorType::Rgb | png::ColorType::Rgba)
+    {
+        return Err("POV-Ray post-blend requires an 8-bit RGB or RGBA image".into());
+    }
+    for reader in &readers {
+        let layer = reader.info();
+        if (layer.width, layer.height) != dimensions
+            || layer.color_type != color
+            || layer.bit_depth != png::BitDepth::Eight
+        {
+            return Err("POV-Ray post-blend layer does not match the background".into());
+        }
+    }
+    if info.interlaced || readers.iter().any(|reader| reader.info().interlaced) {
+        return blend_pov_passes_buffered(background_path, layers, output_path);
+    }
+    let file = fs::File::create(output_path).map_err(|error| error.to_string())?;
+    let mut encoder = png::Encoder::new(BufWriter::new(file), dimensions.0, dimensions.1);
+    encoder.set_color(color);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_compression(png::Compression::Fast);
+    encoder.set_adaptive_filter(png::AdaptiveFilterType::Adaptive);
+    let mut writer = encoder.write_header().map_err(|error| error.to_string())?;
+    let mut stream = writer.stream_writer().map_err(|error| error.to_string())?;
+    let row_size = background.output_line_size(dimensions.0);
+    let mut accumulated = vec![0.0; row_size];
+    let mut output = vec![0; row_size];
+    let background_weight = 1.0 - layers.iter().map(|(_, alpha)| alpha).sum::<f64>();
+    for _ in 0..dimensions.1 {
+        let row = background
+            .next_row()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "POV-Ray background is missing a row".to_string())?;
+        for (value, byte) in accumulated.iter_mut().zip(row.data()) {
+            *value = f64::from(*byte) * background_weight;
+        }
+        for (reader, (_, alpha)) in readers.iter_mut().zip(layers) {
+            let row = reader
+                .next_row()
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "POV-Ray layer is missing a row".to_string())?;
+            for (value, byte) in accumulated.iter_mut().zip(row.data()) {
+                *value += f64::from(*byte) * alpha;
+            }
+        }
+        for (value, output) in accumulated.iter().zip(&mut output) {
+            *output = value.clamp(0.0, 255.0) as u8;
+        }
+        stream
+            .write_all(&output)
+            .map_err(|error| error.to_string())?;
+    }
+    background.finish().map_err(|error| error.to_string())?;
+    for reader in &mut readers {
+        reader.finish().map_err(|error| error.to_string())?;
+    }
+    stream.finish().map_err(|error| error.to_string())?;
+    writer.finish().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn blend_pov_passes_buffered(
     background_path: &Path,
     layers: &[(&Path, f64)],
     output_path: &Path,
@@ -581,6 +666,59 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
+
+    #[test]
+    fn png_blending_preserves_rgb_rgba_rows_and_interlaced_input() {
+        let directory = tempfile::tempdir().unwrap();
+        let background = directory.path().join("background.png");
+        let layer = directory.path().join("layer.png");
+        let output = directory.path().join("output.png");
+        let write = |path: &Path, pixels: &[u8], size, color, interlaced| {
+            let mut info = png::Info::with_size(size, size);
+            info.bit_depth = png::BitDepth::Eight;
+            info.color_type = color;
+            info.interlaced = interlaced;
+            let mut writer = png::Encoder::with_info(fs::File::create(path).unwrap(), info)
+                .unwrap()
+                .write_header()
+                .unwrap();
+            writer.write_image_data(pixels).unwrap();
+            writer.finish().unwrap();
+        };
+        for (color, back, front, expected) in [
+            (
+                png::ColorType::Rgb,
+                vec![100, 100, 100, 0, 0, 0, 255, 255, 255, 10, 20, 30],
+                vec![200, 40, 100, 50, 100, 200, 0, 0, 0, 20, 10, 0],
+                vec![150, 70, 100, 25, 50, 100, 127, 127, 127, 15, 15, 15],
+            ),
+            (
+                png::ColorType::Rgba,
+                vec![
+                    100, 100, 100, 255, 0, 0, 0, 255, 255, 255, 255, 255, 10, 20, 30, 255,
+                ],
+                vec![200, 40, 100, 0, 50, 100, 200, 0, 0, 0, 0, 0, 20, 10, 0, 0],
+                vec![
+                    150, 70, 100, 127, 25, 50, 100, 127, 127, 127, 127, 127, 15, 15, 15, 127,
+                ],
+            ),
+        ] {
+            write(&background, &back, 2, color, false);
+            write(&layer, &front, 2, color, false);
+            blend_pov_passes(&background, &[(&layer, 0.5)], &output).unwrap();
+            assert_eq!(image::open(&output).unwrap().as_bytes(), expected);
+            let components = color.samples();
+            write(&background, &back[..components], 1, color, true);
+            write(&layer, &front[..components], 1, color, true);
+            blend_pov_passes(&background, &[(&layer, 0.5)], &output).unwrap();
+            assert_eq!(
+                image::open(&output).unwrap().as_bytes(),
+                &expected[..components]
+            );
+            write(&layer, &front, 2, color, false);
+            assert!(blend_pov_passes(&background, &[(&layer, 0.5)], &output).is_err());
+        }
+    }
 
     #[test]
     fn file_render_preserves_existing_output_on_failure_and_drains_large_logs() {

@@ -1,6 +1,71 @@
 # Validation evidence
 
 
+## POV-Ray pixel labels and bounded PNG composition
+
+Following dd06fd4, a live render reproduced missing name labels when a Python
+script enabled usePixImgs. The script exporter had not supplied the pixel images.
+It now collects live lightweight-object images and, in GUI-enabled builds, name
+and measurement labels. Font, color, alignment, displacement and camera settings
+come from the shared scene. Explicit world-space corners keep each label's pixel
+size in orthographic and perspective views. Disabling usePixImgs clears the
+exporter's image list. Both Linux and macOS script regressions pass.
+
+The real bundled renderer now passes name-label and distance-label checks,
+transparent-layer composition and changing animation frames. These assertions
+compare decoded pixels; PNG metadata alone cannot satisfy them. The generated
+label images were also inspected. The macOS Tauri model suite passed 167 tests
+with five optional checks ignored; the native Linux GUI suite passed 189.
+WASM compilation also passed. GUI-enabled release binaries include label
+rasterization; a headless source build without the offscreen feature does not.
+
+The Rust post-blend compositor now reads and writes non-interlaced RGB8/RGBA8
+PNGs one row at a time. The existing buffered path remains for interlaced input.
+The tests cover multiple rows, RGB/RGBA, Adam7 input, dimension mismatch, process
+failure, truncated output and cancellation. Post-blend metadata is scanned with
+a buffered reader instead of allocating the full scene text.
+
+The following comparison uses three sequential fresh Linux debug processes per
+condition, 2048 by 2048 RGB images and four transparency layers. A fixture copies
+pre-generated PNGs in place of a ray tracer. Timings include native process
+startup, copied passes, composition, encoding and output validation; they exclude
+fixture generation and pixel-hash verification. Hash verification runs in a
+separate Python process so its allocations cannot inflate the next sample's
+process memory measurement.
+
+| Implementation | Median elapsed time | Median peak RSS |
+| --- | ---: | ---: |
+| Buffered PNG composition | 4721.75 ms | 112.00 MiB |
+| Row-based PNG composition | 4420.06 ms | 40.25 MiB |
+
+Every decoded output has the same SHA-256. This measures PNG composition rather
+than total molecular ray-tracing time. Reproduce the current condition with:
+
+```sh
+uv run --no-project python scripts/benchmark-pov-blending.py \
+  --binary target/debug/cuemol --output .cache/pov-blending.json
+```
+
+The shared render, core and command suites passed 646 tests, with one
+optional real-renderer test skipped in that aggregate run. The actual renderer
+was executed separately by the Python smoke check.
+
+## Apple-silicon stereo capability check
+
+On macOS 15.6 with an Apple M4 and a connected 3840 by 1600 display, accelerated
+double-buffered OpenGL pixel-format selection succeeded. Adding the stereo
+attribute returned CGL error 10000 and no formats. This setup therefore cannot
+validate quad-buffer presentation, whose backend remains unimplemented.
+
+The native binary produced normal, parallel and cross-eye 96 by 96 PNGs through
+the wgpu offscreen exporter. Normal and stereo images contained molecular
+shading, and the cross-eye image exactly exchanged the parallel image's two
+halves. This validates image generation, not window presentation or physical
+stereo output. Screen-capture and accessibility permissions were still denied
+to the remote test process; the user authorized granting them, but the OS grant
+had not yet taken effect.
+
+
 ## Native Python POV-Ray rendering
 
 The native Python bridge now embeds both the current povrender.PovRender class
@@ -32,8 +97,8 @@ Validation on the Linux development build:
 - Release verification now runs the helper smoke check against each platform's
   bundled renderer. This workflow change has not been executed remotely.
 
-These checks do not yet establish parity for script-exported name/measurement
-labels or every renderer setting. Earlier exclusions of the Python POV helper
+The follow-up pixel-label checks above cover name and measurement labels;
+these finite checks do not establish parity for every renderer setting. Earlier exclusions of the Python POV helper
 below describe historical scope; the current all-feature request includes it.
 
 Entries record successive checkpoints, so earlier test counts and distribution

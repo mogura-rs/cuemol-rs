@@ -110,6 +110,8 @@ pub mod effects;
 #[cfg(feature = "offscreen")]
 pub mod labels;
 mod memory_io;
+#[cfg(feature = "offscreen")]
+mod pov_labels;
 mod prepared_io;
 pub use prepared_io::PreparedFile;
 #[cfg(feature = "offscreen")]
@@ -29606,6 +29608,38 @@ impl DesktopAppState {
                         .unwrap_or_default()
                 }
             });
+            let pov_pixel_images = script_env::with(|env| -> Result<Vec<PovPixelImage>> {
+                let Some(ScriptNativeSceneExporter::Pov(exporter)) =
+                    env.native_scene_exporters.get(&id)
+                else {
+                    return Ok(Vec::new());
+                };
+                if !exporter.use_pix_imgs() {
+                    return Ok(Vec::new());
+                }
+                let app = env.live_app.as_ref().expect("script app is available");
+                let scene_id = Uid::new(scene_uid);
+                let scene = app
+                    .scene_manager()
+                    .scene(scene_id)
+                    .ok_or_else(|| CueMolError::NotFound("POV-Ray scene".into()))?;
+                #[allow(unused_mut)]
+                let mut images = pov_lw_pixel_images(scene, &app.scene_styles(scene))?;
+                #[cfg(feature = "offscreen")]
+                {
+                    let mut camera = camera.clone();
+                    camera.set_perspective(exporter.perspective());
+                    images.extend(crate::pov_labels::collect_images(
+                        app,
+                        scene_id,
+                        &camera,
+                        exporter.width().max(1) as u32,
+                        exporter.height().max(1) as u32,
+                    ));
+                }
+                Ok(images)
+            })
+            .map_err(|error| script_error(error.to_string()))?;
             let mut exporter = script_env::with_mut(|env| env.native_scene_exporters.remove(&id))
                 .ok_or_else(|| script_error("SceneExporter is not available"))?;
             let mesh = cuemol_render::tessellate_snapshot(&render_scene.snapshot);
@@ -29679,6 +29713,7 @@ impl DesktopAppState {
                     }
                 }
                 ScriptNativeSceneExporter::Pov(exporter) => {
+                    exporter.set_pixel_images(pov_pixel_images);
                     exporter.set_preamble(script_env::with(|env| {
                         env.styles.get_config("pov", "preamble", scene_uid)
                     }));

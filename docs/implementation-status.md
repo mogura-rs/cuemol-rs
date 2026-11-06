@@ -23,11 +23,11 @@ Tauri and WebGL/WebGPU checks. The current operation inventory is complete; newl
 | Molecular structures, maps, surfaces and editing | Readers, representations, map controls, selections, labels, measurements, editing and undo exist. Current QIF method/property coverage passes; the new selection and fit-box numerical oracles pass. Continue the remaining behavior audit. |
 | Console and scripting | CueMol, PyMOL, ChimeraX, JavaScript and persistent native Python exist. ChimeraX shares the command runtime, supports `.cxc` scripts and has 59 registered commands. Parser, palette and automatic-style comparisons and native, Tauri and WebGL/WebGPU execution checks pass. |
 | Unified command and MCP | `cuemol` owns GUI launch, scripts, MCP, tools, web builds, installation diagnostics and updates. All 129 current registrations, 127 MCP operations, 444 parameters and 159 console names/aliases pass the read-only inventory. Added focus/orientation, clipboard, scene encoding and EMDB behavior passes focused native and browser checks; broader behavior remains under audit. |
-| Native appearance and input | The current Linux OS-input suite passes, including the new ChimeraX console, camera-preserving history and multiple-object Zoom. Screenshots were inspected. Local macOS screen/input permissions remain unavailable; hardware and other-platform window checks still need current binaries. |
+| Native appearance and input | The current Linux OS-input suite passes, including the new ChimeraX console, camera-preserving history and multiple-object Zoom. Screenshots were inspected. On the authorized Apple-silicon host, normal and software-stereo wgpu images pass, including exact left/right eye exchange. OS screen/input permission grants remain pending; other-platform window checks still need current binaries. |
 | MD loading, seeking and playback | Indexed DCD, XTC, TRR, NetCDF and MDCRD are implemented. MDCRD decoding and shared frame application avoid intermediate copies; malformed frames and oversized averaging windows have regressions. Coordinate/RSS benchmarks, affected native tests, and rebuilt-browser File seeking, agent undo and multi-object trajectory export/reload pass. |
 | Performance and memory | Measure changed operations with identical inputs and output checks. Record at least three fresh-process samples; do not infer application-wide speedups from one stage. |
 | Bug fixes | Require a reproducer and relevant regression checks for confirmed defects. Keep failed operations transactional. |
-| Built-in rendering and external tools | Rust GI/NPR and bundled APBS, PDB2PQR, FFmpeg, POV-Ray, OIDN and numerical kernels exist. Current native tool checks pass. Python POV-Ray stills, post-blending, animation, Unicode/space paths and failure preservation also pass using the bundled renderer. |
+| Built-in rendering and external tools | Rust GI/NPR and bundled APBS, PDB2PQR, FFmpeg, POV-Ray, OIDN and numerical kernels exist. Current native tool checks pass. Python POV-Ray stills, name/measurement labels, post-blending, animation, Unicode/space paths and failure preservation pass using the bundled renderer. Non-interlaced PNG composition now uses bounded row buffers and passes pixel/RSS comparisons. |
 | Native binary and app distributions | Packaging for Linux x86-64/ARM64, macOS Intel/Apple silicon and Windows exists. Latest baseline Release build passed all five targets; it did not publish a new version. |
 | WASM and browser interaction | Parser worker, WebGPU/WebGL2 viewer and Pages deployment exist. Build and run relevant browser checks after shared behavior changes. |
 | Installer and self-upgrade | Raw GitHub installers, checksums, rollback and binary/app self-upgrade pass current Linux and macOS local-fixture checks. Current source changes have not been published as a release. |
@@ -37,6 +37,7 @@ Tauri and WebGL/WebGPU checks. The current operation inventory is complete; newl
 | Incremental commits | Commit coherent implementations after focused verification; preserve unrelated working-tree changes. |
 
 Hardware quad-buffer presentation remains unimplemented and needs a compatible
-OS, GPU and display for integration validation. Live third-party AI provider
+OS, GPU and display for integration validation. The authorized Apple M4/macOS
+setup rejects stereo pixel-format selection, although software stereo passes. Live third-party AI provider
 checks require credentials; loopback tests cover adapters without paid requests.
 These boundaries do not establish complete parity.

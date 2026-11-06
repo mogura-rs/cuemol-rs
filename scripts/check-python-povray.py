@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import runpy
+import shutil
 import subprocess
 import tempfile
 
@@ -13,9 +14,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', required=True, type=Path)
     parser.add_argument('--renderer-host', type=Path)
+    parser.add_argument('--out', type=Path)
     args = parser.parse_args()
     binary = args.binary.resolve()
-    png_colors = runpy.run_path(str(Path(__file__).with_name('check-povray.py')))['png_colors']
+    png_helpers = runpy.run_path(str(Path(__file__).with_name('check-povray.py')))
+    png_colors, png_pixels = png_helpers['png_colors'], png_helpers['png_pixels']
     with tempfile.TemporaryDirectory(prefix='cuemol-python-pov-check-') as directory:
         work = Path(directory)
         fixture = work / 'molecule.pdb'
@@ -32,6 +35,23 @@ molecule = cm.obj(json.loads(scene.getObjectTreeJSON())[0]['ID'])
 render = povrender.PovRender(96, 96, fps=2.0, use_fog=False)
 render.render_simple(scene, 'class output λ')
 povrender.render(scene, 'function output λ.png', width=96, height=96)
+labels = molecule.createRenderer('*namelabel')
+labels.setLabel(1, 'CueMol')
+labels.color = cm.col('#00ff00')
+labels.font_size = 12
+labels.dispy = 20
+labels.label_on_top = True
+povrender.PovRender(96, 96, use_pix_imgs=False).render_simple(scene, 'no labels')
+povrender.PovRender(96, 96, use_pix_imgs=True).render_simple(scene, 'with labels')
+labels.visible = False
+distance = molecule.createRenderer('atomintr')
+distance.appendById(1, molecule.uid, 2, False)
+distance.showlabel = True
+distance.label_on_top = True
+povrender.PovRender(96, 96, use_pix_imgs=False).render_simple(scene, 'no distance label')
+povrender.PovRender(96, 96, use_pix_imgs=True).render_simple(scene, 'distance label')
+distance.visible = False
+
 layer = molecule.createRenderer('cpk')
 layer.name = 'transparent'
 layer.defaultcolor = cm.col('#ff0000')
@@ -77,16 +97,24 @@ print('Python POV-Ray helpers completed')
             if response is None or response.get('error') or response.get('result', {}).get('isError'):
                 raise RuntimeError(f'Python POV-Ray request failed: {response}\n{result.stderr}')
         names = ['class output λ.png', 'function output λ.png', 'blended output λ.png',
-                 'animation output λ-0000.png', 'animation output λ-0001.png']
+                 'animation output λ-0000.png', 'animation output λ-0001.png', 'with labels.png']
         for name in names:
             count = png_colors(work / name)
             if count < 32:
                 raise RuntimeError(f'{name} has no molecular shading: {count} colors')
-        if (work / names[0]).read_bytes() == (work / names[2]).read_bytes():
+        if png_pixels(work / 'no labels.png') == png_pixels(work / 'with labels.png'):
+            raise RuntimeError('POV pixel labels are missing')
+        if png_pixels(work / 'no distance label.png') == png_pixels(work / 'distance label.png'):
+            raise RuntimeError('POV distance label is missing')
+        if png_pixels(work / names[0]) == png_pixels(work / names[2]):
             raise RuntimeError('post-blended renderer did not change the image')
-        if (work / names[3]).read_bytes() == (work / names[4]).read_bytes():
+        if png_pixels(work / names[3]) == png_pixels(work / names[4]):
             raise RuntimeError('animation frames did not change')
-        print('Python POV-Ray class/function, post-blending, animation, paths and failure preservation passed')
+        if args.out:
+            args.out.mkdir(parents=True, exist_ok=True)
+            for path in work.glob('*.png'):
+                shutil.copy2(path, args.out / path.name)
+        print('Python POV-Ray class/function, name/measurement labels, post-blending, animation, paths and failure preservation passed')
 
 
 if __name__ == '__main__':

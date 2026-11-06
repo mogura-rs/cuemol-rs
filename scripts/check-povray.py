@@ -9,12 +9,12 @@ import tempfile
 import zlib
 
 
-def png_colors(path):
+def png_pixels(path, expected_size=(96, 96)):
     data = path.read_bytes()
     if data[:8] != b'\x89PNG\r\n\x1a\n':
         raise ValueError('POV-Ray output is not a PNG')
     width, height, depth, color = struct.unpack('>IIBB', data[16:26])
-    if (width, height, depth) != (96, 96, 8) or color not in (2, 6):
+    if (width, height) != expected_size or depth != 8 or color not in (2, 6):
         raise ValueError('POV-Ray output has unexpected dimensions or format')
     compressed, offset = bytearray(), 8
     while offset < len(data):
@@ -23,7 +23,7 @@ def png_colors(path):
             compressed.extend(data[offset + 8:offset + 8 + size])
         offset += size + 12
     raw = zlib.decompress(compressed)
-    channels, colors = (3 if color == 2 else 4), set()
+    channels, pixels = (3 if color == 2 else 4), bytearray()
     stride = width * channels
     previous = bytearray(stride)
     for y in range(height):
@@ -36,9 +36,14 @@ def png_colors(path):
             predicted = left + above - diagonal
             paeth = min((left, above, diagonal), key=lambda value: abs(predicted - value))
             row[i] = (row[i] + (0, left, above, (left + above) // 2, paeth)[kind]) & 255
-        colors.update(bytes(row[i:i + channels]) for i in range(0, stride, channels))
+        pixels.extend(row)
         previous = row
-    return len(colors)
+    return width, height, channels, bytes(pixels)
+
+
+def png_colors(path):
+    _, _, channels, pixels = png_pixels(path)
+    return len({pixels[i:i + channels] for i in range(0, len(pixels), channels)})
 
 
 def main():
