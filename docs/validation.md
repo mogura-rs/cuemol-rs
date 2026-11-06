@@ -2785,3 +2785,24 @@ target heading to change before filtering Scene or View properties. A
 1.5-second delay reproduced editing the old object with the previous driver;
 the corrected driver passed the full window check with that delay and preserved
 the assertion that scene edits must not rename the selected molecule.
+
+
+## Combined node focus against the current reference
+
+`focus_nodes` frames the union of molecule selections and map cells in the
+current view axes. Object targets use every atom; renderer and group targets
+use their own selections. Invalid identifiers and nodes without fit boxes are
+skipped. A single remaining map uses the existing map fitting path, including
+its slab and distance behavior. The shared native console resolves a list of
+names, UID references and patterns once, preserves order and removes duplicates.
+Native, Tauri and browser tree selections invoke the same numerical operation.
+
+Validation includes four shared geometry/console regressions within 186 passing
+command crate tests, 24 native workspace tests and the Tauri workspace fit test.
+A browser interaction test selects multiple objects in the Tauri shell. Actual
+WebGL2 and WebGPU runs select a renderer and another transformed molecule, click
+Focus, and verify the camera center, zoom, slab and viewport aspect ratio. Both
+browser backends passed. The broader browser regression run passed all 69 tests
+covering navigation, clipboard, scene tabs, selections and the Tauri shell.
+Existing camera fit-box oracle coverage remains
+applicable to each box before the union.

@@ -4965,12 +4965,12 @@ impl DesktopAppState {
             .to_json())
     }
 
-    pub fn fit_molecule_view(
+    pub fn molecule_fit_box(
         &self,
         object_uid: Uid,
         renderer_uid: Option<Uid>,
-        view: &mut View,
-    ) -> Result<bool> {
+        view: &View,
+    ) -> Result<Option<(Vector4, Vector4)>> {
         let object = self
             .scene_manager()
             .object(object_uid)
@@ -4995,7 +4995,26 @@ impl DesktopAppState {
             .transpose()?;
         Ok(object
             .mol()
-            .fit_view_with_xform(view, selection.as_ref(), object.xform_matrix()))
+            .get_fit_box_with_xform(view, selection.as_ref(), object.xform_matrix()))
+    }
+
+    pub fn fit_molecule_view(
+        &self,
+        object_uid: Uid,
+        renderer_uid: Option<Uid>,
+        view: &mut View,
+    ) -> Result<bool> {
+        Ok(self
+            .molecule_fit_box(object_uid, renderer_uid, view)?
+            .is_some_and(|(min, max)| view.fit_to_box(min, max)))
+    }
+
+    pub fn density_map_fit_box(&self, map_uid: Uid, view: &View) -> Result<(Vector4, Vector4)> {
+        let map = self
+            .density_maps
+            .get(&map_uid)
+            .ok_or_else(|| CueMolError::NotFound(format!("density map {}", map_uid.get())))?;
+        Ok(map.map.get_fit_box_with_xform(view, map.xform))
     }
 
     pub fn set_molecule_selection_text(&mut self, object_uid: Uid, selection: &str) -> Result<()> {

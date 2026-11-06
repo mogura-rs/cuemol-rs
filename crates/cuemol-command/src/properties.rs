@@ -1,5 +1,5 @@
 use crate::{
-    commands::{fit, renderer_owner, scene, text, uid},
+    commands::{renderer_owner, scene, text, uid},
     console::resolve_property_reference,
     nodes,
 };
@@ -24,6 +24,77 @@ pub fn is_view_property_write(state: &DesktopAppState, name: &str, args: &Value)
     }
 }
 
+/// Fit scene nodes in the current view axes, skipping nodes without bounds.
+pub fn focus_nodes(state: &DesktopAppState, view: &mut View, ids: &[Uid]) -> Result<bool> {
+    let scene_id = scene(state)?;
+    let current = state
+        .scene_manager()
+        .scene(scene_id)
+        .ok_or_else(|| CueMolError::not_found("scene"))?;
+    let nodes = ids
+        .iter()
+        .filter_map(|&id| {
+            if current.object(id).is_some()
+                || current.loaded_surface(id).is_some()
+                || current.loaded_lw_object(id).is_some()
+                || state
+                    .density_map_summary(id)
+                    .is_some_and(|map| map.scene_uid == scene_id)
+            {
+                Some((id, None))
+            } else {
+                renderer_owner(state, id)
+                    .ok()
+                    .map(|owner| (owner, Some(id)))
+            }
+        })
+        .collect::<Vec<_>>();
+    if let [(object_id, renderer_id)] = nodes.as_slice() {
+        if current.object(*object_id).is_some() {
+            return state.fit_molecule_view(*object_id, *renderer_id, view);
+        }
+        if state.density_map_summary(*object_id).is_some() {
+            state.fit_density_map_view(*object_id, view)?;
+            return Ok(true);
+        }
+        return Ok(false);
+    }
+    let mut bounds: Option<(Vector4, Vector4)> = None;
+    for (object_id, renderer_id) in nodes {
+        let node_bounds = if current.object(object_id).is_some() {
+            state.molecule_fit_box(object_id, renderer_id, view)?
+        } else if state.density_map_summary(object_id).is_some() {
+            Some(state.density_map_fit_box(object_id, view)?)
+        } else {
+            None
+        };
+        let Some((min, max)) = node_bounds else {
+            continue;
+        };
+        bounds = Some(match bounds {
+            None => (min, max),
+            Some((lo, hi)) => (
+                Vector4::new3(lo.x.min(min.x), lo.y.min(min.y), lo.z.min(min.z)),
+                Vector4::new3(hi.x.max(max.x), hi.y.max(max.y), hi.z.max(max.z)),
+            ),
+        });
+    }
+    Ok(bounds.is_some_and(|(min, max)| view.fit_to_box(min, max)))
+}
+
+fn current_fit_view(state: &DesktopAppState, camera: &Camera) -> Result<View> {
+    let mut view = View::new(Uid::new(1), scene(state)?);
+    view.set_camera(camera);
+    let size = state
+        .active_view_summary()
+        .and_then(|summary| state.command_manager().view(summary.uid))
+        .map_or((800, 600), |active| {
+            (active.width().max(1), active.height().max(1))
+        });
+    view.set_view_size(size.0, size.1);
+    Ok(view)
+}
+
 pub fn call_tool(
     state: &mut DesktopAppState,
     camera: &mut Camera,
@@ -44,19 +115,12 @@ pub fn call_tool(
             } else {
                 renderer_owner(state, id)?
             };
-            if state.density_map_summary(object).is_some() {
-                let mut view = View::new(Uid::new(1), scene(state)?);
-                view.set_camera(camera);
-                view.set_view_size(800, 600);
-                state.fit_density_map_view(object, &mut view)?;
-                *camera = view.camera().clone();
-            } else if state.scene_manager().object(object).is_some() {
-                let selection = if id != object {
-                    nodes::renderer_properties(state, id)?.get("sel").cloned()
-                } else {
-                    None
-                };
-                fit(state, camera, Some(object), selection.as_deref(), true)?;
+            if state.density_map_summary(object).is_some()
+                || state.scene_manager().object(object).is_some()
+            {
+                let mut view = current_fit_view(state, camera)?;
+                focus_nodes(state, &mut view, &[id])?;
+                *camera = view.camera();
             } else {
                 let snapshot = state.workspace_object_render_snapshot(object)?;
                 let (min, max) = snapshot
@@ -69,6 +133,24 @@ pub fn call_tool(
                 camera.set_slab_depth(size * 2.);
             }
             Ok(crate::view_json(camera))
+        }
+        "focus_nodes" => {
+            let ids = args["nodeIds"]
+                .as_array()
+                .ok_or_else(|| CueMolError::invalid_argument("nodeIds must be an array"))?
+                .iter()
+                .map(|id| {
+                    id.as_u64().map(Uid::new).ok_or_else(|| {
+                        CueMolError::invalid_argument("nodeIds must contain identifiers")
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let mut view = current_fit_view(state, camera)?;
+            let ok = focus_nodes(state, &mut view, &ids)?;
+            *camera = view.camera();
+            let mut result = crate::view_json(camera);
+            result["ok"] = json!(ok);
+            Ok(result)
         }
         "move_node" => move_node(state, args),
         "set_render_settings" => {

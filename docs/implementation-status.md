@@ -9,8 +9,9 @@ ignored `.cache` directory.
 The current reference is the sibling CueMol checkout at `794fe4ac` (3.0.0.554).
 Earlier comparisons in [parity-audit.md](parity-audit.md) used 2.4.1.547.
 The newer reference adds a ChimeraX console, selection simplification, combined
-node framing and additional command options. Selection rewriting and fit-box APIs are now implemented and checked. ChimeraX
-and combined node framing remain required before claiming full support. The reference checkout is read-only.
+node framing and additional command options. Selection rewriting, fit-box APIs and combined node framing are now implemented
+and checked across the shared command, native and browser frontends. ChimeraX
+remains required before claiming full support. The reference checkout is read-only.
 
 | Requirement | Existing implementation and next verification |
 | --- | --- |

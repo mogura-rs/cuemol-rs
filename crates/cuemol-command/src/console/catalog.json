@@ -1930,5 +1930,15 @@
       "build2ndry",
       "autoTopology"
     ]
+  },
+  "focus_nodes": {
+    "tool": "focus_nodes",
+    "group": "nodes",
+    "params": [
+      "nodeIds"
+    ],
+    "semantics": {
+      "nodeIds": "nodes"
+    }
   }
 }

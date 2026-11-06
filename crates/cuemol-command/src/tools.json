@@ -4779,6 +4779,31 @@
     }
   },
   {
+    "name": "focus_nodes",
+    "description": "Fit objects and renderers together while preserving the view direction. Nodes without a fit box are skipped.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "nodeIds": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "description": "Object, renderer, or renderer group UIDs."
+        }
+      },
+      "required": [
+        "nodeIds"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "list_node_props",
     "description": "List properties of a renderer, object, scene or view with current values, types, allowed values, read-only flags and default/reset state. Nested properties use dot paths. Read this before editing or resetting properties.",
     "inputSchema": {

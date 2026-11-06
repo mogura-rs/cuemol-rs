@@ -130,7 +130,7 @@ async function openShell(page, storage = {}, options = {}) {
         style.source=args.path;
         return structuredClone(snapshot);
       }
-      if (command === 'render_viewport') return viewport;
+      if (command === 'render_viewport' || command === 'fit_workspace_item' || command === 'fit_workspace_items') return viewport;
       if (command === 'update_camera') {
         if (args.action === 'zoom') viewport.zoom *= args.x;
         return {...viewport, width: args.width, height: args.height};
@@ -1433,5 +1433,21 @@ test('Tauri workspace selection actions apply the shared parser result', async (
   await select('Invert','unused');
   await expect(page.locator('#error-alert-dialog')).toContainText('Rewrite failed');
   expect(await page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='molecule_selection_action').length)).toBe(2);
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri Focus submits the selected objects together', async ({page}) => {
+  const errors = await openShell(page, {}, {selectionSecond:true});
+  await page.locator('.tree-object').filter({hasText:'Probe'}).click();
+  await page.locator('.tree-object').filter({hasText:'Other'}).click({modifiers:['ControlOrMeta']});
+  await expect(page.locator('#workspace-zoom')).toBeEnabled();
+  await page.locator('#workspace-zoom').click();
+  await expect.poll(() => page.evaluate(() => window.__shellCalls.filter(call => call.command === 'fit_workspace_items').length)).toBe(1);
+  const args = await page.evaluate(() => window.__shellCalls.find(call => call.command === 'fit_workspace_items').args);
+  expect(args.targets.map(target => target.objectUid)).toEqual([3,8]);
+  expect(args.targets.every(target => target.kind === 'object')).toBe(true);
+  expect(args.width).toBeGreaterThan(0);
+  expect(args.height).toBeGreaterThan(0);
   expect(errors).toEqual([]);
 });

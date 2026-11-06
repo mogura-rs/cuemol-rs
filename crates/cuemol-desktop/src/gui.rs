@@ -10032,12 +10032,28 @@ impl GuiApplication {
             .map(|renderer| renderer.name)
     }
 
+    fn workspace_focus_ids(&self) -> Vec<cuemol_core::Uid> {
+        let targets = if self.workspace_multiple_selection.len() > 1 {
+            self.workspace_multiple_selection.clone()
+        } else {
+            self.current_workspace_target().into_iter().collect()
+        };
+        targets
+            .into_iter()
+            .filter_map(|target| match target {
+                NativeWorkspaceTarget::Object { owner, .. } => Some(owner.uid()),
+                NativeWorkspaceTarget::Renderer { renderer_uid, .. } => Some(renderer_uid),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn workspace_selection_can_zoom(&self) -> bool {
         if self.workspace_multiple_selection.len() > 1 {
-            return false;
+            return !self.workspace_focus_ids().is_empty();
         }
         if self.selected_object.is_some() {
-            return !self.selected_renderer_is_group();
+            return true;
         }
         self.workspace_aux_selection.is_some_and(|selection| {
             matches!(
@@ -10075,31 +10091,9 @@ impl GuiApplication {
             viewport.x.max(1.0).round() as u32,
             viewport.y.max(1.0).round() as u32,
         );
-        let fitted = if self.selected_renderer_is_group() {
-            false
-        } else if let Some(object_uid) = self.selected_object {
-            self.state
-                .fit_molecule_view(object_uid, self.selected_renderer, &mut view)
-                .map_err(|error| error.to_string())?
-        } else {
-            match self.workspace_aux_selection {
-                Some(WorkspaceAuxSelection::DensityMap { map_uid, .. }) => {
-                    self.state
-                        .fit_density_map_view(map_uid, &mut view)
-                        .map_err(|error| error.to_string())?;
-                    true
-                }
-                Some(
-                    WorkspaceAuxSelection::CameraRoot { .. }
-                    | WorkspaceAuxSelection::Camera { .. }
-                    | WorkspaceAuxSelection::StyleRoot { .. }
-                    | WorkspaceAuxSelection::Style { .. }
-                    | WorkspaceAuxSelection::Surface { .. }
-                    | WorkspaceAuxSelection::Lightweight { .. },
-                )
-                | None => false,
-            }
-        };
+        let fitted =
+            cuemol_command::focus_nodes(&self.state, &mut view, &self.workspace_focus_ids())
+                .map_err(|error| error.to_string())?;
         if fitted {
             camera.apply_qsys_camera(&view.camera());
         }
@@ -38533,6 +38527,22 @@ mod tests {
         assert!((camera.target.x - 10.0).abs() < 1.0e-5);
         assert!((camera.target.y - 5.0).abs() < 1.0e-5);
         assert!((camera.ortho_scale - 5.0).abs() < 1.0e-4);
+        app.workspace_multiple_selection = vec![
+            NativeWorkspaceTarget::Renderer {
+                scene_uid,
+                owner: NativePropertyObject::Molecule(object_uid),
+                renderer_uid,
+                is_group: false,
+            },
+            NativeWorkspaceTarget::Object {
+                scene_uid,
+                owner: NativePropertyObject::DensityMap(map_uid),
+            },
+        ];
+        assert!(app.workspace_selection_can_zoom());
+        assert!(app.fit_workspace_selection(&mut camera).unwrap());
+        assert!((camera.target.x - 9.0).abs() < 1.0e-5);
+        assert!((camera.ortho_scale - 5.5).abs() < 1.0e-4);
     }
 
     #[test]

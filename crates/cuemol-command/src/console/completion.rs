@@ -387,6 +387,7 @@ pub(super) fn native(session: &Session, state: &DesktopAppState, source: &str) -
     }
     let mut candidates = Vec::new();
     let list = semantic == "node"
+        || semantic == "nodes"
         || semantic == "renderer"
         || semantic == "object"
         || semantic.ends_with(" object")

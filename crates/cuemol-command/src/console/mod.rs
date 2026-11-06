@@ -244,7 +244,7 @@ fn nodes(state: &DesktopAppState) -> Result<Vec<Node>, String> {
 fn node_accepts(node: &Node, semantic: &str) -> bool {
     match semantic {
         "renderer" => node.kind != "object",
-        "node" => true,
+        "node" | "nodes" => true,
         "object" => node.kind == "object",
         kind if kind.ends_with(" object") => {
             node.kind == "object"
@@ -489,7 +489,10 @@ impl Session {
             values.insert(key.clone(), value.clone());
         }
         let inventory = if spec.semantics.values().any(|kind| {
-            kind == "node" || kind == "renderer" || (kind == "object" || kind.ends_with(" object"))
+            kind == "node"
+                || kind == "nodes"
+                || kind == "renderer"
+                || (kind == "object" || kind.ends_with(" object"))
         }) {
             nodes(state)?
         } else {
@@ -504,6 +507,31 @@ impl Session {
                 continue;
             }
             let semantic = spec.semantics.get(key).map(String::as_str).unwrap_or("");
+            if semantic == "nodes" {
+                if raw.trim().starts_with('[') {
+                    values.insert(key.clone(), typed_value(raw, &schema["properties"][key])?);
+                } else {
+                    let mut ids = Vec::new();
+                    let mut seen = std::collections::BTreeSet::new();
+                    for word in refs::words(raw) {
+                        let found = if refs::is_glob(&word.pattern) {
+                            refs::candidates(&inventory, &word.pattern, "node", true)?
+                        } else {
+                            vec![resolve_node(&inventory, &word.value, "node")?]
+                        };
+                        if found.is_empty() {
+                            return Err(format!("No node: {}", word.value));
+                        }
+                        for node in found {
+                            if seen.insert(node.id) {
+                                ids.push(node.id);
+                            }
+                        }
+                    }
+                    values.insert(key.clone(), json!(ids));
+                }
+                continue;
+            }
             if semantic == "scene" {
                 let word = unquote(raw);
                 let scenes = state.scene_summaries();

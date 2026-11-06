@@ -14,7 +14,7 @@ mod nodes;
 mod properties;
 pub mod selection;
 pub use animation::advance_animation;
-pub use properties::render_settings;
+pub use properties::{focus_nodes, render_settings};
 pub mod config;
 pub mod console;
 mod protocol;

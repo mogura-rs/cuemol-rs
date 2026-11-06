@@ -13579,9 +13579,10 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
                 : true;
   workspaceZoom.disabled =
     workspaceDelete.disabled ||
-    ["multiple", "rendererGroup", "cameraRoot", "camera", "styleRoot", "style"].includes(
-      workspaceSelectionKind,
-    );
+    ["cameraRoot", "camera", "styleRoot", "style"].includes(workspaceSelectionKind) ||
+    (workspaceSelectionKind === "multiple" && !workspaceMultipleSelection.some(
+      (target) => !["camera", "style"].includes(target.kind),
+    ));
 }
 
 function renderInspector(renderKey = workspaceChromeRenderKey()) {
@@ -17412,14 +17413,19 @@ function cameraCommand(action, x = 0, y = 0) {
 async function fitWorkspaceItem() {
   if (!invoke) return;
   const target = selectedWorkspaceTarget();
-  if (!target) {
+  const targets = workspaceSelectionKind === "multiple"
+    ? workspaceMultipleSelection.filter((item) => !["camera", "style"].includes(item.kind))
+    : [];
+  if (!target && targets.length === 0) {
     showError("Select an object or renderer first.");
     return;
   }
   const size = viewportDimensions();
   const sequence = ++requestSequence;
   try {
-    const result = await invoke("fit_workspace_item", { target, ...size });
+    const result = targets.length > 0
+      ? await invoke("fit_workspace_items", { targets, ...size })
+      : await invoke("fit_workspace_item", { target, ...size });
     applyViewport(result, sequence);
   } catch (error) {
     showError(error);

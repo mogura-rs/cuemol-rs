@@ -4515,32 +4515,63 @@ impl AppModel {
         let mut view = View::new(Uid::new(1), scene_uid);
         view.set_camera(&self.camera);
         view.set_view_size(width, height);
-        let object_uid = Uid::new(target.object_uid);
-        let fitted = match target.kind.as_str() {
-            "object" => self
-                .desktop
-                .fit_molecule_view(object_uid, None, &mut view)
-                .map_err(|error| error.to_string())?,
-            "renderer" => {
-                let renderer_uid = Uid::new(
-                    target
-                        .renderer_uid
-                        .ok_or_else(|| "renderer UID is required".to_string())?,
-                );
-                self.desktop
-                    .fit_molecule_view(object_uid, Some(renderer_uid), &mut view)
-                    .map_err(|error| error.to_string())?
-            }
-            "rendererGroup" => false,
-            "densityMap" | "densityRenderer" => {
-                self.desktop
-                    .fit_density_map_view(object_uid, &mut view)
-                    .map_err(|error| error.to_string())?;
-                true
-            }
-            "surface" | "surfaceRenderer" | "lwObject" | "lwRenderer" => false,
-            kind => return Err(format!("unsupported Workspace item type: {kind}")),
-        };
+        if !matches!(
+            target.kind.as_str(),
+            "object"
+                | "renderer"
+                | "rendererGroup"
+                | "densityMap"
+                | "densityRenderer"
+                | "surface"
+                | "surfaceRenderer"
+                | "lwObject"
+                | "lwRenderer"
+        ) {
+            return Err(format!("unsupported Workspace item type: {}", target.kind));
+        }
+        let node_id = Uid::new(target.renderer_uid.unwrap_or(target.object_uid));
+        let fitted = cuemol_command::focus_nodes(&self.desktop, &mut view, &[node_id])
+            .map_err(|error| error.to_string())?;
+        if fitted {
+            self.camera = view.camera();
+            self.status = "View fitted".to_string();
+        }
+        Ok(fitted)
+    }
+
+    fn fit_workspace_items(
+        &mut self,
+        targets: Vec<WorkspaceFitInput>,
+        width: u32,
+        height: u32,
+    ) -> Result<bool, String> {
+        let scene_uid = self
+            .desktop
+            .active_scene()
+            .ok_or_else(|| "no active scene".to_string())?;
+        let mut view = View::new(Uid::new(1), scene_uid);
+        view.set_camera(&self.camera);
+        view.set_view_size(width, height);
+        let ids = targets
+            .iter()
+            .filter(|target| {
+                matches!(
+                    target.kind.as_str(),
+                    "object"
+                        | "renderer"
+                        | "rendererGroup"
+                        | "densityMap"
+                        | "densityRenderer"
+                        | "surface"
+                        | "surfaceRenderer"
+                        | "lwObject"
+                        | "lwRenderer"
+                )
+            })
+            .map(|target| Uid::new(target.renderer_uid.unwrap_or(target.object_uid)))
+            .collect::<Vec<_>>();
+        let fitted = cuemol_command::focus_nodes(&self.desktop, &mut view, &ids)
+            .map_err(|error| error.to_string())?;
         if fitted {
             self.camera = view.camera();
             self.status = "View fitted".to_string();
@@ -8168,6 +8199,11 @@ enum ModelRequest {
     CreateWorkspaceRendererGroup(WorkspaceRendererGroupInput),
     RenameWorkspaceRendererGroup(WorkspaceRendererGroupInput),
     RenameWorkspaceNode(WorkspaceRenameInput),
+    FitWorkspaceItems {
+        targets: Vec<WorkspaceFitInput>,
+        width: u32,
+        height: u32,
+    },
     FitWorkspaceItem {
         target: WorkspaceFitInput,
         width: u32,
@@ -10720,6 +10756,10 @@ fn handle_model_request(
             model.rename_workspace_node(input)?;
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
+        }
+        ModelRequest::FitWorkspaceItems { targets, width, height } => {
+            model.fit_workspace_items(targets, width, height)?;
+            Ok(ModelResponse::Viewport(model.render(width, height)))
         }
         ModelRequest::FitWorkspaceItem {
             target,
@@ -14781,6 +14821,23 @@ fn rename_workspace_node(
 }
 
 #[tauri::command]
+fn fit_workspace_items(
+    targets: Vec<WorkspaceFitInput>,
+    width: u32,
+    height: u32,
+    state: State<'_, ManagedState>,
+) -> Result<ViewportDto, String> {
+    viewport_response(request_model(
+        &state,
+        ModelRequest::FitWorkspaceItems {
+            targets,
+            width,
+            height,
+        },
+    )?)
+}
+
+#[tauri::command]
 fn fit_workspace_item(
     target: WorkspaceFitInput,
     width: u32,
@@ -16743,6 +16800,7 @@ pub fn run() -> Result<(), tauri::Error> {
             rename_workspace_renderer_group,
             rename_workspace_node,
             fit_workspace_item,
+            fit_workspace_items,
             set_config_value,
             undo,
             redo,
@@ -23258,6 +23316,26 @@ mod tests {
         assert!((model.camera.center().x - 10.0).abs() < 1.0e-6);
         assert!((model.camera.center().y - 5.0).abs() < 1.0e-6);
         assert!((model.camera.zoom() - 10.0).abs() < 1.0e-6);
+        assert!(model
+            .fit_workspace_items(
+                vec![
+                    WorkspaceFitInput {
+                        kind: "renderer".into(),
+                        object_uid: object_uid.get(),
+                        renderer_uid: Some(renderer_uid.get())
+                    },
+                    WorkspaceFitInput {
+                        kind: "densityMap".into(),
+                        object_uid: map_uid.get(),
+                        renderer_uid: None
+                    },
+                ],
+                800,
+                400
+            )
+            .unwrap());
+        assert!((model.camera.center().x - 9.0).abs() < 1.0e-6);
+        assert!((model.camera.zoom() - 11.0).abs() < 1.0e-6);
     }
 
     #[test]

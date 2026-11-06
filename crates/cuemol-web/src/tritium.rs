@@ -830,6 +830,37 @@ impl App {
                     });
             });
     }
+    fn select_tree_node(&mut self, id: u64, order: &[u64], modifiers: egui::Modifiers) {
+        if modifiers.shift {
+            if let Some((first, last)) = self
+                .tree_selection_anchor
+                .and_then(|anchor| order.iter().position(|node| *node == anchor))
+                .zip(order.iter().position(|node| *node == id))
+            {
+                if !modifiers.command {
+                    self.tree_selection.clear();
+                }
+                for &node in &order[first.min(last)..=first.max(last)] {
+                    if !self.tree_selection.contains(&node) {
+                        self.tree_selection.push(node);
+                    }
+                }
+                return;
+            }
+        }
+        if modifiers.command {
+            if let Some(index) = self.tree_selection.iter().position(|node| *node == id) {
+                self.tree_selection.remove(index);
+            } else {
+                self.tree_selection.push(id);
+            }
+        } else {
+            self.tree_selection.clear();
+            self.tree_selection.push(id);
+        }
+        self.tree_selection_anchor = Some(id);
+    }
+
     fn scene_tree(&mut self, ui: &mut egui::Ui) {
         let data = cuemol_command::call_tool(
             &mut self.state,
@@ -838,6 +869,44 @@ impl App {
             &json!({}),
         )
         .unwrap_or(Value::Null);
+        let mut order = Vec::new();
+        for object in data["objects"].as_array().into_iter().flatten() {
+            if let Some(id) = object["id"].as_u64() {
+                order.push(id);
+                let open = ui
+                    .ctx()
+                    .data_mut(|data| {
+                        data.get_persisted::<bool>(egui::Id::new(("object-expanded", id)))
+                    })
+                    .unwrap_or(true);
+                if open {
+                    order.extend(
+                        object["renderers"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter(|renderer| renderer["type"] != "*selection")
+                            .filter_map(|renderer| renderer["id"].as_u64()),
+                    );
+                }
+            }
+        }
+        self.tree_selection.retain(|id| order.contains(id));
+        if self.tree_selection.is_empty() {
+            if let Some(id) = self
+                .inspector_target
+                .as_ref()
+                .and_then(|target| target.id)
+                .filter(|id| order.contains(id))
+            {
+                self.tree_selection.push(id);
+            }
+        }
+        let focus = ui.add_enabled(!self.tree_selection.is_empty(), egui::Button::new("Focus"));
+        self.record_ui_rect("Workspace Focus", &focus);
+        if focus.clicked() {
+            self.call("focus_nodes", json!({"nodeIds":self.tree_selection}));
+        }
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.y = 0.;
             for scene in self.state.scene_summaries() {
@@ -851,6 +920,8 @@ impl App {
                 );
                 self.record_ui_rect(&format!("scene:{}", scene.uid.get()), &response);
                 if response.clicked() {
+                    self.tree_selection.clear();
+                    self.tree_selection_anchor = None;
                     self.call("switch_scene", json!({"sceneId":scene.uid.get()}));
                     self.open_properties("scene", Some(scene.uid.get()));
                 }
@@ -877,7 +948,7 @@ impl App {
                             ui,
                             &label,
                             Icon::Crystal,
-                            self.selected.map(Uid::get) == Some(id),
+                            self.tree_selection.contains(&id),
                             Some(&mut open),
                             Some(&mut visible),
                         )
@@ -900,6 +971,7 @@ impl App {
                     );
                 }
                 if response.clicked() {
+                    self.select_tree_node(id, &order, ui.input(|input| input.modifiers));
                     self.selected = Some(Uid::new(id));
                     self.open_properties("object", Some(id));
                     self.paint_selected = 0;
@@ -935,10 +1007,7 @@ impl App {
                             };
                             let before = renderer["visible"] == true;
                             let mut visible = before;
-                            let selected = self
-                                .inspector_target
-                                .as_ref()
-                                .is_some_and(|t| t.kind == "renderer" && t.id == Some(rid));
+                            let selected = self.tree_selection.contains(&rid);
                             let label = format!(
                                 "{} ({})",
                                 renderer["name"].as_str().unwrap_or("Renderer"),
@@ -968,6 +1037,11 @@ impl App {
                                 );
                             }
                             if response.clicked() {
+                                self.select_tree_node(
+                                    rid,
+                                    &order,
+                                    ui.input(|input| input.modifiers),
+                                );
                                 self.selected = Some(Uid::new(id));
                                 self.open_properties("renderer", Some(rid));
                                 self.paint_selected = 0;

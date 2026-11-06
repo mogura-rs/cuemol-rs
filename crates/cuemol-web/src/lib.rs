@@ -238,6 +238,8 @@ struct App {
     viewport_menu: Option<(egui::Pos2, AtomHit)>,
     rectangle_start: Option<egui::Pos2>,
     inspector_target: Option<cuemol_ui::InspectorTarget>,
+    tree_selection: Vec<u64>,
+    tree_selection_anchor: Option<u64>,
     bottom_tab: String,
     bottom_open: bool,
     sequence_panel: cuemol_ui::sequence::SequencePanel,
@@ -406,6 +408,8 @@ impl App {
             viewport_menu: None,
             rectangle_start: None,
             inspector_target: None,
+            tree_selection: Vec::new(),
+            tree_selection_anchor: None,
             bottom_tab: "Console".into(),
             bottom_open: true,
             sequence_panel: cuemol_ui::sequence::SequencePanel::default(),
@@ -611,6 +615,18 @@ impl App {
         self.call_shared(name, args);
     }
     fn call_shared(&mut self, name: &str, args: Value) -> bool {
+        if let Some((summary, rect)) = self
+            .state
+            .active_view_summary()
+            .zip(self.ui_rects.get("Viewport"))
+        {
+            if let Some(view) = self.state.command_manager_mut().view_mut(summary.uid) {
+                view.set_view_size(
+                    rect[2].max(1.).round() as u32,
+                    rect[3].max(1.).round() as u32,
+                );
+            }
+        }
         let mutating = cuemol_command::tool_changes_scene(name);
         if mutating {
             self.cancel_console("Scene changed outside the console; remaining commands cancelled.");

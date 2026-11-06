@@ -106,3 +106,35 @@ for (const backend of ['webgl', 'webgpu']) {
     expect((await command(page,'count_selection',{objId:object.id,selection:lines[0]})).count).toBe(2);
   });
 }
+
+
+for (const backend of ['webgl', 'webgpu']) {
+  test(`Workspace Focus frames a renderer and another object in ${backend}`, async ({page}) => {
+    await page.goto(`./?renderer=${backend}`);
+    await expect.poll(() => page.evaluate(() => window.cuemol?.status()?.scene?.sceneId), {timeout:60000}).toBeGreaterThan(0);
+    for (const name of ['Probe','Target']) {
+      await page.locator('#files').setInputFiles({name:`${name}.pdb`,mimeType:'application/octet-stream',buffer:Buffer.from(pdb)});
+      await expect.poll(async () => (await status(page)).scene.objects.length).toBe(name === 'Probe' ? 1 : 2);
+    }
+    const [probe, target] = (await status(page)).scene.objects;
+    const renderer = await command(page, 'create_renderer', {objId:probe.id,rendererType:'cpk',name:'focus_first',selection:'name C1'});
+    await command(page, 'execute_script', {source:`var offset=cuemol.Vector('(20,0,0)'); var matrix=cuemol.createObj('Matrix'); matrix.setTranslate(offset); cuemol.getObject(${target.id}).xformMat=matrix;`});
+    await command(page, 'set_view', {rotation:[0,0,0,1],center:[100,100,100],zoom:200,slab:200});
+    const click = async (name, modifiers=[]) => {
+      await expect.poll(async () => Boolean((await status(page)).ui.rects[name])).toBe(true);
+      const [x,y,w,h] = (await status(page)).ui.rects[name];
+      for (const key of modifiers) await page.keyboard.down(key);
+      await page.mouse.click(x+w/2,y+h/2);
+      for (const key of modifiers.toReversed()) await page.keyboard.up(key);
+    };
+    await click(`renderer:${renderer.rendererId}`);
+    await click(`object:${target.id}`, ['ControlOrMeta']);
+    await click('Workspace Focus');
+    await expect.poll(async () => (await status(page)).view.center[0]).toBeCloseTo(9.8, 5);
+    const state = await status(page);
+    const [, , width, height] = state.ui.rects.Viewport;
+    expect(state.view.center[1]).toBeCloseTo(0.75,5);
+    expect(state.view.zoom).toBeCloseTo(Math.max(23.6/(Math.round(width)/Math.round(height)),4),4);
+    expect(state.view.slab).toBeCloseTo(4,5);
+  });
+}
