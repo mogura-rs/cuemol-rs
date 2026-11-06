@@ -5,6 +5,16 @@ results are historical. Generated inputs and logs stay in the ignored checkout
 cache. The current repairs and their limits appear in the completion audit;
 passing tests do not establish equivalence for every parameter combination.
 
+## View direction and depth dragging
+
+The public `View::forward_vec` now points out of the screen, matching the C++
+`getForwardVector` implementation. The internal depth-drag conversion retains
+its previous sign. The read-only C++ TTY view confirmed identity and 90-degree
+Y rotations. Fifteen view tests passed, including a direction/depth regression,
+and the existing C++ input oracle compared 3,862 camera states successfully.
+The public script vector was previously reversed; existing drag behavior is
+preserved.
+
 ## Current-reference object export options
 
 `save_object` and native `write` now accept `selection`, `format` and `link`.

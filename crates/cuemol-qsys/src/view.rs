@@ -555,7 +555,7 @@ impl View {
     }
 
     pub fn forward_vector(&self) -> Vector4 {
-        rotate_vector(self.rot_quat, Vector4::new3(0.0, 0.0, -1.0))
+        rotate_vector(self.rot_quat, Vector4::new3(0.0, 0.0, 1.0))
     }
 
     pub fn get_forward_vector(&self) -> Vector4 {
@@ -857,7 +857,7 @@ impl View {
             .right_vector()
             .scale(dx * pixel_scale)
             .add_vec(self.up_vector().scale(-dy * pixel_scale));
-        let z_translation = self.forward_vector().scale(dz / 4.0);
+        let z_translation = self.forward_vector().scale(-dz / 4.0);
         self.center - xy_translation - z_translation
     }
 
@@ -1457,6 +1457,24 @@ mod tests {
         assert_eq!(sqlen(view.rotation()), 0.0);
         assert!(!view.perspective());
         assert_eq!(view.style(), "");
+    }
+
+    #[test]
+    fn forward_vector_points_out_of_screen_and_keeps_depth_drag_direction() {
+        let mut view = View::new(Uid::new(1), Uid::new(2));
+        view.set_rotation(Quat::IDENTITY);
+        view.set_center(Vector4::new3(0.0, 0.0, 0.0));
+        assert_eq!(view.forward_vector(), Vector4::new3(0.0, 0.0, 1.0));
+        view.translate_view_drag(0.0, 0.0, 8.0);
+        assert_eq!(view.center(), Vector4::new3(0.0, 0.0, 2.0));
+        view.set_rotation(
+            Quat::from_axis_angle(Vector4::new3(0.0, 1.0, 0.0), std::f64::consts::FRAC_PI_2)
+                .unwrap(),
+        );
+        assert!((view.forward_vector() - Vector4::new3(1.0, 0.0, 0.0)).length3d() < 1e-12);
+        assert!((view.right_vector() - Vector4::new3(0.0, 0.0, -1.0)).length3d() < 1e-12);
+        view.translate_view_drag(0.0, 0.0, 8.0);
+        assert!((view.center() - Vector4::new3(2.0, 0.0, 2.0)).length3d() < 1e-12);
     }
 
     #[test]
