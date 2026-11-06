@@ -145,6 +145,7 @@ def main():
     parser.add_argument('--selection-pane-only', action='store_true')
     parser.add_argument('--cross-selection-only', action='store_true')
     parser.add_argument('--current-features-only', action='store_true')
+    parser.add_argument('--inspector-preview-only', action='store_true')
     args = parser.parse_args()
     binary, work = args.binary.resolve(), args.out.resolve()
     work.mkdir(parents=True, exist_ok=True)
@@ -230,6 +231,68 @@ def main():
             def input_focused(box):
                 pixels = capture().crop(box).getdata()
                 return sum(b - r > 30 and g - r > 10 for r, g, b in pixels) > 100
+
+            if args.inspector_preview_only:
+                primary = 'command' if sys.platform == 'darwin' else 'ctrl'
+                object_id = state['objects'][0]['id']
+                for renderer in state['objects'][0]['renderers']:
+                    call('delete_node', {'nodeType': 'renderer', 'nodeId': renderer['id']})
+                renderer_id = call('create_renderer', {'objId': object_id, 'rendererType': 'cpk', 'name': 'Preview spheres'})['rendererId']
+                call('set_view', {'center': [-0.5, 0.75, 0], 'zoom': 12, 'slab': 20})
+                click_at(x + 175, y + 214)
+                click_at(x + width - 260, y + 149)
+                click_at(x + width - 150, y + 174)
+                pyautogui.hotkey(primary, 'a')
+                pyautogui.write('vdwr_C', interval=0.1)
+                pyautogui.press('tab')
+                click_at(x + width - 260, y + 149)
+
+                def property_entry():
+                    rows = call('list_node_props', {'nodeType': 'renderer', 'nodeId': renderer_id})['properties']
+                    return next(row for row in rows if row['key'] == 'vdwr_C')
+
+                original = property_entry()
+                original_value = float(original['value'])
+                if not original['isdefault']:
+                    raise RuntimeError('The preview fixture is not using its default radius')
+                call('clear_undo')
+                call('rename_node', {'nodeType': 'object', 'nodeId': object_id, 'name': 'Redo anchor'})
+                call('undo')
+                view_box = (310, 80, width - 305, height - 205)
+                before = capture('preview-before.png').crop(view_box)
+
+                def drag():
+                    click_at(x + width - 260, y + 149)
+                    move_pointer_and_wait(width - 100, 225)
+                    pyautogui.mouseDown()
+                    pyautogui.moveRel(20, 0, duration=0.5)
+                    return wait_for(lambda: entry if float((entry := property_entry())['value']) > original_value else None)
+
+                drag()
+                wait_for(lambda: ImageChops.difference(before, capture().crop(view_box)).getbbox())
+                capture('preview-drag.png')
+                pyautogui.press('escape')
+                pyautogui.mouseUp()
+                wait_for(lambda: property_entry() == original)
+                call('redo')
+                if call('get_scene_state')['objects'][0]['name'] != 'Redo anchor':
+                    raise RuntimeError('Cancelling the numeric drag discarded redo')
+                call('undo')
+                changed = drag()
+                pyautogui.mouseUp()
+                wait_for(lambda: property_entry() == changed)
+                click_at(x + width - 260, y + 149)
+                pyautogui.hotkey(primary, 'z')
+                wait_for(lambda: property_entry() == original)
+                pyautogui.hotkey(primary, 'shift', 'z')
+                wait_for(lambda: property_entry() == changed)
+                capture('preview-redo.png')
+                report.update(ok=True, numeric_preview=True, preview_pixels_changed=True,
+                              abort_restores_default=True, abort_preserves_redo=True,
+                              numeric_single_undo=True, radius_before=original_value,
+                              radius_after=float(changed['value']))
+                print(json.dumps(report), flush=True)
+                return
 
             if args.current_features_only:
                 primary = 'command' if sys.platform == 'darwin' else 'ctrl'

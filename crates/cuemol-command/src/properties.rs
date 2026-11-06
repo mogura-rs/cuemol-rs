@@ -654,61 +654,15 @@ fn properties(
         return Ok(json!({"properties":metadata::rows(state, camera, &kind, id)?, "reset":keys}));
     }
     if name == "set_node_prop" || name == "set_prop" {
-        let value = text(args, "value")?;
-        if property_readonly(state, &kind, id, &prop) {
-            return Err(CueMolError::invalid_argument(format!(
-                "{prop} is read-only"
-            )));
-        }
-        match kind.as_str() {
-            "renderer" | "rendGroup" => {
-                let id = id.ok_or_else(|| CueMolError::invalid_argument("nodeId is required"))?;
-                let owner = renderer_owner(state, id)?;
-                let is_group = kind == "rendGroup"
-                    || state
-                        .scene_manager()
-                        .object(owner)
-                        .and_then(|object| object.renderer(id))
-                        .is_some_and(|renderer| renderer.renderer_type() == "*group");
-                if is_group && prop == "name" {
-                    state.rename_renderer_group(owner, id, value)?;
-                } else if is_group && prop == "visible" && args["cascadeGroupVisibility"] == true {
-                    let visible = value
-                        .parse::<bool>()
-                        .map_err(|_| CueMolError::invalid_argument("expected true or false"))?;
-                    state.set_renderer_group_visible(owner, id, visible)?;
-                } else {
-                    nodes::set_renderer_property(state, id, &prop, value)?;
-                }
-            }
-            "object" => set_object_property(
-                state,
-                id.ok_or_else(|| CueMolError::invalid_argument("nodeId is required"))?,
-                &prop,
-                value,
-            )?,
-            "view" => set_view_property(state, camera, &prop, value)?,
-            "scene" => {
-                if matches!(
-                    prop.as_str(),
-                    "activeObjID" | "activeRendID" | "activeViewID"
-                ) {
-                    set_scene_active_id(state, camera, sid, &prop, value)?;
-                } else {
-                    validate_view_effect_property(&prop, value)?;
-                    if prop == "bgcolor" {
-                        cuemol_gfx::parse_color(value)?;
-                    }
-                    let s = state.scene_manager_mut().scene_mut(sid).unwrap();
-                    if prop == "name" {
-                        s.set_name(value);
-                    } else {
-                        s.set_scene_attribute(prop.clone(), value);
-                    }
-                }
-            }
-            _ => return Err(CueMolError::invalid_argument("unknown node type")),
-        }
+        write_node_property(
+            state,
+            camera,
+            &kind,
+            id,
+            &prop,
+            text(args, "value")?,
+            args["cascadeGroupVisibility"] == true,
+        )?;
     } else if name == "reset_prop" {
         reset_node_property(state, sid, &kind, id, &prop)?;
     }
@@ -726,6 +680,179 @@ fn properties(
                 .ok_or_else(|| CueMolError::not_found(format!("{kind} property {prop}")))?)
         };
         Ok(json!({"prop":prop,"value":value}))
+    }
+}
+
+fn write_node_property(
+    state: &mut DesktopAppState,
+    camera: &mut Camera,
+    kind: &str,
+    id: Option<Uid>,
+    prop: &str,
+    value: &str,
+    cascade_group_visibility: bool,
+) -> Result<()> {
+    let sid = scene(state)?;
+    if property_readonly(state, kind, id, prop) {
+        return Err(CueMolError::invalid_argument(format!(
+            "{prop} is read-only"
+        )));
+    }
+    match kind {
+        "renderer" | "rendGroup" => {
+            let id = id.ok_or_else(|| CueMolError::invalid_argument("nodeId is required"))?;
+            let owner = renderer_owner(state, id)?;
+            let is_group = kind == "rendGroup"
+                || state
+                    .scene_manager()
+                    .object(owner)
+                    .and_then(|object| object.renderer(id))
+                    .is_some_and(|renderer| renderer.renderer_type() == "*group");
+            if is_group && prop == "name" {
+                state.rename_renderer_group(owner, id, value)?;
+            } else if is_group && prop == "visible" && cascade_group_visibility {
+                let visible = value
+                    .parse::<bool>()
+                    .map_err(|_| CueMolError::invalid_argument("expected true or false"))?;
+                state.set_renderer_group_visible(owner, id, visible)?;
+            } else {
+                nodes::set_renderer_property(state, id, prop, value)?;
+            }
+        }
+        "object" => set_object_property(
+            state,
+            id.ok_or_else(|| CueMolError::invalid_argument("nodeId is required"))?,
+            prop,
+            value,
+        )?,
+        "view" => set_view_property(state, camera, prop, value)?,
+        "scene" => {
+            if matches!(prop, "activeObjID" | "activeRendID" | "activeViewID") {
+                set_scene_active_id(state, camera, sid, prop, value)?;
+            } else {
+                validate_view_effect_property(prop, value)?;
+                if prop == "bgcolor" {
+                    cuemol_gfx::parse_color(value)?;
+                }
+                let s = state.scene_manager_mut().scene_mut(sid).unwrap();
+                if prop == "name" {
+                    s.set_name(value);
+                } else {
+                    s.set_scene_attribute(prop.to_string(), value);
+                }
+            }
+        }
+        _ => return Err(CueMolError::invalid_argument("unknown node type")),
+    }
+    Ok(())
+}
+
+/// Apply a transient numeric edit, or restore its anchor before a normal commit.
+/// A returned command is recorded through the frontend's ordinary history path.
+pub fn prepare_property_edit(
+    state: &mut DesktopAppState,
+    _camera: &mut Camera,
+    args: &Value,
+) -> Result<Option<Value>> {
+    let mode = text(args, "mode")?;
+    if !matches!(mode, "preview" | "commit" | "abort") {
+        return Err(CueMolError::invalid_argument("unknown property edit mode"));
+    }
+    let kind = text(args, "nodeType")?;
+    if !matches!(kind, "renderer" | "rendGroup") {
+        return Err(CueMolError::invalid_argument(
+            "numeric previews require a renderer",
+        ));
+    }
+    let id = args["nodeId"]
+        .as_u64()
+        .map(Uid::new)
+        .ok_or_else(|| CueMolError::invalid_argument("nodeId is required"))?;
+    let prop = text(args, "prop")?;
+    let sid = uid(args, "sceneId")?;
+    if mode != "abort" && state.active_scene() != Some(sid) {
+        return Err(CueMolError::invalid_argument("the inspected scene changed"));
+    }
+    let owner = crate::commands::renderer_owner_in_scene(state, id, sid)?;
+    let renderer_type = if let Some(renderer) = state
+        .scene_manager()
+        .object(owner)
+        .and_then(|object| object.renderer(id))
+    {
+        renderer.renderer_type().to_string()
+    } else {
+        state
+            .auxiliary_renderer_properties(owner, id)?
+            .remove("type_name")
+            .unwrap_or_default()
+    };
+    use cuemol_desktop_core::property_catalog::{
+        map_renderer_attr_property, renderer_property_spec, RendererAttrKind,
+    };
+    let spec = renderer_property_spec(&renderer_type, prop)
+        .or_else(|| map_renderer_attr_property(&renderer_type, prop));
+    if !spec.is_some_and(|spec| {
+        spec.writable
+            && matches!(
+                spec.kind,
+                RendererAttrKind::Integer | RendererAttrKind::Real
+            )
+    }) || cuemol_desktop_core::auxiliary_property_readonly(prop)
+    {
+        return Err(CueMolError::invalid_argument(
+            "numeric previews require a writable numeric property",
+        ));
+    }
+    let value = text(args, "value")?;
+    let original = text(args, "originalValue")?;
+    for number in [value, original] {
+        if !number.parse::<f64>().is_ok_and(f64::is_finite) {
+            return Err(CueMolError::invalid_argument(
+                "numeric edits require finite values",
+            ));
+        }
+    }
+    let was_default = args["originalWasDefault"]
+        .as_bool()
+        .ok_or_else(|| CueMolError::invalid_argument("originalWasDefault is required"))?;
+    if mode == "preview" {
+        write_numeric_property(state, owner, id, prop, value)?;
+        return Ok(None);
+    }
+    if was_default {
+        if let Some((child, key)) = prop
+            .split_once('.')
+            .filter(|_| state.scene_manager().object(owner).is_some())
+        {
+            state.reset_renderer_child_property(owner, id, child, key)?;
+        } else {
+            state.reset_renderer_property(owner, id, prop)?;
+        }
+    } else {
+        write_numeric_property(state, owner, id, prop, original)?;
+    }
+    if mode == "abort" || value.parse::<f64>() == original.parse::<f64>() {
+        return Ok(None);
+    }
+    Ok(Some(
+        json!({"nodeType":kind,"nodeId":id.get(),"prop":prop,"value":value}),
+    ))
+}
+
+fn write_numeric_property(
+    state: &mut DesktopAppState,
+    owner: Uid,
+    id: Uid,
+    prop: &str,
+    value: &str,
+) -> Result<()> {
+    if let Some((child, key)) = prop
+        .split_once('.')
+        .filter(|_| state.scene_manager().object(owner).is_some())
+    {
+        state.set_renderer_child_property(owner, id, child, key, value)
+    } else {
+        state.set_renderer_property(owner, id, prop, value)
     }
 }
 

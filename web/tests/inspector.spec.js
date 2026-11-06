@@ -36,8 +36,8 @@ async function filter(page, text) {
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   await page.keyboard.press('Tab');
 }
-async function setup(page) {
-  await page.goto('./?renderer=webgl');
+async function setup(page, backend = 'webgl') {
+  await page.goto(`./?renderer=${backend}`);
   await expect.poll(() => page.evaluate(() => window.cuemol?.status()?.scene?.sceneId), {timeout:60000}).toBeGreaterThan(0);
   await page.locator('#files').setInputFiles({name:'inspector.pdb',mimeType:'application/octet-stream',buffer:Buffer.from(pdb)});
   await expect.poll(async () => (await status(page)).scene.objects.length).toBe(1);
@@ -624,3 +624,56 @@ test('Scene presets use one undo and View fields follow viewport navigation', as
   await expect.poll(()=>page.evaluate(()=>navigator.clipboard.readText())).toBe('External rename');
   await page.screenshot({path:testInfo.outputPath('inspector-scene-view.png')});
 });
+
+
+for (const backend of ['webgl', 'webgpu']) {
+  test(`Inspector ${backend} previews a numeric drag and keeps one undo step`, async ({page}) => {
+    const {object} = await setup(page, backend);
+    const {rendererId:id} = await command(page,'create_renderer',{objId:object.id,rendererType:'cpk',name:'Drag spheres'});
+    await click(page,`renderer:${id}`,false);
+    await click(page,'Properties tab');
+    await filter(page,'vdwr_C');
+    await command(page,'set_view',{zoom:8,slab:20});
+    await command(page,'clear_undo');
+    await command(page,'rename_node',{nodeType:'object',nodeId:object.id,name:'Redo survives'});
+    await command(page,'undo');
+    const original = Number(await prop(page,id,'vdwr_C'));
+    const entry = async () => (await command(page,'list_node_props',{nodeType:'renderer',nodeId:id})).properties.find(row=>row.key==='vdwr_C');
+    expect((await entry()).isdefault).toBe(true);
+    const drag = async () => {
+      await click(page,"Properties tab");
+      await settleRect(page,'vdwr_C');
+      const [x,y,w,h]=(await status(page)).ui.inspector.vdwr_C;
+      await page.mouse.move(x+w/2,y+h/2);
+      await page.mouse.down();
+      await page.mouse.move(x+w/2+12,y+h/2,{steps:4});
+      await expect.poll(async()=>Number(await prop(page,id,'vdwr_C'))).toBeGreaterThan(original);
+    };
+    await drag();
+    await page.keyboard.press('Escape');
+    await page.mouse.up();
+    await expect.poll(async()=>Number(await prop(page,id,'vdwr_C'))).toBe(original);
+    expect((await entry()).isdefault).toBe(true);
+    await command(page,'redo');
+    expect((await status(page)).scene.objects[0].name).toBe('Redo survives');
+    await command(page,'undo');
+    await drag();
+    const changed = Number(await prop(page,id,'vdwr_C'));
+    await page.mouse.up();
+    await expect.poll(async()=>Number(await prop(page,id,'vdwr_C'))).toBe(changed);
+    expect((await entry()).isdefault).toBe(false);
+    await command(page,'undo');
+    expect(Number(await prop(page,id,'vdwr_C'))).toBe(original);
+    expect((await entry()).isdefault).toBe(true);
+    await command(page,'redo');
+    expect(Number(await prop(page,id,'vdwr_C'))).toBe(changed);
+    expect((await status(page)).scene.objects[0].name).toBe(object.name);
+    const sceneId=(await status(page)).scene.sceneId;
+    await drag();
+    await command(page,'create_scene',{name:'Other scene'});
+    await page.mouse.up();
+    await command(page,'undo');
+    await command(page,'switch_scene',{sceneId});
+    expect(Number(await prop(page,id,'vdwr_C'))).toBe(changed);
+  });
+}

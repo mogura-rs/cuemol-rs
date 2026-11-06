@@ -187,6 +187,9 @@ impl App {
         }
         self.shell_sidebar(ctx);
         if self.activity == Some(Activity::Actions) {
+            for (tool, args) in self.inspector.cancel_numeric_edit() {
+                self.call(tool, args);
+            }
             self.actions_panel.inspector(ctx);
         } else {
             self.inspector.inspect(

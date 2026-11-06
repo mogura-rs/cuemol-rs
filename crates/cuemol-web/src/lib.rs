@@ -543,7 +543,26 @@ impl App {
         self.future.clear();
     }
     fn call(&mut self, name: &str, args: Value) {
-        if cuemol_command::tool_changes_scene(name) {
+        if name == "edit_node_property" {
+            self.cancel_console("Scene changed outside the console; remaining commands cancelled.");
+            match cuemol_command::prepare_property_edit(&mut self.state, &mut self.camera, &args) {
+                Ok(Some(command)) => {
+                    self.call_shared("set_node_prop", command);
+                }
+                Ok(None) => {
+                    self.revision = self.revision.wrapping_add(1);
+                    self.dirty = true;
+                }
+                Err(error) => self.message = format!("Error: {error}"),
+            }
+            return;
+        }
+        if cuemol_command::tool_changes_scene(name)
+            || matches!(name, "undo" | "redo" | "clear_undo")
+        {
+            for (tool, args) in self.inspector.cancel_numeric_edit() {
+                self.call(tool, args);
+            }
             self.cancel_console("Scene changed outside the console; remaining commands cancelled.");
         }
         if name == "cancel_load" {

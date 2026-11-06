@@ -32,7 +32,14 @@ pub(crate) fn scene(state: &DesktopAppState) -> Result<Uid> {
         .ok_or_else(|| CueMolError::not_found("active scene"))
 }
 pub(crate) fn renderer_owner(state: &DesktopAppState, renderer: Uid) -> Result<Uid> {
-    let sid = scene(state)?;
+    renderer_owner_in_scene(state, renderer, scene(state)?)
+}
+
+pub(crate) fn renderer_owner_in_scene(
+    state: &DesktopAppState,
+    renderer: Uid,
+    sid: Uid,
+) -> Result<Uid> {
     let current = state
         .scene_manager()
         .scene(sid)
@@ -65,7 +72,7 @@ pub(crate) fn renderer_owner(state: &DesktopAppState, renderer: Uid) -> Result<U
             return Ok(object.uid);
         }
     }
-    Err(CueMolError::not_found("renderer in active scene"))
+    Err(CueMolError::not_found("renderer in scene"))
 }
 
 pub fn view_json(camera: &Camera) -> Value {

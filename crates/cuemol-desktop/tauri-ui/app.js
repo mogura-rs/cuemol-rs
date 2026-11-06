@@ -17283,6 +17283,7 @@ function scheduleRender(delay = 100) {
 }
 
 async function mutate(command, args = {}, render = renderShell, refreshViewport = true) {
+  await cancelCueMolNumericDrag();
   if (!invoke) {
     showError("Tauri IPC is unavailable. Run this frontend through the Tauri binary.");
     return false;
@@ -17378,6 +17379,7 @@ async function changeWorkspaceAuxRendererType(kind, object, renderer, targetType
 }
 
 async function mutateWithViewport(command, args = {}, render = renderShell) {
+  await cancelCueMolNumericDrag();
   if (!invoke) {
     showError("Tauri IPC is unavailable. Run this frontend through the Tauri binary.");
     return false;

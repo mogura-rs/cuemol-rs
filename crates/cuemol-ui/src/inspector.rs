@@ -44,12 +44,22 @@ struct ColorDraft {
     rgba: egui::Color32,
 }
 
+#[derive(Debug, Clone)]
+struct NumericDrag {
+    original: String,
+    was_default: bool,
+    realtime: bool,
+}
+
 #[derive(Debug, Default)]
 struct NumericEdit {
     id: Option<egui::Id>,
     value: Option<f64>,
     dirty: bool,
     optional_value: Option<f64>,
+    drag: Option<NumericDrag>,
+    action: Option<(&'static str, NumericDrag, String)>,
+    cancelled: bool,
 }
 
 #[derive(Debug)]
@@ -82,6 +92,7 @@ pub struct Inspector {
     error: String,
     color_draft: Option<ColorDraft>,
     numeric_edits: BTreeMap<String, NumericEdit>,
+    pending_changes: Vec<(&'static str, Value)>,
     local_toggles: BTreeMap<String, bool>,
     font_generation: u32,
     font_listener: bool,
@@ -92,7 +103,48 @@ pub struct Inspector {
 }
 
 impl Inspector {
+    fn abort_numeric_drags(&mut self) {
+        let mut aborted = false;
+        for (key, edit) in &mut self.numeric_edits {
+            let Some(drag) = edit.drag.take() else {
+                continue;
+            };
+            aborted = true;
+            if drag.realtime {
+                if let Some(target) = &self.target {
+                    self.pending_changes.push(numeric_change(
+                        target,
+                        self.context.0,
+                        key,
+                        "abort",
+                        &drag,
+                        &drag.original,
+                    ));
+                }
+            }
+            if let Some(row) = self.rows.iter_mut().find(|row| row.key == *key) {
+                row.value.clone_from(&drag.original);
+                if let Some(value) = &mut row.structured_value {
+                    value.clone_from(&drag.original);
+                }
+            }
+            edit.value = drag.original.parse().ok();
+            edit.dirty = false;
+            edit.cancelled = true;
+            edit.action = None;
+        }
+        if aborted {
+            self.revision = u64::MAX;
+        }
+    }
+
+    pub fn cancel_numeric_edit(&mut self) -> Vec<(&'static str, Value)> {
+        self.abort_numeric_drags();
+        std::mem::take(&mut self.pending_changes)
+    }
+
     fn clear_properties(&mut self) {
+        self.abort_numeric_drags();
         self.rows.clear();
         self.sections.clear();
         self.generic_order.clear();
@@ -138,6 +190,15 @@ impl Inspector {
         {
             return;
         }
+        if target == self.target
+            && context == self.context
+            && self
+                .numeric_edits
+                .values()
+                .any(|edit| edit.drag.is_some() || edit.cancelled)
+        {
+            return;
+        }
         let drafts: BTreeMap<_, _> = if target == self.target && context == self.context {
             self.rows
                 .iter()
@@ -157,6 +218,7 @@ impl Inspector {
             BTreeMap::new()
         };
         if target != self.target || context != self.context {
+            self.abort_numeric_drags();
             self.numeric_edits.clear();
             self.local_toggles.clear();
             self.selection_draft = None;
@@ -360,7 +422,18 @@ impl Inspector {
         state: &DesktopAppState,
     ) -> Vec<(&'static str, Value)> {
         self.rects.clear();
-        let mut changes = Vec::new();
+        if !ctx.input(|input| input.pointer.primary_down()) {
+            for edit in self.numeric_edits.values_mut() {
+                edit.cancelled = false;
+            }
+        }
+        if !self.visible
+            || self.target.is_none()
+            || ctx.input(|input| input.key_pressed(egui::Key::Escape) || !input.focused)
+        {
+            self.abort_numeric_drags();
+        }
+        let mut changes = std::mem::take(&mut self.pending_changes);
         if !self.visible || self.target.is_none() {
             return changes;
         }
@@ -452,6 +525,10 @@ impl Inspector {
                                         }
                                     } else { ui.add_space(22.); }
                                 });
+                                if let Some((mode, drag, value)) = self.numeric_edits.get_mut(&row.key).and_then(|edit| edit.action.take()) {
+                                    changes.push(numeric_change(&target, self.context.0, &row.key, mode, &drag, &value));
+                                    if mode != "preview" { self.revision = u64::MAX; }
+                                }
                                 if changed && display_changed(row, &self.committed, structured) {
                                     if structured && row.kind == "toggle" && row.schema.as_ref().is_some_and(|schema| schema["local"] == true) {
                                         self.local_toggles.insert(row.key.clone(), row.value == "true");
@@ -602,8 +679,31 @@ impl Inspector {
                 self.color_draft = None;
             }
         }
+        if !self.visible
+            || self
+                .numeric_edits
+                .iter()
+                .any(|(key, edit)| edit.drag.is_some() && !self.rects.contains_key(key))
+        {
+            self.abort_numeric_drags();
+            changes.append(&mut self.pending_changes);
+        }
         changes
     }
+}
+
+fn numeric_change(
+    target: &InspectorTarget,
+    scene: Option<u64>,
+    key: &str,
+    mode: &'static str,
+    drag: &NumericDrag,
+    value: &str,
+) -> (&'static str, Value) {
+    (
+        "edit_node_property",
+        json!({"nodeType":target.kind,"nodeId":target.id,"sceneId":scene,"prop":key,"mode":mode,"value":value,"originalValue":drag.original,"originalWasDefault":drag.was_default}),
+    )
 }
 
 fn equivalent(left: &str, right: &str) -> bool {
@@ -937,6 +1037,30 @@ fn edit_field(
                 value = (value * scale).round() / scale;
             }
         }
+        if response.drag_started() && !edit.cancelled {
+            edit.drag = Some(NumericDrag {
+                original: committed
+                    .get(&row.key)
+                    .cloned()
+                    .unwrap_or_else(|| previous.to_string()),
+                was_default: row.is_default,
+                realtime: schema.is_some_and(|schema| schema["realtime"] == true),
+            });
+        }
+        if edit.cancelled {
+            value = committed
+                .get(&row.key)
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(previous);
+            *value_text = value.to_string();
+            if !ui.input(|input| input.pointer.primary_down()) {
+                edit.cancelled = false;
+            }
+            edit.id = Some(response.id);
+            edit.value = Some(value);
+            edit.dirty = false;
+            return false;
+        }
         edit.id = Some(response.id);
         edit.value = Some(value);
         edit.dirty =
@@ -944,8 +1068,21 @@ fn edit_field(
         if response.changed() && (optional.is_none() || optional_on) {
             *value_text = value.to_string();
         }
-        let changed =
+        let mut changed =
             toggled || (response.changed() && !response.dragged()) || response.drag_stopped();
+        if let Some(drag) = &edit.drag {
+            if drag.realtime {
+                changed = toggled;
+                if response.drag_stopped() {
+                    edit.action = Some(("commit", drag.clone(), value_text.clone()));
+                } else if response.changed() {
+                    edit.action = Some(("preview", drag.clone(), value_text.clone()));
+                }
+            }
+        }
+        if response.drag_stopped() {
+            edit.drag = None;
+        }
         (response, changed)
     } else {
         if row.kind == "color" {

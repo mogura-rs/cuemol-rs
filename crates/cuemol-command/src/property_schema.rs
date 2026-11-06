@@ -417,6 +417,26 @@ fn node_sections(state: &DesktopAppState, kind: &str, rows: &[Value]) -> Value {
         }
     }
     for section in &mut sections {
+        for row in section["rows"].as_array_mut().unwrap() {
+            let key = row["key"].as_str().unwrap_or("");
+            let realtime = kind != "object"
+                && !group
+                && (key == "alpha"
+                    || match renderer_type {
+                        "cpk" => key.starts_with("vdwr_"),
+                        "simple" | "trace" | "contour" | "gpu_mapmesh" | "isosurf" | "molsurf" => {
+                            key == "width"
+                        }
+                        "ballstick" => matches!(key, "sphr" | "bondw" | "thickness"),
+                        "tracestick" => matches!(key, "sphr" | "bondw"),
+                        "spline" => matches!(key, "smooth" | "line_width"),
+                        "*namelabel" => matches!(key, "dispx" | "dispy"),
+                        _ => false,
+                    });
+            if realtime {
+                row["realtime"] = json!(true);
+            }
+        }
         section["rows"].as_array_mut().unwrap().retain(|row| {
             row["kind"] == "toggle"
                 || row["options"].is_array()

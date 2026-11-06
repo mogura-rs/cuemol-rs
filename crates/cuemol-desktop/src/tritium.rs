@@ -63,6 +63,9 @@ impl GuiApplication {
                     _ => None,
                 });
         if self.activity == Some(Activity::Actions) {
+            for (tool, args) in self.inspector.cancel_numeric_edit() {
+                self.tritium_command(tool, args, camera);
+            }
             self.actions_panel.inspector(ctx);
         } else {
             let mut view = camera.to_qsys_camera("__current");
@@ -316,6 +319,26 @@ impl GuiApplication {
         camera: &mut CameraController,
     ) -> bool {
         let mut view = camera.to_qsys_camera("__current");
+        if name == "edit_node_property" {
+            self.cancel_console("Scene changed outside the console; remaining commands cancelled.");
+            return match cuemol_command::prepare_property_edit(&mut self.state, &mut view, &args) {
+                Ok(Some(command)) => self.try_tritium_command("set_node_prop", command, camera),
+                Ok(None) => {
+                    self.sync_active_scene_properties();
+                    self.rebuild_snapshot();
+                    true
+                }
+                Err(error) => {
+                    self.set_status(error.to_string());
+                    false
+                }
+            };
+        }
+        if cuemol_command::tool_changes_scene(name) {
+            for (tool, args) in self.inspector.cancel_numeric_edit() {
+                self.tritium_command(tool, args, camera);
+            }
+        }
         let record_history = cuemol_command::tool_records_history(name)
             && !cuemol_command::is_view_property_write(&self.state, name, &args);
         let undo = record_history.then(|| {

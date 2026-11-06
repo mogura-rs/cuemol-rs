@@ -824,3 +824,100 @@ fn molecule_property_reset_updates_typed_selection_and_name() {
         );
     }
 }
+
+#[test]
+fn transient_numeric_edits_restore_defaults_and_leave_other_properties_alone() {
+    let mut state = DesktopAppState::new();
+    state.open_bytes("preview.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+    let object = state.active_object_summaries()[0].uid;
+    let renderer = state
+        .scene_manager_mut()
+        .object_mut(object)
+        .unwrap()
+        .add_renderer("cpk", "preview");
+    let scene = state.active_scene().unwrap();
+    let mut camera = Camera::new();
+    let target = json!({"nodeType":"renderer","nodeId":renderer.get()});
+    let read = |state: &mut DesktopAppState, camera: &mut Camera| {
+        call(state, camera, "list_node_props", target.clone())["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["key"] == "vdwr_C")
+            .unwrap()
+            .clone()
+    };
+    let initial = read(&mut state, &mut camera);
+    let original = initial["value"].as_str().unwrap();
+    assert_eq!(initial["isdefault"], true);
+    let baseline = state.clone();
+    let mut args = json!({"nodeType":"renderer","nodeId":renderer.get(),"sceneId":scene.get(),"prop":"vdwr_C","mode":"preview","value":"2.1","originalValue":original,"originalWasDefault":true});
+    for value in ["1.9", "2.1"] {
+        args["value"] = json!(value);
+        assert!(
+            cuemol_command::prepare_property_edit(&mut state, &mut camera, &args)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(read(&mut state, &mut camera)["value"], value);
+    }
+    args["mode"] = json!("abort");
+    cuemol_command::prepare_property_edit(&mut state, &mut camera, &args).unwrap();
+    assert_eq!(read(&mut state, &mut camera), initial);
+    assert!(baseline.same_undo_state(&state));
+    args["mode"] = json!("preview");
+    cuemol_command::prepare_property_edit(&mut state, &mut camera, &args).unwrap();
+    state
+        .set_renderer_property(object, renderer, "bondw", "0.2")
+        .unwrap();
+    args["mode"] = json!("commit");
+    let command = cuemol_command::prepare_property_edit(&mut state, &mut camera, &args)
+        .unwrap()
+        .unwrap();
+    assert_eq!(read(&mut state, &mut camera), initial);
+    assert_eq!(
+        state
+            .scene_manager()
+            .object(object)
+            .unwrap()
+            .renderer(renderer)
+            .unwrap()
+            .qsc_attr("bondw"),
+        Some("0.2")
+    );
+    call(&mut state, &mut camera, "set_node_prop", command);
+    let changed = read(&mut state, &mut camera);
+    assert_eq!(changed["value"], "2.1");
+    assert_eq!(changed["isdefault"], false);
+    args["originalValue"] = json!("2.1");
+    args["originalWasDefault"] = json!(false);
+    args["value"] = json!("2.3");
+    args["mode"] = json!("preview");
+    cuemol_command::prepare_property_edit(&mut state, &mut camera, &args).unwrap();
+    args["mode"] = json!("abort");
+    cuemol_command::prepare_property_edit(&mut state, &mut camera, &args).unwrap();
+    assert_eq!(read(&mut state, &mut camera), changed);
+    let before_invalid = state.clone();
+    for (key, value) in [
+        ("prop", json!("name")),
+        ("prop", json!("uid")),
+        ("value", json!("NaN")),
+        ("sceneId", json!(scene.get() + 1)),
+    ] {
+        let mut invalid = args.clone();
+        invalid["mode"] = json!("preview");
+        invalid[key] = value;
+        assert!(cuemol_command::prepare_property_edit(&mut state, &mut camera, &invalid).is_err());
+        assert!(before_invalid.same_undo_state(&state));
+    }
+    args["mode"] = json!("preview");
+    cuemol_command::prepare_property_edit(&mut state, &mut camera, &args).unwrap();
+    let other = state.new_scene("other", true).result_scene;
+    args["mode"] = json!("abort");
+    cuemol_command::prepare_property_edit(&mut state, &mut camera, &args).unwrap();
+    assert_eq!(state.active_scene(), Some(other));
+    state.set_active_scene(Some(scene));
+    assert_eq!(read(&mut state, &mut camera), changed);
+    state.destroy_renderer_in_object(object, renderer).unwrap();
+    assert!(cuemol_command::prepare_property_edit(&mut state, &mut camera, &args).is_err());
+}

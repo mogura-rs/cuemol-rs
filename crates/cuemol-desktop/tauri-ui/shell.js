@@ -94,6 +94,96 @@ function setCueMolInspectorWidth(value) {
 
 const cueMolPropertyInspector = {key: '', target: null, rows: [], sections: [], source: null, serial: 0, tab: 'Properties', filter: '', error: '', localToggles: {}, optionalValues: {}, selectionDrafts:new Map()};
 let cueMolViewInspectorTimer = null;
+let cueMolNumericDrag = null;
+
+function cancelCueMolNumericDrag() {
+  return cueMolNumericDrag?.finish('abort');
+}
+
+function attachCueMolNumericDrag(input, label, row, commit) {
+  label.style.cursor = 'ew-resize';
+  const start = event => {
+    if (event.button !== 0 || input.disabled || input.value === '' || !Number.isFinite(Number(input.value)) || cueMolNumericDrag) return;
+    if (event.target === input && event.clientX >= input.getBoundingClientRect().right - 18) return;
+    event.preventDefault();
+    const inspector = cueMolPropertyInspector;
+    const original = row.value;
+    const args = {...inspector.target, sceneId:snapshot.activeSceneUid, prop:row.key, originalValue:original, originalWasDefault:Boolean(row.isdefault)};
+    const drag = {key:inspector.key, value:original, moved:false, ending:false, pending:null, running:null, finish:null};
+    cueMolNumericDrag = drag;
+    const apply = async (mode, value) => {
+      const result = await invoke('inspector_request', {tool:'edit_node_property', args:{...args, mode, value}});
+      if (result.snapshot && cueMolNumericDrag === drag) {
+        snapshot = result.snapshot;
+        void renderViewport();
+      }
+    };
+    const pump = () => {
+      if (drag.running || drag.ending || drag.pending === null) return;
+      const value = drag.pending;
+      drag.pending = null;
+      drag.running = apply('preview', value).catch(error => {
+        inspector.error = String(error);
+        void drag.finish('abort');
+      }).finally(() => { drag.running = null; pump(); });
+    };
+    const move = next => {
+      if (drag.ending || next.pointerId !== event.pointerId) return;
+      const delta = next.clientX - event.clientX;
+      if (!drag.moved && Math.abs(delta) < 3) return;
+      next.preventDefault();
+      drag.moved = true;
+      const step = row.schema?.step ?? (row.type === 'integer' ? 1 : 0.01);
+      const speed = next.ctrlKey || next.metaKey ? row.schema?.coarseStep ?? step*10 : next.shiftKey ? row.schema?.fineStep ?? step/10 : step;
+      const fine = row.schema?.fineStep ?? step/10;
+      const decimals = row.type === 'integer' ? 0 : Math.max(0, -Math.floor(Math.log10(fine)));
+      const value = Math.max(row.schema?.min ?? -Infinity, Math.min(row.schema?.max ?? Infinity, Number(original) + delta*speed));
+      drag.value = String(Number(value.toFixed(Math.min(15,decimals))));
+      input.value = drag.value;
+      if (row.schema?.realtime) { drag.pending = drag.value; pump(); }
+    };
+    const up = next => { if (next.pointerId === event.pointerId) void drag.finish('commit'); };
+    const abort = () => { void drag.finish('abort'); };
+    const escape = next => {
+      if (next.key === 'Escape') { next.preventDefault(); next.stopImmediatePropagation(); abort(); }
+    };
+    drag.finish = mode => {
+      if (drag.ending) return drag.completion;
+      drag.ending = true;
+      drag.completion = (async () => {
+      drag.pending = null;
+      document.removeEventListener('pointermove', move, true);
+      document.removeEventListener('pointerup', up, true);
+      document.removeEventListener('pointercancel', abort, true);
+      document.removeEventListener('keydown', escape, true);
+      window.removeEventListener('blur', abort);
+      try {
+        if (drag.running) await drag.running;
+        if (drag.moved && row.schema?.realtime) await apply(mode, drag.value);
+        else if (drag.moved && mode === 'commit') commit(drag.value);
+        if (mode === 'abort') input.value = original;
+      } catch (error) { inspector.error = String(error); }
+      finally {
+        if (cueMolNumericDrag === drag) cueMolNumericDrag = null;
+        if (drag.moved) {
+          inspector.source = null;
+          renderShell();
+          void renderViewport();
+        } else if (mode === 'commit' && event.target === input) { input.focus(); input.select(); }
+      }
+      })();
+      return drag.completion;
+    };
+    document.addEventListener('pointermove', move, true);
+    document.addEventListener('pointerup', up, true);
+    document.addEventListener('pointercancel', abort, true);
+    document.addEventListener('keydown', escape, true);
+    window.addEventListener('blur', abort);
+  };
+  label.addEventListener('pointerdown', start);
+  input.addEventListener('pointerdown', start);
+}
+
 
 function refreshCueMolViewInspector() {
   if (workspaceSelectionKind !== 'view' || cueMolInspectorClosed || cueMolViewInspectorTimer !== null) return;
@@ -106,7 +196,7 @@ function refreshCueMolViewInspector() {
 }
 
 function renderTritiumInspector(owner, camera, style) {
-  if (cueMolActivity === "actions" && renderActionInspector()) return;
+  if (cueMolActivity === "actions" && renderActionInspector()) { void cancelCueMolNumericDrag(); return; }
   const rendererUid = workspaceSelectionKind === "densityRenderer" ? selectedDensityRendererUid
     : workspaceSelectionKind === "surfaceRenderer" ? selectedSurfaceRendererUid
     : workspaceSelectionKind === "lwRenderer" ? selectedLwRendererUid
@@ -117,6 +207,7 @@ function renderTritiumInspector(owner, camera, style) {
   const target = context || renderer || owner || camera || style;
   const key = target ? `${snapshot?.activeSceneUid}:${workspaceSelectionKind}:${target.uid ?? target.name}` : "";
   if (key !== cueMolInspectorTarget) {
+    void cancelCueMolNumericDrag();
     cueMolSelectionPicker?.cancel();
     cueMolInspectorTarget = key;
     cueMolInspectorClosed = false;
@@ -135,7 +226,7 @@ function renderTritiumInspector(owner, camera, style) {
   }
   const node = {nodeType: context ? workspaceSelectionKind : renderer ? 'renderer' : 'object', nodeId: target.uid};
   const inspector = cueMolPropertyInspector;
-  if (inspector.key === key && inspector.source === snapshot) return;
+  if (cueMolNumericDrag?.key === key || inspector.key === key && inspector.source === snapshot) return;
   const selectedChanged = inspector.key !== key;
   inspector.key = key;
   inspector.target = node;
@@ -156,6 +247,7 @@ function renderTritiumInspector(owner, camera, style) {
 }
 
 async function editCueMolProperty(tool, args) {
+  await cancelCueMolNumericDrag();
   const inspector = cueMolPropertyInspector;
   const key = inspector.key;
   const target = {...inspector.target};
@@ -180,6 +272,7 @@ async function editCueMolProperty(tool, args) {
 }
 
 function paintCueMolProperties() {
+  if (cueMolNumericDrag && !cueMolNumericDrag.ending) { void cancelCueMolNumericDrag(); return; }
   const inspector = cueMolPropertyInspector;
   const fields = document.getElementById('inspector-fields');
   const active = fields.contains(document.activeElement) ? document.activeElement : null;
@@ -232,6 +325,7 @@ function inspectorDashValue(value) {
 }
 
 function paintCueMolPropertyRows() {
+  if (cueMolNumericDrag && !cueMolNumericDrag.ending) { void cancelCueMolNumericDrag(); return; }
   const inspector = cueMolPropertyInspector;
   const host = document.querySelector('.inspector-property-rows');
   if (!host) return;
@@ -338,7 +432,7 @@ function paintCueMolPropertyRows() {
         if (!on) { input.value=String(remembered); input.disabled=true; }
       }
       input.addEventListener('change', () => {
-        if (cueMolSelectionPicker?.owns(input)) return;
+        if (cueMolNumericDrag || cueMolSelectionPicker?.owns(input)) return;
         if (input.type === 'number' && row.schema?.min !== undefined && row.schema?.max !== undefined && input.value !== '' && Number.isFinite(Number(input.value))) {
           const fine=Number(input.step);
           const value=Math.max(row.schema.min,Math.min(row.schema.max,Number(input.value)));
@@ -352,6 +446,7 @@ function paintCueMolPropertyRows() {
         if (event.key === 'Escape') { event.preventDefault(); input.value=row.schema?.blankNegative && Number(row.value)<0 ? '' : row.value; input.blur(); }
         else if (event.key === 'Enter') { event.preventDefault(); input.blur(); }
       });
+      if (input.type === 'number') attachCueMolNumericDrag(input, label, row, commit);
       if (row.type === 'color' && row.rgba) {
         const color = document.createElement('input'); color.type='color'; color.disabled=input.disabled;
         color.value='#'+row.rgba.slice(0,3).map(value=>value.toString(16).padStart(2,'0')).join('');
@@ -434,6 +529,7 @@ function setupTritiumShell() {
     saveCueMolShell();
   });
   document.querySelector('[data-shell-action="close-inspector"]').addEventListener("click", () => {
+    void cancelCueMolNumericDrag();
     cueMolInspectorClosed = true;
     contentHolder.classList.remove("has-inspector");
   });

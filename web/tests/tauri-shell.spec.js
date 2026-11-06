@@ -317,7 +317,7 @@ async function openShell(page, storage = {}, options = {}) {
           const properties=rows();
           if (window.__delayInspector) { window.__delayInspector=false; return new Promise(resolve=>{window.__releaseInspector=()=>resolve({properties});}); }
           const sections=options.inspectorPages && target===renderer ? [{title:'Basic settings',expanded:true,rows:[
-            {key:'name',label:'Name'},{key:'alpha',label:'Opacity',min:0,max:1,step:0.1},
+            {key:'name',label:'Name'},{key:'alpha',label:'Opacity',min:0,max:1,step:0.1,realtime:true},
             {key:'detail',label:'Detail',choices:['2','4','8','16','24','32']},
             {key:'material',label:'Material',choices:['','Matte'],labels:{'':'(none)'}},
             {key:'font_name',label:'Font name',font:true,choices:['Portable face','8514oem','serif','monospace']},
@@ -350,6 +350,13 @@ async function openShell(page, storage = {}, options = {}) {
           if(key==='egtype') renderer.edgeType=value;
           if(Object.hasOwn(inspectorValues,key)) inspectorValues[key]=value;
         };
+        if(args.tool==='edit_node_property') {
+          const edit=args.args;
+          if(window.__holdNumericPreview && edit.mode==='preview') await window.__holdNumericPreview;
+          set(edit.prop, edit.mode==='abort' ? edit.originalWasDefault ? defaults[edit.prop] : edit.originalValue : edit.value);
+          if(edit.mode==='commit' && edit.value!==edit.originalValue) { snapshot.canUndo=true; snapshot.undoDescriptions.push('Change properties'); }
+          return {snapshot:structuredClone(snapshot)};
+        }
         if(args.tool==='set_node_prop') set(args.args.prop,args.args.value);
         else if(args.tool==='set_node_props') for(const {prop,value} of args.args.updates) set(prop,value);
         else for(const key of args.args.props || Object.keys(defaults)) if(Object.hasOwn(values,key)) set(key,defaults[key]);
@@ -1555,5 +1562,38 @@ test('Tauri About displays and copies runtime rows and handles clipboard failure
   await page.evaluate(() => { navigator.clipboard.writeText = async () => { throw new Error('Clipboard unavailable'); }; });
   await dialog.getByRole('button', {name: 'Copied', exact: true}).click();
   await expect(page.locator('#error-alert-dialog')).toContainText('Clipboard unavailable');
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri numeric dragging coalesces previews and cancels an in-flight edit', async ({page}) => {
+  const errors=await openShell(page,{}, {inspectorPages:true});
+  await page.locator('.tree-renderer').filter({hasText:'Atoms'}).click();
+  const input=page.getByLabel('Inspected alpha',{exact:true});
+  await expect(input).toHaveValue('1');
+  const writes=()=>page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='inspector_request' && call.args.tool==='edit_node_property').map(call=>call.args.args));
+  const drag=async()=>{
+    const box=await input.boundingBox();
+    await page.mouse.move(box.x+box.width/2,box.y+box.height/2);
+    await page.mouse.down();
+    await page.mouse.move(box.x+box.width/2-4,box.y+box.height/2,{steps:4});
+  };
+  await page.evaluate(()=>{ window.__holdNumericPreview=new Promise(resolve=>{window.__releaseNumericPreview=()=>{window.__holdNumericPreview=null;resolve();};}); });
+  await drag();
+  await expect.poll(async()=>(await writes()).length).toBe(1);
+  await page.mouse.move((await input.boundingBox()).x+10,(await input.boundingBox()).y+10,{steps:8});
+  expect((await writes()).length).toBe(1);
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+  await page.evaluate(()=>window.__releaseNumericPreview());
+  await expect.poll(async()=>(await writes()).map(edit=>edit.mode)).toEqual(['preview','abort']);
+  await expect(input).toHaveValue('1');
+  await expect(page.getByRole('button',{name:'Reset alpha',exact:true})).toBeDisabled();
+  await drag();
+  await expect.poll(async()=>Number(await input.inputValue())).toBeLessThan(1);
+  await page.mouse.up();
+  await expect.poll(async()=>(await writes()).at(-1).mode).toBe('commit');
+  expect((await writes()).filter(edit=>edit.mode==='commit')).toHaveLength(1);
+  await expect(page.getByRole('button',{name:'Reset alpha',exact:true})).toBeEnabled();
   expect(errors).toEqual([]);
 });

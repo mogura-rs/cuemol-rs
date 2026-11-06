@@ -17107,6 +17107,67 @@ mod tests {
     }
 
     #[test]
+    fn inspector_numeric_preview_abort_preserves_redo_and_commit_records_one_step() {
+        let mut model = model_without_gpu();
+        model.desktop.open_bytes("preview.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let object = model.desktop.active_object_summaries()[0].uid;
+        let renderer = model
+            .desktop
+            .scene_manager_mut()
+            .object_mut(object)
+            .unwrap()
+            .add_renderer("cpk", "preview");
+        let target = serde_json::json!({"nodeType":"renderer","nodeId":renderer.get()});
+        let read = |model: &mut AppModel| {
+            model.inspector_request("list_node_props", &target).unwrap()["properties"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["key"] == "vdwr_C")
+                .unwrap()
+                .clone()
+        };
+        let original = read(&mut model);
+        model.inspector_request("set_node_prop", &serde_json::json!({"nodeType":"renderer","nodeId":renderer.get(),"prop":"name","value":"redo anchor"})).unwrap();
+        model.undo(0).unwrap();
+        assert_eq!(model.redo_stack.len(), 1);
+        let baseline = model.desktop.clone();
+        let mut args = serde_json::json!({"nodeType":"renderer","nodeId":renderer.get(),"sceneId":model.desktop.active_scene().unwrap().get(),"prop":"vdwr_C","mode":"preview","value":"2.1","originalValue":original["value"],"originalWasDefault":true});
+        for value in ["1.9", "2.1", "2.3"] {
+            args["value"] = serde_json::json!(value);
+            model
+                .inspector_request("edit_node_property", &args)
+                .unwrap();
+            assert_eq!(read(&mut model)["value"], value);
+            assert!(model.undo_stack.is_empty());
+            assert_eq!(model.redo_stack.len(), 1);
+        }
+        args["mode"] = serde_json::json!("abort");
+        model
+            .inspector_request("edit_node_property", &args)
+            .unwrap();
+        assert!(baseline.same_undo_state(&model.desktop));
+        assert_eq!(read(&mut model), original);
+        assert_eq!(model.redo_stack.len(), 1);
+        args["mode"] = serde_json::json!("preview");
+        model
+            .inspector_request("edit_node_property", &args)
+            .unwrap();
+        args["mode"] = serde_json::json!("commit");
+        model
+            .inspector_request("edit_node_property", &args)
+            .unwrap();
+        assert_eq!(model.undo_stack.len(), 1);
+        assert!(model.redo_stack.is_empty());
+        assert_eq!(read(&mut model)["value"], "2.3");
+        model.undo(0).unwrap();
+        assert_eq!(read(&mut model), original);
+        model.redo(0).unwrap();
+        assert_eq!(read(&mut model)["value"], "2.3");
+        assert_eq!(read(&mut model)["isdefault"], false);
+    }
+
+    #[test]
     fn inspector_batches_one_undo_and_queries_preserve_redo() {
         let mut model = model_without_gpu();
         model.desktop.open_bytes("inspected.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();

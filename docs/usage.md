@@ -27,6 +27,12 @@ Hardware quad-buffer stereo is unavailable on the wgpu frontends.
 Center marks invert the displayed colors so they remain visible over molecular
 geometry. Crosses, axes and labels retain their logical size on HiDPI displays.
 
+Drag an Inspector numeric field horizontally to adjust it. Appearance controls
+such as opacity, sphere radii and line widths update the viewport during the
+drag and create one undo step when released. Escape cancels the drag and
+restores the original value and default state. Hold Shift for finer adjustments
+or Ctrl/Cmd for larger steps. Tauri also accepts dragging the field label.
+
 Use **Help → About cuemol-rs** to inspect the version, source commit, build time,
 compiler, target and the libraries used by the selected frontend. **Copy** puts
 these rows on the clipboard for bug reports. Native builds include the OS

@@ -16,6 +16,18 @@ impl AppModel {
             return cuemol_command::selection::request(&self.desktop, args)
                 .map_err(|error| error.to_string());
         }
+        if tool == "edit_node_property" {
+            self.stop_console();
+            let command =
+                cuemol_command::prepare_property_edit(&mut self.desktop, &mut self.camera, args)
+                    .map_err(|error| error.to_string())?;
+            if let Some(command) = command {
+                return self.inspector_request("set_node_prop", &command);
+            }
+            self.sync_active_scene_properties();
+            self.invalidate_snapshot(false);
+            return Ok(json!({"snapshot":self.snapshot()}));
+        }
         if !matches!(
             tool,
             "list_node_props" | "set_node_prop" | "set_node_props" | "reset_node_props"

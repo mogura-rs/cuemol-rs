@@ -1,5 +1,41 @@
 # Validation evidence
 
+## Inspector numeric drag previews
+
+Structured renderer controls now follow the current reference's realtime flags:
+opacity, CPK radii, simple/trace and map/surface line widths, sphere/stick sizes,
+spline smoothness/width and label offsets preview while dragging. Expensive
+geometry controls retain commit-on-release behavior. Preview writes do not
+capture scene snapshots or clear redo. Release first restores the original
+value and default flag, then records one ordinary property edit. Escape, lost
+window focus, a hidden field or a changed target restores the anchor. An abort
+can restore the original scene after the active scene changes. Later unrelated
+edits are preserved. Invalid numbers, read-only properties and missing renderers
+are rejected without changing another target.
+
+Tauri numeric fields and their labels support horizontal dragging. Worker
+requests are coalesced to one in-flight preview and the latest pending value.
+Commit and abort discard pending previews and wait for the in-flight request,
+so delayed work cannot overwrite a cancellation. Normal typed values, native
+number steppers, fine/coarse modifiers and existing numeric limits remain usable.
+
+The shared command run passed 228 checks with two optional checks ignored; all
+32 shared UI, 191 native GUI and 169 macOS Tauri model checks passed. Five optional
+Tauri checks remained ignored. The rebuilt browser passed all 60 Inspector and
+Tauri shell cases, including WebGL/WebGPU mouse drags, cancellation restoring
+defaults and redo, one-step undo/redo, and scene creation during a drag. Tauri's
+shell test deliberately held a preview response while sending more motion and
+Escape, then verified that only the original preview and abort were applied.
+The actual model test separately verifies history and default flags.
+
+A Linux native window also passed OS mouse/keyboard and pixel checks using
+`scripts/check-native-gui.py --inspector-preview-only`: carbon radius changed
+from 1.7 to 2.4 while the button was held, rendered pixels changed, Escape
+restored the default, and keyboard undo/redo restored the expected values.
+The screenshots were inspected. The native and WASM builds, JavaScript syntax,
+formatting and whitespace checks passed. This covers renderer numeric edits;
+animation timing and the separate Density map pane are audited independently.
+
 ## Atom identity and molecule-edit history
 
 The low-level deletion record previously copied atoms back through the ordinary
