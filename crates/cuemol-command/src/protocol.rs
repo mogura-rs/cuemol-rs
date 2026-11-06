@@ -18,8 +18,24 @@ pub fn tool_is_mutating(name: &str) -> bool {
         .is_some_and(|tool| tool["annotations"]["readOnlyHint"] == false)
 }
 
+pub(crate) fn tool_changes_view(name: &str) -> bool {
+    matches!(
+        name,
+        "set_view"
+            | "rotate_view"
+            | "pan_view"
+            | "set_projection"
+            | "center_view"
+            | "focus_selection"
+            | "focus_node"
+            | "focus_nodes"
+            | "orient_view"
+    )
+}
+
 pub fn tool_changes_scene(name: &str) -> bool {
     tool_is_mutating(name)
+        && !tool_changes_view(name)
         && !matches!(
             name,
             "save_camera_file"

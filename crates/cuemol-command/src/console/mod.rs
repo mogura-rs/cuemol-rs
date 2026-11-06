@@ -601,10 +601,10 @@ impl Session {
                     })
                     .collect::<Result<Vec<_>, String>>()?;
                 values.insert(key.clone(), json!(atoms));
-            } else if semantic == "x, y, z" {
+            } else if matches!(semantic, "x, y, z" | "a, x, y, z") {
                 let text = unquote(raw);
                 let coordinates = if text.starts_with('[') {
-                    serde_json::from_str(text).map_err(|e| format!("Expected x y z: {e}"))?
+                    serde_json::from_str(text).map_err(|e| format!("Expected {semantic}: {e}"))?
                 } else {
                     Value::Array(
                         text.split_whitespace()

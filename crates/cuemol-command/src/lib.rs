@@ -8,6 +8,7 @@ mod electrostatics;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod external;
 mod file_commands;
+mod view_commands;
 pub use downloads::{load_fetched, prepare_fetch, FetchPlan};
 pub mod navigation;
 mod nodes;

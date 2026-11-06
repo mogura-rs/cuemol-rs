@@ -15,6 +15,9 @@ mod metadata;
 mod schema;
 
 pub fn is_view_property_write(state: &DesktopAppState, name: &str, args: &Value) -> bool {
+    if crate::protocol::tool_changes_view(name) {
+        return true;
+    }
     match name {
         "set_node_prop" | "set_node_props" | "reset_node_props" => args["nodeType"] == "view",
         "set_prop" | "reset_prop" => args["path"].as_str().is_some_and(|path| {

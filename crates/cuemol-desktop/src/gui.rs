@@ -796,6 +796,12 @@ impl NativeRunner {
             }
             let mutating =
                 is_call && name != "clear_undo" && cuemol_command::tool_changes_scene(name);
+            let view_change = is_call
+                && cuemol_command::is_view_property_write(
+                    &app.state,
+                    name,
+                    &request.message["params"]["arguments"],
+                );
             gpu.camera.store_view_options(&mut app.state);
             let undo = (is_call && cuemol_command::tool_records_history(name)).then(|| {
                 let mut undo = if name == "execute_script" {
@@ -814,7 +820,7 @@ impl NativeRunner {
             let success = response.as_ref().is_some_and(|value| {
                 value.get("result").is_some() && value["result"]["isError"] != true
             });
-            if mutating && success {
+            if (mutating || view_change) && success {
                 if let Some(undo) = undo {
                     if script_call {
                         app.push_script_undo_snapshot(undo);
@@ -5275,6 +5281,8 @@ impl GuiApplication {
                 continue;
             }
             let mutating = cuemol_command::tool_changes_scene(&name);
+            let view_change =
+                cuemol_command::is_view_property_write(&self.state, &name, &arguments);
             let script_before = (name == "execute_script").then(|| self.state.clone());
             let camera_before = view.clone();
             let undo = (mutating && !self.agent.changed_scene).then(|| {
@@ -5303,7 +5311,7 @@ impl GuiApplication {
             let changed = script_before
                 .as_ref()
                 .is_none_or(|before| !before.same_undo_state(&self.state) || camera_before != view);
-            if result.is_ok() && mutating && changed {
+            if result.is_ok() && (mutating || view_change) && changed {
                 let history_changed = undo.as_ref().is_some_and(|undo| {
                     !undo.state.same_scene_undo_state(&self.state) || camera_before != view
                 });
@@ -14720,12 +14728,13 @@ impl GuiApplication {
             self.workspace_aux_selection = None;
         }
         let _ = self.state.set_active_view_camera(&run.camera);
-        let changed = cuemol_command::tool_records_history(name)
-            && run
-                .checkpoint
-                .update(&self.state, &run.camera, &self.selection_text);
-        self.console_session
-            .complete_record(changed && run.checkpoint.scene_changed() && !value.is_null());
+        let changed = run
+            .checkpoint
+            .update(&self.state, &run.camera, &self.selection_text);
+        let view_changed = cuemol_command::is_view_property_write(&self.state, name, args);
+        self.console_session.complete_record(
+            changed && (run.checkpoint.scene_changed() || view_changed) && !value.is_null(),
+        );
         if name == "save_scene" && !value.is_null() {
             if let Some(scene) = self.state.active_scene() {
                 self.state.clear_scene_modified(scene);
@@ -14740,7 +14749,7 @@ impl GuiApplication {
                 self.push_undo_snapshot(before);
             }
         }
-        let changed = changed && cuemol_command::tool_changes_scene(name);
+        let changed = changed && (cuemol_command::tool_changes_scene(name) || view_changed);
         if changed {
             self.console_session.scene_changed();
             run.changed = true;
@@ -40484,8 +40493,10 @@ mod tests {
             "probe"
         );
         assert!(app.state.scene_manager().object(uid).unwrap().is_visible());
-        app.console.source = "get_scene_state".into();
+        app.console.source = "view zoom=37, rotation=1 0 0 0; get_scene_state".into();
         app.execute_console_input();
+        assert_eq!(app.state.active_view_camera().unwrap().zoom(), 37.);
+        assert!(app.pending_script_view);
         assert!(app.undo_stack.is_empty());
         assert_eq!(app.redo_stack.len(), 1);
         app.console.source = "redo".into();

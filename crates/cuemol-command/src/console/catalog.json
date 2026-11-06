@@ -725,11 +725,13 @@
       "zoom",
       "slab",
       "distance",
-      "center"
+      "center",
+      "rotation"
     ],
     "semantics": {
       "objId": "object",
-      "center": "x, y, z"
+      "center": "x, y, z",
+      "rotation": "a, x, y, z"
     },
     "fixed": {
       "fitSlab": true
@@ -867,11 +869,13 @@
       "distance",
       "center",
       "fitSlab",
-      "objId"
+      "objId",
+      "rotation"
     ],
     "semantics": {
       "center": "x, y, z",
-      "objId": "object"
+      "objId": "object",
+      "rotation": "a, x, y, z"
     }
   },
   "slab": {
@@ -883,11 +887,13 @@
       "distance",
       "center",
       "fitSlab",
-      "objId"
+      "objId",
+      "rotation"
     ],
     "semantics": {
       "center": "x, y, z",
-      "objId": "object"
+      "objId": "object",
+      "rotation": "a, x, y, z"
     }
   },
   "turn": {
@@ -907,11 +913,13 @@
       "distance",
       "center",
       "fitSlab",
-      "objId"
+      "objId",
+      "rotation"
     ],
     "semantics": {
       "center": "x, y, z",
-      "objId": "object"
+      "objId": "object",
+      "rotation": "a, x, y, z"
     }
   },
   "zoom": {

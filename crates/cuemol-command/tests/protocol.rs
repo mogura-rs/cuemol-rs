@@ -145,12 +145,11 @@ fn image_output_declares_file_writes_and_preserves_scene_redo() {
             &mut protocol,
             &mut state,
             &mut camera,
-            "rotate_view",
-            json!({"axis":"y","angle":20})
+            "set_node_prop",
+            json!({"nodeType":"scene","prop":"bgcolor","value":"red"})
         )["isError"],
         false
     );
-    let rotated = camera.clone();
     assert_eq!(
         call(&mut protocol, &mut state, &mut camera, "undo", json!({}))["isError"],
         false
@@ -178,7 +177,14 @@ fn image_output_declares_file_writes_and_preserves_scene_redo() {
         call(&mut protocol, &mut state, &mut camera, "redo", json!({}))["isError"],
         false
     );
-    assert_eq!(camera, rotated);
+    assert_eq!(
+        state
+            .scene_manager()
+            .scene(state.active_scene().unwrap())
+            .unwrap()
+            .scene_attribute("bgcolor"),
+        Some("red")
+    );
     let listed = request(
         &mut protocol,
         &mut state,
@@ -431,7 +437,7 @@ fn handshake_mutation_undo_and_failed_command_are_consistent() {
         &mut state,
         &mut camera,
         "set_view",
-        json!({"zoom":30,"slab":-2}),
+        json!({"zoom":30,"slab":12,"fitSlab":true}),
     );
     assert_eq!(bad["isError"], true);
     assert_eq!(camera.zoom(), before);
@@ -446,16 +452,8 @@ fn handshake_mutation_undo_and_failed_command_are_consistent() {
         false
     );
     assert_eq!(camera.zoom(), 30.);
-    assert_eq!(
-        call(&mut p, &mut state, &mut camera, "undo", json!({}))["isError"],
-        false
-    );
-    assert_eq!(camera.zoom(), before);
-    assert_eq!(
-        call(&mut p, &mut state, &mut camera, "redo", json!({}))["isError"],
-        false
-    );
-    assert_eq!(camera.zoom(), 30.);
+    assert!(!cuemol_command::tool_changes_scene("set_view"));
+    assert!(!cuemol_command::tool_records_history("set_view"));
     assert_eq!(
         call(
             &mut p,
@@ -548,4 +546,65 @@ fn loads_selects_and_saves_a_real_scene_without_node() {
     );
     assert_eq!(rendered["isError"], false, "{rendered}");
     assert_eq!(rendered["content"][1]["type"], "image");
+}
+
+#[test]
+fn camera_operations_preserve_scene_redo_and_qax_replay() {
+    let mut state = DesktopAppState::new();
+    let scene = state.new_scene("view", true).result_scene;
+    let mut camera = Camera::new();
+    let mut protocol = Protocol::new();
+    request(
+        &mut protocol,
+        &mut state,
+        &mut camera,
+        "initialize",
+        json!({}),
+    );
+    assert_eq!(
+        call(
+            &mut protocol,
+            &mut state,
+            &mut camera,
+            "set_node_prop",
+            json!({"nodeType":"scene","prop":"bgcolor","value":"red"})
+        )["isError"],
+        false
+    );
+    assert_eq!(
+        call(&mut protocol, &mut state, &mut camera, "undo", json!({}))["isError"],
+        false
+    );
+    state.clear_scene_modified(scene);
+    let mut session = cuemol_command::console::Session::default();
+    for (name, args) in [
+        (
+            "set_view",
+            json!({"rotation":[1,0,0,0],"center":[1,2,3],"zoom":37}),
+        ),
+        ("rotate_view", json!({"axis":"y","angle":30})),
+        ("pan_view", json!({"dx":10,"dy":20})),
+        ("set_projection", json!({"perspective":true})),
+    ] {
+        session.prepare_record(&state, name, &args);
+        assert_eq!(
+            call(&mut protocol, &mut state, &mut camera, name, args)["isError"],
+            false
+        );
+        session.complete_record(true);
+        assert!(!state.scene_is_modified(scene));
+    }
+    assert_eq!(session.action_record.entry_count(), 4);
+    assert_eq!(
+        call(&mut protocol, &mut state, &mut camera, "redo", json!({}))["isError"],
+        false
+    );
+    assert_eq!(
+        state
+            .scene_manager()
+            .scene(scene)
+            .unwrap()
+            .scene_attribute("bgcolor"),
+        Some("red")
+    );
 }

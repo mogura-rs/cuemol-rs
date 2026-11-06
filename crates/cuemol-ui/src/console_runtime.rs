@@ -65,10 +65,9 @@ impl ConsoleCheckpoint {
     }
 
     pub fn update(&mut self, state: &DesktopAppState, camera: &Camera, selection: &str) -> bool {
-        let scene_changed = !cuemol_command::console::same_camera_view(&self.camera, camera)
-            || self.selection != selection
-            || !self.state.same_scene_undo_state(state);
-        let changed = scene_changed || !self.state.same_undo_state(state);
+        let camera_changed = !cuemol_command::console::same_camera_view(&self.camera, camera);
+        let scene_changed = self.selection != selection || !self.state.same_scene_undo_state(state);
+        let changed = camera_changed || scene_changed || !self.state.same_undo_state(state);
         if changed {
             *self = Self::new(state, camera, selection);
         }

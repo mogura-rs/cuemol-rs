@@ -306,18 +306,7 @@ pub fn call_tool(
         "set_mol_selection" => {state.set_molecule_selection_text(uid(args,"objId")?,text(args,"selection")?)?;Ok(json!({"selection":args["selection"]}))}
         "center_view" => {fit(state,camera,Some(uid(args,"objId")?),args["selection"].as_str(),args["zoom"]==true)?;Ok(view_json(camera))}
         "get_view" => Ok(view_json(camera)),
-        "set_view" => {
-            for key in ["zoom","slab","distance"] {if let Some(n)=args[key].as_f64() {
-                if n<=0.0 || !n.is_finite() {return Err(CueMolError::invalid_argument(format!("{key} must be positive")));}
-                match key {"zoom"=>camera.set_zoom(n),"slab"=>camera.set_slab_depth(n),_=>camera.set_cam_dist(n)}
-            }}
-            if let Some(center)=args["center"].as_array() {camera.set_center(Vector4::new3(center[0].as_f64().unwrap(),center[1].as_f64().unwrap(),center[2].as_f64().unwrap()));}
-            if args["fitSlab"]==true {
-                if !args["slab"].is_null() {return Err(CueMolError::invalid_argument("fitSlab and slab are mutually exclusive"));}
-                let mut fitted=camera.clone();fit(state,&mut fitted,args["objId"].as_u64().map(Uid::new),None,true)?;camera.set_slab_depth(fitted.slab_depth());
-            }
-            Ok(view_json(camera))
-        }
+        "set_view" => crate::view_commands::set_view(state,camera,args),
         "rotate_view" => {
             let axis=match text(args,"axis")? {"x"=>Vector4::new3(1.,0.,0.),"y"=>Vector4::new3(0.,1.,0.),_=>Vector4::new3(0.,0.,1.)};
             camera.set_rotation(camera.rotation().mul_quat(Quat::from_axis_angle(axis,args["angle"].as_f64().unwrap().to_radians())?).normalize()?);

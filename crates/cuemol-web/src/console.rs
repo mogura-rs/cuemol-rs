@@ -157,12 +157,13 @@ impl App {
                 }
             }
         }
-        let changed = cuemol_command::tool_records_history(name)
-            && run
-                .checkpoint
-                .update(&self.state, &self.camera, &self.selection);
-        self.console_session
-            .complete_record(changed && run.checkpoint.scene_changed() && !result.is_null());
+        let changed = run
+            .checkpoint
+            .update(&self.state, &self.camera, &self.selection);
+        let view_changed = cuemol_command::is_view_property_write(&self.state, name, args);
+        self.console_session.complete_record(
+            changed && (run.checkpoint.scene_changed() || view_changed) && !result.is_null(),
+        );
         if changed && run.checkpoint.scene_changed() && cuemol_command::tool_records_history(name) {
             if let Some(mut before) = run.undo.take() {
                 before.record = self.console_session.action_record.clone();
@@ -174,7 +175,7 @@ impl App {
                 self.future.clear();
             }
         }
-        if changed && cuemol_command::tool_changes_scene(name) {
+        if changed && (cuemol_command::tool_changes_scene(name) || view_changed) {
             self.console_session.scene_changed();
             run.changed = true;
             self.revision = self.revision.wrapping_add(1);

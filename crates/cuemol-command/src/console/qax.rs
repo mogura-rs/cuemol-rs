@@ -297,7 +297,7 @@ impl Session {
                 &json!({"nodeType":kind,"nodeId":id.map(|id| id.get()),"prop":prop,"value":args["value"]}),
             );
         }
-        if !crate::tool_records_history(name) {
+        if !crate::tool_records_history(name) && !crate::is_view_property_write(state, name, args) {
             return None;
         }
         let Some(spec) = catalog()

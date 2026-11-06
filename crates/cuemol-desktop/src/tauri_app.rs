@@ -25649,8 +25649,13 @@ mod tests {
             "probe"
         );
         model
-            .start_console("get_scene_state", cuemol_command::console::Dialect::CueMol)
+            .start_console(
+                "view zoom=37, rotation=1 0 0 0; get_scene_state",
+                cuemol_command::console::Dialect::CueMol,
+            )
             .unwrap();
+        assert_eq!(model.camera.zoom(), 37.);
+        assert!(model.undo_stack.is_empty());
         assert_eq!(model.redo_stack.len(), 1);
         model
             .start_console("redo", cuemol_command::console::Dialect::PyMol)

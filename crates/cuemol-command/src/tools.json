@@ -1248,7 +1248,7 @@
   },
   {
     "name": "set_view",
-    "description": "Set camera zoom, clipping slab, distance, or center.",
+    "description": "Read or set camera zoom, clipping slab, distance, center or rotation. Fit the slab around the current center without moving or zooming the view.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1292,6 +1292,18 @@
             "integer",
             "null"
           ]
+        },
+        "rotation": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number"
+          },
+          "minItems": 4,
+          "maxItems": 4,
+          "description": "Quaternion [a, x, y, z], scalar first. [1, 0, 0, 0] is the default orientation."
         }
       },
       "required": [],

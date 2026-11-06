@@ -663,7 +663,7 @@ impl App {
                     self.revision = self.revision.wrapping_add(1);
                 }
                 self.message = serde_json::to_string_pretty(&value).unwrap();
-                self.dirty |= mutating && changed;
+                self.dirty |= (mutating || view_property) && changed;
                 if name == "set_mol_selection" {
                     self.selected = args["objId"].as_u64().map(Uid::new);
                     self.selection = args["selection"].as_str().unwrap_or_default().into();

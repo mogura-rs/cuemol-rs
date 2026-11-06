@@ -46,9 +46,10 @@ test('CueMol console resolves names sequentially and a submission has one undo e
   expect((await status(page)).scene.objects[0].name).toBe('changed');
   expect((await status(page)).scene.objects[0].visible).toBe(true);
   await call(page, 'undo');
-  await input(page, 'get_scene_state');
+  await input(page, 'view zoom=37, rotation=1 0 0 0; get_scene_state');
   await page.keyboard.press('Enter');
   await expect.poll(async () => (await status(page)).message).toBe('Console executed');
+  expect((await status(page)).view.zoom).toBe(37);
   await call(page, 'redo');
   expect((await status(page)).scene.objects[0].name).toBe('changed');
   await page.screenshot({path: testInfo.outputPath('console-native-dialect.png')});

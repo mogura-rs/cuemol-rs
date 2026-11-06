@@ -5,6 +5,28 @@ results are historical. Generated inputs and logs stay in the ignored checkout
 cache. The current repairs and their limits appear in the completion audit;
 passing tests do not establish equivalence for every parameter combination.
 
+## Current-reference camera command options
+
+`set_view` now accepts the reference scalar-first quaternion `[a, x, y, z]`,
+normalizes it, and validates arguments before changing the camera. The existing
+`get_view` rotation result remains `[x, y, z, w]` for compatibility with current
+consumers. `fitSlab` uses transformed all-atom bounds and the current view center
+and rotation, before applying any simultaneous center/rotation arguments. It
+skips maps and keeps the view center and zoom. Distance is applied before slab
+clamping. Empty geometry and malformed arguments leave the camera unchanged.
+
+Camera commands no longer consume a scene undo entry or clear redo. They still
+update native/browser viewports and remain recordable in QAX action logs.
+Shared console checkpoints distinguish camera updates from scene edits, and
+all three frontends acknowledge each update before the next command.
+
+The shared command suite passed, including three camera-option regressions and
+an MCP redo/action-log regression. Two native console tests and three macOS
+Tauri console tests passed. Rebuilt WASM passed 15 console and selection tests,
+including scalar-first rotation, current-center slab fitting, workspace focus,
+geometry/picking refresh and redo preservation on WebGL and WebGPU. These are
+finite behavior checks; they do not establish complete camera/UI parity.
+
 ## Current-reference selection and fit-box APIs
 
 The current CueMol 3.0.0.554 source (`794fe4ac`) adds selection rewriting and

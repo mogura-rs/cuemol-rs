@@ -119,7 +119,7 @@ for (const backend of ['webgl', 'webgpu']) {
     const [probe, target] = (await status(page)).scene.objects;
     const renderer = await command(page, 'create_renderer', {objId:probe.id,rendererType:'cpk',name:'focus_first',selection:'name C1'});
     await command(page, 'execute_script', {source:`var offset=cuemol.Vector('(20,0,0)'); var matrix=cuemol.createObj('Matrix'); matrix.setTranslate(offset); cuemol.getObject(${target.id}).xformMat=matrix;`});
-    await command(page, 'set_view', {rotation:[0,0,0,1],center:[100,100,100],zoom:200,slab:200});
+    await command(page, 'set_view', {rotation:[1,0,0,0],center:[100,100,100],zoom:200,slab:200});
     const click = async (name, modifiers=[]) => {
       await expect.poll(async () => Boolean((await status(page)).ui.rects[name])).toBe(true);
       const [x,y,w,h] = (await status(page)).ui.rects[name];
@@ -136,5 +136,30 @@ for (const backend of ['webgl', 'webgpu']) {
     expect(state.view.center[1]).toBeCloseTo(0.75,5);
     expect(state.view.zoom).toBeCloseTo(Math.max(23.6/(Math.round(width)/Math.round(height)),4),4);
     expect(state.view.slab).toBeCloseTo(4,5);
+  });
+}
+
+for (const backend of ['webgl', 'webgpu']) {
+  test(`camera rotation and slab fitting preserve scene redo in ${backend}`, async ({page}) => {
+    await page.goto(`./?renderer=${backend}`);
+    await expect.poll(() => page.evaluate(() => window.cuemol?.status()?.scene?.sceneId), {timeout:60000}).toBeGreaterThan(0);
+    await page.locator('#files').setInputFiles({name:'Probe.pdb',mimeType:'application/octet-stream',buffer:Buffer.from(pdb)});
+    await expect.poll(async () => (await status(page)).scene.objects.length).toBe(1);
+    const object = (await status(page)).scene.objects[0];
+    await command(page, 'rename_node', {nodeType:'object',nodeId:object.id,name:'renamed'});
+    await command(page, 'undo');
+    await command(page, 'set_view', {rotation:[1,0,0,0],center:[0,0,30],distance:200,zoom:37});
+    await command(page, 'set_view', {fitSlab:true,objId:object.id});
+    const fitted = (await status(page)).view;
+    expect(fitted.center).toEqual([0,0,30]);
+    expect(fitted.zoom).toBe(37);
+    expect(fitted.slab).toBeCloseTo(66,5);
+    const q = Math.SQRT1_2;
+    await command(page, 'set_view', {rotation:[q,0,q,0],center:[0,0,0],fitSlab:true});
+    expect((await status(page)).view.slab).toBeCloseTo(66,5);
+    await command(page, 'set_view', {fitSlab:true});
+    expect((await status(page)).view.slab).toBeCloseTo(4.4,5);
+    await command(page, 'redo');
+    expect((await status(page)).scene.objects[0].name).toBe('renamed');
   });
 }

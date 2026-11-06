@@ -120,12 +120,13 @@ impl AppModel {
             }
             self.restore_script_view();
         }
-        let changed = cuemol_command::tool_records_history(name)
-            && run
-                .checkpoint
-                .update(&self.desktop, &self.camera, &self.selection);
-        self.console_session
-            .complete_record(changed && run.checkpoint.scene_changed() && !result.is_null());
+        let changed = run
+            .checkpoint
+            .update(&self.desktop, &self.camera, &self.selection);
+        let view_changed = cuemol_command::is_view_property_write(&self.desktop, name, args);
+        self.console_session.complete_record(
+            changed && (run.checkpoint.scene_changed() || view_changed) && !result.is_null(),
+        );
         if name == "save_scene" && !result.is_null() {
             if let Some(scene) = self.desktop.active_scene() {
                 self.desktop.clear_scene_modified(scene);
@@ -141,7 +142,7 @@ impl AppModel {
                 }
             }
         }
-        if changed && cuemol_command::tool_changes_scene(name) {
+        if changed && (cuemol_command::tool_changes_scene(name) || view_changed) {
             self.console_session.scene_changed();
             run.changed = true;
             self.invalidate_snapshot(false);
