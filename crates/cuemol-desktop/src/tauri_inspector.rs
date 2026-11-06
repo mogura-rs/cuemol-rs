@@ -3,6 +3,74 @@ use serde_json::{json, Value};
 
 impl AppModel {
     pub(super) fn inspector_request(&mut self, tool: &str, args: &Value) -> Result<Value, String> {
+        if tool == "animation_element_detail" {
+            if args["sceneId"].as_u64() != self.desktop.active_scene().map(|sid| sid.get()) {
+                return Err("The inspected scene changed".into());
+            }
+            let uid = args["uid"].as_u64().ok_or("Animation uid is required")?;
+            return cuemol_command::animation_element_detail(&self.desktop, uid)
+                .map_err(|error| error.to_string());
+        }
+        if tool == "animation_selection" {
+            if args["sceneId"].as_u64() != self.desktop.active_scene().map(|sid| sid.get()) {
+                return Err("The inspected scene changed".into());
+            }
+            let animation = self.active_animation_manager()?;
+            let uids = args["uids"]
+                .as_array()
+                .ok_or("Animation uids are required")?;
+            let indices = uids
+                .iter()
+                .map(|uid| {
+                    animation
+                        .motions()
+                        .iter()
+                        .position(|motion| Some(motion.base().uid().get()) == uid.as_u64())
+                        .ok_or_else(|| "Animation element was not found".to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            match args["action"].as_str() {
+                Some("delete") => self.delete_animation_objects(&indices)?,
+                Some("up") => self.move_animation_objects(&indices, -1)?,
+                Some("down") => self.move_animation_objects(&indices, 1)?,
+                _ => return Err("Unknown animation selection action".into()),
+            }
+            return Ok(json!({"snapshot":self.snapshot()}));
+        }
+        if tool == "edit_animation_property" {
+            self.stop_console();
+            let command =
+                cuemol_command::prepare_animation_edit(&mut self.desktop, &mut self.camera, args)
+                    .map_err(|error| error.to_string())?;
+            if let Some((tool, mut command)) = command {
+                command["sceneId"] = args["sceneId"].clone();
+                return self.inspector_request(tool, &command);
+            }
+            self.reset_animation_playback();
+            self.sync_active_scene_properties();
+            self.invalidate_snapshot(false);
+            return Ok(json!({"snapshot":self.snapshot()}));
+        }
+        let animation = matches!(
+            tool,
+            "add_anim"
+                | "set_anim_time"
+                | "set_anim_prop"
+                | "set_anim_generic_prop"
+                | "reset_anim_prop"
+        );
+        if animation && args["sceneId"].as_u64() != self.desktop.active_scene().map(|sid| sid.get())
+        {
+            return Err("The inspected scene changed".into());
+        }
+        let mut command_args = args.clone();
+        if animation {
+            command_args
+                .as_object_mut()
+                .ok_or("Inspector arguments must be an object")?
+                .remove("sceneId");
+        }
+        let args = if animation { &command_args } else { args };
         if tool == "style_edit" {
             return self.style_edit_request(args);
         }
@@ -28,10 +96,12 @@ impl AppModel {
             self.invalidate_snapshot(false);
             return Ok(json!({"snapshot":self.snapshot()}));
         }
-        if !matches!(
-            tool,
-            "list_node_props" | "set_node_prop" | "set_node_props" | "reset_node_props"
-        ) {
+        if !animation
+            && !matches!(
+                tool,
+                "list_node_props" | "set_node_prop" | "set_node_props" | "reset_node_props"
+            )
+        {
             return Err("Unsupported inspector operation".into());
         }
         if !args.is_object() {
@@ -46,6 +116,9 @@ impl AppModel {
         let record = cuemol_command::console::actions::Record::operation(&self.desktop, tool, args);
         let result = cuemol_command::call_tool(&mut self.desktop, &mut self.camera, tool, args)
             .map_err(|error| error.to_string())?;
+        if animation {
+            self.reset_animation_playback();
+        }
         self.sync_active_scene_properties();
         let changed = !before.desktop.same_undo_state(&self.desktop);
         if changed || !cuemol_command::console::same_camera_view(&before.camera, &self.camera) {

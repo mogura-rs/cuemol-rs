@@ -87,7 +87,6 @@ const animationTime = document.getElementById("animation-time");
 const animationDuration = document.getElementById("animation-duration");
 const animationStartCamera = document.getElementById("animation-start-camera");
 const animationBody = document.querySelector(".animation-body");
-const animationColumns = document.getElementById("animation-columns");
 const animationList = document.getElementById("animation-list");
 const animationAdd = document.getElementById("animation-add");
 const animationDelete = document.getElementById("animation-delete");
@@ -129,7 +128,6 @@ const dialog = tauri?.dialog;
 const RECENT_STORAGE_KEY = "cuemol2.recentFiles.v1";
 const SELECTION_HISTORY_STORAGE_KEY = "cuemol2.selectionHistory.v1";
 const ANIMATION_RENDER_STORAGE_KEY = "cuemol2.animationRender.v1";
-const ANIMATION_COLUMN_WIDTHS_STORAGE_KEY = "cuemol2.animationColumnWidths.v1";
 const COLORING_PAINT_COLUMN_WIDTH_STORAGE_KEY = "cuemol2.coloringPaintColumnWidth.v1";
 const COMMAND_HISTORY_STORAGE_KEY = "cuemol2.commandHistory.v1";
 const BOTTOM_PANEL_HEIGHT_STORAGE_KEY = "cuemol2.bottomPanelHeight.v1";
@@ -8384,7 +8382,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
   } else if (title === "Animation object properties") {
     const pending = pendingAnimationAdd;
     const object = pending?.object || snapshot?.animationObjects.find(
-      (item) => item.index === selectedAnimationIndex,
+      (item) => item.uid === cueMolAnimationTimeline.primary,
     );
     if (!object) {
       dialogContent.append(dialogParagraph("Select an animation object first."));
@@ -8800,6 +8798,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
           return;
         }
         const input = {
+          uid: object.uid ?? null,
           index: object.index,
           name: name.value,
           disabled: disabled.checked,
@@ -8819,9 +8818,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
         if (changed) {
           if (pending) {
             const index = Math.min(object.index, snapshot.animationObjects.length - 1);
-            selectedAnimationIndex = index;
-            selectedAnimationIndices = new Set([index]);
-            selectedAnimationAnchor = index;
+            selectAnimationByIndex(index);
             pendingAnimationAdd = null;
           }
           referenceDialog.close();
@@ -12501,6 +12498,7 @@ function showWorkspaceMultipleContextMenu(event, target) {
 }
 
 function normalizeSelection() {
+  reconcileAnimationSelection();
   if (workspaceSelectionKind === "multiple") {
     workspaceMultipleSelection = workspaceMultipleSelection.filter(workspaceTargetExists);
     if (workspaceMultipleSelection.length >= 2) return;
@@ -12556,6 +12554,7 @@ function normalizeSelection() {
     selectedRendererUid = null;
     if (
       ![
+        "animation",
         "scene",
         "view",
         "cameraRoot",
@@ -13666,6 +13665,9 @@ function renderSceneTree(renderKey = workspaceChromeRenderKey()) {
 }
 
 function renderInspector(renderKey = workspaceChromeRenderKey()) {
+  document.querySelector(".inspector-panel").classList.toggle("animation-inspector", workspaceSelectionKind === "animation" && cueMolActivity !== "actions");
+  if (workspaceSelectionKind === "animation" && cueMolActivity !== "actions") { renderAnimationInspector(); return; }
+  clearAnimationInspector();
   const map = ["densityMap", "densityRenderer"].includes(workspaceSelectionKind)
     ? selectedDensityMap()
     : null;
@@ -16185,6 +16187,7 @@ function parseAnimationObjectTime(value) {
 
 function defaultAnimationObjectProperties(object) {
   const input = {
+    uid: object.uid ?? null,
     index: object.index,
     name: object.name,
     disabled: false,
@@ -16318,41 +16321,31 @@ function newAnimationObjectDraft(kind, index) {
 }
 
 async function addAnimationObject(kind = "simple-spin") {
-  const insertionIndex = selectedAnimationIndex === null
-    ? snapshot.animationObjects.length
-    : selectedAnimationIndex + 1;
-  if (referenceDialog.open) referenceDialog.close();
-  pendingAnimationAdd = {
-    kind,
-    afterIndex: selectedAnimationIndex,
-    object: newAnimationObjectDraft(kind, insertionIndex),
-  };
-  await showReferenceDialog("Animation object properties");
+  reconcileAnimationSelection();
+  const types={"simple-spin":"spin","camera-motion":"camera",show:"show",hide:"hide","slide-in":"slidein","slide-out":"slideout","mol-anim":"mol",noop:"wait"};
+  const existing=new Set(snapshot.animationObjects.map(object=>object.uid));
+  const following=selectedAnimationIndex===null?null:snapshot.animationObjects[selectedAnimationIndex+1];
+  const args={type:types[kind]};
+  if(following)args.before=`#${following.uid}`;
+  if(await editCueMolAnimation('add_anim',args)) {
+    const added=snapshot.animationObjects.find(object=>!existing.has(object.uid));
+    if(added)selectAnimationObject(added);
+  }
 }
 
 async function deleteSelectedAnimationObjects() {
-  if (selectedAnimationIndices.size === 0) return;
-  await mutate("delete_animation_objects", {
-    indices: [...selectedAnimationIndices].sort((lhs, rhs) => lhs - rhs),
-  });
-  selectedAnimationIndex = null;
-  selectedAnimationIndices = new Set();
-  selectedAnimationAnchor = null;
-  renderAnimation();
+  reconcileAnimationSelection();
+  const state=cueMolAnimationTimeline,index=selectedAnimationIndex;
+  if(!state.selected.size)return;
+  if(await editCueMolAnimation('animation_selection',{action:'delete',uids:[...state.selected]})) {
+    const next=snapshot.animationObjects[Math.min(index??0,snapshot.animationObjects.length-1)];
+    if(next)selectAnimationObject(next);else {state.selected.clear();state.primary=null;renderAnimation();renderInspector();}
+  }
 }
-
 async function moveSelectedAnimationObjects(direction) {
-  if (selectedAnimationIndices.size === 0) return;
-  const indices = [...selectedAnimationIndices].sort((lhs, rhs) => lhs - rhs);
-  await mutate("move_animation_objects", { indices, direction });
-  selectedAnimationIndices = new Set(indices.map((index) => index + direction));
-  selectedAnimationIndex = selectedAnimationIndex === null
-    ? null
-    : selectedAnimationIndex + direction;
-  selectedAnimationAnchor = selectedAnimationAnchor === null
-    ? null
-    : selectedAnimationAnchor + direction;
-  renderAnimation();
+  reconcileAnimationSelection();
+  const state=cueMolAnimationTimeline;
+  if(state.selected.size)await editCueMolAnimation('animation_selection',{action:direction<0?'up':'down',uids:[...state.selected]});
 }
 
 function animationContextItems() {
@@ -16362,7 +16355,7 @@ function animationContextItems() {
     {
       label: "Change...",
       disabled: indices.length !== 1,
-      action: () => showReferenceDialog("Animation object properties"),
+      action: showAnimationInspector,
     },
     {
       label: "Delete",
@@ -16387,124 +16380,6 @@ function animationContextItems() {
       action: () => moveSelectedAnimationObjects(1),
     },
   ];
-}
-
-function animationColumnRenderedWidths() {
-  const headings = animationColumns?.querySelectorAll(":scope > span");
-  return {
-    nameWidth: headings?.[0]?.getBoundingClientRect().width || 110,
-    startWidth: headings?.[1]?.getBoundingClientRect().width || 52,
-  };
-}
-
-function setAnimationColumnWidths(nameWidth, startWidth, persist = false) {
-  let nextNameWidth = Math.min(400, Math.max(60, Number(nameWidth) || 110));
-  let nextStartWidth = Math.min(200, Math.max(44, Number(startWidth) || 52));
-  const availableWidth = animationColumns?.clientWidth || 0;
-  if (availableWidth >= 158) {
-    nextNameWidth = Math.min(nextNameWidth, availableWidth - nextStartWidth - 54);
-    nextNameWidth = Math.max(60, nextNameWidth);
-    nextStartWidth = Math.min(nextStartWidth, availableWidth - nextNameWidth - 54);
-    nextStartWidth = Math.max(44, nextStartWidth);
-  }
-  animationBody?.style.setProperty("--animation-name-width", `${nextNameWidth}px`);
-  animationBody?.style.setProperty("--animation-start-width", `${nextStartWidth}px`);
-  const splitters = animationColumns?.querySelectorAll("[data-animation-column-splitter]");
-  splitters?.[0]?.setAttribute("aria-valuenow", String(Math.round(nextNameWidth)));
-  splitters?.[1]?.setAttribute("aria-valuenow", String(Math.round(nextStartWidth)));
-  if (!persist) return;
-  try {
-    localStorage.setItem(
-      ANIMATION_COLUMN_WIDTHS_STORAGE_KEY,
-      JSON.stringify({ nameWidth: nextNameWidth, startWidth: nextStartWidth }),
-    );
-  } catch {
-    // Storage can be unavailable in restricted webviews.
-  }
-}
-
-function restoreAnimationColumnWidths() {
-  let widths;
-  try {
-    widths = JSON.parse(localStorage.getItem(ANIMATION_COLUMN_WIDTHS_STORAGE_KEY) || "null");
-  } catch {
-    return;
-  }
-  if (
-    widths &&
-    Number.isFinite(Number(widths.nameWidth)) &&
-    Number.isFinite(Number(widths.startWidth))
-  ) {
-    setAnimationColumnWidths(widths.nameWidth, widths.startWidth);
-  }
-}
-
-function resetAnimationColumnWidths() {
-  animationBody?.style.removeProperty("--animation-name-width");
-  animationBody?.style.removeProperty("--animation-start-width");
-  try {
-    localStorage.removeItem(ANIMATION_COLUMN_WIDTHS_STORAGE_KEY);
-  } catch {
-    // Storage can be unavailable in restricted webviews.
-  }
-  for (const splitter of animationColumns?.querySelectorAll(
-    "[data-animation-column-splitter]",
-  ) || []) {
-    splitter.removeAttribute("aria-valuenow");
-  }
-}
-
-function setupAnimationColumnSplitters() {
-  restoreAnimationColumnWidths();
-  for (const splitter of animationColumns?.querySelectorAll(
-    "[data-animation-column-splitter]",
-  ) || []) {
-    const nameColumn = splitter.dataset.animationColumnSplitter === "name";
-    splitter.setAttribute("aria-valuemin", nameColumn ? "60" : "44");
-    splitter.setAttribute("aria-valuemax", nameColumn ? "400" : "200");
-    splitter.title = "Drag to resize columns; double-click to reset";
-    splitter.addEventListener("pointerdown", (event) => {
-      if (event.button !== 0) return;
-      event.preventDefault();
-      const column = splitter.dataset.animationColumnSplitter;
-      const initial = animationColumnRenderedWidths();
-      const startX = event.clientX;
-      splitter.setPointerCapture(event.pointerId);
-      splitter.classList.add("dragging");
-      const resize = (moveEvent) => {
-        const delta = moveEvent.clientX - startX;
-        setAnimationColumnWidths(
-          column === "name" ? initial.nameWidth + delta : initial.nameWidth,
-          column === "start" ? initial.startWidth + delta : initial.startWidth,
-        );
-      };
-      const finish = (finishEvent) => {
-        if (finishEvent.type !== "pointercancel") resize(finishEvent);
-        const current = animationColumnRenderedWidths();
-        setAnimationColumnWidths(current.nameWidth, current.startWidth, true);
-        splitter.classList.remove("dragging");
-        splitter.removeEventListener("pointermove", resize);
-        splitter.removeEventListener("pointerup", finish);
-        splitter.removeEventListener("pointercancel", finish);
-      };
-      splitter.addEventListener("pointermove", resize);
-      splitter.addEventListener("pointerup", finish);
-      splitter.addEventListener("pointercancel", finish);
-    });
-    splitter.addEventListener("dblclick", resetAnimationColumnWidths);
-    splitter.addEventListener("keydown", (event) => {
-      if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
-      event.preventDefault();
-      const column = splitter.dataset.animationColumnSplitter;
-      const current = animationColumnRenderedWidths();
-      const delta = event.key === "ArrowRight" ? 10 : -10;
-      setAnimationColumnWidths(
-        column === "name" ? current.nameWidth + delta : current.nameWidth,
-        column === "start" ? current.startWidth + delta : current.startWidth,
-        true,
-      );
-    });
-  }
 }
 
 function syncAnimationTimer() {
@@ -16540,86 +16415,7 @@ function renderAnimation() {
   const error = document.getElementById("animation-error");
   error.textContent = snapshot.animationResolveError || "";
   error.hidden = !snapshot.animationResolveError;
-  const validIndices = new Set(objects.map((object) => object.index));
-  selectedAnimationIndices = new Set(
-    [...selectedAnimationIndices].filter((index) => validIndices.has(index)),
-  );
-  if (!validIndices.has(selectedAnimationIndex)) {
-    selectedAnimationIndex = [...selectedAnimationIndices][0] ?? null;
-  }
-  if (!validIndices.has(selectedAnimationAnchor)) selectedAnimationAnchor = null;
-  const listKey = JSON.stringify([
-    [...selectedAnimationIndices].sort((lhs, rhs) => lhs - rhs),
-    objects.map((object) => [object.index, object.name, object.start, object.end, object.resolveError]),
-  ]);
-  if (renderedAnimationListKey !== listKey) {
-    renderedAnimationListKey = listKey;
-    animationList.replaceChildren();
-    if (objects.length === 0) {
-      const empty = document.createElement("p");
-      empty.className = "animation-empty";
-      empty.textContent = "No animation objects.";
-      animationList.append(empty);
-    }
-    for (const object of objects) {
-      const row = button(
-        "",
-        `animation-row${selectedAnimationIndices.has(object.index) ? " selected" : ""}`,
-        (event) => {
-          if (event.shiftKey && selectedAnimationAnchor !== null) {
-            const first = Math.min(selectedAnimationAnchor, object.index);
-            const last = Math.max(selectedAnimationAnchor, object.index);
-            selectedAnimationIndices = new Set(
-              objects
-                .filter((candidate) => candidate.index >= first && candidate.index <= last)
-                .map((candidate) => candidate.index),
-            );
-          } else if (event.metaKey || event.ctrlKey) {
-            if (selectedAnimationIndices.has(object.index)) {
-              selectedAnimationIndices.delete(object.index);
-            } else {
-              selectedAnimationIndices.add(object.index);
-            }
-            selectedAnimationAnchor = object.index;
-          } else {
-            selectedAnimationIndices = new Set([object.index]);
-            selectedAnimationAnchor = object.index;
-          }
-          selectedAnimationIndex = selectedAnimationIndices.has(object.index)
-            ? object.index
-            : [...selectedAnimationIndices][0] ?? null;
-          renderAnimation();
-        },
-      );
-      const name = document.createElement("span");
-      row.title = object.resolveError || "";
-      if (object.resolveError) row.classList.add("inspector-error");
-      name.textContent = object.name
-        ? `${object.name} (${object.typeName})`
-        : object.typeName;
-      const start = document.createElement("span");
-      start.textContent = object.resolveError ? "unresolved" : formatAnimationObjectTime(object.start);
-      const end = document.createElement("span");
-      end.textContent = object.resolveError ? "unresolved" : formatAnimationObjectTime(object.end);
-      row.append(name, start, end);
-      row.addEventListener("dblclick", () => {
-        selectedAnimationIndices = new Set([object.index]);
-        selectedAnimationIndex = object.index;
-        selectedAnimationAnchor = object.index;
-        showReferenceDialog("Animation object properties");
-      });
-      row.addEventListener("contextmenu", (event) => {
-        if (!selectedAnimationIndices.has(object.index)) {
-          selectedAnimationIndices = new Set([object.index]);
-          selectedAnimationIndex = object.index;
-          selectedAnimationAnchor = object.index;
-          renderAnimation();
-        }
-        showWorkspaceContextMenu(event, animationContextItems());
-      });
-      animationList.append(row);
-    }
-  }
+  renderAnimationStrips();
   const total = snapshot.animationDuration;
   renderReadonlyAnimationTime(animationDuration, total);
   const cameraOptions = [
@@ -17185,6 +16981,7 @@ function scheduleRender(delay = 100) {
 }
 
 async function mutate(command, args = {}, render = renderShell, refreshViewport = true) {
+  cancelAnimationStripDrag();
   await cancelCueMolNumericDrag();
   if (!invoke) {
     showError("Tauri IPC is unavailable. Run this frontend through the Tauri binary.");
@@ -17281,6 +17078,7 @@ async function changeWorkspaceAuxRendererType(kind, object, renderer, targetType
 }
 
 async function mutateWithViewport(command, args = {}, render = renderShell) {
+  cancelAnimationStripDrag();
   await cancelCueMolNumericDrag();
   if (!invoke) {
     showError("Tauri IPC is unavailable. Run this frontend through the Tauri binary.");
@@ -18171,9 +17969,7 @@ animationAdd.addEventListener("click", (event) => {
 
 animationDelete.addEventListener("click", deleteSelectedAnimationObjects);
 
-animationChange.addEventListener("click", () => {
-  showReferenceDialog("Animation object properties");
-});
+animationChange.addEventListener("click", showAnimationInspector);
 
 animationUp.addEventListener("click", () => moveSelectedAnimationObjects(-1));
 
@@ -18676,7 +18472,7 @@ window.addEventListener("drop", (event) => {
 });
 
 restoreSidePanelState();
-setupAnimationColumnSplitters();
+setupAnimationTimeline();
 restoreColoringPaintSelectionColumnWidth();
 setupWorkspaceColumnSplitter();
 setupSidePanelReordering();

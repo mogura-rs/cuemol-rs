@@ -73,7 +73,8 @@ pub fn parse_clock(text: &str) -> Option<f64> {
         }
         total = total * 60. + value;
     }
-    (total.is_finite() && total >= 0.).then_some(sign * total * 1000.)
+    let milliseconds = sign * total * 1000.;
+    milliseconds.is_finite().then_some(milliseconds)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

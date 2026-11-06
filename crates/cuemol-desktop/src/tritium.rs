@@ -74,12 +74,18 @@ impl GuiApplication {
             for (tool, args) in self.inspector.cancel_numeric_edit() {
                 self.tritium_command(tool, args, camera);
             }
+            for (tool, args) in self.animation_inspector.cancel() {
+                self.tritium_command(tool, args, camera);
+            }
             self.actions_panel.inspector(ctx);
         } else if let Some(uid) = target
             .as_ref()
             .filter(|target| target.kind == "animation")
             .and_then(|target| target.id)
         {
+            for (tool, args) in self.inspector.cancel_numeric_edit() {
+                self.tritium_command(tool, args, camera);
+            }
             for (tool, args) in
                 self.animation_inspector
                     .panel(ctx, &self.state, uid, self.snapshot_revision)
@@ -87,7 +93,9 @@ impl GuiApplication {
                 self.tritium_command(tool, args, camera);
             }
         } else {
-            self.animation_inspector.cancel();
+            for (tool, args) in self.animation_inspector.cancel() {
+                self.tritium_command(tool, args, camera);
+            }
             let mut view = camera.to_qsys_camera("__current");
             self.inspector
                 .inspect(&mut self.state, &mut view, target, self.snapshot_revision);
@@ -339,6 +347,22 @@ impl GuiApplication {
         camera: &mut CameraController,
     ) -> bool {
         let mut view = camera.to_qsys_camera("__current");
+        if name == "edit_animation_property" {
+            self.cancel_console("Scene changed outside the console; remaining commands cancelled.");
+            return match cuemol_command::prepare_animation_edit(&mut self.state, &mut view, &args) {
+                Ok(Some((tool, command))) => self.try_tritium_command(tool, command, camera),
+                Ok(None) => {
+                    *camera = CameraController::from_qsys_camera(&view);
+                    self.sync_active_scene_properties();
+                    self.rebuild_snapshot();
+                    true
+                }
+                Err(error) => {
+                    self.set_status(error.to_string());
+                    false
+                }
+            };
+        }
         if name == "edit_node_property" {
             self.cancel_console("Scene changed outside the console; remaining commands cancelled.");
             return match cuemol_command::prepare_property_edit(&mut self.state, &mut view, &args) {
@@ -359,6 +383,9 @@ impl GuiApplication {
                 self.tritium_command(tool, args, camera);
             }
             for (tool, args) in self.density_panel.cancel() {
+                self.tritium_command(tool, args, camera);
+            }
+            for (tool, args) in self.animation_inspector.cancel() {
                 self.tritium_command(tool, args, camera);
             }
         }
@@ -404,19 +431,25 @@ impl GuiApplication {
         }
     }
     fn tritium_bottom(&mut self, ctx: &egui::Context, camera: &mut CameraController) {
-        let panel = egui::TopBottomPanel::bottom("tritium-bottom")
-            .resizable(self.show_bottom_panel)
-            .default_height(if self.show_bottom_panel {
-                self.bottom_panel_height
-            } else {
-                30.
-            })
-            .height_range(if self.show_bottom_panel {
-                100.0..=600.0
-            } else {
-                30.0..=30.0
-            });
+        let was_expanded = self.show_bottom_panel;
+        let panel = egui::TopBottomPanel::bottom(if was_expanded {
+            "tritium-bottom"
+        } else {
+            "tritium-bottom-collapsed"
+        })
+        .resizable(self.show_bottom_panel)
+        .default_height(if self.show_bottom_panel {
+            self.bottom_panel_height
+        } else {
+            30.
+        })
+        .height_range(if self.show_bottom_panel {
+            100.0..=600.0
+        } else {
+            30.0..=30.0
+        });
         let response = panel.show(ctx, |ui| {
+            ui.set_min_height(ui.available_height());
             let previous = self.bottom_tab;
             let compact = shell::compact_tabs(ui);
             ui.horizontal(|ui| {
@@ -504,7 +537,7 @@ impl GuiApplication {
                 }
             }
         });
-        if self.show_bottom_panel {
+        if was_expanded && self.show_bottom_panel {
             self.bottom_panel_height = response.response.rect.height();
             self.state
                 .put_config_value("bottom_panel:height", self.bottom_panel_height.to_string());
@@ -596,6 +629,40 @@ mod tests {
             .viewport_rect
             .is_some_and(|rect| rect.left() >= 44. && rect.width() > 300. && rect.height() > 100.));
     }
+    #[test]
+    fn animation_bottom_panel_preserves_configured_height_with_few_elements() {
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.bottom_tab = BottomTab::Animation;
+        app.show_bottom_panel = true;
+        app.bottom_panel_height = 300.;
+        app.try_tritium_command(
+            "add_anim",
+            serde_json::json!({"type":"spin","name":"single"}),
+            &mut camera,
+        );
+        let ctx = egui::Context::default();
+        for frame in 0..6 {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1024., 768.),
+                    )),
+                    time: Some(frame as f64 / 60.),
+                    focused: true,
+                    ..Default::default()
+                },
+                |ctx| app.ui(ctx, &mut camera),
+            );
+            assert!(
+                (app.bottom_panel_height - 300.).abs() < 2.,
+                "frame {frame}: {}",
+                app.bottom_panel_height
+            );
+        }
+    }
+
     #[test]
     fn compact_bottom_tabs_remain_clickable_beside_the_inspector() {
         let mut app = GuiApplication::new();

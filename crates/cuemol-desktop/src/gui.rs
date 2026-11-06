@@ -28455,6 +28455,9 @@ impl GuiApplication {
     }
 
     fn undo(&mut self, camera: &mut CameraController) {
+        for (tool, args) in self.animation_inspector.cancel() {
+            self.tritium_command(tool, args, camera);
+        }
         let Some(mut snapshot) = self.undo_stack.pop() else {
             self.set_status("Nothing to undo");
             return;
@@ -28476,6 +28479,9 @@ impl GuiApplication {
     }
 
     fn redo(&mut self, camera: &mut CameraController) {
+        for (tool, args) in self.animation_inspector.cancel() {
+            self.tritium_command(tool, args, camera);
+        }
         let Some(mut snapshot) = self.redo_stack.pop() else {
             self.set_status("Nothing to redo");
             return;
@@ -40969,6 +40975,106 @@ mod tests {
                 .base()
                 .rel_start(),
             1_000_000
+        );
+    }
+
+    #[test]
+    fn native_animation_inspector_timing_drag_previews_and_undo_restores_anchor() {
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.try_tritium_command(
+            "add_anim",
+            serde_json::json!({"type":"spin","name":"base"}),
+            &mut camera,
+        );
+        let id = app.active_animation_manager().unwrap().motions()[0]
+            .base()
+            .uid()
+            .get();
+        app.undo_stack.clear();
+        app.redo_stack.clear();
+        let original = app.active_animation_manager().unwrap().to_ldom2_node();
+        let ctx = egui::Context::default();
+        let mut frame = 0;
+        let mut draw = |app: &mut GuiApplication, camera: &mut CameraController, events| {
+            frame += 1;
+            let mut commands = vec![];
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1000., 900.),
+                    )),
+                    time: Some(frame as f64 / 60.),
+                    events,
+                    focused: true,
+                    ..Default::default()
+                },
+                |ctx| {
+                    commands =
+                        app.animation_inspector
+                            .panel(ctx, &app.state, id, app.snapshot_revision);
+                },
+            );
+            for (tool, args) in commands {
+                assert!(app.try_tritium_command(tool, args, camera));
+            }
+        };
+        draw(&mut app, &mut camera, vec![]);
+        draw(&mut app, &mut camera, vec![]);
+        let [x, y, w, h] = app.animation_inspector.rects["Animation property durationMs"];
+        let p = egui::pos2(x + w / 2., y + h / 2.);
+        let pointer = |pos, pressed| {
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                },
+            ]
+        };
+        draw(&mut app, &mut camera, pointer(p, true));
+        draw(
+            &mut app,
+            &mut camera,
+            vec![egui::Event::PointerMoved(p + egui::vec2(20., 0.))],
+        );
+        assert!(app.undo_stack.is_empty());
+        assert!(
+            app.active_animation_manager().unwrap().motions()[0]
+                .base()
+                .rel_end()
+                > 1_000_000_000
+        );
+        draw(
+            &mut app,
+            &mut camera,
+            pointer(p + egui::vec2(20., 0.), false),
+        );
+        assert_eq!(app.undo_stack.len(), 1);
+        app.undo(&mut camera);
+        assert_eq!(
+            original,
+            app.active_animation_manager().unwrap().to_ldom2_node()
+        );
+        assert_eq!(app.redo_stack.len(), 1);
+        draw(&mut app, &mut camera, vec![]);
+        let [x, y, w, h] = app.animation_inspector.rects["Animation property durationMs"];
+        let p = egui::pos2(x + w / 2., y + h / 2.);
+        draw(&mut app, &mut camera, pointer(p, true));
+        draw(
+            &mut app,
+            &mut camera,
+            vec![egui::Event::PointerMoved(p + egui::vec2(35., 0.))],
+        );
+        app.redo(&mut camera);
+        assert_eq!(app.undo_stack.len(), 1);
+        app.undo(&mut camera);
+        assert_eq!(
+            original,
+            app.active_animation_manager().unwrap().to_ldom2_node()
         );
     }
 

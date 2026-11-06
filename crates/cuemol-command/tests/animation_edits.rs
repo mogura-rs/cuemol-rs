@@ -23,6 +23,72 @@ fn fixture() -> (DesktopAppState, Camera) {
 }
 
 #[test]
+fn nonfinite_animation_numeric_edits_are_rejected_without_mutation() {
+    let (mut state, mut camera) = fixture();
+    for (kind, name) in [
+        ("spin", "rotation"),
+        ("show", "visibility"),
+        ("slidein", "slide"),
+    ] {
+        call(
+            &mut state,
+            &mut camera,
+            "add_anim",
+            json!({"type":kind,"name":name}),
+        );
+    }
+    for tool in ["set_anim_prop", "set_anim_generic_prop"] {
+        for (element, prop) in [
+            ("base", "quadric"),
+            ("rotation", "angle"),
+            ("visibility", "tgt_alpha"),
+            ("slide", "direction"),
+            ("slide", "distance"),
+        ] {
+            let prop = if tool == "set_anim_prop" && prop == "tgt_alpha" {
+                "tgtAlpha"
+            } else {
+                prop
+            };
+            for value in ["NaN", "inf", "-inf", "1e999", "not a number"] {
+                let before = state.clone();
+                let old_camera = camera.clone();
+                let result = call_tool(
+                    &mut state,
+                    &mut camera,
+                    tool,
+                    &json!({"element":element,"prop":prop,"value":value}),
+                );
+                assert!(result.is_err(), "{tool} {element}.{prop} accepted {value}");
+                assert!(before.same_undo_state(&state));
+                assert_eq!(camera, old_camera);
+            }
+        }
+    }
+    call(
+        &mut state,
+        &mut camera,
+        "set_anim_prop",
+        json!({"element":"rotation","prop":"angle","value":" 1.25e2 "}),
+    );
+    assert_eq!(
+        cuemol_command::animation_element_detail(
+            &state,
+            state
+                .scene_animation(state.active_scene().unwrap())
+                .unwrap()
+                .unwrap()
+                .motions()[3]
+                .base()
+                .uid()
+                .get()
+        )
+        .unwrap()["properties"]["angle"],
+        "125"
+    );
+}
+
+#[test]
 fn renaming_an_animation_keeps_its_dependents_and_identity() {
     let (mut state, mut camera) = fixture();
     let before = call(&mut state, &mut camera, "list_anims", json!({}));
@@ -326,4 +392,96 @@ fn signed_animation_offsets_and_typed_spin_axes_match_reference_commands() {
     )
     .is_err());
     assert!(before.same_undo_state(&state));
+}
+
+#[test]
+fn animation_preview_restores_anchor_before_commit_and_aborts_in_inactive_scene() {
+    let (mut state, mut camera) = fixture();
+    let scene = state.active_scene().unwrap();
+    let uid = call(&mut state, &mut camera, "list_anims", json!({}))["elements"][0]["uid"]
+        .as_u64()
+        .unwrap();
+    let anchor = state.clone();
+    let edit = |mode: &str, start: f64| json!({"sceneId":scene.get(),"uid":uid,"prop":"timing","mode":mode,"value":{"startMs":start,"endMs":start+1000.},"originalValue":{"startMs":0.,"endMs":1000.}});
+    for start in [100., 200., 350.] {
+        assert!(cuemol_command::prepare_animation_edit(
+            &mut state,
+            &mut camera,
+            &edit("preview", start)
+        )
+        .unwrap()
+        .is_none());
+        assert_eq!(
+            call(&mut state, &mut camera, "list_anims", json!({}))["elements"][1]["absStartMs"],
+            start + 1000.
+        );
+    }
+    let (tool, args) =
+        cuemol_command::prepare_animation_edit(&mut state, &mut camera, &edit("commit", 450.))
+            .unwrap()
+            .unwrap();
+    assert!(anchor.same_scene_undo_state(&state));
+    call(&mut state, &mut camera, tool, args);
+    assert_eq!(
+        call(&mut state, &mut camera, "list_anims", json!({}))["elements"][0]["startMs"],
+        450.
+    );
+    let mut second = edit("preview", 600.);
+    second["originalValue"] = json!({"startMs":450.,"endMs":1450.});
+    cuemol_command::prepare_animation_edit(&mut state, &mut camera, &second).unwrap();
+    state.new_scene("other", true);
+    let other = state.active_scene().unwrap();
+    let before = state.clone();
+    assert!(cuemol_command::prepare_animation_edit(&mut state, &mut camera, &second).is_err());
+    assert!(before.same_undo_state(&state));
+    second["mode"] = json!("abort");
+    cuemol_command::prepare_animation_edit(&mut state, &mut camera, &second).unwrap();
+    assert_eq!(state.active_scene(), Some(other));
+    assert_eq!(
+        state.scene_animation(scene).unwrap().unwrap().motions()[0]
+            .base()
+            .rel_start(),
+        450_000_000
+    );
+}
+
+#[test]
+fn animation_numeric_previews_reject_invalid_targets_and_values_atomically() {
+    let (mut state, mut camera) = fixture();
+    let data = call(&mut state, &mut camera, "list_anims", json!({}));
+    let uid = data["elements"][0]["uid"].as_u64().unwrap();
+    let scene = state.active_scene().unwrap().get();
+    let anchor = state.clone();
+    let mut edit = json!({"sceneId":scene,"uid":uid,"prop":"quadric","mode":"preview","value":"0.25","originalValue":"0"});
+    cuemol_command::prepare_animation_edit(&mut state, &mut camera, &edit).unwrap();
+    assert_eq!(
+        call(&mut state, &mut camera, "list_anims", json!({}))["elements"][0]["quadric"],
+        0.25
+    );
+    for (key, value) in [
+        ("value", json!("NaN")),
+        ("originalValue", json!("inf")),
+        ("prop", json!("name")),
+        ("uid", json!(u64::MAX)),
+        ("mode", json!("invalid")),
+    ] {
+        let before = state.clone();
+        let mut invalid = edit.clone();
+        invalid[key] = value;
+        assert!(cuemol_command::prepare_animation_edit(&mut state, &mut camera, &invalid).is_err());
+        assert!(before.same_undo_state(&state));
+    }
+    edit["mode"] = json!("abort");
+    cuemol_command::prepare_animation_edit(&mut state, &mut camera, &edit).unwrap();
+    assert!(anchor.same_scene_undo_state(&state));
+    edit["mode"] = json!("preview");
+    cuemol_command::prepare_animation_edit(&mut state, &mut camera, &edit).unwrap();
+    edit["mode"] = json!("commit");
+    edit["value"] = json!("0");
+    assert!(
+        cuemol_command::prepare_animation_edit(&mut state, &mut camera, &edit)
+            .unwrap()
+            .is_none()
+    );
+    assert!(anchor.same_scene_undo_state(&state));
 }

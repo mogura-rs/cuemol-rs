@@ -838,6 +838,7 @@ struct LwRendererDto {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AnimationObjectDto {
+    uid: u64,
     index: usize,
     resolve_error: Option<String>,
     name: String,
@@ -1539,6 +1540,8 @@ struct AnimationRenderInput {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AnimationObjectPropertiesInput {
+    #[serde(default)]
+    uid: Option<u64>,
     index: usize,
     name: String,
     disabled: bool,
@@ -7341,6 +7344,7 @@ impl AppModel {
         self.set_active_animation_manager(&animation)?;
         if let Some(mut properties) = properties {
             properties.index = insertion_index;
+            properties.uid = None;
             if let Err(error) = self.set_animation_object_properties(properties) {
                 self.restore_undo(undo)?;
                 return Err(error);
@@ -7383,19 +7387,28 @@ impl AppModel {
             return Err("animation quadric must be between 0 and 0.5".to_string());
         }
         let mut animation = self.active_animation_manager()?;
+        let index = if let Some(uid) = input.uid {
+            animation
+                .motions()
+                .iter()
+                .position(|motion| motion.base().uid().get() == uid)
+                .ok_or_else(|| "Animation element was not found".to_string())?
+        } else {
+            input.index
+        };
         let current = animation
             .motions()
-            .get(input.index)
+            .get(index)
             .ok_or_else(|| format!("animation object {} was not found", input.index))?;
         let uid = current.base().uid();
         let old_name = current.base().name().to_string();
         let graph = AnimationGraph::read(&animation);
-        let original = &graph.nodes[input.index];
+        let original = &graph.nodes[index];
         if old_name != name {
-            graph.check_name(input.index, &name)?;
+            graph.check_name(index, &name)?;
         }
         let rebased = if time_ref_name != original.time_ref_name {
-            graph.rebase_span(input.index, &time_ref_name)?
+            graph.rebase_span(index, &time_ref_name)?
         } else {
             None
         };
@@ -7571,10 +7584,7 @@ impl AppModel {
                 AnimMotion::Noop(_) | AnimMotion::Unknown { .. } => {}
             }
         });
-        if old_name != name
-            && !old_name.is_empty()
-            && graph.first.get(&old_name) == Some(&input.index)
-        {
+        if old_name != name && !old_name.is_empty() && graph.first.get(&old_name) == Some(&index) {
             let referencing = animation
                 .motions()
                 .iter()
@@ -9380,6 +9390,7 @@ fn animation_object_dto(index: usize, motion: &AnimMotion) -> AnimationObjectDto
     let start = animation_seconds(object.abs_start());
     let end = animation_seconds(object.abs_end());
     let mut dto = AnimationObjectDto {
+        uid: object.uid().get(),
         index,
         resolve_error: None,
         name: object.name().to_string(),
@@ -17352,6 +17363,7 @@ mod tests {
 
     fn animation_properties_input(object: &AnimationObjectDto) -> AnimationObjectPropertiesInput {
         AnimationObjectPropertiesInput {
+            uid: Some(object.uid),
             index: object.index,
             name: object.name.clone(),
             disabled: object.disabled,
@@ -26661,5 +26673,90 @@ mod tests {
         let cleared = model.hover_at_screen(-1., -1., 128, 128).unwrap();
         assert_eq!(cleared.image, first.image);
         assert_eq!(model.desktop.active_hover_hit(), None);
+    }
+    #[test]
+    fn animation_inspector_preview_uses_uid_and_keeps_one_history_step() {
+        let mut model = model_without_gpu();
+        add_test_animation(&mut model, AnimKind::Spin, 1.0);
+        add_test_animation(&mut model, AnimKind::Pause, 1.0);
+        let initial = model.snapshot();
+        let uid = initial.animation_objects[0].uid;
+        let scene = model.desktop.active_scene().unwrap().get();
+        let mut properties = animation_properties_input(&initial.animation_objects[0]);
+        model.inspector_request("set_anim_prop",&serde_json::json!({"sceneId":scene,"element":format!("#{uid}"),"prop":"name","value":"redo anchor"})).unwrap();
+        model.undo(0).unwrap();
+        assert_eq!(model.redo_stack.len(), 1);
+        let original = model.desktop.clone();
+        let mut args = serde_json::json!({"sceneId":scene,"uid":uid,"prop":"timing","mode":"preview","value":{"startMs":200.,"endMs":1400.},"originalValue":{"startMs":0.,"endMs":1000.}});
+        model
+            .inspector_request("edit_animation_property", &args)
+            .unwrap();
+        assert!(model.undo_stack.is_empty());
+        assert_eq!(model.redo_stack.len(), 1);
+        assert_eq!(model.snapshot().animation_objects[0].relative_start, 0.2);
+        args["mode"] = serde_json::json!("abort");
+        model
+            .inspector_request("edit_animation_property", &args)
+            .unwrap();
+        assert!(original.same_scene_undo_state(&model.desktop));
+        assert_eq!(model.redo_stack.len(), 1);
+        args["mode"] = serde_json::json!("preview");
+        model
+            .inspector_request("edit_animation_property", &args)
+            .unwrap();
+        args["mode"] = serde_json::json!("commit");
+        model
+            .inspector_request("edit_animation_property", &args)
+            .unwrap();
+        assert_eq!(model.undo_stack.len(), 1);
+        model.undo(0).unwrap();
+        assert!(original.same_scene_undo_state(&model.desktop));
+        model.redo(0).unwrap();
+        model
+            .inspector_request(
+                "animation_selection",
+                &serde_json::json!({"sceneId":scene,"uids":[uid],"action":"down"}),
+            )
+            .unwrap();
+        assert_eq!(model.snapshot().animation_objects[1].uid, uid);
+        properties.name = "same element after reorder".into();
+        handle_model_request(
+            &mut model,
+            ModelRequest::SetAnimationObjectProperties(properties),
+        )
+        .unwrap();
+        let current = model.snapshot();
+        assert_eq!(
+            current.animation_objects[1].name,
+            "same element after reorder"
+        );
+        assert_ne!(
+            current.animation_objects[0].name,
+            "same element after reorder"
+        );
+        let before = model.desktop.clone();
+        assert!(model.inspector_request("set_anim_time",&serde_json::json!({"sceneId":scene+1,"element":format!("#{uid}"),"startMs":0.,"endMs":1500.})).is_err());
+        assert!(before.same_undo_state(&model.desktop));
+        let detail = model
+            .inspector_request(
+                "animation_element_detail",
+                &serde_json::json!({"sceneId":scene,"uid":uid}),
+            )
+            .unwrap();
+        assert_eq!(detail["uid"], uid);
+        assert_eq!(detail["properties"]["name"], "same element after reorder");
+        let undo_count = model.undo_stack.len();
+        model
+            .inspector_request(
+                "add_anim",
+                &serde_json::json!({"sceneId":scene,"type":"spin","before":format!("#{uid}")}),
+            )
+            .unwrap();
+        let added = model.snapshot();
+        assert_eq!(added.animation_objects.len(), 3);
+        assert_eq!(added.animation_objects[2].uid, uid);
+        assert_eq!(model.undo_stack.len(), undo_count + 1);
+        model.undo(0).unwrap();
+        assert!(before.same_scene_undo_state(&model.desktop));
     }
 }

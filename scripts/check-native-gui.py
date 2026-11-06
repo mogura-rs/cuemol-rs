@@ -288,8 +288,32 @@ def main():
                 pyautogui.hotkey(primary, 'shift', 'z')
                 wait_for(lambda: call('list_anims')['elements'][0]['startMs'] == 300)
                 capture('animation-strip-redo.png')
+                start_time = call('list_anims')['elements'][0]['startMs']
+                end_time = call('list_anims')['elements'][0]['endMs']
+                move_pointer_and_wait(width - 112, 333)
+                pyautogui.mouseDown()
+                pyautogui.moveRel(20, 0, duration=0.4)
+                wait_for(lambda: call('list_anims')['elements'][0]['endMs'] > end_time)
+                capture('animation-timing-preview.png')
+                pyautogui.press('escape')
+                pyautogui.mouseUp()
+                wait_for(lambda: call('list_anims')['elements'][0]['endMs'] == end_time)
+                move_pointer_and_wait(width - 112, 333)
+                pyautogui.mouseDown()
+                pyautogui.moveRel(20, 0, duration=0.4)
+                preview_end = wait_for(lambda: value if (value := call('list_anims')['elements'][0]['endMs']) > end_time else None)
+                pyautogui.mouseUp()
+                wait_for(lambda: call('list_anims')['elements'][0]['endMs'] == preview_end)
+                pyautogui.hotkey(primary, 'z')
+                wait_for(lambda: call('list_anims')['elements'][0]['endMs'] == end_time)
+                if call('list_anims')['elements'][0]['startMs'] != start_time:
+                    raise RuntimeError('Undoing the timing drag also undid the preceding strip edit')
+                pyautogui.hotkey(primary, 'shift', 'z')
+                wait_for(lambda: call('list_anims')['elements'][0]['endMs'] == preview_end)
+                capture('animation-timing-redo.png')
                 report.update(ok=True, animation_strip=True, abort_preserves_redo=True,
-                              animation_single_undo=True, start_before_ms=0, start_after_ms=300)
+                              animation_single_undo=True, animation_timing_preview=True, animation_timing_abort=True,
+                              animation_timing_single_undo=True, start_before_ms=0, start_after_ms=300)
                 print(json.dumps(report), flush=True)
                 return
 

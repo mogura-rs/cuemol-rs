@@ -15,17 +15,46 @@ pub struct ElementInspector {
     numeric: BTreeMap<String, NumericEdit>,
     generic: bool,
     error: String,
+    pending: Vec<Command>,
+    timing_anchor: Option<Value>,
+    axis_mode: Option<String>,
 }
 
 impl ElementInspector {
-    pub fn cancel(&mut self) {
+    pub fn cancel(&mut self) -> Vec<Command> {
+        if let Some(original) = self.timing_anchor.take() {
+            if let Some((scene, uid)) = self.target {
+                self.pending.push(edit_command(
+                    scene,
+                    uid,
+                    "timing",
+                    "abort",
+                    original.clone(),
+                    original,
+                ));
+            }
+        }
         for (key, edit) in &mut self.numeric {
             if let Some(drag) = edit.drag.take() {
+                if drag.realtime && !matches!(key.as_str(), "startMs" | "durationMs") {
+                    if let Some((scene, uid)) = self.target {
+                        self.pending.push(edit_command(
+                            scene,
+                            uid,
+                            key,
+                            "abort",
+                            json!(drag.original),
+                            json!(drag.original),
+                        ));
+                    }
+                }
                 self.values.insert(key.clone(), drag.original);
             }
             edit.cancelled = true;
+            edit.action = None;
         }
         self.revision = None;
+        std::mem::take(&mut self.pending)
     }
 
     pub fn panel(
@@ -36,9 +65,11 @@ impl ElementInspector {
         revision: u64,
     ) -> Vec<Command> {
         self.rects.clear();
+        let mut changes = std::mem::take(&mut self.pending);
         let target = state.active_scene().map(|sid| (sid.get(), uid));
         if target != self.target {
-            self.cancel();
+            changes.extend(self.cancel());
+            self.axis_mode = None;
             self.numeric.clear();
             self.values.clear();
             self.target = target;
@@ -46,7 +77,7 @@ impl ElementInspector {
             self.generic = false;
         }
         if ctx.input(|input| input.key_pressed(egui::Key::Escape) || !input.focused) {
-            self.cancel();
+            changes.extend(self.cancel());
         }
         if !ctx.input(|input| input.pointer.primary_down()) {
             for edit in self.numeric.values_mut() {
@@ -82,25 +113,27 @@ impl ElementInspector {
             self.revision = Some(revision);
         }
         if !self.visible {
-            return Vec::new();
+            return changes;
         }
-        let mut changes = Vec::new();
         egui::SidePanel::right("animation_inspector").default_width(300.).width_range(240.0..=600.).resizable(true).show(ctx,|ui| {
             ui.horizontal(|ui| {
                 ui.strong("Inspector");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui| {
                     let close=ui.small_button("×").on_hover_text("Close Inspector");
                     record(&mut self.rects,"Close animation Inspector",close.rect);
-                    if close.clicked() {self.visible=false; self.cancel();}
+                    if close.clicked() {self.visible=false; changes.extend(self.cancel());}
                 });
             });
+            if !self.visible {return;}
             ui.separator();
             ui.strong(self.values.get("name").map(String::as_str).unwrap_or("Animation element"));
             ui.weak(text(&self.data,"type"));
+            let previous_tab = self.generic;
             ui.horizontal(|ui| {
                 record(&mut self.rects,"Animation Properties tab",ui.selectable_value(&mut self.generic,false,"Properties").rect);
                 record(&mut self.rects,"Animation Generic tab",ui.selectable_value(&mut self.generic,true,"Generic").rect);
             });
+            if previous_tab != self.generic { changes.extend(self.cancel()); }
             if !self.error.is_empty() {ui.colored_label(ui.visuals().error_fg_color,&self.error);return;}
             if let Some(error)=self.data["resolveError"].as_str() {ui.colored_label(ui.visuals().warn_fg_color,error);}
             let reset=ui.button("Reset all to default");
@@ -127,7 +160,7 @@ impl ElementInspector {
                     let keys=self.data["properties"].as_object().into_iter().flatten().map(|(key,_)|key.clone()).filter(|key|!matches!(key.as_str(),"uid"|"name"|"disabled"|"timeRefName"|"start"|"end"|"quadric")).collect::<Vec<_>>();
                     for key in keys {
                         let (label,schema)=match key.as_str() {
-                            "angle"=>("Rotation angle",Some(json!({"min":0,"max":360,"step":5,"unit":"°","decimals":0}))),
+                            "angle"=>("Rotation angle",Some(json!({"step":5,"unit":"°","decimals":0}))),
                             "axis"=>("Spin axis",None), "endcam"=>("Target camera",None),
                             "ignorecenter"=>("Ignore center",None), "ignorerotate"=>("Ignore rotation",None),
                             "ignorezoom"=>("Ignore zoom",None), "ignoreslab"=>("Ignore slab",None),
@@ -136,16 +169,121 @@ impl ElementInspector {
                             "tgt_alpha"=>("Target opacity",Some(json!({"min":0,"max":1,"step":0.1}))),
                             "direction"=>("Direction angle",Some(json!({"min":0,"max":360,"step":1,"unit":"°","decimals":0}))),
                             "distance"=>("Distance",Some(json!({"min":0,"max":2,"step":0.1}))),
-                            "startValue"=>("Start value",Some(json!({"min":0,"max":1,"step":0.1}))),
-                            "endValue"=>("End value",Some(json!({"min":0,"max":1,"step":0.1}))),
+                            "startValue"=>("Start value",morph_range(text(&self.data,"type"))),
+                            "endValue"=>("End value",morph_range(text(&self.data,"type"))),
                             _=>(key.as_str(),None),
                         };
-                        self.field(ui,uid,&key,label,schema,&mut changes);
+                        if key == "axis" { self.axis_field(ui, uid, &mut changes); }
+                        else { self.field(ui,uid,&key,label,schema,&mut changes); }
                     }
                 }
             });
         });
         changes
+    }
+
+    fn axis_field(&mut self, ui: &mut egui::Ui, uid: u64, changes: &mut Vec<Command>) {
+        let raw = self.values.get("axis").cloned().unwrap_or_default();
+        let axis = cuemol_core::Vector4::from_script_string(&raw)
+            .unwrap_or(cuemol_core::Vector4::new3(0., 1., 0.));
+        let mut components = [axis.x, axis.y, axis.z];
+        let mut mode = self
+            .axis_mode
+            .clone()
+            .unwrap_or_else(|| axis_preset(components).into());
+        ui.horizontal(|ui| {
+            ui.label("Spin axis");
+            let combo = egui::ComboBox::from_id_salt("animation_axis_preset")
+                .width(110.)
+                .selected_text(axis_label(&mode))
+                .show_ui(ui, |ui| {
+                    for (key, label) in [
+                        ("x", "X axis"),
+                        ("y", "Y axis"),
+                        ("z", "Z axis"),
+                        ("cart", "Cartesian"),
+                    ] {
+                        let response = ui.selectable_value(&mut mode, key.into(), label);
+                        record(
+                            &mut self.rects,
+                            format!("Animation axis {key}"),
+                            response.rect,
+                        );
+                    }
+                });
+            record(
+                &mut self.rects,
+                "Animation axis preset",
+                combo.response.rect,
+            );
+        });
+        if self.axis_mode.as_deref().unwrap_or(axis_preset(components)) != mode {
+            self.axis_mode = Some(mode.clone());
+            let preset = match mode.as_str() {
+                "x" => Some([1., 0., 0.]),
+                "y" => Some([0., 1., 0.]),
+                "z" => Some([0., 0., 1.]),
+                _ => None,
+            };
+            if let Some(preset) = preset {
+                components = preset;
+                self.commit_axis(uid, components, changes);
+            }
+        }
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(mode == "cart", |ui| {
+                for (i, key) in ["x", "y", "z"].into_iter().enumerate() {
+                    ui.label(key.to_uppercase());
+                    let draft = self
+                        .values
+                        .entry(format!("axis.{key}"))
+                        .or_insert_with(|| format_axis(components[i]));
+                    let response = ui.add(egui::TextEdit::singleline(draft).desired_width(48.));
+                    record(
+                        &mut self.rects,
+                        format!("Animation axis component {key}"),
+                        response.rect,
+                    );
+                    if response.lost_focus()
+                        || response.has_focus()
+                            && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                    {
+                        if let Ok(value) = draft.parse::<f64>() {
+                            let mut updated = components;
+                            updated[i] = value;
+                            if updated.iter().all(|value| value.is_finite())
+                                && updated
+                                    .iter()
+                                    .map(|value| value * value)
+                                    .sum::<f64>()
+                                    .sqrt()
+                                    >= 1e-6
+                            {
+                                if updated != components {
+                                    components = updated;
+                                    self.commit_axis(uid, components, changes);
+                                }
+                            }
+                        }
+                        self.values
+                            .insert(format!("axis.{key}"), format_axis(components[i]));
+                    }
+                }
+            });
+            let reset = ui.small_button("↺").on_hover_text("Reset to default");
+            record(&mut self.rects, "Animation reset axis", reset.rect);
+            if reset.clicked() {
+                changes.push((
+                    "reset_anim_prop",
+                    json!({"element":element_arg(uid),"props":"axis"}),
+                ));
+                self.revision = None;
+            }
+        });
+    }
+    fn commit_axis(&mut self, uid: u64, axis: [f64; 3], changes: &mut Vec<Command>) {
+        changes.push(("set_anim_prop",json!({"element":element_arg(uid),"prop":"axis","value":format!("{} {} {}",axis[0],axis[1],axis[2])})));
+        self.revision = None;
     }
 
     fn field(
@@ -181,7 +319,7 @@ impl ElementInspector {
                 let width = (ui.available_width() * 0.36).min(100.);
                 ui.add_sized([width, 24.], egui::Label::new(label).wrap());
                 ui.add_enabled_ui(!readonly, |ui| {
-                    let width = (ui.available_width() - 28.).max(32.);
+                    let width = (ui.available_width() - if key == "direction" && !self.generic {108.} else {28.}).max(32.);
                     ui.allocate_ui_with_layout(
                         egui::vec2(width, 24.),
                         egui::Layout::left_to_right(egui::Align::Center),
@@ -241,14 +379,7 @@ impl ElementInspector {
                                     [width, 24.],
                                     egui::DragValue::new(&mut number)
                                         .speed(10.)
-                                        .range(
-                                            (if key == "startMs" {
-                                                super::number(&self.data, "startMs").min(0.)
-                                            } else {
-                                                0.
-                                            })
-                                                ..=f64::MAX,
-                                        )
+                                        .range(0. ..=f64::MAX)
                                         .clamp_existing_to_range(false)
                                         .custom_formatter(|value, _| clock(value))
                                         .custom_parser(parse_clock)
@@ -264,14 +395,25 @@ impl ElementInspector {
                                     edit.drag = Some(crate::numeric::NumericDrag {
                                         original: original.clone(),
                                         was_default: false,
-                                        realtime: false,
+                                        realtime: true,
                                     });
+                                    self.timing_anchor = Some(json!({"startMs":super::number(&self.data,"startMs"),"endMs":super::number(&self.data,"endMs")}));
                                 }
                                 if edit.cancelled {
                                     number = original.parse().unwrap_or(0.);
                                 } else {
-                                    changed = (response.changed() && !response.dragged())
-                                        || response.drag_stopped();
+                                    changed = response.changed() && !response.dragged() && edit.drag.is_none();
+                                    if edit.drag.is_some() && (response.changed() || response.drag_stopped()) {
+                                        let start = if key == "startMs" {number} else {self.values.get("startMs").and_then(|s|s.parse().ok()).unwrap_or(0.)};
+                                        let duration = if key == "durationMs" {number} else {self.values.get("durationMs").and_then(|s|s.parse().ok()).unwrap_or(0.)};
+                                        if let Some(anchor) = self.timing_anchor.clone() {
+                                            let mode = if response.drag_stopped() {"commit"} else {"preview"};
+                                            if let Some((scene, _)) = self.target {
+                                                changes.push(edit_command(scene, uid, "timing", mode, json!({"startMs":start,"endMs":start+duration.max(0.)}), anchor));
+                                            }
+                                            if response.drag_stopped() {self.timing_anchor = None; self.revision = None;}
+                                        }
+                                    }
                                 }
                                 if response.drag_stopped() {
                                     edit.drag = None;
@@ -298,6 +440,7 @@ impl ElementInspector {
                                 } else {
                                     original.clone()
                                 };
+                                let schema = if self.generic {Some(json!({"realtime":true}))} else {schema};
                                 let (response, commit) = crate::numeric::field(
                                     ui,
                                     &format!("Animation property {key}"),
@@ -315,6 +458,12 @@ impl ElementInspector {
                                     response.rect,
                                 );
                                 changed = commit;
+                                if let Some((mode, drag, value)) = self.numeric.get_mut(key).and_then(|edit|edit.action.take()) {
+                                    if let Some((scene, _)) = self.target {
+                                        changes.push(edit_command(scene, uid, key, mode, json!(value), json!(drag.original)));
+                                    }
+                                    if mode == "commit" {self.revision = None;}
+                                }
                             } else if matches!(key, "endcam" | "mol") && !self.generic {
                                 let options = self.data
                                     [if key == "mol" { "molecules" } else { "cameras" }]
@@ -388,6 +537,18 @@ impl ElementInspector {
                         },
                     );
                 });
+                if key == "direction" && !self.generic {
+                    let current = value.parse::<f64>().unwrap_or(0.);
+                    let preset = direction_label(current);
+                    let combo = egui::ComboBox::from_id_salt("direction_preset").width(66.).selected_text(preset).show_ui(ui, |ui| {
+                        for (degrees, label) in [(0., "Left"), (90., "Up"), (180., "Right"), (270., "Down")] {
+                            let response = ui.selectable_label(current == degrees, label);
+                            record(&mut self.rects, format!("Animation direction {label}"), response.rect);
+                            if response.clicked() { value = degrees.to_string(); changed = true; }
+                        }
+                    });
+                    record(&mut self.rects,"Animation direction preset",combo.response.rect);
+                }
                 if resettable(key) {
                     let response = ui.small_button("↺").on_hover_text("Reset to default");
                     record(
@@ -405,6 +566,11 @@ impl ElementInspector {
                 }
             })
         });
+        if changed && key == "angle" && !self.generic {
+            if let Ok(angle) = value.parse::<f64>() {
+                value = wrap_angle(angle).to_string();
+            }
+        }
         if percent {
             value = (value.parse::<f64>().unwrap_or(0.) / 100.).to_string();
         }
@@ -445,4 +611,63 @@ fn resettable(key: &str) -> bool {
             | "startMs"
             | "durationMs"
     )
+}
+
+fn edit_command(
+    scene: u64,
+    uid: u64,
+    prop: &str,
+    mode: &str,
+    value: Value,
+    original: Value,
+) -> Command {
+    (
+        "edit_animation_property",
+        json!({"sceneId":scene,"uid":uid,"prop":prop,"mode":mode,"value":value,"originalValue":original}),
+    )
+}
+fn morph_range(kind: &str) -> Option<Value> {
+    (kind == "MolAnim").then(|| json!({"min":0,"max":1,"step":0.1}))
+}
+fn wrap_angle(value: f64) -> f64 {
+    if !value.is_finite() {
+        return 0.;
+    }
+    let result = value.rem_euclid(360.);
+    if result == 0. && value > 0. {
+        360.
+    } else {
+        result
+    }
+}
+fn axis_preset([x, y, z]: [f64; 3]) -> &'static str {
+    if x == 1. && y == 0. && z == 0. {
+        "x"
+    } else if x == 0. && y == 1. && z == 0. {
+        "y"
+    } else if x == 0. && y == 0. && z == 1. {
+        "z"
+    } else {
+        "cart"
+    }
+}
+fn axis_label(mode: &str) -> &'static str {
+    match mode {
+        "x" => "X axis",
+        "y" => "Y axis",
+        "z" => "Z axis",
+        _ => "Cartesian",
+    }
+}
+fn format_axis(value: f64) -> String {
+    ((value * 10000.).round() / 10000.).to_string()
+}
+fn direction_label(value: f64) -> &'static str {
+    match value {
+        0. => "Left",
+        90. => "Up",
+        180. => "Right",
+        270. => "Down",
+        _ => "Custom",
+    }
 }

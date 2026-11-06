@@ -63,3 +63,29 @@ for(const backend of ['webgl','webgpu']) {
     await call(page,'undo');expect((await timeline(page)).elements.map(e=>e.name)).toEqual(['renamed','parent']);
   });
 }
+
+for(const backend of ['webgl','webgpu']) {
+  test(`Animation Inspector realtime timing ${backend} preserves redo and generic drag history`,async({page},testInfo)=>{
+    await page.goto(`./?renderer=${backend}`);
+    await expect.poll(async()=>Boolean((await status(page))?.scene.sceneId),{timeout:60000}).toBe(true);
+    await call(page,'add_anim',{type:'spin',name:'base'});await call(page,'add_anim',{type:'wait',name:'child'});
+    await click(page,'Animation');await click(page,'Animation label base');await call(page,'clear_undo');
+    const begin=async(key,delta)=>{const [x,y,w,h]=await rect(page,key);const px=x+w/2,py=y+h/2;await page.mouse.move(px,py);await page.mouse.down();await settle(page);await page.mouse.move(px+delta,py,{steps:6});await settle(page);return {px,py};};
+    await begin('Animation property durationMs',20);
+    let data=await timeline(page);expect(data.elements[0].endMs).toBeGreaterThan(1000);expect(data.elements[1].absStartMs).toBe(data.elements[0].endMs);
+    await page.mouse.up();await settle(page);const committed=(await timeline(page)).elements[0].endMs;
+    await call(page,'undo');expect((await timeline(page)).elements[0].endMs).toBe(1000);
+    await begin('Animation property startMs',30);expect((await timeline(page)).elements[0].startMs).toBeGreaterThan(0);
+    await page.keyboard.press('Escape');await page.mouse.up();await settle(page);expect((await timeline(page)).elements[0].startMs).toBe(0);
+    await call(page,'redo');expect((await timeline(page)).elements[0].endMs).toBe(committed);
+    await click(page,'Animation Generic tab');await call(page,'clear_undo');
+    await begin('Animation property quadric',20);expect((await timeline(page)).elements[0].quadric).toBeGreaterThan(0);await page.mouse.up();await settle(page);
+    const quadric=(await timeline(page)).elements[0].quadric;await call(page,'undo');expect((await timeline(page)).elements[0].quadric).toBeCloseTo(0,12);
+    await call(page,'redo');expect((await timeline(page)).elements[0].quadric).toBe(quadric);
+    await click(page,'Animation Properties tab');
+    await click(page,'Animation axis preset');await click(page,'Animation axis x');
+    await click(page,'Animation axis preset');await click(page,'Animation axis cart');
+    await enter(page,'Animation axis component y','2');
+    await page.screenshot({path:testInfo.outputPath('animation-inspector-presets.png')});
+  });
+}

@@ -202,3 +202,162 @@ fn inspector_drag_commits_once_and_escape_keeps_committed_value() {
     assert!(step(&mut editor, vec![escape()]).is_empty());
     assert!(step(&mut editor, pointer(p - vec2(15., 0.), false)).is_empty());
 }
+
+struct InspectorHarness {
+    ctx: egui::Context,
+    frame: u64,
+    editor: ElementInspector,
+    state: DesktopAppState,
+    camera: Camera,
+    uid: u64,
+    history: Vec<DesktopAppState>,
+}
+impl InspectorHarness {
+    fn new() -> Self {
+        let (state, camera, data) = scene();
+        let mut h = Self {
+            ctx: Default::default(),
+            frame: 0,
+            editor: Default::default(),
+            state,
+            camera,
+            uid: uid(&data["elements"][0]),
+            history: vec![],
+        };
+        h.step(vec![]);
+        h.step(vec![]);
+        h
+    }
+    fn step(&mut self, events: Vec<egui::Event>) {
+        self.frame += 1;
+        let mut commands = vec![];
+        let _ = self.ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1000., 1000.))),
+                time: Some(self.frame as f64 / 60.),
+                events,
+                focused: true,
+                ..Default::default()
+            },
+            |ctx| {
+                commands = self.editor.panel(ctx, &self.state, self.uid, self.frame);
+            },
+        );
+        for (tool, args) in commands {
+            let command = if tool == "edit_animation_property" {
+                cuemol_command::prepare_animation_edit(&mut self.state, &mut self.camera, &args)
+                    .unwrap()
+            } else {
+                Some((tool, args))
+            };
+            if let Some((tool, args)) = command {
+                let before = self.state.clone();
+                cuemol_command::call_tool(&mut self.state, &mut self.camera, tool, &args).unwrap();
+                if !before.same_scene_undo_state(&self.state) {
+                    self.history.push(before);
+                }
+            }
+        }
+    }
+    fn click(&mut self, key: &str) {
+        let p = point(self.editor.rects[key]);
+        self.step(pointer(p, true));
+        self.step(pointer(p, false));
+        self.step(vec![]);
+    }
+    fn detail(&self) -> Value {
+        cuemol_command::animation_element_detail(&self.state, self.uid).unwrap()
+    }
+}
+
+#[test]
+fn inspector_timing_previews_update_dependents_and_abort_without_history() {
+    let mut h = InspectorHarness::new();
+    let original = h.state.clone();
+    let p = point(h.editor.rects["Animation property durationMs"]);
+    h.step(pointer(p, true));
+    h.step(vec![egui::Event::PointerMoved(p + vec2(15., 0.))]);
+    assert!(h.detail()["endMs"].as_f64().unwrap() > 1000.);
+    assert!(h.history.is_empty());
+    let duration = h.detail()["endMs"].clone();
+    assert_eq!(
+        cuemol_command::animation_timeline(&h.state).unwrap()["elements"][1]["absStartMs"],
+        duration
+    );
+    h.step(pointer(p + vec2(15., 0.), false));
+    assert_eq!(h.history.len(), 1);
+    assert!(original.same_scene_undo_state(&h.history[0]));
+    h.step(vec![]);
+    let committed = h.state.clone();
+    let p = point(h.editor.rects["Animation property startMs"]);
+    h.step(pointer(p, true));
+    h.step(vec![egui::Event::PointerMoved(p + vec2(25., 0.))]);
+    assert!(h.detail()["startMs"].as_f64().unwrap() > 0.);
+    h.step(vec![escape()]);
+    h.step(pointer(p + vec2(25., 0.), false));
+    assert!(committed.same_scene_undo_state(&h.state));
+    assert_eq!(h.history.len(), 1);
+}
+
+#[test]
+fn generic_animation_numeric_preview_aborts_and_commits_once() {
+    let mut h = InspectorHarness::new();
+    h.click("Animation Generic tab");
+    let original = h.state.clone();
+    let p = point(h.editor.rects["Animation property angle"]);
+    h.step(pointer(p, true));
+    h.step(vec![egui::Event::PointerMoved(p - vec2(30., 0.))]);
+    assert_ne!(h.detail()["properties"]["angle"], "360");
+    assert!(h.history.is_empty());
+    h.step(vec![escape()]);
+    h.step(pointer(p - vec2(30., 0.), false));
+    assert!(original.same_scene_undo_state(&h.state));
+    h.step(vec![]);
+    let p = point(h.editor.rects["Animation property angle"]);
+    h.step(pointer(p, true));
+    h.step(vec![egui::Event::PointerMoved(p - vec2(30., 0.))]);
+    h.step(pointer(p - vec2(30., 0.), false));
+    assert_eq!(h.history.len(), 1);
+    assert!(original.same_scene_undo_state(&h.history[0]));
+}
+
+#[test]
+fn spin_axis_presets_and_cartesian_components_preserve_explicit_mode() {
+    let mut h = InspectorHarness::new();
+    h.click("Animation axis preset");
+    h.click("Animation axis x");
+    let axis = cuemol_core::Vector4::from_script_string(
+        h.detail()["properties"]["axis"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert_eq!([axis.x, axis.y, axis.z], [1., 0., 0.]);
+    h.click("Animation axis preset");
+    h.click("Animation axis cart");
+    assert_eq!(h.history.len(), 1);
+    let p = point(h.editor.rects["Animation axis component y"]);
+    h.step(pointer(p, true));
+    h.step(pointer(p, false));
+    h.step(vec![
+        egui::Event::Key {
+            key: egui::Key::A,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL,
+        },
+        egui::Event::Text("2".into()),
+        egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        },
+    ]);
+    let axis = cuemol_core::Vector4::from_script_string(
+        h.detail()["properties"]["axis"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert!((axis.y / axis.x - 2.).abs() < 1e-9);
+    assert_eq!(h.history.len(), 2);
+}

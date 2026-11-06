@@ -356,6 +356,27 @@ pub fn call_tool(
                             cuemol_core::Vector4::new3(values[0], values[1], values[2])
                                 .script_string(),
                         );
+                    } else if matches!(
+                        prop,
+                        "quadric"
+                            | "angle"
+                            | "tgt_alpha"
+                            | "direction"
+                            | "distance"
+                            | "startValue"
+                            | "endValue"
+                    ) {
+                        let numeric = value
+                            .trim()
+                            .parse::<f64>()
+                            .ok()
+                            .filter(|v| v.is_finite())
+                            .ok_or_else(|| {
+                                CueMolError::invalid_argument(format!(
+                                    "{prop} takes a finite number"
+                                ))
+                            })?;
+                        node.set_str_attr(prop, numeric.to_string());
                     } else {
                         node.set_str_attr(prop, value);
                     }
@@ -368,34 +389,137 @@ pub fn call_tool(
             mgr.motions_mut()[index] = motion;
         }
     }
+    save_edited_animation(state, camera, sid, &mut mgr, name != "set_anim_options")?;
+    Ok(timeline(state, &mgr, sid))
+}
+
+/// Apply a preview without history, or restore its anchor before a normal commit.
+pub fn prepare_animation_edit(
+    state: &mut DesktopAppState,
+    camera: &mut Camera,
+    args: &Value,
+) -> Result<Option<(&'static str, Value)>> {
+    let mode = text(args, "mode")?;
+    if !matches!(mode, "preview" | "commit" | "abort") {
+        return Err(CueMolError::invalid_argument("unknown animation edit mode"));
+    }
+    let sid = crate::commands::uid(args, "sceneId")?;
+    let uid = crate::commands::uid(args, "uid")?;
+    if mode != "abort" && state.active_scene() != Some(sid) {
+        return Err(CueMolError::invalid_argument("the inspected scene changed"));
+    }
+    let mut mgr = state
+        .scene_animation(sid)?
+        .ok_or_else(|| CueMolError::not_found("animation"))?;
+    let index = element(&mgr, &format!("#{}", uid.get()))?;
+    let prop = text(args, "prop")?;
+    let current = &mgr.motions()[index];
+    let motion_for = |value: &Value| -> Result<AnimMotion> {
+        let mut node = current.to_ldom2_node();
+        if prop == "timing" {
+            let (start, end) = value["startMs"]
+                .as_f64()
+                .zip(value["endMs"].as_f64())
+                .filter(|(start, end)| start.is_finite() && end.is_finite())
+                .ok_or_else(|| {
+                    CueMolError::invalid_argument("timing requires two finite numbers")
+                })?;
+            node.set_str_attr("start", editor_time_ms(start.min(end)).to_string());
+            node.set_str_attr("end", editor_time_ms(start.max(end)).to_string());
+        } else {
+            if !matches!(
+                prop,
+                "quadric"
+                    | "angle"
+                    | "tgt_alpha"
+                    | "direction"
+                    | "distance"
+                    | "startValue"
+                    | "endValue"
+            ) || !node.children().iter().any(|child| child.tag_name() == prop)
+            {
+                return Err(CueMolError::invalid_argument(
+                    "animation previews require a numeric property or timing",
+                ));
+            }
+            let number = value
+                .as_str()
+                .and_then(|value| value.trim().parse::<f64>().ok())
+                .filter(|v| v.is_finite())
+                .ok_or_else(|| {
+                    CueMolError::invalid_argument("numeric edits require finite values")
+                })?;
+            node.set_str_attr(prop, number.to_string());
+        }
+        let mut motion = AnimMotion::from_ldom2_node(&node)?;
+        motion.base_mut().set_abs_start(current.base().abs_start());
+        motion.base_mut().set_abs_end(current.base().abs_end());
+        Ok(motion)
+    };
+    let value = motion_for(&args["value"])?;
+    let original = motion_for(&args["originalValue"])?;
+    let unchanged = value.to_ldom2_node() == original.to_ldom2_node();
+    mgr.motions_mut()[index] = if mode == "preview" {
+        value.clone()
+    } else {
+        original
+    };
+    save_edited_animation(state, camera, sid, &mut mgr, true)?;
+    if mode != "commit" || unchanged {
+        return Ok(None);
+    }
+    let element = format!("#{}", uid.get());
+    Ok(Some(if prop == "timing" {
+        (
+            "set_anim_time",
+            json!({"element":element,"startMs":time_to_milliseconds(value.base().rel_start()),"endMs":time_to_milliseconds(value.base().rel_end())}),
+        )
+    } else {
+        (
+            "set_anim_generic_prop",
+            json!({"element":element,"prop":prop,"value":args["value"]}),
+        )
+    }))
+}
+
+fn save_edited_animation(
+    state: &mut DesktopAppState,
+    camera: &mut Camera,
+    sid: Uid,
+    mgr: &mut AnimMgr,
+    stop_playback: bool,
+) -> Result<()> {
     if let Err(error) = mgr.try_resolve_rel_time() {
-        let graph = Graph::read(&mgr);
-        if graph.error().is_none() {
+        if Graph::read(mgr).error().is_none() {
             return Err(error);
         }
     }
-    let duration = mgr
-        .motions()
-        .iter()
-        .map(|m| m.base().abs_end())
-        .max()
-        .unwrap_or(0);
-    mgr.set_length(duration);
-    if name != "set_anim_options" {
+    mgr.set_length(
+        mgr.motions()
+            .iter()
+            .map(|motion| motion.base().abs_end())
+            .max()
+            .unwrap_or(0),
+    );
+    if stop_playback {
         let active = state.has_scene_animation_player(sid)
             || state
                 .scene_animation(sid)?
                 .is_some_and(|manager| manager.initial_camera().is_some());
         if active {
             let view = state
-                .active_view_summary()
+                .scene_manager()
+                .scene(sid)
+                .and_then(|scene| scene.active_view_uid())
                 .ok_or_else(|| CueMolError::not_found("view"))?;
-            *camera = state.stop_scene_animation(sid, view.uid)?;
+            let restored = state.stop_scene_animation(sid, view)?;
+            if state.active_scene() == Some(sid) {
+                *camera = restored;
+            }
         }
         mgr.discard_playback_state();
     }
-    state.set_scene_animation(sid, Some(&mgr))?;
-    Ok(timeline(state, &mgr, sid))
+    state.set_scene_animation(sid, Some(mgr))
 }
 
 fn apply_time(state: &mut DesktopAppState, camera: &mut Camera, sid: Uid, time: f64) -> Result<()> {

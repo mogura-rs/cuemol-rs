@@ -22,7 +22,9 @@ pub mod pdb;
 pub use object_export::{prepare_save_object, PreparedObjectSave};
 mod properties;
 pub mod selection;
-pub use animation::{advance_animation, animation_element_detail, animation_timeline};
+pub use animation::{
+    advance_animation, animation_element_detail, animation_timeline, prepare_animation_edit,
+};
 pub use properties::{focus_nodes, render_settings};
 pub mod config;
 pub mod console;

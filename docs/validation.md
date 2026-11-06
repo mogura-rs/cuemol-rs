@@ -1,5 +1,49 @@
 # Validation evidence
 
+## Animation preview transactions and Tauri strips
+
+The native, browser and Tauri element Inspectors now preview paired start/end
+timing and generic numeric edits through the shared command layer. Previews
+preserve redo, cancellation restores the anchor, and release restores the anchor
+before recording one ordinary undo entry. Scene changes, target changes and
+hidden fields cancel the edit. Tauri coalesces previews and waits for an in-flight
+request before applying abort or commit. Stable UIDs also protect the legacy
+property dialog from editing a different element after a reorder.
+
+All three frontends provide axis presets, Cartesian components and cardinal
+slide directions. Structured angles wrap to the reference range, and only
+MolAnim fractions use the 0..1 range. A command reproducer showed that non-finite
+scalar values were accepted; these now fail without changing the animation.
+Clock parsing also rejects overflow after conversion to milliseconds.
+
+Tauri now uses colored strip lanes, edge grips, a ruler, local scrubbing, zoom,
+Fit and UID-based selection. Moving, resizing, reordering, deletion and immediate
+insertion use the shared commands and existing history boundary. A screenshot
+check exposed a CSS specificity conflict that hid the timeline summary; the
+corrected grid keeps the ribbon, summary and ruler separate. Native panel tests
+also reproduced progressive height shrinkage and loss of the expanded height
+after collapsing. The panel now fills its assigned height and keeps separate
+expanded/collapsed state.
+
+The shared command, animation and UI run passed 302 checks with two unrelated
+optional checks ignored. The UI run included 42 checks and explicitly executed
+the reference geometry oracle. Native animation checks passed 27, including a
+real Inspector drag through preview, abort, commit and undo/redo. All six native
+layout/history checks passed after the height fix. The macOS Tauri animation
+model passed 25 checks with one optional GPU case ignored. The full Tauri shell
+run passed 50 checks; after final CSS and insertion assertions, all three affected
+animation cases passed again. WebGL and WebGPU realtime timing/generic cases
+also passed, including Escape preserving redo and one-step undo/redo.
+The final Linux OS-input run repeated strip and Inspector duration drags,
+cancellation and keyboard undo/redo successfully. Native and Tauri screenshots
+were inspected after the layout fixes. Formatting, whitespace and script syntax
+checks passed; generated evidence remains in the ignored cache.
+
+The earlier strip-timeline milestone below describes its state at that commit.
+Its remaining Tauri, preset and realtime-preview items are covered above.
+Default-state metadata and the remaining reference Inspector details are still
+under audit; this does not establish complete feature or appearance parity.
+
 ## Animation strip timeline and shared element Inspector
 
 The default native and browser windows now share the current reference's strip

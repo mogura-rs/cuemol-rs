@@ -4714,3 +4714,46 @@ svg { flex: none; }
 .density-color-row input[type="text"] { min-width: 0; flex: 1; }
 .density-color-row input[type="color"] { width: 28px; }
 .density-level-hint { color: var(--text-muted); font-size: 11px; }
+
+.bottom-content.animation-dock { overflow: hidden; display: none; flex-direction: column; }
+.bottom-content.animation-dock.active { display: flex; }
+.animation-dock .animation-editor { min-height: 0; flex: 1; margin: 0; display: flex; flex-direction: column; }
+.animation-dock .animation-editor .animation-body { overflow: hidden; display: grid; flex: 1; min-height: 0; padding: 2px 0 0; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: 24px auto minmax(26px, 1fr) 24px; gap: 0; }
+.animation-dock .animation-summary { height: 24px; margin: 0 8px; flex: 0 1 auto; }
+.animation-dock #animation-error { width: 100%; margin: 0 8px; }
+.animation-dock .animation-strip-list { flex: 1 0 100%; min-height: 26px; height: 0; max-height: none; border: 0; overflow: auto; position: relative; }
+.animation-timeline-grid { position: relative; min-width: 100%; min-height: 100%; }
+.animation-timeline-head, .animation-row.animation-lane { display: grid; grid-template-columns: 140px minmax(0, 1fr); align-items: stretch; height: 26px; min-height: 26px; padding: 0; border: 0; background: var(--bg-input); }
+.animation-timeline-head { position: sticky; top: 0; z-index: 4; background: var(--bg-surface); border-bottom: 1px solid var(--border); }
+.animation-lane-label { position: sticky; left: 0; z-index: 3; width: 140px; min-width: 0; padding: 3px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; border: 0; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); border-radius: 0; background: var(--bg-surface); font-size: 11px; }
+.animation-lane.selected .animation-lane-label { color: var(--accent); background: var(--bg-active); }
+.animation-lane.selected .animation-lane-track { background: var(--bg-active); }
+.animation-lane-track, .animation-time-ruler { position: relative; min-width: 0; border-bottom: 1px solid var(--border); }
+.animation-time-ruler { cursor: crosshair; user-select: none; touch-action: none; }
+.animation-time-tick { position: absolute; height: 100%; padding: 3px 4px; border-left: 1px solid var(--border); white-space: nowrap; font-size: 10px; color: var(--text-secondary); }
+.animation-strip { position: absolute; top: 3px; height: 20px; min-width: 3px; border-radius: 3px; outline: 1px solid #ffffff22; cursor: grab; touch-action: none; color: #f4f6fa; user-select: none; overflow: hidden; }
+.animation-strip:active { cursor: grabbing; }
+.animation-lane.selected .animation-strip { outline: 2px solid var(--accent); }
+.animation-lane.disabled .animation-strip { opacity: 0.4; }
+.animation-lane.unresolved .animation-strip { background-image: repeating-linear-gradient(135deg, transparent 0 4px, #f1a93b99 4px 7px); cursor: default; }
+.animation-row .animation-strip-caption { display: block; height: 20px; line-height: 16px; padding: 2px 8px; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; border: 0; font-size: 10px; }
+.animation-row .animation-strip-edge { position: absolute; z-index: 2; width: 6px; min-height: 20px; padding: 0; top: 0; bottom: 0; cursor: ew-resize; }
+.animation-strip-edge.left { left: 0; }.animation-strip-edge.right { right: 0; }
+.animation-playhead { position: absolute; top: 0; bottom: 0; width: 1px; background: #ef6b73; pointer-events: none; z-index: 2; }
+.animation-tools { flex: 0 0 100%; display: flex; height: 24px; margin: 0; padding: 1px 8px; border-top: 1px solid var(--border); }
+.animation-ribbon-panel { flex-wrap: wrap; flex: 0 0 auto; align-items: center; gap: 4px; }
+.animation-ribbon-panel > button { min-width: 24px; min-height: 24px; }
+.animation-ribbon-panel .animation-time { flex: 0 0 auto; }
+#animation-current-time { width: 88px; min-width: 70px; min-height: 24px; font-family: var(--font-mono); }
+.animation-zoom-controls { margin-left: auto; display: flex; gap: 4px; align-items: center; font-size: 10px; white-space: nowrap; }
+.animation-zoom-controls button { min-width: 24px; min-height: 24px; }
+.animation-axis-editor { display: flex; flex-direction: column; gap: 4px; }
+.animation-axis-editor > label { display: flex; justify-content: space-between; gap: 6px; }
+.animation-axis-components { display: flex; gap: 4px; }.animation-axis-components input { min-width: 0; width: 28%; }
+.animation-renderer-choices { display: flex; flex-direction: column; gap: 4px; }.animation-renderer-choices label { display: flex; gap: 4px; }.animation-renderer-choices input { width: auto; }
+.animation-dock .animation-summary { grid-row: 1; align-self: center; }
+.animation-dock #animation-error { grid-column: 1 / -1; grid-row: 2; width: auto; }
+.animation-dock .animation-strip-list { grid-column: 1 / -1; grid-row: 3; height: auto; }
+.animation-dock .animation-tools { grid-column: 1 / -1; grid-row: 4; }
+
+.animation-inspector #inspector-fields ~ * { display: none; }

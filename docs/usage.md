@@ -42,7 +42,7 @@ builds can set `SOURCE_DATE_EPOCH` to control the reported UTC build time.
 
 ### Animation references
 
-The default native window and browser show animation elements as strips in the
+The native, Tauri and browser windows show animation elements as strips in the
 bottom Animation tab. Drag a strip to move it, or drag an edge to resize it.
 The ruler and current-time field scrub the playhead. These gestures preview
 locally and commit once on release; Escape cancels them. Fit and the zoom
@@ -50,6 +50,13 @@ buttons change the time scale. Select a channel or strip to open its Inspector,
 which includes common and type-specific properties, target choices and a
 Generic tab. Add inserts after the selection; Delete retains the next available
 selection, and the arrow buttons reorder the selected element.
+
+Start and duration fields preview the resolved timeline while dragging. Numeric
+fields in the Generic tab also preview their values. Release records one undo
+step; Escape, focus loss or changing the target restores the original value.
+Spin axes support X/Y/Z presets and Cartesian components, and renderer slide
+directions support cardinal presets. Structured controls retain their type's
+ranges; generic real-property values are not restricted to morph fractions.
 
 Animation elements can start relative to another element's end. Renaming the
 reference updates its dependent elements, and deleting it keeps their current

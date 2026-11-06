@@ -11,6 +11,7 @@
     <script src="./selection.js" defer></script>
     <script src="./actions.js" defer></script>
     <script src="./clipboard.js" defer></script>
+    <script src="./animation.js" defer></script>
     <script src="./app.js" defer></script>
   </head>
   <body>
@@ -508,13 +509,6 @@
             <div class="side-body animation-body">
               <label class="animation-summary">Duration: <output id="animation-duration"></output></label>
               <label class="animation-summary">Start cam: <select id="animation-start-camera"><option value="">(none)</option></select></label>
-              <div id="animation-columns" class="animation-columns">
-                <span>Name</span>
-                <div class="animation-column-splitter" data-animation-column-splitter="name" role="separator" aria-orientation="vertical" aria-label="Name column width" tabindex="0"></div>
-                <span>Start</span>
-                <div class="animation-column-splitter" data-animation-column-splitter="start" role="separator" aria-orientation="vertical" aria-label="Start column width" tabindex="0"></div>
-                <span>End</span>
-              </div>
               <p id="animation-error" class="inspector-error" role="status" hidden></p>
               <div id="animation-list" class="animation-list"></div>
               <div class="animation-tools">

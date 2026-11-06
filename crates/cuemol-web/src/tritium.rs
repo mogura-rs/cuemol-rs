@@ -196,6 +196,9 @@ impl App {
             for (tool, args) in self.inspector.cancel_numeric_edit() {
                 self.call(tool, args);
             }
+            for (tool, args) in self.animation_inspector.cancel() {
+                self.call(tool, args);
+            }
             self.actions_panel.inspector(ctx);
         } else if let Some(uid) = self
             .inspector_target
@@ -203,6 +206,9 @@ impl App {
             .filter(|target| target.kind == "animation")
             .and_then(|target| target.id)
         {
+            for (tool, args) in self.inspector.cancel_numeric_edit() {
+                self.call(tool, args);
+            }
             for (tool, args) in self
                 .animation_inspector
                 .panel(ctx, &self.state, uid, self.revision)
@@ -211,7 +217,9 @@ impl App {
             }
             self.ui_rects.extend(self.animation_inspector.rects.clone());
         } else {
-            self.animation_inspector.cancel();
+            for (tool, args) in self.animation_inspector.cancel() {
+                self.call(tool, args);
+            }
             self.inspector.inspect(
                 &mut self.state,
                 &mut self.camera,

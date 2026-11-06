@@ -104,7 +104,7 @@ function cancelCueMolNumericDrag() {
 function attachCueMolNumericDrag(input, label, row, commit, owner = cueMolPropertyInspector) {
   label.style.cursor = 'ew-resize';
   const start = event => {
-    if (event.button !== 0 || input.disabled || input.value === '' || !Number.isFinite(Number(input.value)) || cueMolNumericDrag) return;
+    if (event.button !== 0 || input.disabled || input.value === '' || !(row.parse ? Number.isFinite(row.parse(input.value)) && row.parse(input.value) !== null : Number.isFinite(Number(input.value))) || cueMolNumericDrag) return;
     if (event.target === input && event.clientX >= input.getBoundingClientRect().right - 18) return;
     event.preventDefault();
     const inspector = owner;
@@ -113,9 +113,11 @@ function attachCueMolNumericDrag(input, label, row, commit, owner = cueMolProper
     const drag = {owner, key:inspector.key, value:original, moved:false, ending:false, pending:null, running:null, finish:null};
     cueMolNumericDrag = drag;
     const apply = async (mode, value) => {
-      const result = await invoke('inspector_request', {tool:'edit_node_property', args:{...args, mode, value}});
+      const request = owner.editRequest?.(row, mode, value, args) || {tool:'edit_node_property', args:{...args, mode, value}};
+      const result = await invoke('inspector_request', request);
       if (result.snapshot && cueMolNumericDrag === drag && owner.key === drag.key) {
         snapshot = result.snapshot;
+        owner.onPreview?.(mode);
         void renderViewport();
       }
     };
@@ -140,7 +142,7 @@ function attachCueMolNumericDrag(input, label, row, commit, owner = cueMolProper
       const decimals = row.type === 'integer' ? 0 : Math.max(0, -Math.floor(Math.log10(fine)));
       const value = Math.max(row.schema?.min ?? -Infinity, Math.min(row.schema?.max ?? Infinity, Number(original) + delta*speed));
       drag.value = String(Number(value.toFixed(Math.min(15,decimals))));
-      input.value = drag.value;
+      input.value = row.format ? row.format(drag.value) : drag.value;
       if (row.schema?.realtime) { drag.pending = drag.value; pump(); }
     };
     const up = next => { if (next.pointerId === event.pointerId) void drag.finish('commit'); };
@@ -162,7 +164,7 @@ function attachCueMolNumericDrag(input, label, row, commit, owner = cueMolProper
         if (drag.running) await drag.running;
         if (drag.moved && row.schema?.realtime) await apply(mode, drag.value);
         else if (drag.moved && mode === 'commit') commit(drag.value);
-        if (mode === 'abort') input.value = original;
+        if (mode === 'abort') input.value = row.format ? row.format(original) : original;
       } catch (error) { inspector.error = String(error); }
       finally {
         if (cueMolNumericDrag === drag) cueMolNumericDrag = null;

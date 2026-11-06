@@ -52,8 +52,19 @@ async function openShell(page, storage = {}, options = {}) {
     }
     if(options.brokenAnimation) {
       snapshot.animationResolveError='"child" is relative to "missing", which does not exist';
-      snapshot.animationObjects=[{index:0,name:'child',typeName:'NoopAnimObj',start:0,end:1,duration:1,resolveError:snapshot.animationResolveError}];
+      snapshot.animationObjects=[{uid:20,index:0,relativeStart:0,timeRefName:'missing',disabled:false,quadric:0,name:'child',typeName:'NoopAnimObj',start:0,end:1,duration:1,resolveError:snapshot.animationResolveError}];
       snapshot.animationDuration=1;
+    }
+    const animationUndo=[],animationRedo=[];
+    const resolveAnimation=()=>{
+      const ends=new Map();
+      const resolve=object=>{if(ends.has(object.uid))return ends.get(object.uid);const parent=snapshot.animationObjects.find(item=>item.name===object.timeRefName);const base=parent?resolve(parent):0;object.start=base+object.relativeStart;object.end=object.start+object.duration;ends.set(object.uid,object.end);return object.end;};
+      snapshot.animationObjects.forEach((object,index)=>{object.index=index;resolve(object);});snapshot.animationDuration=Math.max(0,...snapshot.animationObjects.map(object=>object.end));
+    };
+    if(options.animationTimeline){
+      snapshot.animationObjects=['base','child','last'].map((name,index)=>({uid:20+index,index,name,typeName:'SimpleSpin',disabled:false,timeRefName:index?['base','child'][index-1]:'',relativeStart:0,duration:1,quadric:0,angle:360,axis:[0,1,0],resolveError:null}));resolveAnimation();
+      window.__animationState=()=>structuredClone(snapshot.animationObjects);
+      window.__reverseAnimations=()=>{snapshot.animationObjects.reverse();resolveAnimation();};
     }
     const styleDocuments = new Map();
     if (options.styles) {
@@ -235,7 +246,28 @@ async function openShell(page, storage = {}, options = {}) {
         return structuredClone(snapshot);
       }
       if(options.density && command==='redraw_density_renderer') return structuredClone(snapshot);
+      if(options.animationTimeline && command==='seek_animation'){snapshot.animationElapsed=Math.max(0,Math.min(snapshot.animationDuration,args.elapsed));return structuredClone(snapshot);}
+      if(options.animationTimeline && ['undo','redo'].includes(command)){
+        const from=command==='undo'?animationUndo:animationRedo,to=command==='undo'?animationRedo:animationUndo;
+        if(from.length){to.push(structuredClone(snapshot.animationObjects));snapshot.animationObjects=from.pop();resolveAnimation();}snapshot.canUndo=animationUndo.length>0;snapshot.canRedo=animationRedo.length>0;return structuredClone(snapshot);
+      }
       if (command === 'inspector_request') {
+        if((options.animationTimeline||options.brokenAnimation) && (args.tool.includes('anim')||args.tool==='animation_selection')) {
+          const request=args.args,uid=request.uid??Number(request.element?.slice(1));
+          const object=snapshot.animationObjects.find(object=>object.uid===uid);
+          if(args.tool==='animation_element_detail')return {sceneId:1,uid,type:object.typeName,startMs:object.relativeStart*1000,endMs:(object.relativeStart+object.duration)*1000,properties:{uid:String(uid),name:object.name,disabled:String(object.disabled),timeRefName:object.timeRefName,start:String(object.relativeStart*1e9),end:String((object.relativeStart+object.duration)*1e9),quadric:String(object.quadric),angle:String(object.angle),axis:`(${(object.axis??[0,1,0]).join(',')})`},references:snapshot.animationObjects.map(item=>({name:item.name,error:item.uid===uid?'Self reference':null})),cameras:[],renderers:[],molecules:[]};
+          const record=()=>{animationUndo.push(structuredClone(snapshot.animationObjects));animationRedo.splice(0);snapshot.canUndo=true;snapshot.canRedo=false;};
+          const timing=value=>{object.relativeStart=value.startMs/1000;object.duration=(value.endMs-value.startMs)/1000;};
+          if(args.tool==='edit_animation_property') {
+            if(request.mode==='preview'&&window.__holdAnimationPreview)await window.__holdAnimationPreview;
+            const write=value=>request.prop==='timing'?timing(value):object[request.prop]=Number(value);
+            if(request.mode==='commit'){write(request.originalValue);record();write(request.value);}else write(request.mode==='abort'?request.originalValue:request.value);
+          } else if(args.tool==='add_anim'){record();const before=snapshot.animationObjects.findIndex(object=>`#${object.uid}`===request.before),index=before<0?snapshot.animationObjects.length:before,previous=snapshot.animationObjects[index-1];snapshot.animationObjects.splice(index,0,{uid:Math.max(0,...snapshot.animationObjects.map(object=>object.uid))+1,index,name:'SimpleSpin0',typeName:'SimpleSpin',disabled:false,timeRefName:previous?.name||'',relativeStart:0,duration:1,quadric:0,angle:360,axis:[0,1,0],resolveError:null});}
+          else if(args.tool==='set_anim_time'){record();timing(request);}
+          else if(args.tool==='set_anim_generic_prop'||args.tool==='set_anim_prop'){record();if(request.prop==='name'){const before=object.name;for(const child of snapshot.animationObjects)if(child.timeRefName===before)child.timeRefName=request.value;object.name=request.value;}else if(request.prop==='axis')object.axis=request.value.split(/\s+/).map(Number);else object[request.prop]=Number.isFinite(Number(request.value))&&request.value!==''?Number(request.value):request.value;}
+          else if(args.tool==='animation_selection'){record();if(request.action==='delete')snapshot.animationObjects=snapshot.animationObjects.filter(object=>!request.uids.includes(object.uid));else {const index=snapshot.animationObjects.findIndex(object=>object.uid===request.uids[0]),target=index+(request.action==='up'?-1:1);[snapshot.animationObjects[index],snapshot.animationObjects[target]]=[snapshot.animationObjects[target],snapshot.animationObjects[index]];}}
+          resolveAnimation();return {snapshot:structuredClone(snapshot)};
+        }
         if(options.density && [11,12].includes(args.args.nodeId)) {
           const target=snapshot.densityMaps[0].renderers.find(item=>item.uid===args.args.nodeId);
           const values=()=>({alpha:String(target.alpha),...target.specific});
@@ -1688,5 +1720,68 @@ test('Tauri animation reports unresolved chains without hiding the editable row'
   await expect(page.locator('#animation-play')).toBeDisabled();
   await page.locator('.animation-row').click();
   await expect(page.locator('#animation-change')).toBeEnabled();
+  expect(errors).toEqual([]);
+});
+
+test('Tauri animation strips move resize scrub and keep selection through reorder',async({page},testInfo)=>{
+  const errors=await openShell(page,{}, {animationTimeline:true});
+  await page.locator('[data-bottom-select="animation"]').click();
+  const state=()=>page.evaluate(()=>window.__animationState());
+  const writes=()=>page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='inspector_request'&&call.args.tool==='set_anim_time'));
+  let strip=page.getByRole('button',{name:'Animation strip base',exact:true}),box=await strip.boundingBox();
+  await page.mouse.move(box.x+box.width/2,box.y+box.height/2);await page.mouse.down();await page.mouse.move(box.x+box.width/2+40,box.y+box.height/2,{steps:5});
+  expect(await writes()).toHaveLength(0);await page.mouse.up();
+  await expect.poll(async()=>(await state())[0].relativeStart).toBeCloseTo(0.4,6);
+  expect((await writes())[0].args.args.element).toBe('#20');
+  const right=page.locator('[data-animation-uid="20"] .animation-strip-edge.right');box=await right.boundingBox();
+  await page.mouse.move(box.x+box.width/2,box.y+box.height/2);await page.mouse.down();await page.mouse.move(box.x+box.width/2+25,box.y+box.height/2,{steps:5});await page.mouse.up();
+  await expect.poll(async()=>(await state())[0].duration).toBeCloseTo(1.25,6);
+  box=await strip.boundingBox();await page.mouse.move(box.x+box.width/2,box.y+box.height/2);await page.mouse.down();await page.mouse.move(box.x+box.width/2+35,box.y+box.height/2,{steps:5});await page.keyboard.press('Escape');await page.mouse.up();
+  expect(await writes()).toHaveLength(2);
+  const ruler=page.getByLabel('Animation time ruler');box=await ruler.boundingBox();
+  await page.mouse.move(box.x+20,box.y+box.height/2);await page.mouse.down();await page.mouse.move(box.x+70,box.y+box.height/2,{steps:4});await page.mouse.up();
+  await expect(page.getByLabel('Animation current time',{exact:true})).toHaveValue('0:00.700');
+  await page.locator('#animation-down').click();
+  await expect(page.locator('[data-animation-uid="20"]')).toHaveClass(/selected/);
+  expect((await state()).map(object=>object.uid)).toEqual([21,20,22]);
+  await page.evaluate(async()=>{window.__reverseAnimations();snapshot=await invoke('get_snapshot');renderShell();renderAnimation();});
+  await expect(page.locator('[data-animation-uid="20"]')).toHaveClass(/selected/);
+  await page.getByLabel('Animation zoom fit',{exact:true}).click();await page.getByLabel('Animation zoom in',{exact:true}).click();await page.getByLabel('Animation zoom out',{exact:true}).click();
+  const summary=await page.locator('.animation-summary').first().boundingBox(),rulerBox=await ruler.boundingBox(),ribbonBox=await page.locator('.animation-ribbon-panel').boundingBox();
+  expect(summary.y).toBeGreaterThanOrEqual(ribbonBox.y+ribbonBox.height-1);expect(rulerBox.y).toBeGreaterThanOrEqual(summary.y+summary.height-1);
+  await expect(page.locator('#object-stats')).not.toBeVisible();
+  await page.screenshot({path:testInfo.outputPath('tauri-animation-strips.png')});
+  await page.locator('#animation-add').click();await page.getByText('Simple spin',{exact:true}).click();
+  await expect.poll(async()=>(await state()).length).toBe(4);
+  await expect(page.locator('.animation-lane.selected')).toContainText('SimpleSpin0');
+
+  expect(errors).toEqual([]);
+});
+
+test('Tauri animation Inspector previews timing and aborts queued numeric edits',async({page})=>{
+  const errors=await openShell(page,{}, {animationTimeline:true});
+  await page.locator('[data-bottom-select="animation"]').click();
+  await page.getByRole('button',{name:'Animation element base',exact:true}).click();
+  const duration=page.getByLabel('Animation property durationMs',{exact:true});
+  await expect(duration).toHaveValue('0:01.000');
+  const state=()=>page.evaluate(()=>window.__animationState());
+  const edits=()=>page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='inspector_request'&&call.args.tool==='edit_animation_property').map(call=>call.args.args));
+  let box=await duration.boundingBox();
+  await page.mouse.move(box.x+box.width/2,box.y+box.height/2);await page.mouse.down();await page.mouse.move(box.x+box.width/2+20,box.y+box.height/2,{steps:5});
+  await expect.poll(async()=>(await state())[0].duration).toBeGreaterThan(1);expect((await edits()).some(edit=>edit.mode==='commit')).toBe(false);
+  await page.mouse.up();await expect.poll(async()=>(await edits()).filter(edit=>edit.mode==='commit').length).toBe(1);
+  await page.getByLabel('Animation Generic tab',{exact:true}).click();
+  const angle=page.getByLabel('Animation property angle',{exact:true});await expect(angle).toHaveValue('360');
+  await page.evaluate(()=>{window.__holdAnimationPreview=new Promise(resolve=>window.__releaseAnimationPreview=resolve);});
+  box=await angle.boundingBox();await page.mouse.move(box.x+box.width/2,box.y+box.height/2);await page.mouse.down();await page.mouse.move(box.x+box.width/2-25,box.y+box.height/2,{steps:3});
+  await expect.poll(async()=>(await edits()).filter(edit=>edit.prop==='angle'&&edit.mode==='preview').length).toBeGreaterThan(0);
+  await page.keyboard.press('Escape');await page.mouse.up();await page.evaluate(()=>window.__releaseAnimationPreview());
+  await expect.poll(async()=>(await edits()).filter(edit=>edit.prop==='angle'&&edit.mode==='abort').length).toBe(1);
+  await expect(angle).toHaveValue('360');
+  expect((await edits()).filter(edit=>edit.prop==='angle'&&edit.mode==='commit')).toHaveLength(0);
+  await page.getByLabel('Animation Properties tab',{exact:true}).click();await page.getByLabel('Animation axis preset',{exact:true}).selectOption('x');
+  await expect.poll(async()=>(await state())[0].axis).toEqual([1,0,0]);
+  await page.getByLabel('Animation axis preset',{exact:true}).selectOption('cart');await page.getByLabel('Animation axis component y',{exact:true}).fill('2');await page.getByLabel('Animation axis component y',{exact:true}).press('Tab');
+  await expect.poll(async()=>(await state())[0].axis).toEqual([1,2,0]);
   expect(errors).toEqual([]);
 });

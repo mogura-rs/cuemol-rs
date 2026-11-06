@@ -549,6 +549,20 @@ impl App {
         self.future.clear();
     }
     fn call(&mut self, name: &str, args: Value) {
+        if name == "edit_animation_property" {
+            self.cancel_console("Scene changed outside the console; remaining commands cancelled.");
+            match cuemol_command::prepare_animation_edit(&mut self.state, &mut self.camera, &args) {
+                Ok(Some((tool, command))) => {
+                    self.call_shared(tool, command);
+                }
+                Ok(None) => {
+                    self.revision = self.revision.wrapping_add(1);
+                    self.dirty = true;
+                }
+                Err(error) => self.message = format!("Error: {error}"),
+            }
+            return;
+        }
         if name == "edit_node_property" {
             self.cancel_console("Scene changed outside the console; remaining commands cancelled.");
             match cuemol_command::prepare_property_edit(&mut self.state, &mut self.camera, &args) {
@@ -570,6 +584,9 @@ impl App {
                 self.call(tool, args);
             }
             for (tool, args) in self.density_panel.cancel() {
+                self.call(tool, args);
+            }
+            for (tool, args) in self.animation_inspector.cancel() {
                 self.call(tool, args);
             }
             self.cancel_console("Scene changed outside the console; remaining commands cancelled.");
