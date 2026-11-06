@@ -1,6 +1,117 @@
 use super::*;
 
+fn apply_coordinates(
+    molecule: &mut MolCoord,
+    count: usize,
+    indices: Option<&[usize]>,
+    cell: Option<[f64; 6]>,
+    position: impl Fn(usize) -> Vector4,
+) -> Result<()> {
+    if indices.is_some_and(|indices| indices.iter().any(|index| *index >= count)) {
+        return Err(CueMolError::invalid_argument(
+            "trajectory selection index is out of range",
+        ));
+    }
+    if let Some(indices) = indices {
+        molecule.set_positions(indices.iter().map(|index| position(*index)))?;
+    } else {
+        molecule.set_positions((0..count).map(position))?;
+    }
+    if let Some([a, b, c, alpha, beta, gamma]) = cell {
+        molecule.set_cell_params(cuemol_core::CellParams::new(a, b, c, alpha, beta, gamma));
+    }
+    molecule.fire_atoms_moved();
+    Ok(())
+}
+
 impl GuiTrajectoryFrames {
+    pub(super) fn frame_atom_count(&self, index: usize) -> Result<usize> {
+        match self {
+            Self::Memory(frames) => frames
+                .get(index)
+                .map(Vec::len)
+                .ok_or_else(|| CueMolError::not_found("trajectory frame")),
+            Self::Owned(block) => block
+                .frame(index)
+                .map(|frame| frame.len() / 3)
+                .ok_or_else(|| CueMolError::not_found("trajectory frame")),
+            Self::File(file) => Ok(file.read_frame(index)?.coordinates.len() / 3),
+            Self::Selected { source, indices } => {
+                let count = source.frame_atom_count(index)?;
+                if indices.iter().any(|index| *index >= count) {
+                    return Err(CueMolError::invalid_argument(
+                        "trajectory selection index is out of range",
+                    ));
+                }
+                Ok(indices.len())
+            }
+        }
+    }
+
+    pub(super) fn apply_frame(
+        &self,
+        molecule: &mut MolCoord,
+        index: usize,
+        indices: Option<&[usize]>,
+    ) -> Result<()> {
+        match self {
+            Self::Memory(frames) => {
+                let frame = frames
+                    .get(index)
+                    .ok_or_else(|| CueMolError::not_found("trajectory frame"))?;
+                apply_coordinates(molecule, frame.len(), indices, None, |index| frame[index])
+            }
+            Self::Owned(block) => {
+                let frame = block
+                    .frame(index)
+                    .ok_or_else(|| CueMolError::not_found("trajectory frame"))?;
+                apply_coordinates(molecule, frame.len() / 3, indices, block.cell(index), |i| {
+                    Vector4::new3(
+                        frame[i * 3] as f64,
+                        frame[i * 3 + 1] as f64,
+                        frame[i * 3 + 2] as f64,
+                    )
+                })
+            }
+            Self::File(file) => {
+                let frame = file.read_frame(index)?;
+                apply_coordinates(
+                    molecule,
+                    frame.coordinates.len() / 3,
+                    indices,
+                    frame.cell,
+                    |i| {
+                        Vector4::new3(
+                            frame.coordinates[i * 3] as f64,
+                            frame.coordinates[i * 3 + 1] as f64,
+                            frame.coordinates[i * 3 + 2] as f64,
+                        )
+                    },
+                )
+            }
+            Self::Selected {
+                source,
+                indices: selected,
+            } => {
+                if let Some(indices) = indices {
+                    let remapped = indices
+                        .iter()
+                        .map(|index| {
+                            selected.get(*index).copied().ok_or_else(|| {
+                                CueMolError::invalid_argument(
+                                    "trajectory selection index is out of range",
+                                )
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    source.apply_frame(molecule, index, Some(&remapped))
+                } else {
+                    source.apply_frame(molecule, index, Some(selected))
+                }
+            }
+        }
+    }
+
     pub(super) fn is_lazy(&self) -> bool {
         match self {
             Self::File(_) => true,
@@ -403,5 +514,126 @@ pub(super) fn amber_bond_mode(value: &str) -> Result<i32> {
         _ => Err(CueMolError::invalid_argument(format!(
             "invalid AMBER bond mode: {value}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod playback_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn molecule(count: usize) -> MolCoord {
+        let template = cuemol_molstr::read_pdb_str(
+            "HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n",
+        )
+        .unwrap()
+        .atoms()[0]
+            .clone();
+        let mut molecule = MolCoord::new();
+        for index in 0..count {
+            let mut atom = template.clone();
+            atom.serial = index as i32 + 1;
+            molecule.push_atom(atom);
+        }
+        molecule
+    }
+
+    #[test]
+    fn direct_playback_preserves_all_storage_kinds_selection_order_and_cells() {
+        let cell = Some([10., 11., 12., 90., 80., 75.]);
+        let mut block = cuemol_mdtools::TrajBlock::new(3);
+        block
+            .append_frame(vec![-0., 2., 3., 4., 5., 6., 7., 8., 9.], cell)
+            .unwrap();
+        block
+            .append_frame(vec![1., 3., 5., 7., 9., 11., 13., 15., 17.], cell)
+            .unwrap();
+        let owned = GuiTrajectoryFrames::Owned(Arc::new(block));
+        let vectors = GuiTrajectoryFrames::Memory(Arc::new(
+            (0..2)
+                .map(|index| owned.frame_with_cell(index).unwrap().0)
+                .collect(),
+        ));
+        let bytes = owned.dcd_bytes(3).unwrap();
+        let file = GuiTrajectoryFrames::File(Arc::new(
+            cuemol_mdtools::IndexedTrajectory::from_bytes(&bytes, 1, Some(3)).unwrap(),
+        ));
+        for source in [owned, vectors, file] {
+            let selected = GuiTrajectoryFrames::Selected {
+                source: Arc::new(source.clone()),
+                indices: Arc::new(vec![2, 0]),
+            };
+            let nested = GuiTrajectoryFrames::Selected {
+                source: Arc::new(selected.clone()),
+                indices: Arc::new(vec![1, 0, 1]),
+            };
+            for frames in [source, selected, nested] {
+                for index in 0..2 {
+                    let (expected, cell) = frames.frame_with_cell(index).unwrap();
+                    let mut molecule = molecule(expected.len());
+                    let generation = molecule.atoms_moved_generation();
+                    frames.apply_frame(&mut molecule, index, None).unwrap();
+                    for (actual, expected) in molecule.atoms().iter().zip(expected) {
+                        let actual = actual.position;
+                        assert_eq!(
+                            [actual.x, actual.y, actual.z, actual.w].map(f64::to_bits),
+                            [expected.x, expected.y, expected.z, expected.w].map(f64::to_bits),
+                        );
+                    }
+                    assert_eq!(molecule.atoms_moved_generation(), generation + 1);
+                    assert_eq!(molecule.cell_params().is_some(), cell.is_some());
+                    if let Some([a, b, c, alpha, beta, gamma]) = cell {
+                        assert_eq!(
+                            molecule.cell_params(),
+                            Some(&cuemol_core::CellParams::new(a, b, c, alpha, beta, gamma))
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_direct_frame_does_not_change_coordinates_cell_or_frame_index() {
+        let source = GuiTrajectoryFrames::Memory(Arc::new(vec![
+            vec![Vector4::new3(1., 2., 3.)],
+            vec![Vector4::ZERO, Vector4::ZERO],
+        ]));
+        let mut trajectory = GuiTrajectoryData {
+            blocks: vec![GuiTrajectoryBlockData {
+                stride: 1,
+                uid: 1,
+                source: String::new(),
+                format: "SYNTHETIC".into(),
+                frames: source.clone(),
+            }],
+            ..Default::default()
+        };
+        let mut molecule = molecule(1);
+        molecule.set_cell_params(cuemol_core::CellParams::new(10., 11., 12., 90., 90., 90.));
+        trajectory.apply_frame(&mut molecule, 0).unwrap();
+        let before = molecule.clone();
+        for index in [1, 2, usize::MAX] {
+            assert!(trajectory.apply_frame(&mut molecule, index).is_err());
+            assert_eq!(trajectory.current_frame, 0);
+            assert_eq!(molecule.atoms(), before.atoms());
+            assert_eq!(molecule.cell_params(), before.cell_params());
+            assert_eq!(
+                molecule.atoms_moved_generation(),
+                before.atoms_moved_generation()
+            );
+        }
+        for selected in [vec![1], vec![0, usize::MAX]] {
+            let frames = GuiTrajectoryFrames::Selected {
+                source: Arc::new(source.clone()),
+                indices: Arc::new(selected),
+            };
+            assert!(frames.apply_frame(&mut molecule, 0, None).is_err());
+            assert_eq!(molecule.atoms(), before.atoms());
+            assert_eq!(
+                molecule.atoms_moved_generation(),
+                before.atoms_moved_generation()
+            );
+        }
     }
 }

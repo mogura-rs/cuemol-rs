@@ -3035,3 +3035,56 @@ verify Linux OS event delivery and window rendering, not hardware acceleration.
 The current macOS binary and Tauri model tests pass, but a fresh local macOS
 OS-input/screen-capture run remains unverified because this process lacks those
 permissions. Historical published multi-platform checks remain historical.
+
+
+## MD coordinate updates without intermediate frame copies
+
+Native and shared scene playback now copies directly from stored vectors or
+decoded packed coordinates into the molecule. Selected trajectories validate
+their indices first and apply only those coordinates, including nested selection
+order. File-backed loading validates the first frame once before applying it,
+instead of decoding that frame twice for atom-count checks. Source frames and
+undo snapshots remain shared. Averaged playback retains its existing calculation.
+
+`trajectory_playback_bench` and `scripts/benchmark-trajectory-playback.py` compare
+four synthetic frames with 32 nonsequential updates. The table reports medians
+from three fresh Linux x86-64 debug processes per condition, before and after the
+change. Apply time includes file decoding where applicable; coordinate hashing
+is outside that timer. Every coordinate bit in every visited frame contributed
+to the same hash before and after, and the in-memory and indexed inputs matched.
+These are scene-coordinate timings, not rendered frame rates. Other work was
+running on the host, so small timing differences should not be overinterpreted.
+
+| Storage | Atoms | 32 updates (ms) | Attach/create (ms) | Process peak RSS (MiB) |
+| --- | ---: | ---: | ---: | ---: |
+| memory | 20,000 | 29.33 -> 21.82 | 3.11 -> 2.77 | 17.09 -> 16.41 |
+| indexed_dcd | 20,000 | 221.29 -> 175.62 | 24.70 -> 15.20 | 16.41 -> 15.97 |
+| memory | 200,000 | 509.76 -> 457.73 | 30.62 -> 30.78 | 102.16 -> 96.03 |
+| indexed_dcd | 200,000 | 2504.09 -> 2099.50 | 249.74 -> 159.02 | 84.87 -> 78.75 |
+
+At 200,000 atoms, indexed DCD updates fell from 2.50 s to 2.10 s, attachment from
+250 ms to 159 ms, and peak RSS from 84.87 MiB to 78.75 MiB. In-memory updates fell
+from 510 ms to 458 ms and peak RSS from 102.16 MiB to 96.03 MiB. At 20,000 atoms,
+the process peak did not resolve the smaller eliminated allocation.
+
+A separate reproducer showed integer overflow when the eager trajectory's
+averaging radius was `usize::MAX`. Saturating the upper frame bound now averages
+the available frames without panicking. Invalid frame counts, indices and reads
+continue to preserve coordinates, cell parameters and the current frame.
+
+The affected shared suite passed 617 tests. Native GUI model tests passed 192
+with one existing optional test ignored; Tauri passed 170 with six optional
+tests ignored. The final coordinate iterator passed its two focused regressions
+and the WASM target check. Browser execution of the new MD path is checked
+separately after rebuilding the browser application.
+
+The current Linux GUI binary also passed the real Python helper, APBS potential,
+POV-Ray image and OIDN image checks. PDB2PQR and FFmpeg reported their versions.
+Unix installer checks passed on Linux and macOS, including checksum rejection,
+failed-replacement rollback and binary/app self-upgrade in temporary locations.
+The macOS GUI binary built successfully; these checks did not grant OS input or
+screen-capture permissions.
+
+The `set_object_trajectory` comment previously claimed mismatched frames were
+applied up to the shorter length. The code already rejected them; the comment
+now describes the actual behavior.

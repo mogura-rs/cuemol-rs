@@ -512,7 +512,9 @@ impl Trajectory {
         }
 
         let start = index.saturating_sub(self.frame_average_size);
-        let end = (index + self.frame_average_size).min(self.total_frames - 1);
+        let end = index
+            .saturating_add(self.frame_average_size)
+            .min(self.total_frames - 1);
         let mut average = vec![0.0; self.molecule.atom_count().saturating_mul(3)];
         let mut count = 0_usize;
         for frame_index in start..=end {

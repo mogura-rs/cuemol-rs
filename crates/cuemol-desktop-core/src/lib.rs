@@ -592,9 +592,15 @@ impl GuiTrajectoryData {
         if block.frames.len() == 0 {
             return Ok(block);
         }
-        let count = block.frames.frame_with_cell(0)?.0.len();
+        let mut count = block.frames.frame_atom_count(0)?;
         if let Some(indices) = &self.atom_indices {
             if self.source_atom_count == Some(count) {
+                if indices.iter().any(|index| *index >= count) {
+                    return Err(CueMolError::invalid_argument(
+                        "trajectory selection index is out of range",
+                    ));
+                }
+                count = indices.len();
                 block.frames = GuiTrajectoryFrames::Selected {
                     source: std::sync::Arc::new(block.frames),
                     indices: indices.clone(),
@@ -605,7 +611,7 @@ impl GuiTrajectoryData {
                 ));
             }
         }
-        if block.frames.frame_with_cell(0)?.0.len() != atoms {
+        if count != atoms {
             return Err(CueMolError::invalid_argument(
                 "trajectory atom count does not match topology",
             ));
@@ -642,6 +648,18 @@ impl GuiTrajectoryData {
     }
 
     fn apply_frame(&mut self, molecule: &mut MolCoord, index: usize) -> Result<()> {
+        if self.frame_average_size == 0 {
+            let mut remaining = index;
+            for block in &self.blocks {
+                if remaining < block.frames.len() {
+                    block.frames.apply_frame(molecule, remaining, None)?;
+                    self.current_frame = index;
+                    return Ok(());
+                }
+                remaining -= block.frames.len();
+            }
+            return Err(CueMolError::not_found("trajectory frame"));
+        }
         let (positions, cell) = self.frame_with_cell(index)?;
         if positions.len() != molecule.atom_count() {
             return Err(CueMolError::invalid_argument(
@@ -7840,9 +7858,8 @@ impl DesktopAppState {
     }
 
     /// Store an MD trajectory (frames of atom positions, in molecule order) for an
-    /// object, enabling the MolAnim animation type. Frames whose length doesn't match
-    /// the molecule's atom count are kept but applied position-by-position up to the
-    /// shorter length.
+    /// object, enabling the MolAnim animation type. Frames with a different atom
+    /// count are retained but rejected without changing coordinates when applied.
     pub fn set_object_trajectory(
         &mut self,
         object_uid: Uid,
@@ -8208,32 +8225,16 @@ impl DesktopAppState {
     }
 
     pub fn apply_trajectory_frame(&mut self, object_uid: Uid, index: usize) -> Result<()> {
-        let (frame, cell) = self
+        let trajectory = self
             .trajectories
-            .get(&object_uid)
-            .ok_or_else(|| CueMolError::not_found("trajectory"))?
-            .frame_with_cell(index)?;
+            .get_mut(&object_uid)
+            .ok_or_else(|| CueMolError::not_found("trajectory"))?;
         let object = self
+            .command_manager
             .scene_manager_mut()
             .object_mut(object_uid)
             .ok_or_else(|| CueMolError::not_found("trajectory object"))?;
-        if object.mol().atom_count() != frame.len() {
-            return Err(CueMolError::parse(
-                "trajectory frame atom count does not match its object",
-            ));
-        }
-        object.mol_mut().set_positions(frame)?;
-        if let Some([a, b, c, alpha, beta, gamma]) = cell {
-            object
-                .mol_mut()
-                .set_cell_params(cuemol_core::CellParams::new(a, b, c, alpha, beta, gamma));
-        }
-        object.mol_mut().fire_atoms_moved();
-        self.trajectories
-            .get_mut(&object_uid)
-            .expect("trajectory frame came from this entry")
-            .current_frame = index;
-        Ok(())
+        trajectory.apply_frame(object.mol_mut(), index)
     }
 
     /// Apply the trajectory frame at `fraction` (0..1) to an object's atoms — overwrites
