@@ -441,24 +441,39 @@ fn parse_restart_reals<'a>(lines: impl Iterator<Item = &'a str>) -> Result<Vec<f
     Ok(values)
 }
 
+pub(crate) fn mdcrd_fields(line: &str) -> Result<impl Iterator<Item = &str>> {
+    if !line.is_ascii() {
+        return Err(CueMolError::parse("MDCRD is not ASCII text"));
+    }
+    let line = line.trim_end_matches(['\r', '\n']);
+    let fixed_len = line.len() / MDCRD_WIDTH * MDCRD_WIDTH;
+    let is_fixed = line.as_bytes()[..fixed_len]
+        .chunks_exact(MDCRD_WIDTH)
+        .all(|field| !field.trim_ascii().iter().any(u8::is_ascii_whitespace));
+    let (mut fixed, tail) = if is_fixed {
+        line.split_at(fixed_len)
+    } else {
+        ("", line)
+    };
+    let mut tail = tail.split_ascii_whitespace();
+    Ok(std::iter::from_fn(move || {
+        while !fixed.is_empty() {
+            let (field, rest) = fixed.split_at(MDCRD_WIDTH);
+            fixed = rest;
+            let field = field.trim_ascii();
+            if !field.is_empty() {
+                return Some(field);
+            }
+        }
+        tail.next()
+    }))
+}
+
 fn parse_mdcrd_reals<'a>(lines: impl Iterator<Item = &'a str>) -> Result<Vec<f64>> {
     let mut values = Vec::new();
     for line in lines {
-        let stripped = line.trim_end_matches(['\r', '\n']);
-        let mut pos = 0;
-        while pos + MDCRD_WIDTH <= stripped.len() {
-            let token = fixed_ascii(stripped, pos, pos + MDCRD_WIDTH)
-                .ok_or_else(|| CueMolError::parse("invalid AMBER mdcrd line"))?
-                .trim();
-            if !token.is_empty() {
-                values.push(parse_fortran_real(token, "invalid AMBER mdcrd real")?);
-            }
-            pos += MDCRD_WIDTH;
-        }
-        if pos < stripped.len() {
-            for token in stripped[pos..].split_whitespace() {
-                values.push(parse_fortran_real(token, "invalid AMBER mdcrd tail real")?);
-            }
+        for token in mdcrd_fields(line)? {
+            values.push(parse_fortran_real(token, "invalid AMBER mdcrd real")?);
         }
     }
     Ok(values)
@@ -828,11 +843,13 @@ fn mass_symbol(mass: f64) -> Option<&'static str> {
     })
 }
 
-fn parse_fortran_real(token: &str, message: &'static str) -> Result<f64> {
-    let normalized = token.replace(['D', 'd'], "E");
-    normalized
-        .parse::<f64>()
-        .map_err(|_| CueMolError::parse(message))
+pub(crate) fn parse_fortran_real(token: &str, message: &'static str) -> Result<f64> {
+    if token.contains(['D', 'd']) {
+        token.replace(['D', 'd'], "E").parse::<f64>()
+    } else {
+        token.parse::<f64>()
+    }
+    .map_err(|_| CueMolError::parse(message))
 }
 
 fn fixed_ascii(input: &str, start: usize, end: usize) -> Option<&str> {

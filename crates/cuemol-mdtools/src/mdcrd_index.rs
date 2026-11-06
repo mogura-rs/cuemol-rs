@@ -47,17 +47,17 @@ impl MdcrdIndexer {
         })
     }
     pub fn push(&mut self, bytes: &[u8]) -> Result<()> {
-        for byte in bytes {
-            self.offset += 1;
-            if *byte == b'\n' {
+        for chunk in bytes.split_inclusive(|byte| *byte == b'\n') {
+            self.offset += chunk.len() as u64;
+            let content = chunk.strip_suffix(b"\n").unwrap_or(chunk);
+            if self.line.len() + content.len() > 4096 {
+                return Err(CueMolError::parse("MDCRD line exceeds 4096 bytes"));
+            }
+            self.line.extend_from_slice(content);
+            if content.len() != chunk.len() {
                 self.complete_line()?;
                 self.line.clear();
                 self.line_start = self.offset;
-            } else {
-                if self.line.len() >= 4096 {
-                    return Err(CueMolError::parse("MDCRD line exceeds 4096 bytes"));
-                }
-                self.line.push(*byte);
             }
         }
         Ok(())
@@ -73,14 +73,7 @@ impl MdcrdIndexer {
         if line.trim().is_empty() {
             return Ok(());
         }
-        let count = if line.is_ascii() && line.len() % 8 == 0 {
-            line.as_bytes()
-                .chunks(8)
-                .filter(|field| field.iter().any(|b| !b.is_ascii_whitespace()))
-                .count()
-        } else {
-            line.split_ascii_whitespace().count()
-        };
+        let count = crate::amber::mdcrd_fields(line)?.count();
         if count == 0 || count > 10 {
             return Err(CueMolError::parse("Invalid MDCRD coordinate row"));
         }
@@ -139,29 +132,42 @@ impl MdcrdIndexer {
 }
 
 pub fn decode_mdcrd_frame(bytes: &[u8], atoms: usize, has_box: bool) -> Result<TrajectoryFrame> {
+    let coordinate_count = atoms
+        .checked_mul(3)
+        .filter(|count| *count > 0 && *count <= bytes.len())
+        .ok_or_else(|| CueMolError::parse("Invalid MDCRD atom count"))?;
     let text =
         std::str::from_utf8(bytes).map_err(|_| CueMolError::parse("MDCRD is not ASCII text"))?;
-    let mut trajectory = crate::read_amber_mdcrd_str(&format!("frame\n{text}"), atoms, has_box)?;
-    if trajectory.frames.len() != 1 {
-        return Err(CueMolError::parse("MDCRD indexed frame has invalid length"));
-    }
-    let frame = trajectory.frames.pop().unwrap();
-    let mut coordinates = Vec::with_capacity(atoms * 3);
-    for p in frame.positions {
-        for value in [p.x, p.y, p.z] {
-            if !(value as f32).is_finite() {
-                return Err(CueMolError::parse("Invalid MDCRD coordinate"));
+    let mut coordinates = Vec::with_capacity(coordinate_count);
+    let mut cell = [0., 0., 0., 90., 90., 90.];
+    let mut cell_values = 0;
+    for line in text.lines() {
+        for token in crate::amber::mdcrd_fields(line)? {
+            let value = crate::amber::parse_fortran_real(token, "Invalid MDCRD value")?;
+            if coordinates.len() < coordinate_count {
+                let value = value as f32;
+                if !value.is_finite() {
+                    return Err(CueMolError::parse("Invalid MDCRD coordinate"));
+                }
+                coordinates.push(value);
+            } else if has_box && cell_values < 3 {
+                if !value.is_finite() || value <= 0. {
+                    return Err(CueMolError::parse("Invalid MDCRD box lengths"));
+                }
+                cell[cell_values] = value;
+                cell_values += 1;
+            } else {
+                return Err(CueMolError::parse("MDCRD indexed frame has invalid length"));
             }
-            coordinates.push(value as f32);
         }
     }
-    let cell = frame
-        .cell
-        .map(|c| [c.a(), c.b(), c.c(), c.alpha(), c.beta(), c.gamma()]);
-    if cell.is_some_and(|c| c[..3].iter().any(|v| !v.is_finite() || *v <= 0.)) {
-        return Err(CueMolError::parse("Invalid MDCRD box lengths"));
+    if coordinates.len() != coordinate_count || (has_box && cell_values != 3) {
+        return Err(CueMolError::parse("MDCRD indexed frame has invalid length"));
     }
-    Ok(TrajectoryFrame { coordinates, cell })
+    Ok(TrajectoryFrame {
+        coordinates,
+        cell: has_box.then_some(cell),
+    })
 }
 
 #[cfg(test)]
@@ -187,6 +193,85 @@ mod tests {
         }
         text.into_bytes()
     }
+    #[test]
+    fn whitespace_and_fixed_rows_share_index_and_decode_boundaries() {
+        for row in [
+            "1.0 2.0 3.0 4.0 5.0 6.0",
+            "1 2 3 4 5 6     ",
+            "1.0D+00 2.0d+00 3 4 5 6",
+            "   1.000   2.000   3.000   4.000   5.000   6.000",
+        ] {
+            let text = format!("trajectory\n{row}\n{row}\n");
+            let trajectory = crate::IndexedTrajectory::from_bytes_with_name(
+                text.as_bytes(),
+                "test.mdcrd",
+                1,
+                Some(2),
+            )
+            .unwrap();
+            assert_eq!(trajectory.frame_count(), 2, "{row}");
+            let eager = crate::read_amber_mdcrd_str(&text, 2, false).unwrap();
+            for index in [1, 0] {
+                let frame = trajectory.read_frame(index).unwrap();
+                assert_eq!(frame.coordinates, [1., 2., 3., 4., 5., 6.], "{row}");
+                for (xyz, expected) in frame
+                    .coordinates
+                    .chunks_exact(3)
+                    .zip(&eager.frames[index].positions)
+                {
+                    assert_eq!(
+                        xyz,
+                        [expected.x as f32, expected.y as f32, expected.z as f32]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn packed_fields_and_short_tail_preserve_values() {
+        let text = "-123.456-234.567-345.678   1.000 2 3\n";
+        let frame = decode_mdcrd_frame(text.as_bytes(), 2, false).unwrap();
+        assert_eq!(
+            frame.coordinates,
+            [-123.456, -234.567, -345.678, 1., 2., 3.]
+        );
+    }
+
+    #[test]
+    fn indexed_decoder_rejects_invalid_counts_values_and_boxes() {
+        for atoms in [0, usize::MAX, usize::MAX / 3, 10_000_000] {
+            assert!(decode_mdcrd_frame(b"1 2 3\n", atoms, false).is_err());
+        }
+        for row in [
+            "1 2",
+            "1 2 3 4",
+            "NaN 2 3",
+            "inf 2 3",
+            "1e40 2 3",
+            "1 2 \u{e9}",
+        ] {
+            assert!(
+                decode_mdcrd_frame(row.as_bytes(), 1, false).is_err(),
+                "{row}"
+            );
+        }
+        for cell in [
+            "0 10 10",
+            "-1 10 10",
+            "NaN 10 10",
+            "inf 10 10",
+            "10 10",
+            "10 10 10 10",
+        ] {
+            let text = format!("1 2 3\n{cell}\n");
+            assert!(
+                decode_mdcrd_frame(text.as_bytes(), 1, true).is_err(),
+                "{cell}"
+            );
+        }
+    }
+
     #[test]
     fn split_chunks_crlf_stride_and_random_frames_match_eager_reader() {
         for boxed in [false, true] {

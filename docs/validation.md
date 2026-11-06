@@ -5,6 +5,43 @@ results are historical. Generated inputs and logs stay in the ignored checkout
 cache. The current repairs and their limits appear in the completion audit;
 passing tests do not establish equivalence for every parameter combination.
 
+## MDCRD decoding and current-reference audit
+
+An MDCRD regression accepted whitespace-separated rows during indexing but
+failed when decoding the selected frame. The index and both coordinate readers
+now use the same allocation-free field iterator. It retains fixed-width packed
+negative values, short trailing fields, CRLF and Fortran D exponents. Indexed
+frame decoding writes directly to the final coordinate vector; it no longer
+copies the frame text or constructs intermediate f64 and Vector4 arrays.
+Ordinary decimal tokens no longer allocate a normalized string. Line indexing
+copies chunks up to newline boundaries instead of appending every byte.
+
+The optimized Linux x86-64 benchmark used four synthetic boxed frames and 32
+nonsequential frame reads per fresh process. Both executables used the same
+Rust release profile and checksum work. Each cell below is the median of three
+sequential processes; filesystem cache state and other host workloads were not
+controlled. Peak RSS includes index construction, decoded input and checksums.
+
+| Atoms | Stage | Before | After |
+| ---: | --- | ---: | ---: |
+| 20,000 | Index construction | 7.80 ms | 6.89 ms |
+| 20,000 | Decode and checksum, 32 reads | 190.57 ms | 91.13 ms |
+| 20,000 | Maximum process RSS | 4,704 KiB | 3,560 KiB |
+| 200,000 | Index construction | 61.18 ms | 52.37 ms |
+| 200,000 | Decode and checksum, 32 reads | 1,926.30 ms | 895.84 ms |
+| 200,000 | Maximum process RSS | 23,104 KiB | 9,836 KiB |
+
+Coordinate-bit and cell-bit hashes match before and after in every sample.
+These numbers describe MDCRD indexing and frame decoding, not GUI frame time
+or a comparison against the C++ application. Regressions also cover invalid
+atom counts, truncated/excess values, nonfinite coordinates, invalid boxes and
+arbitrarily split input chunks.
+
+The current reference QIF audit identified missing selection-simplification
+and fit-box methods introduced after the older compatibility baseline.
+[Implementation status](implementation-status.md) tracks those additions and
+the remaining full-feature checks.
+
 ## Scene saved state and optional execution follow-up
 
 Scene status is now shared by commands, scripts and all three frontends.
