@@ -273,7 +273,14 @@ Hover information and highlighting are configurable in Settings.
 Native, WebGL, WebGPU and Tauri views share geometry-based GPU picking and a
 translucent hover fill with a two-tone outline. Picking follows visible sphere,
 bond and mesh fragments, including ribbon and nucleic-base atom ownership.
-`ViewInputConfig.gpu_pick` switches to the CPU point-picking path, and
+**GPU picking** in native/Tauri Options and browser Settings switches between
+rendered-geometry picking and CPU atom-center picking. **Hover info** disables
+pointer-movement hit tests while retaining clicks; **Hover highlight** controls
+the overlay and requires both other switches. Changes apply immediately after
+accepting native/Tauri Options, or when toggled in the browser. They persist
+across restarts and scene undo/redo. The corresponding config keys are
+`view_input:gpu-pick`, `view_input:hover-info` and `view_input:hover-highlight`.
+For scripts, `ViewInputConfig.gpu_pick` controls the current runtime and
 `hover_hl_color` sets the fill color. `View.setHoverHit` and `clearHoverHit` update
 transient highlighting without adding scene geometry or undo entries. Locked
 objects/renderers and GPU sections with opacity at or below 0.6 do not

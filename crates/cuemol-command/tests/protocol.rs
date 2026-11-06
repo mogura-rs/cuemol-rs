@@ -634,3 +634,42 @@ fn camera_operations_preserve_scene_redo_and_qax_replay() {
         &later
     ));
 }
+
+#[test]
+#[cfg(feature = "scripting")]
+fn scene_history_preserves_live_host_preferences() {
+    let mut state = DesktopAppState::new();
+    let scene = state.new_scene("before", true).result_scene;
+    let mut camera = Camera::new();
+    let mut protocol = Protocol::new();
+    request(
+        &mut protocol,
+        &mut state,
+        &mut camera,
+        "initialize",
+        json!({}),
+    );
+    assert_eq!(
+        call(
+            &mut protocol,
+            &mut state,
+            &mut camera,
+            "set_node_prop",
+            json!({"nodeType":"scene","prop":"name","value":"after"})
+        )["isError"],
+        false
+    );
+    state.put_config_value("view_input:gpu-pick", "false");
+    state.put_config_value("view_input:hover-info", "false");
+    state.view_input_config_mut().set_tbrad(1.4);
+    for (command, name) in [("undo", "before"), ("redo", "after")] {
+        assert_eq!(
+            call(&mut protocol, &mut state, &mut camera, command, json!({}))["isError"],
+            false
+        );
+        assert_eq!(state.scene_manager().scene(scene).unwrap().name(), name);
+        assert!(!state.resolved_view_input(false).gpu_pick());
+        assert_eq!(state.config_value("view_input:hover-info"), "false");
+        assert_eq!(state.view_input_config().tbrad(), 1.4);
+    }
+}

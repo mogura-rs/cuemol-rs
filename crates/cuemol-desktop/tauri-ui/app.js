@@ -1923,6 +1923,9 @@ function optionsEditor(source) {
   check(presetGroup, "Emulate right mouse button", draft.emulateRightButton, (value) => {
     draft.emulateRightButton = value;
   });
+  for (const [key, label] of [["gpuPicking", "GPU picking"], ["hoverInfo", "Hover info"], ["hoverHighlight", "Hover highlight"]]) {
+    check(presetGroup, label, draft[key] ?? true, value => { draft[key] = value; });
+  }
   mousePane.append(presetGroup);
 
   const cancel = button("Cancel", "", () => referenceDialog.close());
@@ -18172,6 +18175,7 @@ viewport.addEventListener("pointerdown", (event) => {
 let hoverPending = null;
 let hoverRunning = false;
 async function updateHover(x, y) {
+  if (preferences?.hoverInfo === false) { hoverPending = null; return; }
   hoverPending = {x, y};
   if (hoverRunning || !invoke || drag || cameraRequest) return;
   hoverRunning = true;
@@ -18181,6 +18185,7 @@ async function updateHover(x, y) {
       hoverPending = null;
       const sequence = requestSequence;
       const result = await invoke("hover_at_screen", {...point, ...viewportDimensions()});
+      if (preferences?.hoverInfo === false) continue;
       if (result.image) applyViewport(result, sequence);
     }
   } catch (error) { showError(error); }

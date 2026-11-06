@@ -249,6 +249,7 @@ impl Protocol {
                 return Err(format!("Nothing to {name}"));
             };
             previous.preserve_global_styles_from(state);
+            previous.preserve_host_preferences_from(state);
             let view = previous.preserve_view_state_from(state, camera);
             to.push((
                 state.replace_snapshot(previous),

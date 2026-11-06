@@ -1483,7 +1483,17 @@ struct PreferencesDto {
     momentum_scroll: bool,
     multitouch_pad: bool,
     emulate_right_button: bool,
+    #[serde(default = "enabled_preference")]
+    gpu_picking: bool,
+    #[serde(default = "enabled_preference")]
+    hover_info: bool,
+    #[serde(default = "enabled_preference")]
+    hover_highlight: bool,
     shortcuts: Vec<ShortcutDto>,
+}
+
+fn enabled_preference() -> bool {
+    true
 }
 
 #[derive(Serialize)]
@@ -2776,6 +2786,9 @@ impl AppModel {
             ),
             trackball_radius: input.tbrad(),
             hit_precision: input.hitprec(),
+            gpu_picking: self.desktop.resolved_view_input(false).gpu_pick(),
+            hover_info: config_bool(&self.desktop, "view_input:hover-info", true),
+            hover_highlight: config_bool(&self.desktop, "view_input:hover-highlight", true),
             momentum_scroll: config_bool(&self.desktop, "cuemol2.ui.mouse-momentum-scroll", false),
             multitouch_pad: config_bool(&self.desktop, "cuemol2.ui.mouse-multitouch-pad", false),
             emulate_right_button: config_bool(
@@ -2924,6 +2937,12 @@ impl AppModel {
             ("cuemol2.ui.viewinconf", preferences.mouse_preset.clone()),
             ("view_input:tbrad", preferences.trackball_radius.to_string()),
             ("view_input:hitprec", preferences.hit_precision.to_string()),
+            ("view_input:gpu-pick", preferences.gpu_picking.to_string()),
+            ("view_input:hover-info", preferences.hover_info.to_string()),
+            (
+                "view_input:hover-highlight",
+                preferences.hover_highlight.to_string(),
+            ),
             (
                 "cuemol2.ui.mouse-momentum-scroll",
                 preferences.momentum_scroll.to_string(),
@@ -2956,6 +2975,9 @@ impl AppModel {
                 &format!("shortcut:{}:shift", shortcut.id),
                 shortcut.shift.to_string(),
             );
+        }
+        if !preferences.hover_info {
+            self.desktop.set_active_hover_hit(None);
         }
         self.save_config()?;
         self.status = "Options updated".to_string();
@@ -7156,7 +7178,9 @@ impl AppModel {
     }
 
     fn hover_at_screen(&mut self, x: f64, y: f64, width: u32, height: u32) -> Option<ViewportDto> {
-        let hit = self.pick_record(x, y, width, height);
+        let hit = (self.desktop.config_value("view_input:hover-info") != "false")
+            .then(|| self.pick_record(x, y, width, height))
+            .flatten();
         let identity = hit.map(|record| record.hit);
         if identity == self.desktop.active_hover_hit() {
             return None;
@@ -7970,6 +7994,10 @@ impl AppModel {
                 .snapshot
                 .desktop
                 .preserve_global_styles_from(&self.desktop);
+            entry
+                .snapshot
+                .desktop
+                .preserve_host_preferences_from(&self.desktop);
             entry.snapshot.camera = entry
                 .snapshot
                 .desktop
@@ -8004,6 +8032,10 @@ impl AppModel {
                 .snapshot
                 .desktop
                 .preserve_global_styles_from(&self.desktop);
+            entry
+                .snapshot
+                .desktop
+                .preserve_host_preferences_from(&self.desktop);
             entry.snapshot.camera = entry
                 .snapshot
                 .desktop
@@ -18485,6 +18517,9 @@ mod tests {
         preferences.trackball_radius = 1.25;
         preferences.hit_precision = 6.0;
         preferences.momentum_scroll = true;
+        preferences.gpu_picking = false;
+        preferences.hover_info = false;
+        preferences.hover_highlight = false;
         preferences.shortcuts[0].key = "ArrowUp".to_string();
         preferences.shortcuts[1].key = "ArrowDown".to_string();
         model.set_preferences(preferences).unwrap();
@@ -18510,9 +18545,51 @@ mod tests {
         assert_eq!(restored.trackball_radius, 1.25);
         assert_eq!(restored.hit_precision, 6.0);
         assert!(restored.momentum_scroll);
+        assert!(!restored.gpu_picking);
+        assert!(!restored.hover_info);
+        assert!(!restored.hover_highlight);
         assert_eq!(restored.shortcuts[0].key, "ArrowUp");
         assert_eq!(restored.shortcuts[1].key, "ArrowDown");
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn picking_preferences_survive_scene_history_and_stop_hover_tests() {
+        let mut model = model_without_gpu();
+        model.renderer_init_attempted = true;
+        model.desktop.open_bytes("pick.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        model.rebuild_snapshot(false).unwrap();
+        model.camera.set_center(Vector4::ZERO);
+        model.camera.set_zoom(10.);
+        model.camera.set_perspective(false);
+        assert!(model.hover_at_screen(64., 64., 128, 128).is_some());
+        assert!(model.desktop.active_hover_hit().is_some());
+        model
+            .desktop
+            .put_config_value("view_input:hover-info", "false");
+        assert!(model.hover_at_screen(64., 64., 128, 128).is_some());
+        assert!(model.desktop.active_hover_hit().is_none());
+        assert!(model
+            .atom_at_screen("", 64., 64., 128, 128)
+            .unwrap()
+            .is_some());
+        model
+            .inspector_request(
+                "set_node_prop",
+                &serde_json::json!({"nodeType":"scene","prop":"name","value":"edited"}),
+            )
+            .unwrap();
+        let mut prefs = model.preferences();
+        prefs.gpu_picking = false;
+        prefs.hover_info = false;
+        prefs.hover_highlight = false;
+        model.set_preferences(prefs).unwrap();
+        model.undo(0).unwrap();
+        assert!(!model.desktop.resolved_view_input(false).gpu_pick());
+        assert_eq!(model.desktop.config_value("view_input:hover-info"), "false");
+        model.redo(0).unwrap();
+        assert!(!model.preferences().gpu_picking);
+        assert!(!model.preferences().hover_highlight);
     }
 
     #[test]
@@ -26997,6 +27074,33 @@ mod tests {
         let cleared = model.hover_at_screen(-1., -1., 128, 128).unwrap();
         assert_eq!(cleared.image, first.image);
         assert_eq!(model.desktop.active_hover_hit(), None);
+        let mut prefs = model.preferences();
+        prefs.gpu_picking = false;
+        model.set_preferences(prefs).unwrap();
+        let cpu = model.render(128, 128);
+        assert_eq!(cpu.image, first.image);
+        assert!(model
+            .atom_at_screen("", 82., 64., 128, 128)
+            .unwrap()
+            .is_none());
+        assert!(model
+            .atom_at_screen("", 64., 64., 128, 128)
+            .unwrap()
+            .is_some());
+        let mut prefs = model.preferences();
+        prefs.gpu_picking = true;
+        prefs.hover_highlight = false;
+        model.set_preferences(prefs).unwrap();
+        model.render(128, 128);
+        let unhighlighted = model.hover_at_screen(82., 64., 128, 128).unwrap();
+        assert_eq!(unhighlighted.image, first.image);
+        assert!(model.desktop.active_hover_hit().is_some());
+        let mut prefs = model.preferences();
+        prefs.hover_info = false;
+        model.set_preferences(prefs).unwrap();
+        assert!(model.hover_at_screen(82., 64., 128, 128).is_none());
+        assert!(model.desktop.active_hover_hit().is_none());
+        assert_eq!(model.snapshot_revision, revision);
     }
     #[test]
     fn animation_inspector_preview_uses_uid_and_keeps_one_history_step() {

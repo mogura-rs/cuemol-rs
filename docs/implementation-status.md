@@ -26,6 +26,7 @@ Tauri and WebGL/WebGPU checks. The current operation inventory is complete; newl
 | Native appearance and input | The current Linux OS-input suite passes, including the new ChimeraX console, camera-preserving history and multiple-object Zoom. Screenshots were inspected. On the authorized Apple-silicon host, normal and software-stereo wgpu images pass, including exact left/right eye exchange. OS screen/input permission grants remain pending; other-platform window checks still need current binaries. |
 | Animation timelines | Reference chains, transactional edits and broken-chain repair pass shared/native/Tauri/browser checks. All three frontends provide UID selection, strip move/resize, scrubbing, transport, axis/direction presets and an element Inspector. Timing and generic numeric drags preview without history and commit one undo step. Property types and default flags match the current C++ oracle; resets, cancellation, history and serialization have focused checks. Command conversions now match 98 current TypeScript/C++ cases, including boolean aliases, numeric notation, native generic types and near-zero axes. Start-camera initialization, explicit show defaults and first-add undo now pass shared/native/Tauri/browser checks. Broader appearance checks remain under audit. |
 | File destinations and OS drops | Native and Tauri accept OS file-drop events. Native and browser imports share batch destinations, reuse untouched scenes and retain the first successful destination. Tauri applies the same destination after accepting reader options. Menu opens remain in the active scene; drop and shell preferences are independent. Focused model, browser and Linux XDND checks are recorded in the validation log. |
+| Picking preferences | Native, Tauri and browser controls persist GPU picking, hover information and highlighting. Shared runtime/config checks, scene-history regressions, Metal pixel comparisons, WebGL/WebGPU and Linux OS input cover switching to CPU atom picking, stopping hover requests, cancellation and persistence. |
 | Saved camera controls | Native and browser frontends share named selection, toolbar actions, rename, reordering, properties, show/hide editing and file controls. Tauri exposes the same actions. Focused command, model and actual-window/browser checks cover overwrite metadata, pinned order, visibility, navigation preserving redo and camera-file round trips. |
 | View transforms | Native and browser share relative rotation, viewing-axis pan, absolute coordinate entry, chained keyboard input, zoom/slab/distance, projection and center-mark controls. Tauri uses the shared transform math and matching numeric interactions. C++ comparisons, shared/model tests, WebGL/WebGPU and Linux OS input verify distance/slab separation and navigation preserving redo. |
 | Crystal symmetry controls | Native and browser frontends share molecule/map selection, crystal readouts, constrained cell editing, symmetry extents and unit-cell actions. Default cell values, cancellation, scene changes, repeated unit-cell actions and history pass focused checks. Tauri also uses the current defaults, ignores stale space-group replies and offers explicit cancellation. |
@@ -59,9 +60,9 @@ Their user workflows are implemented, but this does not imply support for every
 plugin setting or contribution rule.
 
 The settings audit found the two file-destination preferences and disconnected
-native file-drop handling. Those paths are now implemented. The remaining
-settings comparison includes the current category tree, GPU-picking control,
-plugin enable/disable behavior and the component catalog. The current reference
+native file-drop handling. Those paths are now implemented. GPU-picking and hover controls now pass persistence and interaction checks across
+all frontends. The remaining settings comparison includes the current category
+tree, plugin enable/disable behavior and the component catalog. The current reference
 ships its plugin registry at build time; runtime installation is a future
 reference feature, not an implemented interface to port.
 

@@ -120,11 +120,22 @@ async function openShell(page, storage = {}, options = {}) {
     }));
     const sequenceLayout = options.sequenceExtremes ? {minimum: -2147483648, columns:16, insertions:[[-2147483648,'A',1],[2147483647,'B',6]],gaps:[{first:-2147483647,last:-1,column:2,removed:2147483646},{first:1,last:2147483646,column:4,removed:4294967291}]} : {minimum: -2, columns: 5014, insertions: [[1, 'A', 4], [1, 'B', 5]]};
     window.__switchView = () => { snapshot.views[0].uid += 10; };
+    let preferences = {
+      dropTarget: options.files ? 'new' : 'active', shellTarget:'active',
+      atomLabelFont:'sans-serif',atomLabelSize:12,atomLabelColor:'yellow',
+      atomLabelItalic:false,atomLabelBold:false,uiLanguage:'en-US',useHidpi:false,
+      mousePreset:'DefaultViewInConf',trackballRadius:0.8,hitPrecision:10,
+      momentumScroll:false,multitouchPad:false,emulateRightButton:false,
+      gpuPicking:true,hoverInfo:true,hoverHighlight:true,
+      shortcuts:[{id:'view-trans-plusx',key:'ArrowRight',ctrl:true,alt:false,shift:false},{id:'view-trans-minusx',key:'ArrowLeft',ctrl:true,alt:false,shift:false}],
+    };
     window.__shellCalls = [];
     window.__actionsRunning = false;
     window.__TAURI__ = {core: {invoke: async (command, args) => {
       window.__shellCalls.push({command, args});
-      if (command === 'get_initial_state') return {snapshot, viewport, preferences: options.files ? {dropTarget:'new'} : {}, startupPathsPending: false};
+      if (command === 'get_initial_state') return {snapshot, viewport, preferences: options.picking ? structuredClone(preferences) : options.files ? {dropTarget:'new'} : {}, startupPathsPending: false};
+      if (command === 'get_preferences') return structuredClone(preferences);
+      if (command === 'set_preferences') { preferences=structuredClone(args.preferences);return {preferences,status:'Options updated'}; }
       if (command === 'get_snapshot') return snapshot;
       if(options.files && command==='get_file_renderer_setup')return null;
       if(options.files && command==='open_paths') {
@@ -2038,5 +2049,33 @@ test('Tauri native file drops pass one destination through the batch',async({pag
   expect(calls[0].args.openContext).toEqual({target:'new'});
   expect(calls[1].args.openContext).toEqual({target:'new',sceneId:7});
   expect(calls.map(call=>call.args.paths)).toEqual([['first.pdb'],['second.pdb']]);
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri picking preferences preserve cancellation and stop hover requests', async ({page},testInfo) => {
+  const errors=await openShell(page,{}, {picking:true});
+  const dialog=page.locator('#reference-dialog');
+  const open=async()=>{await page.getByRole('button',{name:'Settings',exact:true}).click();await dialog.locator('[data-options-tab="Mouse"]').click();};
+  await open();
+  for(const name of ['GPU picking','Hover info','Hover highlight'])await expect(dialog.getByLabel(name,{exact:true})).toBeChecked();
+  await dialog.getByLabel('GPU picking',{exact:true}).uncheck();
+  await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
+  await open();await expect(dialog.getByLabel('GPU picking',{exact:true})).toBeChecked();
+  for(const name of ['GPU picking','Hover info','Hover highlight'])await dialog.getByLabel(name,{exact:true}).uncheck();
+  await dialog.getByRole('button',{name:'OK',exact:true}).click();
+  const saved=await page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='set_preferences').at(-1).args.preferences);
+  expect([saved.gpuPicking,saved.hoverInfo,saved.hoverHighlight]).toEqual([false,false,false]);
+  await page.mouse.move(1,1);
+  const before=await page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='hover_at_screen').length);
+  await page.locator('#viewport').hover();await page.waitForTimeout(150);
+  expect(await page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='hover_at_screen').length)).toBe(before);
+  await open();
+  for(const name of ['GPU picking','Hover info','Hover highlight'])await expect(dialog.getByLabel(name,{exact:true})).not.toBeChecked();
+  await page.screenshot({path:testInfo.outputPath('picking-preferences.png')});
+  await dialog.getByLabel('Hover info',{exact:true}).check();
+  await dialog.getByRole('button',{name:'OK',exact:true}).click();
+  await page.locator('#viewport').hover();
+  await expect.poll(()=>page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='hover_at_screen').length)).toBeGreaterThan(before);
   expect(errors).toEqual([]);
 });

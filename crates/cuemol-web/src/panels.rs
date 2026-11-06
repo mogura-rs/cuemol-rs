@@ -254,7 +254,8 @@ impl App {
     }
     pub(super) fn settings_ui(&mut self, ctx: &egui::Context) {
         let mut open = self.show_settings;
-        egui::Window::new("Settings").open(&mut open).default_width(620.).show(ctx,|ui|{
+        let window = egui::Window::new("Settings").open(&mut open).default_width(620.)
+            .max_height((ctx.content_rect().height()-60.).max(120.)).vscroll(true).show(ctx,|ui|{
             if let Some(scene) = self.state.active_scene() {
                 let mut proof = self.state.scene_manager().scene(scene).and_then(|s| s.scene_attribute("use_colproof")).is_some_and(|v| v == "true");
                 if ui.checkbox(&mut proof, "Use color proofing").changed() {
@@ -293,6 +294,11 @@ impl App {
             }
             let mut momentum = self.state.config_value("cuemol2.ui.mouse-momentum-scroll") == "true";
             if ui.checkbox(&mut momentum, "Momentum scroll").changed() { self.state.put_config_value("cuemol2.ui.mouse-momentum-scroll", momentum.to_string()); input_changed = true; }
+            let mut gpu_picking = self.state.resolved_view_input(false).gpu_pick();
+            let response = ui.checkbox(&mut gpu_picking, "GPU picking")
+                .on_hover_text("Pick rendered geometry. Turn off to pick atom centers on the CPU.");
+            self.record_ui_rect("GPU picking", &response);
+            if response.changed() { self.state.put_config_value("view_input:gpu-pick", gpu_picking.to_string()); input_changed = true; }
             for (key,label,default) in [("view_input:hover-info","Hover info",true),("view_input:hover-highlight","Hover highlight",true),("cuemol2.ui.mouse-emulate-rbutton","Emulate mouse R button",false)] {
                 let raw=self.state.config_value(key); let mut value=if raw.is_empty(){default}else{raw=="true"};
                 let response=ui.checkbox(&mut value,label); self.record_ui_rect(label,&response);
@@ -309,7 +315,9 @@ impl App {
             ui.label("Runs when the viewer opens. Saved scenes and the cuemol scripting API are available.");
             ui.add(egui::TextEdit::multiline(&mut self.startup_text).code_editor().desired_rows(10).desired_width(f32::INFINITY));
             ui.horizontal(|ui|{
-                if ui.button("Save").clicked(){
+                let save = ui.button("Save");
+                self.record_ui_rect("Settings Save", &save);
+                if save.clicked(){
                     let previous=self.state.clone();
                     match self.state.load_config_text(&self.settings_text){
                         Ok(_)=>{self.state.view_input_config_mut().set_style("");if let Some(storage)=web_sys::window().and_then(|w|w.local_storage().ok().flatten()){
@@ -322,6 +330,9 @@ impl App {
                 if ui.button("Run startup now").clicked(){self.call("execute_script",json!({"source":self.startup_text}));}
             });
         });
+        if let Some(window) = window {
+            self.record_ui_rect("Settings window", &window.response);
+        }
         self.show_settings = open;
     }
     pub(super) fn tools_ui(&mut self, ctx: &egui::Context) {

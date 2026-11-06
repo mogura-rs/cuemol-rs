@@ -1,5 +1,32 @@
 use cuemol_desktop_core::DesktopAppState;
 
+#[cfg(feature = "scripting")]
+#[test]
+fn gpu_picking_preferences_apply_live_and_survive_config_reload() {
+    let mut app = DesktopAppState::new();
+    app.new_scene("picking", true);
+    app.view_input_config_mut().set_style("PymolViewInConf");
+    app.put_config_value("view_input:gpu-pick", "false");
+    assert!(!app.resolved_view_input(false).gpu_pick());
+    assert_eq!(
+        app.run_script_js("print(getService('ViewInputConfig').gpu_pick)")
+            .unwrap()
+            .0,
+        "false\n"
+    );
+    let mut restored = DesktopAppState::new();
+    restored.load_config_text(&app.config_text()).unwrap();
+    assert!(!restored.resolved_view_input(true).gpu_pick());
+    app.run_script_js("getService('ViewInputConfig').gpu_pick=true")
+        .unwrap();
+    assert!(app.resolved_view_input(false).gpu_pick());
+    assert_eq!(app.config_value("view_input:gpu-pick"), "false");
+    app.put_config_value("view_input:gpu-pick", "false");
+    assert!(!app.resolved_view_input(false).gpu_pick());
+    app.put_config_value("view_input:gpu-pick", "true");
+    assert!(app.resolved_view_input(false).gpu_pick());
+}
+
 #[test]
 fn config_files_and_browser_text_preserve_values_exactly() {
     let mut original = DesktopAppState::new();

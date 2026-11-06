@@ -687,6 +687,7 @@ impl App {
                     self.history.push(current);
                 }
                 snapshot.state.preserve_global_styles_from(&self.state);
+                snapshot.state.preserve_host_preferences_from(&self.state);
                 snapshot.camera = snapshot
                     .state
                     .preserve_view_state_from(&self.state, &self.camera);

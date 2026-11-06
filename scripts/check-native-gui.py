@@ -201,6 +201,7 @@ def main():
     parser.add_argument('--camera-only', action='store_true')
     parser.add_argument('--view-only', action='store_true')
     parser.add_argument('--file-drop-only', action='store_true')
+    parser.add_argument('--picking-only', action='store_true')
     args = parser.parse_args()
     binary, work = args.binary.resolve(), args.out.resolve()
     work.mkdir(parents=True, exist_ok=True)
@@ -298,6 +299,43 @@ def main():
             def input_focused(box):
                 pixels = capture().crop(box).getdata()
                 return sum(b - r > 30 and g - r > 10 for r, g, b in pixels) > 100
+
+            if args.picking_only:
+                def gpu_enabled():
+                    return call('execute_script', {'source': "print(getService('ViewInputConfig').gpu_pick)"})['log'].strip() == 'true'
+                def open_picking():
+                    click_at(x + 22, y + height - 45)
+                    time.sleep(0.2)
+                    click_at(x + 472, y + 157)
+                    time.sleep(0.2)
+                def toggle_picking():
+                    for row_y in [352, 378, 404]:
+                        click_at(x + 380, y + row_y)
+                call('clear_undo')
+                call('set_node_prop', {'nodeType': 'scene', 'prop': 'name', 'value': 'edited'})
+                open_picking()
+                toggle_picking()
+                click_at(x + 938, y + 503)
+                if not gpu_enabled():
+                    raise RuntimeError('Cancelled picking options changed the runtime')
+                open_picking()
+                toggle_picking()
+                click_at(x + 979, y + 503)
+                wait_for(lambda: not gpu_enabled())
+                saved = (config / 'config.tsv').read_text()
+                for key in ['gpu-pick', 'hover-info', 'hover-highlight']:
+                    if f'view_input:{key}\tfalse' not in saved:
+                        raise RuntimeError(f'Picking preference was not saved: {key}')
+                for command in ['undo', 'redo']:
+                    call(command)
+                    if gpu_enabled():
+                        raise RuntimeError(f'{command} reverted the picking preference')
+                open_picking()
+                capture('picking-options-final.png')
+                click_at(x + 938, y + 503)
+                report.update(ok=True, picking_preferences=True, picking_cancel=True, host_preferences_survive_history=True)
+                print(json.dumps(report), flush=True)
+                return
 
             if args.file_drop_only:
                 original = state['sceneId']

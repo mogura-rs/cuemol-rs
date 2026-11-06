@@ -2593,6 +2593,7 @@ struct NativePreferences {
     emulate_right_button: bool,
     hover_info: bool,
     hover_highlight: bool,
+    gpu_picking: bool,
     shortcuts: Vec<NativeShortcut>,
 }
 
@@ -4552,6 +4553,7 @@ impl NativePreferences {
             emulate_right_button: config_bool(state, "cuemol2.ui.mouse-emulate-rbutton", false),
             hover_info: config_bool(state, "view_input:hover-info", true),
             hover_highlight: config_bool(state, "view_input:hover-highlight", true),
+            gpu_picking: state.resolved_view_input(false).gpu_pick(),
             shortcuts: ["view-trans-plusx", "view-trans-minusx"]
                 .into_iter()
                 .map(|id| NativeShortcut {
@@ -19307,6 +19309,8 @@ impl GuiApplication {
             });
         ui.checkbox(&mut draft.momentum_scroll, "Momentum scroll");
         ui.checkbox(&mut draft.emulate_right_button, "Emulate mouse R button");
+        ui.checkbox(&mut draft.gpu_picking, "GPU picking")
+            .on_hover_text("Pick rendered geometry. Turn off to pick atom centers on the CPU.");
         ui.checkbox(&mut draft.hover_info, "Hover info");
         ui.checkbox(&mut draft.hover_highlight, "Hover highlight");
     }
@@ -19402,6 +19406,7 @@ impl GuiApplication {
             ("view_input:device", preferences.input_device.clone()),
             ("view_input:tbrad", preferences.trackball_radius.to_string()),
             ("view_input:hitprec", preferences.hit_precision.to_string()),
+            ("view_input:gpu-pick", preferences.gpu_picking.to_string()),
             ("view_input:hover-info", preferences.hover_info.to_string()),
             (
                 "view_input:hover-highlight",
@@ -27877,6 +27882,7 @@ impl GuiApplication {
         }
         redo.record = snapshot.record.clone();
         snapshot.state.preserve_global_styles_from(&self.state);
+        snapshot.state.preserve_host_preferences_from(&self.state);
         snapshot.camera = Some(
             snapshot
                 .state
@@ -27901,6 +27907,7 @@ impl GuiApplication {
         }
         undo.record = snapshot.record.clone();
         snapshot.state.preserve_global_styles_from(&self.state);
+        snapshot.state.preserve_host_preferences_from(&self.state);
         snapshot.camera = Some(
             snapshot
                 .state
@@ -34391,6 +34398,9 @@ mod tests {
         preferences.momentum_scroll = true;
         preferences.input_device = "trackpad".to_string();
         preferences.emulate_right_button = true;
+        preferences.gpu_picking = false;
+        preferences.hover_info = false;
+        preferences.hover_highlight = false;
         preferences.shortcuts[0].key = "ArrowUp".to_string();
         preferences.shortcuts[1].key = "ArrowDown".to_string();
 
@@ -34410,6 +34420,7 @@ mod tests {
             "ArrowUp"
         );
         let input = app.state.resolved_view_input(false);
+        assert!(!input.gpu_pick());
         assert_eq!(input.find_event(0, cuemol_qsys::view_input::MIDDLE), -1);
         assert_eq!(input.find_event(0, cuemol_qsys::view_input::RIGHT), 5);
         app.state
@@ -34431,6 +34442,29 @@ mod tests {
         let roundtrip = NativePreferences::from_state(&restored.state);
         assert_eq!(roundtrip, preferences);
         fs::remove_file(path).expect("remove native options config");
+    }
+
+    #[test]
+    fn picking_preferences_survive_native_scene_history() {
+        let mut app = GuiApplication::new();
+        let directory = tempfile::tempdir().unwrap();
+        app.config_path = directory.path().join("config.tsv").to_string_lossy().into();
+        app.state.ensure_active_scene();
+        let mut camera = CameraController::default();
+        app.tritium_command(
+            "set_node_prop",
+            serde_json::json!({"nodeType":"scene","prop":"name","value":"edited"}),
+            &mut camera,
+        );
+        let mut preferences = NativePreferences::from_state(&app.state);
+        preferences.gpu_picking = false;
+        preferences.hover_info = false;
+        app.apply_preferences(&preferences).unwrap();
+        app.undo(&mut camera);
+        assert!(!app.state.resolved_view_input(false).gpu_pick());
+        assert_eq!(app.state.config_value("view_input:hover-info"), "false");
+        app.redo(&mut camera);
+        assert!(!app.state.resolved_view_input(false).gpu_pick());
     }
 
     #[test]

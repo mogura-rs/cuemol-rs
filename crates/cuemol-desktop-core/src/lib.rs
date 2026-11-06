@@ -2148,6 +2148,14 @@ impl DesktopAppState {
             .preserve_global_scope_from(&current.script_styles);
     }
 
+    /// Keep application preferences when restoring a scene history entry.
+    pub fn preserve_host_preferences_from(&mut self, current: &Self) {
+        self.config.clone_from(&current.config);
+        #[cfg(feature = "scripting")]
+        self.script_view_input_config
+            .clone_from(&current.script_view_input_config);
+    }
+
     /// Keep live views when restoring scene edits; saved camera bookmarks remain undoable.
     pub fn preserve_view_state_from(
         &mut self,
@@ -2750,6 +2758,13 @@ impl DesktopAppState {
     }
 
     pub fn put_config_value(&mut self, key: &str, value: impl Into<String>) {
+        let value = value.into();
+        #[cfg(feature = "scripting")]
+        if key == "view_input:gpu-pick" {
+            if let Ok(enabled) = value.parse() {
+                self.script_view_input_config.set_gpu_pick(enabled);
+            }
+        }
         self.config.put(key, value);
     }
 

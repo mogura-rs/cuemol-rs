@@ -1,5 +1,45 @@
 # Validation evidence
 
+## Picking preferences and scene-history separation
+
+The existing GPU picking pass had no settings control. A failing core regression
+also showed that loading a stored GPU preference left the runtime enabled.
+The shared config setter now updates `ViewInputConfig.gpu_pick`, so CLI/browser
+config loads and all three GUI preference editors use the same runtime value.
+Explicit later script changes remain possible without rewriting the saved key.
+
+A Tauri model regression reproduced scene undo reverting the newly accepted
+preference. Native, browser, Tauri and MCP scene-history restoration now retains
+current application configuration and the view-input service. Transactional
+rollback still restores its complete snapshot. Tauri also exposes both hover
+switches, avoids disabled hover requests and rejects an in-flight hover image
+after disabling feedback. Disabling hover leaves click picking available.
+
+All five config round-trip tests, nine MCP protocol cases, 204 native GUI tests
+and 177 Tauri model tests pass; five optional Tauri tests remain ignored in the
+ordinary model run. The Metal geometry test was then run explicitly and passed:
+GPU-off picking misses sphere edges outside the atom-center radius, centered
+clicks still work, highlighting can be disabled, and hover-off clears feedback
+without rebuilding the scene. The sandbox could not enumerate a Metal adapter;
+the explicit GPU run used normal device access.
+
+WebGL and WebGPU scenarios exercise actual settings toggles, geometry versus
+atom-center picking, hover suppression, live script values, restart persistence
+and undo/redo. The Tauri shell checks cancellation, saved controls and absence
+of hover requests. The 62 affected browser scenarios pass after focused reruns;
+an initial HiDPI fixture failure was corrected by keeping the new preference
+fixture limited to the picking test. Linux OS input accepts/cancels the native dialog and checks
+its saved file and runtime after undo/redo. Its screenshot was inspected.
+Run `scripts/check-native-gui.py --picking-only` for that window check.
+
+The browser settings window now scrolls within the available height; the
+previous unrestricted layout placed Save below the viewport. Both backend tests
+check the window bounds and reach Save by scrolling. Current reference
+`SettingsPane.tsx` still describes non-theme fields as mock-only in its header,
+although its contexts persist and apply those fields. The port follows that
+implementation, not the stale header.
+
+
 ## File destinations and native file drops
 
 A failing native regression showed that `DroppedFile` events never reached the
