@@ -1806,6 +1806,13 @@ impl AnimMgr {
         self.play_state = AnimPlayState::Stop;
     }
 
+    /// Clear snapshots after the owner has restored the animated scene.
+    pub fn discard_playback_state(&mut self) {
+        self.stop();
+        self.render_start_camera = None;
+        self.saved_properties = runtime::SavedProperties::default();
+    }
+
     pub fn stop_in_scene<T>(&mut self, scene: &mut Scene<T>) {
         self.saved_properties.restore(scene);
         self.render_start_camera = None;
@@ -2310,7 +2317,8 @@ impl AnimMgr {
             // timeline updates until all forward references are available.
             manager.motions.push(AnimMotion::from_ldom2_node(child)?);
         }
-        manager.try_resolve_rel_time()?;
+        // Loaded chains may be repaired through the timeline editor.
+        let _ = manager.try_resolve_rel_time();
         if node.str_attr("length").is_empty() {
             manager.length = manager
                 .motions
@@ -3346,6 +3354,10 @@ mod tests {
                </animation>"#,
         )
         .unwrap();
-        assert!(AnimMgr::from_ldom2_node(tree.top()).is_err());
+        let mut loaded = AnimMgr::from_ldom2_node(tree.top()).unwrap();
+        assert_eq!(loaded.size(), 2);
+        assert!(loaded.try_resolve_rel_time().is_err());
+        loaded.motions_mut()[0].base_mut().set_time_ref_name("");
+        loaded.try_resolve_rel_time().unwrap();
     }
 }

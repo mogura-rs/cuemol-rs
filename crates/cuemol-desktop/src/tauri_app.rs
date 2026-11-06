@@ -1,5 +1,6 @@
 //! Tauri desktop shell backed by the shared [`DesktopAppState`].
 
+use cuemol_command::animation_graph::{editor_time_ms, Graph as AnimationGraph};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -838,6 +839,7 @@ struct LwRendererDto {
 #[serde(rename_all = "camelCase")]
 struct AnimationObjectDto {
     index: usize,
+    resolve_error: Option<String>,
     name: String,
     type_name: String,
     disabled: bool,
@@ -932,6 +934,7 @@ struct AppSnapshot {
     color_proofing: bool,
     density_level: f64,
     animation_objects: Vec<AnimationObjectDto>,
+    animation_resolve_error: Option<String>,
     animation_elapsed: f64,
     animation_duration: f64,
     animation_playing: bool,
@@ -2387,11 +2390,21 @@ impl AppModel {
             })
             .collect();
         let animation = self.active_animation_manager().unwrap_or_default();
+        let graph = AnimationGraph::read(&animation);
         let animation_objects = animation
             .motions()
             .iter()
             .enumerate()
-            .map(|(index, motion)| animation_object_dto(index, motion))
+            .map(|(index, motion)| {
+                let mut dto = animation_object_dto(index, motion);
+                let node = &graph.nodes[index];
+                dto.resolve_error = node.error.clone();
+                if let Some((start, end)) = node.abs_start_ms.zip(node.abs_end_ms) {
+                    dto.start = start / 1000.;
+                    dto.end = end / 1000.;
+                }
+                dto
+            })
             .collect();
         let morphs = objects
             .iter()
@@ -2462,6 +2475,7 @@ impl AppModel {
             color_proofing: self.color_proofing,
             density_level: self.density_level,
             animation_objects,
+            animation_resolve_error: graph.error().map(str::to_owned),
             animation_elapsed: self.animation_position(),
             animation_duration: animation_seconds(animation.length()),
             animation_playing: self.animation_is_playing(),
@@ -7317,12 +7331,7 @@ impl AppModel {
         let insertion_index = after_index
             .map(|index| index.saturating_add(1).min(animation.size()))
             .unwrap_or_else(|| animation.size());
-        let reference = insertion_index
-            .checked_sub(1)
-            .and_then(|index| animation.motions().get(index))
-            .map(AnimMotion::base)
-            .map(|object| object.name().to_string())
-            .unwrap_or_default();
+        let reference = AnimationGraph::read(&animation).auto_chain_name(insertion_index);
         let motion = new_animation_motion(kind, name, reference);
         if insertion_index == animation.size() {
             animation.append_motion(motion);
@@ -7347,6 +7356,16 @@ impl AppModel {
         &mut self,
         input: AnimationObjectPropertiesInput,
     ) -> Result<(), String> {
+        let animation = self.prepare_animation_object_properties(&input)?;
+        self.set_active_animation_manager(&animation)?;
+        self.reset_animation_playback();
+        Ok(())
+    }
+
+    fn prepare_animation_object_properties(
+        &self,
+        input: &AnimationObjectPropertiesInput,
+    ) -> Result<AnimMgr, String> {
         let name = input.name.trim().to_string();
         let time_ref_name = input.time_ref_name.trim().to_string();
         if name.is_empty() {
@@ -7370,23 +7389,20 @@ impl AppModel {
             .ok_or_else(|| format!("animation object {} was not found", input.index))?;
         let uid = current.base().uid();
         let old_name = current.base().name().to_string();
-        if animation
-            .motions()
-            .iter()
-            .any(|motion| motion.base().uid() != uid && motion.base().name() == name)
-        {
-            return Err(format!("animation object name {name} is already used"));
+        let graph = AnimationGraph::read(&animation);
+        let original = &graph.nodes[input.index];
+        if old_name != name {
+            graph.check_name(input.index, &name)?;
         }
-        if !time_ref_name.is_empty() {
-            let reference = animation
-                .motions()
-                .iter()
-                .find(|motion| motion.base().name() == time_ref_name)
-                .ok_or_else(|| format!("animation reference {time_ref_name} was not found"))?;
-            if reference.base().uid() == uid {
-                return Err("animation object cannot reference itself".to_string());
-            }
-        }
+        let rebased = if time_ref_name != original.time_ref_name {
+            graph.rebase_span(input.index, &time_ref_name)?
+        } else {
+            None
+        };
+        let original_start = current.base().rel_start();
+        let original_duration = current.base().rel_end().saturating_sub(original_start);
+        let preserve_span = input.start == animation_seconds(original_start)
+            && input.duration == animation_seconds(original_duration);
         if let Some(value) = input.angle {
             if !value.is_finite() {
                 return Err("rotation angle must be finite".to_string());
@@ -7437,8 +7453,17 @@ impl AppModel {
                 return Err(format!("camera {target_camera} was not found"));
             }
         }
-        let start = animation_time(input.start);
-        let duration = animation_time(input.duration);
+        let (start, duration) = if let Some((start, end)) = rebased.filter(|_| preserve_span) {
+            let start = editor_time_ms(start);
+            (start, editor_time_ms(end).saturating_sub(start))
+        } else if preserve_span {
+            (original_start, original_duration)
+        } else {
+            (
+                editor_time_ms(input.start * 1000.),
+                editor_time_ms(input.duration * 1000.),
+            )
+        };
         animation.edit_motion_by_uid(uid, "properties", "", |motion| {
             let object = motion.base_mut();
             object.set_name(name.clone());
@@ -7546,7 +7571,10 @@ impl AppModel {
                 AnimMotion::Noop(_) | AnimMotion::Unknown { .. } => {}
             }
         });
-        if old_name != name {
+        if old_name != name
+            && !old_name.is_empty()
+            && graph.first.get(&old_name) == Some(&input.index)
+        {
             let referencing = animation
                 .motions()
                 .iter()
@@ -7559,12 +7587,9 @@ impl AppModel {
                 });
             }
         }
-        animation
-            .try_resolve_rel_time()
-            .map_err(|error| error.to_string())?;
-        self.set_active_animation_manager(&animation)?;
-        self.reset_animation_playback();
-        Ok(())
+        let _ = animation.try_resolve_rel_time();
+        animation.discard_playback_state();
+        Ok(animation)
     }
 
     fn animation_duration(&self) -> f64 {
@@ -7587,46 +7612,7 @@ impl AppModel {
             return Err(format!("animation object {index} was not found"));
         }
         let undo = self.capture_undo();
-        let deleted_names = indices
-            .iter()
-            .filter_map(|index| animation.motions().get(*index))
-            .map(|motion| motion.base().name().to_string())
-            .collect::<BTreeSet<_>>();
-        let deleted_references = indices
-            .iter()
-            .filter_map(|index| animation.motions().get(*index))
-            .map(|motion| {
-                (
-                    motion.base().name().to_string(),
-                    motion.base().time_ref_name().to_string(),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        let rewrites = animation
-            .motions()
-            .iter()
-            .filter(|motion| !deleted_names.contains(motion.base().name()))
-            .filter_map(|motion| {
-                let original = motion.base().time_ref_name();
-                if !deleted_names.contains(original) {
-                    return None;
-                }
-                let mut reference = original.to_string();
-                let mut visited = BTreeSet::new();
-                while deleted_names.contains(&reference) && visited.insert(reference.clone()) {
-                    reference = deleted_references
-                        .get(&reference)
-                        .cloned()
-                        .unwrap_or_default();
-                }
-                Some((motion.base().uid(), reference))
-            })
-            .collect::<Vec<_>>();
-        for (uid, reference) in rewrites {
-            animation.edit_motion_by_uid(uid, "timeRefName", "", |motion| {
-                motion.base_mut().set_time_ref_name(reference);
-            });
-        }
+        AnimationGraph::read(&animation).detach_dependents(&mut animation, &indices);
         for index in indices.iter().rev() {
             animation.remove_at(*index);
         }
@@ -7726,6 +7712,9 @@ impl AppModel {
     }
 
     fn begin_animation_playback(&mut self) -> Result<(), String> {
+        if let Some(error) = AnimationGraph::read(&self.active_animation_manager()?).error() {
+            return Err(error.to_string());
+        }
         if self.shared_animation_scene().is_none() && !self.animation_started_from_ui {
             self.persist_camera()?;
             self.animation_start_camera = Some(self.camera.clone());
@@ -9392,6 +9381,7 @@ fn animation_object_dto(index: usize, motion: &AnimMotion) -> AnimationObjectDto
     let end = animation_seconds(object.abs_end());
     let mut dto = AnimationObjectDto {
         index,
+        resolve_error: None,
         name: object.name().to_string(),
         type_name: motion.type_name().to_string(),
         disabled: object.disabled(),
@@ -9399,7 +9389,7 @@ fn animation_object_dto(index: usize, motion: &AnimMotion) -> AnimationObjectDto
         relative_start: animation_seconds(object.rel_start()),
         start,
         end,
-        duration: (end - start).max(0.0),
+        duration: animation_seconds(object.rel_end().saturating_sub(object.rel_start())).max(0.0),
         quadric: object.quadric(),
         angle: None,
         axis: None,
@@ -12534,19 +12524,23 @@ fn handle_model_request(
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::SetAnimationObjectProperties(input) => {
+            let animation = model.prepare_animation_object_properties(&input)?;
             model.restore_animation_playback(false)?;
             model.animation_elapsed = 0.0;
             let undo = model.capture_undo();
-            model.set_animation_object_properties(input)?;
+            model.set_active_animation_manager(&animation)?;
+            model.reset_animation_playback();
             model.status = "Animation object properties changed".to_string();
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::ResetAnimationObjectProperties(input) => {
+            let animation = model.prepare_animation_object_properties(&input)?;
             model.restore_animation_playback(false)?;
             model.animation_elapsed = 0.0;
             let undo = model.capture_undo();
-            model.set_animation_object_properties(input)?;
+            model.set_active_animation_manager(&animation)?;
+            model.reset_animation_playback();
             model.status = "Reset all to default".to_string();
             model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
@@ -24566,7 +24560,8 @@ mod tests {
         assert!(model.snapshot().animation_objects.is_empty());
 
         let motion = new_animation_motion(AnimKind::Spin, "SimpleSpin1".to_string(), String::new());
-        let properties = animation_properties_input(&animation_object_dto(0, &motion));
+        let mut properties = animation_properties_input(&animation_object_dto(0, &motion));
+        properties.duration = 0.0;
         assert!(handle_model_request(
             &mut model,
             ModelRequest::AddConfiguredAnimationObject {
@@ -24652,6 +24647,85 @@ mod tests {
         );
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         assert_eq!(model.snapshot().animation_objects.len(), 4);
+    }
+
+    #[test]
+    fn animation_reference_edits_keep_the_span_and_allow_broken_siblings() {
+        let mut model = model_without_gpu();
+        for _ in 0..3 {
+            model.add_animation_object("noop", None, None).unwrap();
+        }
+        let original = model.snapshot();
+        let mut input = animation_properties_input(&original.animation_objects[1]);
+        input.time_ref_name.clear();
+        model.set_animation_object_properties(input).unwrap();
+        let detached = model.active_animation_manager().unwrap();
+        assert_eq!(detached.motions()[1].base().abs_start(), NANOS_PER_SECOND);
+        assert_eq!(detached.motions()[1].base().rel_start(), NANOS_PER_SECOND);
+        let mut input = animation_properties_input(&model.snapshot().animation_objects[1]);
+        input.time_ref_name = detached.motions()[2].base().name().to_string();
+        let before = model.desktop.clone();
+        assert!(model
+            .set_animation_object_properties(input)
+            .unwrap_err()
+            .contains("cycle"));
+        assert!(before.same_undo_state(&model.desktop));
+        let mut broken = detached.clone();
+        broken.motions_mut()[2]
+            .base_mut()
+            .set_time_ref_name("missing");
+        model.set_active_animation_manager(&broken).unwrap();
+        let mut input = animation_properties_input(&model.snapshot().animation_objects[0]);
+        input.disabled = true;
+        model.set_animation_object_properties(input).unwrap();
+        let after = model.active_animation_manager().unwrap();
+        assert!(after.motions()[0].base().disabled());
+        assert_eq!(after.motions()[2].base().time_ref_name(), "missing");
+        let snapshot = model.snapshot();
+        assert!(snapshot
+            .animation_resolve_error
+            .as_deref()
+            .unwrap()
+            .contains("missing"));
+        assert!(snapshot.animation_objects[2].resolve_error.is_some());
+        assert_eq!(snapshot.animation_objects[2].duration, 1.0);
+        let mut input = animation_properties_input(&snapshot.animation_objects[1]);
+        input.start = 1.001;
+        model.set_animation_object_properties(input).unwrap();
+        let fractional = model.snapshot();
+        let mut input = animation_properties_input(&fractional.animation_objects[1]);
+        input.time_ref_name = fractional.animation_objects[0].name.clone();
+        model.set_animation_object_properties(input).unwrap();
+        assert_eq!(
+            model.active_animation_manager().unwrap().motions()[1]
+                .base()
+                .rel_start(),
+            1_000_000
+        );
+        model.delete_animation_objects(&[0]).unwrap();
+        let graph = AnimationGraph::read(&model.active_animation_manager().unwrap());
+        assert_eq!(graph.nodes[0].abs_start_ms, Some(1001.));
+    }
+
+    #[test]
+    fn invalid_animation_reference_does_not_stop_tauri_playback() {
+        let mut model = model_without_gpu();
+        for _ in 0..2 {
+            model.add_animation_object("noop", None, None).unwrap();
+        }
+        model.begin_animation_playback().unwrap();
+        assert!(model.animation_is_playing());
+        let snapshot = model.snapshot();
+        let mut input = animation_properties_input(&snapshot.animation_objects[0]);
+        input.time_ref_name = snapshot.animation_objects[1].name.clone();
+        let history = model.undo_stack.len();
+        assert!(handle_model_request(
+            &mut model,
+            ModelRequest::SetAnimationObjectProperties(input)
+        )
+        .is_err());
+        assert!(model.animation_is_playing());
+        assert_eq!(model.undo_stack.len(), history);
     }
 
     #[test]

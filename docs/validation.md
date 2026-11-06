@@ -3505,3 +3505,52 @@ screen-capture permissions.
 The `set_object_trajectory` comment previously claimed mismatched frames were
 applied up to the shorter length. The code already rejected them; the comment
 now describes the actual behavior.
+
+
+## Current animation references and edit transactions
+
+The current reference treats animation names as links to the first element
+carrying that name. Renaming that element now updates its dependents without
+changing their identities or absolute times. Deleting it makes its direct
+children absolute at their current positions. A later duplicate name does not
+own those links. Changing a reference preserves the current span and clamps a
+negative new offset to zero while retaining the duration. Native and Tauri
+property dialogs also preserve millisecond offsets when only the reference
+changes. Explicit timing edits round to milliseconds like the reference editor.
+
+A shared iterative graph reports missing, cyclic and upstream failures for each
+element. Loaded QSC files can contain such chains and remain editable; playback
+and seeking report the cause until the chain is repaired. An unrelated invalid
+chain does not reject valid edits elsewhere. Native, Tauri and browser panels
+show the unresolved rows and their cause. Tauri derives editable duration from
+relative times, so a loaded unresolved element retains its authored duration.
+
+A reproducer also showed invalid reference edits stopping native and Tauri
+playback before validation. Both now validate first. Conversely, shared command
+edits previously left playback running after an accepted change; they now stop
+and restore the animated scene before committing the new manager. Runtime
+snapshots are then discarded so later playback cannot restore obsolete values.
+Rejected edits preserve playback and history. Generic timing writes must use
+`set_anim_time`, unknown property resets fail atomically, and the structured
+`tgtAlpha` spelling updates the persistent `tgt_alpha` property.
+
+The read-only `check-reference-animation.mjs` oracle compared 128 generated
+reference graphs, including every candidate name and time reference. All node
+states, absolute spans and validation errors matched the current TypeScript
+implementation. Run this optional comparison with:
+
+```sh
+CUEMOL_ANIM_REFERENCE="$(cd ../cuemol2 && pwd)" \
+  cargo test --locked -p cuemol-command --lib animation_graph -- --nocapture
+```
+
+The animation and command crate suites passed 215 tests; the two ignored tests
+require public metadata services or a real POV-Ray executable and are unrelated
+to this change. The explicit graph oracle was also run separately. Native GUI
+animation tests passed 25, and macOS Tauri model tests passed 24 with one existing
+optional render test ignored. Nine affected browser cases passed: both WebGL
+and WebGPU preserve time references through rename, removal, undo/redo and QSC
+reload; both load and repair a broken chain; both retain pixel-verified playback,
+pause and stop behavior; the shared startup path and two Tauri panel checks also
+pass. The broken-chain browser screenshot was inspected. This verifies the
+listed animation behaviors, not complete application parity.

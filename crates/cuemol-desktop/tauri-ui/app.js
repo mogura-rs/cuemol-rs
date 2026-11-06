@@ -16537,6 +16537,9 @@ function syncAnimationTimer() {
 
 function renderAnimation() {
   const objects = snapshot.animationObjects;
+  const error = document.getElementById("animation-error");
+  error.textContent = snapshot.animationResolveError || "";
+  error.hidden = !snapshot.animationResolveError;
   const validIndices = new Set(objects.map((object) => object.index));
   selectedAnimationIndices = new Set(
     [...selectedAnimationIndices].filter((index) => validIndices.has(index)),
@@ -16547,7 +16550,7 @@ function renderAnimation() {
   if (!validIndices.has(selectedAnimationAnchor)) selectedAnimationAnchor = null;
   const listKey = JSON.stringify([
     [...selectedAnimationIndices].sort((lhs, rhs) => lhs - rhs),
-    objects.map((object) => [object.index, object.name, object.start, object.end]),
+    objects.map((object) => [object.index, object.name, object.start, object.end, object.resolveError]),
   ]);
   if (renderedAnimationListKey !== listKey) {
     renderedAnimationListKey = listKey;
@@ -16589,13 +16592,15 @@ function renderAnimation() {
         },
       );
       const name = document.createElement("span");
+      row.title = object.resolveError || "";
+      if (object.resolveError) row.classList.add("inspector-error");
       name.textContent = object.name
         ? `${object.name} (${object.typeName})`
         : object.typeName;
       const start = document.createElement("span");
-      start.textContent = formatAnimationObjectTime(object.start);
+      start.textContent = object.resolveError ? "unresolved" : formatAnimationObjectTime(object.start);
       const end = document.createElement("span");
-      end.textContent = formatAnimationObjectTime(object.end);
+      end.textContent = object.resolveError ? "unresolved" : formatAnimationObjectTime(object.end);
       row.append(name, start, end);
       row.addEventListener("dblclick", () => {
         selectedAnimationIndices = new Set([object.index]);
@@ -16644,10 +16649,10 @@ function renderAnimation() {
   animationStartCamera.disabled = snapshot.activeSceneUid === null;
   animationSlider.max = String(Math.max(total, 0));
   animationSlider.value = String(Math.min(snapshot.animationElapsed, total));
-  animationSlider.disabled = total <= 0;
+  animationSlider.disabled = total <= 0 || !!snapshot.animationResolveError;
   animationTime.textContent = `${formatAnimationTime(snapshot.animationElapsed)} / ${formatAnimationTime(total)}`;
   animationLoop.checked = snapshot.animationLoop;
-  animationPlay.disabled = objects.length === 0;
+  animationPlay.disabled = objects.length === 0 || (!!snapshot.animationResolveError && !snapshot.animationPlaying);
   animationStop.disabled = !snapshot.animationPlaying && snapshot.animationElapsed <= 0;
   const playIcon = animationPlay.querySelector(".tool-icon");
   const playLabel = animationPlay.querySelector("span:last-child");

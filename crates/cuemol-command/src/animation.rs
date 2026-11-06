@@ -1,3 +1,4 @@
+use crate::animation_graph::{editor_time_ms, Graph};
 use crate::commands::{scene, text};
 use cuemol_anim::{AnimMgr, AnimMotion};
 use cuemol_core::{
@@ -27,19 +28,27 @@ fn timeline(state: &DesktopAppState, mgr: &AnimMgr, sid: Uid) -> Value {
     } else {
         "stopped"
     };
+    let graph = Graph::read(mgr);
     let elements = mgr.motions().iter().enumerate().map(|(index, motion)| {
         let base = motion.base();
-        json!({
+        let node = &graph.nodes[index];
+        let mut entry = json!({
             "number": index + 1, "uid": base.uid().get(), "name": base.name(),
             "type": motion.type_name(), "startMs": time_to_milliseconds(base.rel_start()),
-            "endMs": time_to_milliseconds(base.rel_end()), "absStartMs": time_to_milliseconds(base.abs_start()),
-            "absEndMs": time_to_milliseconds(base.abs_end()), "timeRefName": base.time_ref_name(),
-            "disabled": base.disabled()
-        })
+            "endMs": time_to_milliseconds(base.rel_end()), "absStartMs": node.abs_start_ms.unwrap_or_else(|| time_to_milliseconds(base.abs_start())),
+            "absEndMs": node.abs_end_ms.unwrap_or_else(|| time_to_milliseconds(base.abs_end())), "timeRefName": base.time_ref_name(),
+            "disabled": base.disabled(), "quadric": base.quadric(), "timeRefState": node.state
+        });
+        if let Some(error) = &node.error { entry["resolveError"] = json!(error); }
+        entry
     }).collect::<Vec<_>>();
-    json!({"mgr": {"lengthMs": time_to_milliseconds(mgr.length()), "loop": mgr.loop_enabled(),
+    let mut data = json!({"sceneId":sid.get(), "fps":30, "cameras":state.camera_summaries(sid).into_iter().map(|camera| camera.name).collect::<Vec<_>>(), "mgr": {"lengthMs": time_to_milliseconds(mgr.length()), "loop": mgr.loop_enabled(),
         "startcam": mgr.startcam(), "playState": play_state,
-        "elapsedMs": state.scene_animation_elapsed_ms(sid)}, "elements": elements})
+        "elapsedMs": state.scene_animation_elapsed_ms(sid)}, "elements": elements});
+    if let Some(error) = graph.error() {
+        data["resolveError"] = json!(error);
+    }
+    data
 }
 
 pub fn call_tool(
@@ -69,8 +78,6 @@ pub fn call_tool(
         return Ok(timeline(state, &mgr, sid));
     }
     if name == "animate" {
-        advance_animation(state, camera)?;
-        mgr = state.scene_animation(sid)?.unwrap_or_default();
         let action = text(args, "action")?;
         if !matches!(action, "play" | "pause" | "stop" | "seek") {
             return Err(CueMolError::invalid_argument("unknown animation action"));
@@ -87,6 +94,13 @@ pub fn call_tool(
                 "seek requires a nonnegative timeMs",
             ));
         }
+        if matches!(action, "play" | "seek") {
+            if let Some(error) = Graph::read(&mgr).error() {
+                return Err(CueMolError::invalid_argument(error));
+            }
+        }
+        advance_animation(state, camera)?;
+        mgr = state.scene_animation(sid)?.unwrap_or_default();
         if mgr.startcam().is_empty() && matches!(action, "play" | "seek") {
             let mut start = mgr
                 .initial_camera()
@@ -163,12 +177,15 @@ pub fn call_tool(
             "wait" => "NoopAnimObj",
             _ => return Err(CueMolError::invalid_argument("unknown animation type")),
         };
-        let label = args["name"].as_str().map(str::to_owned).unwrap_or_else(|| {
-            (1..)
-                .map(|i| format!("{kind}{i}"))
-                .find(|n| mgr.motions().iter().all(|m| m.base().name() != n))
-                .unwrap()
-        });
+        let label = args["name"]
+            .as_str()
+            .map(|value| value.trim().to_string())
+            .unwrap_or_else(|| {
+                (0..)
+                    .map(|i| format!("{class}{i}"))
+                    .find(|n| mgr.motions().iter().all(|m| m.base().name() != n))
+                    .unwrap()
+            });
         if label.is_empty() || mgr.motions().iter().any(|m| m.base().name() == label) {
             return Err(CueMolError::invalid_argument(
                 "animation name is empty or already used",
@@ -184,8 +201,9 @@ pub fn call_tool(
         node.set_type_name(class);
         node.set_str_attr("name", &label);
         node.set_str_attr("end", time_from_milliseconds(1000.).to_string());
-        if before > 0 {
-            node.set_str_attr("timeRefName", mgr.motions()[before - 1].base().name());
+        let reference = Graph::read(&mgr).auto_chain_name(before);
+        if !reference.is_empty() {
+            node.set_str_attr("timeRefName", reference);
         }
         if kind == "spin" {
             node.set_str_attr("angle", "360");
@@ -201,14 +219,9 @@ pub fn call_tool(
     } else {
         let index = element(&mgr, text(args, "element")?)?;
         if name == "remove_anim" {
-            let removed = mgr.motions()[index].base().name().to_string();
-            let prior = mgr.motions()[index].base().time_ref_name().to_string();
+            let graph = Graph::read(&mgr);
+            graph.detach_dependents(&mut mgr, &[index]);
             mgr.remove_at(index);
-            for motion in mgr.motions_mut() {
-                if motion.base().time_ref_name() == removed {
-                    motion.base_mut().set_time_ref_name(prior.clone());
-                }
-            }
         } else if name == "move_anim" {
             let to = crate::nodes::move_target(args, index, mgr.size())?;
             let motion = mgr.motions()[index].clone();
@@ -224,48 +237,115 @@ pub fn call_tool(
                         "animation end must follow a nonnegative start",
                     ));
                 }
-                node.set_str_attr("start", time_from_milliseconds(start).to_string());
-                node.set_str_attr("end", time_from_milliseconds(end).to_string());
+                node.set_str_attr("start", editor_time_ms(start).to_string());
+                node.set_str_attr("end", editor_time_ms(end).to_string());
             } else if name == "reset_anim_prop" {
                 for prop in text(args, "props")?
                     .split(|c: char| c.is_whitespace() || c == ',')
                     .filter(|p| !p.is_empty())
                 {
-                    if prop == "name" || prop == "uid" {
-                        return Err(CueMolError::invalid_argument("identity cannot be reset"));
+                    if matches!(
+                        prop,
+                        "name" | "uid" | "timeRefName" | "start" | "end" | "absStart" | "absEnd"
+                    ) {
+                        return Err(CueMolError::invalid_argument(format!(
+                            "{prop} has no writable default"
+                        )));
+                    }
+                    if !node.children().iter().any(|child| child.tag_name() == prop) {
+                        return Err(CueMolError::invalid_argument(format!(
+                            "unknown property {prop}"
+                        )));
                     }
                     node.remove_child(prop);
                 }
             } else {
-                let prop = text(args, "prop")?;
+                let requested = text(args, "prop")?;
+                let prop = if name == "set_anim_prop" && requested == "tgtAlpha" {
+                    "tgt_alpha"
+                } else {
+                    requested
+                };
                 let value = text(args, "value")?;
-                if !node.children().iter().any(|child| child.tag_name() == prop)
-                    && !matches!(
-                        prop,
-                        "axis"
-                            | "name"
-                            | "timeRefName"
-                            | "endcam"
-                            | "rend"
-                            | "mol"
-                            | "disabled"
-                            | "quadric"
-                    )
-                {
-                    return Err(CueMolError::invalid_argument(format!(
-                        "unknown property {prop}"
-                    )));
+                if matches!(prop, "start" | "end") {
+                    return Err(CueMolError::invalid_argument(
+                        "start and end are edited together through set_anim_time",
+                    ));
                 }
-                if prop == "uid" {
-                    return Err(CueMolError::invalid_argument("identity is read-only"));
+                if matches!(prop, "name" | "timeRefName") {
+                    let graph = Graph::read(&mgr);
+                    let original = &graph.nodes[index];
+                    if prop == "name" {
+                        let name = graph
+                            .check_name(index, value)
+                            .map_err(CueMolError::invalid_argument)?;
+                        if name == original.name {
+                            return Ok(timeline(state, &mgr, sid));
+                        }
+                        if !original.name.is_empty()
+                            && graph.first.get(&original.name) == Some(&index)
+                        {
+                            for dependent in &graph.nodes {
+                                if dependent.index != index
+                                    && dependent.time_ref_name == original.name
+                                {
+                                    mgr.motions_mut()[dependent.index]
+                                        .base_mut()
+                                        .set_time_ref_name(&name);
+                                }
+                            }
+                        }
+                        node.set_str_attr("name", name);
+                    } else {
+                        let span = graph
+                            .rebase_span(index, value)
+                            .map_err(CueMolError::invalid_argument)?;
+                        if value == original.time_ref_name {
+                            return Ok(timeline(state, &mgr, sid));
+                        }
+                        if let Some((relative_start, relative_end)) = span {
+                            node.set_str_attr("start", editor_time_ms(relative_start).to_string());
+                            node.set_str_attr("end", editor_time_ms(relative_end).to_string());
+                        }
+                        node.set_str_attr("timeRefName", value);
+                    }
+                } else {
+                    if !node.children().iter().any(|child| child.tag_name() == prop)
+                        && !matches!(
+                            prop,
+                            "axis"
+                                | "name"
+                                | "timeRefName"
+                                | "endcam"
+                                | "rend"
+                                | "mol"
+                                | "disabled"
+                                | "quadric"
+                        )
+                    {
+                        return Err(CueMolError::invalid_argument(format!(
+                            "unknown property {prop}"
+                        )));
+                    }
+                    if prop == "uid" {
+                        return Err(CueMolError::invalid_argument("identity is read-only"));
+                    }
+                    node.set_str_attr(prop, value);
                 }
-                node.set_str_attr(prop, value);
             }
-            let motion = AnimMotion::from_ldom2_node(&node)?;
+            let mut motion = AnimMotion::from_ldom2_node(&node)?;
+            let previous = mgr.motions()[index].base();
+            motion.base_mut().set_abs_start(previous.abs_start());
+            motion.base_mut().set_abs_end(previous.abs_end());
             mgr.motions_mut()[index] = motion;
         }
     }
-    mgr.try_resolve_rel_time()?;
+    if let Err(error) = mgr.try_resolve_rel_time() {
+        let graph = Graph::read(&mgr);
+        if graph.error().is_none() {
+            return Err(error);
+        }
+    }
     let duration = mgr
         .motions()
         .iter()
@@ -273,6 +353,19 @@ pub fn call_tool(
         .max()
         .unwrap_or(0);
     mgr.set_length(duration);
+    if name != "set_anim_options" {
+        let active = state.has_scene_animation_player(sid)
+            || state
+                .scene_animation(sid)?
+                .is_some_and(|manager| manager.initial_camera().is_some());
+        if active {
+            let view = state
+                .active_view_summary()
+                .ok_or_else(|| CueMolError::not_found("view"))?;
+            *camera = state.stop_scene_animation(sid, view.uid)?;
+        }
+        mgr.discard_playback_state();
+    }
     state.set_scene_animation(sid, Some(&mgr))?;
     Ok(timeline(state, &mgr, sid))
 }

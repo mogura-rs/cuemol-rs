@@ -516,9 +516,18 @@ impl App {
         let data =
             cuemol_command::call_tool(&mut self.state, &mut self.camera, "list_anims", &json!({}))
                 .unwrap_or(Value::Null);
+        if let Some(error) = data["resolveError"].as_str() {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
         ui.horizontal(|ui| {
             for action in ["play", "pause", "stop"] {
-                if ui.button(action).clicked() {
+                if ui
+                    .add_enabled(
+                        action != "play" || data["resolveError"].is_null(),
+                        egui::Button::new(action),
+                    )
+                    .clicked()
+                {
                     self.call("animate", json!({"action":action}));
                 }
             }
@@ -536,12 +545,20 @@ impl App {
         }
         for motion in data["elements"].as_array().into_iter().flatten() {
             ui.horizontal(|ui| {
-                ui.label(format!(
-                    "{}  {}–{} ms",
-                    motion["name"].as_str().unwrap_or(""),
-                    motion["absStartMs"],
-                    motion["absEndMs"]
-                ));
+                if let Some(error) = motion["resolveError"].as_str() {
+                    ui.colored_label(
+                        ui.visuals().error_fg_color,
+                        motion["name"].as_str().unwrap_or(""),
+                    )
+                    .on_hover_text(error);
+                } else {
+                    ui.label(format!(
+                        "{}  {}–{} ms",
+                        motion["name"].as_str().unwrap_or(""),
+                        motion["absStartMs"],
+                        motion["absEndMs"]
+                    ));
+                }
                 if ui.small_button("Time…").clicked() {
                     self.select_tool("set_anim_time");
                 }

@@ -40,6 +40,21 @@ release; browser and Tauri builds also include the browser or WebView user agent
 Builds without Git metadata display `unavailable` for the commit. Reproducible
 builds can set `SOURCE_DATE_EPOCH` to control the reported UTC build time.
 
+### Animation references
+
+Animation elements can start relative to another element's end. Renaming the
+reference updates its dependent elements, and deleting it keeps their current
+absolute times. Changing a reference preserves the span unless it must move
+forward to the new reference's end. The property dialog uses the same rules as
+`set_anim_prop` and `set_anim_generic_prop`; use `set_anim_time` to edit both time
+bounds together.
+
+A scene with missing or cyclic references still loads. The Animation panel and
+`list_anims` report the unresolved elements so their references can be repaired.
+Playback and seeking resume once the chain resolves. A rejected edit preserves
+current playback and undo history; an accepted element edit stops playback and
+restores the underlying scene before applying the change.
+
 ### Representations and rendering
 
 Open files on the command line, through the file dialog, or by drag and drop.

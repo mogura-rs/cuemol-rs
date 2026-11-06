@@ -2,6 +2,7 @@
 pub mod about;
 mod advanced;
 mod animation;
+pub mod animation_graph;
 pub mod clipboard;
 mod commands;
 mod downloads;

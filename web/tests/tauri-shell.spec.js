@@ -50,6 +50,11 @@ async function openShell(page, storage = {}, options = {}) {
       const densityRenderer={...renderer,uid:11,name:'Contour',rendererType:'contour',specific};
       snapshot.densityMaps=[{uid:10,sceneUid:1,name:'Density',source:'density.dx',sourceType:'dx',className:'ElePotMap',uiOrder:1,uiCollapsed:false,visible:true,locked:false,counts:[9,9,9],starts:[0,0,0],intervals:[9,9,9],origin:[0,0,0],spacing:[1,1,1],minimum:0,maximum:1,mean:0.1,rmsd:0.16,renderers:[densityRenderer,{...densityRenderer,uid:12,name:'Other',specific:{...specific},alpha:0.5}]}];
     }
+    if(options.brokenAnimation) {
+      snapshot.animationResolveError='"child" is relative to "missing", which does not exist';
+      snapshot.animationObjects=[{index:0,name:'child',typeName:'NoopAnimObj',start:0,end:1,duration:1,resolveError:snapshot.animationResolveError}];
+      snapshot.animationDuration=1;
+    }
     const styleDocuments = new Map();
     if (options.styles) {
       snapshot.styles = [
@@ -1670,5 +1675,18 @@ test('Tauri EM density pane uses top-percent limits and disables full-region ext
   await expect(pane.getByLabel('Density extent',{exact:true})).toBeDisabled();
   await pane.getByLabel('Density map options').click();
   await expect(pane.getByRole('button',{name:/Use top-percent contour level$/})).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri animation reports unresolved chains without hiding the editable row', async ({page}) => {
+  const errors = await openShell(page, {}, {brokenAnimation:true});
+  await page.locator('[data-bottom-select="animation"]').click();
+  await expect(page.locator('#animation-error')).toContainText('missing');
+  await expect(page.locator('#animation-list')).toContainText('child');
+  await expect(page.locator('#animation-list')).toContainText('unresolved');
+  await expect(page.locator('#animation-play')).toBeDisabled();
+  await page.locator('.animation-row').click();
+  await expect(page.locator('#animation-change')).toBeEnabled();
   expect(errors).toEqual([]);
 });

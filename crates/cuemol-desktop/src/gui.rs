@@ -1,3 +1,4 @@
+use cuemol_command::animation_graph::{editor_time_ms, Graph as AnimationGraph};
 #[path = "gui_actions.rs"]
 mod actions;
 #[path = "gui_clipboard.rs"]
@@ -12664,6 +12665,9 @@ impl GuiApplication {
         &mut self,
         camera: &CameraController,
     ) -> std::result::Result<(), String> {
+        if let Some(error) = AnimationGraph::read(&self.active_animation_manager()?).error() {
+            return Err(error.to_string());
+        }
         if self.shared_animation_scene().is_some() {
             let mut current = camera.to_qsys_camera("__current");
             cuemol_command::call_tool(
@@ -13239,11 +13243,7 @@ impl GuiApplication {
             .animation_selected
             .map(|index| index.saturating_add(1).min(animation.size()))
             .unwrap_or_else(|| animation.size());
-        let reference = insertion_index
-            .checked_sub(1)
-            .and_then(|index| animation.motions().get(index))
-            .map(|motion| motion.base().name().to_string())
-            .unwrap_or_default();
+        let reference = AnimationGraph::read(&animation).auto_chain_name(insertion_index);
         let prefix = native_animation_name_prefix(kind);
         let name = unique_native_animation_name(&animation, prefix);
         let motion = new_native_animation_motion(kind, name, reference);
@@ -13271,11 +13271,7 @@ impl GuiApplication {
             .animation_selected
             .map(|index| index.saturating_add(1).min(animation.size()))
             .unwrap_or_else(|| animation.size());
-        let reference = insertion_index
-            .checked_sub(1)
-            .and_then(|index| animation.motions().get(index))
-            .map(|motion| motion.base().name().to_string())
-            .unwrap_or_default();
+        let reference = AnimationGraph::read(&animation).auto_chain_name(insertion_index);
         let name = unique_native_animation_name(&animation, native_animation_name_prefix(kind));
         let motion = new_native_animation_motion(kind, name, reference);
         let mut draft = NativeAnimationProperties::from_motion(insertion_index, &motion);
@@ -13325,11 +13321,7 @@ impl GuiApplication {
             animation.set_startcam("__current");
         }
         let insertion_index = insertion_index.min(animation.size());
-        let reference = insertion_index
-            .checked_sub(1)
-            .and_then(|index| animation.motions().get(index))
-            .map(|motion| motion.base().name().to_string())
-            .unwrap_or_default();
+        let reference = AnimationGraph::read(&animation).auto_chain_name(insertion_index);
         let name = unique_native_animation_name(&animation, native_animation_name_prefix(kind));
         let motion = new_native_animation_motion(kind, name, reference);
         if insertion_index == animation.size() {
@@ -13406,47 +13398,8 @@ impl GuiApplication {
         if let Some(index) = indices.iter().find(|index| **index >= animation.size()) {
             return Err(format!("animation object {index} was not found"));
         }
-        let deleted_names = indices
-            .iter()
-            .filter_map(|index| animation.motions().get(*index))
-            .map(|motion| motion.base().name().to_string())
-            .collect::<std::collections::BTreeSet<_>>();
-        let deleted_references = indices
-            .iter()
-            .filter_map(|index| animation.motions().get(*index))
-            .map(|motion| {
-                (
-                    motion.base().name().to_string(),
-                    motion.base().time_ref_name().to_string(),
-                )
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
-        let rewrites = animation
-            .motions()
-            .iter()
-            .filter(|motion| !deleted_names.contains(motion.base().name()))
-            .filter_map(|motion| {
-                let original = motion.base().time_ref_name();
-                if !deleted_names.contains(original) {
-                    return None;
-                }
-                let mut reference = original.to_string();
-                let mut visited = std::collections::BTreeSet::new();
-                while deleted_names.contains(&reference) && visited.insert(reference.clone()) {
-                    reference = deleted_references
-                        .get(&reference)
-                        .cloned()
-                        .unwrap_or_default();
-                }
-                Some((motion.base().uid(), reference))
-            })
-            .collect::<Vec<_>>();
         let undo = self.capture_undo();
-        for (uid, reference) in rewrites {
-            animation.edit_motion_by_uid(uid, "timeRefName", "", |motion| {
-                motion.base_mut().set_time_ref_name(reference);
-            });
-        }
+        AnimationGraph::read(&animation).detach_dependents(&mut animation, &indices);
         for index in indices.iter().rev() {
             animation.remove_at(*index);
         }
@@ -13637,7 +13590,6 @@ impl GuiApplication {
             }
         }
 
-        self.restore_animation_playback(camera, false)?;
         let mut animation = self.active_animation_manager()?;
         let current = animation
             .motions()
@@ -13645,23 +13597,20 @@ impl GuiApplication {
             .ok_or_else(|| format!("animation object {} was not found", draft.index))?;
         let uid = current.base().uid();
         let old_name = current.base().name().to_string();
-        if animation
-            .motions()
-            .iter()
-            .any(|motion| motion.base().uid() != uid && motion.base().name() == name)
-        {
-            return Err(format!("animation object name {name} is already used"));
+        let graph = AnimationGraph::read(&animation);
+        let original = &graph.nodes[draft.index];
+        if old_name != name {
+            graph.check_name(draft.index, &name)?;
         }
-        if !time_ref_name.is_empty() {
-            let reference = animation
-                .motions()
-                .iter()
-                .find(|motion| motion.base().name() == time_ref_name)
-                .ok_or_else(|| format!("animation reference {time_ref_name} was not found"))?;
-            if reference.base().uid() == uid {
-                return Err("animation object cannot reference itself".to_string());
-            }
-        }
+        let rebased = if time_ref_name != original.time_ref_name {
+            graph.rebase_span(draft.index, &time_ref_name)?
+        } else {
+            None
+        };
+        let original_start = current.base().rel_start();
+        let original_duration = current.base().rel_end().saturating_sub(original_start);
+        let preserve_span = draft.start == time_to_seconds(original_start)
+            && draft.duration == time_to_seconds(original_duration);
         if let Some(target_camera) = draft.target_camera.as_deref() {
             let target_camera = target_camera.trim();
             let scene_uid = self.state.active_scene().unwrap();
@@ -13676,9 +13625,20 @@ impl GuiApplication {
             }
         }
 
+        self.restore_animation_playback(camera, false)?;
+        animation = self.active_animation_manager()?;
         let undo = self.capture_undo();
-        let start = time_from_seconds(draft.start);
-        let duration = time_from_seconds(draft.duration);
+        let (start, duration) = if let Some((start, end)) = rebased.filter(|_| preserve_span) {
+            let start = editor_time_ms(start);
+            (start, editor_time_ms(end).saturating_sub(start))
+        } else if preserve_span {
+            (original_start, original_duration)
+        } else {
+            (
+                editor_time_ms(draft.start * 1000.),
+                editor_time_ms(draft.duration * 1000.),
+            )
+        };
         animation.edit_motion_by_uid(uid, "properties", "", |motion| {
             let object = motion.base_mut();
             object.set_name(name.clone());
@@ -13786,7 +13746,10 @@ impl GuiApplication {
                 AnimMotion::Noop(_) | AnimMotion::Unknown { .. } => {}
             }
         });
-        if old_name != name {
+        if old_name != name
+            && !old_name.is_empty()
+            && graph.first.get(&old_name) == Some(&draft.index)
+        {
             let referencing = animation
                 .motions()
                 .iter()
@@ -13799,9 +13762,7 @@ impl GuiApplication {
                 });
             }
         }
-        animation
-            .try_resolve_rel_time()
-            .map_err(|error| error.to_string())?;
+        let _ = animation.try_resolve_rel_time();
         self.set_active_animation_manager(&animation)?;
         self.animation_elapsed = 0.0;
         self.push_undo_snapshot(undo);
@@ -13812,6 +13773,10 @@ impl GuiApplication {
     /// Animation panel backed by the active scene's serialized `AnimMgr`.
     fn animation_section(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
         let animation = self.active_animation_manager().unwrap_or_default();
+        let graph = AnimationGraph::read(&animation);
+        if let Some(error) = graph.error() {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
         self.animation_selection
             .retain(|index| *index < animation.size());
         if self
@@ -14013,13 +13978,18 @@ impl GuiApplication {
             let row_height = ui.spacing().interact_size.y;
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
+                let node = &graph.nodes[index];
                 let title = format!("{} ({})", base.name(), motion.type_name());
+                let mut label = egui::RichText::new(&title);
+                if node.error.is_some() {
+                    label = label.color(ui.visuals().error_fg_color);
+                }
                 let response = ui
                     .add_sized(
                         [name_width, row_height],
-                        egui::Button::selectable(self.animation_selection.contains(&index), &title),
+                        egui::Button::selectable(self.animation_selection.contains(&index), label),
                     )
-                    .on_hover_text(&title);
+                    .on_hover_text(node.error.as_deref().unwrap_or(&title));
                 if response.clicked() {
                     let modifiers = ui.input(|input| input.modifiers);
                     self.update_animation_selection(
@@ -14098,7 +14068,15 @@ impl GuiApplication {
                 );
                 ui.add_sized(
                     [start_width, row_height],
-                    egui::Label::new(format_native_animation_time(base.abs_start())),
+                    egui::Label::new(
+                        node.abs_start_ms
+                            .map(|value| {
+                                format_native_animation_time(cuemol_core::time_from_milliseconds(
+                                    value,
+                                ))
+                            })
+                            .unwrap_or_else(|| "unresolved".into()),
+                    ),
                 );
                 let (start_separator, _) = ui.allocate_exact_size(
                     egui::vec2(ANIMATION_COLUMN_SPLITTER_WIDTH, row_height),
@@ -14113,7 +14091,15 @@ impl GuiApplication {
                 );
                 ui.add_sized(
                     [end_width, row_height],
-                    egui::Label::new(format_native_animation_time(base.abs_end())),
+                    egui::Label::new(
+                        node.abs_end_ms
+                            .map(|value| {
+                                format_native_animation_time(cuemol_core::time_from_milliseconds(
+                                    value,
+                                ))
+                            })
+                            .unwrap_or_else(|| "unresolved".into()),
+                    ),
                 );
             });
         }
@@ -40892,7 +40878,11 @@ mod tests {
         assert_eq!(app.undo_stack.len(), undo_count + 1);
         let animation = app.state.scene_animation(scene_uid).unwrap().unwrap();
         assert_eq!(animation.size(), 2);
-        assert_eq!(animation.motions()[1].base().time_ref_name(), "SimpleSpin1");
+        assert_eq!(animation.motions()[1].base().time_ref_name(), "");
+        assert_eq!(
+            time_to_seconds(animation.motions()[1].base().abs_start()),
+            3.0
+        );
         app.undo(&mut camera);
         assert_eq!(
             app.state
@@ -40902,6 +40892,77 @@ mod tests {
                 .size(),
             4
         );
+    }
+
+    #[test]
+    fn native_animation_reference_edits_keep_the_span_and_allow_broken_siblings() {
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        for _ in 0..3 {
+            app.add_animation_motion(AnimKind::Pause, &mut camera)
+                .unwrap();
+        }
+        let original = app.active_animation_manager().unwrap();
+        let mut draft = NativeAnimationProperties::from_motion(1, &original.motions()[1]);
+        draft.time_ref_name.clear();
+        app.apply_animation_properties(&draft, &mut camera).unwrap();
+        let detached = app.active_animation_manager().unwrap();
+        assert_eq!(detached.motions()[1].base().abs_start(), NANOS_PER_SECOND);
+        assert_eq!(detached.motions()[1].base().rel_start(), NANOS_PER_SECOND);
+        let mut draft = NativeAnimationProperties::from_motion(1, &detached.motions()[1]);
+        draft.time_ref_name = detached.motions()[2].base().name().to_string();
+        let before = app.state.clone();
+        let history = app.undo_stack.len();
+        assert!(app
+            .apply_animation_properties(&draft, &mut camera)
+            .unwrap_err()
+            .contains("cycle"));
+        assert!(before.same_undo_state(&app.state));
+        assert_eq!(app.undo_stack.len(), history);
+        let mut broken = detached.clone();
+        broken.motions_mut()[2]
+            .base_mut()
+            .set_time_ref_name("missing");
+        app.set_active_animation_manager(&broken).unwrap();
+        let mut draft = NativeAnimationProperties::from_motion(0, &broken.motions()[0]);
+        draft.disabled = true;
+        app.apply_animation_properties(&draft, &mut camera).unwrap();
+        let after = app.active_animation_manager().unwrap();
+        assert!(after.motions()[0].base().disabled());
+        assert_eq!(after.motions()[2].base().time_ref_name(), "missing");
+        let mut draft = NativeAnimationProperties::from_motion(1, &after.motions()[1]);
+        draft.start = 1.001;
+        app.apply_animation_properties(&draft, &mut camera).unwrap();
+        let fractional = app.active_animation_manager().unwrap();
+        let mut draft = NativeAnimationProperties::from_motion(1, &fractional.motions()[1]);
+        draft.time_ref_name = fractional.motions()[0].base().name().to_string();
+        app.apply_animation_properties(&draft, &mut camera).unwrap();
+        assert_eq!(
+            app.active_animation_manager().unwrap().motions()[1]
+                .base()
+                .rel_start(),
+            1_000_000
+        );
+    }
+
+    #[test]
+    fn invalid_animation_reference_does_not_stop_native_playback() {
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        for _ in 0..2 {
+            app.add_animation_motion(AnimKind::Pause, &mut camera)
+                .unwrap();
+        }
+        app.begin_animation_playback(&camera).unwrap();
+        let scene = app.state.active_scene().unwrap();
+        assert!(app.state.is_scene_animation_playing(scene));
+        let animation = app.active_animation_manager().unwrap();
+        let mut draft = NativeAnimationProperties::from_motion(0, &animation.motions()[0]);
+        draft.time_ref_name = animation.motions()[1].base().name().to_string();
+        let history = app.undo_stack.len();
+        assert!(app.apply_animation_properties(&draft, &mut camera).is_err());
+        assert!(app.state.is_scene_animation_playing(scene));
+        assert_eq!(app.undo_stack.len(), history);
     }
 
     #[test]
@@ -41058,7 +41119,7 @@ mod tests {
         assert_eq!(
             app.apply_animation_properties(&invalid, &mut camera)
                 .unwrap_err(),
-            "animation object cannot reference itself"
+            "An element cannot be relative to itself"
         );
 
         let undo_count = app.undo_stack.len();
