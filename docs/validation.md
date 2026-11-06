@@ -1,5 +1,55 @@
 # Validation evidence
 
+## Animation strip timeline and shared element Inspector
+
+The default native and browser windows now share the current reference's strip
+layout: a fixed channel column, a scrollable time ruler, colored element lanes,
+resize grips and a playhead. Body/edge drags and ruler/current-time scrubs preview
+locally and commit one edit on release. Escape, focus loss, scene changes and an
+external change to a dragged span cancel it. Selection follows the stable UID
+through reorder and history. Deletion selects the next or previous surviving
+element. The transport includes start/end, play/pause, stop, current time,
+duration, start camera, loop, element count, FPS, Fit and zoom. The timeline read
+model is cached by scene/revision; playback updates its transport values without
+rebuilding the element graph on every frame.
+
+A shared right-side element Inspector exposes structured and generic fields,
+validated reference choices, camera/renderer/MorphMol targets, signed legacy
+starts, duration and property resets. Numeric fields commit on release. Generic
+start/end remain read-only because the paired timing command owns them. A
+regression reproduced rejection of a negative relative start; the command now
+matches the reference's signed timing contract. The typed spin-axis operation
+also accepts the documented three whitespace-separated finite numbers.
+
+The read-only geometry oracle compared 128 cases against the current reference's
+scale limits, fitting, width, tick spacing, labels and integer-millisecond clock
+formatting. Fractional clock rounding intentionally carries into the next second:
+59,999.6 ms displays `1:00.000`, whereas the reference helper produces `0:59.1000`.
+The reference AnimationPanel source comment still says per-type editing belongs
+to a later phase, but its current AnimElementInspector implements it. The UI
+follows that implementation; the reference checkout remains unchanged.
+
+The full animation/command suites passed 216 tests with two unrelated optional
+checks ignored. All 39 shared UI tests passed, including the explicitly enabled
+geometry oracle. Native animation checks passed 26, including a strip drag
+through the real application command/history boundary. A Linux window also
+passed OS mouse/keyboard checks with
+`scripts/check-native-gui.py --animation-timeline-only`: holding a drag left the
+scene unchanged, Escape preserved redo, and one keyboard undo/redo changed the
+start between 0 and 300 ms. The screenshots were inspected.
+
+Ten affected WebGL/WebGPU cases passed: four new strip/Inspector cases, four
+reference-chain/QSC cases and two pixel-based playback/pause/stop cases. The
+final UI build repeated the four new cases and both playback cases successfully.
+Checks cover moving/resizing, local scrubbing, cancellation, undo/redo, renaming,
+paired duration edits, rejected cyclic candidates, reordering and deletion.
+Final browser and native screenshots were inspected, and formatting, whitespace
+and script syntax checks passed. Generated evidence remains in the ignored cache.
+
+Tauri's strip layout, structured axis/direction presets and the reference's
+realtime Inspector timing previews remain in the animation UI audit. This
+milestone does not close the complete feature/appearance requirement.
+
 ## Density map pane and shared numeric controls
 
 The browser's former three-button placeholder now uses the same Rust Density

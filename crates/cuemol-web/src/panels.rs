@@ -513,62 +513,23 @@ impl App {
         self.show_timeline = open;
     }
     pub(super) fn timeline_contents(&mut self, ui: &mut egui::Ui) {
-        let data =
-            cuemol_command::call_tool(&mut self.state, &mut self.camera, "list_anims", &json!({}))
-                .unwrap_or(Value::Null);
-        if let Some(error) = data["resolveError"].as_str() {
-            ui.colored_label(ui.visuals().error_fg_color, error);
+        let previous = self.animation_panel.selected;
+        let output = self
+            .animation_panel
+            .show_state(ui, &self.state, self.revision);
+        self.ui_rects.extend(self.animation_panel.rects.clone());
+        for (tool, args) in output.commands {
+            self.call(tool, args);
         }
-        ui.horizontal(|ui| {
-            for action in ["play", "pause", "stop"] {
-                if ui
-                    .add_enabled(
-                        action != "play" || data["resolveError"].is_null(),
-                        egui::Button::new(action),
-                    )
-                    .clicked()
-                {
-                    self.call("animate", json!({"action":action}));
-                }
-            }
-            if ui.button("Add element…").clicked() {
-                self.select_tool("add_anim");
-            }
-        });
-        let duration = data["mgr"]["lengthMs"].as_f64().unwrap_or(0.);
-        let mut time = data["mgr"]["elapsedMs"].as_f64().unwrap_or(0.);
-        if ui
-            .add(egui::Slider::new(&mut time, 0.0..=duration.max(1.)).suffix(" ms"))
-            .changed()
-        {
-            self.call("animate", json!({"action":"seek","timeMs":time}));
-        }
-        for motion in data["elements"].as_array().into_iter().flatten() {
-            ui.horizontal(|ui| {
-                if let Some(error) = motion["resolveError"].as_str() {
-                    ui.colored_label(
-                        ui.visuals().error_fg_color,
-                        motion["name"].as_str().unwrap_or(""),
-                    )
-                    .on_hover_text(error);
-                } else {
-                    ui.label(format!(
-                        "{}  {}–{} ms",
-                        motion["name"].as_str().unwrap_or(""),
-                        motion["absStartMs"],
-                        motion["absEndMs"]
-                    ));
-                }
-                if ui.small_button("Time…").clicked() {
-                    self.select_tool("set_anim_time");
-                }
-                if ui.small_button("×").clicked() {
-                    self.call(
-                        "remove_anim",
-                        json!({"element":format!("#{}",motion["uid"])}),
-                    );
-                }
-            });
+        if previous != self.animation_panel.selected || output.inspect.is_some() {
+            self.inspector_target =
+                self.animation_panel
+                    .selected
+                    .map(|uid| cuemol_ui::InspectorTarget {
+                        kind: "animation".into(),
+                        id: Some(uid),
+                    });
+            self.animation_inspector.visible = self.animation_panel.selected.is_some();
         }
     }
 }

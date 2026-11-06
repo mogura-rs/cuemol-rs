@@ -197,7 +197,21 @@ impl App {
                 self.call(tool, args);
             }
             self.actions_panel.inspector(ctx);
+        } else if let Some(uid) = self
+            .inspector_target
+            .as_ref()
+            .filter(|target| target.kind == "animation")
+            .and_then(|target| target.id)
+        {
+            for (tool, args) in self
+                .animation_inspector
+                .panel(ctx, &self.state, uid, self.revision)
+            {
+                self.call(tool, args);
+            }
+            self.ui_rects.extend(self.animation_inspector.rects.clone());
         } else {
+            self.animation_inspector.cancel();
             self.inspector.inspect(
                 &mut self.state,
                 &mut self.camera,

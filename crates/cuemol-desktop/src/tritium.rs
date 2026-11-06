@@ -37,12 +37,14 @@ impl GuiApplication {
         if let Some(context) = &mut self.inspector_context {
             context.id = if context.kind == "scene" {
                 self.state.active_scene().map(|id| id.get())
-            } else {
+            } else if context.kind == "view" {
                 self.state
                     .active_scene()
                     .and_then(|id| self.state.scene_manager().scene(id))
                     .and_then(|scene| scene.active_view_uid())
                     .map(|id| id.get())
+            } else {
+                context.id
             };
         }
         let target =
@@ -73,7 +75,19 @@ impl GuiApplication {
                 self.tritium_command(tool, args, camera);
             }
             self.actions_panel.inspector(ctx);
+        } else if let Some(uid) = target
+            .as_ref()
+            .filter(|target| target.kind == "animation")
+            .and_then(|target| target.id)
+        {
+            for (tool, args) in
+                self.animation_inspector
+                    .panel(ctx, &self.state, uid, self.snapshot_revision)
+            {
+                self.tritium_command(tool, args, camera);
+            }
         } else {
+            self.animation_inspector.cancel();
             let mut view = camera.to_qsys_camera("__current");
             self.inspector
                 .inspect(&mut self.state, &mut view, target, self.snapshot_revision);
@@ -482,8 +496,7 @@ impl GuiApplication {
                         });
                 }
                 BottomTab::Animation => {
-                    self.animation_playback_controls(ui, camera);
-                    egui::ScrollArea::both().show(ui, |ui| self.animation_section(ui, camera));
+                    self.animation_timeline_section(ui, camera);
                 }
                 BottomTab::Sequence => self.sequence_tab(ui, camera),
                 BottomTab::Trajectory => {

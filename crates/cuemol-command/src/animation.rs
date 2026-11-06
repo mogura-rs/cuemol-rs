@@ -20,6 +20,12 @@ fn element(mgr: &AnimMgr, spec: &str) -> Result<usize> {
     };
     index.ok_or_else(|| CueMolError::not_found(format!("animation element {spec}")))
 }
+pub fn animation_timeline(state: &DesktopAppState) -> Result<Value> {
+    let sid = scene(state)?;
+    let mgr = state.scene_animation(sid)?.unwrap_or_default();
+    Ok(timeline(state, &mgr, sid))
+}
+
 fn timeline(state: &DesktopAppState, mgr: &AnimMgr, sid: Uid) -> Value {
     let play_state = if state.is_scene_animation_playing(sid) {
         "playing"
@@ -232,9 +238,9 @@ pub fn call_tool(
             if name == "set_anim_time" {
                 let start = args["startMs"].as_f64().unwrap();
                 let end = args["endMs"].as_f64().unwrap();
-                if start < 0. || end < start {
+                if end < start {
                     return Err(CueMolError::invalid_argument(
-                        "animation end must follow a nonnegative start",
+                        "animation end must not be before the start",
                     ));
                 }
                 node.set_str_attr("start", editor_time_ms(start).to_string());
@@ -330,7 +336,29 @@ pub fn call_tool(
                     if prop == "uid" {
                         return Err(CueMolError::invalid_argument("identity is read-only"));
                     }
-                    node.set_str_attr(prop, value);
+                    if prop == "axis" && name == "set_anim_prop" {
+                        let values = value
+                            .split_whitespace()
+                            .map(str::parse::<f64>)
+                            .collect::<std::result::Result<Vec<_>, _>>()
+                            .map_err(|_| {
+                                CueMolError::invalid_argument(
+                                    "axis takes three finite numbers separated by spaces",
+                                )
+                            })?;
+                        if values.len() != 3 || values.iter().any(|value| !value.is_finite()) {
+                            return Err(CueMolError::invalid_argument(
+                                "axis takes three finite numbers separated by spaces",
+                            ));
+                        }
+                        node.set_str_attr(
+                            prop,
+                            cuemol_core::Vector4::new3(values[0], values[1], values[2])
+                                .script_string(),
+                        );
+                    } else {
+                        node.set_str_attr(prop, value);
+                    }
                 }
             }
             let mut motion = AnimMotion::from_ldom2_node(&node)?;
@@ -388,4 +416,65 @@ pub fn advance_animation(state: &mut DesktopAppState, camera: &mut Camera) -> Re
     } else {
         Ok(false)
     }
+}
+pub fn animation_element_detail(state: &DesktopAppState, uid: u64) -> Result<Value> {
+    let sid = scene(state)?;
+    let manager = state.scene_animation(sid)?.unwrap_or_default();
+    let index = element(&manager, &format!("#{uid}"))?;
+    let motion = &manager.motions()[index];
+    let node = motion.to_ldom2_node();
+    let properties: serde_json::Map<String, Value> = node
+        .children()
+        .iter()
+        .filter(|child| child.is_attr())
+        .map(|child| (child.tag_name().into(), json!(child.value())))
+        .collect();
+    let graph = Graph::read(&manager);
+    let references = graph
+        .first
+        .keys()
+        .map(|name| json!({"name":name,"error":graph.check_reference(index,name).err()}))
+        .collect::<Vec<_>>();
+    let mut renderers = Vec::new();
+    let mut molecules = Vec::new();
+    if let Some(scene) = state.scene_manager().scene(sid) {
+        for object in scene.objects() {
+            if object.object_type() == "MorphMol" {
+                molecules.push(object.name().to_string());
+            }
+            for renderer in object.renderers() {
+                if !renderer.name().is_empty() {
+                    renderers.push(json!({"object":object.name(),"name":renderer.name()}));
+                }
+            }
+        }
+    }
+    for object in state.density_map_summaries(sid) {
+        for renderer in object.renderers {
+            if !renderer.name.is_empty() {
+                renderers.push(json!({"object":object.name,"name":renderer.name}));
+            }
+        }
+    }
+    for object in state.surface_summaries(sid) {
+        for renderer in object.renderers {
+            if !renderer.name.is_empty() {
+                renderers.push(json!({"object":object.name,"name":renderer.name}));
+            }
+        }
+    }
+    for object in state.lw_object_summaries(sid) {
+        for renderer in object.renderers {
+            if !renderer.name.is_empty() {
+                renderers.push(json!({"object":object.name,"name":renderer.name}));
+            }
+        }
+    }
+    Ok(
+        json!({"sceneId":sid.get(),"uid":uid,"type":motion.type_name(),"properties":properties,
+        "startMs":time_to_milliseconds(motion.base().rel_start()),"endMs":time_to_milliseconds(motion.base().rel_end()),
+        "resolveError":graph.nodes[index].error,"references":references,
+        "cameras":state.camera_summaries(sid).into_iter().map(|c|c.name).collect::<Vec<_>>(),
+        "renderers":renderers,"molecules":molecules}),
+    )
 }

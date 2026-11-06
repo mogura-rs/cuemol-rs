@@ -146,6 +146,7 @@ def main():
     parser.add_argument('--cross-selection-only', action='store_true')
     parser.add_argument('--current-features-only', action='store_true')
     parser.add_argument('--inspector-preview-only', action='store_true')
+    parser.add_argument('--animation-timeline-only', action='store_true')
     args = parser.parse_args()
     binary, work = args.binary.resolve(), args.out.resolve()
     work.mkdir(parents=True, exist_ok=True)
@@ -164,6 +165,9 @@ def main():
     (config / 'config.tsv').write_text(
         f'window:width\t{window_width}\nwindow:height\t{window_height}\n'
         f'window:x\t{window_x}\nwindow:y\t{window_y}\n')
+    if args.animation_timeline_only:
+        with (config / 'config.tsv').open('a') as stream:
+            stream.write('bottom_panel:tab\tanimation\nbottom_panel:visible\ttrue\nbottom_panel:height\t300\n')
     env = {key: value for key, value in os.environ.items() if not key.startswith('CUEMOL_')}
     env.update(CUEMOL_CONFIG_DIR=str(config), CUEMOL_CACHE_DIR=str(work / 'cache'))
 
@@ -231,6 +235,63 @@ def main():
             def input_focused(box):
                 pixels = capture().crop(box).getdata()
                 return sum(b - r > 30 and g - r > 10 for r, g, b in pixels) > 100
+
+            if args.animation_timeline_only:
+                primary = 'command' if sys.platform == 'darwin' else 'ctrl'
+                for name in ['base', 'child', 'last']:
+                    call('add_anim', {'type': 'spin', 'name': name})
+                call('clear_undo')
+                object_id = state['objects'][0]['id']
+                call('rename_node', {'nodeType': 'object', 'nodeId': object_id, 'name': 'Redo anchor'})
+                call('undo')
+
+                def first_strip():
+                    image = capture()
+                    matches = []
+                    for row in range(height // 2, height - 20):
+                        for column in range(300, width):
+                            pixel = image.getpixel((column, row))
+                            if all(abs(a - b) <= 2 for a, b in zip(pixel, (47, 125, 138))):
+                                matches.append((column, row))
+                        if matches and row > matches[0][1] + 20:
+                            break
+                    if not matches:
+                        return None
+                    top = matches[0][1]
+                    band = [(column, row) for column, row in matches if row < top + 18]
+                    left, right = min(p[0] for p in band), max(p[0] for p in band)
+                    bottom = max(p[1] for p in band)
+                    return left, top, right, bottom
+
+                def drag_strip(distance):
+                    left, top, right, bottom = wait_for(first_strip)
+                    move_pointer_and_wait((left + right) / 2, (top + bottom) / 2)
+                    pyautogui.mouseDown()
+                    pyautogui.moveRel(distance, 0, duration=0.4)
+                    time.sleep(0.2)
+
+                drag_strip(30)
+                if call('list_anims')['elements'][0]['startMs'] != 0:
+                    raise RuntimeError('A strip drag changed the scene before release')
+                capture('animation-strip-preview.png')
+                pyautogui.press('escape')
+                pyautogui.mouseUp()
+                call('redo')
+                if call('get_scene_state')['objects'][0]['name'] != 'Redo anchor':
+                    raise RuntimeError('Cancelling the strip drag discarded redo')
+                call('undo')
+                drag_strip(30)
+                pyautogui.mouseUp()
+                wait_for(lambda: call('list_anims')['elements'][0]['startMs'] == 300)
+                pyautogui.hotkey(primary, 'z')
+                wait_for(lambda: call('list_anims')['elements'][0]['startMs'] == 0)
+                pyautogui.hotkey(primary, 'shift', 'z')
+                wait_for(lambda: call('list_anims')['elements'][0]['startMs'] == 300)
+                capture('animation-strip-redo.png')
+                report.update(ok=True, animation_strip=True, abort_preserves_redo=True,
+                              animation_single_undo=True, start_before_ms=0, start_after_ms=300)
+                print(json.dumps(report), flush=True)
+                return
 
             if args.inspector_preview_only:
                 primary = 'command' if sys.platform == 'darwin' else 'ctrl'

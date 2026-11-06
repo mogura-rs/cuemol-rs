@@ -1462,6 +1462,8 @@ struct GuiApplication {
     /// Renderer chosen independently in the Density map panel.
     densitymap_target: Option<(cuemol_core::Uid, cuemol_core::Uid)>,
     density_panel: cuemol_ui::density::DensityPanel,
+    animation_panel: cuemol_ui::animation::TimelinePanel,
+    animation_inspector: cuemol_ui::animation::ElementInspector,
     /// Relative degree accumulators shown by the View panel rotation fake-dials.
     view_rotation_delta: Vec3,
     /// Molecular-surface (SES) display: the toggle + a cached mesh (the SES is
@@ -4946,6 +4948,8 @@ impl GuiApplication {
             density_solid_mesh: None,
             densitymap_target: None,
             density_panel: Default::default(),
+            animation_panel: Default::default(),
+            animation_inspector: Default::default(),
             view_rotation_delta: Vec3::ZERO,
             show_surface: false,
             surface_mesh: None,
@@ -6402,7 +6406,10 @@ impl GuiApplication {
             LeftPanel::Symmetry => self.symmetry_section(ui, camera),
             LeftPanel::DensityMap => self.densitymap_section(ui, camera),
             LeftPanel::View => self.view_section(ui, camera),
-            LeftPanel::Animation => self.animation_section(ui, camera),
+            LeftPanel::Animation => {
+                self.animation_playback_controls(ui, camera);
+                self.animation_section(ui, camera);
+            }
         }
         match panel {
             LeftPanel::Workspace => self
@@ -13770,6 +13777,26 @@ impl GuiApplication {
         Ok(())
     }
 
+    fn animation_timeline_section(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
+        let previous = self.animation_panel.selected;
+        let output = self
+            .animation_panel
+            .show_state(ui, &self.state, self.snapshot_revision);
+        for (tool, args) in output.commands {
+            self.tritium_command(tool, args, camera);
+        }
+        if previous != self.animation_panel.selected || output.inspect.is_some() {
+            self.inspector_context =
+                self.animation_panel
+                    .selected
+                    .map(|uid| cuemol_ui::InspectorTarget {
+                        kind: "animation".into(),
+                        id: Some(uid),
+                    });
+            self.animation_inspector.visible = self.animation_panel.selected.is_some();
+        }
+    }
+
     /// Animation panel backed by the active scene's serialized `AnimMgr`.
     fn animation_section(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
         let animation = self.active_animation_manager().unwrap_or_default();
@@ -14210,7 +14237,7 @@ impl GuiApplication {
                     egui::Layout::top_down(egui::Align::LEFT),
                     |ui| match self.bottom_tab {
                         BottomTab::Output | BottomTab::Console => self.output_tab(ui),
-                        BottomTab::Animation => self.animation_section(ui, camera),
+                        BottomTab::Animation => self.animation_timeline_section(ui, camera),
                         BottomTab::Sequence => self.sequence_tab(ui, camera),
                         BottomTab::Trajectory => self.trajectory_tab(ui),
                     },
@@ -40943,6 +40970,93 @@ mod tests {
                 .rel_start(),
             1_000_000
         );
+    }
+
+    #[test]
+    fn native_animation_strip_drag_records_one_undo_step_and_preserves_selection() {
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        for _ in 0..2 {
+            app.add_animation_motion(AnimKind::Pause, &mut camera)
+                .unwrap();
+        }
+        let id = app.active_animation_manager().unwrap().motions()[0]
+            .base()
+            .uid()
+            .get();
+        app.undo_stack.clear();
+        app.redo_stack.clear();
+        let ctx = egui::Context::default();
+        let mut frame = 0;
+        let mut draw = |app: &mut GuiApplication, camera: &mut CameraController, events| {
+            frame += 1;
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1000., 400.),
+                    )),
+                    time: Some(frame as f64 / 60.),
+                    events,
+                    focused: true,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default()
+                        .show(ctx, |ui| app.animation_timeline_section(ui, camera));
+                },
+            );
+        };
+        draw(&mut app, &mut camera, vec![]);
+        draw(&mut app, &mut camera, vec![]);
+        let [x, y, w, h] = app.animation_panel.rects[&format!("Animation strip {id}")];
+        let origin = egui::pos2(x + w / 2., y + h / 2.);
+        let event = |pos, pressed| {
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                },
+            ]
+        };
+        draw(&mut app, &mut camera, event(origin, true));
+        draw(
+            &mut app,
+            &mut camera,
+            vec![egui::Event::PointerMoved(origin + egui::vec2(40., 0.))],
+        );
+        assert!(app.undo_stack.is_empty());
+        draw(
+            &mut app,
+            &mut camera,
+            event(origin + egui::vec2(40., 0.), false),
+        );
+        assert_eq!(app.undo_stack.len(), 1);
+        assert_eq!(
+            app.active_animation_manager().unwrap().motions()[0]
+                .base()
+                .rel_start(),
+            400_000_000
+        );
+        assert_eq!(app.inspector_context.as_ref().unwrap().id, Some(id));
+        app.undo(&mut camera);
+        assert_eq!(
+            app.active_animation_manager().unwrap().motions()[0]
+                .base()
+                .rel_start(),
+            0
+        );
+        app.redo(&mut camera);
+        assert_eq!(
+            app.active_animation_manager().unwrap().motions()[0]
+                .base()
+                .rel_start(),
+            400_000_000
+        );
+        assert_eq!(app.animation_panel.selected, Some(id));
     }
 
     #[test]

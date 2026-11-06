@@ -282,3 +282,48 @@ fn animation_timing_writes_round_like_the_reference_editor() {
     assert_eq!(timeline["elements"][0]["endMs"], 2000.);
     assert_eq!(timeline["elements"][1]["absStartMs"], 2000.);
 }
+
+#[test]
+fn signed_animation_offsets_and_typed_spin_axes_match_reference_commands() {
+    let (mut state, mut camera) = fixture();
+    call(
+        &mut state,
+        &mut camera,
+        "set_anim_time",
+        json!({"element":"child","startMs":-250,"endMs":750}),
+    );
+    let timeline = call(&mut state, &mut camera, "list_anims", json!({}));
+    assert_eq!(timeline["elements"][1]["absStartMs"], 750.);
+    call(
+        &mut state,
+        &mut camera,
+        "add_anim",
+        json!({"type":"spin","name":"spin"}),
+    );
+    call(
+        &mut state,
+        &mut camera,
+        "set_anim_prop",
+        json!({"element":"spin","prop":"axis","value":"1 0 0"}),
+    );
+    let manager = state
+        .scene_animation(state.active_scene().unwrap())
+        .unwrap()
+        .unwrap();
+    let spin = manager
+        .motions()
+        .iter()
+        .find(|motion| motion.base().name() == "spin")
+        .unwrap();
+    let detail = cuemol_command::animation_element_detail(&state, spin.base().uid().get()).unwrap();
+    assert_eq!(detail["properties"]["axis"], "(1,0,0)");
+    let before = state.clone();
+    assert!(call_tool(
+        &mut state,
+        &mut camera,
+        "set_anim_prop",
+        &json!({"element":"spin","prop":"axis","value":"1 NaN 0"})
+    )
+    .is_err());
+    assert!(before.same_undo_state(&state));
+}

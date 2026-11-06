@@ -42,6 +42,15 @@ builds can set `SOURCE_DATE_EPOCH` to control the reported UTC build time.
 
 ### Animation references
 
+The default native window and browser show animation elements as strips in the
+bottom Animation tab. Drag a strip to move it, or drag an edge to resize it.
+The ruler and current-time field scrub the playhead. These gestures preview
+locally and commit once on release; Escape cancels them. Fit and the zoom
+buttons change the time scale. Select a channel or strip to open its Inspector,
+which includes common and type-specific properties, target choices and a
+Generic tab. Add inserts after the selection; Delete retains the next available
+selection, and the arrow buttons reorder the selected element.
+
 Animation elements can start relative to another element's end. Renaming the
 reference updates its dependent elements, and deleting it keeps their current
 absolute times. Changing a reference preserves the span unless it must move

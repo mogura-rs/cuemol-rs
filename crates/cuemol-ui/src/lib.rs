@@ -61,3 +61,6 @@ mod numeric;
 
 #[cfg(feature = "egui")]
 pub mod density;
+
+#[cfg(feature = "egui")]
+pub mod animation;
