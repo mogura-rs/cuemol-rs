@@ -43,6 +43,7 @@ async function openShell(page, storage = {}, options = {}) {
       canUndo: false, canRedo: false, undoDescriptions: [], redoDescriptions: [], openedPaths: [],
       materialNames: [], logLines: [], status: 'Ready',
     };
+    if(options.cameras) snapshot.cameras=['front','__current','back'].map(name=>({sceneUid:1,name,source:name==='front'?'front.cam':'',visibilityCount:name==='front'?2:0}));
     if (options.density) {
       scene.mapCount=1;
       const specific={color:'blue',colormode:'solid',use_abslevel:'false',siglevel:'1.1',siglevel_effective:'1.1',level:'0.183',ui_level_min:'-10',ui_level_max:'10',ui_abslevel_min:'0',ui_abslevel_max:'1',extent:'15',maxExtent:'50',map_type_resolved:'xtal',region_mode_resolved:'box'};
@@ -124,6 +125,27 @@ async function openShell(page, storage = {}, options = {}) {
       window.__shellCalls.push({command, args});
       if (command === 'get_initial_state') return {snapshot, viewport, preferences: {}, startupPathsPending: false};
       if (command === 'get_snapshot') return snapshot;
+      if(options.cameras && command==='create_camera') {
+        const name=args.name.trim();
+        if(!snapshot.cameras.some(camera=>camera.name===name))snapshot.cameras.push({sceneUid:1,name,source:'',visibilityCount:0});
+        return structuredClone(snapshot);
+      }
+      if(options.cameras && command==='inspector_request' && ['save_camera','apply_camera','delete_camera','rename_camera','move_camera','clear_camera_visibility'].includes(args.tool)) {
+        const request=args.args;
+        if(request.sceneId!==snapshot.activeSceneUid)throw new Error('Scene changed');
+        const camera=snapshot.cameras.find(camera=>camera.name===request.name);
+        if(!camera)throw new Error('Camera not found');
+        if(args.tool==='save_camera')camera.visibilityCount=request.withVisibility?2:0;
+        if(args.tool==='clear_camera_visibility')camera.visibilityCount=0;
+        if(args.tool==='rename_camera')camera.name=request.newName;
+        if(args.tool==='delete_camera')snapshot.cameras=snapshot.cameras.filter(item=>item!==camera);
+        if(args.tool==='move_camera'){
+          const cameras=snapshot.cameras.slice().sort((a,b)=>Number(b.name==='__current')-Number(a.name==='__current'));
+          const from=cameras.indexOf(camera);cameras.splice(from,1);cameras.splice(Math.max(1,request.to-1),0,camera);snapshot.cameras=cameras;
+        }
+        return {snapshot:structuredClone(snapshot)};
+      }
+
       if (command === 'get_application_info') return {
         productName: 'cuemol-rs', version: 'test-version', target: 'test-target', features: [], plugins: [], config: [],
         aboutRows: [['Version', 'test-version'], ['Commit', 'abc123'], ['Date', '2026-11-01T00:00:00Z'], ['Rust', 'rustc test'], ['wgpu', 'test-wgpu'], ['Tauri', 'test-tauri'], ['OS', 'test-os']],
@@ -1909,5 +1931,33 @@ test('Tauri symmetry ignores stale space-group responses',async({page})=>{
   await expect(dialog.getByLabel('Space Group Number',{exact:true})).toHaveValue('195');
   await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
   expect(await page.evaluate(()=>window.__shellCalls.filter(item=>item.command==='change_crystal_info'))).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test('Tauri saved camera pane selects, applies, renames and reorders',async({page},testInfo)=>{
+  const errors=await openShell(page,{'cuemol3.shell.v1':JSON.stringify({activity:'view'})},{cameras:true});
+  const list=page.getByRole('listbox',{name:'Saved cameras',exact:true});
+  const rows=list.getByRole('option');
+  await expect(rows).toHaveCount(3);await expect(rows.first()).toHaveAttribute('data-camera-name','__current');
+  const front=rows.filter({hasText:'front'});
+  await front.click();await expect(front).toHaveAttribute('aria-selected','true');
+  expect(await page.evaluate(()=>window.__shellCalls.filter(call=>call.args?.tool==='apply_camera'))).toHaveLength(0);
+  await page.getByRole('button',{name:'Apply to view',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>window.__shellCalls.filter(call=>call.args?.tool==='apply_camera').at(-1)?.args.args.withVisibility)).toBe(false);
+  await front.dblclick();
+  await expect.poll(()=>page.evaluate(()=>window.__shellCalls.filter(call=>call.args?.tool==='apply_camera').at(-1)?.args.args.withVisibility)).toBe(true);
+  await page.getByRole('button',{name:'Save from view',exact:true}).click();
+  await expect(front.locator('[title="Has saved show/hide state"]')).toHaveCount(0);
+  await page.getByRole('button',{name:'Save from view with show/hide',exact:true}).click();
+  await expect(front.locator('[title="Has saved show/hide state"]')).toHaveCount(1);
+  await front.click();await page.keyboard.press('ArrowDown');await page.keyboard.press('F2');
+  await page.getByRole('textbox',{name:'Camera name',exact:true}).fill('renamed');await page.keyboard.press('Enter');
+  await expect(rows.filter({hasText:'renamed'})).toHaveCount(1);
+  await rows.filter({hasText:'renamed'}).dragTo(rows.first(),{targetPosition:{x:40,y:2}});
+  await expect(rows.nth(1)).toHaveAttribute('data-camera-name','renamed');
+  await rows.filter({hasText:'front'}).click({button:'right'});
+  await expect(page.getByRole('menuitem',{name:'Rename...',exact:true})).toBeVisible();
+  await page.keyboard.press('Escape');
+  await page.screenshot({path:testInfo.outputPath('tauri-camera-pane.png')});
   expect(errors).toEqual([]);
 });

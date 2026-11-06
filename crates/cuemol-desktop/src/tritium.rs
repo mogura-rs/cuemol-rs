@@ -1,5 +1,6 @@
 use super::*;
 use cuemol_ui::shell::{self, Activity, Icon};
+#[cfg(test)]
 use serde_json::json;
 
 impl GuiApplication {
@@ -27,12 +28,15 @@ impl GuiApplication {
         }
         self.density_panel.rects.clear();
         self.symmetry_panel.rects.clear();
+        self.camera_panel.rects.clear();
         if self.show_workspace {
             self.tritium_sidebar(ctx, camera);
         }
         for (tool, args) in self.symmetry_panel.dialog(ctx, &self.state) {
             self.tritium_command(tool, args, camera);
         }
+        let camera_actions = self.camera_panel.dialog(ctx, &self.state);
+        self.camera_panel_actions(ctx, camera_actions, camera);
         if self.density_panel.rects.is_empty() {
             for (tool, args) in self.density_panel.cancel() {
                 self.tritium_command(tool, args, camera);
@@ -266,35 +270,76 @@ impl GuiApplication {
         }
     }
     fn camera_sidebar(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
+        let actions = self.camera_panel.show(ui, &self.state);
+        self.camera_panel_actions(ui.ctx(), actions, camera);
+        self.clipboard_focus
+            .region(cuemol_ui::clipboard::Scope::Cameras, ui);
+    }
+    fn camera_panel_actions(
+        &mut self,
+        ctx: &egui::Context,
+        actions: Vec<cuemol_ui::camera::Intent>,
+        camera: &mut CameraController,
+    ) {
+        use cuemol_ui::camera::Intent;
+        if actions.is_empty() && self.camera_panel.rects.is_empty() {
+            return;
+        }
         let Some(scene) = self.state.active_scene() else {
             return;
         };
-        for (camera_index, saved) in self.state.camera_summaries(scene).into_iter().enumerate() {
-            ui.horizontal(|ui| {
-                let response = ui.selectable_label(matches!(self.workspace_aux_selection, Some(WorkspaceAuxSelection::Camera { scene_uid, camera_index: index }) if scene_uid == scene && index == camera_index), &saved.name);
-                if response.clicked() {
-                    self.apply_workspace_target(NativeWorkspaceTarget::Camera { scene_uid: scene, camera_index });
+        for action in actions {
+            self.select_camera_panel_row(scene);
+            let selection = self.workspace_aux_selection;
+            match action {
+                Intent::Command(tool, args) => self.tritium_command(tool, args, camera),
+                Intent::Clipboard(action) => {
+                    self.clipboard_focus.scope = Some(cuemol_ui::clipboard::Scope::Cameras);
+                    self.clipboard_focus.text = None;
+                    self.clipboard_action(ctx, action);
                 }
-                if response.double_clicked() {
-                    self.tritium_command("apply_camera", json!({"name":saved.name}), camera);
+                Intent::Load => {
+                    self.choose_load_workspace_camera_file(scene, camera);
+                    if let Some(saved) = self
+                        .workspace_aux_selection
+                        .and_then(|selection| self.camera_summary_for_selection(selection))
+                    {
+                        self.camera_panel.selected = Some(saved.name);
+                    }
                 }
-                if ui.small_button("Apply").clicked() {
-                    self.tritium_command("apply_camera", json!({"name":saved.name}), camera);
+                Intent::SaveFile(save_as) => {
+                    if let Some(selection) = selection {
+                        self.choose_save_workspace_camera_file(selection, save_as);
+                    }
                 }
-                if ui
-                    .small_button("×")
-                    .on_hover_text("Delete camera")
-                    .clicked()
-                {
-                    self.delete_workspace_camera(scene, &saved.name);
+                Intent::Reload => {
+                    if let Some(selection) = selection {
+                        self.reload_workspace_camera_file(selection);
+                    }
                 }
+            }
+        }
+        self.select_camera_panel_row(scene);
+    }
+    fn select_camera_panel_row(&mut self, scene: cuemol_core::Uid) {
+        if let Some(index) = self
+            .state
+            .camera_summaries(scene)
+            .iter()
+            .position(|camera| self.camera_panel.selected.as_ref() == Some(&camera.name))
+        {
+            self.workspace_aux_selection = Some(WorkspaceAuxSelection::Camera {
+                scene_uid: scene,
+                camera_index: index,
             });
+            self.selected_object = None;
+            self.selected_renderer = None;
+        } else if matches!(
+            self.workspace_aux_selection,
+            Some(WorkspaceAuxSelection::Camera { .. })
+        ) {
+            self.workspace_aux_selection = None;
         }
-        if ui.button("Save current camera…").clicked() {
-            self.open_new_camera_dialog(scene, camera);
-        }
-        self.clipboard_focus
-            .region(cuemol_ui::clipboard::Scope::Cameras, ui);
     }
     fn action_sidebar(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
         let done: Vec<_> = self
@@ -404,10 +449,9 @@ impl GuiApplication {
         });
         match cuemol_command::call_tool(&mut self.state, &mut view, name, &args) {
             Ok(_) => {
-                if let Some(undo) = undo.filter(|before| {
-                    !before.state.same_undo_state(&self.state)
-                        || before.camera.as_ref() != Some(&view)
-                }) {
+                if let Some(undo) =
+                    undo.filter(|before| !before.state.same_scene_undo_state(&self.state))
+                {
                     self.push_undo_snapshot(undo);
                 }
                 *camera = CameraController::from_qsys_camera(&view);
@@ -570,6 +614,81 @@ impl GuiApplication {
 mod tests {
     use super::*;
     use egui_kittest::kittest::Queryable;
+    #[test]
+    fn camera_keyboard_navigation_retains_list_focus_for_rename() {
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.activity = Some(Activity::View);
+        app.show_workspace = true;
+        let scene = app.state.active_scene().unwrap();
+        for name in ["__current", "front", "back"] {
+            let mut saved = cuemol_qsys::Camera::new();
+            saved.set_name(name);
+            app.state.save_scene_camera(scene, saved, false).unwrap();
+        }
+        let ctx = egui::Context::default();
+        let frame = |app: &mut GuiApplication, camera: &mut CameraController, events| {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1024., 768.),
+                    )),
+                    focused: true,
+                    events,
+                    ..Default::default()
+                },
+                |ctx| app.ui(ctx, camera),
+            );
+        };
+        for _ in 0..3 {
+            frame(&mut app, &mut camera, vec![]);
+        }
+        let [x, y, w, h] = app.camera_panel.rects["camera:front"];
+        let pos = egui::pos2(x + w / 2., y + h / 2.);
+        for pressed in [true, false] {
+            frame(
+                &mut app,
+                &mut camera,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    },
+                ],
+            );
+        }
+        for key in [egui::Key::ArrowDown, egui::Key::F2] {
+            frame(
+                &mut app,
+                &mut camera,
+                vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Default::default(),
+                }],
+            );
+            frame(
+                &mut app,
+                &mut camera,
+                vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: false,
+                    repeat: false,
+                    modifiers: Default::default(),
+                }],
+            );
+        }
+        assert_eq!(app.camera_panel.selected.as_deref(), Some("back"));
+        assert!(app.camera_panel.rects.contains_key("Camera rename"));
+    }
+
     #[test]
     fn inspector_view_writes_and_empty_resets_keep_redo() {
         let mut app = GuiApplication::new();

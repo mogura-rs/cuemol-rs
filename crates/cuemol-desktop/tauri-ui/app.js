@@ -10419,6 +10419,7 @@ async function showCameraVisibilityEditor(scene, camera) {
 }
 
 async function openNewCameraFlow() {
+  const sceneUid = snapshot.activeSceneUid;
   const used = new Set(activeCameras().map((camera) => camera.name));
   let index = 0;
   while (used.has(`camera_${index}`)) index += 1;
@@ -10428,7 +10429,7 @@ async function openNewCameraFlow() {
     defaultValue: `camera_${index}`,
     confirmLabel: "Create",
   });
-  if (name === null) return false;
+  if (name === null || snapshot.activeSceneUid !== sceneUid) return false;
   const changed = await mutateWithoutViewport("create_camera", { name }, () => {});
   if (!changed) return false;
   selectedCameraName = name;

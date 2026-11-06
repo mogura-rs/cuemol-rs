@@ -1,5 +1,50 @@
 # Validation evidence
 
+## Saved camera semantics and shared controls
+
+Reproducers showed three discrepancies: plain camera saves retained old
+show/hide flags, applying a saved camera copied its source and flags into the
+live view, and reordering the camera vector was undone by sorting unchanged
+stored order values. The current C++ `Scene::saveViewToCam` and
+`View::setCameraAnim` clear the saved/view flags respectively. The Rust paths
+now follow those rules, preserve an overwritten camera's source and slot, and
+write the new order explicitly. The `__current` row remains pinned. Separate
+replacement/import helpers preserve metadata for properties, rename and files;
+invalid targets and duplicate names fail before changing the scene.
+
+The shared native/browser Camera pane and Tauri shell provide row selection,
+keyboard rename/navigation, drag reordering, four save/apply combinations,
+clipboard actions, properties, show/hide edits and camera-file controls. Plain
+apply no longer creates an undo entry or clears redo in the native window.
+A Linux OS-input failure exposed list focus moving away after Up/Down; a full
+native-layout regression reproduced it. Consuming the list navigation now also
+cancels egui's pending spatial focus move. Rows show camera icons, left-aligned
+names and separate visibility/link badges; save/apply arrows distinguish the
+four operations.
+
+Browser `.cam` imports validate the XML before changing the scene and reject
+late results after cancellation or a scene change. Imports use the same bounded
+history as other file edits. Subsequent shared edits and imports prune file
+handles that are absent from live and undo/redo scenes. Reload uses the tab's previously opened File and
+preserves the current view. Save creates a download. Reading later filesystem
+changes requires opening that file again.
+
+The shared core/command run passed 583 checks with two unrelated optional
+checks ignored. Qsys camera/view coverage passed 146 checks; the shared UI
+passed 50, and the native GUI passed 199, including the keyboard-focus
+regression. The macOS Tauri model passed 173 with five optional cases ignored.
+All 60 affected browser checks passed: four Camera-pane cases and two existing
+camera-history cases across WebGL/WebGPU, plus all 54 Tauri-shell cases. The
+Linux OS-input probe passed navigation retaining redo, visibility undo,
+keyboard rename, pinned ordering and one-step drag undo. Native, Tauri and
+browser screenshots were inspected. Final browser resource-retention changes
+were rebuilt and the two camera-file cases were repeated successfully.
+
+The current reference's `features/camera/cameraOps.ts` comment still says
+`listCameras` excludes `__current`, but its list service and Camera pane include
+that row.
+The implementation follows the service and keeps the row pinned.
+
 ## Shared crystal-symmetry controls
 
 The browser's former command shortcuts now use the same Symmetry pane and cell

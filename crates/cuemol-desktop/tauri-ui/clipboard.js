@@ -14,7 +14,7 @@ function clipboardMenu(element) {
 document.addEventListener("pointerdown", event => {
   if (clipboardMenu(event.target)) return;
   clipboardTextTarget = clipboardEditable(event.target) ? event.target : null;
-  clipboardScope = event.target.closest("#scene-tree") ? "tree"
+  clipboardScope = event.target.closest("#scene-tree, .camera-panel") ? "tree"
     : event.target.closest("#coloring-paint-list") ? "paint"
       : event.target.closest("#action-history-list") ? "actions" : null;
 }, true);

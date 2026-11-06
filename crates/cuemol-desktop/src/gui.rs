@@ -825,7 +825,7 @@ impl NativeRunner {
                 if let Some(undo) = undo {
                     if script_call {
                         app.push_script_undo_snapshot(undo);
-                    } else {
+                    } else if !undo.state.same_scene_undo_state(&app.state) {
                         app.push_undo_snapshot(undo);
                     }
                 }
@@ -1370,6 +1370,7 @@ struct GuiApplication {
     densitymap_target: Option<(cuemol_core::Uid, cuemol_core::Uid)>,
     density_panel: cuemol_ui::density::DensityPanel,
     symmetry_panel: cuemol_ui::symmetry::SymmetryPanel,
+    camera_panel: cuemol_ui::camera::CameraPanel,
     animation_panel: cuemol_ui::animation::TimelinePanel,
     animation_inspector: cuemol_ui::animation::ElementInspector,
     /// Relative degree accumulators shown by the View panel rotation fake-dials.
@@ -4807,6 +4808,7 @@ impl GuiApplication {
             densitymap_target: None,
             density_panel: Default::default(),
             symmetry_panel: Default::default(),
+            camera_panel: Default::default(),
             animation_panel: Default::default(),
             animation_inspector: Default::default(),
             view_rotation_delta: Vec3::ZERO,
@@ -22596,17 +22598,8 @@ impl GuiApplication {
         renamed.set_name(name);
         let undo = self.capture_undo();
         self.state
-            .destroy_scene_camera(draft.scene_uid, &draft.original_name)
+            .replace_scene_camera(draft.scene_uid, &draft.original_name, renamed)
             .map_err(|error| error.to_string())?;
-        if let Err(error) = self
-            .state
-            .save_scene_camera(draft.scene_uid, renamed, false)
-        {
-            let _ = self
-                .state
-                .save_scene_camera(draft.scene_uid, original, false);
-            return Err(error.to_string());
-        }
         self.push_undo_snapshot(undo);
         self.state.mark_scene_modified(draft.scene_uid);
         self.rebuild_snapshot();
@@ -22633,14 +22626,6 @@ impl GuiApplication {
         let name = name.trim();
         if name.is_empty() {
             return Err("camera name is required".to_string());
-        }
-        if self
-            .state
-            .scene_manager()
-            .scene(scene_uid)
-            .is_some_and(|scene| scene.camera_by_name(name).is_some())
-        {
-            return Err(format!("camera already exists: {name}"));
         }
         let undo = self.capture_undo();
         self.state
@@ -24129,20 +24114,19 @@ impl GuiApplication {
                             {
                                 saved.set_source(original.source());
                                 saved.set_alt_source(original.alt_source());
+                                saved.set_ui_order(original.ui_order());
                                 for (uid, visible, is_object) in original.visibility_settings() {
                                     saved.vis_append(uid, visible, is_object);
                                 }
                             }
                         }
                         let undo = self.capture_undo();
-                        if !old_name.is_empty() && old_name != new_name {
-                            self.state
-                                .destroy_scene_camera(scene_uid, &old_name)
-                                .map_err(|error| error.to_string())?;
+                        if old_name.is_empty() {
+                            self.state.save_scene_camera(scene_uid, saved, false)
+                        } else {
+                            self.state.replace_scene_camera(scene_uid, &old_name, saved)
                         }
-                        self.state
-                            .save_scene_camera(scene_uid, saved, false)
-                            .map_err(|error| error.to_string())?;
+                        .map_err(|error| error.to_string())?;
                         self.push_undo_snapshot(undo);
                         self.state.mark_scene_modified(scene_uid);
                         let camera_index = self
@@ -35298,10 +35282,9 @@ mod tests {
                 camera_index: 0,
             })
         );
-        assert_eq!(
-            app.create_workspace_camera(scene_uid, "camera_0", &camera),
-            Err("camera already exists: camera_0".to_string())
-        );
+        app.create_workspace_camera(scene_uid, "camera_0", &camera)
+            .unwrap();
+        assert_eq!(app.state.camera_summaries(scene_uid).len(), 1);
     }
 
     #[test]
@@ -35326,7 +35309,7 @@ mod tests {
         current.set_zoom(64.0);
         let mut camera = CameraController::from_qsys_camera(&current);
         app.save_workspace_camera_from_view(selection, &camera);
-        assert_eq!(app.state.camera_summaries(scene_uid)[0].visibility_count, 2);
+        assert_eq!(app.state.camera_summaries(scene_uid)[0].visibility_count, 0);
         app.state.set_object_visible(object_uid, false).unwrap();
         let undo_count = app.undo_stack.len();
         app.load_workspace_camera_view(selection, &mut camera);
@@ -40136,6 +40119,36 @@ mod tests {
                 .as_deref(),
             Some("true")
         );
+    }
+
+    #[test]
+    fn native_saved_camera_navigation_preserves_redo() {
+        let mut app = GuiApplication::new();
+        let scene = app.state.ensure_active_scene();
+        let mut view = cuemol_qsys::Camera::new();
+        view.set_name("front");
+        view.set_zoom(80.);
+        app.state
+            .save_scene_camera(scene, view.clone(), false)
+            .unwrap();
+        view.set_name("back");
+        app.state.save_scene_camera(scene, view, false).unwrap();
+        let mut camera = CameraController::default();
+        assert!(app.try_tritium_command(
+            "delete_camera",
+            serde_json::json!({"name":"back"}),
+            &mut camera
+        ));
+        app.undo(&mut camera);
+        assert_eq!(app.redo_stack.len(), 1);
+        assert!(app.try_tritium_command(
+            "apply_camera",
+            serde_json::json!({"name":"front"}),
+            &mut camera
+        ));
+        assert_eq!(app.redo_stack.len(), 1);
+        assert!(app.undo_stack.is_empty());
+        assert_eq!(camera.to_qsys_camera("current").zoom(), 80.);
     }
 
     #[test]

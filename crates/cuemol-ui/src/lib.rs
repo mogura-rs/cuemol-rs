@@ -67,3 +67,6 @@ pub mod symmetry;
 
 #[cfg(feature = "egui")]
 pub mod animation;
+
+#[cfg(feature = "egui")]
+pub mod camera;

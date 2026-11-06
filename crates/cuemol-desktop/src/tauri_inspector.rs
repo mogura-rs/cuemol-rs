@@ -59,18 +59,29 @@ impl AppModel {
                 | "set_anim_generic_prop"
                 | "reset_anim_prop"
         );
-        if animation && args["sceneId"].as_u64() != self.desktop.active_scene().map(|sid| sid.get())
+        let saved_camera = matches!(
+            tool,
+            "save_camera"
+                | "apply_camera"
+                | "delete_camera"
+                | "rename_camera"
+                | "move_camera"
+                | "clear_camera_visibility"
+        );
+        let contextual = animation || saved_camera;
+        if contextual
+            && args["sceneId"].as_u64() != self.desktop.active_scene().map(|sid| sid.get())
         {
             return Err("The inspected scene changed".into());
         }
         let mut command_args = args.clone();
-        if animation {
+        if contextual {
             command_args
                 .as_object_mut()
                 .ok_or("Inspector arguments must be an object")?
                 .remove("sceneId");
         }
-        let args = if animation { &command_args } else { args };
+        let args = if contextual { &command_args } else { args };
         if tool == "style_edit" {
             return self.style_edit_request(args);
         }
@@ -96,7 +107,7 @@ impl AppModel {
             self.invalidate_snapshot(false);
             return Ok(json!({"snapshot":self.snapshot()}));
         }
-        if !animation
+        if !contextual
             && !matches!(
                 tool,
                 "list_node_props" | "set_node_prop" | "set_node_props" | "reset_node_props"
@@ -122,7 +133,9 @@ impl AppModel {
         self.sync_active_scene_properties();
         let changed = !before.desktop.same_undo_state(&self.desktop);
         if changed || !cuemol_command::console::same_camera_view(&before.camera, &self.camera) {
-            self.status = if tool == "reset_node_props" {
+            self.status = if saved_camera {
+                format!("Camera: {}", args["name"].as_str().unwrap_or(""))
+            } else if tool == "reset_node_props" {
                 "Reset properties".into()
             } else {
                 format!("Change property: {}", args["prop"].as_str().unwrap_or(""))

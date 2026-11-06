@@ -232,7 +232,10 @@ impl App {
                             self.open_properties("renderer", Some(id.get()));
                         }
                     }
-                    GuiPastedNode::Camera(name) => self.clipboard_camera = Some(name),
+                    GuiPastedNode::Camera(name) => {
+                        self.camera_panel.selected = Some(name.clone());
+                        self.clipboard_camera = Some(name);
+                    }
                     GuiPastedNode::Style { .. } => {}
                 }
                 self.message = format!("Pasted {}", payload.kind);

@@ -1,5 +1,6 @@
 #![cfg(target_arch = "wasm32")]
 mod actions;
+mod camera;
 mod clipboard;
 mod console;
 mod input;
@@ -62,6 +63,7 @@ enum Event {
     ),
     ImportActions(String, String),
     Source(web_sys::File),
+    CameraFile(u64, web_sys::File, String, Option<String>),
     SourceFinished(u64),
     SourceError(u64, String),
     Prepared(u64, String, cuemol_desktop_core::PreparedFile),
@@ -232,6 +234,8 @@ struct App {
     inspector: cuemol_ui::Inspector,
     density_panel: cuemol_ui::density::DensityPanel,
     symmetry_panel: cuemol_ui::symmetry::SymmetryPanel,
+    camera_panel: cuemol_ui::camera::CameraPanel,
+    camera_files: BTreeMap<(Uid, String), web_sys::File>,
     animation_panel: cuemol_ui::animation::TimelinePanel,
     animation_inspector: cuemol_ui::animation::ElementInspector,
     navigation: Navigation,
@@ -408,6 +412,8 @@ impl App {
             inspector: Default::default(),
             density_panel: Default::default(),
             symmetry_panel: Default::default(),
+            camera_panel: Default::default(),
+            camera_files: Default::default(),
             animation_panel: Default::default(),
             animation_inspector: Default::default(),
             navigation: Navigation::default(),
@@ -750,6 +756,9 @@ impl App {
                 if cuemol_command::selection::remember_property_edit(&mut self.state, name, &args) {
                     self.persist_selection_history();
                 }
+                if mutating {
+                    self.prune_camera_files();
+                }
                 true
             }
             Err(e) => {
@@ -871,6 +880,11 @@ impl App {
                             self.source_queue.clear();
                         }
                         self.message = error;
+                    }
+                }
+                Event::CameraFile(generation, file, xml, replace) => {
+                    if self.current_source(generation) {
+                        self.apply_camera_file(file, &xml, replace.as_deref());
                     }
                 }
                 Event::Prepared(generation, name, file) => {

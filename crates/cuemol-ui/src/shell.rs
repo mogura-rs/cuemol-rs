@@ -56,6 +56,10 @@ impl Activity {
 pub enum Icon {
     Explorer,
     Camera,
+    SavedCamera,
+    CameraSave(bool),
+    CameraApply(bool),
+    Link,
     Selection,
     Crystal,
     History,
@@ -368,9 +372,45 @@ pub fn configure_fonts(fonts: &mut egui::FontDefinitions) {
 
 pub fn paint_icon(ui: &Ui, icon: Icon, rect: Rect, color: Color32) {
     use egui_phosphor::regular as glyph;
+    if let Icon::CameraSave(filled) | Icon::CameraApply(filled) = icon {
+        let point = |x: f32, y: f32| {
+            let y = if matches!(icon, Icon::CameraApply(_)) {
+                24. - y
+            } else {
+                y
+            };
+            rect.min + egui::vec2(x * rect.width() / 24., y * rect.height() / 24.)
+        };
+        let stroke = egui::Stroke::new(1.5, color);
+        ui.painter()
+            .line_segment([point(4., 21.), point(20., 21.)], stroke);
+        if filled {
+            ui.painter().rect_filled(
+                egui::Rect::from_two_pos(point(10., 3.), point(14., 12.)),
+                0.,
+                color,
+            );
+            ui.painter().add(egui::Shape::convex_polygon(
+                vec![point(19., 12.), point(12., 19.), point(5., 12.)],
+                color,
+                egui::Stroke::NONE,
+            ));
+        } else {
+            ui.painter()
+                .line_segment([point(12., 3.), point(12., 18.)], stroke);
+            ui.painter()
+                .line_segment([point(5., 11.), point(12., 18.)], stroke);
+            ui.painter()
+                .line_segment([point(19., 11.), point(12., 18.)], stroke);
+        }
+        return;
+    }
     let text = match icon {
         Icon::Explorer => glyph::TREE_STRUCTURE,
         Icon::Camera => glyph::BINOCULARS,
+        Icon::SavedCamera => glyph::CAMERA,
+        Icon::Link => glyph::LINK,
+        Icon::CameraSave(_) | Icon::CameraApply(_) => unreachable!(),
         Icon::Selection => glyph::SELECTION,
         Icon::Crystal => glyph::CUBE,
         Icon::History => glyph::SCROLL,

@@ -40,6 +40,28 @@ release; browser and Tauri builds also include the browser or WebView user agent
 Builds without Git metadata display `unavailable` for the commit. Reproducible
 builds can set `SOURCE_DATE_EPOCH` to control the reported UTC build time.
 
+### Saved cameras
+
+The View activity contains the Camera pane. Select a row, then use the down-arrow
+buttons to save the current view or the up-arrow buttons to apply it. Filled
+arrows include object/renderer show/hide flags. A plain save replaces any stored
+flags with an empty set, while a plain apply leaves the scene's visibility alone.
+Double-click applies the view and its saved flags. View-only navigation preserves
+undo/redo; visibility changes are ordinary scene edits.
+
+Use New to capture a named view, F2 to rename, and Delete to remove the selected
+camera. Creating a name that already exists overwrites that camera while keeping
+its file link and display position. Up/Down and Home/End select rows; drag rows to
+reorder them. The scene-opening camera, `__current`, remains at the top. Its row
+can still be selected, edited or deleted. Camera properties and show/hide editing
+are available from the context menu, together with Cut, Copy and Paste.
+
+The Camera file submenu loads, reloads and saves `.cam` documents. Native reload
+reads the linked file; browser reload uses the File already opened in that tab.
+Browser Save and Save as both create downloads and do not overwrite local files.
+To read changed file contents in a browser, open the file again. Camera names,
+links, order and show/hide flags survive scene saves and ordinary camera edits.
+
 ### Animation references
 
 The native, Tauri and browser windows show animation elements as strips in the

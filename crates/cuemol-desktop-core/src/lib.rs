@@ -3450,7 +3450,11 @@ impl DesktopAppState {
                         source: camera.source().to_string(),
                         visibility_count: camera.visibility_size(),
                     })
-                    .collect()
+                    .collect::<Vec<_>>()
+            })
+            .map(|mut cameras| {
+                cameras.sort_by_key(|camera| camera.name != "__current");
+                cameras
             })
             .unwrap_or_default()
     }
@@ -3489,29 +3493,16 @@ impl DesktopAppState {
             .scene_manager_mut()
             .scene_mut(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
-        let preserved_visibility = if save_visibility {
-            None
-        } else {
-            scene.camera_by_name(&name).map(|existing| {
-                existing
-                    .visibility_settings()
-                    .collect::<Vec<(u64, bool, bool)>>()
-            })
-        };
         if let Some(existing) = scene.camera_by_name(&name) {
             camera.set_source(existing.source());
             camera.set_alt_source(existing.alt_source());
         }
         camera.set_name(name);
+        camera.set_ui_order(-1);
+        camera.clear_visibility_settings();
         if let Some(visibility_settings) = visibility_settings {
-            camera.clear_visibility_settings();
             for (target_uid, visible, is_object) in visibility_settings {
                 camera.vis_append(target_uid.get(), visible, is_object);
-            }
-        } else if let Some(preserved_visibility) = preserved_visibility {
-            camera.clear_visibility_settings();
-            for (target_uid, visible, is_object) in preserved_visibility {
-                camera.vis_append(target_uid, visible, is_object);
             }
         }
         scene.set_camera(camera);
@@ -3528,14 +3519,42 @@ impl DesktopAppState {
             .scene_manager()
             .scene(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
-        let camera = camera
+        let mut camera = camera
             .camera_by_name(name)
             .cloned()
             .ok_or_else(|| CueMolError::NotFound(format!("camera {name}")))?;
         if load_visibility {
             self.apply_scene_visibility_settings(scene_uid, camera.visibility_settings())?;
         }
+        camera.set_source("");
+        camera.clear_visibility_settings();
         Ok(camera)
+    }
+
+    /// Replace a named camera without discarding its supplied metadata.
+    pub fn replace_scene_camera(
+        &mut self,
+        scene_uid: Uid,
+        old_name: &str,
+        mut camera: cuemol_qsys::Camera,
+    ) -> Result<()> {
+        let name = camera.name().trim().to_string();
+        let scene = self
+            .scene_manager_mut()
+            .scene_mut(scene_uid)
+            .ok_or_else(|| CueMolError::not_found("scene"))?;
+        if scene.camera_by_name(old_name).is_none() {
+            return Err(CueMolError::not_found("camera"));
+        }
+        if name.is_empty() || (name != old_name && scene.camera_by_name(&name).is_some()) {
+            return Err(CueMolError::invalid_argument(
+                "camera name is empty or already used",
+            ));
+        }
+        camera.set_name(name);
+        scene.destroy_camera(old_name);
+        scene.set_camera(camera);
+        Ok(())
     }
 
     pub fn save_scene_camera_file(
@@ -3569,17 +3588,37 @@ impl DesktopAppState {
         let path = path.as_ref();
         let resolved_path = self.resolve_scene_path(scene_uid, path)?;
         let xml = fs::read_to_string(&resolved_path)?;
-        let mut camera = self.parse_scene_camera_xml(scene_uid, &xml)?;
-        camera.set_source(resolved_path.to_string_lossy());
+        self.import_scene_camera_xml(scene_uid, &resolved_path.to_string_lossy(), &xml, None)
+    }
+
+    /// Import a camera document or replace a previously imported camera.
+    pub fn import_scene_camera_xml(
+        &mut self,
+        scene_uid: Uid,
+        source: &str,
+        xml: &str,
+        replace: Option<&str>,
+    ) -> Result<String> {
+        let mut camera = self.parse_scene_camera_xml(scene_uid, xml)?;
+        camera.set_source(source);
         let source_name = if camera.name().trim().is_empty() {
-            default_object_name(&resolved_path)
+            default_object_name(Path::new(source))
         } else {
             camera.name().to_string()
         };
         let scene = self
             .scene_manager_mut()
             .scene_mut(scene_uid)
-            .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
+            .ok_or_else(|| CueMolError::not_found("scene"))?;
+        if let Some(name) = replace {
+            let previous = scene
+                .camera_by_name(name)
+                .ok_or_else(|| CueMolError::not_found("camera"))?;
+            camera.set_name(name);
+            camera.set_ui_order(previous.ui_order());
+            scene.set_camera(camera);
+            return Ok(name.into());
+        }
         let name = if scene.camera_by_name(&source_name).is_none() {
             source_name
         } else {
@@ -3589,6 +3628,7 @@ impl DesktopAppState {
                 .expect("the camera name suffix space is inexhaustible")
         };
         camera.set_name(&name);
+        camera.set_ui_order(-1);
         scene.set_camera(camera);
         Ok(name)
     }
@@ -3634,7 +3674,7 @@ impl DesktopAppState {
         })
     }
 
-    fn scene_camera_xml(&self, scene_uid: Uid, name: &str) -> Result<String> {
+    pub fn scene_camera_xml(&self, scene_uid: Uid, name: &str) -> Result<String> {
         let scene = self
             .scene_manager()
             .scene(scene_uid)
@@ -72982,7 +73022,10 @@ attribute \"dep\" string \"positions\"
         let mut view_only = cuemol_qsys::Camera::new();
         view_only.set_name("camera_0");
         view_only.set_zoom(76.0);
-        app.save_scene_camera(scene_uid, view_only, false).unwrap();
+        app.save_scene_camera(scene_uid, view_only.clone(), false)
+            .unwrap();
+        assert_eq!(app.camera_summaries(scene_uid)[0].visibility_count, 0);
+        app.save_scene_camera(scene_uid, view_only, true).unwrap();
         assert_eq!(app.camera_summaries(scene_uid)[0].visibility_count, 6);
 
         let object = app

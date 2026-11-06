@@ -340,6 +340,7 @@ impl GuiApplication {
                 }
             }
             GuiPastedNode::Camera(name) => {
+                self.camera_panel.selected = Some(name.clone());
                 if let Some(camera_index) = self
                     .state
                     .camera_summaries(scene)

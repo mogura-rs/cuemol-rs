@@ -516,6 +516,8 @@ impl View {
 
     pub fn set_camera(&mut self, camera: &Camera) {
         self.camera_template = camera.clone();
+        self.camera_template.set_source("");
+        self.camera_template.clear_visibility_settings();
         self.name = camera.name().to_string();
         self.zoom = camera.zoom();
         self.view_dist = camera.cam_dist();
@@ -1667,11 +1669,9 @@ mod tests {
         assert_eq!(out.cam_dist(), 300.0);
         let copied = view.camera();
         assert_eq!(copied.ui_order(), 7);
-        assert_eq!(copied.source(), "saved.cam");
-        assert_eq!(
-            copied.visibility_settings().collect::<Vec<_>>(),
-            camera.visibility_settings().collect::<Vec<_>>()
-        );
+        assert_eq!(copied.source(), "");
+        assert_eq!(copied.visibility_size(), 0);
+        assert_eq!(camera.visibility_size(), 1);
     }
 
     #[test]

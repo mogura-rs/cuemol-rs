@@ -12,6 +12,7 @@
     <script src="./actions.js" defer></script>
     <script src="./clipboard.js" defer></script>
     <script src="./animation.js" defer></script>
+    <script src="./camera.js" defer></script>
     <script src="./app.js" defer></script>
   </head>
   <body>
@@ -408,8 +409,8 @@
             </div>
           </section>
           <section class="camera-panel" data-activity-panel="view">
-            <h2>Cameras</h2><div id="camera-list"></div>
-            <button type="button" data-dialog="Save Current View">Save current view…</button>
+            <h2>Camera</h2><div id="camera-toolbar" class="camera-toolbar" role="toolbar" aria-label="Saved cameras"></div>
+            <div id="camera-list" role="listbox" aria-label="Saved cameras" tabindex="-1"></div>
           </section>
         </aside>
 

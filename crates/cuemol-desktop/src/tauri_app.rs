@@ -4386,12 +4386,9 @@ impl AppModel {
         let Some(mut camera) = scene.camera_by_name(&input.old_name).cloned() else {
             return Ok(false);
         };
-        self.desktop
-            .destroy_scene_camera(scene_uid, &input.old_name)
-            .map_err(|error| error.to_string())?;
         camera.set_name(new_name);
         self.desktop
-            .save_scene_camera(scene_uid, camera, false)
+            .replace_scene_camera(scene_uid, &input.old_name, camera)
             .map_err(|error| error.to_string())?;
         self.status = format!("Rename to {new_name}");
         Ok(true)
@@ -6238,13 +6235,8 @@ impl AppModel {
             return Err(format!("camera already exists: {new_name}"));
         }
         Self::apply_camera_properties(&mut camera, &input)?;
-        if new_name != old_name {
-            self.desktop
-                .destroy_scene_camera(scene_uid, old_name)
-                .map_err(|error| error.to_string())?;
-        }
         self.desktop
-            .save_scene_camera(scene_uid, camera, false)
+            .replace_scene_camera(scene_uid, old_name, camera)
             .map_err(|error| error.to_string())?;
         self.status = format!("Saved camera {new_name}");
         Ok(())
@@ -10264,14 +10256,6 @@ fn handle_model_request(
             let name = name.trim();
             if name.is_empty() {
                 return Err("camera name is required".to_string());
-            }
-            let scene = model
-                .desktop
-                .active_scene()
-                .and_then(|scene_uid| model.desktop.scene_manager().scene(scene_uid))
-                .ok_or_else(|| "no active scene".to_string())?;
-            if scene.camera_by_name(name).is_some() {
-                return Err(format!("camera already exists: {name}"));
             }
             let undo = model.capture_undo();
             model.save_named_camera(name, false)?;
@@ -22268,6 +22252,106 @@ mod tests {
     }
 
     #[test]
+    fn saved_camera_inspector_commands_keep_navigation_out_of_history() {
+        let mut model = model_without_gpu();
+        let scene = model.desktop.active_scene().unwrap();
+        let object = model
+            .desktop
+            .scene_manager_mut()
+            .scene_mut(scene)
+            .unwrap()
+            .add_molecule("mol", Default::default());
+        model.camera.set_zoom(81.);
+        for name in ["front", "__current", "back"] {
+            model
+                .inspector_request(
+                    "save_camera",
+                    &serde_json::json!({"sceneId":scene.get(),"name":name,"withVisibility":true}),
+                )
+                .unwrap();
+        }
+        model
+            .inspector_request(
+                "delete_camera",
+                &serde_json::json!({"sceneId":scene.get(),"name":"back"}),
+            )
+            .unwrap();
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        let count = model.undo_stack.len();
+        model.camera.set_zoom(12.);
+        model
+            .inspector_request(
+                "apply_camera",
+                &serde_json::json!({"sceneId":scene.get(),"name":"front","withVisibility":false}),
+            )
+            .unwrap();
+        assert_eq!(model.camera.zoom(), 81.);
+        assert_eq!(model.undo_stack.len(), count);
+        assert_eq!(model.redo_stack.len(), 1);
+        model.desktop.set_object_visible(object, false).unwrap();
+        model
+            .inspector_request(
+                "apply_camera",
+                &serde_json::json!({"sceneId":scene.get(),"name":"front","withVisibility":true}),
+            )
+            .unwrap();
+        assert!(model.desktop.object_summaries(scene)[0].visible);
+        assert_eq!(model.undo_stack.len(), count + 1);
+        handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
+        assert!(!model.desktop.object_summaries(scene)[0].visible);
+        assert_eq!(model.camera.zoom(), 81.);
+        model
+            .inspector_request(
+                "rename_camera",
+                &serde_json::json!({"sceneId":scene.get(),"name":"front","newName":"renamed"}),
+            )
+            .unwrap();
+        assert_eq!(
+            model
+                .desktop
+                .active_camera_summaries()
+                .iter()
+                .find(|camera| camera.name == "renamed")
+                .unwrap()
+                .visibility_count,
+            1
+        );
+        model
+            .inspector_request(
+                "move_camera",
+                &serde_json::json!({"sceneId":scene.get(),"name":"back","end":"top"}),
+            )
+            .unwrap();
+        assert_eq!(
+            model
+                .desktop
+                .active_camera_summaries()
+                .iter()
+                .map(|camera| camera.name.as_str())
+                .collect::<Vec<_>>(),
+            ["__current", "back", "renamed"]
+        );
+        let before = model.desktop.clone();
+        let history = model.undo_stack.len();
+        model
+            .inspector_request(
+                "move_camera",
+                &serde_json::json!({"sceneId":scene.get(),"name":"back","end":"top"}),
+            )
+            .unwrap();
+        assert!(before.same_scene_undo_state(&model.desktop));
+        assert_eq!(model.undo_stack.len(), history);
+        assert!(model
+            .inspector_request(
+                "delete_camera",
+                &serde_json::json!({"sceneId":scene.get()+999,"name":"back"})
+            )
+            .is_err());
+        assert!(before.same_scene_undo_state(&model.desktop));
+        assert_eq!(model.undo_stack.len(), history);
+    }
+
+    #[test]
     fn camera_workspace_commands_update_snapshot_and_support_undo() {
         let mut model = model_without_gpu();
         model.camera.set_zoom(63.0);
@@ -22288,10 +22372,8 @@ mod tests {
             &mut model,
             ModelRequest::CreateCamera("camera_0".to_string()),
         );
-        assert_eq!(
-            duplicate.err().as_deref(),
-            Some("camera already exists: camera_0")
-        );
+        assert!(duplicate.is_ok());
+        assert_eq!(model.snapshot().cameras.len(), 1);
 
         model.camera.set_zoom(12.0);
         handle_model_request(&mut model, ModelRequest::LoadCamera("camera_0".to_string())).unwrap();
@@ -22512,7 +22594,7 @@ mod tests {
             ModelRequest::SaveCameraView("camera_0".to_string()),
         )
         .unwrap();
-        assert_eq!(model.snapshot().cameras[0].visibility_count, 2);
+        assert_eq!(model.snapshot().cameras[0].visibility_count, 0);
         model.desktop.set_object_visible(object_uid, false).unwrap();
         model.camera.set_zoom(10.0);
         let undo_count = model.undo_stack.len();

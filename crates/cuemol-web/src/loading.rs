@@ -3,20 +3,21 @@ use cuemol_desktop_core::PreparedFile;
 
 pub(super) enum Source {
     File(web_sys::File),
+    Camera(web_sys::File, String),
     Pdb(cuemol_command::pdb::DownloadFile),
 }
 
 impl Source {
     fn name(&self) -> String {
         match self {
-            Self::File(file) => file.name(),
+            Self::File(file) | Self::Camera(file, _) => file.name(),
             Self::Pdb(file) => file.filename.clone(),
         }
     }
 
     async fn open(self, signal: Option<web_sys::AbortSignal>) -> Result<web_sys::File, JsValue> {
         let download = match self {
-            Self::File(file) => return Ok(file),
+            Self::File(file) | Self::Camera(file, _) => return Ok(file),
             Self::Pdb(download) => download,
         };
         let options = web_sys::RequestInit::new();
@@ -85,7 +86,7 @@ impl App {
         self.queue_request(Source::File(file));
     }
 
-    fn queue_request(&mut self, source: Source) {
+    pub(super) fn queue_request(&mut self, source: Source) {
         if !self.source_active && self.source_queue.is_empty() {
             self.source_scene = self.state.active_scene();
         }
@@ -151,8 +152,9 @@ impl App {
         let name = source.name();
         let extension = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
         self.message = format!("Loading {name}…");
-        let file = match source {
-            Source::File(file) => file,
+        let (file, camera_replace) = match source {
+            Source::File(file) => (file, None),
+            Source::Camera(file, name) => (file, Some(name)),
             remote => {
                 self.start_prepared_source(remote, name, generation);
                 return;
@@ -188,6 +190,26 @@ impl App {
                         enqueue(Event::Trajectory(generation, id, trajectory, first))
                     }
                     Err(error) => enqueue(Event::SourceError(generation, js_error(error))),
+                }
+                enqueue(Event::SourceFinished(generation));
+            });
+        } else if extension == "cam" {
+            spawn_local(async move {
+                if file.size() > 8_388_608. {
+                    enqueue(Event::SourceError(
+                        generation,
+                        "Camera files must be smaller than 8 MiB.".into(),
+                    ));
+                } else {
+                    match JsFuture::from(file.text()).await {
+                        Ok(text) => enqueue(Event::CameraFile(
+                            generation,
+                            file,
+                            text.as_string().unwrap_or_default(),
+                            camera_replace,
+                        )),
+                        Err(error) => enqueue(Event::SourceError(generation, js_error(error))),
+                    }
                 }
                 enqueue(Event::SourceFinished(generation));
             });

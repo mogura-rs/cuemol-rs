@@ -187,11 +187,15 @@ impl App {
         }
         self.density_panel.rects.clear();
         self.symmetry_panel.rects.clear();
+        self.camera_panel.rects.clear();
         self.shell_sidebar(ctx);
         for (tool, args) in self.symmetry_panel.dialog(ctx, &self.state) {
             self.call(tool, args);
         }
         self.ui_rects.extend(self.symmetry_panel.rects.clone());
+        let camera_actions = self.camera_panel.dialog(ctx, &self.state);
+        self.camera_panel_actions(ctx, camera_actions);
+        self.ui_rects.extend(self.camera_panel.rects.clone());
         if self.density_panel.rects.is_empty() {
             for (tool, args) in self.density_panel.cancel() {
                 self.call(tool, args);
@@ -1437,46 +1441,34 @@ impl App {
         }
     }
     fn camera_list(&mut self, ui: &mut egui::Ui) {
-        let data = cuemol_command::call_tool(
-            &mut self.state,
-            &mut self.camera,
-            "list_cameras",
-            &json!({}),
-        )
-        .unwrap_or(Value::Null);
-        for camera in data
-            .as_array()
-            .or_else(|| data["cameras"].as_array())
-            .into_iter()
-            .flatten()
-        {
-            if let Some(name) = camera["name"].as_str() {
-                let row = ui.selectable_label(self.clipboard_camera.as_deref() == Some(name), name);
-                self.record_ui_rect(&format!("camera:{name}"), &row);
-                if row.clicked() {
-                    self.clipboard_camera = Some(name.into());
-                }
-                if row.double_clicked() {
-                    self.call("apply_camera", json!({"name":name}));
-                }
-                row.context_menu(|ui| {
-                    for (label, action) in [("Copy", "copy"), ("Cut", "cut"), ("Paste", "paste")] {
-                        if ui.button(label).clicked() {
-                            self.clipboard_camera = Some(name.into());
-                            self.clipboard_focus.scope = Some(cuemol_ui::clipboard::Scope::Cameras);
-                            self.clipboard_focus.text = None;
-                            self.clipboard_action(ui.ctx(), action);
-                            ui.close();
-                        }
-                    }
-                });
-            }
-        }
-        if ui.button("Save current camera…").clicked() {
-            self.select_tool("save_camera");
-        }
+        let actions = self.camera_panel.show(ui, &self.state);
+        self.camera_panel_actions(ui.ctx(), actions);
         self.clipboard_focus
             .region(cuemol_ui::clipboard::Scope::Cameras, ui);
+    }
+    fn camera_panel_actions(
+        &mut self,
+        ctx: &egui::Context,
+        actions: Vec<cuemol_ui::camera::Intent>,
+    ) {
+        use cuemol_ui::camera::Intent;
+        self.clipboard_camera = self.camera_panel.selected.clone();
+        for action in actions {
+            match action {
+                Intent::Command(tool, args) => {
+                    self.call(tool, args);
+                }
+                Intent::Clipboard(action) => {
+                    self.clipboard_focus.scope = Some(cuemol_ui::clipboard::Scope::Cameras);
+                    self.clipboard_focus.text = None;
+                    self.clipboard_action(ctx, action);
+                }
+                Intent::Load => choose_file(),
+                Intent::SaveFile(_) => self.save_camera_file(),
+                Intent::Reload => self.reload_camera_file(),
+            }
+        }
+        self.clipboard_camera = self.camera_panel.selected.clone();
     }
     fn view_controls(&mut self, ui: &mut egui::Ui) {
         let mut perspective = self.camera.is_perspective();

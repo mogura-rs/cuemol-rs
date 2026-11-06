@@ -4608,6 +4608,17 @@ svg { flex: none; }
 .action-panel button, .camera-item { display: block; width: 100%; min-height: 28px; padding: 4px 8px; border: 0; background: transparent; text-align: left; }
 .camera-panel { border-top: 1px solid var(--border); }
 .camera-panel p { color: var(--text-muted); }
+.camera-toolbar { display: flex; gap: 2px; margin-bottom: 4px; }
+.camera-toolbar .camera-action { width: 26px; min-width: 26px; height: 26px; padding: 4px; border: 0; background: transparent; }
+.camera-action svg, .camera-row-icon svg, .camera-badge svg { display: block; width: 16px; height: 16px; }
+#camera-list { min-height: 100px; outline: none; }
+#camera-list .camera-item { display: flex; align-items: center; gap: 5px; min-height: 26px; cursor: default; border-top: 2px solid transparent; border-bottom: 2px solid transparent; }
+#camera-list .camera-item[aria-selected="true"] { background: var(--bg-active); }
+.camera-row-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.camera-badge { color: var(--text-muted); }
+.camera-pinned { border-bottom-color: var(--border); }
+#camera-list .camera-drop-before { border-top-color: var(--accent); }
+#camera-list .camera-drop-after { border-bottom-color: var(--accent); }
 
 .main-view { grid-template-rows: 30px minmax(100px, 1fr) 4px var(--bottom-panel-height, 180px); }
 .scene-strip { align-items: stretch; background: var(--bg-input); }

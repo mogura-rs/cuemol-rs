@@ -287,12 +287,13 @@ pub fn call_tool(
             let source = text(args, "name")?;
             let s = state.scene_manager_mut().scene_mut(sid).unwrap();
             let mut cameras = s.cameras().to_vec();
+            cameras.sort_by_key(|camera| camera.name() != "__current");
             let from = cameras
                 .iter()
                 .position(|c| c.name() == source)
                 .ok_or_else(|| CueMolError::not_found("camera"))?;
             if name == "rename_camera" {
-                let label = text(args, "newName")?;
+                let label = text(args, "newName")?.trim();
                 if label.trim().is_empty() || cameras.iter().any(|c| c.name() == label) {
                     return Err(CueMolError::invalid_argument(
                         "camera name is empty or already used",
@@ -300,12 +301,24 @@ pub fn call_tool(
                 }
                 cameras[from].set_name(label);
             } else {
-                let to = nodes::move_target(args, from, cameras.len())?;
+                let pinned = usize::from(
+                    cameras
+                        .first()
+                        .is_some_and(|camera| camera.name() == "__current"),
+                );
+                let to = nodes::move_target(args, from, cameras.len())?
+                    .max(pinned.min(cameras.len() - 1));
+                if source == "__current" || from == to {
+                    return Ok(json!({"name":source}));
+                }
                 let c = cameras.remove(from);
                 cameras.insert(to, c);
+                for (index, camera) in cameras.iter_mut().enumerate() {
+                    camera.set_ui_order(index as i32);
+                }
             }
             s.replace_cameras(cameras);
-            Ok(json!({"name":args["newName"].as_str().unwrap_or(source)}))
+            Ok(json!({"name":args["newName"].as_str().map(str::trim).unwrap_or(source)}))
         }
         "clear_camera_visibility" => Ok(
             json!({"cleared":state.clear_scene_camera_visibility_settings(scene(state)?,text(args,"name")?)?}),

@@ -148,6 +148,7 @@ def main():
     parser.add_argument('--inspector-preview-only', action='store_true')
     parser.add_argument('--animation-timeline-only', action='store_true')
     parser.add_argument('--symmetry-only', action='store_true')
+    parser.add_argument('--camera-only', action='store_true')
     args = parser.parse_args()
     binary, work = args.binary.resolve(), args.out.resolve()
     work.mkdir(parents=True, exist_ok=True)
@@ -169,6 +170,9 @@ def main():
     if args.animation_timeline_only:
         with (config / 'config.tsv').open('a') as stream:
             stream.write('bottom_panel:tab\tanimation\nbottom_panel:visible\ttrue\nbottom_panel:height\t300\n')
+    if args.camera_only:
+        with (config / 'config.tsv').open('a') as stream:
+            stream.write('layout:activity\tview\n')
     if args.symmetry_only:
         with (config / 'config.tsv').open('a') as stream:
             stream.write('layout:activity\tcrystal\n')
@@ -239,6 +243,65 @@ def main():
             def input_focused(box):
                 pixels = capture().crop(box).getdata()
                 return sum(b - r > 30 and g - r > 10 for r, g, b in pixels) > 100
+
+            if args.camera_only:
+                primary = 'command' if sys.platform == 'darwin' else 'ctrl'
+                object_id = state['objects'][0]['id']
+                call('set_view', {'zoom': 16})
+                for name in ['front', '__current', 'back']:
+                    call('save_camera', {'name': name})
+                call('clear_undo')
+                time.sleep(0.2)
+
+                def camera_names():
+                    return [camera['name'] for camera in call('list_cameras')['cameras']]
+
+                def visible():
+                    return next(obj['visible'] for obj in call('get_scene_state')['objects']
+                                if obj['id'] == object_id)
+
+                click_at(x + 181, y + 194)
+                call('delete_camera', {'name': 'back'})
+                call('undo')
+                call('set_view', {'zoom': 24})
+                click_at(x + 171, y + 139)
+                wait_for(lambda: call('get_view')['zoom'] == 16)
+                call('redo')
+                if camera_names() != ['__current', 'front']:
+                    raise RuntimeError('Applying a camera discarded the redo entry')
+                call('undo')
+                click_at(x + 181, y + 194)
+                click_at(x + 143, y + 139)
+                call('set_node_prop', {'nodeType': 'object', 'nodeId': object_id,
+                                       'prop': 'visible', 'value': 'false'})
+                click_at(x + 171, y + 139)
+                if visible():
+                    raise RuntimeError('Applying only the view also changed visibility')
+                click_at(x + 199, y + 139)
+                wait_for(visible)
+                call('undo')
+                wait_for(lambda: not visible())
+                call('redo')
+                click_at(x + 181, y + 194)
+                pyautogui.press('down')
+                pyautogui.press('f2')
+                time.sleep(0.2)
+                pyautogui.hotkey(primary, 'a')
+                pyautogui.write('renamed', interval=0.03)
+                pyautogui.press('enter')
+                wait_for(lambda: camera_names() == ['__current', 'front', 'renamed'])
+                move_pointer_and_wait(181, 222)
+                pyautogui.dragTo(x + 181, y + 157, duration=0.5)
+                wait_for(lambda: camera_names() == ['__current', 'renamed', 'front'])
+                call('undo')
+                if camera_names() != ['__current', 'front', 'renamed']:
+                    raise RuntimeError('The camera move did not undo in one step')
+                capture('camera-final.png')
+                report.update(ok=True, camera_navigation_preserves_redo=True,
+                              camera_visibility_undo=True, camera_keyboard_rename=True,
+                              camera_drag_order=True, camera_current_pinned=True)
+                print(json.dumps(report), flush=True)
+                return
 
             if args.symmetry_only:
                 primary = 'command' if sys.platform == 'darwin' else 'ctrl'

@@ -15,6 +15,13 @@ const cueMolIcons = {
   new: '<path d="M6 3h8l4 4v14H6zM14 3v5h4M9 14h6m-3-3v6"/>',
   open: '<path d="M3 7V4h7l2 3h8v4M3 7v13h15l4-9H7z"/>',
   save: '<path d="M4 3h14l3 3v15H3V3zM7 3v6h10V3M7 21v-8h10v8"/>',
+  camera: '<path d="M3 6h5l2-3h4l2 3h5v15H3z"/><circle cx="12" cy="13" r="4"/>',
+  link: '<path d="m10 13 4-4m-7 7-1 1a4 4 0 0 1-6-6l5-5a4 4 0 0 1 6 0m2 2 1-1a4 4 0 0 1 6 6l-5 5a4 4 0 0 1-6 0"/>',
+  cameraSave: '<path d="M4 21h16M12 3v15m-7-7 7 7 7-7"/>',
+  cameraSaveVis: '<path d="M4 21h16"/><path d="M10 3h4v9h5l-7 7-7-7h5z" fill="currentColor" stroke="none"/>',
+  cameraApply: '<path d="M4 3h16M12 21V6m-7 7 7-7 7 7"/>',
+  cameraApplyVis: '<path d="M4 3h16"/><path d="M10 21h4v-9h5l-7-7-7 7h5z" fill="currentColor" stroke="none"/>',
+  delete: '<path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7"/>',
   reload: '<path d="M20 10a8 8 0 1 0-1 8M20 3v7h-7"/>',
   undo: '<path d="M8 5 3 10l5 5M3 10h11a6 6 0 0 1 0 12"/>',
   redo: '<path d="m16 5 5 5-5 5M21 10H10a6 6 0 0 0 0 12"/>',
@@ -483,17 +490,7 @@ function renderTritiumShell() {
     const current = tauri?.webviewWindow?.getCurrentWebviewWindow?.();
     if (current?.setTitle) void current.setTitle(title).catch(() => {});
   }
-  const cameras = document.getElementById("camera-list");
-  cameras.replaceChildren();
-  const available = (snapshot?.cameras || []).filter((camera) => camera.sceneUid === scene?.uid);
-  for (const camera of available) {
-    cameras.append(button(camera.name, "camera-item", () => void mutate("load_camera", { name: camera.name })));
-  }
-  if (!available.length) {
-    const empty = document.createElement("p");
-    empty.textContent = "No saved cameras";
-    cameras.append(empty);
-  }
+  renderCameraPane();
 }
 
 function setupTritiumShell() {
