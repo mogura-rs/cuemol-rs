@@ -1767,7 +1767,7 @@ body.resizing-side-panel-height {
 
 .view-dial-row {
   display: grid;
-  grid-template-columns: 42px 30px minmax(0, 1fr) 13px;
+  grid-template-columns: 42px minmax(0, 1fr) 13px;
   gap: 3px;
   align-items: center;
   padding-left: 8px;
@@ -1777,7 +1777,7 @@ body.resizing-side-panel-height {
   text-align: right;
 }
 
-.view-dial-row input[type="number"] {
+.view-dial-row .view-numeric {
   width: 100%;
   min-width: 0;
   min-height: 21px;
@@ -1785,23 +1785,8 @@ body.resizing-side-panel-height {
   text-align: right;
 }
 
-.view-dial-wheel {
-  min-width: 0;
-  min-height: 21px;
-  padding: 0 3px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-elevated);
-  color: var(--text-primary);
-  cursor: ew-resize;
-  font-size: 12px;
-  line-height: 1;
-}
-
-.view-dial-wheel.active {
-  border-color: var(--accent);
-  background: var(--bg-active);
-}
+.view-numeric[readonly] { cursor: ew-resize; }
+.view-numeric[data-dragging] { border-color: var(--accent); background: var(--bg-active); }
 
 .view-dial-unit {
   color: var(--text-primary);
@@ -4603,10 +4588,10 @@ svg { flex: none; }
 .vertical-splitter, .horizontal-splitter, .side-panel-splitter, .inspector-splitter { background: var(--border); border: 0; }
 .vertical-splitter:hover, .horizontal-splitter:hover, .inspector-splitter:hover { background: var(--accent); }
 .side-panel-splitter { height: 4px; }
-.action-panel, .camera-panel { padding: 8px; }
+.action-panel { padding: 8px; }
 .action-panel h2, .camera-panel h2 { margin: 12px 0 7px; font-size: 12px; font-weight: 600; }
 .action-panel button, .camera-item { display: block; width: 100%; min-height: 28px; padding: 4px 8px; border: 0; background: transparent; text-align: left; }
-.camera-panel { border-top: 1px solid var(--border); }
+.camera-panel .side-body { height: var(--side-panel-height, max(80px, calc((100vh - 150px) * 0.45))); }
 .camera-panel p { color: var(--text-muted); }
 .camera-toolbar { display: flex; gap: 2px; margin-bottom: 4px; }
 .camera-toolbar .camera-action { width: 26px; min-width: 26px; height: 26px; padding: 4px; border: 0; background: transparent; }

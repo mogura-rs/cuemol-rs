@@ -1,5 +1,43 @@
 # Validation evidence
 
+## Shared View transforms
+
+A failing reproducer showed that changing camera distance also reduced the slab
+in the Rust View implementation. The current C++ `View::setViewDist` changes
+only the distance; `setSlabDepth` applies the distance-dependent clamp when the
+slab is edited. A second reproducer found that the Rust View could retain slabs above the
+Camera limit of 10,000 Å. Both fixes pass 26 C++ oracle cases covering distance
+boundaries, slab clamps, zoom limits and rotated pan. The camera-reference runner now builds
+and runs this oracle alongside its existing comparisons.
+
+Native and browser windows share a View pane with relative rotation, viewing-axis
+translation, absolute text coordinates, zoom/slab/distance and projection/center
+marks. A shared transform helper also serves Tauri and retains unrelated camera
+metadata. Inputs use horizontal drag, reference fine/coarse modifiers and
+Enter-chained coordinates. The shared input tests exposed missing text selection
+when focusing the next coordinate; explicit selection now preserves consecutive
+entry. View changes do not create scene undo entries or discard redo.
+
+Tauri uses single numeric fields instead of separate wheel buttons. Its Camera
+pane now precedes View and supports the existing pane resizing/collapse controls.
+Queued camera movement is tagged with the active view so it cannot be replayed
+onto another view. Draft controls also retain their original view identity.
+
+The shared UI suite passed 53 checks, including three actual-input View cases;
+the final cases also check Shift and Ctrl snapping. The transform-helper
+regression, all Qsys tests (146 unit and three integration checks), and five
+shared view-command checks passed. The native GUI suite passed 199 checks, and
+the macOS Tauri model passed 173 with five unrelated optional checks ignored.
+WebGL and WebGPU each passed the new View-pane scenario, including rotated pan,
+chained coordinates, distance/slab separation, projection and redo preservation.
+All 55 existing Tauri shell cases passed after the pane-layout change; the added
+stale-view queue scenario also passed separately.
+
+The Linux OS-input probe passed rotation, relative pan, chained coordinate input,
+distance/slab behavior, projection and redo preservation in a real 1024×768
+window. Native, browser and Tauri screenshots were inspected. These checks cover
+the changed View controls and do not imply complete application appearance parity.
+
 ## Saved camera semantics and shared controls
 
 Reproducers showed three discrepancies: plain camera saves retained old

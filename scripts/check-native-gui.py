@@ -149,6 +149,7 @@ def main():
     parser.add_argument('--animation-timeline-only', action='store_true')
     parser.add_argument('--symmetry-only', action='store_true')
     parser.add_argument('--camera-only', action='store_true')
+    parser.add_argument('--view-only', action='store_true')
     args = parser.parse_args()
     binary, work = args.binary.resolve(), args.out.resolve()
     work.mkdir(parents=True, exist_ok=True)
@@ -170,7 +171,7 @@ def main():
     if args.animation_timeline_only:
         with (config / 'config.tsv').open('a') as stream:
             stream.write('bottom_panel:tab\tanimation\nbottom_panel:visible\ttrue\nbottom_panel:height\t300\n')
-    if args.camera_only:
+    if args.camera_only or args.view_only:
         with (config / 'config.tsv').open('a') as stream:
             stream.write('layout:activity\tview\n')
     if args.symmetry_only:
@@ -243,6 +244,60 @@ def main():
             def input_focused(box):
                 pixels = capture().crop(box).getdata()
                 return sum(b - r > 30 and g - r > 10 for r, g, b in pixels) > 100
+
+            if args.view_only:
+                primary = 'command' if sys.platform == 'darwin' else 'ctrl'
+                call('set_view', {'zoom': 50, 'distance': 200, 'slab': 300,
+                                  'center': [0, 0, 0], 'rotation': [1, 0, 0, 0]})
+                call('set_projection', {'perspective': False})
+                call('save_camera', {'name': 'front'})
+                call('clear_undo')
+                call('delete_camera', {'name': 'front'})
+                call('undo')
+                move_pointer_and_wait(180, 407)
+                pyautogui.dragTo(x + 180, y + 200, duration=0.5)
+                time.sleep(0.3)
+                capture('view-start.png')
+                def edit_view(row_y, value):
+                    click_at(x + 190, y + row_y)
+                    pyautogui.hotkey(primary, 'a')
+                    pyautogui.write(str(value), interval=0.03)
+                    pyautogui.press('enter')
+                    time.sleep(0.2)
+                edit_view(277, 30)
+                wait_for(lambda: abs(call('get_view')['rotation'][0] - 0.2588190451) < 1e-5)
+                edit_view(303, 45)
+                edit_view(329, 90)
+                move_pointer_and_wait(190, 380)
+                pyautogui.dragTo(x + 210, y + 392, duration=0.5)
+                center = call('get_view')['center']
+                if not (abs(center[0]) < 1e-5 and center[1] < 0 and center[2] < 0
+                        and abs(center[1] / center[2] - 3 ** 0.5) < 1e-4):
+                    raise RuntimeError(f'View pan did not follow the rotated axes: {center}')
+                edit_view(380, '12.25')
+                pyautogui.write('-8.5', interval=0.03)
+                pyautogui.press('enter')
+                time.sleep(0.2)
+                pyautogui.write('3', interval=0.03)
+                pyautogui.press('enter')
+                wait_for(lambda: call('get_view')['center'] == [12.25, -8.5, 3])
+                edit_view(535, 10)
+                if call('get_view')['slab'] != 300:
+                    raise RuntimeError('Changing distance resized the slab')
+                edit_view(509, 500)
+                wait_for(lambda: call('get_view')['slab'] == 20)
+                call('redo')
+                if call('list_cameras')['cameras']:
+                    raise RuntimeError('View input discarded scene redo')
+                call('set_view', {'zoom': 40, 'distance': 200, 'slab': 60})
+                click_at(x + 154, y + 586)
+                wait_for(lambda: call('get_view')['perspective'])
+                capture('view-final.png')
+                report.update(ok=True, view_rotation_input=True, view_relative_pan=True,
+                              view_chained_coordinates=True, view_distance_preserves_slab=True,
+                              view_navigation_preserves_redo=True, view_projection=True)
+                print(json.dumps(report), flush=True)
+                return
 
             if args.camera_only:
                 primary = 'command' if sys.platform == 'darwin' else 'ctrl'

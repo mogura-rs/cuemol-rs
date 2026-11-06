@@ -6771,94 +6771,49 @@ impl AppModel {
                 self.camera
                     .set_center(pan_center(&self.camera, x, y, viewport_height.max(1)));
             }
-            "rotate-x" | "rotate-y" | "rotate-z" => {
-                if !x.is_finite() {
-                    return Err("rotation delta must be finite".to_string());
-                }
-                let rotation = match action {
-                    "rotate-x" => self.camera.rotation().rotate_x(x),
-                    "rotate-y" => self.camera.rotation().rotate_y(x),
-                    "rotate-z" => self.camera.rotation().rotate_z(x),
-                    _ => unreachable!(),
-                }
-                .map_err(|error| error.to_string())?;
-                self.camera.set_rotation(rotation);
-            }
-            "translate-x" | "translate-y" => {
-                if !x.is_finite() {
-                    return Err("translation delta must be finite".to_string());
-                }
-                let (dx, dy) = if action == "translate-x" {
-                    (x, 0.0)
-                } else {
-                    (0.0, x)
+            "rotate-x" | "rotate-y" | "rotate-z" | "translate-x" | "translate-y"
+            | "translate-z" | "set-center-x" | "set-center-y" | "set-center-z" | "adjust-zoom"
+            | "set-zoom" | "adjust-slab" | "set-slab" | "adjust-distance" | "set-distance" => {
+                use cuemol_desktop_core::ViewTransform;
+                let axis = match action.rsplit('-').next() {
+                    Some("y") => 1,
+                    Some("z") => 2,
+                    _ => 0,
                 };
-                self.camera
-                    .set_center(pan_center(&self.camera, dx, dy, viewport_height.max(1)));
-            }
-            "translate-z" => {
-                if !x.is_finite() {
-                    return Err("translation delta must be finite".to_string());
-                }
-                let rotation = self.camera.rotation().to_matrix();
-                let center = self.camera.center();
-                self.camera.set_center(Vector4::new3(
-                    center.x + rotation.values[2][0] * x / 4.0,
-                    center.y + rotation.values[2][1] * x / 4.0,
-                    center.z + rotation.values[2][2] * x / 4.0,
-                ));
-            }
-            "set-center-x" | "set-center-y" | "set-center-z" => {
-                if !x.is_finite() {
-                    return Err("view center must be finite".to_string());
-                }
-                let mut center = self.camera.center();
-                match action {
-                    "set-center-x" => center.x = x,
-                    "set-center-y" => center.y = x,
-                    "set-center-z" => center.z = x,
-                    _ => unreachable!(),
-                }
-                self.camera.set_center(center);
-            }
-            "adjust-zoom" | "set-zoom" => {
-                if !x.is_finite() || (action == "set-zoom" && x <= 0.0) {
-                    return Err("view zoom must be a positive finite number".to_string());
-                }
-                let zoom = if action == "adjust-zoom" {
-                    (self.camera.zoom() + x).max(0.01)
+                let transform = if action.starts_with("rotate-") {
+                    let mut delta = [0.; 3];
+                    delta[axis] = x;
+                    ViewTransform::Rotate(delta)
+                } else if action.starts_with("translate-") {
+                    let mut delta = [0.; 3];
+                    delta[axis] = x;
+                    ViewTransform::Translate(delta)
+                } else if action.starts_with("set-center-") {
+                    let center = self.camera.center();
+                    let mut center = [center.x, center.y, center.z];
+                    center[axis] = x;
+                    ViewTransform::Center(center)
                 } else {
-                    x
+                    let relative = action.starts_with("adjust-");
+                    match action.rsplit('-').next() {
+                        Some("zoom") => {
+                            ViewTransform::Zoom(if relative { self.camera.zoom() + x } else { x })
+                        }
+                        Some("slab") => ViewTransform::Slab(if relative {
+                            self.camera.slab_depth() + x
+                        } else {
+                            x
+                        }),
+                        _ => ViewTransform::Distance(if relative {
+                            self.camera.cam_dist() + x
+                        } else {
+                            x
+                        }),
+                    }
                 };
-                self.camera.set_zoom(zoom.max(0.01));
-            }
-            "adjust-slab" | "set-slab" => {
-                if !x.is_finite() || (action == "set-slab" && x <= 0.0) {
-                    return Err("view slab must be a positive finite number".to_string());
-                }
-                let slab = if action == "adjust-slab" {
-                    (self.camera.slab_depth() + x).max(0.1)
-                } else {
-                    x
-                };
-                self.camera
-                    .set_slab_depth(slab.clamp(0.1, (self.camera.cam_dist() * 2.0).max(0.1)));
-            }
-            "adjust-distance" | "set-distance" => {
-                if !x.is_finite() || (action == "set-distance" && x <= 0.0) {
-                    return Err("view distance must be a positive finite number".to_string());
-                }
-                let distance = if action == "adjust-distance" {
-                    (self.camera.cam_dist() + x).max(0.1)
-                } else {
-                    x
-                };
-                self.camera.set_cam_dist(distance.clamp(0.1, 10_000.0));
-                self.camera.set_slab_depth(
-                    self.camera
-                        .slab_depth()
-                        .clamp(0.1, self.camera.cam_dist() * 2.0),
-                );
+                transform
+                    .apply(&mut self.camera, [1, viewport_height])
+                    .map_err(|error| error.to_string())?;
             }
             "zoom" => {
                 self.camera
@@ -21102,7 +21057,9 @@ mod tests {
         assert!(rotated_up.z.abs() > 0.999);
 
         model.update_camera("set-zoom", 75.0, 0.0, 100).unwrap();
+        let previous_slab = model.camera.slab_depth();
         model.update_camera("set-distance", 10.0, 0.0, 100).unwrap();
+        assert_eq!(model.camera.slab_depth(), previous_slab);
         model.update_camera("set-slab", 500.0, 0.0, 100).unwrap();
         assert_eq!(model.camera.zoom(), 75.0);
         assert_eq!(model.camera.cam_dist(), 10.0);

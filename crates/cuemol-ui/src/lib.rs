@@ -70,3 +70,6 @@ pub mod animation;
 
 #[cfg(feature = "egui")]
 pub mod camera;
+
+#[cfg(feature = "egui")]
+pub mod view;

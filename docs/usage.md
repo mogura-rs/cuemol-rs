@@ -62,6 +62,25 @@ Browser Save and Save as both create downloads and do not overwrite local files.
 To read changed file contents in a browser, open the file again. Camera names,
 links, order and show/hide flags survive scene saves and ordinary camera edits.
 
+### View transforms
+
+Below Cameras, the View pane provides rotation, translation, zoom, slab depth,
+camera distance, projection and center marks. Native and browser windows share
+these controls; Tauri provides the same interactions. Drag a field horizontally
+for live updates. Shift slows dragging by a factor of ten and uses finer steps;
+Ctrl/Cmd snaps to ten-unit steps. Rotation inputs apply relative angles and
+return to zero when the interaction ends.
+
+Translation drags and arrow-key steps pan along the current viewing axes. The
+fields display absolute world coordinates, and typing a coordinate sets that
+axis directly. Enter moves from TraX to TraY to TraZ for consecutive input;
+Escape discards an unfinished text edit. These view changes preserve scene
+undo/redo. Changing camera distance leaves the slab unchanged. Editing the
+slab itself clamps it to twice the current distance and at most 10,000 Å,
+matching the reference.
+The separator above View resizes the Camera pane, and View scrolls when its
+controls exceed the available height.
+
 ### Animation references
 
 The native, Tauri and browser windows show animation elements as strips in the

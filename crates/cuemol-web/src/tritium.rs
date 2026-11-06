@@ -188,6 +188,7 @@ impl App {
         self.density_panel.rects.clear();
         self.symmetry_panel.rects.clear();
         self.camera_panel.rects.clear();
+        self.view_panel.rects.clear();
         self.shell_sidebar(ctx);
         for (tool, args) in self.symmetry_panel.dialog(ctx, &self.state) {
             self.call(tool, args);
@@ -196,6 +197,7 @@ impl App {
         let camera_actions = self.camera_panel.dialog(ctx, &self.state);
         self.camera_panel_actions(ctx, camera_actions);
         self.ui_rects.extend(self.camera_panel.rects.clone());
+        self.ui_rects.extend(self.view_panel.rects.clone());
         if self.density_panel.rects.is_empty() {
             for (tool, args) in self.density_panel.cancel() {
                 self.call(tool, args);
@@ -1471,32 +1473,22 @@ impl App {
         self.clipboard_camera = self.camera_panel.selected.clone();
     }
     fn view_controls(&mut self, ui: &mut egui::Ui) {
-        let mut perspective = self.camera.is_perspective();
-        if ui.checkbox(&mut perspective, "Perspective").changed() {
-            self.camera.set_perspective(perspective);
-        }
-        let mut slab = self.camera.slab_depth();
-        if ui
-            .add(
-                egui::Slider::new(&mut slab, 0.1..=self.camera.cam_dist() * 2.)
-                    .text("Slab")
-                    .logarithmic(true),
-            )
-            .changed()
-        {
-            self.camera.set_slab_depth(slab);
-        }
-        let mut zoom = self.camera.zoom();
-        if ui
-            .add(
-                egui::DragValue::new(&mut zoom)
-                    .prefix("Zoom ")
-                    .range(0.1..=100000.),
-            )
-            .changed()
-        {
-            self.camera.set_zoom(zoom);
-        }
+        let pixels = ui.ctx().pixels_per_point();
+        let viewport = self
+            .target
+            .as_ref()
+            .map(|target| {
+                target
+                    .size
+                    .map(|size| (size as f32 / pixels).max(1.) as u32)
+            })
+            .unwrap_or([800, 600]);
+        self.view_panel.show(
+            ui,
+            &mut self.camera,
+            self.state.active_view_summary().map(|view| view.uid),
+            viewport,
+        );
         if ui.button("Fit scene").clicked() {
             self.fit(false);
         }

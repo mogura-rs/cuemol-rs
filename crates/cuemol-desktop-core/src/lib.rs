@@ -32,6 +32,8 @@ pub mod projection;
 pub mod stereo;
 mod view_state;
 pub use view_state::GuiViewOptions;
+mod view_transform;
+pub use view_transform::ViewTransform;
 #[cfg(all(test, feature = "scripting"))]
 mod script_completion_tests;
 #[cfg(all(test, feature = "scripting"))]

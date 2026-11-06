@@ -13,6 +13,7 @@
     <script src="./clipboard.js" defer></script>
     <script src="./animation.js" defer></script>
     <script src="./camera.js" defer></script>
+    <script src="./view.js" defer></script>
     <script src="./app.js" defer></script>
   </head>
   <body>
@@ -383,9 +384,19 @@
             </div>
           </section>
 
+          <section class="side-card camera-panel open" data-side-card data-activity-panel="view" data-panel-name="Cameras">
+            <button class="side-title" type="button" data-panel-toggle aria-expanded="true">
+              <span class="disclosure">▾</span><span>Cameras</span><span class="panel-close">×</span>
+            </button>
+            <div class="side-body">
+              <div id="camera-toolbar" class="camera-toolbar" role="toolbar" aria-label="Saved cameras"></div>
+              <div id="camera-list" role="listbox" aria-label="Saved cameras" tabindex="-1"></div>
+            </div>
+          </section>
+
           <section class="side-card open" data-side-card data-activity-panel="view" data-panel-name="View">
-            <button class="side-title" type="button" data-panel-toggle aria-expanded="false">
-              <span class="disclosure">▸</span><span>View</span><span class="panel-close">×</span>
+            <button class="side-title" type="button" data-panel-toggle aria-expanded="true">
+              <span class="disclosure">▾</span><span>View</span><span class="panel-close">×</span>
             </button>
             <div class="side-body view-body">
               <div id="view-content"></div>
@@ -408,10 +419,7 @@
               <p id="action-description"></p>
             </div>
           </section>
-          <section class="camera-panel" data-activity-panel="view">
-            <h2>Camera</h2><div id="camera-toolbar" class="camera-toolbar" role="toolbar" aria-label="Saved cameras"></div>
-            <div id="camera-list" role="listbox" aria-label="Saved cameras" tabindex="-1"></div>
-          </section>
+
         </aside>
 
         <div

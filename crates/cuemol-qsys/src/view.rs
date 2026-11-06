@@ -246,7 +246,6 @@ impl View {
             return;
         }
         self.view_dist = view_dist;
-        self.slab_depth = self.slab_depth.min(self.view_dist * 2.0).max(0.1);
         self.set_projection_changed();
         self.fire_property_changed("distance", false);
     }
@@ -272,7 +271,7 @@ impl View {
     }
 
     pub fn set_slab_depth(&mut self, slab_depth: f64) {
-        let slab_depth = slab_depth.clamp(0.1, self.view_dist * 2.0);
+        let slab_depth = slab_depth.clamp(0.1, (self.view_dist * 2.0).min(10000.0));
         if (self.slab_depth - slab_depth).abs() < F_EPS4 {
             return;
         }

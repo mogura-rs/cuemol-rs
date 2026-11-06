@@ -146,6 +146,7 @@ const SIDE_PANEL_DEFAULT_ORDER = [
   "Coloring",
   "Symmetry",
   "Density map",
+  "Cameras",
   "View",
 ];
 const MAX_RECENT_FILES = 10;
@@ -9374,7 +9375,7 @@ function restoreDefaultPanels() {
   setSidePanelWidth(260, true);
   setBottomPanelHeight(180, true);
   setRibbonCollapsed(false, true);
-  const openPanels = new Set(["Workspace", "MolStruct", "Selection", "Coloring", "Density map"]);
+  const openPanels = new Set(["Workspace", "MolStruct", "Selection", "Coloring", "Density map", "Cameras", "View"]);
   applySidePanelOrder(SIDE_PANEL_DEFAULT_ORDER);
   sidePanel.querySelectorAll("[data-side-card]").forEach((card) => {
     card.hidden = false;
@@ -9406,6 +9407,9 @@ function sidePanelCardName(card) {
 }
 
 function applySidePanelOrder(order) {
+  if (!order.includes("Cameras") && order.includes("View")) {
+    order = order.flatMap(name => name === "View" ? ["Cameras", name] : [name]);
+  }
   const cards = new Map(
     [...sidePanel.querySelectorAll("[data-side-card]")].map((card) => [
       sidePanelCardName(card),
@@ -9610,6 +9614,9 @@ function renderSidePanel(name) {
       break;
     case "Density map":
       renderDensity();
+      break;
+    case "Cameras":
+      renderCameraPane();
       break;
     case "View":
       renderView();
@@ -15546,52 +15553,6 @@ function renderDensity() {
   if(draft){const input=document.getElementById(draft.id);if(input&&!input.disabled){if(draft.value!==draft.initial)input.value=draft.value;input.focus({preventScroll:true});}}
 }
 
-function viewDialWheel(label, action, step = 1) {
-  const wheel = document.createElement("button");
-  wheel.type = "button";
-  wheel.className = "view-dial-wheel";
-  wheel.textContent = "↔";
-  wheel.setAttribute("aria-label", `Adjust ${label}`);
-  let previousX = null;
-  const stop = (event) => {
-    previousX = null;
-    wheel.classList.remove("active");
-    if (event?.pointerId !== undefined && wheel.hasPointerCapture(event.pointerId)) {
-      wheel.releasePointerCapture(event.pointerId);
-    }
-  };
-  wheel.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0) return;
-    previousX = event.clientX;
-    wheel.classList.add("active");
-    wheel.setPointerCapture(event.pointerId);
-    event.preventDefault();
-  });
-  wheel.addEventListener("pointermove", (event) => {
-    if (previousX === null) return;
-    const delta = event.clientX - previousX;
-    if (Math.abs(delta) < 1) return;
-    previousX = event.clientX;
-    cameraCommand(action, delta * step);
-  });
-  wheel.addEventListener("pointerup", stop);
-  wheel.addEventListener("pointercancel", stop);
-  wheel.addEventListener(
-    "wheel",
-    (event) => {
-      event.preventDefault();
-      cameraCommand(action, -Math.sign(event.deltaY) * step);
-    },
-    { passive: false },
-  );
-  wheel.addEventListener("keydown", (event) => {
-    if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
-    event.preventDefault();
-    cameraCommand(action, (event.key === "ArrowRight" ? 1 : -1) * step);
-  });
-  return wheel;
-}
-
 function viewDialSection(title) {
   const section = document.createElement("section");
   section.className = "view-dial-section";
@@ -15607,25 +15568,14 @@ function viewDialRow({ label, wheelAction, valueField, setAction, decimals, unit
   row.className = "view-dial-row";
   const caption = document.createElement("span");
   caption.textContent = label;
-  const input = document.createElement("input");
-  input.type = "number";
-  input.step = decimals === 0 ? "1" : "0.01";
-  input.value = relative ? "0" : "";
-  if (valueField) input.dataset.viewField = valueField;
-  input.addEventListener("change", async () => {
-    const value = Number(input.value);
-    if (!Number.isFinite(value) || (!relative && value <= 0 && !valueField.startsWith("center"))) {
-      const current = relative ? 0 : viewPanelFieldValue(valueField);
-      input.value = Number.isFinite(current) ? Number(current).toFixed(decimals) : "";
-      return;
-    }
-    await cameraCommand(setAction, value);
-    if (relative) input.value = "0";
+  const context = cameraContext();
+  const input = createViewNumeric({ label, valueField, wheelAction, setAction, decimals, relative,
+    send: cameraCommand, value: () => viewPanelFieldValue(valueField), current: () => context === cameraContext(),
   });
   const suffix = document.createElement("span");
   suffix.className = "view-dial-unit";
   suffix.textContent = unit;
-  row.append(caption, viewDialWheel(label, wheelAction), input, suffix);
+  row.append(caption, input, suffix);
   return row;
 }
 
@@ -15640,7 +15590,7 @@ function viewPanelFieldValue(field) {
 function syncViewPanelControls() {
   if (!viewContent || !viewPanelCamera) return;
   viewContent.querySelectorAll("[data-view-field]").forEach((input) => {
-    if (document.activeElement === input) return;
+    if (input.dataset.editing || input.dataset.dragging) return;
     const value = viewPanelFieldValue(input.dataset.viewField);
     if (!Number.isFinite(value)) return;
     const decimals = input.dataset.viewField.startsWith("center-") ? 2 : 0;
@@ -17139,9 +17089,14 @@ function snapshotHasRenderableContent() {
   );
 }
 
+function cameraContext() {
+  return (snapshot?.views || []).find(view => view.active)?.uid ?? null;
+}
+
 function enqueueCameraCommand(action, x, y) {
+  const context = cameraContext();
   const pending = cameraQueue.at(-1);
-  if (pending?.action === action) {
+  if (pending?.action === action && pending.context === context) {
     if (action === "pan" || action === "rotate") {
       pending.x += x;
       pending.y += y;
@@ -17181,13 +17136,14 @@ function enqueueCameraCommand(action, x, y) {
       return;
     }
   }
-  cameraQueue.push({ action, x, y });
+  cameraQueue.push({ action, x, y, context });
 }
 
 async function flushCameraCommands() {
   try {
     while (cameraQueue.length) {
-      const command = cameraQueue.shift();
+      const {context, ...command} = cameraQueue.shift();
+      if (context !== cameraContext()) continue;
       const size = viewportDimensions();
       const sequence = ++requestSequence;
       try {
@@ -17196,7 +17152,7 @@ async function flushCameraCommands() {
           ...size,
           renderScale: CAMERA_PREVIEW_SCALE,
         });
-        applyViewport(result, sequence);
+        if (context === cameraContext()) applyViewport(result, sequence);
       } catch (error) {
         showError(error);
       }

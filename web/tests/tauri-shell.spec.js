@@ -119,6 +119,7 @@ async function openShell(page, storage = {}, options = {}) {
       objectUid: 3 + index, objectName: `Probe${index}`, chainId: 'A', residues: sequenceResidues,
     }));
     const sequenceLayout = options.sequenceExtremes ? {minimum: -2147483648, columns:16, insertions:[[-2147483648,'A',1],[2147483647,'B',6]],gaps:[{first:-2147483647,last:-1,column:2,removed:2147483646},{first:1,last:2147483646,column:4,removed:4294967291}]} : {minimum: -2, columns: 5014, insertions: [[1, 'A', 4], [1, 'B', 5]]};
+    window.__switchView = () => { snapshot.views[0].uid += 10; };
     window.__shellCalls = [];
     window.__actionsRunning = false;
     window.__TAURI__ = {core: {invoke: async (command, args) => {
@@ -184,7 +185,16 @@ async function openShell(page, storage = {}, options = {}) {
       }
       if (command === 'render_viewport' || command === 'fit_workspace_item' || command === 'fit_workspace_items') return viewport;
       if (command === 'update_camera') {
+        if(options.delayCamera && !window.__cameraWasDelayed){window.__cameraWasDelayed=true;await new Promise(resolve=>window.__releaseCamera=resolve);}
         if (args.action === 'zoom') viewport.zoom *= args.x;
+        if (args.action.startsWith('set-center-')) viewport.center['xyz'.indexOf(args.action.at(-1))]=args.x;
+        if (args.action.startsWith('translate-')) viewport.center['xyz'.indexOf(args.action.at(-1))]+=args.x;
+        for(const field of ['zoom','slab','distance']) {
+          if(args.action===`set-${field}`)viewport[field]=args.x;
+          if(args.action===`adjust-${field}`)viewport[field]+=args.x;
+        }
+        if(args.action==='projection')viewport.perspective=!viewport.perspective;
+        if(args.action.startsWith('center-mark-'))viewport.centerMark=args.action.slice('center-mark-'.length);
         return {...viewport, width: args.width, height: args.height};
       }
       if(options.symmetry && command==='get_space_groups') {
@@ -1960,4 +1970,44 @@ test('Tauri saved camera pane selects, applies, renames and reorders',async({pag
   await page.keyboard.press('Escape');
   await page.screenshot({path:testInfo.outputPath('tauri-camera-pane.png')});
   expect(errors).toEqual([]);
+});
+
+
+test('View pane supports drags, relative arrow steps and chained absolute coordinate edits',async({page},testInfo)=>{
+  const errors=await openShell(page,{'cuemol3.shell.v1':JSON.stringify({activity:'view'})});
+  const panel=page.locator('#view-content');
+  const x=panel.getByRole('textbox',{name:'TraX',exact:true});
+  await expect(x).toHaveValue('0.00');
+  const box=await x.boundingBox();
+  await page.mouse.move(box.x+box.width/2,box.y+box.height/2);await page.mouse.down();
+  await page.mouse.move(box.x+box.width/2+20,box.y+box.height/2+10,{steps:10});await page.mouse.up();
+  await expect(x).toHaveValue('20.00');
+  await x.click();await x.fill('12.25');await x.press('Enter');
+  const y=panel.getByRole('textbox',{name:'TraY',exact:true});await expect(y).toBeFocused();await y.fill('-8.5');await y.press('Enter');
+  const z=panel.getByRole('textbox',{name:'TraZ',exact:true});await expect(z).toBeFocused();await z.fill('3');await z.press('Enter');await expect(z).toHaveValue('3.00');
+  await y.click();await y.press('ArrowUp');await expect(y).toHaveValue('-7.50');await y.press('Escape');
+  const rotation=panel.getByRole('textbox',{name:'RotZ',exact:true});await rotation.click();await rotation.fill('90');await rotation.press('Enter');await expect(rotation).toHaveValue('0');
+  const distance=panel.getByRole('textbox',{name:'Dist',exact:true});await distance.click();await distance.fill('0');await distance.press('Enter');await expect(distance).toHaveValue('0');
+  await x.click();await x.fill('999');await x.press('Escape');await expect(x).toHaveValue('12.25');
+  await panel.locator('#view-perspective').check();await panel.locator('#view-center-mark').selectOption('axis');
+  const calls=await page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='update_camera').map(call=>call.args));
+  expect(calls.filter(call=>call.action==='translate-x').reduce((total,call)=>total+call.x,0)).toBe(20);
+  expect(calls).toEqual(expect.arrayContaining([expect.objectContaining({action:'set-center-x',x:12.25}),expect.objectContaining({action:'set-center-y',x:-8.5}),expect.objectContaining({action:'set-center-z',x:3}),expect.objectContaining({action:'translate-y',x:1}),expect.objectContaining({action:'rotate-z',x:90}),expect.objectContaining({action:'set-distance',x:0}),expect.objectContaining({action:'center-mark-axis'})]));
+  expect(calls.some(call=>call.x===999)).toBe(false);
+  expect(errors).toEqual([]);await page.screenshot({path:testInfo.outputPath('view-pane-tauri.png')});
+});
+
+
+test('View input discards queued movement after changing the active view',async({page})=>{
+  const errors=await openShell(page,{'cuemol3.shell.v1':JSON.stringify({activity:'view'})},{delayCamera:true});
+  const field=page.locator('#view-content').getByRole('textbox',{name:'RotX',exact:true});
+  const box=await field.boundingBox();
+  await page.mouse.move(box.x+box.width/2,box.y+box.height/2);await page.mouse.down();
+  await page.mouse.move(box.x+box.width/2+10,box.y+box.height/2);
+  await expect.poll(()=>page.evaluate(()=>Boolean(window.__releaseCamera))).toBe(true);
+  await page.mouse.move(box.x+box.width/2+30,box.y+box.height/2);await page.mouse.up();
+  await page.evaluate(async()=>{window.__switchView();await mutate('get_snapshot',{},()=>{},false);window.__releaseCamera();});
+  await expect.poll(()=>page.evaluate(()=>cameraRequest===null)).toBe(true);
+  const calls=await page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='update_camera'));
+  expect(calls).toHaveLength(1);expect(calls[0].args.x).toBe(10);expect(errors).toEqual([]);
 });

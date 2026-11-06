@@ -44,10 +44,21 @@ def main():
         str(ROOT / 'crates/cuemol-desktop-core/tests/reference_view_history.cpp'),
         '-L' + str(build / 'src'), '-lcuemol2', '-Wl,-rpath,' + str(build / 'src'),
         '-o', str(view_history_oracle)], check=True, cwd=ROOT)
+    view_xform_oracle = output / 'view-xform-oracle'
+    subprocess.run(shlex.split(os.environ.get('CXX', 'c++')) + [
+        '-O2', '-std=c++20', '-DHAVE_CONFIG_H', '-DNO_SCRIPT',
+        '-I' + str(reference / 'src'), '-I' + str(build / 'src'),
+        '-I' + str(build / '_deps/spdlog-src/include'),
+        str(ROOT / 'crates/cuemol-qsys/tests/reference_view_xform.cpp'),
+        '-L' + str(build / 'src'), '-lcuemol2', '-Wl,-rpath,' + str(build / 'src'),
+        '-o', str(view_xform_oracle)], check=True, cwd=ROOT)
     environment = dict(os.environ, CUEMOL_CAMERA_FIT_ORACLE=str(oracle),
                        CUEMOL_MAP_FIT_BOX_ORACLE=str(map_oracle),
                        CUEMOL_VIEW_HISTORY_ORACLE=str(view_history_oracle),
+                       CUEMOL_VIEW_XFORM_ORACLE=str(view_xform_oracle),
                        CUEMOL_CAMERA_FIT_CONFIG=str(config))
+    subprocess.run(['cargo', 'test', '--locked', '-p', 'cuemol-qsys', '--test',
+                    'view_xform', '--', '--nocapture'], check=True, cwd=ROOT, env=environment)
     subprocess.run(['cargo', 'test', '--locked', '-p', 'cuemol-molstr', '--test',
                     'camera_fit_compat', '--', '--nocapture'], check=True, cwd=ROOT, env=environment)
     subprocess.run(['cargo', 'test', '--locked', '-p', 'cuemol-xtal', '--test',
