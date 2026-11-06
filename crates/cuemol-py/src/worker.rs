@@ -103,6 +103,13 @@ impl PythonWorker {
                 include_str!("bootstrap.py"),
             ])
             .env("UV_CACHE_DIR", super::uv_cache_dir())
+            .env(
+                "CUEMOL_EXECUTABLE",
+                std::env::var_os("CUEMOL_EXECUTABLE")
+                    .map(std::path::PathBuf::from)
+                    .or_else(|| std::env::current_exe().ok())
+                    .ok_or_else(|| "cannot locate the CueMol executable".to_string())?,
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -141,6 +148,7 @@ fn worker_source() -> String {
         "cuemol.mol_util": include_str!("helpers/mol_util.py"),
         "cuemol.net_fetch": include_str!("helpers/net_fetch.py"),
         "cuemol.renderer": include_str!("helpers/renderer.py"),
+        "cuemol.povrender": include_str!("helpers/povrender.py"),
         "cuemol.scene_util": include_str!("helpers/scene_util.py"),
         "cuemol.undo_txn": include_str!("helpers/undo_txn.py"),
         "cuemol.wrapper_base": include_str!("helpers/wrapper_base.py"),

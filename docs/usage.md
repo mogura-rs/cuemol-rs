@@ -341,11 +341,28 @@ py.runString('print(scene.uid)');
 
 Python execution requires a native process and is unavailable in the browser.
 The embedded helpers include `fileio`, `mol_util`, `renderer`, `scene_util`,
-`cmd`, `net_fetch`, `logging`, `UndoTxn` and the wrapper compatibility modules.
+`cmd`, `net_fetch`, `logging`, `UndoTxn`, `povrender` and the wrapper compatibility modules.
 They operate on the live scene, including object copies, selections, transforms,
 compressed input and scene exporters such as Umbreon. Third-party scientific
-Python libraries are not bundled. The reference `povrender` helper is outside
-this compatibility work.
+Python libraries are not bundled. Native `povrender.PovRender` supports still
+images, animation frames, transparent-layer blending and the reference render
+options. The legacy `povrender.render(scene, output, ...)` function is also
+available. Both use `cuemol tools render-pov` and the packaged POV-Ray executable;
+no Python image library is required. A failed render leaves an existing output
+file intact. For example, run the following through `PythonBridge`:
+
+```python
+from cuemol import povrender
+
+povrender.PovRender(1200, 900).render_simple(scene, "molecule")
+povrender.PovRender(1200, 900, fps=25).render_anim(scene, "frame", 0, -1)
+```
+
+`cuemol tools render-pov request.json` accepts `input_path`, `output_path`,
+optional `executable` and `include_dir`, and an `options` object. Pass `-` to read
+the JSON request from standard input. Relative paths use the current directory.
+The requested PNG replaces its destination only after complete PNG decoding and
+dimension checks succeed.
 
 `export-scene` and `render-qsc` use the same readers, default representations and
 scene geometry as the GUI. They support STL, OBJ, POV-Ray, PNG, MQO, LuxRender,

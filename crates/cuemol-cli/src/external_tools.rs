@@ -43,6 +43,7 @@ pub fn run(args: Vec<String>) -> Result<()> {
                 Err(format!("{} exited with {status}", args[1]))
             }
         }
+        "render-pov" if args.len() == 2 => cuemol_command::pov::run_cli_request(&args[1]),
         "bundle" => {
             let mut root = std::env::current_dir().map_err(|e| e.to_string())?;
             while !root.join("scripts/bundle-tools.py").is_file() {
@@ -63,7 +64,7 @@ pub fn run(args: Vec<String>) -> Result<()> {
             }
         }
         _ => Err(
-            "Usage: cuemol tools list | path NAME | run NAME [ARG ...] | bundle [--out DIR]".into(),
+            "Usage: cuemol tools list | path NAME | run NAME [ARG ...] | render-pov REQUEST.json|- | bundle [--out DIR]".into(),
         ),
     }
 }

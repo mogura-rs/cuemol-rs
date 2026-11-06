@@ -1,5 +1,41 @@
 # Validation evidence
 
+
+## Native Python POV-Ray rendering
+
+The native Python bridge now embeds both the current povrender.PovRender class
+and the legacy povrender.render function. Stills and animation frames call the
+shared Rust POV-Ray process runner through cuemol tools render-pov; the direct
+egui and Tauri development executables also dispatch that request before opening
+a window. Render options include fog, clipping, perspective, lighting, radiosity,
+thread count and transparent-layer post-blending. An explicit external blendpng
+executable is honored; otherwise Rust performs the composition.
+
+The output is staged beside its destination, fully decoded as PNG, checked
+against the requested dimensions and then atomically replaced. Process errors
+and truncated PNGs preserve an existing destination. Captured stdout/stderr are
+drained while retaining at most one MiB each; JSON requests are bounded to one
+MiB. The temporary exporter directory is removed on success and ordinary errors.
+
+Validation on the Linux development build:
+
+- Shared command, CLI and Python suites: 255 passed, one optional real-renderer
+  test ignored in the default run.
+- Native GUI models: 189 passed. The POV process tests moved into the shared
+  command crate, so the native count is lower than the previous 192-test run.
+- macOS Tauri models: 167 passed, five optional checks ignored.
+- scripts/check-python-povray.py used the bundled real renderer for the class
+  and legacy function, transparent-layer composition, two changing animation
+  frames, Unicode/space paths, and failed-render output preservation.
+- The same live helper check also passed with the direct egui executable as its
+  renderer host, proving that the Python child does not open another GUI.
+- Release verification now runs the helper smoke check against each platform's
+  bundled renderer. This workflow change has not been executed remotely.
+
+These checks do not yet establish parity for script-exported name/measurement
+labels or every renderer setting. Earlier exclusions of the Python POV helper
+below describe historical scope; the current all-feature request includes it.
+
 Entries record successive checkpoints, so earlier test counts and distribution
 results are historical. Generated inputs and logs stay in the ignored checkout
 cache. The current repairs and their limits appear in the completion audit;

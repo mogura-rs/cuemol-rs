@@ -16818,6 +16818,8 @@ impl GuiApplication {
                 verbose: true,
                 post_blend: settings.post_blend,
                 blend_group: None,
+                use_fog: true,
+                blend_executable: None,
             },
         };
         let labels = collect_scene_pov_labels(

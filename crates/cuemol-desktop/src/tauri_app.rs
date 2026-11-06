@@ -12858,6 +12858,8 @@ fn handle_model_request(
                     verbose: true,
                     post_blend: input.post_blend,
                     blend_group: None,
+                use_fog: true,
+                blend_executable: None,
                 },
             };
             let labels = collect_scene_pov_labels(

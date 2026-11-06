@@ -861,7 +861,7 @@ fn print_usage() {
     eprintln!("  cuemol skill [--help]   Print the agent skill as Markdown");
     eprintln!("  cuemol self-upgrade [--check]");
     eprintln!("  cuemol --build-info   Print compiled source and feature metadata as JSON");
-    eprintln!("  cuemol tools list | path NAME | run NAME [ARG ...] | bundle [--out DIR]");
+    eprintln!("  cuemol tools list | path NAME | run NAME [ARG ...] | render-pov REQUEST.json|- | bundle [--out DIR]");
     eprintln!("  cuemol [file ...]");
     eprintln!("  cuemol gui [file ...]");
     eprintln!(

@@ -8,6 +8,8 @@ mod electrostatics;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod external;
 mod file_commands;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod pov;
 pub use file_commands::scene_save_options;
 mod view_commands;
 pub use downloads::{advance_fetch, load_fetched, prepare_fetch, FetchPlan};
