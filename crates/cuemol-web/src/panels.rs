@@ -264,6 +264,18 @@ impl App {
                 if ui.button("Import ICC profile…").clicked() { choose_file(); }
             }
             let mut input_changed = false;
+            let mut target = cuemol_desktop_core::FileOpenTarget::from_config(&self.state.config_value("files:drop-target"));
+            let old_target = target;
+            let combo = egui::ComboBox::from_label("Drag and drop opens into")
+                .selected_text(if target == cuemol_desktop_core::FileOpenTarget::New {"New scene"} else {"Current scene"})
+                .show_ui(ui, |ui| {
+                    for (value, label) in [(cuemol_desktop_core::FileOpenTarget::Active, "Current scene"), (cuemol_desktop_core::FileOpenTarget::New, "New scene")] {
+                        let response = ui.selectable_value(&mut target, value, label);
+                        self.record_ui_rect(&format!("Drop target {label}"), &response);
+                    }
+                });
+            self.record_ui_rect("Drag and drop opens into", &combo.response);
+            if target != old_target { self.state.put_config_value("files:drop-target", target.as_str()); input_changed = true; }
             for (key, label, options) in [
                 ("view_input:device", "Input device", &["auto", "mouse", "trackpad"][..]),
                 ("cuemol2.ui.viewinconf", "View operation preset", &["DefaultViewInConf", "CootViewInConf", "PymolViewInConf", "IphoneViewInConf", "TrackpadViewInConf"][..]),

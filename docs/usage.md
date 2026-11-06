@@ -40,6 +40,23 @@ release; browser and Tauri builds also include the browser or WebView user agent
 Builds without Git metadata display `unavailable` for the commit. Reproducible
 builds can set `SOURCE_DATE_EPOCH` to control the reported UTC build time.
 
+### File destinations
+
+The default destination for dropped object files is the current scene. Native
+Options and browser Settings expose **Drag and drop opens into**; choosing
+**New scene** creates one destination for each batch, while reusing an untouched
+empty scene. Later files in that batch keep the first successful destination,
+including when a later scene file opens another tab. Invalid files do not create
+empty destination tabs or consume redo history.
+
+Native Options also provides **File manager opens into** for startup file paths.
+Tauri places both choices in its Files options tab. The portable configuration
+keys are `files:drop-target` and `files:shell-target`, each accepting `active`
+or `new`. File > Open and recent-file actions continue to use the active scene.
+QSC and PyMOL scene files use the scene-opening rule independently of these
+object-file preferences. Browser file access uses the selected `File` objects;
+it does not require filesystem paths.
+
 ### Saved cameras
 
 The View activity contains the Camera pane. Select a row, then use the down-arrow

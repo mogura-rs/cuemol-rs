@@ -1,5 +1,46 @@
 # Validation evidence
 
+## File destinations and native file drops
+
+A failing native regression showed that `DroppedFile` events never reached the
+loader. The native event loop now retains incoming paths through initialization
+and opens each batch using the configured destination. Tauri also subscribes to
+its native drag/drop API instead of relying on the browser-only `File.path`.
+The current reference separates drop and shell destinations, reuses untouched
+scenes and pins later object files to the first successful load. A shared
+`FileOpenBatch` now applies these rules, and a closed destination or failed load
+leaves the scene unchanged. Tauri resolves the target after accepting reader
+options. Its failed renderer setup leaves no new tab or undo entry.
+
+Browser imports retain a batch with their `File` objects while the parser worker
+runs. Scene files retain their independent opening rule, including empty-scene
+reuse; menu files use the current scene. Cancelled or superseded parsing retains
+the existing generation and scene checks. Native and Tauri preferences persist
+the independent `files:drop-target` and `files:shell-target` values; the browser
+stores its drop choice locally. The native path wrapper reuses its outer
+transaction instead of making another full application snapshot.
+
+A further failing surface-drop regression showed that native object imports
+cleared the unsaved marker because surface loads share a result variant with
+scene files. The handler now distinguishes saved scenes from imported objects
+and PyMOL sessions, preserving the marker and undo/redo.
+
+Eight core file/loading regressions pass, as do all 203 native GUI tests. The
+macOS Tauri model passed 175 tests with five optional cases ignored; the added
+reader-option destination case and updated preferences round trip also pass.
+All 73 affected browser cases pass across the loading suite, Tauri shell and
+WebGL/WebGPU destination scenarios. The initial destination test clicked the
+combined field label; targeting the actual combo box fixed the test, after which
+both backends passed batching, persistent settings, menu destinations and
+failure-preserving redo.
+
+The X11 OS-input probe transfers real `text/uri-list` data through XDND and
+checks a two-file drop, its separate scene, undo and redo after an invalid drop.
+It passes with the current native build, and the captured window was inspected.
+Run it with `scripts/check-native-gui.py --file-drop-only` on an X11 display.
+These checks do not cover other platforms' native file-drop events.
+
+
 ## Animation authoring cameras and default state
 
 Failing regressions showed that shared `add_anim` commands did not save the

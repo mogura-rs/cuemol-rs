@@ -1439,9 +1439,37 @@ struct ShortcutDto {
     shift: bool,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileOpenContext {
+    #[serde(default)]
+    target: cuemol_desktop_core::FileOpenTarget,
+    scene_id: Option<u64>,
+    #[serde(default)]
+    shell: bool,
+}
+
+impl FileOpenContext {
+    fn batch(&self, state: &DesktopAppState) -> cuemol_desktop_core::FileOpenBatch {
+        let target = if self.shell {
+            cuemol_desktop_core::FileOpenTarget::from_config(
+                &state.config_value("files:shell-target"),
+            )
+        } else {
+            self.target
+        };
+        cuemol_desktop_core::FileOpenBatch::new(target)
+            .with_scene(self.scene_id.map(cuemol_core::Uid::new))
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PreferencesDto {
+    #[serde(default)]
+    drop_target: cuemol_desktop_core::FileOpenTarget,
+    #[serde(default)]
+    shell_target: cuemol_desktop_core::FileOpenTarget,
     atom_label_font: String,
     atom_label_size: f64,
     atom_label_color: String,
@@ -1754,8 +1782,13 @@ impl AppModel {
             }
         };
         let mut loaded = 0usize;
+        let mut batch = FileOpenContext {
+            shell: true,
+            ..Default::default()
+        }
+        .batch(&desktop);
         for path in open_paths {
-            match desktop.open_path(&path) {
+            match batch.open_path(&mut desktop, &path) {
                 Ok(_) => loaded += 1,
                 Err(error) => failures.push(format!("{}: {error}", path.display())),
             }
@@ -2721,6 +2754,12 @@ impl AppModel {
         let font_weight = self.desktop.style_value(0, "", "DefaultLabel.font_weight");
         let input = self.desktop.view_input_config();
         PreferencesDto {
+            drop_target: cuemol_desktop_core::FileOpenTarget::from_config(
+                &self.desktop.config_value("files:drop-target"),
+            ),
+            shell_target: cuemol_desktop_core::FileOpenTarget::from_config(
+                &self.desktop.config_value("files:shell-target"),
+            ),
             atom_label_font: nonempty_or(font, "san-serif"),
             atom_label_size: size.parse().unwrap_or(12.0),
             atom_label_color: nonempty_or(color, "Yellow"),
@@ -2799,6 +2838,10 @@ impl AppModel {
             return Err("pick precision must be between 0 and 100".to_string());
         }
         validate_shortcuts(&preferences.shortcuts)?;
+        self.desktop
+            .put_config_value("files:drop-target", preferences.drop_target.as_str());
+        self.desktop
+            .put_config_value("files:shell-target", preferences.shell_target.as_str());
 
         self.desktop.set_style_value(
             0,
@@ -6306,11 +6349,21 @@ impl AppModel {
         Ok(())
     }
 
+    #[cfg(test)]
     fn open_paths(&mut self, paths: Vec<String>) -> Result<usize, String> {
+        self.open_paths_in_context(paths, FileOpenContext::default())
+    }
+
+    fn open_paths_in_context(
+        &mut self,
+        paths: Vec<String>,
+        context: FileOpenContext,
+    ) -> Result<usize, String> {
+        let mut batch = context.batch(&self.desktop);
         self.opened_paths.clear();
         let mut failures = Vec::new();
         for path in paths {
-            match self.desktop.open_path(&path) {
+            match batch.open_path(&mut self.desktop, Path::new(&path)) {
                 Ok(_) => self.opened_paths.push(path),
                 Err(error) => failures.push(format!("{path}: {error}")),
             }
@@ -8189,6 +8242,7 @@ enum ModelRequest {
     Redo(usize),
     ClearUndo,
     OpenPathsViewport {
+        open_context: FileOpenContext,
         paths: Vec<String>,
         width: u32,
         height: u32,
@@ -8203,6 +8257,7 @@ enum ModelRequest {
         path: String,
     },
     OpenPathWithRendererSetup {
+        open_context: FileOpenContext,
         path: String,
         target: crate::GuiFileRendererTarget,
         reader_options: Option<crate::GuiMoleculeReaderOptions>,
@@ -9774,13 +9829,23 @@ fn validate_coloring_update(input: &ColoringUpdateInput) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
 fn apply_open_paths(model: &mut AppModel, paths: Vec<String>) -> Result<(), String> {
+    apply_open_paths_in_context(model, paths, FileOpenContext::default())
+}
+
+fn apply_open_paths_in_context(
+    model: &mut AppModel,
+    paths: Vec<String>,
+    context: FileOpenContext,
+) -> Result<(), String> {
     model.start_renderer_warmup();
     model.restore_animation_playback(false)?;
     model.animation_elapsed = 0.0;
     let previous_scene = model.desktop.active_scene();
     let undo = model.capture_undo();
-    model.open_paths(paths)?;
+    model.sync_view_camera()?;
+    model.open_paths_in_context(paths, context)?;
     if model.desktop.active_scene() != previous_scene {
         model.reset_animation_playback();
     }
@@ -10759,11 +10824,12 @@ fn handle_model_request(
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::OpenPathsViewport {
+            open_context,
             paths,
             width,
             height,
         } => {
-            apply_open_paths(model, paths)?;
+            apply_open_paths_in_context(model, paths, open_context)?;
             let viewport = model.viewport_metadata(width, height);
             Ok(ModelResponse::MolStructUpdate(Box::new(
                 MolStructUpdateDto {
@@ -10821,6 +10887,7 @@ fn handle_model_request(
             Ok(ModelResponse::FileRendererSetup(Some(setup)))
         }
         ModelRequest::OpenPathWithRendererSetup {
+            open_context,
             path,
             target,
             reader_options,
@@ -10835,7 +10902,8 @@ fn handle_model_request(
             let undo = model.capture_undo();
             let recenter = renderer_setup.recenter;
             let map_renderer_center = (!recenter).then(|| model.camera.center());
-            let result = match target {
+            model.sync_view_camera()?;
+            let result = open_context.batch(&model.desktop).open_object(&mut model.desktop, |desktop| match target {
                 crate::GuiFileRendererTarget::Molecule
                     if density_map_options.is_some() || msms_options.is_some() =>
                 {
@@ -10844,7 +10912,7 @@ fn handle_model_request(
                     ))
                 }
                 crate::GuiFileRendererTarget::Molecule => {
-                    model.desktop.open_path_with_file_reader_and_renderer_setup(
+                    desktop.open_path_with_file_reader_and_renderer_setup(
                         &path,
                         reader_options.as_ref(),
                         namd_coor_options.as_ref(),
@@ -10861,7 +10929,7 @@ fn handle_model_request(
                     ))
                 }
                 crate::GuiFileRendererTarget::DensityMap => {
-                    model.desktop.open_density_map_path_with_renderer_setup(
+                    desktop.open_density_map_path_with_renderer_setup(
                         &path,
                         density_map_options.as_ref(),
                         map_renderer_center,
@@ -10878,13 +10946,13 @@ fn handle_model_request(
                     ))
                 }
                 crate::GuiFileRendererTarget::Surface => {
-                    model.desktop.open_surface_path_with_renderer_setup(
+                    desktop.open_surface_path_with_renderer_setup(
                         &path,
                         msms_options.as_ref(),
                         &renderer_setup,
                     )
                 }
-            };
+            });
             if let Err(error) = result {
                 model.restore_undo(undo)?;
                 return Err(error.to_string());
@@ -14838,6 +14906,7 @@ fn clear_undo(state: State<'_, ManagedState>) -> Result<AppSnapshot, String> {
 #[tauri::command]
 fn open_paths(
     paths: Vec<String>,
+    open_context: Option<FileOpenContext>,
     width: u32,
     height: u32,
     state: State<'_, ManagedState>,
@@ -14845,6 +14914,7 @@ fn open_paths(
     molecule_selection_update_response(request_model(
         &state,
         ModelRequest::OpenPathsViewport {
+            open_context: open_context.unwrap_or_default(),
             paths,
             width,
             height,
@@ -14895,6 +14965,10 @@ fn open_initial_paths(
     molecule_selection_update_response(request_model(
         &state,
         ModelRequest::OpenPathsViewport {
+            open_context: FileOpenContext {
+                shell: true,
+                ..Default::default()
+            },
             paths: paths
                 .into_iter()
                 .map(|path| path.to_string_lossy().into_owned())
@@ -14934,6 +15008,7 @@ fn get_file_renderer_setup(
 fn open_path_with_renderer_setup(
     path: String,
     file_setup: FileRendererSetupInput,
+    open_context: Option<FileOpenContext>,
     width: u32,
     height: u32,
     state: State<'_, ManagedState>,
@@ -14974,6 +15049,7 @@ fn open_path_with_renderer_setup(
     molecule_selection_update_response(request_model(
         &state,
         ModelRequest::OpenPathWithRendererSetup {
+            open_context: open_context.unwrap_or_default(),
             path,
             target,
             reader_options,
@@ -17836,6 +17912,7 @@ mod tests {
         let response = handle_model_request(
             &mut model,
             ModelRequest::OpenPathsViewport {
+                open_context: FileOpenContext::default(),
                 paths: vec![path.to_string_lossy().into_owned()],
                 width: 800,
                 height: 600,
@@ -18064,6 +18141,7 @@ mod tests {
         let error = match handle_model_request(
             &mut model,
             ModelRequest::OpenPathWithRendererSetup {
+                open_context: FileOpenContext::default(),
                 path: path_text.clone(),
                 target: crate::GuiFileRendererTarget::Molecule,
                 reader_options: defaults
@@ -18095,6 +18173,7 @@ mod tests {
         let response = handle_model_request(
             &mut model,
             ModelRequest::OpenPathWithRendererSetup {
+                open_context: FileOpenContext::default(),
                 path: path_text.clone(),
                 target: crate::GuiFileRendererTarget::Molecule,
                 reader_options: defaults
@@ -18165,6 +18244,7 @@ mod tests {
         let response = handle_model_request(
             &mut model,
             ModelRequest::OpenPathWithRendererSetup {
+                open_context: FileOpenContext::default(),
                 path: path_text,
                 target: crate::GuiFileRendererTarget::DensityMap,
                 reader_options: None,
@@ -18241,6 +18321,7 @@ mod tests {
         let response = handle_model_request(
             &mut model,
             ModelRequest::OpenPathWithRendererSetup {
+                open_context: FileOpenContext::default(),
                 path: path_text,
                 target: crate::GuiFileRendererTarget::Surface,
                 reader_options: None,
@@ -18393,6 +18474,8 @@ mod tests {
             std::env::temp_dir().join(format!("cuemol-options-{}-{nonce}.tsv", std::process::id()));
         let mut model = AppModel::new_with_config(Vec::new(), Some(path.clone()));
         let mut preferences = model.preferences();
+        preferences.drop_target = cuemol_desktop_core::FileOpenTarget::New;
+        preferences.shell_target = cuemol_desktop_core::FileOpenTarget::New;
         preferences.atom_label_font = "monospace".to_string();
         preferences.atom_label_size = 18.0;
         preferences.atom_label_color = "#33aa55".to_string();
@@ -18410,6 +18493,14 @@ mod tests {
         assert!(path.is_file());
 
         let restored = AppModel::new_with_config(Vec::new(), Some(path.clone())).preferences();
+        assert_eq!(
+            restored.drop_target,
+            cuemol_desktop_core::FileOpenTarget::New
+        );
+        assert_eq!(
+            restored.shell_target,
+            cuemol_desktop_core::FileOpenTarget::New
+        );
         assert_eq!(restored.atom_label_font, "monospace");
         assert_eq!(restored.atom_label_size, 18.0);
         assert_eq!(restored.atom_label_color, "#33aa55");
@@ -21202,6 +21293,119 @@ mod tests {
         model.undo(0).unwrap();
         assert!(model.snapshot().objects.is_empty());
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn file_renderer_options_apply_destination_only_after_valid_load() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("atoms.pdb");
+        fs::write(&path, b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let mut model = model_without_gpu();
+        model.desktop.open_path(&path).unwrap();
+        let original = model.desktop.active_scene();
+        for kind in ["invalid", "ballstick"] {
+            let before = model.desktop.clone();
+            let result = handle_model_request(
+                &mut model,
+                ModelRequest::OpenPathWithRendererSetup {
+                    open_context: FileOpenContext {
+                        target: cuemol_desktop_core::FileOpenTarget::New,
+                        ..Default::default()
+                    },
+                    path: path.to_string_lossy().into_owned(),
+                    target: crate::GuiFileRendererTarget::Molecule,
+                    reader_options: None,
+                    namd_coor_options: None,
+                    density_map_options: None,
+                    msms_options: None,
+                    renderer_setup: crate::GuiRendererSetup {
+                        object_name: "new molecule".into(),
+                        renderer_type: kind.into(),
+                        renderer_name: "atoms".into(),
+                        selection: None,
+                        recenter: true,
+                    },
+                    width: 800,
+                    height: 600,
+                },
+            );
+            if kind == "invalid" {
+                assert!(result.is_err());
+                assert!(model.desktop.same_scene_undo_state(&before));
+                assert!(model.undo_stack.is_empty());
+            } else {
+                assert!(result.is_ok());
+                assert_ne!(model.desktop.active_scene(), original);
+                assert_eq!(model.desktop.active_object_summaries().len(), 1);
+                assert_eq!(model.undo_stack.len(), 1);
+                model.undo(0).unwrap();
+                assert_eq!(model.desktop.active_scene(), original);
+            }
+        }
+    }
+
+    #[test]
+    fn file_destinations_preserve_first_batch_scene_and_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("atoms.pdb");
+        fs::write(&path, b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let text = path.to_string_lossy().into_owned();
+        let mut model = model_without_gpu();
+        apply_open_paths(&mut model, vec![text.clone()]).unwrap();
+        let original = model.desktop.active_scene().unwrap();
+        let context = FileOpenContext {
+            target: cuemol_desktop_core::FileOpenTarget::New,
+            ..Default::default()
+        };
+        apply_open_paths_in_context(
+            &mut model,
+            vec![text.clone(), text.clone()],
+            context.clone(),
+        )
+        .unwrap();
+        let target = model.desktop.active_scene().unwrap();
+        assert_ne!(target, original);
+        assert_eq!(model.desktop.active_object_summaries().len(), 2);
+        model.undo(0).unwrap();
+        assert_eq!(model.desktop.active_scene(), Some(original));
+        let redo = model.redo_stack.len();
+        let before = model.desktop.clone();
+        assert!(apply_open_paths_in_context(
+            &mut model,
+            vec![directory
+                .path()
+                .join("missing.pdb")
+                .to_string_lossy()
+                .into_owned()],
+            context.clone()
+        )
+        .is_err());
+        assert!(model.desktop.same_scene_undo_state(&before));
+        assert_eq!(model.redo_stack.len(), redo);
+        model.redo(0).unwrap();
+        model.desktop.set_active_scene(Some(original));
+        apply_open_paths_in_context(
+            &mut model,
+            vec![text.clone()],
+            FileOpenContext {
+                scene_id: Some(target.get()),
+                ..context
+            },
+        )
+        .unwrap();
+        assert_eq!(model.desktop.active_scene(), Some(target));
+        assert_eq!(model.desktop.active_object_summaries().len(), 3);
+        model.desktop.put_config_value("files:shell-target", "new");
+        apply_open_paths_in_context(
+            &mut model,
+            vec![text],
+            FileOpenContext {
+                shell: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_ne!(model.desktop.active_scene(), Some(target));
     }
 
     #[test]

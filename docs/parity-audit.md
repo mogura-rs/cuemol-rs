@@ -6,6 +6,9 @@ the cuemol-rs baseline revision `f4ed01c` (v0.1.8). The later `d21afd1` revision
 only adds validation documentation. Repairs and their subsequent checks are
 recorded below. The upstream checkout is read-only.
 
+This is a historical comparison. The current-reference scope and outstanding
+requirements are maintained in [implementation-status.md](implementation-status.md).
+
 The checklist below distinguishes a confirmed difference from an unmeasured
 area. Earlier evidence in [validation.md](validation.md) remains useful for its
 listed cases, but does not establish equivalence for an entire feature family.
@@ -46,8 +49,9 @@ speedup from a single optimized stage or compare timings from different hosts.
 | Native integration | Windows, dialogs, settings, recent files, installer/update and OS credential stores | Five-platform published checks exist; local OS-input prerequisites remain documented |
 | External prerequisites | Real AI providers and hardware quad-buffer presentation | Credentials/target hardware remain required; quad-buffer backend is unimplemented |
 
-POV-Ray changes remain outside this request's established scope; rendering work
-uses Umbreon. Any newly confirmed mismatch must have a reproducer, a repair or
+POV-Ray changes were outside the scope of this historical comparison. The
+current replacement request includes POV-Ray, and subsequent bundled-renderer
+and Python-helper checks are recorded in [validation.md](validation.md). Any newly confirmed mismatch must have a reproducer, a repair or
 explicit unresolved status, and evidence after the repair. Publication requires
 the affected regression checks, public review, terminal CI, distribution and
 Pages verification. Unresolved required rows prevent a claim of full parity.

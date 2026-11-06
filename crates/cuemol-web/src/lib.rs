@@ -63,6 +63,7 @@ enum Event {
     ),
     ImportActions(String, String),
     Source(web_sys::File),
+    Files(Vec<web_sys::File>, bool),
     CameraFile(u64, web_sys::File, String, Option<String>),
     SourceFinished(u64),
     SourceError(u64, String),
@@ -108,6 +109,16 @@ pub fn open_file(file: web_sys::File) {
     }
     enqueue(Event::Source(file));
 }
+#[wasm_bindgen]
+pub fn open_files(files: js_sys::Array, dropped: bool) -> Result<(), JsValue> {
+    let files = files
+        .iter()
+        .map(|file| file.dyn_into::<web_sys::File>())
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    enqueue(Event::Files(files, dropped));
+    Ok(())
+}
+
 #[wasm_bindgen]
 pub fn command(name: String, arguments: String) -> Result<u32, JsValue> {
     let args = serde_json::from_str(&arguments).map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -292,6 +303,7 @@ struct App {
     source_scene: Option<Uid>,
     source_abort: Option<web_sys::AbortController>,
     source_pdb: Option<cuemol_command::pdb::DownloadFile>,
+    source_batch: Option<Rc<RefCell<cuemol_desktop_core::FileOpenBatch>>>,
     frame: usize,
     busy: bool,
     last_command: u32,
@@ -482,6 +494,7 @@ impl App {
             source_scene: None,
             source_abort: None,
             source_pdb: None,
+            source_batch: None,
             frame: 0,
             busy: false,
             last_command: 0,
@@ -870,11 +883,41 @@ impl App {
                     );
                     self.queue_source(file);
                 }
+                Event::Files(files, dropped) => {
+                    if dropped && (self.source_active || !self.source_queue.is_empty()) {
+                        self.message = "File drop ignored while another batch is loading.".into();
+                    } else {
+                        self.cancel_console(
+                            "File opened outside the console; remaining commands cancelled.",
+                        );
+                        let target = if dropped {
+                            cuemol_desktop_core::FileOpenTarget::from_config(
+                                &self.state.config_value("files:drop-target"),
+                            )
+                        } else {
+                            cuemol_desktop_core::FileOpenTarget::Active
+                        };
+                        let batch = Rc::new(RefCell::new(cuemol_desktop_core::FileOpenBatch::new(
+                            target,
+                        )));
+                        for file in files {
+                            if file.name().to_ascii_lowercase().ends_with(".qax") {
+                                open_file(file);
+                            } else {
+                                self.queue_request(loading::Source::File(
+                                    file,
+                                    Some(batch.clone()),
+                                ));
+                            }
+                        }
+                    }
+                }
                 Event::SourceFinished(generation) => {
                     if self.current_source(generation) {
                         self.source_active = false;
                         self.source_abort = None;
                         self.source_pdb = None;
+                        self.source_batch = None;
                         self.busy = false;
                         if self.source_queue.is_empty() {
                             self.source_scene = None;

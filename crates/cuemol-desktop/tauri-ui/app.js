@@ -1868,6 +1868,16 @@ function optionsEditor(source) {
   keyGroup.append(keyTable, shortcutDetail);
   keyPane.append(keyGroup);
 
+  const filesPane = createPane("Files");
+  const fileGroup = group("File destinations");
+  for (const [key, label] of [["dropTarget", "Drag and drop opens into"], ["shellTarget", "File manager opens into"]]) {
+    const control = select([["active", "Current scene"], ["new", "New scene"]], draft[key] || "active");
+    control.setAttribute("aria-label", label);
+    control.addEventListener("change", () => { draft[key] = control.value; });
+    field(fileGroup, label, control);
+  }
+  filesPane.append(fileGroup);
+
   const mousePane = createPane("Mouse");
   const presetGroup = group("Mouse configuration");
   const preset = select(
@@ -17260,18 +17270,30 @@ async function openScene() {
   await openSelectedPaths(paths);
 }
 
-async function openSelectedPaths(paths) {
+let fileBatchOpening = false;
+async function openSelectedPaths(paths, dropped = false) {
+  if (fileBatchOpening) return false;
+  fileBatchOpening = true;
+  try { return await openSelectedPathsBatch(paths, dropped); }
+  finally { fileBatchOpening = false; }
+}
+
+async function openSelectedPathsBatch(paths, dropped) {
+  const openContext = { target: dropped ? preferences?.dropTarget || "active" : "active" };
+  const pin = () => {
+    if (openContext.sceneId == null) openContext.sceneId = snapshot?.scenes.find(scene => scene.active)?.uid;
+  };
   const viewPaths = paths.filter((path) => /\.(view|cam)$/i.test(path));
   const trajectoryPaths = paths.filter((path) => /\.(dcd|trr|xtc|nc)$/i.test(path));
   const objectPaths = paths.filter(
     (path) => !/\.(view|cam|dcd|trr|xtc|nc)$/i.test(path),
   );
   let opened = false;
-  const directPaths = [];
   for (const path of objectPaths) {
     if (/\.(qsc|pse)$/i.test(path)) {
       if (await mutateWithViewport("open_scene", { path })) {
         addRecentFile(path, "scene");
+        pin();
         opened = true;
       }
       continue;
@@ -17284,7 +17306,11 @@ async function openSelectedPaths(paths) {
       continue;
     }
     if (!defaults) {
-      directPaths.push(path);
+      if (await mutateWithViewport("open_paths", { paths: [path], openContext })) {
+        const loaded = Array.isArray(snapshot?.openedPaths) ? snapshot.openedPaths : [];
+        addRecentFiles(loaded.map(path => ({ path })));
+        if (loaded.length) { pin(); opened = true; }
+      }
       continue;
     }
     const setup = await showRendererSetup(defaults);
@@ -17292,6 +17318,7 @@ async function openSelectedPaths(paths) {
     if (
       await mutateWithViewport("open_path_with_renderer_setup", {
         path,
+        openContext,
         fileSetup: {
           targetKind: setup.targetKind,
           rendererSetup: setup.rendererSetup,
@@ -17304,13 +17331,9 @@ async function openSelectedPaths(paths) {
       })
     ) {
       addRecentFile(path);
+      pin();
       opened = true;
     }
-  }
-  if (directPaths.length && (await mutateWithViewport("open_paths", { paths: directPaths }))) {
-    const openedPaths = Array.isArray(snapshot?.openedPaths) ? snapshot.openedPaths : [];
-    addRecentFiles(openedPaths.map((path) => ({ path })));
-    opened = openedPaths.length > 0 || opened;
   }
   for (const path of viewPaths) {
     opened = (await mutate("load_view", { path })) || opened;
@@ -18447,9 +18470,15 @@ window.addEventListener("drop", (event) => {
   event.preventDefault();
   const paths = [...event.dataTransfer.files].map((file) => file.path).filter(Boolean);
   if (paths.length) {
-    openSelectedPaths(paths);
+    openSelectedPaths(paths, true);
   }
 });
+const dropWindow = tauri?.webviewWindow?.getCurrentWebviewWindow?.();
+if (dropWindow?.onDragDropEvent) {
+  dropWindow.onDragDropEvent(event => {
+    if (event.payload.type === "drop") void openSelectedPaths(event.payload.paths, true);
+  }).catch(showError);
+}
 
 restoreSidePanelState();
 setupAnimationTimeline();

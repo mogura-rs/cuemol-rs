@@ -124,8 +124,22 @@ async function openShell(page, storage = {}, options = {}) {
     window.__actionsRunning = false;
     window.__TAURI__ = {core: {invoke: async (command, args) => {
       window.__shellCalls.push({command, args});
-      if (command === 'get_initial_state') return {snapshot, viewport, preferences: {}, startupPathsPending: false};
+      if (command === 'get_initial_state') return {snapshot, viewport, preferences: options.files ? {dropTarget:'new'} : {}, startupPathsPending: false};
       if (command === 'get_snapshot') return snapshot;
+      if(options.files && command==='get_file_renderer_setup')return null;
+      if(options.files && command==='open_paths') {
+        const context=args.openContext;
+        if(context?.sceneId == null && context?.target==='new') {
+          snapshot.scenes.forEach(scene=>scene.active=false);
+          snapshot.scenes.push({uid:7,name:'Dropped files',active:true,modified:true,objectCount:0,mapCount:0});
+        }
+        const active=snapshot.scenes.find(scene=>scene.active);
+        active.objectCount++;
+        snapshot.activeSceneUid=active.uid;
+        snapshot.openedPaths=args.paths;
+        return {snapshot,viewport};
+      }
+
       if(options.cameras && command==='create_camera') {
         const name=args.name.trim();
         if(!snapshot.cameras.some(camera=>camera.name===name))snapshot.cameras.push({sceneUid:1,name,source:'',visibilityCount:0});
@@ -502,6 +516,9 @@ async function openShell(page, storage = {}, options = {}) {
     }}};
     const backendInvoke=window.__TAURI__.core.invoke;
     window.__TAURI__.core.invoke=async(command,args)=>structuredClone(await backendInvoke(command,structuredClone(args)));
+    if(options.files) window.__TAURI__.webviewWindow={getCurrentWebviewWindow:()=>({
+      onDragDropEvent:async callback=>{window.__nativeFileDrop=callback;return ()=>{};}
+    })};
     window.__TAURI__.dialog={save:async options=>{
       window.__saveDialogOptions=options;
       return options.defaultPath;
@@ -2010,4 +2027,16 @@ test('View input discards queued movement after changing the active view',async(
   await expect.poll(()=>page.evaluate(()=>cameraRequest===null)).toBe(true);
   const calls=await page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='update_camera'));
   expect(calls).toHaveLength(1);expect(calls[0].args.x).toBe(10);expect(errors).toEqual([]);
+});
+
+
+test('Tauri native file drops pass one destination through the batch',async({page})=>{
+  const errors=await openShell(page,{}, {files:true});
+  await page.evaluate(()=>window.__nativeFileDrop({payload:{type:'drop',paths:['first.pdb','second.pdb']}}));
+  await expect.poll(()=>page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='open_paths').length)).toBe(2);
+  const calls=await page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='open_paths'));
+  expect(calls[0].args.openContext).toEqual({target:'new'});
+  expect(calls[1].args.openContext).toEqual({target:'new',sceneId:7});
+  expect(calls.map(call=>call.args.paths)).toEqual([['first.pdb'],['second.pdb']]);
+  expect(errors).toEqual([]);
 });

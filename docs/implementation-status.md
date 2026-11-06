@@ -25,6 +25,7 @@ Tauri and WebGL/WebGPU checks. The current operation inventory is complete; newl
 | Unified command and MCP | `cuemol` owns GUI launch, scripts, MCP, tools, web builds, installation diagnostics and updates. All 129 current registrations, 127 MCP operations, 444 parameters and 159 console names/aliases pass the read-only inventory. Added focus/orientation, clipboard, scene encoding and EMDB behavior passes focused native and browser checks; broader behavior remains under audit. |
 | Native appearance and input | The current Linux OS-input suite passes, including the new ChimeraX console, camera-preserving history and multiple-object Zoom. Screenshots were inspected. On the authorized Apple-silicon host, normal and software-stereo wgpu images pass, including exact left/right eye exchange. OS screen/input permission grants remain pending; other-platform window checks still need current binaries. |
 | Animation timelines | Reference chains, transactional edits and broken-chain repair pass shared/native/Tauri/browser checks. All three frontends provide UID selection, strip move/resize, scrubbing, transport, axis/direction presets and an element Inspector. Timing and generic numeric drags preview without history and commit one undo step. Property types and default flags match the current C++ oracle; resets, cancellation, history and serialization have focused checks. Command conversions now match 98 current TypeScript/C++ cases, including boolean aliases, numeric notation, native generic types and near-zero axes. Start-camera initialization, explicit show defaults and first-add undo now pass shared/native/Tauri/browser checks. Broader appearance checks remain under audit. |
+| File destinations and OS drops | Native and Tauri accept OS file-drop events. Native and browser imports share batch destinations, reuse untouched scenes and retain the first successful destination. Tauri applies the same destination after accepting reader options. Menu opens remain in the active scene; drop and shell preferences are independent. Focused model, browser and Linux XDND checks are recorded in the validation log. |
 | Saved camera controls | Native and browser frontends share named selection, toolbar actions, rename, reordering, properties, show/hide editing and file controls. Tauri exposes the same actions. Focused command, model and actual-window/browser checks cover overwrite metadata, pinned order, visibility, navigation preserving redo and camera-file round trips. |
 | View transforms | Native and browser share relative rotation, viewing-axis pan, absolute coordinate entry, chained keyboard input, zoom/slab/distance, projection and center-mark controls. Tauri uses the shared transform math and matching numeric interactions. C++ comparisons, shared/model tests, WebGL/WebGPU and Linux OS input verify distance/slab separation and navigation preserving redo. |
 | Crystal symmetry controls | Native and browser frontends share molecule/map selection, crystal readouts, constrained cell editing, symmetry extents and unit-cell actions. Default cell values, cancellation, scene changes, repeated unit-cell actions and history pass focused checks. Tauri also uses the current defaults, ignores stale space-group replies and offers explicit cancellation. |
@@ -45,3 +46,27 @@ OS, GPU and display for integration validation. The authorized Apple M4/macOS
 setup rejects stereo pixel-format selection, although software stereo passes. Live third-party AI provider
 checks require credentials; loopback tests cover adapters without paid requests.
 These boundaries do not establish complete parity.
+
+## Current interface inventory
+
+The current shell declares ten sidebar panes: Scene, Color, Camera, View,
+Molecular Structure, Selection, Symmetry, Density Map, Action History and
+Action Library. Each has a corresponding native, browser and Tauri interface;
+its focused evidence is recorded above and in [validation.md](validation.md).
+The built-in bottom tabs are Output and Animation. The compiled plugin registry
+adds Console, Sequence and Trajectory tabs, the Agent activity and Get PDB.
+Their user workflows are implemented, but this does not imply support for every
+plugin setting or contribution rule.
+
+The settings audit found the two file-destination preferences and disconnected
+native file-drop handling. Those paths are now implemented. The remaining
+settings comparison includes the current category tree, GPU-picking control,
+plugin enable/disable behavior and the component catalog. The current reference
+ships its plugin registry at build time; runtime installation is a future
+reference feature, not an implemented interface to port.
+
+The old [parity audit](parity-audit.md) retains measurements against 2.4.1.547.
+Its historical open rows and publication notes do not supersede this checklist.
+The remaining dialog audit covers reader options, molecular editing, surface
+operations, interaction analysis and rendering controls against the current
+reference. A registered command alone does not close a dialog or appearance row.

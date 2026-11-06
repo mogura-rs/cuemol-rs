@@ -138,6 +138,56 @@ def scroll_steps(steps):
     pyautogui.scroll(steps * 120 if sys.platform == 'win32' else steps)
 
 
+
+def drop_files_x11(pid, paths):
+    from Xlib import X, display, protocol
+    if sys.platform != 'linux':
+        raise RuntimeError('The XDND probe requires an X11 window')
+    connection = display.Display()
+    source = connection.screen().root.create_window(0, 0, 1, 1, 0, X.CopyFromParent)
+    handles = subprocess.check_output(['xdotool', 'search', '--onlyvisible', '--pid', str(pid)], text=True).split()
+    target = connection.create_resource_object('window', int(handles[0]))
+    atom = connection.intern_atom
+    uri_type = atom('text/uri-list')
+    selection = atom('XdndSelection')
+    source.set_selection_owner(selection, X.CurrentTime)
+    payload = ('\r\n'.join(path.resolve().as_uri() for path in paths) + '\r\n').encode()
+
+    def send(name, data):
+        target.send_event(protocol.event.ClientMessage(window=target, client_type=atom(name), data=(32, data)), event_mask=0)
+        connection.flush()
+
+    send('XdndEnter', [source.id, 5 << 24, uri_type, 0, 0])
+    send('XdndPosition', [source.id, 0, (400 << 16) | 300, X.CurrentTime, atom('XdndActionCopy')])
+    deadline = time.monotonic() + 10
+    dropped = False
+    delivered = False
+    try:
+        while time.monotonic() < deadline:
+            if not connection.pending_events():
+                time.sleep(0.01)
+                continue
+            event = connection.next_event()
+            if event.type == X.ClientMessage and event.client_type == atom('XdndStatus') and not dropped:
+                send('XdndDrop', [source.id, 0, X.CurrentTime, 0, 0])
+                dropped = True
+            elif event.type == X.SelectionRequest:
+                requestor = event.requestor
+                requestor.change_property(event.property, uri_type, 8, payload)
+                requestor.send_event(protocol.event.SelectionNotify(time=event.time, requestor=requestor,
+                    selection=event.selection, target=event.target, property=event.property), event_mask=0)
+                connection.flush()
+                delivered = True
+            elif event.type == X.ClientMessage and event.client_type == atom('XdndFinished'):
+                if not delivered:
+                    raise RuntimeError('XDND completed without requesting file data')
+                return
+        raise RuntimeError('XDND file transfer timed out')
+    finally:
+        source.destroy()
+        connection.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, required=True)
@@ -150,6 +200,7 @@ def main():
     parser.add_argument('--symmetry-only', action='store_true')
     parser.add_argument('--camera-only', action='store_true')
     parser.add_argument('--view-only', action='store_true')
+    parser.add_argument('--file-drop-only', action='store_true')
     args = parser.parse_args()
     binary, work = args.binary.resolve(), args.out.resolve()
     work.mkdir(parents=True, exist_ok=True)
@@ -174,6 +225,9 @@ def main():
     if args.camera_only or args.view_only:
         with (config / 'config.tsv').open('a') as stream:
             stream.write('layout:activity\tview\n')
+    if args.file_drop_only:
+        with (config / 'config.tsv').open('a') as stream:
+            stream.write('files:drop-target\tnew\n')
     if args.symmetry_only:
         with (config / 'config.tsv').open('a') as stream:
             stream.write('layout:activity\tcrystal\n')
@@ -244,6 +298,30 @@ def main():
             def input_focused(box):
                 pixels = capture().crop(box).getdata()
                 return sum(b - r > 30 and g - r > 10 for r, g, b in pixels) > 100
+
+            if args.file_drop_only:
+                original = state['sceneId']
+                second = work / 'second molecule.pdb'
+                second.write_bytes(fixture.read_bytes())
+                drop_files_x11(process.pid, [fixture, second])
+                wait_for(lambda: len(call('get_scene_state')['objects']) == 2)
+                dropped = call('get_scene_state')
+                if dropped['sceneId'] == original:
+                    raise RuntimeError('The file drop ignored the new-scene preference')
+                capture('file-drop-batch.png')
+                call('undo')
+                call('undo')
+                restored = call('get_scene_state')
+                if restored['sceneId'] != original or len(restored['objects']) != 1:
+                    raise RuntimeError('Undo did not restore the original file destination')
+                drop_files_x11(process.pid, [work / 'missing.pdb'])
+                call('redo')
+                if len(call('get_scene_state')['objects']) != 1:
+                    raise RuntimeError('A failed file drop discarded redo')
+                capture('file-drop-redo.png')
+                report.update(ok=True, native_file_drop=True, batch_destination=True, failed_drop_preserves_redo=True)
+                print(json.dumps(report), flush=True)
+                return
 
             if args.view_only:
                 primary = 'command' if sys.platform == 'darwin' else 'ctrl'

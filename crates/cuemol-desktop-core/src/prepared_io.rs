@@ -39,6 +39,13 @@ enum PreparedContents {
 }
 
 impl PreparedFile {
+    pub fn is_scene(&self) -> bool {
+        matches!(
+            self.contents,
+            PreparedContents::Scene { .. } | PreparedContents::Pymol(_)
+        )
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -339,6 +346,16 @@ impl PreparedFile {
 
 impl DesktopAppState {
     pub fn open_prepared(&mut self, file: PreparedFile) -> Result<GuiLoadedPath> {
+        let reusable =
+            matches!(file.contents, PreparedContents::Pymol(_)).then(|| self.ensure_active_scene());
+        self.open_prepared_in_scene(file, reusable)
+    }
+
+    pub(crate) fn open_prepared_in_scene(
+        &mut self,
+        file: PreparedFile,
+        reusable: Option<Uid>,
+    ) -> Result<GuiLoadedPath> {
         let PreparedFile { name, contents } = file;
         match contents {
             PreparedContents::Style { node, data } => {
@@ -384,7 +401,7 @@ impl DesktopAppState {
                     .map(DensityMapData::into_map)
                     .collect::<Result<VecDeque<_>>>()?;
                 let previous = self.active_scene();
-                let scene_uid = self.new_scene(name, true).result_scene;
+                let scene_uid = reusable.unwrap_or_else(|| self.new_scene(name, true).result_scene);
                 let result = (|| {
                     self.scene_manager_mut()
                         .scene_mut(scene_uid)
@@ -420,7 +437,8 @@ impl DesktopAppState {
                 result
             }
             PreparedContents::Pymol(tree) => {
-                let scene_uid = self.ensure_active_scene();
+                let scene_uid =
+                    reusable.unwrap_or_else(|| self.new_scene(&name, true).result_scene);
                 self.load_pse_tree(scene_uid, &tree, &name)?;
                 if let Some(camera) = self.active_scene_saved_camera() {
                     self.set_active_view_camera(&camera)?;

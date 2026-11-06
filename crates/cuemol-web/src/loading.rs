@@ -2,7 +2,10 @@ use super::*;
 use cuemol_desktop_core::PreparedFile;
 
 pub(super) enum Source {
-    File(web_sys::File),
+    File(
+        web_sys::File,
+        Option<Rc<RefCell<cuemol_desktop_core::FileOpenBatch>>>,
+    ),
     Camera(web_sys::File, String),
     Pdb(cuemol_command::pdb::DownloadFile),
 }
@@ -10,14 +13,14 @@ pub(super) enum Source {
 impl Source {
     fn name(&self) -> String {
         match self {
-            Self::File(file) | Self::Camera(file, _) => file.name(),
+            Self::File(file, _) | Self::Camera(file, _) => file.name(),
             Self::Pdb(file) => file.filename.clone(),
         }
     }
 
     async fn open(self, signal: Option<web_sys::AbortSignal>) -> Result<web_sys::File, JsValue> {
         let download = match self {
-            Self::File(file) | Self::Camera(file, _) => return Ok(file),
+            Self::File(file, _) | Self::Camera(file, _) => return Ok(file),
             Self::Pdb(download) => download,
         };
         let options = web_sys::RequestInit::new();
@@ -74,6 +77,7 @@ impl App {
         self.source_generation = self.source_generation.wrapping_add(1);
         self.source_queue.clear();
         self.source_pdb = None;
+        self.source_batch = None;
         if self.source_active {
             self.busy = false;
         }
@@ -83,7 +87,7 @@ impl App {
     }
 
     pub(super) fn queue_source(&mut self, file: web_sys::File) {
-        self.queue_request(Source::File(file));
+        self.queue_request(Source::File(file, None));
     }
 
     pub(super) fn queue_request(&mut self, source: Source) {
@@ -152,8 +156,12 @@ impl App {
         let name = source.name();
         let extension = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
         self.message = format!("Loading {name}…");
+        self.source_batch = None;
         let (file, camera_replace) = match source {
-            Source::File(file) => (file, None),
+            Source::File(file, batch) => {
+                self.source_batch = batch;
+                (file, None)
+            }
             Source::Camera(file, name) => (file, Some(name)),
             remote => {
                 self.start_prepared_source(remote, name, generation);
@@ -226,7 +234,7 @@ impl App {
                 enqueue(Event::SourceFinished(generation));
             });
         } else {
-            self.start_prepared_source(Source::File(file), name, generation);
+            self.start_prepared_source(Source::File(file, None), name, generation);
         }
     }
 
@@ -286,7 +294,13 @@ impl App {
         let style_name = file.style_name();
         let previous_selection = self.selected;
         let before = self.capture_history();
-        let result = self.state.open_prepared(file).and_then(|loaded| {
+        let _ = self.state.set_active_view_camera(&self.camera);
+        let result = if let Some(batch) = &self.source_batch {
+            batch.borrow_mut().open_prepared(&mut self.state, file)
+        } else {
+            self.state.open_prepared(file)
+        }
+        .and_then(|loaded| {
             if let Some(download) = &self.source_pdb {
                 cuemol_command::pdb::configure_downloaded(
                     &mut self.state,

@@ -315,6 +315,7 @@ struct NativeRunner {
     app: Option<GuiApplication>,
     init_error: Option<CueMolError>,
     startup_paths: Vec<PathBuf>,
+    dropped_paths: Vec<PathBuf>,
     started_at: Instant,
     exit_after: Option<Duration>,
     wheel_filter: wheel_filter::X11WheelFilter,
@@ -339,6 +340,7 @@ impl NativeRunner {
             app: None,
             init_error: None,
             startup_paths,
+            dropped_paths: Vec::new(),
             started_at: Instant::now(),
             exit_after: exit_after_from_env(),
             wheel_filter: wheel_filter::X11WheelFilter::default(),
@@ -558,6 +560,11 @@ impl NativeRunner {
             return;
         };
         if window_id != window.id() {
+            return;
+        }
+        if let WindowEvent::DroppedFile(path) = &event {
+            self.dropped_paths.push(path.clone());
+            window.request_redraw();
             return;
         }
         if matches!(event, WindowEvent::CloseRequested) {
@@ -854,10 +861,19 @@ impl NativeRunner {
         self.poll_config_init(event_loop);
         self.poll_commands();
         if let (Some(app), Some(gpu)) = (&mut self.app, &mut self.gpu) {
+            let mut batch = cuemol_desktop_core::FileOpenBatch::new(
+                cuemol_desktop_core::FileOpenTarget::from_config(
+                    &app.state.config_value("files:shell-target"),
+                ),
+            );
             for path in std::mem::take(&mut self.startup_paths) {
                 app.open_path = path.to_string_lossy().into_owned();
-                app.open_current_path(&mut gpu.camera);
+                app.open_current_path_in_batch(&mut gpu.camera, Some(&mut batch));
             }
+            for path in std::mem::take(&mut self.dropped_paths) {
+                app.handle_window_event(&WindowEvent::DroppedFile(path), &mut gpu.camera);
+            }
+            app.file_drop_batch = None;
         }
         if self.should_exit_now() {
             event_loop.exit();
@@ -1289,6 +1305,7 @@ struct GuiApplication {
     agent: cuemol_ui::AgentPanel,
     state: DesktopAppState,
     open_path: String,
+    file_drop_batch: Option<cuemol_desktop_core::FileOpenBatch>,
     save_path: String,
     object_save_path: String,
     view_save_path: String,
@@ -2559,6 +2576,8 @@ struct NativeShortcut {
 
 #[derive(Debug, Clone, PartialEq)]
 struct NativePreferences {
+    drop_target: cuemol_desktop_core::FileOpenTarget,
+    shell_target: cuemol_desktop_core::FileOpenTarget,
     atom_label_font: String,
     atom_label_size: f64,
     atom_label_color: String,
@@ -4493,6 +4512,12 @@ impl NativePreferences {
     fn from_state(state: &DesktopAppState) -> Self {
         let input = state.view_input_config();
         Self {
+            drop_target: cuemol_desktop_core::FileOpenTarget::from_config(
+                &state.config_value("files:drop-target"),
+            ),
+            shell_target: cuemol_desktop_core::FileOpenTarget::from_config(
+                &state.config_value("files:shell-target"),
+            ),
             atom_label_font: nonempty_or(
                 state.style_value(0, "", "DefaultLabel.font_name"),
                 "san-serif",
@@ -4740,6 +4765,7 @@ impl GuiApplication {
             agent,
             state,
             open_path: "../cuemol2/tests/test_data/1CRN.pdb".to_string(),
+            file_drop_batch: None,
             save_path: "scene.qsc".to_string(),
             object_save_path: "object.pdb".to_string(),
             view_save_path: "current_view.cam".to_string(),
@@ -16494,6 +16520,14 @@ impl GuiApplication {
     }
 
     fn open_current_path(&mut self, camera: &mut CameraController) {
+        self.open_current_path_in_batch(camera, None);
+    }
+
+    fn open_current_path_in_batch(
+        &mut self,
+        camera: &mut CameraController,
+        batch: Option<&mut cuemol_desktop_core::FileOpenBatch>,
+    ) {
         let open_path = self.open_path.trim().to_string();
         if open_path.is_empty() {
             self.set_status("Open path is empty");
@@ -16510,10 +16544,27 @@ impl GuiApplication {
             return;
         }
         let undo = self.capture_undo();
-        match self.state.open_path(&path) {
+        let result = if let Some(batch) = batch {
+            let _ = self
+                .state
+                .set_active_view_camera(&camera.to_qsys_camera("__current"));
+            batch.open_path(&mut self.state, &path)
+        } else {
+            self.state.open_path(&path)
+        };
+        match result {
             Ok(GuiLoadedPath::Scene { scene_uid }) => {
                 self.push_undo_snapshot(undo);
-                self.state.clear_scene_modified(scene_uid);
+                let saved_scene = self
+                    .state
+                    .active_scene_source_path()
+                    .is_some_and(|source| source == path);
+                let scene_file = saved_scene || is_scene_file(&path);
+                if saved_scene {
+                    self.state.clear_scene_modified(scene_uid);
+                } else {
+                    self.state.mark_scene_modified(scene_uid);
+                }
                 self.selected_object = None;
                 self.selected_renderer = None;
                 self.workspace_aux_selection = None;
@@ -16522,7 +16573,9 @@ impl GuiApplication {
                 // Report unsupported object classes or source formats so a partial
                 // scene load is not silent.
                 let skipped = self.state.active_scene_skipped_objects();
-                if skipped.is_empty() {
+                if !scene_file {
+                    self.set_status(format!("Opened object in scene {}", scene_uid.get()));
+                } else if skipped.is_empty() {
                     self.set_status(format!("Opened scene {}", scene_uid.get()));
                 } else {
                     self.set_status(format!(
@@ -16542,7 +16595,11 @@ impl GuiApplication {
                 self.rebuild_snapshot();
                 // Restore the scene's saved view (a `.qsc` `<camera>`); only a
                 // camera-less scene falls back to auto-framing the bounding box.
-                match self.state.active_scene_saved_camera() {
+                match self
+                    .state
+                    .active_scene_saved_camera()
+                    .filter(|_| scene_file)
+                {
                     Some(saved) => camera.apply_qsys_camera(&saved),
                     None => camera.fit_snapshot(&self.snapshot),
                 }
@@ -16555,7 +16612,6 @@ impl GuiApplication {
                 self.state.mark_scene_modified(scene_uid);
                 self.selected_object = Some(object_uid);
                 self.selected_renderer = None;
-                self.workspace_aux_selection = None;
                 self.workspace_aux_selection = None;
                 self.last_loaded_path = Some(path);
                 self.add_recent_path(self.last_loaded_path.clone().unwrap());
@@ -19083,6 +19139,33 @@ impl GuiApplication {
 
     fn options_misc_ui(ui: &mut egui::Ui, draft: &mut NativePreferences) {
         ui.group(|ui| {
+            ui.strong("Files");
+            for (label, target) in [
+                ("Drag and drop opens into", &mut draft.drop_target),
+                ("File manager opens into", &mut draft.shell_target),
+            ] {
+                egui::ComboBox::from_label(label)
+                    .selected_text(if *target == cuemol_desktop_core::FileOpenTarget::New {
+                        "New scene"
+                    } else {
+                        "Current scene"
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            target,
+                            cuemol_desktop_core::FileOpenTarget::Active,
+                            "Current scene",
+                        );
+                        ui.selectable_value(
+                            target,
+                            cuemol_desktop_core::FileOpenTarget::New,
+                            "New scene",
+                        );
+                    });
+            }
+        });
+        ui.add_space(8.0);
+        ui.group(|ui| {
             ui.set_min_width(ui.available_width());
             ui.strong("Atom label");
             egui::Grid::new("options_misc_atom_label")
@@ -19233,6 +19316,10 @@ impl GuiApplication {
         preferences: &NativePreferences,
     ) -> std::result::Result<(), String> {
         validate_native_preferences(preferences)?;
+        self.state
+            .put_config_value("files:drop-target", preferences.drop_target.as_str());
+        self.state
+            .put_config_value("files:shell-target", preferences.shell_target.as_str());
         self.state.set_style_value(
             0,
             "user",
@@ -29211,6 +29298,23 @@ impl GuiApplication {
 
     fn handle_window_event(&mut self, event: &WindowEvent, camera: &mut CameraController) -> bool {
         use cuemol_qsys::view_input::{self as input, PointerRelease};
+        if let WindowEvent::DroppedFile(path) = event {
+            self.open_path = path.to_string_lossy().into_owned();
+            if is_trajectory_file(path) {
+                self.request_open_current_path(camera);
+            } else {
+                let mut batch = self.file_drop_batch.take().unwrap_or_else(|| {
+                    cuemol_desktop_core::FileOpenBatch::new(
+                        cuemol_desktop_core::FileOpenTarget::from_config(
+                            &self.state.config_value("files:drop-target"),
+                        ),
+                    )
+                });
+                self.open_current_path_in_batch(camera, Some(&mut batch));
+                self.file_drop_batch = Some(batch);
+            }
+            return true;
+        }
         let time = self.input_origin.elapsed().as_millis() as i64;
         let rect = self.viewport_rect.unwrap_or(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
@@ -34185,6 +34289,66 @@ mod tests {
     }
 
     #[test]
+    fn native_file_drop_loads_coordinates() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("dropped.pdb");
+        fs::write(&path, b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        assert!(app.handle_window_event(&WindowEvent::DroppedFile(path), &mut camera));
+        assert_eq!(app.state.active_object_summaries().len(), 1);
+    }
+
+    #[test]
+    fn native_file_drop_surface_remains_modified_and_undoable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("surface.obj");
+        fs::write(&path, "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").unwrap();
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        app.handle_window_event(&WindowEvent::DroppedFile(path), &mut camera);
+        let scene = app.state.active_scene().unwrap();
+        assert_eq!(app.state.active_surface_summaries().len(), 1);
+        assert!(app.state.scene_is_modified(scene));
+        app.undo(&mut camera);
+        assert!(app.state.active_surface_summaries().is_empty());
+        app.redo(&mut camera);
+        assert_eq!(app.state.active_surface_summaries().len(), 1);
+        assert!(app.state.scene_is_modified(scene));
+    }
+
+    #[test]
+    fn native_file_drop_batches_keep_destinations_and_failed_drops_keep_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("atoms.pdb");
+        fs::write(&path, b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        let original = app.state.active_scene().unwrap();
+        app.state.put_config_value("files:drop-target", "new");
+        for _ in 0..2 {
+            app.handle_window_event(&WindowEvent::DroppedFile(path.clone()), &mut camera);
+        }
+        assert_eq!(app.state.active_scene(), Some(original));
+        assert_eq!(app.state.active_object_summaries().len(), 2);
+        app.file_drop_batch = None;
+        app.handle_window_event(&WindowEvent::DroppedFile(path.clone()), &mut camera);
+        assert_ne!(app.state.active_scene(), Some(original));
+        assert_eq!(app.state.active_object_summaries().len(), 1);
+        app.undo(&mut camera);
+        assert_eq!(app.state.active_scene(), Some(original));
+        let before = app.state.clone();
+        let redo = app.redo_stack.len();
+        app.file_drop_batch = None;
+        app.handle_window_event(
+            &WindowEvent::DroppedFile(directory.path().join("missing.pdb")),
+            &mut camera,
+        );
+        assert!(app.state.same_scene_undo_state(&before));
+        assert_eq!(app.redo_stack.len(), redo);
+    }
+
+    #[test]
     fn native_options_apply_runtime_values_and_persist_config() {
         let path = std::env::temp_dir().join(format!(
             "cuemol-native-options-{}-{}.tsv",
@@ -34212,6 +34376,8 @@ mod tests {
             .resolved_view_input(false)
             .style()
             .starts_with("DefaultViewInConf"));
+        preferences.drop_target = cuemol_desktop_core::FileOpenTarget::New;
+        preferences.shell_target = cuemol_desktop_core::FileOpenTarget::New;
         preferences.atom_label_font = "monospace".to_string();
         preferences.atom_label_size = 18.0;
         preferences.atom_label_color = "#123456".to_string();
