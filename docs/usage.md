@@ -341,7 +341,7 @@ py.runString('print(scene.uid)');
 
 Python execution requires a native process and is unavailable in the browser.
 The embedded helpers include `fileio`, `mol_util`, `renderer`, `scene_util`,
-`cmd`, `net_fetch`, `logging`, `UndoTxn`, `povrender` and the wrapper compatibility modules.
+`cmd`, `net_fetch`, `logging`, `UndoTxn`, `povrender`, `umbreon_render` and the wrapper compatibility modules.
 They operate on the live scene, including object copies, selections, transforms,
 compressed input and scene exporters such as Umbreon. Third-party scientific
 Python libraries are not bundled. Native `povrender.PovRender` supports still
@@ -357,6 +357,22 @@ from cuemol import povrender
 
 povrender.PovRender(1200, 900).render_simple(scene, "molecule")
 povrender.PovRender(1200, 900, fps=25).render_anim(scene, "frame", 0, -1)
+```
+
+`umbreon_render.render` uses the scene's saved render settings, including the
+Umbreon/NPR backend, projection and physical image size. Explicit width and
+height override the output size without changing the scene settings.
+`render_file` loads a QSC and returns its scene after rendering. Both require
+the named saved camera, defaulting to `__current`. Without stored render settings,
+the helper uses RenderSettings defaults and the saved camera's projection;
+it does not create scene app data. Run these helpers through the same native
+PythonBridge:
+
+```python
+from cuemol import umbreon_render
+
+umbreon_render.render(scene, "molecule.png", width=1200, height=900)
+loaded_scene = umbreon_render.render_file("molecule.qsc", "saved-settings.png")
 ```
 
 `cuemol tools render-pov request.json` accepts `input_path`, `output_path`,

@@ -1,5 +1,36 @@
 # Validation evidence
 
+## Native Python Umbreon helper and dictionary results
+
+The current reference includes cuemol.umbreon_render; importing that module
+previously failed in the Rust application. The native bridge now embeds its
+apply_scene_settings, render and render_file interfaces. They use the shared
+Rust exporter, preserving stored Umbreon/NPR settings, optional size overrides,
+saved-camera selection and the fallback projection when no render app data
+exists. Applying defaults leaves the scene without a new settings holder.
+
+The live render_file check exposed a separate binding defect: CmdMgr.runCmdArgs
+returned a proxy where the reference QIF declares a dictionary. The Python
+bridge now recursively converts ordinary data objects into dictionaries while
+retaining native objects and callable handles. Arrays retain their list form.
+Non-enumerable fields are excluded; cyclic or excessively nested data returns
+an error without desynchronizing the worker.
+
+The Linux shared core, command and Python suites passed 560 tests, with one
+optional real-POV test ignored. The two focused dictionary tests also passed in
+the offscreen-enabled build. They check dictionary keys and nulls, live scene
+handles retained across Python submissions, nested data and vectors, and recovery
+after a cyclic result. The existing native Python smoke check passed.
+
+scripts/check-python-umbreon.py rendered actual molecular PNGs. Helper and
+direct-exporter pixels match exactly, including after QSC reload. The check
+also covers NPR output, size overrides, Unicode/space paths, saved settings,
+missing-camera errors and preserving an existing file on that error. The
+generated image was inspected. The same live helper check passed on Apple-silicon
+macOS with a fresh native build. Release verification now includes this smoke
+check; the updated workflow has not been run remotely.
+
+
 
 ## POV-Ray pixel labels and bounded PNG composition
 

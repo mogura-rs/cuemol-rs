@@ -149,6 +149,7 @@ fn worker_source() -> String {
         "cuemol.net_fetch": include_str!("helpers/net_fetch.py"),
         "cuemol.renderer": include_str!("helpers/renderer.py"),
         "cuemol.povrender": include_str!("helpers/povrender.py"),
+        "cuemol.umbreon_render": include_str!("helpers/umbreon_render.py"),
         "cuemol.scene_util": include_str!("helpers/scene_util.py"),
         "cuemol.undo_txn": include_str!("helpers/undo_txn.py"),
         "cuemol.wrapper_base": include_str!("helpers/wrapper_base.py"),

@@ -117,18 +117,61 @@ fn decode(value: &Value, context: &mut Context) -> JsResult<JsValue> {
 }
 
 fn encode(value: JsValue, receiver: JsValue, context: &mut Context) -> JsResult<Value> {
+    encode_nested(value, receiver, context, 0)
+}
+
+fn encode_nested(
+    value: JsValue,
+    receiver: JsValue,
+    context: &mut Context,
+    depth: usize,
+) -> JsResult<Value> {
+    if depth >= 128 {
+        return Err(error("Python value is cyclic or nested too deeply"));
+    }
     if let Some(object) = value.as_object() {
         if object.is_array() {
             let array = JsArray::from_object(object.clone())?;
             let mut values = Vec::new();
             for index in 0..array.length(context)? {
-                values.push(encode(
+                values.push(encode_nested(
                     array.get(index, context)?,
                     JsValue::undefined(),
                     context,
+                    depth + 1,
                 )?);
             }
             return Ok(Value::Array(values));
+        }
+        let class = object.get(JsString::from("_class"), context)?;
+        let kind = object.get(JsString::from("type"), context)?;
+        let native = class.as_string().is_some()
+            || kind.as_string().is_some_and(|name| {
+                SCRIPT_RUNTIME_CLASS_NAMES.contains(&name.to_std_string_escaped().as_str())
+                    || name == &JsString::from("DirectSurfRenderer2")
+            });
+        if !object.is_callable() && !native {
+            let mut values = serde_json::Map::new();
+            for key in object.own_property_keys(context)? {
+                if matches!(key, boa_engine::property::PropertyKey::Symbol(_)) {
+                    continue;
+                }
+                let enumerable = object
+                    .borrow()
+                    .properties()
+                    .get(&key)
+                    .and_then(|property| property.enumerable())
+                    .unwrap_or(false);
+                if enumerable {
+                    let name = key.to_string();
+                    let item = object.get(key, context)?;
+                    values.insert(
+                        name,
+                        encode_nested(item, value.clone(), context, depth + 1)?,
+                    );
+                }
+            }
+            return Ok(Value::Object(values));
         }
         let id = script_env::with_mut(|env| {
             let mut services = env.services.borrow_mut();
