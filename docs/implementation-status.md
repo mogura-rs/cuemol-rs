@@ -14,7 +14,7 @@ and checked across the shared command, native and browser frontends. Camera comm
 rotation, slab fitting and undo separation also pass focused cross-frontend
 checks. Object export selection, format and source-link options also pass native and
 browser checks. The current ChimeraX console command set is implemented and passes native,
-Tauri and WebGL/WebGPU checks. The reference checkout is read-only.
+Tauri and WebGL/WebGPU checks. The current operation inventory is complete; newly added operation behavior has focused coverage. The reference checkout is read-only.
 
 | Requirement | Existing implementation and next verification |
 | --- | --- |
@@ -22,7 +22,7 @@ Tauri and WebGL/WebGPU checks. The reference checkout is read-only.
 | Rust implementation and wgpu | Shared Rust scene, command, GUI and rendering crates exist. Native and browser viewports use wgpu. Vendored numerical kernels and bundled external executables retain their provenance. |
 | Molecular structures, maps, surfaces and editing | Readers, representations, map controls, selections, labels, measurements, editing and undo exist. Current QIF method/property coverage passes; the new selection and fit-box numerical oracles pass. Continue the remaining behavior audit. |
 | Console and scripting | CueMol, PyMOL, ChimeraX, JavaScript and persistent native Python exist. ChimeraX shares the command runtime, supports `.cxc` scripts and has 59 registered commands. Parser, palette and automatic-style comparisons and native, Tauri and WebGL/WebGPU execution checks pass. |
-| Unified command and MCP | `cuemol` owns GUI launch, scripts, MCP, tools, web builds, installation diagnostics and updates. Recheck new reference operation names, schemas and behavior. |
+| Unified command and MCP | `cuemol` owns GUI launch, scripts, MCP, tools, web builds, installation diagnostics and updates. All 129 current registrations, 127 MCP operations, 444 parameters and 159 console names/aliases pass the read-only inventory. Added focus/orientation, clipboard, scene encoding and EMDB behavior passes focused native and browser checks; broader behavior remains under audit. |
 | Native appearance and input | Shared Tritium shell, inspectors, selection/style/render panels and native OS input checks exist. Recheck changed controls with real window input. |
 | MD loading, seeking and playback | Indexed DCD, XTC, TRR, NetCDF and MDCRD exist. Audit format boundaries, repeated frame decoding, shared snapshots and playback memory. |
 | Performance and memory | Measure changed operations with identical inputs and output checks. Record at least three fresh-process samples; do not infer application-wide speedups from one stage. |

@@ -89,11 +89,13 @@ pub(super) fn load<'a>(
     let kind = arg("type").to_ascii_lowercase();
     let assembly = kind
         .strip_prefix("pdb")
+        .filter(|s| !s.starts_with('0'))
         .and_then(|s| s.parse::<u32>().ok())
         .filter(|n| *n > 0);
-    if !["", "cif", "mmcif", "pdb", "2fofc", "fofc"].contains(&kind.as_str()) && assembly.is_none()
+    if !["", "cif", "mmcif", "pdb", "2fofc", "fofc", "emd"].contains(&kind.as_str())
+        && assembly.is_none()
     {
-        return Err("Fetch types are cif, pdb, pdb1.., 2fofc and fofc".into());
+        return Err("Fetch types are cif, pdb, pdb1.., 2fofc, fofc and emd".into());
     }
     let codes = arg("code")
         .split(|ch: char| ch.is_whitespace() || ch == ',')
@@ -106,15 +108,45 @@ pub(super) fn load<'a>(
         return Err("An object name cannot be used with multiple PDB codes".into());
     }
     for code in codes {
+        let lower = code.to_ascii_lowercase();
+        let prefixed = lower
+            .strip_prefix("emd-")
+            .or_else(|| lower.strip_prefix("emd_"))
+            .filter(|number| !number.is_empty() && number.bytes().all(|c| c.is_ascii_digit()));
+        if kind == "emd" || prefixed.is_some() {
+            let number = prefixed
+                .or_else(|| {
+                    (code.len() >= 4 && code.bytes().all(|c| c.is_ascii_digit())).then_some(code)
+                })
+                .ok_or_else(|| format!("Invalid EMDB code: {code}"))?;
+            let label = if !arg("name").is_empty() {
+                arg("name").to_string()
+            } else if prefixed.is_some() {
+                code.to_string()
+            } else {
+                format!("emd_{number}")
+            };
+            actions.push(tool(
+                "fetch_emdb",
+                json!({"id":format!("EMD-{number}"),"name":label,"source":"WWPDB"}),
+            )?);
+            continue;
+        }
         if !code.is_ascii()
-            || !(4..=5).contains(&code.len())
+            || code.len() < 4
             || !code.as_bytes()[0].is_ascii_digit()
-            || !code.bytes().all(|ch| ch.is_ascii_alphanumeric())
+            || !code[..4].bytes().all(|c| c.is_ascii_alphanumeric())
         {
             return Err(format!("Invalid PDB code: {code}"));
         }
         let id = code[..4].to_ascii_lowercase();
-        let chain = &code[4..];
+        let rest = &code[4..];
+        let chain = rest.strip_prefix(['.', '_', '-', ':']).unwrap_or(rest);
+        if (!rest.is_empty() && chain.is_empty())
+            || !chain.bytes().all(|c| c.is_ascii_alphanumeric())
+        {
+            return Err(format!("Invalid PDB code: {code}"));
+        }
         if ["2fofc", "fofc"].contains(&kind.as_str()) {
             if !chain.is_empty() {
                 return Err("A density map cannot be fetched for one chain".into());

@@ -230,7 +230,7 @@ pub fn call_tool(
             for map in state.active_density_map_summaries() {
                 let unit = state.density_map_level_unit(map.uid)?;
                 for r in map.renderers {
-                    rows.push(json!({"objectId":map.uid.get(),"rendId":r.uid.get(),"name":r.name,"type":r.renderer_type,"visible":r.visible,"alpha":r.alpha,"unit":unit,"level":r.specific.get("siglevel").and_then(|s|s.parse::<f64>().ok()),"properties":r.specific}));
+                    rows.push(json!({"objectId":map.uid.get(),"rendId":r.uid.get(),"rendererId":r.uid.get(),"name":format!("{}/{}",map.name,r.name),"extent":r.specific.get("extent").and_then(|s|s.parse::<f64>().ok()),"color":r.specific.get("color"),"type":r.renderer_type,"visible":r.visible,"alpha":r.alpha,"unit":unit,"level":r.specific.get("siglevel").and_then(|s|s.parse::<f64>().ok()),"properties":r.specific}));
                 }
             }
             Ok(json!({"contours":rows}))

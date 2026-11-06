@@ -85,7 +85,7 @@ pub fn focus_nodes(state: &DesktopAppState, view: &mut View, ids: &[Uid]) -> Res
     Ok(bounds.is_some_and(|(min, max)| view.fit_to_box(min, max)))
 }
 
-fn current_fit_view(state: &DesktopAppState, camera: &Camera) -> Result<View> {
+pub(crate) fn current_fit_view(state: &DesktopAppState, camera: &Camera) -> Result<View> {
     let mut view = View::new(Uid::new(1), scene(state)?);
     view.set_camera(camera);
     let size = state
@@ -298,6 +298,17 @@ pub fn call_tool(
                     uid(args, "movId")?,
                     result.matrix,
                     args["keepAsProperty"] == true,
+                )?;
+            }
+            if args["recenter"] == true {
+                crate::view_commands::focus_selection(
+                    state,
+                    camera,
+                    &json!({
+                        "objId":args["movId"],
+                        "selection":args["movSel"].as_str().unwrap_or(if algorithm == "LSQ" { "name CA" } else { "*" }),
+                    }),
+                    false,
                 )?;
             }
             Ok(

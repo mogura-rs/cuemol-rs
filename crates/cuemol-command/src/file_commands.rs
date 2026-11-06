@@ -4,7 +4,7 @@ use cuemol_desktop_core::{
     DesktopAppState, GuiDensityMapReaderOptions, GuiFileRendererTarget, GuiLoadedPath,
     GuiRendererSetup,
 };
-use cuemol_qsys::{Camera, View};
+use cuemol_qsys::Camera;
 use serde_json::{json, Value};
 
 pub fn call_tool(
@@ -16,6 +16,18 @@ pub fn call_tool(
     match name {
         "load_pdb" | "load_mmcif" | "load_mtz" | "load_ccp4" | "load_msms" | "load_namd"
         | "load_amber" => load_file(state, camera, name, args),
+        "fetch_emdb" => {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                crate::transport::fetch_emdb(state, camera, args)
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                Err(CueMolError::invalid_argument(
+                    "Use fetch_emdb in the browser console",
+                ))
+            }
+        }
         "fetch_map" => {
             #[cfg(not(target_arch = "wasm32"))]
             {
@@ -28,6 +40,7 @@ pub fn call_tool(
                 ))
             }
         }
+        "copy_node" => copy(state, args),
         "paste_node" => paste(state, args),
         "calc_elepot" => crate::electrostatics::calculate(state, args),
         _ => Err(CueMolError::not_found(format!("tool {name}"))),
@@ -66,24 +79,7 @@ pub fn load_file(
         return Ok(loaded_result(loaded));
     };
     if let Some(reader) = &mut options.molecule_reader_options {
-        if let Some(v) = args["loadModel"].as_bool() {
-            reader.ignore_multiple_models = !v;
-        }
-        if let Some(v) = args["loadAnisou"].as_bool() {
-            reader.ignore_anisou = !v;
-        }
-        if let Some(v) = args["loadAltConf"].as_bool() {
-            reader.ignore_alt_conf = !v;
-        }
-        if let Some(v) = args["loadSegid"].as_bool() {
-            reader.load_segid_as_chain = v;
-        }
-        if let Some(v) = args["build2ndry"].as_bool() {
-            reader.calculate_secondary_structure = v;
-        }
-        if let Some(v) = args["autoTopology"].as_bool() {
-            reader.auto_generate_topology = v;
-        }
+        apply_structure_reader_options(reader, args);
     }
     if let Some(reader) = &mut options.namd_coor_reader_options {
         if let Some(v) = args["psfFile"].as_str() {
@@ -210,7 +206,7 @@ pub fn load_file(
     Ok(loaded_result(loaded))
 }
 
-fn map_center_policy(args: &Value) -> Result<&str> {
+pub(crate) fn map_center_policy(args: &Value) -> Result<&str> {
     let policy = args["mapCenterPolicy"].as_str().unwrap_or("auto");
     if matches!(policy, "auto" | "moveViewCenter" | "setMapCenter" | "view") {
         Ok(policy)
@@ -225,25 +221,42 @@ pub(crate) fn apply_map_center_policy(
     map_uid: Uid,
     args: &Value,
 ) -> Result<()> {
-    let move_view = match map_center_policy(args)? {
+    let renderers = state
+        .density_map_summary(map_uid)
+        .ok_or_else(|| CueMolError::not_found("density map"))?
+        .renderers
+        .into_iter()
+        .map(|renderer| renderer.uid)
+        .collect::<Vec<_>>();
+    apply_map_renderer_center_policy(state, camera, map_uid, &renderers, args)
+}
+
+pub(crate) fn apply_map_renderer_center_policy(
+    state: &mut DesktopAppState,
+    camera: &mut Camera,
+    map_uid: Uid,
+    renderers: &[Uid],
+    args: &Value,
+) -> Result<()> {
+    let policy = map_center_policy(args)?;
+    if state.density_map_kind(map_uid).is_none() {
+        return Ok(());
+    }
+    let move_view = match policy {
         "auto" => state
             .density_map_kind(map_uid)
             .is_some_and(|(_, kind)| kind == "em"),
         "moveViewCenter" => true,
         _ => false,
-    } && args["centerView"] != false;
-    let summary = state
-        .density_map_summary(map_uid)
-        .ok_or_else(|| CueMolError::not_found("density map"))?;
+    };
     if move_view {
-        let mut view = View::new(Uid::new(1), summary.scene_uid);
-        view.set_camera(camera);
-        view.set_view_size(800, 600);
+        let mut view = crate::properties::current_fit_view(state, camera)?;
         state.fit_density_map_view(map_uid, &mut view)?;
         *camera = view.camera();
-    }
-    for renderer in summary.renderers {
-        state.set_density_renderer_center(map_uid, renderer.uid, camera.center())?;
+    } else {
+        for &renderer in renderers {
+            state.set_density_renderer_center(map_uid, renderer, camera.center())?;
+        }
     }
     Ok(())
 }
@@ -331,4 +344,90 @@ fn paste(state: &mut DesktopAppState, args: &Value) -> Result<Value> {
             json!({"rendererIds":uids.into_iter().map(Uid::get).collect::<Vec<_>>(),"groupId":group.map(Uid::get)})
         }
     })
+}
+
+fn copy(state: &DesktopAppState, args: &Value) -> Result<Value> {
+    let id = crate::commands::uid(args, "nodeId")?;
+    let payload = if text(args, "nodeType")? == "object" {
+        let scene = crate::commands::scene(state)?;
+        if state.scene_manager().scene_uid_for_object(id) != Some(scene)
+            && state.scene_manager().scene_uid_for_surface(id) != Some(scene)
+            && state.scene_manager().scene_uid_for_lw_object(id) != Some(scene)
+            && !state
+                .density_map_summary(id)
+                .is_some_and(|map| map.scene_uid == scene)
+        {
+            return Err(CueMolError::not_found("object in active scene"));
+        }
+        state.copy_workspace_object(id)?.to_text_payload()?
+    } else {
+        crate::clipboard::copy_payload(state, &crate::clipboard::renderer_target(state, id)?)?
+    };
+    let xml = String::from_utf8(payload.bytes)
+        .map_err(|_| CueMolError::parse("Clipboard data is not UTF-8"))?;
+    Ok(json!({"kind":payload.kind,"form":payload.form,"xml":xml}))
+}
+
+pub fn scene_save_options(
+    state: &DesktopAppState,
+    args: &Value,
+) -> Result<cuemol_desktop_core::GuiSceneSaveOptions> {
+    use cuemol_desktop_core::{GuiQscCompression as Compression, GuiQscVersion as Version};
+    let mut options = state.active_scene_save_options()?;
+    let encoding = !args["compress"].is_null() || !args["base64"].is_null();
+    options.version = match args["version"].as_str() {
+        Some("QDF0") if encoding => {
+            return Err(CueMolError::invalid_argument(
+                "compress and base64 need version QDF1.",
+            ))
+        }
+        Some("QDF0") => Version::Qdf0,
+        Some("QDF1") => Version::Qdf1,
+        Some(_) => return Err(CueMolError::invalid_argument("Invalid QSC version")),
+        None if encoding => Version::Qdf1,
+        None => options.version,
+    };
+    if let Some(embed) = args["embedAll"].as_bool() {
+        options.embed_all = embed;
+    }
+    if let Some(base64) = args["base64"].as_bool() {
+        options.base64 = base64;
+    }
+    if let Some(compression) = args["compress"].as_str() {
+        options.compression = match compression {
+            "none" => Compression::None,
+            "gzip" => Compression::Gzip,
+            "xzip" => Compression::Xz,
+            _ => return Err(CueMolError::invalid_argument("Invalid QSC compression")),
+        };
+    }
+    if options.version == Version::Qdf0 {
+        options.compression = Compression::None;
+        options.base64 = false;
+    }
+    Ok(options)
+}
+
+pub(crate) fn apply_structure_reader_options(
+    reader: &mut cuemol_desktop_core::GuiMoleculeReaderOptions,
+    args: &Value,
+) {
+    if let Some(v) = args["loadModel"].as_bool() {
+        reader.ignore_multiple_models = !v;
+    }
+    if let Some(v) = args["loadAnisou"].as_bool() {
+        reader.ignore_anisou = !v;
+    }
+    if let Some(v) = args["loadAltConf"].as_bool() {
+        reader.ignore_alt_conf = !v;
+    }
+    if let Some(v) = args["loadSegid"].as_bool() {
+        reader.load_segid_as_chain = v;
+    }
+    if let Some(v) = args["build2ndry"].as_bool() {
+        reader.calculate_secondary_structure = v;
+    }
+    if let Some(v) = args["autoTopology"].as_bool() {
+        reader.auto_generate_topology = v;
+    }
 }

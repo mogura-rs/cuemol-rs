@@ -65,15 +65,13 @@
     }
   },
   "focus": {
-    "tool": "focus_node",
+    "tool": "focus_nodes",
     "group": "nodes",
     "params": [
-      "nodeId",
-      "nodeType"
+      "nodeIds"
     ],
     "semantics": {
-      "nodeId": "node",
-      "nodeType": "one of `object`, `renderer`, `rendGroup`"
+      "nodeIds": "nodes"
     }
   },
   "focus_node": {
@@ -256,7 +254,8 @@
       "rendererType",
       "name",
       "selection",
-      "centerView"
+      "centerView",
+      "mapCenterPolicy"
     ],
     "semantics": {
       "objId": "object"
@@ -678,7 +677,7 @@
     "params": []
   },
   "center": {
-    "tool": "center_view",
+    "tool": "focus_selection",
     "group": "viewing",
     "params": [
       "objId",
@@ -923,7 +922,7 @@
     }
   },
   "zoom": {
-    "tool": "center_view",
+    "tool": "focus_selection",
     "group": "viewing",
     "params": [
       "objId",
@@ -1207,7 +1206,8 @@
       "refSel",
       "algo",
       "pivot",
-      "keepAsProperty"
+      "keepAsProperty",
+      "recenter"
     ],
     "semantics": {
       "movId": "MolCoord object",
@@ -1613,7 +1613,13 @@
       "name",
       "rendererName",
       "preset",
-      "centerView"
+      "centerView",
+      "loadModel",
+      "loadAnisou",
+      "loadAltConf",
+      "loadSegid",
+      "build2ndry",
+      "autoTopology"
     ],
     "defaults": {
       "format": "mmcif"
@@ -1630,7 +1636,13 @@
       "name",
       "rendererName",
       "preset",
-      "centerView"
+      "centerView",
+      "loadModel",
+      "loadAnisou",
+      "loadAltConf",
+      "loadSegid",
+      "build2ndry",
+      "autoTopology"
     ]
   },
   "fetch_url": {
@@ -1791,7 +1803,11 @@
     "tool": "save_scene",
     "group": "files",
     "params": [
-      "path"
+      "path",
+      "embedAll",
+      "version",
+      "compress",
+      "base64"
     ],
     "semantics": {
       "path": "path"
@@ -1816,7 +1832,11 @@
     "tool": "save_scene",
     "group": "files",
     "params": [
-      "path"
+      "path",
+      "embedAll",
+      "version",
+      "compress",
+      "base64"
     ],
     "semantics": {
       "path": "path"
@@ -1954,5 +1974,50 @@
     "semantics": {
       "nodeIds": "nodes"
     }
+  },
+  "focus_selection": {
+    "tool": "focus_selection",
+    "group": "viewing",
+    "params": [
+      "objId",
+      "selection",
+      "zoom"
+    ],
+    "semantics": {
+      "objId": "MolCoord object"
+    }
+  },
+  "orient_view": {
+    "tool": "orient_view",
+    "group": "viewing",
+    "params": [
+      "objId",
+      "selection"
+    ],
+    "semantics": {
+      "objId": "MolCoord object"
+    }
+  },
+  "copy_node": {
+    "tool": "copy_node",
+    "group": "nodes",
+    "params": [
+      "nodeId",
+      "nodeType"
+    ],
+    "semantics": {
+      "nodeId": "node",
+      "nodeType": "one of `object`, `renderer`, `rendGroup`"
+    }
+  },
+  "fetch_emdb": {
+    "tool": "fetch_emdb",
+    "group": "maps",
+    "params": [
+      "id",
+      "name",
+      "source",
+      "level"
+    ]
   }
 }

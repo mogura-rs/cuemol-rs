@@ -136,3 +136,102 @@ fn set_view_clamps_values_in_reference_order_and_skips_map_only_scenes() {
     )
     .is_err());
 }
+
+#[test]
+fn focus_selection_reads_live_selection_and_preserves_it_on_success_and_failure() {
+    let (mut state, id) = fixture();
+    let mut camera = Camera::new();
+    camera.set_zoom(83.);
+    camera.set_slab_depth(49.);
+    for selection in ["", "none"] {
+        state.set_molecule_selection_text(id, selection).unwrap();
+        let before = camera.clone();
+        assert!(call_tool(
+            &mut state,
+            &mut camera,
+            "focus_selection",
+            &json!({"objId":id.get()})
+        )
+        .is_err());
+        assert_eq!(camera, before);
+    }
+    state.set_molecule_selection_text(id, "resid 2").unwrap();
+    call_tool(
+        &mut state,
+        &mut camera,
+        "focus_selection",
+        &json!({"objId":id.get(),"zoom":false}),
+    )
+    .unwrap();
+    assert_eq!(camera.center(), Vector4::new3(8., 4., 110.));
+    close(camera.zoom(), 83.);
+    close(camera.slab_depth(), 49.);
+    call_tool(
+        &mut state,
+        &mut camera,
+        "focus_selection",
+        &json!({"objId":id.get(),"selection":"*"}),
+    )
+    .unwrap();
+    assert_eq!(camera.center(), Vector4::new3(5., 2., 105.));
+    assert!(camera.zoom() < 83.);
+    assert_eq!(
+        state
+            .scene_manager()
+            .object(id)
+            .unwrap()
+            .mol()
+            .selection_text(),
+        "resid 2"
+    );
+    let actions = Session::default()
+        .plan(&state, &format!("zoom #{} , resid 1", id.get()))
+        .unwrap();
+    assert!(actions.iter().any(|action| matches!(action,Action::Tool{name,args} if name=="focus_selection" && args["zoom"]==true)));
+}
+
+#[test]
+fn orient_view_changes_only_the_camera_and_rejects_empty_selections() {
+    let (mut state, id) = fixture();
+    let mut camera = Camera::new();
+    camera.set_zoom(80.);
+    let before = camera.clone();
+    assert!(call_tool(
+        &mut state,
+        &mut camera,
+        "orient_view",
+        &json!({"objId":id.get(),"selection":"none"})
+    )
+    .is_err());
+    assert_eq!(camera, before);
+    call_tool(
+        &mut state,
+        &mut camera,
+        "orient_view",
+        &json!({"objId":id.get(),"selection":"*"}),
+    )
+    .unwrap();
+    assert_ne!(camera.rotation(), before.rotation());
+    assert!(camera.zoom() < before.zoom());
+    assert_eq!(
+        state
+            .scene_manager()
+            .object(id)
+            .unwrap()
+            .mol()
+            .selection_text(),
+        "none"
+    );
+    let object = state.scene_manager().object(id).unwrap();
+    let positions = object
+        .mol()
+        .atoms()
+        .iter()
+        .map(|atom| {
+            let mut p = atom.position;
+            object.xform_matrix().xform3d(&mut p);
+            camera.rotation().to_matrix().mul_vec(p - camera.center())
+        })
+        .collect::<Vec<_>>();
+    close((positions[0] - positions[1]).z, 0.);
+}

@@ -592,16 +592,27 @@ impl App {
     }
 
     fn try_save_scene_download(&mut self) -> bool {
-        if let Err(error) = self.state.set_active_view_camera(&self.camera) {
-            self.message = error.to_string();
-            return false;
+        match self.save_command_scene_download(&json!({"path":"scene.qsc","embedAll":true})) {
+            Ok(_) => {
+                self.message = "Scene download started.".into();
+                true
+            }
+            Err(error) => {
+                self.message = error;
+                false
+            }
         }
-        let mut saved_camera = self.camera.clone();
-        saved_camera.set_name("__current");
-        if let Err(error) = self.state.set_active_scene_camera(saved_camera) {
-            self.message = error.to_string();
-            return false;
-        }
+    }
+
+    pub(super) fn save_command_scene_download(&mut self, args: &Value) -> Result<Value, String> {
+        cuemol_command::validate_args("save_scene", args)?;
+        let options =
+            cuemol_command::scene_save_options(&self.state, args).map_err(|e| e.to_string())?;
+        let path = args["path"].as_str().ok_or("A scene path is required")?;
+        let filename = std::path::Path::new(path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(path);
         let external = self
             .trajectories
             .iter()
@@ -614,34 +625,42 @@ impl App {
             .iter()
             .map(|(id, block)| (*id, block.source_type()))
             .collect::<Vec<_>>();
-        let result = self
+        let fragments = self
             .state
-            .active_scene_parts_with_external_trajectories(&sources)
-            .map_err(|error| error.to_string())
-            .and_then(|fragments| {
-                let parts = js_sys::Array::new();
-                for (index, fragment) in fragments.iter().enumerate() {
-                    parts.push(&js_sys::Uint8Array::from(fragment.as_slice()));
-                    if let Some((_, block)) = external.get(index) {
-                        parts.push(block.file());
-                    }
-                }
-                download_parts("scene.qsc", &parts, "application/octet-stream").map_err(js_error)
-            });
-        if let Err(error) = result {
-            self.message = error;
-            return false;
+            .active_scene_parts_with_external_trajectories_and_options(
+                &sources,
+                options,
+                Some(&self.camera),
+            )
+            .map_err(|e| e.to_string())?;
+        let parts = js_sys::Array::new();
+        for (index, fragment) in fragments.iter().enumerate() {
+            parts.push(&js_sys::Uint8Array::from(fragment.as_slice()));
+            if let Some((_, block)) = external.get(index) {
+                parts.push(block.file());
+            }
         }
+        download_parts(filename, &parts, "application/octet-stream").map_err(js_error)?;
+        self.state
+            .set_active_view_camera(&self.camera)
+            .map_err(|e| e.to_string())?;
+        let mut saved = self.camera.clone();
+        saved.set_name("__current");
+        self.state
+            .set_active_scene_camera(saved)
+            .map_err(|e| e.to_string())?;
         if let Some(scene) = self.state.active_scene() {
-            if let Err(error) = self.state.complete_embedded_scene_save(scene) {
-                self.message = error.to_string();
-                return false;
+            if options.embed_all {
+                self.state
+                    .complete_embedded_scene_save(scene)
+                    .map_err(|e| e.to_string())?;
+            } else {
+                self.state.clear_scene_modified(scene);
             }
         }
         self.history.clear();
         self.future.clear();
-        self.message = "Scene download started.".into();
-        true
+        Ok(json!({"path":filename}))
     }
     fn save_object_download(&mut self) {
         let Some(id) = self.selected else {

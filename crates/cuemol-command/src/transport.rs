@@ -366,7 +366,7 @@ pub(crate) fn fetch_structure(
             .map(|n| json!(n))
             .unwrap_or(json!(label)),
     );
-    let result = crate::call_tool(state, camera, "load_file", &input);
+    let result = crate::file_commands::load_file(state, camera, "load_file", &input);
     if result.is_err() {
         let _ = std::fs::remove_file(&path);
     }
@@ -386,4 +386,45 @@ pub(crate) fn download(url: &str, format: &str) -> Result<PathBuf> {
     file.flush()?;
     let (_, path) = file.keep().map_err(|e| CueMolError::Io(e.to_string()))?;
     Ok(path)
+}
+
+pub(crate) fn fetch_emdb(
+    state: &mut DesktopAppState,
+    camera: &mut Camera,
+    args: &Value,
+) -> Result<Value> {
+    let mut plan = crate::prepare_fetch("fetch_emdb", args)?;
+    while plan.is_metadata() {
+        let response = if let Some(body) = &plan.request_body {
+            ureq::post(&plan.url).send_json(body)
+        } else {
+            ureq::get(&plan.url).call()
+        };
+        let (status, bytes) = match response {
+            Ok(mut response) => {
+                let status = response.status().as_u16();
+                let mut bytes = Vec::new();
+                response
+                    .body_mut()
+                    .as_reader()
+                    .take(4 * 1024 * 1024 + 1)
+                    .read_to_end(&mut bytes)?;
+                if bytes.len() > 4 * 1024 * 1024 {
+                    return Err(CueMolError::invalid_argument("Metadata exceeds 4 MiB"));
+                }
+                (status, bytes)
+            }
+            Err(ureq::Error::StatusCode(status)) => (status, Vec::new()),
+            Err(_) if plan.optional_metadata() => (0, Vec::new()),
+            Err(error) => return Err(CueMolError::Io(error.to_string())),
+        };
+        plan = crate::advance_fetch(&plan, status, &bytes)?
+            .ok_or_else(|| CueMolError::parse("Missing download metadata stage"))?;
+    }
+    let path = download(&plan.url, "map.gz")?;
+    let result = std::fs::read(&path)
+        .map_err(CueMolError::from)
+        .and_then(|bytes| crate::load_fetched(state, camera, &plan, &bytes));
+    let _ = std::fs::remove_file(path);
+    result
 }

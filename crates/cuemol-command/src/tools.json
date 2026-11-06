@@ -218,28 +218,46 @@
       "type": "object",
       "properties": {
         "objId": {
-          "type": "integer"
+          "type": "integer",
+          "description": "Uid of the object to draw."
         },
         "rendererType": {
-          "type": "string"
+          "type": "string",
+          "description": "Renderer type, from list_renderer_types."
         },
         "name": {
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "description": "Name for the renderer. Null picks an unused default."
         },
         "selection": {
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "description": "Draw only this selection. Null draws the whole object. Check it with count_selection first."
         },
         "centerView": {
           "type": [
             "boolean",
             "null"
-          ]
+          ],
+          "description": "True also centres the view on the new renderer (MolCoord objects only). Null or false leaves the view."
+        },
+        "mapCenterPolicy": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "auto",
+            "setMapCenter",
+            "moveViewCenter",
+            null
+          ],
+          "description": "For a map renderer: setMapCenter draws it around the view centre, moveViewCenter moves the view to the map. Null or auto picks by the map kind."
         }
       },
       "required": [
@@ -350,56 +368,106 @@
       "type": "object",
       "properties": {
         "pdbId": {
-          "type": "string"
+          "type": "string",
+          "description": "Four-character PDB accession code, for example 1CRN."
         },
         "format": {
           "type": "string",
           "enum": [
             "mmcif",
             "pdb"
-          ]
+          ],
+          "description": "Which file to fetch. Prefer mmcif."
         },
         "rendererType": {
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "description": "Renderer to create for it, for example cartoon. Null draws a molecule with the PyMOL-like preset DefaultPymRendPreset (cartoon, ligand sticks, ion spheres, water lines) when no selection is given, and anything else with its own default renderer."
         },
         "selection": {
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "description": "Draw only this selection. Null draws everything."
         },
         "name": {
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "description": "Name of the new object. Null uses the accession code."
         },
         "rendererName": {
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "description": "Name of the renderer. Null uses <type>1."
         },
         "preset": {
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "description": "Draw it with this renderer preset (a group), instead of rendererType. Null leaves the choice to rendererType."
         },
         "centerView": {
           "type": [
             "boolean",
             "null"
-          ]
+          ],
+          "description": "False leaves the view where it is. Null or true centres it on the new object."
         },
         "mapCenterPolicy": {
           "type": [
             "string",
             "null"
           ]
+        },
+        "loadModel": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Read every model of a multi-model file (NMR), not only the first."
+        },
+        "loadAnisou": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Read the anisotropic B-factors (ANISOU)."
+        },
+        "loadAltConf": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Read the alternative conformations."
+        },
+        "loadSegid": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Read the segment ids (format pdb only)."
+        },
+        "build2ndry": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Compute the secondary structure instead of reading it from the file."
+        },
+        "autoTopology": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Build the bonds of residues the topology does not know."
         }
       },
       "required": [
@@ -766,6 +834,13 @@
           "type": [
             "string",
             "null"
+          ],
+          "enum": [
+            "auto",
+            "setMapCenter",
+            "moveViewCenter",
+            "view",
+            null
           ]
         }
       },
@@ -1040,7 +1115,47 @@
       "type": "object",
       "properties": {
         "path": {
-          "type": "string"
+          "type": "string",
+          "description": "Where to write the .qsc file."
+        },
+        "embedAll": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "True embeds the data of every object in the file instead of linking to its source file."
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "QDF1",
+            "QDF0",
+            null
+          ],
+          "description": "File format version. QDF0 (the old format) has no compression or base64. Null keeps the default, or QDF1 when compress or base64 is given."
+        },
+        "compress": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "xzip",
+            "gzip",
+            "none",
+            null
+          ],
+          "description": "Compression of the embedded data (QDF1 only)."
+        },
+        "base64": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "True writes the embedded data as base64 text (QDF1 only)."
         }
       },
       "required": [
@@ -4679,6 +4794,13 @@
             "null"
           ],
           "description": "True keeps the fit as the object's transform (xformMat) and leaves the coordinates; null or false moves the coordinates."
+        },
+        "recenter": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "True fits the view to the fitted atoms of the moving object afterwards; null or false leaves the view."
         }
       },
       "required": [
@@ -5720,6 +5842,145 @@
       "readOnlyHint": false,
       "destructiveHint": true,
       "openWorldHint": false
+    }
+  },
+  {
+    "name": "focus_selection",
+    "description": "Fit or center selected molecular atoms without changing the selection.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer",
+          "description": "Uid of the MolCoord object."
+        },
+        "selection": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The atoms to frame. Null uses the object's current selection."
+        },
+        "zoom": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "True (or null) fits the zoom too; false only centres."
+        }
+      },
+      "required": [
+        "objId"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "orient_view",
+    "description": "Orient selected atoms along their principal axes and fit the camera.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "objId": {
+          "type": "integer",
+          "description": "Uid of the MolCoord object."
+        },
+        "selection": {
+          "type": "string",
+          "description": "The atoms to orient on; \"*\" for the whole object."
+        }
+      },
+      "required": [
+        "objId",
+        "selection"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "copy_node",
+    "description": "Copy object, renderer or renderer group XML for paste_node.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "nodeId": {
+          "type": "integer",
+          "description": "Uid of the object, renderer or renderer group."
+        },
+        "nodeType": {
+          "type": "string",
+          "enum": [
+            "object",
+            "renderer",
+            "rendGroup"
+          ],
+          "description": "What nodeId refers to."
+        }
+      },
+      "required": [
+        "nodeId",
+        "nodeType"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "fetch_emdb",
+    "description": "Fetch the cryo-EM map of an EMDB accession or PDB entry with its recommended contour level.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "EMDB code such as EMD-11638, or the PDB ID of a cryo-EM entry."
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Name for the map object. Null uses emd_<number>."
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "WWPDB",
+            "EBI",
+            null
+          ],
+          "description": "Which mirror: WWPDB (files.wwpdb.org) or EBI. Null is WWPDB."
+        },
+        "level": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Contour level in the map's own density units. Null uses the level EMDB recommends (the top 1% of grid points when it gives none)."
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": true
     }
   }
 ]

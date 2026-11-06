@@ -29,13 +29,30 @@ impl WorkspaceStyleClipboard {
 
 impl WorkspaceObjectClipboard {
     pub fn to_payload(&self) -> Result<GuiClipboardPayload> {
+        self.payload_with_options(GuiSceneSaveOptions {
+            embed_all: true,
+            ..Default::default()
+        })
+    }
+
+    /// Encode embedded binary object data as text for JSON command callers.
+    pub fn to_text_payload(&self) -> Result<GuiClipboardPayload> {
+        self.payload_with_options(GuiSceneSaveOptions {
+            embed_all: true,
+            version: GuiQscVersion::Qdf1,
+            base64: true,
+            ..Default::default()
+        })
+    }
+
+    fn payload_with_options(&self, options: GuiSceneSaveOptions) -> Result<GuiClipboardPayload> {
         let mut temporary = DesktopAppState::new();
         let scene = temporary.ensure_active_scene();
         let id = temporary.paste_workspace_object(scene, self)?;
         if let Some(object) = temporary.scene_manager_mut().object_mut(id) {
             object.set_source_type("qdfmol");
         }
-        let bytes = temporary.active_scene_bytes()?;
+        let bytes = temporary.active_scene_bytes_with_options(options, None)?;
         let (xml, suffix) = split_qsc_document(&bytes)?;
         let tree = parse_ldom2_xml(xml)?;
         let node = tree

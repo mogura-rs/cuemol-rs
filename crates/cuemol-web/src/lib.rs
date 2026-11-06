@@ -567,6 +567,13 @@ impl App {
             self.render_async(name, &args, download, false);
             return;
         }
+        if name == "save_scene" {
+            self.message = match self.save_command_scene_download(&args) {
+                Ok(result) => result.to_string(),
+                Err(error) => format!("Error: {error}"),
+            };
+            return;
+        }
         if name == "save_object" {
             self.message = match self.save_command_object_download(&args) {
                 Ok(result) => result.to_string(),

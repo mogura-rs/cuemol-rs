@@ -55,7 +55,7 @@ fn group(name: &str) -> &str {
         | "count_selection"
         | "list_chains"
         | "add_paint"
-        | "center_view"
+        | "focus_selection"
         | "rotate_view"
         | "set_view" => "core",
         "list_residues"
@@ -96,8 +96,12 @@ fn group(name: &str) -> &str {
         | "set_projection"
         | "pan_view"
         | "get_view"
-        | "focus_node" => "view",
+        | "center_view"
+        | "focus_node"
+        | "focus_nodes"
+        | "orient_view" => "view",
         "fetch_map"
+        | "fetch_emdb"
         | "list_map_contours"
         | "set_map_contour"
         | "recenter_map"

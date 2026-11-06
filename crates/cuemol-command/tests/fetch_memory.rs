@@ -67,3 +67,51 @@ fn cancelled_native_render_does_not_create_an_output_file() {
         .is_err());
     assert!(!path.exists());
 }
+
+#[test]
+fn pdb_download_options_control_models_altloc_and_anisotropic_data() {
+    let pdb=b"MODEL        1\nATOM      1  CA AALA A   1       0.000   0.000   0.000  1.00 10.00           C  \nANISOU    1  CA AALA A   1     1111   2222   3333    444    555    666       C  \nATOM      2  CA BALA A   1       1.000   0.000   0.000  1.00 10.00           C  \nENDMDL\nMODEL        2\nATOM      3  N   GLY A   2       2.000   0.000   0.000  1.00 10.00           N  \nENDMDL\n";
+    for (models, altloc, anisou, count) in [
+        (false, true, true, 2),
+        (true, true, false, 3),
+        (false, false, false, 1),
+    ] {
+        let mut state = DesktopAppState::new();
+        let mut camera = Camera::new();
+        let plan=prepare_fetch("fetch_pdb",&json!({"pdbId":"1crn","format":"pdb","loadModel":models,"loadAltConf":altloc,"loadAnisou":anisou,"build2ndry":false,"autoTopology":false})).unwrap();
+        let result = load_fetched(&mut state, &mut camera, &plan, pdb).unwrap();
+        let molecule = state
+            .scene_manager()
+            .object(cuemol_core::Uid::new(result["objectId"].as_u64().unwrap()))
+            .unwrap()
+            .mol();
+        assert_eq!(molecule.atom_count(), count);
+        assert_eq!(molecule.atoms()[0].int_prop("anisou_u11").is_some(), anisou);
+    }
+}
+
+#[test]
+fn pymol_fetch_accepts_emdb_and_multichar_chain_codes() {
+    use cuemol_command::console::{Action, Dialect, Session};
+    let state = DesktopAppState::new();
+    let mut session = Session::default();
+    let camera = Camera::new();
+    for (command, id, label) in [
+        ("fetch EMD-11638", "EMD-11638", "EMD-11638"),
+        ("fetch 11638, type=emd", "EMD-11638", "emd_11638"),
+    ] {
+        let actions = session
+            .plan_dialect(&state, &camera, Dialect::PyMol, command)
+            .unwrap();
+        assert!(actions.iter().any(|action|matches!(action,Action::Tool{name,args} if name=="fetch_emdb" && args["id"]==id && args["name"]==label)));
+    }
+    let actions = session
+        .plan_dialect(&state, &camera, Dialect::PyMol, "fetch 1abc:AB")
+        .unwrap();
+    assert!(actions
+        .iter()
+        .any(|action| matches!(action,Action::KeepChain{chain,..} if chain=="AB")));
+    assert!(session
+        .plan_dialect(&state, &camera, Dialect::PyMol, "fetch 1abc, type=pdb01")
+        .is_err());
+}

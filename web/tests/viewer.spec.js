@@ -1164,8 +1164,7 @@ test('browser trajectories append ordered files across molecules and retain bloc
   await call(page,'set_frame',{objId:second,frame:1});expect(await x(second)).toBe(41);
   expect((await list()).map(item=>item.frame)).toEqual([2,1]);
   const saved=page.waitForEvent('download');
-  const button=await page.evaluate(()=>window.cuemol.status().ui.rects['Save Scene']);
-  await page.mouse.click(button[0]+button[2]/2,button[1]+button[3]/2);
+  await call(page,'save_scene',{path:'multiple.qsc',embedAll:true,version:'QDF1',compress:'gzip',base64:true});
   const chunks=[];for await(const part of await (await saved).createReadStream())chunks.push(part);
   await page.reload();await expect.poll(()=>page.evaluate(()=>!!window.cuemol),{timeout:60000}).toBe(true);
   await load(page,'multiple.qsc',Buffer.concat(chunks));

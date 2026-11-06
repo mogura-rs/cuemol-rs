@@ -33,6 +33,10 @@ Open files on the command line, through the file dialog, or by drag and drop.
 Browser file parsing runs in a worker so navigation and edits remain available.
 Use **Cancel loading** or Escape to stop the current input and discard queued
 files. **Get PDB** uses the same queue and also cancels its network request.
+The shared console also accepts `fetch_emdb EMD-1010` or a PDB identifier with
+an associated EM map. It uses the archive's recommended contour when available;
+an explicit `level` overrides it. `mapCenterPolicy` controls whether loading or
+creating a map renderer centers the view or centers the new contour on the view.
 A failed load keeps existing edits and redo history. Changing the active scene
 while an input is queued, downloading or being parsed prevents its late result
 from entering the new scene. Loading waits for an active image render, and

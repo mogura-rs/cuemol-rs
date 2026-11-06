@@ -205,24 +205,8 @@ impl ConsoleRunner {
                     name: "clear_undo".into(),
                     args: json!({}),
                 });
-                #[cfg(target_arch = "wasm32")]
-                {
-                    let mut saved = state.clone();
-                    saved
-                        .set_active_view_camera(camera)
-                        .map_err(|e| e.to_string())?;
-                    let bytes = saved.active_scene_bytes().map_err(|e| e.to_string())?;
-                    return Ok(ConsoleStep::Action(Action::WriteFile {
-                        path: args["path"]
-                            .as_str()
-                            .ok_or("A scene path is required")?
-                            .into(),
-                        bytes: Arc::new(bytes),
-                        mime: "application/octet-stream".into(),
-                    }));
-                }
             }
-            if ["fetch_pdb", "fetch_url", "fetch_map"].contains(&name.as_str()) {
+            if ["fetch_pdb", "fetch_url", "fetch_map", "fetch_emdb"].contains(&name.as_str()) {
                 let wake = wake.clone();
                 self.pending = Some(Pending::Download {
                     job: cuemol_agent::DownloadJob::start(

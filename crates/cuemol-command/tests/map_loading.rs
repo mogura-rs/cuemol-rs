@@ -80,14 +80,14 @@ fn downloaded_map_center_policy_preserves_view() {
 }
 
 #[test]
-fn automatic_map_center_policy_uses_map_kind_and_respects_disabled_centering() {
+fn automatic_map_center_policy_uses_map_kind_independently_of_molecule_centering() {
     for (em, policy, center_view, moves_view) in [
         (false, "auto", true, false),
         (true, "auto", true, true),
-        (true, "auto", false, false),
+        (true, "auto", false, true),
         (true, "setMapCenter", true, false),
         (false, "moveViewCenter", true, true),
-        (false, "moveViewCenter", false, false),
+        (false, "moveViewCenter", false, true),
     ] {
         let (mut state, mut camera) = initial_state();
         let before = view_json(&camera);
@@ -162,4 +162,77 @@ fn command_subsampling_matches_reader_before_quantization() {
     assert_eq!(reloaded.min_density, summary.min_density);
     assert_eq!(reloaded.max_density, summary.max_density);
     assert_eq!(reloaded.center, summary.center);
+}
+
+#[test]
+fn creating_map_renderer_applies_policy_only_to_the_new_renderer() {
+    let (mut state, mut camera) = initial_state();
+    state.open_bytes("crystal.map", &map_bytes(false)).unwrap();
+    let map = state.active_density_map_summaries()[0].clone();
+    let old = map.renderers[0].clone();
+    let result = call_tool(
+        &mut state,
+        &mut camera,
+        "create_renderer",
+        &json!({"objId":map.uid.get(),"rendererType":"contour","mapCenterPolicy":"setMapCenter"}),
+    )
+    .unwrap();
+    let summary = state.density_map_summary(map.uid).unwrap();
+    assert_eq!(
+        summary
+            .renderers
+            .iter()
+            .find(|r| r.uid == old.uid)
+            .unwrap()
+            .specific["center"],
+        old.specific["center"]
+    );
+    assert_eq!(
+        summary
+            .renderers
+            .iter()
+            .find(|r| Some(r.uid.get()) == result["rendererId"].as_u64())
+            .unwrap()
+            .specific["center"],
+        camera.center().to_string()
+    );
+    call_tool(&mut state,&mut camera,"create_renderer",&json!({"objId":map.uid.get(),"rendererType":"isosurf","mapCenterPolicy":"moveViewCenter","centerView":false})).unwrap();
+    assert_ne!(camera.center(), Vector4::new3(30., 40., 50.));
+}
+
+#[test]
+fn emdb_download_uses_absolute_or_default_contour_and_fits_the_map() {
+    for level in [Some(10.), None] {
+        let (mut state, mut camera) = initial_state();
+        let before = camera.clone();
+        let mut plan = prepare_fetch("fetch_emdb", &json!({"id":"11638","level":level})).unwrap();
+        if plan.is_metadata() {
+            plan = cuemol_command::advance_fetch(&plan, 503, &[])
+                .unwrap()
+                .unwrap();
+        }
+        plan.filename = "test.map".into();
+        let result = load_fetched(&mut state, &mut camera, &plan, &map_bytes(false)).unwrap();
+        let id = Uid::new(result["objectId"].as_u64().unwrap());
+        assert_eq!(result["emdbId"], "EMD-11638");
+        assert_eq!(state.density_map_kind(id).unwrap().1, "em");
+        let map = state.density_map_summary(id).unwrap();
+        assert_eq!(map.renderers.len(), 1);
+        assert_eq!(map.renderers[0].renderer_type, "isosurf");
+        assert_ne!(camera, before);
+        if let Some(level) = level {
+            let prop = call_tool(
+                &mut state,
+                &mut camera,
+                "get_renderer_property",
+                &json!({"rendId":map.renderers[0].uid.get(),"prop":"level"}),
+            )
+            .unwrap();
+            assert!(
+                (prop["value"].as_str().unwrap().parse::<f64>().unwrap() - level).abs()
+                    <= state.density_quantization_step(id),
+                "{prop}"
+            );
+        }
+    }
 }

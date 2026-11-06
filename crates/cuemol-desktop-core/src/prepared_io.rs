@@ -75,6 +75,56 @@ impl PreparedFile {
         Ok(value)
     }
 
+    pub fn parse_with_molecule_options(
+        name: &str,
+        bytes: &[u8],
+        options: &GuiMoleculeReaderOptions,
+    ) -> Result<Self> {
+        let decoded = if [".gz", ".bz2", ".xz"]
+            .iter()
+            .any(|suffix| name.to_ascii_lowercase().ends_with(suffix))
+        {
+            std::borrow::Cow::Owned(cuemol_core::compressed::decode_bytes(bytes)?)
+        } else {
+            std::borrow::Cow::Borrowed(bytes)
+        };
+        let text =
+            std::str::from_utf8(&decoded).map_err(|error| CueMolError::parse(error.to_string()))?;
+        let molecule = match options.kind {
+            GuiMoleculeReaderKind::Pdb => cuemol_molstr::read_pdb_str_with_options(
+                text,
+                cuemol_molstr::PdbReadOptions {
+                    load_model: !options.ignore_multiple_models,
+                    load_anisou: !options.ignore_anisou,
+                    load_alt_conf: !options.ignore_alt_conf,
+                    build_secondary: options.calculate_secondary_structure,
+                    load_seg_id: options.load_segid_as_chain,
+                    auto_topo_gen: options.auto_generate_topology,
+                },
+            )?,
+            GuiMoleculeReaderKind::Mmcif => {
+                let mut molecule = cuemol_molstr::read_mmcif_str_with_options(
+                    text,
+                    cuemol_molstr::MmcifReadOptions {
+                        load_model: !options.ignore_multiple_models,
+                        load_anisou: !options.ignore_anisou,
+                        load_alt_conf: !options.ignore_alt_conf,
+                        load_secstr: !options.calculate_secondary_structure,
+                        auto_topo_gen: options.auto_generate_topology,
+                    },
+                )?;
+                if options.calculate_secondary_structure {
+                    molecule.calc_prot_2ndry(-500., false);
+                }
+                molecule
+            }
+        };
+        Ok(Self {
+            name: name.into(),
+            contents: PreparedContents::Molecule(molecule.transfer_data()),
+        })
+    }
+
     pub fn parse(name: &str, bytes: &[u8]) -> Result<Self> {
         let lower = name.to_ascii_lowercase();
         if [".gz", ".bz2", ".xz"]

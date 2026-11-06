@@ -135,3 +135,59 @@ pub(crate) fn set_view(
     *camera = updated;
     Ok(view_json(camera))
 }
+
+pub(crate) fn focus_selection(
+    state: &DesktopAppState,
+    camera: &mut Camera,
+    args: &Value,
+    orient: bool,
+) -> Result<Value> {
+    let id = uid(args, "objId")?;
+    let current = state
+        .scene_manager()
+        .scene(scene(state)?)
+        .ok_or_else(|| CueMolError::not_found("scene"))?;
+    let object = current
+        .object(id)
+        .ok_or_else(|| CueMolError::not_found("No object with that id in this scene."))?;
+    let text = args["selection"]
+        .as_str()
+        .unwrap_or_else(|| object.mol().selection_text());
+    if text.trim().is_empty() {
+        return Err(CueMolError::invalid_argument(
+            if args["selection"].is_null() {
+                "The object has no current selection."
+            } else {
+                "The selection did not compile."
+            },
+        ));
+    }
+    let selector = state.parse_object_selector(id, text)?;
+    if object.mol().get_atom_sel_size(&selector) == 0 {
+        return Err(CueMolError::invalid_argument(
+            "The selection matches no atoms.",
+        ));
+    }
+    let mut view = crate::properties::current_fit_view(state, camera)?;
+    if orient {
+        object
+            .mol()
+            .orient_view_with_xform(&mut view, Some(&selector), object.xform_matrix());
+    } else if args["zoom"] != false {
+        object
+            .mol()
+            .fit_view_with_xform(&mut view, Some(&selector), object.xform_matrix());
+    } else {
+        let (sum, count) = object.mol().select_indices(&selector).into_iter().fold(
+            (Vector4::ZERO, 0usize),
+            |(sum, count), index| {
+                let mut position = object.mol().atoms()[index].position;
+                object.xform_matrix().xform3d(&mut position);
+                (sum + position, count + 1)
+            },
+        );
+        view.set_center(sum.scale(1. / count as f64));
+    }
+    *camera = view.camera();
+    Ok(view_json(camera))
+}

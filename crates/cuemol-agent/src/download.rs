@@ -49,28 +49,51 @@ impl Drop for DownloadJob {
     }
 }
 async fn download(name: &str, args: &Value) -> Result<Downloaded, String> {
-    let plan = cuemol_command::prepare_fetch(name, args).map_err(|e| e.to_string())?;
+    let mut plan = cuemol_command::prepare_fetch(name, args).map_err(|e| e.to_string())?;
     let task = async {
-        let response = reqwest::Client::new()
-            .get(&plan.url)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-        if !response.status().is_success() {
-            return Err(format!("Download returned HTTP {}", response.status()));
-        }
-        let mut bytes = Vec::new();
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| e.to_string())?;
-            if bytes.len() + chunk.len() > 256 * 1024 * 1024 {
-                return Err(
-                    "Download exceeds 256 MiB; use a local file for this structure.".into(),
-                );
+        let client = reqwest::Client::new();
+        loop {
+            let request = if let Some(body) = &plan.request_body {
+                client.post(&plan.url).json(body)
+            } else {
+                client.get(&plan.url)
+            };
+            let response = match request.send().await {
+                Ok(response) => response,
+                Err(_) if plan.optional_metadata() => {
+                    plan = cuemol_command::advance_fetch(&plan, 0, &[])
+                        .map_err(|e| e.to_string())?
+                        .unwrap();
+                    continue;
+                }
+                Err(error) => return Err(error.to_string()),
+            };
+            let status = response.status().as_u16();
+            let mut bytes = Vec::new();
+            let limit = if plan.is_metadata() {
+                4 * 1024 * 1024
+            } else {
+                256 * 1024 * 1024
+            };
+            let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|e| e.to_string())?;
+                if bytes.len() + chunk.len() > limit {
+                    return Err(format!(
+                        "Download exceeds {} MiB; use a local file for this data.",
+                        limit / 1024 / 1024
+                    ));
+                }
+                bytes.extend_from_slice(&chunk);
             }
-            bytes.extend_from_slice(&chunk);
+            if let Some(next) =
+                cuemol_command::advance_fetch(&plan, status, &bytes).map_err(|e| e.to_string())?
+            {
+                plan = next;
+            } else {
+                return Ok(Downloaded { plan, bytes });
+            }
         }
-        Ok(Downloaded { plan, bytes })
     };
     #[cfg(not(target_arch = "wasm32"))]
     let timeout = tokio::time::sleep(std::time::Duration::from_secs(120));

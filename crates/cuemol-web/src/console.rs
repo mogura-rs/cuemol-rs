@@ -359,6 +359,8 @@ impl App {
                         }
                         let result = if name == "list_trajectories" {
                             Ok(self.trajectory_list())
+                        } else if name == "save_scene" {
+                            self.save_command_scene_download(&args)
                         } else if name == "save_object" {
                             self.save_command_object_download(&args)
                         } else {

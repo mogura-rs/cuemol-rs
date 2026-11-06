@@ -1,6 +1,6 @@
 use base64::Engine;
 use cuemol_core::{CueMolError, Quat, Result, Uid, Vector4};
-use cuemol_desktop_core::{DesktopAppState, GuiLoadedPath, GuiSceneSaveOptions};
+use cuemol_desktop_core::{DesktopAppState, GuiLoadedPath};
 use cuemol_qsys::{Camera, View};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -231,8 +231,8 @@ pub fn call_tool(
         }
         "close_scene" => {
             let id=if args["sceneId"].is_null() {scene(state)?} else {uid(args,"sceneId")?};
-            let target=state.scene_manager().scene(id).ok_or_else(|| CueMolError::not_found("scene"))?;
-            if args["discardChanges"] != true && target.objects().iter().any(|object| object.modified()) {
+            state.scene_manager().scene(id).ok_or_else(|| CueMolError::not_found("scene"))?;
+            if args["discardChanges"] != true && state.scene_is_modified(id) {
                 return Err(CueMolError::invalid_argument("Scene has unsaved changes; save it or set discardChanges"));
             }
             state.destroy_scene(id);
@@ -255,6 +255,7 @@ pub fn call_tool(
             Ok(json!({"rendererTypes":types.iter().filter(|t|!t.preset).map(|t|&t.name).collect::<Vec<_>>(),"presetTypes":types.iter().filter(|t|t.preset).map(|t|&t.name).collect::<Vec<_>>()}))
         }
         "create_renderer" | "create_preset_renderer" => {
+            crate::file_commands::map_center_policy(args)?;
             let object=uid(args,"objId")?;
             let kind=text(args,if name=="create_renderer" {"rendererType"} else {"preset"})?;
             let label=args["name"].as_str().map(str::to_string).unwrap_or(state.suggest_renderer_name(scene(state)?,kind)?);
@@ -273,7 +274,9 @@ pub fn call_tool(
             if let Some(selection)=args["selection"].as_str().filter(|_| state.scene_manager().object(object).is_none()) {
                 state.set_auxiliary_renderer_property(object,renderer,"sel",selection)?;
             }
-            if args["centerView"] == true { fit(state,camera,Some(object),args["selection"].as_str(),true)?; }
+            if state.density_map_summary(object).is_some() {
+                crate::file_commands::apply_map_renderer_center_policy(state,camera,object,&[renderer],args)?;
+            } else if args["centerView"] == true { fit(state,camera,Some(object),args["selection"].as_str(),true)?; }
             Ok(json!({"objectId":object.get(),"rendererId":renderer.get(),"name":label}))
         }
         "set_renderer_type" => {
@@ -304,6 +307,7 @@ pub fn call_tool(
             }
         }
         "set_mol_selection" => {state.set_molecule_selection_text(uid(args,"objId")?,text(args,"selection")?)?;Ok(json!({"selection":args["selection"]}))}
+        "focus_selection" | "orient_view" => crate::view_commands::focus_selection(state, camera, args, name == "orient_view"),
         "center_view" => {fit(state,camera,Some(uid(args,"objId")?),args["selection"].as_str(),args["zoom"]==true)?;Ok(view_json(camera))}
         "get_view" => Ok(view_json(camera)),
         "set_view" => crate::view_commands::set_view(state,camera,args),
@@ -331,7 +335,7 @@ pub fn call_tool(
             state.save_scene_camera_file(scene(state)?,name,&path)?;Ok(json!({"path":path}))
         }
         "reload_camera" => {state.reload_scene_camera_file(scene(state)?,text(args,"name")?)?;Ok(json!({"name":args["name"]}))}
-        "save_scene" => {state.set_active_view_camera(camera)?;state.save_active_scene_qsc_with_options(text(args,"path")?,GuiSceneSaveOptions{embed_all:true,..Default::default()})?;Ok(json!({"path":args["path"]}))}
+        "save_scene" => {let options=crate::file_commands::scene_save_options(state,args)?;state.save_active_scene_qsc_with_camera(text(args,"path")?,camera.clone(),Some(options))?;Ok(json!({"path":args["path"]}))}
         "render_image" | "get_screenshot" | "capture_view" => render(state,camera,name,args),
         "execute_script" => {
             #[cfg(feature="scripting")]

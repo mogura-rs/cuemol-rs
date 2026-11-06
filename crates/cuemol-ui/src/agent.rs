@@ -211,7 +211,10 @@ impl AgentPanel {
                         let path = map.remove("path").unwrap();
                         map.insert("fileName".into(), path);
                     }
-                    if matches!(name.as_str(), "fetch_pdb" | "fetch_url" | "fetch_map") {
+                    if matches!(
+                        name.as_str(),
+                        "fetch_pdb" | "fetch_url" | "fetch_map" | "fetch_emdb"
+                    ) {
                         let ctx = ctx.clone();
                         let job = DownloadJob::start(
                             name.clone(),

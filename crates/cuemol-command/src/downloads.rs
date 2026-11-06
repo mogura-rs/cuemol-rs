@@ -4,6 +4,15 @@ use cuemol_desktop_core::{DesktopAppState, GuiLoadedPath, GuiRendererSetup};
 use cuemol_qsys::Camera;
 use serde_json::{json, Value};
 
+#[path = "emdb.rs"]
+mod emdb;
+
+#[derive(Debug, Clone)]
+enum FetchMetadata {
+    Pdb { id: String },
+    Emdb { id: String },
+}
+
 #[derive(Debug, Clone)]
 pub struct FetchPlan {
     pub url: String,
@@ -11,9 +20,28 @@ pub struct FetchPlan {
     pub name: String,
     pub arguments: Value,
     pub map_coefficients: bool,
+    pub request_body: Option<Value>,
+    pub emdb_id: Option<String>,
+    metadata: Option<FetchMetadata>,
 }
+impl FetchPlan {
+    pub fn is_metadata(&self) -> bool {
+        self.metadata.is_some()
+    }
+    pub fn optional_metadata(&self) -> bool {
+        matches!(self.metadata, Some(FetchMetadata::Emdb { .. }))
+    }
+}
+
+pub fn advance_fetch(plan: &FetchPlan, status: u16, bytes: &[u8]) -> Result<Option<FetchPlan>> {
+    emdb::advance(plan, status, bytes)
+}
+
 pub fn prepare_fetch(name: &str, args: &Value) -> Result<FetchPlan> {
     crate::validate_args(name, args).map_err(CueMolError::invalid_argument)?;
+    if name == "fetch_emdb" {
+        return emdb::prepare(args);
+    }
     let map_coefficients = name == "fetch_map";
     let (url, filename, label) = if matches!(name, "fetch_pdb" | "fetch_map") {
         let id = args["pdbId"].as_str().unwrap().to_ascii_lowercase();
@@ -81,6 +109,9 @@ pub fn prepare_fetch(name: &str, args: &Value) -> Result<FetchPlan> {
         name: args["name"].as_str().unwrap_or(&label).to_string(),
         arguments: args.clone(),
         map_coefficients,
+        request_body: None,
+        emdb_id: None,
+        metadata: None,
     })
 }
 
@@ -145,7 +176,48 @@ pub fn load_fetched(
             }
             return Ok(json!({"objectId":object.get(),"name":plan.name}));
         }
-        let loaded = state.open_bytes(&plan.filename, bytes)?;
+        let loaded = if args["pdbId"].is_string() {
+            let format = if args["format"] == "pdb" {
+                "pdb"
+            } else {
+                "mmcif"
+            };
+            let mut reader =
+                cuemol_desktop_core::molecule_reader_options_for_format(format).unwrap();
+            crate::file_commands::apply_structure_reader_options(&mut reader, args);
+            state.open_prepared(
+                cuemol_desktop_core::PreparedFile::parse_with_molecule_options(
+                    &plan.filename,
+                    bytes,
+                    &reader,
+                )?,
+            )?
+        } else {
+            state.open_bytes(&plan.filename, bytes)?
+        };
+        if let (Some(id), GuiLoadedPath::Map { map_uid, .. }) = (&plan.emdb_id, &loaded) {
+            state.set_density_map_sampling(*map_uid, 1, "em")?;
+            let setup = GuiRendererSetup {
+                object_name: plan.name.clone(),
+                renderer_type: "isosurf".into(),
+                renderer_name: "isosurf".into(),
+                selection: None,
+                recenter: true,
+            };
+            state.configure_loaded_bytes(&loaded, &setup, None)?;
+            if let Some(level) = args["level"].as_f64() {
+                let renderer = state.density_map_summary(*map_uid).unwrap().renderers[0].uid;
+                crate::nodes::set_renderer_property(state, renderer, "use_abslevel", "true")?;
+                crate::nodes::set_renderer_property(state, renderer, "level", &level.to_string())?;
+            }
+            crate::file_commands::apply_map_center_policy(
+                state,
+                camera,
+                *map_uid,
+                &json!({"mapCenterPolicy":"moveViewCenter"}),
+            )?;
+            return Ok(json!({"objectId":map_uid.get(),"name":plan.name,"emdbId":id}));
+        }
         let default = if matches!(loaded, GuiLoadedPath::Map { .. }) {
             "contour"
         } else {

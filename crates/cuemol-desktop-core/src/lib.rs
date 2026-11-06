@@ -56084,7 +56084,7 @@ fn format_supports_molecule_renderer_setup(format: &str) -> bool {
         && format != "qdflwobj"
 }
 
-fn molecule_reader_options_for_format(format: &str) -> Option<GuiMoleculeReaderOptions> {
+pub fn molecule_reader_options_for_format(format: &str) -> Option<GuiMoleculeReaderOptions> {
     match format {
         "pdb" => Some(GuiMoleculeReaderOptions {
             kind: GuiMoleculeReaderKind::Pdb,

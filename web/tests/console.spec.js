@@ -284,3 +284,74 @@ test('CueMol object exports honor selection, explicit format and source linking'
   expect(await readFile(await all.path(), 'utf8')).toContain('ALA');
   expect(await source()).toBe('whole.pdb');
 });
+
+for (const renderer of ['webgl', 'webgpu']) {
+  test(`Current catalog ${renderer} focus, copy and encoded scene save retain data`, async ({page}) => {
+    await setup(page, renderer);
+    const id = (await status(page)).scene.objects[0].id;
+    await call(page, 'set_mol_selection', {objId:id,selection:'resid 2'});
+    await call(page, 'focus_selection', {objId:id,zoom:false});
+    expect((await status(page)).view.center).toEqual([2,0,0]);
+    await call(page, 'orient_view', {objId:id,selection:'*'});
+    expect((await status(page)).selection).toBe('resid 2');
+    const copied = JSON.parse((await call(page, 'copy_node', {nodeId:id,nodeType:'object'})).message);
+    await call(page, 'paste_node', copied);
+    expect((await status(page)).scene.objects.length).toBe(2);
+    const pending = page.waitForEvent('download');
+    await input(page, 'save_scene current.qsc, embedAll=true, version=QDF1, compress=gzip, base64=true');
+    await page.keyboard.press('Enter');
+    const saved = await pending;
+    const bytes = await readFile(await saved.path());
+    expect(bytes.toString('utf8')).not.toContain('\uFFFD');
+    await expect.poll(async () => (await status(page)).message).toBe('Console executed');
+    await page.reload();
+    await expect.poll(() => page.evaluate(() => window.cuemol?.status()?.scene?.sceneId), {timeout:60000}).toBeGreaterThan(0);
+    await load(page, 'current.qsc', bytes);
+    await expect.poll(async () => (await status(page)).message).toBe('Loaded current.qsc');
+    expect((await status(page)).scene.objects.map(object => object.atoms)).toEqual([2,2]);
+  });
+
+  test(`Current catalog ${renderer} resolves EMDB metadata and loads its contour`, async ({page}) => {
+    await setup(page, renderer);
+    const headers = {'access-control-allow-origin':'*','access-control-allow-methods':'GET,POST,OPTIONS','access-control-allow-headers':'content-type'};
+    const requests = [];
+    await page.route('https://data.rcsb.org/graphql', async route => {
+      if (route.request().method() === 'OPTIONS') return route.fulfill({headers,status:204});
+      requests.push('pdb');
+      expect(route.request().postDataJSON().query).toContain('7A4M');
+      await route.fulfill({headers,json:{data:{entries:[{rcsb_id:'7A4M',exptl:[{method:'ELECTRON MICROSCOPY'}],rcsb_entry_container_identifiers:{emdb_ids:['EMD-11638']}}]}}});
+    });
+    await page.route('https://www.ebi.ac.uk/emdb/api/entry/map/EMD-11638', async route => {
+      requests.push('level');
+      await route.fulfill({headers,json:{map:{contour_list:{contour:[{level:20,primary:true}]}}}});
+    });
+    const map = Buffer.alloc(1024 + 64 * 4);
+    for (let axis = 0; axis < 3; axis++) {
+      map.writeInt32LE(4, axis * 4); map.writeInt32LE(4, (axis + 7) * 4);
+      map.writeFloatLE(8, (axis + 10) * 4); map.writeFloatLE(90, (axis + 13) * 4);
+      map.writeInt32LE(axis + 1, (axis + 16) * 4); map.writeFloatLE(30, (axis + 49) * 4);
+    }
+    map.writeInt32LE(2, 12); map.writeFloatLE(63, 80); map.writeFloatLE(31.5, 84);
+    map.writeFloatLE(18.47, 216); map.write('MAP ', 208);
+    for (let i = 0; i < 64; i++) map.writeFloatLE(i, 1024 + i * 4);
+    const {gzipSync} = await import('node:zlib');
+    await page.route('https://files.wwpdb.org/pub/emdb/structures/EMD-11638/map/emd_11638.map.gz', async route => {
+      requests.push('map');
+      await route.fulfill({headers,contentType:'application/octet-stream',body:gzipSync(map)});
+    });
+    await input(page, 'fetch_emdb 7a4m');
+    await page.keyboard.press('Enter');
+    await expect.poll(async () => (await status(page)).message).toBe('Console executed');
+    expect(requests).toEqual(['pdb','level','map']);
+    expect((await status(page)).scene.maps[0].name).toBe('emd_11638');
+    const contours = JSON.parse((await call(page, 'list_map_contours')).message).contours;
+    expect(contours).toHaveLength(1);
+    const level = JSON.parse((await call(page, 'get_renderer_property', {rendId:contours[0].rendererId,prop:'level'})).message).value;
+    expect(Number(level)).toBeCloseTo(20,0);
+    await page.route('https://www.ebi.ac.uk/emdb/api/entry/map/EMD-9999', route => route.fulfill({headers,status:404,body:''}));
+    await input(page, 'fetch_emdb EMD-9999');
+    await page.keyboard.press('Enter');
+    await expect.poll(async () => (await status(page)).message).toBe('Console error');
+    expect((await status(page)).scene.maps).toHaveLength(1);
+  });
+}

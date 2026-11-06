@@ -5,6 +5,58 @@ results are historical. Generated inputs and logs stay in the ignored checkout
 cache. The current repairs and their limits appear in the completion audit;
 passing tests do not establish equivalence for every parameter combination.
 
+## Current operation catalog and EMDB loading
+
+The read-only catalog check covers the current reference's 129 registrations,
+127 MCP operations, 444 parameters and 159 console names/aliases. All are
+present with compatible input types in the shared Rust catalog. Rust retains
+additional operations and existing aliases. This inventory does not establish
+behavioral equivalence for every argument or response.
+
+```sh
+node scripts/check-reference-catalog.mjs ../cuemol2
+```
+
+`focus_selection` and `orient_view` use live selections, transformed coordinates
+and the actual viewport dimensions without replacing the object's selection.
+`copy_node` serializes molecule/map/surface/lightweight objects and renderer
+hierarchies as text-safe clipboard payloads. `save_scene` honors `embedAll`,
+QDF0/QDF1, compression and base64 options; browser command saves retain external
+trajectory data. Failed native saves preserve the active camera and scene
+metadata. Closing a saved embedded scene checks scene changes rather than the
+independent modified flag on its embedded objects.
+
+PDB fetches pass all six reader options through native and asynchronous byte
+loading. `fetch_emdb` accepts EMDB accessions or resolves a PDB entry through RCSB,
+retrieves the primary recommended contour when available, and downloads the
+compressed map. Missing optional metadata falls back to the top one percent of
+density values; a missing entry fails. Map centering uses its kind and explicit
+policy. New renderers do not change an existing renderer's contour center.
+The reference exposes `create_renderer.mapCenterPolicy` but does not apply it
+in that operation; Rust applies the advertised policy. Map load `centerView`
+is separate from this policy, matching the reference implementation.
+
+Native regressions cover selected fitting, orientation, binary-safe copy/paste,
+all scene encodings, failed saves, alignment recentering, PDB reader options and
+map policies. EMDB tests cover metadata resolution, primary contour selection,
+missing metadata, explicit levels and HTTP errors. Contour comparisons allow
+one density quantization step because the reference converts raw levels through
+its percentile histogram. A live CLI load of EMD-1010 read its 130-cubed map,
+requested the recommended 4.07 contour, and wrote an embedded QSC that reloaded
+with the map and its isosurface renderer. Histogram conversion quantizes the
+actual contour as described above. The deterministic
+browser tests use intercepted metadata and map responses rather than relying
+on the public service.
+
+The complete shared command suite passed 218 tests. Agent and shared egui UI
+suites passed 37 tests, the native GUI suite passed 192 tests with one optional
+case ignored, and four macOS Tauri console tests passed. The rebuilt WASM passed
+four focused WebGL/WebGPU cases for focus, clipboard, encoded saves and EMDB
+loading. A browser trajectory round trip retained both objects and their six
+and two frames after saving through the shared command. The complete console
+and viewer browser suites passed 66 tests, including trajectories, rendering,
+stereo and agent cancellation.
+
 ## Current-reference ChimeraX console
 
 The shared Rust console implements all 59 command registrations in the current

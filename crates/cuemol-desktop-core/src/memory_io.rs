@@ -55,6 +55,26 @@ impl DesktopAppState {
         self.open_prepared(PreparedFile::parse(name, bytes)?)
     }
 
+    pub fn active_scene_save_options(&self) -> Result<GuiSceneSaveOptions> {
+        self.active_scene()
+            .and_then(|id| self.scene_manager().scene(id))
+            .map(scene_qsc_save_options)
+            .ok_or_else(|| CueMolError::not_found("scene"))
+    }
+
+    pub fn active_scene_bytes_with_options(
+        &mut self,
+        options: GuiSceneSaveOptions,
+        camera: Option<&cuemol_qsys::Camera>,
+    ) -> Result<Vec<u8>> {
+        let scene_uid = self
+            .active_scene()
+            .ok_or_else(|| CueMolError::not_found("scene"))?;
+        Ok(self
+            .prepare_scene_save(scene_uid, options.normalized(), None, camera)?
+            .document)
+    }
+
     /// Embed all objects and styles so downloads do not depend on local paths.
     pub fn active_scene_bytes(&mut self) -> Result<Vec<u8>> {
         let scene_uid = self
@@ -91,6 +111,22 @@ impl DesktopAppState {
         &mut self,
         sources: &[(Uid, &str)],
     ) -> Result<Vec<Vec<u8>>> {
+        self.active_scene_parts_with_external_trajectories_and_options(
+            sources,
+            GuiSceneSaveOptions {
+                embed_all: true,
+                ..Default::default()
+            },
+            None,
+        )
+    }
+
+    pub fn active_scene_parts_with_external_trajectories_and_options(
+        &mut self,
+        sources: &[(Uid, &str)],
+        options: GuiSceneSaveOptions,
+        camera: Option<&cuemol_qsys::Camera>,
+    ) -> Result<Vec<Vec<u8>>> {
         let scene = self
             .active_scene()
             .and_then(|sid| self.scene_manager().scene(sid))
@@ -113,7 +149,7 @@ impl DesktopAppState {
                     .ok_or_else(|| CueMolError::not_found("trajectory topology"))
             })
             .collect::<Result<Vec<_>>>()?;
-        let bytes = self.active_scene_bytes()?;
+        let bytes = self.active_scene_bytes_with_options(options, camera)?;
         if sources.is_empty() {
             return Ok(vec![bytes]);
         }
