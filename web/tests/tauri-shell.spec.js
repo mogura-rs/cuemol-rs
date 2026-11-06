@@ -957,6 +957,14 @@ test('Tauri console keeps multiline drafts, IME, completion, dialect and stop co
   await expect(page.locator('[data-console-dialect="PyMOL"]')).toHaveAttribute('aria-checked', 'true');
   await input.press('ArrowUp');
   await expect(input).toHaveValue(source);
+  await page.locator('[data-console-dialect="ChimeraX"]').click();
+  await expect(page.locator('#console-prompt')).toHaveText('ChX>');
+  await input.fill('select #1/A:2');
+  await input.press('Enter');
+  expect(await page.evaluate(() => window.__shellCalls.filter(call => call.command === 'console_start').at(-1).args)).toEqual({source: 'select #1/A:2', dialect: 'ChimeraX'});
+  await page.locator('#console-stop').click();
+  await page.reload();
+  await expect(page.locator('[data-console-dialect="ChimeraX"]')).toHaveAttribute('aria-checked', 'true');
   expect(errors).toEqual([]);
 });
 

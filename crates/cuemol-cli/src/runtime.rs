@@ -122,8 +122,33 @@ pub fn config(args: Vec<String>) -> Result<()> {
     }
 }
 
-#[cfg(feature = "scripting")]
 pub fn script(command: &str, args: Vec<String>) -> Result<()> {
+    if let Some((dialect, offset)) = crate::console::script(
+        if command == "run" || args.first().is_some_and(|s| s == "--dialect") {
+            &args
+        } else {
+            &[]
+        },
+    )? {
+        let source = args.get(offset).ok_or("A script or command is required")?;
+        if dialect != cuemol_command::console::Dialect::JavaScript {
+            if args.len() != offset + 1 {
+                return Err("Only JavaScript scripts accept positional arguments".into());
+            }
+            let source = if command == "run" {
+                std::fs::read_to_string(source).map_err(|e| e.to_string())?
+            } else {
+                source.clone()
+            };
+            return crate::console::execute(&source, dialect);
+        }
+        return javascript(command, args[offset..].to_vec());
+    }
+    javascript(command, args)
+}
+
+#[cfg(feature = "scripting")]
+fn javascript(command: &str, args: Vec<String>) -> Result<()> {
     if args.is_empty() {
         return Err(
             "Usage: cuemol run SCRIPT.js [ARGS...] | cuemol -c JAVASCRIPT [ARGS...]".into(),
@@ -143,7 +168,7 @@ pub fn script(command: &str, args: Vec<String>) -> Result<()> {
 }
 
 #[cfg(not(feature = "scripting"))]
-pub fn script(_command: &str, _args: Vec<String>) -> Result<()> {
+fn javascript(_command: &str, _args: Vec<String>) -> Result<()> {
     Err("This build does not include the scripting feature".into())
 }
 

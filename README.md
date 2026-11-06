@@ -21,7 +21,7 @@ to a shared wgpu viewport, with molecular dynamics playback and image rendering.
 | Maps and surfaces | Crystallographic and EM density, electrostatic potentials, isosurfaces, volume rendering and molecular surfaces |
 | MD trajectories | Indexed DCD, XTC, TRR, AMBER NetCDF and MDCRD playback with shared trajectory sources |
 | Images and scenes | Built-in GI and NPR rendering, stereo views, animation export, embedded QSC scenes and mesh export |
-| Automation | JavaScript, persistent native Python bindings, a shared command API, MCP and an optional AI Agent |
+| Automation | CueMol, PyMOL and ChimeraX consoles, JavaScript, persistent native Python, a shared command API, MCP and an optional AI Agent |
 
 The native, Tauri and browser interfaces share Tritium's layout, light and dark themes,
 and common application and command logic. Release packages bundle APBS,

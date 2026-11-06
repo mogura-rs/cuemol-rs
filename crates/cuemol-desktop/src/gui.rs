@@ -14895,6 +14895,7 @@ impl GuiApplication {
                     }
                     Action::Source(_)
                     | Action::Native(_)
+                    | Action::ChimeraX(_)
                     | Action::Qax(_)
                     | Action::QaxOp(_)
                     | Action::RememberSetting { .. }
@@ -40463,6 +40464,43 @@ mod tests {
             .renderer_summaries(id)
             .iter()
             .any(|renderer| renderer.name == "p_cartoon"));
+    }
+
+    #[test]
+    fn native_chimerax_console_reads_live_state_and_groups_deferred_actions() {
+        let mut app = GuiApplication::new();
+        app.config_path.clear();
+        app.state.open_bytes("probe.pdb", b"ATOM      1  CA  ALA A   1       1.000   0.000   0.000  1.00 10.00           C\nATOM      2  CA  GLY A   2       2.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let id = app.state.active_object_summaries()[0].uid;
+        app.console.dialect = cuemol_command::console::Dialect::ChimeraX;
+        app.console.source = "show #1:2; style #1:2 sphere; label #1:2; distance @CA".into();
+        app.execute_console_input();
+        assert_eq!(app.status, "Console executed", "{:?}", app.log_lines);
+        assert_eq!(app.undo_stack.len(), 1);
+        assert!(app
+            .state
+            .renderer_summaries(id)
+            .iter()
+            .any(|r| r.name == "chx:sphere"));
+        assert!(app
+            .state
+            .renderer_summaries(id)
+            .iter()
+            .any(|r| r.name == "chx:distance"));
+        app.console.source = "undo".into();
+        app.execute_console_input();
+        assert!(!app
+            .state
+            .renderer_summaries(id)
+            .iter()
+            .any(|r| r.name.starts_with("chx:")));
+        app.console.source = "redo".into();
+        app.execute_console_input();
+        assert!(app
+            .state
+            .renderer_summaries(id)
+            .iter()
+            .any(|r| r.name == "chx:sphere"));
     }
 
     #[test]

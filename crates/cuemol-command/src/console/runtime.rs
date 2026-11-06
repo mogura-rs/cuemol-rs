@@ -105,7 +105,7 @@ impl Submission {
     pub fn new(source: &str, dialect: Dialect) -> Result<Self, String> {
         let mut submission = Self {
             work: VecDeque::new(),
-            standalone: dialect != Dialect::JavaScript && split_commands(source)?.len() == 1,
+            standalone: dialect != Dialect::JavaScript && commands(source, dialect)?.len() == 1,
         };
         submission.prepend(source, dialect, 0)?;
         Ok(submission)
@@ -123,7 +123,7 @@ impl Submission {
                 depth,
             });
         } else {
-            for command in split_commands(source)?.into_iter().rev() {
+            for command in commands(source, dialect)?.into_iter().rev() {
                 self.work.push_front(Work::Line {
                     dialect,
                     text: command.text,
@@ -192,6 +192,22 @@ impl Submission {
                             }
                         }
                         return Ok(Some(Action::Echo(format!("{} {text}", dialect.prompt()))));
+                    }
+                }
+                Some(Work::Action {
+                    dialect,
+                    action: Action::ChimeraX(step),
+                    depth,
+                }) => {
+                    for action in super::chimerax::resume(session, state, camera, *step)?
+                        .into_iter()
+                        .rev()
+                    {
+                        self.work.push_front(Work::Action {
+                            dialect,
+                            action,
+                            depth,
+                        });
                     }
                 }
                 Some(Work::Action {
@@ -385,5 +401,16 @@ mod tests {
                 .unwrap()
                 .visible
         );
+    }
+}
+
+pub fn commands(source: &str, dialect: Dialect) -> Result<Vec<super::CommandLine>, String> {
+    if dialect == Dialect::ChimeraX {
+        Ok(super::chimerax::split_lines(source)
+            .into_iter()
+            .map(|text| super::CommandLine { text, quiet: false })
+            .collect())
+    } else {
+        split_commands(source)
     }
 }

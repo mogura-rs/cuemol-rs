@@ -198,7 +198,7 @@ The optional second argument is the frame stride. Legacy `dcd-info`, `xtc-info`,
 
 ### Console and reusable actions
 
-The Console offers CueMol, PyMOL and JavaScript dialects. Enter runs a command,
+The Console offers CueMol, PyMOL, ChimeraX and JavaScript dialects. Enter runs a command,
 Shift-Enter adds a line, Tab completes a command or argument, and Up/Down recall
 previous submissions at the ends of the input. A multiline submission creates
 one undo step. Stop keeps completed edits and prevents pending results from
@@ -215,6 +215,46 @@ subdirectory; browser files remain in local storage until exported or deleted.
 In the native CueMol dialect, `open_log actions.qax` records subsequent edits,
 `close_log` closes the log, and `run actions.qax` replays it. A QAX file can
 contain separate undo steps. Commands that open or save a scene must run alone.
+
+### ChimeraX commands
+
+Select **ChimeraX** in the Console, or run the same dialect from the CLI:
+
+```sh
+cuemol run commands.cxc
+cuemol console --dialect chimerax -c 'open structure.pdb; color bychain; view'
+cuemol console --dialect chimerax
+cuemol run commands.pml
+```
+
+The last console command reads one submission per line from standard input and
+keeps the scene, aliases and model numbers until the process exits. `run` detects
+`.cxc` and `.pml`; `--dialect cuemol|pymol|chimerax|javascript` explicitly selects
+the language. JavaScript retains its existing positional arguments.
+
+The dialect implements the current reference console's 59 registered commands.
+Use `help` or `usage surface` to inspect them. Model numbers such as `#1` are
+assigned in scene order on first use and remain stable after closing or undoing
+objects. Atom specifications include chains, insertion codes, names, attributes,
+boolean operators, zones and scene selections. `sel` reads the current selection.
+Aliases can contain several commands; `.cxc` files use newlines or semicolons,
+and `#` starts a comment only where a command name would appear.
+
+`show`, `hide`, `style`, `cartoon`, `color`, `rainbow`, `surface`, `label` and
+`transparency` edit the live `chx:` renderers. Manual renderer edits are visible
+to subsequent console commands. Surfaces retain their calculation selection
+while patch visibility changes. Residue labels attach to CA, then C4', then the
+first atom. Transparency applies to whole representations, so partial-model
+transparency is rejected. Opening a molecule applies size-dependent automatic
+styling. `distance` measures two atoms, `align` fits ordered atom pairs, and
+`matchmaker` uses CueMol's US-align structural fit with the reference warning.
+
+`save` supports PNG, QSC and one PDB model; `format pdb` also works with a
+filename whose extension differs. QSC open/save and undo/redo require a standalone
+submission. Native `.cxc` scripts read local files; browser file access uses the
+existing picker and download paths. Unsupported ChimeraX options retain the
+reference's explicit errors or warnings. This is the CueMol console dialect,
+whose supported command set is smaller than the ChimeraX application.
 
 ### Agent skill
 

@@ -23,6 +23,7 @@ pub(super) fn dialect(name: &str) -> Result<Dialect, String> {
     match name {
         "CueMol" => Ok(Dialect::CueMol),
         "PyMOL" => Ok(Dialect::PyMol),
+        "ChimeraX" => Ok(Dialect::ChimeraX),
         "JavaScript" => Ok(Dialect::JavaScript),
         _ => Err(format!("Unknown console dialect: {name}")),
     }
@@ -244,6 +245,7 @@ impl AppModel {
                         }
                         Action::Source(_)
                         | Action::Native(_)
+                        | Action::ChimeraX(_)
                         | Action::Qax(_)
                         | Action::QaxOp(_)
                         | Action::RememberSetting { .. }

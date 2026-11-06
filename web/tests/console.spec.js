@@ -19,14 +19,49 @@ async function input(page, text) {
   await page.keyboard.insertText(text);
   await present(page);
 }
-async function setup(page) {
-  await page.goto('./?renderer=webgl');
+async function setup(page, renderer = 'webgl') {
+  await page.goto(`./?renderer=${renderer}`);
   await expect.poll(() => page.evaluate(() => window.cuemol?.status()?.scene?.sceneId), {timeout:60000}).toBeGreaterThan(0);
   await load(page, 'probe.pdb', Buffer.from(pdb));
   await expect.poll(async () => (await status(page)).scene.objects.length).toBe(1);
   await call(page, 'rename_node', {nodeType:'object', nodeId:(await status(page)).scene.objects[0].id, name:'probe'});
   await expect.poll(async () => (await status(page)).scene.objects[0].name).toBe('probe');
   await choose(page, 'Console');
+}
+
+for (const renderer of ['webgl', 'webgpu']) {
+  test(`ChimeraX ${renderer} console shares selections, surfaces, labels, distances and undo`, async ({page}, testInfo) => {
+    await setup(page, renderer);
+    await choose(page, 'Console ChimeraX');
+    await input(page, 'alias mark select $1; show sel');
+    for (const line of ['mark #1:2', 'style sel sphere', 'color sel blue', 'label sel residues', 'surface #1:1', 'surface hidePatches #1:1', 'surface #1:2', 'distance @CA']) {
+      await page.keyboard.press('Shift+Enter');
+      await present(page);
+      await page.keyboard.insertText(line);
+      await present(page);
+    }
+    await page.keyboard.press('Enter');
+    await expect.poll(async () => (await status(page)).message).toBe('Console executed');
+    const current = await status(page);
+    const names = current.scene.objects[0].renderers.map(r => r.name);
+    expect(names).toEqual(expect.arrayContaining(['chx:sphere', 'chx:surface:A', 'chx:label:residues', 'chx:distance']));
+    expect(current.ui.navigation.labels).toBe(1);
+    expect(current.ui.navigation.measurementLabels).toContain('1.00');
+    const download = page.waitForEvent('download');
+    await input(page, 'save exported.data format pdb models #1');
+    await page.keyboard.press('Enter');
+    const saved = await download;
+    expect(saved.suggestedFilename()).toBe('exported.data');
+    expect(await readFile(await saved.path(), 'utf8')).toContain('GLY');
+    await expect.poll(async () => (await status(page)).message).toBe('Console executed');
+    await page.screenshot({path:testInfo.outputPath(`console-chimerax-${renderer}.png`)});
+    await input(page, 'undo');
+    await page.keyboard.press('Enter');
+    await expect.poll(async () => (await status(page)).scene.objects[0].renderers.some(r => r.name.startsWith('chx:'))).toBe(false);
+    await input(page, 'redo');
+    await page.keyboard.press('Enter');
+    await expect.poll(async () => (await status(page)).scene.objects[0].renderers.some(r => r.name === 'chx:sphere')).toBe(true);
+  });
 }
 
 test('CueMol console resolves names sequentially and a submission has one undo entry', async ({page}, testInfo) => {

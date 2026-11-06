@@ -105,7 +105,8 @@ impl ConsoleRunner {
             submission: Submission::new(source, dialect)?,
             pending: None,
             ready: VecDeque::new(),
-            single_command: cuemol_command::console::split_commands(source)?.len() == 1,
+            single_command: cuemol_command::console::split_dialect_commands(source, dialect)?.len()
+                == 1,
         })
     }
 

@@ -42,3 +42,5 @@ __pycache__/
 .ipynb_checkpoints/
 
 third_party/*/Cargo.lock
+
+._*

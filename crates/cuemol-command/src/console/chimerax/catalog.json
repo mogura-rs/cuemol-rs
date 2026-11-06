@@ -1,0 +1,1603 @@
+[
+  {
+    "name": "alias",
+    "args": [
+      {
+        "name": "name",
+        "role": "optional",
+        "kind": "string"
+      },
+      {
+        "name": "text",
+        "role": "optional",
+        "kind": "rest"
+      }
+    ],
+    "summary": "Define a command name standing for other commands ($1-$9, $* for its words); alone, list them.",
+    "mutates": false
+  },
+  {
+    "name": "alias list",
+    "args": [
+      {
+        "name": "internal",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      }
+    ],
+    "summary": "List the aliases.",
+    "mutates": false
+  },
+  {
+    "name": "alias delete",
+    "args": [
+      {
+        "name": "name",
+        "role": "required",
+        "kind": "string"
+      }
+    ],
+    "summary": "Forget an alias, or all of them.",
+    "mutates": false
+  },
+  {
+    "name": "~alias",
+    "args": [
+      {
+        "name": "name",
+        "role": "required",
+        "kind": "string"
+      }
+    ],
+    "summary": "Forget an alias, or all of them.",
+    "mutates": false
+  },
+  {
+    "name": "align",
+    "args": [
+      {
+        "name": "atoms",
+        "role": "required",
+        "kind": "spec"
+      },
+      {
+        "name": "toAtoms",
+        "role": "keyword",
+        "kind": "spec"
+      },
+      {
+        "name": "move",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "each",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "matchChainIds",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "matchNumbering",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "matchAtomNames",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "cutoffDistance",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "reportMatrix",
+        "role": "keyword",
+        "kind": "string"
+      }
+    ],
+    "summary": "Move a model so that atoms fit onto others, pair by pair in order (least squares).",
+    "mutates": true
+  },
+  {
+    "name": "cartoon",
+    "args": [
+      {
+        "name": "atoms",
+        "role": "optional",
+        "kind": "spec"
+      },
+      {
+        "name": "smooth",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "suppressBackboneDisplay",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "bool"
+      }
+    ],
+    "summary": "Show residues as cartoon.",
+    "mutates": true
+  },
+  {
+    "name": "cartoon hide",
+    "args": [
+      {
+        "name": "atoms",
+        "role": "optional",
+        "kind": "spec"
+      }
+    ],
+    "summary": "Hide the cartoon of residues.",
+    "mutates": true
+  },
+  {
+    "name": "close",
+    "args": [
+      {
+        "name": "models",
+        "role": "optional",
+        "kind": "spec"
+      }
+    ],
+    "summary": "Close models (all of them when none are named).",
+    "mutates": true
+  },
+  {
+    "name": "cofr",
+    "args": [
+      {
+        "name": "objects",
+        "role": "optional",
+        "kind": "spec"
+      },
+      {
+        "name": "method",
+        "role": "optional",
+        "kind": "enum",
+        "values": [
+          "frontCenter",
+          "fixed",
+          "centerOfView"
+        ]
+      },
+      {
+        "name": "pivot",
+        "role": "optional",
+        "kind": "string"
+      },
+      {
+        "name": "coordinateSystem",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "showPivot",
+        "role": "keyword",
+        "kind": "string"
+      }
+    ],
+    "summary": "Report the centre of rotation (CueMol turns about the view centre).",
+    "mutates": false
+  },
+  {
+    "name": "color",
+    "args": [
+      {
+        "name": "objects",
+        "role": "optional",
+        "kind": "spec"
+      },
+      {
+        "name": "color",
+        "role": "optional",
+        "kind": "color-or-enum",
+        "values": [
+          "byhetero",
+          "byelement",
+          "bychain",
+          "bymodel",
+          "random",
+          "bypolymer",
+          "byidentity",
+          "bynucleotide",
+          "byatom",
+          "fromatoms",
+          "fromcartoons",
+          "fromribbons"
+        ]
+      },
+      {
+        "name": "what",
+        "role": "optional",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "target",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "transparency",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "halfbond",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      }
+    ],
+    "summary": "Colour atoms, cartoons and surfaces: a colour, byhetero, byelement, bychain, bymodel or random.",
+    "mutates": true
+  },
+  {
+    "name": "delete",
+    "args": [
+      {
+        "name": "atoms",
+        "role": "required",
+        "kind": "spec"
+      },
+      {
+        "name": "attachedHyds",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      }
+    ],
+    "summary": "Delete atoms.",
+    "mutates": true
+  },
+  {
+    "name": "graphics silhouettes",
+    "args": [
+      {
+        "name": "enable",
+        "role": "optional",
+        "kind": "bool"
+      },
+      {
+        "name": "width",
+        "role": "keyword",
+        "kind": "float"
+      },
+      {
+        "name": "color",
+        "role": "keyword",
+        "kind": "color"
+      },
+      {
+        "name": "depthJump",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "float"
+      }
+    ],
+    "summary": "Outline what is drawn (silhouette edges), or report the setting.",
+    "mutates": true
+  },
+  {
+    "name": "hide",
+    "args": [
+      {
+        "name": "objects",
+        "role": "optional",
+        "kind": "spec"
+      },
+      {
+        "name": "what",
+        "role": "optional",
+        "kind": "enum-list",
+        "values": [
+          "atoms",
+          "bonds",
+          "pseudobonds",
+          "pbonds",
+          "cartoons",
+          "ribbons",
+          "surfaces",
+          "models"
+        ]
+      },
+      {
+        "name": "target",
+        "role": "keyword",
+        "kind": "string"
+      }
+    ],
+    "summary": "Hide atoms, cartoons, surfaces or models.",
+    "mutates": true
+  },
+  {
+    "name": "move",
+    "args": [
+      {
+        "name": "axis",
+        "role": "required",
+        "kind": "axis"
+      },
+      {
+        "name": "distance",
+        "role": "optional",
+        "kind": "float"
+      },
+      {
+        "name": "frames",
+        "role": "optional",
+        "kind": "string"
+      },
+      {
+        "name": "coordinateSystem",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "models",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "atoms",
+        "role": "keyword",
+        "kind": "string"
+      }
+    ],
+    "summary": "Move the scene along a screen axis, in angstroms.",
+    "mutates": false
+  },
+  {
+    "name": "open",
+    "args": [
+      {
+        "name": "names",
+        "role": "required",
+        "kind": "path"
+      },
+      {
+        "name": "name",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "format",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "fromDatabase",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      }
+    ],
+    "summary": "Open a file, a .cxc script, or a PDB id (fetched from the RCSB).",
+    "mutates": true
+  },
+  {
+    "name": "rainbow",
+    "args": [
+      {
+        "name": "objects",
+        "role": "optional",
+        "kind": "spec"
+      },
+      {
+        "name": "level",
+        "role": "optional",
+        "default": "residues",
+        "kind": "enum",
+        "values": [
+          "residues",
+          "chains",
+          "polymers",
+          "structures"
+        ]
+      },
+      {
+        "name": "target",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "transparency",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "float"
+      },
+      {
+        "name": "palette",
+        "role": "keyword",
+        "kind": "string"
+      }
+    ],
+    "summary": "Colour residues along each chain (or chains, or models) through a palette, blue to red.",
+    "mutates": true
+  },
+  {
+    "name": "select",
+    "args": [
+      {
+        "name": "objects",
+        "role": "optional",
+        "kind": "spec"
+      },
+      {
+        "name": "residues",
+        "role": "keyword",
+        "kind": "bool"
+      },
+      {
+        "name": "minimumLength",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "maximumLength",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "sequence",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      }
+    ],
+    "summary": "Select what is named (everything when nothing is), replacing the selection.",
+    "mutates": false
+  },
+  {
+    "name": "select add",
+    "args": [
+      {
+        "name": "objects",
+        "role": "optional",
+        "kind": "spec"
+      },
+      {
+        "name": "residues",
+        "role": "keyword",
+        "kind": "bool"
+      }
+    ],
+    "summary": "Add to the selection (everything when nothing is named).",
+    "mutates": false
+  },
+  {
+    "name": "select subtract",
+    "args": [
+      {
+        "name": "objects",
+        "role": "optional",
+        "kind": "spec"
+      },
+      {
+        "name": "residues",
+        "role": "keyword",
+        "kind": "bool"
+      }
+    ],
+    "summary": "Take from the selection (all of it when nothing is named).",
+    "mutates": false
+  },
+  {
+    "name": "select intersect",
+    "args": [
+      {
+        "name": "objects",
+        "role": "required",
+        "kind": "spec"
+      },
+      {
+        "name": "residues",
+        "role": "keyword",
+        "kind": "bool"
+      }
+    ],
+    "summary": "Keep only the part of the selection that is also named.",
+    "mutates": false
+  },
+  {
+    "name": "select clear",
+    "args": [],
+    "summary": "Clear the selection.",
+    "mutates": false
+  },
+  {
+    "name": "~select",
+    "args": [
+      {
+        "name": "objects",
+        "role": "optional",
+        "kind": "spec"
+      },
+      {
+        "name": "residues",
+        "role": "keyword",
+        "kind": "bool"
+      }
+    ],
+    "summary": "Take from the selection (all of it when nothing is named).",
+    "mutates": false
+  },
+  {
+    "name": "set",
+    "args": [
+      {
+        "name": "bgColor",
+        "role": "keyword",
+        "kind": "color"
+      },
+      {
+        "name": "silhouettes",
+        "role": "keyword",
+        "kind": "bool"
+      },
+      {
+        "name": "silhouetteWidth",
+        "role": "keyword",
+        "kind": "float"
+      },
+      {
+        "name": "silhouetteColor",
+        "role": "keyword",
+        "kind": "color"
+      },
+      {
+        "name": "silhouetteDepthJump",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "float"
+      },
+      {
+        "name": "subdivision",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "maxFrameRate",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "selectionColor",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "selectionWidth",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      }
+    ],
+    "summary": "Set the background colour (and the silhouettes); alone, report the background.",
+    "mutates": true
+  },
+  {
+    "name": "show",
+    "args": [
+      {
+        "name": "objects",
+        "role": "optional",
+        "kind": "spec"
+      },
+      {
+        "name": "what",
+        "role": "optional",
+        "kind": "enum-list",
+        "values": [
+          "atoms",
+          "bonds",
+          "pseudobonds",
+          "pbonds",
+          "cartoons",
+          "ribbons",
+          "surfaces",
+          "models"
+        ]
+      },
+      {
+        "name": "target",
+        "role": "keyword",
+        "kind": "string"
+      }
+    ],
+    "summary": "Show atoms, cartoons, surfaces or models.",
+    "mutates": true
+  },
+  {
+    "name": "style",
+    "args": [
+      {
+        "name": "objects",
+        "role": "optional",
+        "kind": "spec"
+      },
+      {
+        "name": "atomStyle",
+        "role": "optional",
+        "kind": "enum",
+        "values": [
+          "stick",
+          "ball",
+          "sphere"
+        ]
+      },
+      {
+        "name": "dashes",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "ringFill",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      }
+    ],
+    "summary": "Draw atoms as stick, ball or sphere.",
+    "mutates": true
+  },
+  {
+    "name": "transparency",
+    "args": [
+      {
+        "name": "objects",
+        "role": "optional",
+        "kind": "spec"
+      },
+      {
+        "name": "percent",
+        "role": "optional",
+        "kind": "float"
+      },
+      {
+        "name": "what",
+        "role": "optional",
+        "kind": "enum-list",
+        "values": [
+          "all",
+          "atoms",
+          "bonds",
+          "cartoons",
+          "ribbons",
+          "surfaces"
+        ]
+      },
+      {
+        "name": "target",
+        "role": "keyword",
+        "kind": "string"
+      }
+    ],
+    "summary": "Make surfaces (or atoms, cartoons) of whole models transparent, 0-100 percent.",
+    "mutates": true
+  },
+  {
+    "name": "turn",
+    "args": [
+      {
+        "name": "axis",
+        "role": "optional",
+        "kind": "axis"
+      },
+      {
+        "name": "angle",
+        "role": "optional",
+        "kind": "float"
+      },
+      {
+        "name": "frames",
+        "role": "optional",
+        "kind": "string"
+      },
+      {
+        "name": "center",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "coordinateSystem",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "rock",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "wobble",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "wobbleAspect",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "models",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "atoms",
+        "role": "keyword",
+        "kind": "string"
+      }
+    ],
+    "summary": "Turn the scene about a screen axis (default y, 90 degrees).",
+    "mutates": false
+  },
+  {
+    "name": "undo",
+    "args": [],
+    "summary": "Undo the last change.",
+    "mutates": false
+  },
+  {
+    "name": "redo",
+    "args": [],
+    "summary": "Redo the last undone change.",
+    "mutates": false
+  },
+  {
+    "name": "usage",
+    "args": [
+      {
+        "name": "commandName",
+        "role": "optional",
+        "kind": "rest"
+      }
+    ],
+    "summary": "Show how a command is written.",
+    "mutates": false
+  },
+  {
+    "name": "view",
+    "args": [
+      {
+        "name": "objects",
+        "role": "optional",
+        "kind": "spec"
+      },
+      {
+        "name": "frames",
+        "role": "optional",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "pad",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      }
+    ],
+    "summary": "Move the camera so that what is named (everything when nothing is) fills the view, or show a named view.",
+    "mutates": false
+  },
+  {
+    "name": "view list",
+    "args": [],
+    "summary": "List the named views.",
+    "mutates": false
+  },
+  {
+    "name": "view delete",
+    "args": [
+      {
+        "name": "name",
+        "role": "required",
+        "kind": "string"
+      }
+    ],
+    "summary": "Delete a named view, or all of them.",
+    "mutates": true
+  },
+  {
+    "name": "view name",
+    "args": [
+      {
+        "name": "name",
+        "role": "required",
+        "kind": "string"
+      }
+    ],
+    "summary": "Save the camera under a name (the camera only: CueMol does not move models).",
+    "mutates": true
+  },
+  {
+    "name": "view matrix",
+    "args": [
+      {
+        "name": "camera",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "models",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "coordinateSystem",
+        "role": "keyword",
+        "kind": "string"
+      }
+    ],
+    "summary": "Set the camera from 12 numbers (a 3x4 matrix by rows), or report it.",
+    "mutates": false
+  },
+  {
+    "name": "zoom",
+    "args": [
+      {
+        "name": "factor",
+        "role": "optional",
+        "kind": "float"
+      },
+      {
+        "name": "frames",
+        "role": "optional",
+        "kind": "string"
+      },
+      {
+        "name": "pixelSize",
+        "role": "keyword",
+        "kind": "float"
+      }
+    ],
+    "summary": "Zoom by a factor, or to a pixel size in angstroms; alone, report the pixel size.",
+    "mutates": false
+  },
+  {
+    "name": "label",
+    "args": [
+      {
+        "name": "objects",
+        "role": "optional",
+        "kind": "spec"
+      },
+      {
+        "name": "otype",
+        "role": "optional",
+        "kind": "enum",
+        "values": [
+          "atoms",
+          "residues",
+          "pseudobonds",
+          "bonds",
+          "models"
+        ]
+      },
+      {
+        "name": "text",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "attribute",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "color",
+        "role": "keyword",
+        "kind": "color"
+      },
+      {
+        "name": "size",
+        "role": "keyword",
+        "kind": "float"
+      },
+      {
+        "name": "onTop",
+        "role": "keyword",
+        "kind": "bool"
+      },
+      {
+        "name": "height",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "bgColor",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "offset",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "font",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      }
+    ],
+    "summary": "Label residues (or atoms) with their name and number, a text, or an attribute.",
+    "mutates": true
+  },
+  {
+    "name": "label delete",
+    "args": [
+      {
+        "name": "objects",
+        "role": "optional",
+        "kind": "spec"
+      },
+      {
+        "name": "otype",
+        "role": "optional",
+        "kind": "enum",
+        "values": [
+          "atoms",
+          "residues",
+          "pseudobonds",
+          "bonds",
+          "models"
+        ]
+      }
+    ],
+    "summary": "Delete residue and atom labels.",
+    "mutates": true
+  },
+  {
+    "name": "~label",
+    "args": [
+      {
+        "name": "objects",
+        "role": "optional",
+        "kind": "spec"
+      },
+      {
+        "name": "otype",
+        "role": "optional",
+        "kind": "enum",
+        "values": [
+          "atoms",
+          "residues",
+          "pseudobonds",
+          "bonds",
+          "models"
+        ]
+      }
+    ],
+    "summary": "Delete residue and atom labels.",
+    "mutates": true
+  },
+  {
+    "name": "surface",
+    "args": [
+      {
+        "name": "atoms",
+        "role": "optional",
+        "kind": "spec"
+      },
+      {
+        "name": "enclose",
+        "role": "keyword",
+        "kind": "spec"
+      },
+      {
+        "name": "probeRadius",
+        "role": "keyword",
+        "kind": "float"
+      },
+      {
+        "name": "color",
+        "role": "keyword",
+        "kind": "color"
+      },
+      {
+        "name": "transparency",
+        "role": "keyword",
+        "kind": "float"
+      },
+      {
+        "name": "include",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "gridSpacing",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "resolution",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "level",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "visiblePatches",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "sharpBoundaries",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "nthread",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "replace",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "update",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      }
+    ],
+    "summary": "Show the molecular surface of each chain (or one around the atoms given with enclose).",
+    "mutates": true
+  },
+  {
+    "name": "surface hidePatches",
+    "args": [
+      {
+        "name": "atoms",
+        "role": "optional",
+        "kind": "spec"
+      }
+    ],
+    "summary": "Hide the surface patches of atoms.",
+    "mutates": true
+  },
+  {
+    "name": "surface close",
+    "args": [
+      {
+        "name": "atoms",
+        "role": "optional",
+        "kind": "spec"
+      }
+    ],
+    "summary": "Delete the surfaces of the chains the atoms are in.",
+    "mutates": true
+  },
+  {
+    "name": "~surface",
+    "args": [
+      {
+        "name": "atoms",
+        "role": "optional",
+        "kind": "spec"
+      }
+    ],
+    "summary": "Hide the surface patches of atoms.",
+    "mutates": true
+  },
+  {
+    "name": "matchmaker",
+    "args": [
+      {
+        "name": "atoms",
+        "role": "required",
+        "kind": "spec"
+      },
+      {
+        "name": "to",
+        "role": "keyword",
+        "kind": "spec"
+      },
+      {
+        "name": "pairing",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "alg",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "matrix",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "cutoffDistance",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "showAlignment",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "bring",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "gapOpen",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "gapExtend",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "ssFraction",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "verbose",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      }
+    ],
+    "summary": "Superpose models onto a reference (by US-align structural alignment).",
+    "mutates": true
+  },
+  {
+    "name": "mmaker",
+    "args": [
+      {
+        "name": "atoms",
+        "role": "required",
+        "kind": "spec"
+      },
+      {
+        "name": "to",
+        "role": "keyword",
+        "kind": "spec"
+      },
+      {
+        "name": "pairing",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "alg",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "matrix",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "cutoffDistance",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "showAlignment",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "bring",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "gapOpen",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "gapExtend",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "ssFraction",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "verbose",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      }
+    ],
+    "summary": "Superpose models onto a reference (by US-align structural alignment).",
+    "mutates": true
+  },
+  {
+    "name": "distance",
+    "args": [
+      {
+        "name": "objects",
+        "role": "required",
+        "kind": "spec"
+      },
+      {
+        "name": "decimalPlaces",
+        "role": "keyword",
+        "default": "3",
+        "kind": "int"
+      },
+      {
+        "name": "color",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "dashes",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "radius",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "symmetry",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "signed",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "monitor",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      }
+    ],
+    "summary": "Measure and draw the distance between two atoms.",
+    "mutates": true
+  },
+  {
+    "name": "distance delete",
+    "args": [
+      {
+        "name": "objects",
+        "role": "optional",
+        "kind": "spec"
+      }
+    ],
+    "summary": "Delete distances (all of them when no atoms are given).",
+    "mutates": true
+  },
+  {
+    "name": "~distance",
+    "args": [
+      {
+        "name": "objects",
+        "role": "optional",
+        "kind": "spec"
+      }
+    ],
+    "summary": "Delete distances (all of them when no atoms are given).",
+    "mutates": true
+  },
+  {
+    "name": "info",
+    "args": [
+      {
+        "name": "objects",
+        "role": "optional",
+        "kind": "spec"
+      },
+      {
+        "name": "saveFile",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      }
+    ],
+    "summary": "Report the models: atoms, residues and chains.",
+    "mutates": false
+  },
+  {
+    "name": "info models",
+    "args": [
+      {
+        "name": "objects",
+        "role": "optional",
+        "kind": "spec"
+      },
+      {
+        "name": "attribute",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "saveFile",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      }
+    ],
+    "summary": "Report the models named, one line each.",
+    "mutates": false
+  },
+  {
+    "name": "info chains",
+    "args": [
+      {
+        "name": "objects",
+        "role": "optional",
+        "kind": "spec"
+      },
+      {
+        "name": "attribute",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "saveFile",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      }
+    ],
+    "summary": "Report the chains named, one line each.",
+    "mutates": false
+  },
+  {
+    "name": "info residues",
+    "args": [
+      {
+        "name": "objects",
+        "role": "optional",
+        "kind": "spec"
+      },
+      {
+        "name": "attribute",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "saveFile",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      }
+    ],
+    "summary": "Report the residues named, one line each.",
+    "mutates": false
+  },
+  {
+    "name": "info atoms",
+    "args": [
+      {
+        "name": "objects",
+        "role": "optional",
+        "kind": "spec"
+      },
+      {
+        "name": "attribute",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "saveFile",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      }
+    ],
+    "summary": "Report the atoms named, one line each.",
+    "mutates": false
+  },
+  {
+    "name": "save",
+    "args": [
+      {
+        "name": "filename",
+        "role": "required",
+        "kind": "path"
+      },
+      {
+        "name": "format",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "models",
+        "role": "keyword",
+        "kind": "spec"
+      },
+      {
+        "name": "width",
+        "role": "keyword",
+        "kind": "int"
+      },
+      {
+        "name": "height",
+        "role": "keyword",
+        "kind": "int"
+      },
+      {
+        "name": "transparentBackground",
+        "role": "keyword",
+        "kind": "bool"
+      },
+      {
+        "name": "supersample",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "pixelSize",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "quality",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      },
+      {
+        "name": "selectedOnly",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "displayedOnly",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "relModel",
+        "role": "keyword",
+        "kind": "string"
+      },
+      {
+        "name": "allCoordsets",
+        "role": "keyword",
+        "kind": "string"
+      }
+    ],
+    "summary": "Save an image (.png), the scene (.qsc) or a model (.pdb).",
+    "mutates": false
+  },
+  {
+    "name": "name",
+    "args": [
+      {
+        "name": "name",
+        "role": "required",
+        "kind": "string"
+      },
+      {
+        "name": "text",
+        "role": "optional",
+        "kind": "rest"
+      }
+    ],
+    "summary": "Name a specification, to use the name as a selector later; with no specification, show the definition.",
+    "mutates": false
+  },
+  {
+    "name": "name frozen",
+    "args": [
+      {
+        "name": "rest",
+        "role": "optional",
+        "kind": "rest"
+      }
+    ],
+    "summary": "Not supported: CueMol names an expression, not a fixed set of atoms.",
+    "mutates": false
+  },
+  {
+    "name": "name delete",
+    "args": [
+      {
+        "name": "name",
+        "role": "required",
+        "kind": "string"
+      }
+    ],
+    "summary": "Forget a name, or all of them.",
+    "mutates": false
+  },
+  {
+    "name": "name list",
+    "args": [
+      {
+        "name": "builtins",
+        "role": "keyword",
+        "ignored": true,
+        "kind": "string"
+      }
+    ],
+    "summary": "List the names.",
+    "mutates": false
+  },
+  {
+    "name": "help",
+    "args": [
+      {
+        "name": "topic",
+        "role": "optional",
+        "kind": "rest"
+      }
+    ],
+    "summary": "List the commands, or show how one is written.",
+    "mutates": false
+  }
+]

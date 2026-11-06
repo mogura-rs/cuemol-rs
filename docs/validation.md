@@ -5,6 +5,56 @@ results are historical. Generated inputs and logs stay in the ignored checkout
 cache. The current repairs and their limits appear in the completion audit;
 passing tests do not establish equivalence for every parameter combination.
 
+## Current-reference ChimeraX console
+
+The shared Rust console implements all 59 command registrations in the current
+reference's ChimeraX plugin. Native egui, Tauri and WASM select the same dialect;
+CLI `run` detects `.cxc` and `.pml`, and `console --dialect` retains a session
+across standard-input submissions. Existing JavaScript arguments are unchanged.
+The implementation reads live selections, coloring and renderer properties.
+Model numbers follow workspace order when first assigned and survive undo and
+object deletion without reuse. Surface visibility does not replace the atoms
+used to calculate the surface. Residue anchors and chain groups use indexed
+lookups instead of scanning every existing group for each atom.
+
+The optional read-only TypeScript oracle compares the command catalog, binding,
+atom specifications, colors, palettes, model/chain colors, numeric formatting,
+automatic-style boundaries and transparency. Run it with:
+
+```sh
+CUEMOL_CHIMERAX_REFERENCE=../cuemol2 cargo test --locked -p cuemol-command \
+  --lib console::chimerax -- --nocapture
+```
+
+The current matrix contains 539 cases, with one documented command-name
+correction: the reference parser accepts `surface h` but rejects the full
+camelCase `surface hidePatches`; Rust accepts both. `save ... format pdb` also
+honors the explicit format when the filename extension differs, fixing the
+reference command's discarded format argument.
+
+Thirteen focused Rust tests cover aliases, live GUI edits, selections, surfaces,
+labels, distance deletion, cross-model measurements, transformed LSQ alignment,
+opening, automatic styling, exports, scripts, completion and stable model
+numbering. The complete shared command suite passed 208 tests, including the final
+model-order regression. Three native console tests and four macOS Tauri console
+tests passed. CLI dialect tests pass with and without the JavaScript feature;
+existing JavaScript argument and startup tests pass. A CLI `matchmaker` smoke
+fitted 30 C-alpha pairs with the built-in US-align implementation and reported
+RMSD below 0.00001 angstrom. The rebuilt WASM passed 51 console and Tauri-shell
+browser checks. These include actual WebGL/WebGPU ChimeraX selection, surfaces,
+labels, measurements, PDB downloads and undo/redo, plus Tauri dialect persistence.
+
+The read-only reference documentation contains these conflicts with its code:
+
+- Section 2 says `rgb()` and `hsl()` are unsupported, whereas the parser and
+  the later command table support them, their alpha variants and `gray()`.
+- The residue description permits a leading `+`, but the atom-spec lexer does
+  not accept it; `:+10` is rejected.
+- The wildcard description includes `[!...]`, but the lexer does not consume
+  `!` there. Rust follows the observed parser behavior.
+- The common `save_object` description advertises an mmCIF writer that is not
+  registered, as recorded in the object-export section below.
+
 ## View direction and depth dragging
 
 The public `View::forward_vec` now points out of the screen, matching the C++

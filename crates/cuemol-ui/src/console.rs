@@ -131,7 +131,12 @@ impl ConsoleEditor {
         self.rects.clear();
         let mut intent = None;
         ui.horizontal(|ui| {
-            for dialect in [Dialect::CueMol, Dialect::PyMol, Dialect::JavaScript] {
+            for dialect in [
+                Dialect::CueMol,
+                Dialect::PyMol,
+                Dialect::ChimeraX,
+                Dialect::JavaScript,
+            ] {
                 let response = ui.selectable_value(&mut self.dialect, dialect, dialect.label());
                 self.record(&format!("Console {}", dialect.label()), &response);
                 if response.changed() {

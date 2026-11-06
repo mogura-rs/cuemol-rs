@@ -34,6 +34,9 @@ editing or exporting an existing session.
 cuemol pdb-info structure.pdb
 cuemol trajectory-info trajectory.xtc
 cuemol run commands.js
+cuemol run commands.cxc
+cuemol run commands.pml
+cuemol console --dialect chimerax
 cuemol -c 'print(21 * 2);'
 cuemol render structure.pdb image.png --width 1200 --height 900
 cuemol render scene.qsc illustration.png --style npr
@@ -43,6 +46,9 @@ cuemol export-scene structure.pdb model.obj
 JavaScript runs in the embedded engine with `cuemol`, `scene` and `view`.
 `cuemol run commands.js arg1 arg2` exposes arguments through `getCmdArgs(index)`;
 `getCmdArgs(-1)` returns their count.
+`.cxc` and `.pml` select the ChimeraX and PyMOL console dialects.
+`cuemol console --dialect NAME` keeps a scene while reading submissions from
+standard input; `-c COMMANDS` runs one submission. `help` lists supported commands.
 Use the current tool schemas for renderer, selection, camera and export
 parameters. Loading coordinates creates default representations; loading a
 saved QSC restores its stored renderer settings. Prefer an embedded QSC when

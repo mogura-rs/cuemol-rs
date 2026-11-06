@@ -437,6 +437,7 @@ impl App {
                     }
                     Action::Source(_)
                     | Action::Native(_)
+                    | Action::ChimeraX(_)
                     | Action::Qax(_)
                     | Action::QaxOp(_)
                     | Action::RememberSetting { .. }

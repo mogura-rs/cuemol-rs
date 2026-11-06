@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod chimerax;
 mod completion;
 mod parser;
 mod pymol;
@@ -11,7 +12,7 @@ mod pymol_view;
 mod qax;
 mod refs;
 mod runtime;
-pub use runtime::Submission;
+pub use runtime::{commands as split_dialect_commands, Submission};
 
 use cuemol_desktop_core::DesktopAppState;
 use serde::Deserialize;
@@ -28,6 +29,7 @@ pub enum Dialect {
     #[default]
     CueMol,
     PyMol,
+    ChimeraX,
     JavaScript,
 }
 
@@ -36,6 +38,7 @@ impl Dialect {
         match self {
             Self::CueMol => "CueMol",
             Self::PyMol => "PyMOL",
+            Self::ChimeraX => "ChimeraX",
             Self::JavaScript => "JavaScript",
         }
     }
@@ -44,6 +47,7 @@ impl Dialect {
         match self {
             Self::CueMol => "CueMol>",
             Self::PyMol => "PyM>",
+            Self::ChimeraX => "ChX>",
             Self::JavaScript => "Js>",
         }
     }
@@ -59,6 +63,7 @@ pub enum Action {
     Echo(String),
     Source(String),
     Native(String),
+    ChimeraX(Box<chimerax::Deferred>),
     Qax(String),
     QaxOp(cuemol_core::LDom2Node),
     Transaction(String),
@@ -123,6 +128,7 @@ const BUILTINS: &[&str] = &[
 #[derive(Clone, Debug)]
 pub struct Session {
     cwd: PathBuf,
+    chimerax: chimerax::State,
     remembered_settings: BTreeMap<(u64, String), String>,
     command_log: Option<PathBuf>,
     qax_log: Option<qax::Log>,
@@ -145,6 +151,7 @@ struct RenderedImage {
 impl Default for Session {
     fn default() -> Self {
         Self {
+            chimerax: chimerax::State::default(),
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             remembered_settings: BTreeMap::new(),
             command_log: None,
@@ -348,6 +355,7 @@ impl Session {
         match dialect {
             Dialect::CueMol => self.plan(state, line),
             Dialect::PyMol => pymol::plan(self, state, camera, line),
+            Dialect::ChimeraX => chimerax::plan(self, state, camera, line, &[]),
             Dialect::JavaScript => Ok(vec![Action::Tool {
                 name: "execute_script".into(),
                 args: json!({"source": line}),
@@ -359,6 +367,7 @@ impl Session {
         match dialect {
             Dialect::CueMol => self.help(topic),
             Dialect::PyMol => pymol::help(topic),
+            Dialect::ChimeraX => chimerax::help(topic),
             Dialect::JavaScript => Ok("JavaScript: use cuemol, scene and view. Enter runs the input; Shift+Enter inserts a line; Up/Down recalls history.".into()),
         }
     }
@@ -372,6 +381,7 @@ impl Session {
         match dialect {
             Dialect::CueMol => self.complete(state, source),
             Dialect::PyMol => pymol::complete(self, state, source),
+            Dialect::ChimeraX => chimerax::complete(self, state, source),
             Dialect::JavaScript => Vec::new(),
         }
     }

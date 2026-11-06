@@ -25608,6 +25608,42 @@ mod tests {
     }
 
     #[test]
+    fn chimerax_console_keeps_deferred_actions_in_one_undo() {
+        let mut model = model_without_gpu();
+        model.desktop.open_bytes("probe.pdb", b"ATOM      1  CA  ALA A   1       1.000   0.000   0.000  1.00 10.00           C\nATOM      2  CA  GLY A   2       2.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+        let id = model.desktop.active_object_summaries()[0].uid;
+        let dialect = cuemol_command::console::Dialect::ChimeraX;
+        model
+            .start_console(
+                "show #1:2; style #1:2 sphere; label #1:2; distance @CA",
+                dialect,
+            )
+            .unwrap();
+        while model.console_run.is_some() {
+            model.poll_console().unwrap();
+        }
+        assert_eq!(model.status, "Console executed", "{:?}", model.log_lines);
+        assert_eq!(model.undo_stack.len(), 1);
+        assert!(model
+            .desktop
+            .renderer_summaries(id)
+            .iter()
+            .any(|r| r.name == "chx:sphere"));
+        model.start_console("undo", dialect).unwrap();
+        assert!(!model
+            .desktop
+            .renderer_summaries(id)
+            .iter()
+            .any(|r| r.name.starts_with("chx:")));
+        model.start_console("redo", dialect).unwrap();
+        assert!(model
+            .desktop
+            .renderer_summaries(id)
+            .iter()
+            .any(|r| r.name == "chx:sphere"));
+    }
+
+    #[test]
     fn console_dialects_share_one_undo_and_cancel_after_manual_changes() {
         let mut model = model_without_gpu();
         model.desktop.open_bytes("probe.pdb", b"ATOM      1  CA  ALA A   1       1.000   0.000   0.000  1.00 10.00           C\nATOM      2  CA  GLY A   2       2.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();

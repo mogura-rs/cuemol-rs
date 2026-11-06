@@ -1479,6 +1479,7 @@ dependencies = [
 name = "cuemol-cli"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "cuemol-agent",
  "cuemol-command",
  "cuemol-core",
@@ -1517,7 +1518,9 @@ dependencies = [
  "cuemol-render",
  "cuemol-xtal",
  "getrandom 0.3.4",
+ "js-sys",
  "png 0.17.16",
+ "regex",
  "semver",
  "serde",
  "serde_json",

@@ -9172,9 +9172,9 @@ function closeConsoleCompletions() {
 }
 
 function setConsoleDialect(value) {
-  consoleDialect = ["CueMol", "PyMOL", "JavaScript"].includes(value) ? value : "CueMol";
+  consoleDialect = ["CueMol", "PyMOL", "ChimeraX", "JavaScript"].includes(value) ? value : "CueMol";
   document.querySelectorAll("[data-console-dialect]").forEach(button => button.setAttribute("aria-checked", String(button.dataset.consoleDialect === consoleDialect)));
-  document.getElementById("console-prompt").textContent = consoleDialect === "JavaScript" ? "Js>" : consoleDialect === "PyMOL" ? "PyM>" : "CueMol>";
+  document.getElementById("console-prompt").textContent = consoleDialect === "JavaScript" ? "Js>" : consoleDialect === "PyMOL" ? "PyM>" : consoleDialect === "ChimeraX" ? "ChX>" : "CueMol>";
   closeConsoleCompletions();
   try { localStorage.setItem("cuemol.console.dialect", consoleDialect); } catch {}
 }

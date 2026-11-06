@@ -1,6 +1,7 @@
 mod agent;
 #[path = "../build_support.rs"]
 mod build_support;
+mod console;
 mod export;
 mod external_tools;
 mod runtime;
@@ -91,6 +92,7 @@ fn run() -> Result<(), String> {
         "web" => web::run(args.collect()),
         "tools" => external_tools::run(args.collect()),
         "config" => runtime::config(args.collect()),
+        "console" => console::run(args.collect()),
         "run" | "-c" | "--eval" => runtime::script(&command, args.collect()),
         "exec" => runtime::execute(args.collect()),
         "render" => runtime::render(args.collect()),
@@ -862,6 +864,10 @@ fn print_usage() {
     eprintln!("  cuemol tools list | path NAME | run NAME [ARG ...] | bundle [--out DIR]");
     eprintln!("  cuemol [file ...]");
     eprintln!("  cuemol gui [file ...]");
+    eprintln!(
+        "  cuemol console [--dialect cuemol|pymol|chimerax|javascript] [-c COMMANDS | SCRIPT]"
+    );
+    eprintln!("  cuemol run [--dialect NAME] SCRIPT.js|.cxc|.pml [JS_ARGS...]");
     eprintln!("  cuemol pdb-info <file.pdb>");
     eprintln!("  cuemol qdfpdb-info <file.qdfpdb>");
     eprintln!("  cuemol pdb-write <file.pdb>");
