@@ -1,3 +1,7 @@
+#[path = "saved_atoms.rs"]
+mod saved_atoms;
+pub(crate) use saved_atoms::SavedAtoms;
+
 use crate::selection::Selector;
 use crate::SolidColoring;
 use cuemol_core::{ByteArray, CueMolError, Matrix3, Matrix4, Quat, Result, Vector4};
@@ -221,6 +225,7 @@ fn insert_residue_pivot(pivots: &mut ResiduePivots, key: &ResidueKey, name: Arc<
 #[derive(Debug, Clone)]
 pub struct MolCoord {
     atoms: Arc<Vec<Atom>>,
+    next_atom_serial: i64,
     residue_count: OnceLock<usize>,
     bonds: Arc<Vec<Bond>>,
     residue_props: Arc<BTreeMap<ResidueKey, BTreeMap<String, String>>>,
@@ -239,6 +244,7 @@ pub struct MolCoord {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct MoleculeData {
     atoms: Arc<Vec<Atom>>,
+    next_atom_serial: i64,
     bonds: Arc<Vec<Bond>>,
     residue_props: Arc<BTreeMap<ResidueKey, BTreeMap<String, String>>>,
     #[serde(default)]
@@ -264,6 +270,13 @@ impl MoleculeData {
             ));
         }
         let mut molecule = MolCoord {
+            next_atom_serial: self.next_atom_serial.max(
+                self.atoms
+                    .iter()
+                    .map(|atom| i64::from(atom.serial) + 1)
+                    .max()
+                    .unwrap_or(1),
+            ),
             atoms: self.atoms,
             bonds: self.bonds,
             residue_props: self.residue_props,
@@ -309,6 +322,7 @@ impl MolCoord {
     pub fn transfer_data(&self) -> MoleculeData {
         MoleculeData {
             atoms: self.atoms.clone(),
+            next_atom_serial: self.next_serial(),
             bonds: self.bonds.clone(),
             residue_props: self.residue_props.clone(),
             residue_pivots: self.residue_pivots.clone(),
@@ -321,8 +335,17 @@ impl MolCoord {
         }
     }
 
+    /// Preserve the allocation limit when restoring an older molecule snapshot.
+    pub fn preserve_allocated_atom_ids_from(&mut self, current: &Self) {
+        self.next_atom_serial = self.next_atom_serial.max(current.next_atom_serial);
+    }
+
     pub fn apply_undo_changes(&mut self, from: &Self, to: &Self) {
         use cuemol_core::snapshot::apply_value_change;
+        self.next_atom_serial = self
+            .next_atom_serial
+            .max(from.next_atom_serial)
+            .max(to.next_atom_serial);
         apply_value_change(&mut self.bonds, &from.bonds, &to.bonds);
         apply_value_change(&mut self.selection, &from.selection, &to.selection);
         apply_value_change(
@@ -398,6 +421,7 @@ impl MolCoord {
     pub fn new() -> Self {
         Self {
             atoms: Arc::default(),
+            next_atom_serial: 1,
             residue_count: OnceLock::new(),
             bonds: Arc::default(),
             residue_props: Arc::default(),
@@ -415,6 +439,11 @@ impl MolCoord {
 
     pub fn with_atoms(atoms: Vec<Atom>) -> Self {
         Self {
+            next_atom_serial: atoms
+                .iter()
+                .map(|atom| i64::from(atom.serial) + 1)
+                .max()
+                .unwrap_or(1),
             atoms: Arc::new(atoms),
             residue_count: OnceLock::new(),
             bonds: Arc::default(),
@@ -738,6 +767,7 @@ impl MolCoord {
     }
 
     pub fn push_atom(&mut self, atom: Atom) {
+        self.next_atom_serial = self.next_atom_serial.max(i64::from(atom.serial) + 1);
         self.residue_count.take();
         Arc::make_mut(&mut self.atoms).push(atom);
     }
@@ -751,9 +781,10 @@ impl MolCoord {
     ) -> i32 {
         let chain = chain.into();
         let resn = resn.into();
-        if atom.serial <= 0 || self.atom_by_serial(atom.serial).is_some() {
-            atom.serial = self.next_serial();
-        }
+        let Ok(serial) = i32::try_from(self.next_serial()) else {
+            return -1;
+        };
+        atom.serial = serial;
         atom.chain_id = chain.clone();
         atom.res_id = resid;
         if resn.is_empty() {
@@ -1593,17 +1624,7 @@ impl MolCoord {
             .select_indices(selector)
             .into_iter()
             .collect::<BTreeSet<_>>();
-        self.delete_atom_indices(&selected)
-    }
-
-    pub(crate) fn delete_atom_keys(&mut self, keys: &BTreeSet<AtomKey>) -> usize {
-        let selected = self
-            .atoms
-            .iter()
-            .enumerate()
-            .filter_map(|(index, atom)| keys.contains(&atom_key(atom)).then_some(index))
-            .collect::<BTreeSet<_>>();
-        self.delete_atom_indices(&selected)
+        self.delete_atom_indices(&self.removal_set(&selected))
     }
 
     fn delete_atom_indices(&mut self, selected: &BTreeSet<usize>) -> usize {
@@ -1611,6 +1632,7 @@ impl MolCoord {
             return 0;
         }
 
+        self.next_atom_serial = self.next_serial();
         let mut remap = vec![None; self.atoms.len()];
         let mut atoms = Vec::with_capacity(self.atoms.len() - selected.len());
         for (old_index, atom) in self.atoms.iter().enumerate() {
@@ -1660,7 +1682,7 @@ impl MolCoord {
         let Some(index) = self.atoms.iter().position(|atom| atom.serial == serial) else {
             return false;
         };
-        self.delete_atom_indices(&BTreeSet::from([index])) == 1
+        self.delete_atom_indices(&self.removal_set(&BTreeSet::from([index]))) > 0
     }
 
     pub fn remove_chain(&mut self, chain: &str) -> bool {
@@ -1762,7 +1784,7 @@ impl MolCoord {
         }
 
         let existing_residues = self.atoms.iter().map(residue_key).collect::<BTreeSet<_>>();
-        let existing_atoms = self.atoms.iter().map(atom_key).collect::<BTreeSet<_>>();
+        let mut copied_names = BTreeSet::new();
         for index in &selected {
             let atom = &source.atoms[*index];
             if existing_residues.contains(&residue_key(atom)) {
@@ -1771,7 +1793,7 @@ impl MolCoord {
                     atom.chain_id, atom.res_id
                 )));
             }
-            if existing_atoms.contains(&atom_key(atom)) {
+            if !copied_names.insert(atom_key(atom)) {
                 return Err(CueMolError::invalid_argument(format!(
                     "atom collision while copying atoms: {} {} {}",
                     atom.chain_id, atom.res_id, atom.name
@@ -1779,11 +1801,19 @@ impl MolCoord {
             }
         }
 
+        let first_serial = self.next_serial();
+        let next_serial = first_serial
+            .checked_add(selected.len() as i64)
+            .filter(|value| *value <= i64::from(i32::MAX) + 1)
+            .ok_or_else(|| CueMolError::invalid_argument("atom ID space is exhausted"))?;
+        self.next_atom_serial = next_serial;
         self.residue_count.take();
         let mut remap = BTreeMap::new();
-        for index in &selected {
+        for (offset, index) in selected.iter().enumerate() {
             let new_index = self.atoms.len();
-            Arc::make_mut(&mut self.atoms).push(source.atoms[*index].clone());
+            let mut atom = source.atoms[*index].clone();
+            atom.serial = (first_serial + offset as i64) as i32;
+            Arc::make_mut(&mut self.atoms).push(atom);
             remap.insert(*index, new_index);
         }
         for bond in source.bonds.iter() {
@@ -2084,8 +2114,16 @@ impl MolCoord {
         Some((chain.to_string(), model.parse::<i32>().ok()?))
     }
 
-    fn next_serial(&self) -> i32 {
-        self.atoms.iter().map(|atom| atom.serial).max().unwrap_or(0) + 1
+    fn next_serial(&self) -> i64 {
+        self.next_atom_serial
+            .max(
+                self.atoms
+                    .iter()
+                    .map(|atom| i64::from(atom.serial) + 1)
+                    .max()
+                    .unwrap_or(1),
+            )
+            .max(1)
     }
 }
 

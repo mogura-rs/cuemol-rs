@@ -405,7 +405,11 @@ to image renderers rather than being converted into an unrelated isosurface.
 Scene Undo, Redo and Rollback update script queries immediately. Transactions
 preserve edits made before they start, changes in other scenes and later changes
 to unrelated properties. An uncaught script error discards that evaluation's
-scene edits and history.
+scene edits and history. Atom IDs belong to their molecule and remain stable
+through merge, coordinate edits and deletion history. New copied or appended
+atoms receive unused IDs during that molecule's session, including after Undo.
+Deleting an atom without an alternate-conformation identifier also removes its
+alternate conformations; Undo restores the complete set and its original order.
 
 ### Preferences and startup scripts
 

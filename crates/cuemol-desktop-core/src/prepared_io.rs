@@ -59,13 +59,13 @@ impl PreparedFile {
 
     /// The transfer protocol is private to matching application builds.
     pub fn encode(&self) -> Result<Vec<u8>> {
-        postcard::to_extend(self, b"CMPL\x04".to_vec())
+        postcard::to_extend(self, b"CMPL\x05".to_vec())
             .map_err(|error| CueMolError::parse(error.to_string()))
     }
 
     pub fn decode(data: &[u8]) -> Result<Self> {
         let data = data
-            .strip_prefix(b"CMPL\x04")
+            .strip_prefix(b"CMPL\x05")
             .ok_or_else(|| CueMolError::parse("unsupported prepared-file version"))?;
         let (value, remaining) = postcard::take_from_bytes(data)
             .map_err(|error| CueMolError::parse(error.to_string()))?;

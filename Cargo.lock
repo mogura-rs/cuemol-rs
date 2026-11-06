@@ -1697,6 +1697,7 @@ dependencies = [
  "cuemol-core",
  "cuemol-gfx",
  "cuemol-qsys",
+ "postcard",
  "regex",
  "serde",
 ]

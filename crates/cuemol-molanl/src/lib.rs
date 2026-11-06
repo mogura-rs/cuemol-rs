@@ -382,9 +382,14 @@ impl MolAnlManager {
         selector: &Selector,
         undo: &mut MolUndoManager,
     ) -> Result<bool> {
-        let edit = MolMergeEditInfo::new_copy(source, selector)?;
+        let start = target.atom_count();
         let changed = self.copy_atoms(target, source, selector)?;
         if changed {
+            let mut ids = cuemol_core::RangeSet::new();
+            for atom in &target.atoms()[start..] {
+                ids.insert_value(atom.serial);
+            }
+            let edit = MolMergeEditInfo::new_copy(target, &Selector::Aid(ids))?;
             undo.record(Box::new(edit));
         }
         Ok(changed)

@@ -1,5 +1,43 @@
 # Validation evidence
 
+## Atom identity and molecule-edit history
+
+The low-level deletion record previously copied atoms back through the ordinary
+merge path, which rejects a partially occupied residue. Regressions reproduced
+failed partial-residue undo, missing alternate conformations and colliding IDs
+when merging molecules with overlapping input serials. New edit records retain
+only affected atoms, their original positions, residue metadata and incident
+bonds. Restoration checks every reserved ID and atom name before changing the
+molecule. Redo removes the recorded IDs without reevaluating a spatial selection.
+
+Molecules now retain an allocation limit across deletion, script transactions,
+application snapshots and parser-worker transfers. Copy and append allocate
+fresh IDs; undo/redo restore the IDs used by later coordinate edits. A separate
+application-snapshot regression failed before the final repair: after undoing a
+merge it allocated ID 6 again, instead of the unused ID 8. The transfer payload
+is private to matching builds and its version is now 5. The low-level
+`MolMergeEditInfo::new_copy` constructor records the destination after copying,
+matching the reference's copy-record creation order.
+
+The molecule-specific undo manager now also clears both history stacks after a
+failed callback or native unwind panic and restores its previous recording
+state. Panic-abort builds cannot recover a panic. Subsequent edits remain
+recordable. All 295 molecular/analysis checks passed with the reference fixtures
+present, including eight new regression cases. The script and application-history
+checks passed in the shared core/command run: 558 passed, two optional checks
+ignored. All 191 native GUI and 168 macOS Tauri model checks passed; five optional
+Tauri checks remained ignored. The read-only C++ probe ran the current reference's
+four deletion/merge tests successfully. Rebuilt WebGL and WebGPU checks both
+passed worker loading, overlapping input IDs, partial deletion with alternate
+conformations, coordinate undo/redo and allocating a fresh ID after merge undo.
+The additional 27 loading, clipboard, selection and camera-history browser
+checks passed. Formatting, whitespace, syntax checks and all 12 distribution
+helper tests passed; the installer/self-upgrade fixture suite also passed.
+
+The reference's `SavedAtoms` comment describes residue properties as needed for
+newly recreated residues, but its restoration loop writes them to every restored
+residue, including an existing one. The Rust low-level record follows that code.
+
 ## Current backbone-width inspector ranges
 
 The current reference narrowed tube, ribbon and cartoon section-width controls

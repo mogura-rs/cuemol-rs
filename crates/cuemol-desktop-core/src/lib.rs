@@ -2118,7 +2118,7 @@ impl DesktopAppState {
         self.mark_scenes_modified(changed);
     }
 
-    /// Restore state without reusing style identifiers already exposed to editors.
+    /// Restore state without reusing atom or style identifiers already exposed to editors.
     pub fn restore_snapshot(&mut self, snapshot: Self) {
         self.replace_snapshot(snapshot);
     }
@@ -2127,6 +2127,15 @@ impl DesktopAppState {
         snapshot
             .script_styles
             .preserve_allocated_ids_from(&self.script_styles);
+        for scene in self.scene_manager().scenes() {
+            for current in scene.objects() {
+                if let Some(restored) = snapshot.scene_manager_mut().object_mut(current.uid()) {
+                    restored
+                        .mol_mut()
+                        .preserve_allocated_atom_ids_from(current.mol());
+                }
+            }
+        }
         std::mem::replace(self, snapshot)
     }
 
@@ -64136,7 +64145,7 @@ end_header
                 )
                 && log.contains("molState=mol-renamed:false:chain A:255:1:2:")
                 && log.contains(":true:true:17:true:true::pdb:")
-                && log.contains("molEdit=true:1:true:1:1:Z:NEW:(8,4,0)")
+                && log.contains("molEdit=true:1:true:2:1:Z:NEW:(8,4,0)")
                 && log.contains(
                     "objectOps=*group:preset:mol-renamed:5:0:true:datachunk:::RendGroup:true:true"
                 ),
@@ -64185,7 +64194,7 @@ end_header
             .object(target_uid)
             .expect("edited target molecule remains");
         assert_eq!(target.mol().atom_count(), 1);
-        let appended = target.mol().get_atom_by_id(1).expect("appended atom");
+        let appended = target.mol().get_atom_by_id(2).expect("appended atom");
         assert_eq!(appended.chain_id, "Z");
         assert_eq!(appended.res_id, 9);
         assert_eq!(appended.res_name, "NEW");
