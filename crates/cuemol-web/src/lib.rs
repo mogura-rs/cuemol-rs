@@ -567,6 +567,13 @@ impl App {
             self.render_async(name, &args, download, false);
             return;
         }
+        if name == "save_object" {
+            self.message = match self.save_command_object_download(&args) {
+                Ok(result) => result.to_string(),
+                Err(error) => format!("Error: {error}"),
+            };
+            return;
+        }
         if name == "list_trajectories" {
             self.message = self.trajectory_list().to_string();
             return;
@@ -614,6 +621,17 @@ impl App {
         }
         self.call_shared(name, args);
     }
+    fn save_command_object_download(&mut self, args: &Value) -> Result<Value, String> {
+        let prepared =
+            cuemol_command::prepare_save_object(&self.state, args).map_err(|e| e.to_string())?;
+        let filename = std::path::Path::new(&prepared.path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&prepared.path);
+        download(filename, &prepared.bytes, "application/octet-stream").map_err(js_error)?;
+        prepared.finish(&mut self.state).map_err(|e| e.to_string())
+    }
+
     fn call_shared(&mut self, name: &str, args: Value) -> bool {
         if let Some((summary, rect)) = self
             .state

@@ -12,7 +12,8 @@ The newer reference adds a ChimeraX console, selection simplification, combined
 node framing and additional command options. Selection rewriting, fit-box APIs and combined node framing are now implemented
 and checked across the shared command, native and browser frontends. Camera command
 rotation, slab fitting and undo separation also pass focused cross-frontend
-checks. Object export options are the next shared-operation gap. ChimeraX
+checks. Object export selection, format and source-link options also pass native and
+browser checks. ChimeraX
 remains required before claiming full support. The reference checkout is read-only.
 
 | Requirement | Existing implementation and next verification |

@@ -10,6 +10,7 @@ pub use selection_support::MAX_SELECTION_HISTORY;
 pub use sequence::{sequence_residue_number, GuiSequenceLayout};
 pub use style_edit::GuiStyleTarget;
 mod command_support;
+mod object_export;
 mod property_access;
 #[cfg(feature = "scripting")]
 mod script_bytes;
@@ -14640,14 +14641,14 @@ impl DesktopAppState {
             .object(object_uid)
             .ok_or_else(|| CueMolError::not_found("molecule"))?;
         let selector = self.parse_object_selector(object_uid, selection)?;
-        if object.mol().select_indices(&selector).is_empty() {
+        if object.mol().atom_sel_count(&selector) == 0 {
             return Err(CueMolError::invalid_argument(
                 "selection matched no atoms; nothing written",
             ));
         }
-        let mut molecule = object.mol().clone();
+        let mut molecule = std::borrow::Cow::Borrowed(object.mol());
         if object.xform_matrix() != Matrix4::IDENTITY {
-            molecule.xform_by_mat(object.xform_matrix(), None);
+            molecule.to_mut().xform_by_mat(object.xform_matrix(), None);
         }
         Ok(match format {
             "pdb" | "ent" => {

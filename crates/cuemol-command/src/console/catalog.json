@@ -1802,7 +1802,10 @@
     "group": "files",
     "params": [
       "objId",
-      "fileName"
+      "fileName",
+      "selection",
+      "format",
+      "link"
     ],
     "semantics": {
       "objId": "object",
@@ -1831,7 +1834,10 @@
     "group": "files",
     "params": [
       "objId",
-      "fileName"
+      "fileName",
+      "selection",
+      "format",
+      "link"
     ],
     "semantics": {
       "objId": "object",

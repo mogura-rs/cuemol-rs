@@ -12,6 +12,8 @@ mod view_commands;
 pub use downloads::{load_fetched, prepare_fetch, FetchPlan};
 pub mod navigation;
 mod nodes;
+mod object_export;
+pub use object_export::{prepare_save_object, PreparedObjectSave};
 mod properties;
 pub mod selection;
 pub use animation::advance_animation;

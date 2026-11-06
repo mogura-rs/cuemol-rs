@@ -220,3 +220,32 @@ test('Console awaits downloads in order and stopping rejects late results while 
   await call(page, 'undo');
   expect((await status(page)).scene.objects.map(object => object.name)).toEqual(['probe']);
 });
+
+test('CueMol object exports honor selection, explicit format and source linking', async ({page}) => {
+  await setup(page);
+  const object = (await status(page)).scene.objects[0];
+  const source = async () => {
+    await call(page, 'list_node_props', {nodeType:'object',nodeId:object.id});
+    return JSON.parse((await status(page)).message).properties.find(property => property.key === 'src').value;
+  };
+  const original = await source();
+  const partial = page.waitForEvent('download');
+  await input(page, 'write probe, selected.data, resid 2, pdb, true');
+  await page.keyboard.press('Enter');
+  const selected = await partial;
+  expect(selected.suggestedFilename()).toBe('selected.data');
+  const bytes = await readFile(await selected.path(), 'utf8');
+  expect(bytes).toContain('GLY');
+  expect(bytes).not.toContain('ALA');
+  await expect.poll(async () => (await status(page)).message).toBe('Console executed');
+  expect(await source()).toBe(original);
+  const unlinked = page.waitForEvent('download');
+  await call(page, 'save_object', {objId:object.id,fileName:'unlinked.pdb',link:false});
+  await unlinked;
+  expect(await source()).toBe(original);
+  const whole = page.waitForEvent('download');
+  await call(page, 'save_object', {objId:object.id,fileName:'whole.pdb',selection:'*'});
+  const all = await whole;
+  expect(await readFile(await all.path(), 'utf8')).toContain('ALA');
+  expect(await source()).toBe('whole.pdb');
+});

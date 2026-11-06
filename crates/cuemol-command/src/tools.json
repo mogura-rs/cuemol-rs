@@ -3014,7 +3014,7 @@
   },
   {
     "name": "save_object",
-    "description": "Write one object to a file in the format its extension names (for a MolCoord object e.g. .pdb or .cif). Relative filenames are resolved from the current working directory. The output path is reported back.",
+    "description": "Write an object using its filename extension or an explicit writer. A selection writes only matching atoms. Whole-object writes update the source unless link is false; partial writes never update it. Relative paths use the current working directory.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -3025,6 +3025,27 @@
         "fileName": {
           "type": "string",
           "description": "The file, e.g. model.pdb."
+        },
+        "selection": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Atom selection for a molecule; null, empty or * writes the whole object."
+        },
+        "format": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Compatible writer name, such as pdb, sdf, pqr, xyzr or qdfmol. Null infers it from the extension."
+        },
+        "link": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "False preserves the current source; null or true links whole-object writes to the new file."
         }
       },
       "required": [

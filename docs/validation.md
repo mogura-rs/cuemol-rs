@@ -5,6 +5,28 @@ results are historical. Generated inputs and logs stay in the ignored checkout
 cache. The current repairs and their limits appear in the completion audit;
 passing tests do not establish equivalence for every parameter combination.
 
+## Current-reference object export options
+
+`save_object` and native `write` now accept `selection`, `format` and `link`.
+The shared exporter validates the writer and selection before writing. A partial
+write keeps the object's source and modified state even when `link` is true.
+Null, empty and `*` selections are whole-object writes; those link by default,
+and `link=false` preserves the source. Failed writes do not update the source.
+The native PDB writer retains raw coordinates, as the reference writer does;
+PyMOL exports retain their existing transformed-coordinate behavior.
+
+Five focused export regressions cover PDB, SDF, PQR, XYZR and molecule QDF,
+map QDF, surface QDF and lightweight QDF, including selected atoms, explicit
+formats with a different filename extension, round trips, failed writes and
+source linking. The complete shared command suite passed 195 tests. Rebuilt
+WASM passed a browser test that downloads selected and complete molecules,
+checks their contents and verifies the source after each link option.
+
+The old `save_object` description advertised `.cif`, but the reference source
+and the Rust writer registry provide no mmCIF writer. The updated local schema
+lists supported writers and rejects `.cif` before creating a file. The read-only
+reference description remains inconsistent with its available writers.
+
 ## Current-reference camera command options
 
 `set_view` now accepts the reference scalar-first quaternion `[a, x, y, z]`,

@@ -333,12 +333,16 @@ pub fn call_tool(
             )
         }
         "save_object" => {
-            state.save_workspace_object_as(
-                nodes::object_kind(state, uid(args, "objId")?)?,
-                uid(args, "objId")?,
-                text(args, "fileName")?,
-            )?;
-            Ok(json!({"path":args["fileName"]}))
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                crate::prepare_save_object(state, args)?.write(state)
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                Err(CueMolError::invalid_argument(
+                    "save_object requires the browser download handler",
+                ))
+            }
         }
         "convert_to_morph" => {
             let (r, created) = state.initialize_morph_object(uid(args, "objId")?)?;
