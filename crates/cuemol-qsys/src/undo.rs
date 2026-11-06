@@ -40,6 +40,7 @@ pub struct UndoManager {
     active: Option<Transaction>,
     nesting: usize,
     disabled: bool,
+    history_dropped: bool,
 }
 
 #[derive(Clone)]
@@ -182,6 +183,29 @@ impl UndoManager {
         self.commit_txn()
     }
 
+    fn run_step(&mut self, txn: &mut Transaction, undo: bool) -> bool {
+        let was_disabled = std::mem::replace(&mut self.disabled, true);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if undo {
+                txn.edits.iter_mut().rev().all(|edit| edit.undo())
+            } else {
+                txn.edits.iter_mut().all(|edit| edit.redo())
+            }
+        }))
+        .unwrap_or(false);
+        self.disabled = was_disabled;
+        result
+    }
+
+    fn drop_history(&mut self) {
+        self.clear_all_info();
+        self.history_dropped = true;
+    }
+
+    pub fn take_history_dropped(&mut self) -> bool {
+        std::mem::take(&mut self.history_dropped)
+    }
+
     pub fn rollback_txn(&mut self) -> bool {
         if self.disabled {
             return false;
@@ -193,11 +217,12 @@ impl UndoManager {
         let Some(mut txn) = self.active.take() else {
             return false;
         };
-        for edit in txn.edits.iter_mut().rev() {
-            edit.undo();
-        }
         self.nesting = 0;
-        true
+        let result = self.run_step(&mut txn, true);
+        if !result {
+            self.drop_history();
+        }
+        result
     }
 
     pub fn rollback_undo_txn(&mut self) -> bool {
@@ -211,17 +236,12 @@ impl UndoManager {
         let Some(mut txn) = self.undo_stack.pop() else {
             return false;
         };
-        self.disabled = true;
-        let mut ok = true;
-        for edit in txn.edits.iter_mut().rev() {
-            if !edit.undo() {
-                ok = false;
-                break;
-            }
+        if !self.run_step(&mut txn, true) {
+            self.drop_history();
+            return false;
         }
-        self.disabled = false;
         self.redo_stack.push(txn);
-        ok
+        true
     }
 
     pub fn redo(&mut self) -> bool {
@@ -231,17 +251,12 @@ impl UndoManager {
         let Some(mut txn) = self.redo_stack.pop() else {
             return false;
         };
-        self.disabled = true;
-        let mut ok = true;
-        for edit in &mut txn.edits {
-            if !edit.redo() {
-                ok = false;
-                break;
-            }
+        if !self.run_step(&mut txn, false) {
+            self.drop_history();
+            return false;
         }
-        self.disabled = false;
         self.undo_stack.push(txn);
-        ok
+        true
     }
 
     pub fn undo_n(&mut self, index: usize) -> bool {
@@ -511,6 +526,102 @@ mod tests {
         assert!(!manager.undo());
         assert_eq!(calls.borrow().as_slice(), &["undo:failing".to_string()]);
         assert!(!manager.is_disabled());
-        assert_eq!(manager.redo_size(), 1);
+        assert_eq!(manager.redo_size(), 0);
+        assert_eq!(manager.undo_size(), 0);
+    }
+    struct PartialFailure {
+        changed: Rc<std::cell::Cell<usize>>,
+        fail_undo: bool,
+        panics: bool,
+    }
+
+    impl PartialFailure {
+        fn change(&self, fail: bool) -> bool {
+            self.changed.set(self.changed.get() + 1);
+            assert!(
+                !(fail && self.panics),
+                "edit failed after changing the scene"
+            );
+            !fail
+        }
+    }
+
+    impl EditInfo for PartialFailure {
+        fn undo(&mut self) -> bool {
+            self.change(self.fail_undo)
+        }
+        fn redo(&mut self) -> bool {
+            self.change(!self.fail_undo)
+        }
+    }
+
+    #[test]
+    fn failed_undo_redo_and_rollback_discard_history_and_resume_recording() {
+        for which in ["undo", "redo", "rollback"] {
+            for panics in [false, true] {
+                let changed = Rc::new(std::cell::Cell::new(0));
+                let mut manager = UndoManager::new();
+                manager.start_txn("older");
+                manager.add_edit_info(Box::new(CountEditInfo::default()));
+                assert!(manager.commit_txn());
+                if which == "rollback" {
+                    assert!(manager.undo());
+                }
+                manager.start_txn("partial failure");
+                manager.add_edit_info(Box::new(PartialFailure {
+                    changed: Rc::clone(&changed),
+                    fail_undo: which != "redo",
+                    panics,
+                }));
+                if which != "rollback" {
+                    assert!(manager.commit_txn());
+                    if which == "redo" {
+                        assert!(manager.undo());
+                    } else {
+                        manager.start_txn("future");
+                        manager.add_edit_info(Box::new(CountEditInfo::default()));
+                        assert!(manager.commit_txn());
+                        assert!(manager.undo());
+                    }
+                }
+                let before = changed.get();
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match which {
+                        "undo" => manager.undo(),
+                        "redo" => manager.redo(),
+                        _ => manager.rollback_txn(),
+                    }));
+                assert!(matches!(result, Ok(false)), "{which}, panics={panics}");
+                assert_eq!(changed.get(), before + 1);
+                assert_eq!(
+                    (manager.undo_size(), manager.redo_size()),
+                    (0, 0),
+                    "{which}"
+                );
+                assert!(!manager.is_disabled());
+                assert!(!manager.is_in_txn());
+                assert!(manager.take_history_dropped());
+                assert!(!manager.take_history_dropped());
+                manager.start_txn("later");
+                manager.add_edit_info(Box::new(CountEditInfo::default()));
+                assert!(manager.commit_txn());
+                assert!(manager.undo());
+            }
+        }
+    }
+
+    #[test]
+    fn refusing_an_unavailable_step_keeps_history() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let mut manager = UndoManager::new();
+        manager.start_txn("refused");
+        let mut edit = RecordingEditInfo::successful("refused", Rc::clone(&calls));
+        edit.undoable = false;
+        manager.add_edit_info(Box::new(edit));
+        assert!(manager.commit_txn());
+        assert!(!manager.undo());
+        assert_eq!(manager.undo_size(), 1);
+        assert!(calls.borrow().is_empty());
+        assert!(!manager.take_history_dropped());
     }
 }

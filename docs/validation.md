@@ -1,5 +1,25 @@
 # Validation evidence
 
+## Failed undo, redo and rollback callbacks
+
+The low-level UndoManager previously moved a failed transaction to the other
+history stack, and rollback ignored failed callbacks. Regressions reproduced
+both defects. A callback that has already changed state cannot safely leave
+older history available, so the manager now stops on the first failure,
+discards both history stacks and restores its previous recording state.
+Native unwind panics follow the same path; panic-abort builds cannot recover
+from a panic.
+
+The scene wrapper emits one undo-information event when a failure discards
+history. Refusing a step before executing it keeps its history. Later edits
+remain recordable and undoable. All 148 qsys tests passed, including partial
+failure, undo/redo/rollback, native panic recovery, refused steps and event
+delivery. A fresh probe against the current C++ reference also passed all six
+combinations of the three operations and false-return/exception failures,
+including one-shot history-drop flags and recording after failure. The shared
+core and command suites passed 556 tests with two optional checks ignored.
+The qsys WASM check, formatting and whitespace checks also passed.
+
 ## NAMD coordinate sniffing and binary map headers
 
 The current reference rejects subnormal values when sniffing NAMD coordinates.

@@ -1019,7 +1019,7 @@ impl<T> Scene<T> {
     }
 
     pub fn rollback_undo_txn(&self) -> bool {
-        self.undo_manager.with_mut(crate::UndoManager::rollback_txn)
+        self.run_history_step(crate::UndoManager::rollback_txn)
     }
 
     pub fn commit_undo_txn(&self) -> bool {
@@ -1031,11 +1031,22 @@ impl<T> Scene<T> {
     }
 
     pub fn undo(&self, index: usize) -> bool {
-        self.undo_manager.with_mut(|manager| manager.undo_n(index))
+        self.run_history_step(|manager| manager.undo_n(index))
     }
 
     pub fn redo(&self, index: usize) -> bool {
-        self.undo_manager.with_mut(|manager| manager.redo_n(index))
+        self.run_history_step(|manager| manager.redo_n(index))
+    }
+
+    fn run_history_step(&self, step: impl FnOnce(&mut crate::UndoManager) -> bool) -> bool {
+        let (result, dropped) = self.undo_manager.with_mut(|manager| {
+            let result = step(manager);
+            (result, manager.take_history_dropped())
+        });
+        if dropped {
+            self.fire_scene_event_type(SceneEvent::SCE_SCENE_UNDOINFO, self.uid, "");
+        }
+        result
     }
 
     pub fn clear_undo_data(&self) {
@@ -1979,5 +1990,51 @@ mod tests {
         assert_eq!(scene.undo_size(), 0);
         assert_eq!(scene.redo_size(), 0);
         assert_eq!(event_types.lock().unwrap().len(), 2);
+    }
+    #[test]
+    fn failed_history_steps_notify_listeners_once() {
+        struct FailingEdit {
+            fail_undo: bool,
+        }
+        impl crate::EditInfo for FailingEdit {
+            fn undo(&mut self) -> bool {
+                !self.fail_undo
+            }
+            fn redo(&mut self) -> bool {
+                self.fail_undo
+            }
+        }
+        for which in ["undo", "redo", "rollback"] {
+            let scene = Scene::<()>::new(Uid::new(1), "scene");
+            scene.start_undo_txn("failing");
+            scene.undo_manager().with_mut(|manager| {
+                manager.add_edit_info(Box::new(FailingEdit {
+                    fail_undo: which != "redo",
+                }));
+            });
+            if which != "rollback" {
+                assert!(scene.commit_undo_txn());
+                if which == "redo" {
+                    assert!(scene.undo(0));
+                }
+            }
+            let events = Arc::new(Mutex::new(0));
+            let captured = Arc::clone(&events);
+            scene.add_listener(shared_event_listener(move |event: &mut SceneEvent| {
+                if event.event_type() == SceneEvent::SCE_SCENE_UNDOINFO {
+                    *captured.lock().unwrap() += 1;
+                }
+            }));
+            assert!(!match which {
+                "undo" => scene.undo(0),
+                "redo" => scene.redo(0),
+                _ => scene.rollback_undo_txn(),
+            });
+            assert_eq!(*events.lock().unwrap(), 1, "{which}");
+            assert_eq!((scene.undo_size(), scene.redo_size()), (0, 0));
+            assert!(!scene.undo(0));
+            assert!(!scene.redo(0));
+            assert_eq!(*events.lock().unwrap(), 1, "{which}");
+        }
     }
 }
