@@ -180,13 +180,13 @@ impl<'a> Properties<'a> {
         ];
         let width = self.number("section.width");
         let minor = self.number("section.tuber") * width;
-        let mut major = number("section.width", "Width1", 0.01, 3., 0.01, "Å");
+        let mut major = number("section.width", "Width1", 0.01, 1.5, 0.01, "Å");
         let mut writes = vec![json!({"prop":"section.width"})];
         if self.0.contains_key("section.tuber") {
             writes.push(json!({"prop":"section.tuber","inverse":minor}));
         }
         major["writes"] = json!(writes);
-        let mut minor_row = number("section.tuber", "Width2", 0.01, 3., 0.01, "Å");
+        let mut minor_row = number("section.tuber", "Width2", 0.01, 1.5, 0.01, "Å");
         minor_row["display"] = json!(minor.to_string());
         minor_row["writes"] =
             json!([{"prop":"section.tuber","scale":if width > 0. {1./width} else {0.}}]);

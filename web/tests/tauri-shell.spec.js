@@ -323,8 +323,8 @@ async function openShell(page, storage = {}, options = {}) {
             {key:'font_name',label:'Font name',font:true,choices:['Portable face','8514oem','serif','monospace']},
           ]},{title:'Geometry',expanded:true,rows:[
             {key:'ring',label:'Show ring'},{key:'thickness',label:'Thickness',min:0,max:3,step:0.01,unit:'Å',disabled:values.ring!=='true'},
-            {key:'section.width',label:'Width1',min:0.01,max:3,step:0.01,writes:[{prop:'section.width'},{prop:'section.tuber',inverse:Number(values['section.width'])*Number(values['section.tuber'])}]},
-            {key:'section.tuber',label:'Width2',display:String(Number(values['section.width'])*Number(values['section.tuber'])),min:0.01,max:3,step:0.01,writes:[{prop:'section.tuber',scale:1/Number(values['section.width'])}]},
+            {key:'section.width',label:'Width1',min:0.01,max:1.5,step:0.01,writes:[{prop:'section.width'},{prop:'section.tuber',inverse:Number(values['section.width'])*Number(values['section.tuber'])}]},
+            {key:'section.tuber',label:'Width2',display:String(Number(values['section.width'])*Number(values['section.tuber'])),min:0.01,max:1.5,step:0.01,writes:[{prop:'section.tuber',scale:1/Number(values['section.width'])}]},
             {key:'helix_ribbon',label:'Type',choices:['false','true'],labels:{false:'Cylinder',true:'Ribbon'}},
           ]},{title:'Optional and composite controls',expanded:true,rows:[
             {key:'loopsize2',label:'Loop size 2',min:0,max:10,step:0.1,optional:{off:-1,on:2,label:'Use a separate loop size 2'}},
@@ -1327,16 +1327,16 @@ test('Tauri renderer schema applies ranges, gates, choices and derived atomic wr
   await input('font_name').selectOption('serif');
   await expect(input('font_name')).toHaveCSS('font-family','serif');
   await input('section.width').fill('2'); await input('section.width').press('Tab');
-  await expect(input('section.width')).toHaveValue('2');
+  await expect(input('section.width')).toHaveValue('1.5');
   await expect(input('section.tuber')).toHaveValue('0.5');
   const batch=await page.evaluate(()=>window.__shellCalls.find(call=>call.command==='inspector_request' && call.args.tool==='set_node_props').args.args.updates);
-  expect(batch).toEqual([{prop:'section.width',value:'2'},{prop:'section.tuber',value:'0.25'}]);
+  expect(batch).toEqual([{prop:'section.width',value:'1.5'},{prop:'section.tuber',value:String(1/3)}]);
   await input('helix_ribbon').selectOption('true');
   await expect(input('helix_ribbon')).toHaveValue('true');
   const flag=await page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='inspector_request' && call.args.args.prop==='helix_ribbon').at(-1).args.args.value);
   expect(flag).toBe('true');
   await page.getByRole('tab',{name:'Generic',exact:true}).click();
-  await expect(input('section.tuber')).toHaveValue('0.25');
+  await expect(input('section.tuber')).toHaveValue(String(1/3));
   await expect(input('font_name')).toHaveAttribute('type','text');
   await expect(input('font_name')).toHaveValue('serif');
   expect(errors).toEqual([]);

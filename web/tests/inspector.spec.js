@@ -471,8 +471,8 @@ test('Tube dimensions and cartoon junctions form atomic edits through the struct
   await click(page,'Properties tab');
   await command(page,'clear_undo');
   await number(page,'section.width','2');
-  await expect.poll(async()=>prop(page,id,'section.width')).toBe('2');
-  expect(await prop(page,id,'section.tuber')).toBe('0.25');
+  await expect.poll(async()=>prop(page,id,'section.width')).toBe('1.5');
+  expect(Number(await prop(page,id,'section.tuber'))).toBeCloseTo(1/3,12);
   await filter(page,'section.tuber');
   await click(page,'section.tuber',true,true);
   await page.keyboard.press('ControlOrMeta+a'); await page.keyboard.press('ControlOrMeta+c');
@@ -481,8 +481,8 @@ test('Tube dimensions and cartoon junctions form atomic edits through the struct
   expect(await prop(page,id,'section.width')).toBe('1');
   expect(await prop(page,id,'section.tuber')).toBe('0.5');
   await command(page,'redo');
-  expect(await prop(page,id,'section.width')).toBe('2');
-  expect(await prop(page,id,'section.tuber')).toBe('0.25');
+  expect(await prop(page,id,'section.width')).toBe('1.5');
+  expect(Number(await prop(page,id,'section.tuber'))).toBeCloseTo(1/3,12);
   const cartoon=await command(page,'create_renderer',{objId:object.id,rendererType:'cartoon',name:'Helix'});
   await click(page,`renderer:${cartoon.rendererId}`,false);
   await filter(page,'helix_ribbon');

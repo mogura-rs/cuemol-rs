@@ -1,5 +1,18 @@
 # Validation evidence
 
+## Current backbone-width inspector ranges
+
+The current reference narrowed tube, ribbon and cartoon section-width controls
+to a maximum of 1.5 angstrom with 0.01 steps. The shared inspector schema now
+uses those limits. Tube semi-axes retain their 0.01 minimum, while ribbon and
+cartoon section widths allow zero. These are UI limits; direct property writes
+and the separate legacy property dialogs retain their existing behavior.
+
+All 32 shared UI and 191 native GUI tests passed. Rebuilt-WASM and Tauri shell
+checks passed the affected numeric controls, including clamping an entered tube
+width of 2 to 1.5, preserving its other semi-axis through one atomic edit, and
+undo/redo. The WASM build, formatting and whitespace checks passed.
+
 ## About build metadata and clipboard
 
 The current reference added runtime details and a Copy button. Native egui and

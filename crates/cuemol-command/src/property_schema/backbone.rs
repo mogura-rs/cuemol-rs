@@ -101,7 +101,7 @@ impl Properties<'_> {
             rows.push(self.detail(&[&name("detail")], "Section detail", min));
         }
         if let Some((max, label)) = width {
-            rows.push(number(&name("width"), label, 0., max, 0.05, "Å"));
+            rows.push(number(&name("width"), label, 0., max, 0.01, "Å"));
         }
         rows.push(number(&name("tuber"), "Tuber", 0.2, 10., 0.1, ""));
         let mut sharp = number(&name("sharp"), "Sharpness", 0., 1., 0.05, "");
@@ -154,7 +154,7 @@ impl Properties<'_> {
                 prefix,
                 prefix != "coil",
                 None,
-                Some((5., "Width")),
+                Some((1.5, "Width")),
                 Some(&["roundsquare", "fancy1"]),
             );
             if let Some((use_key, key, label)) = color {
@@ -209,7 +209,7 @@ impl Properties<'_> {
                 "ribhelix",
                 true,
                 Some(4.),
-                Some((5., "Section width")),
+                Some((1.5, "Section width")),
                 None,
             ));
             helix.extend(self.junction(&["ribhelix_head", "ribhelix_tail"], None));
@@ -251,7 +251,7 @@ impl Properties<'_> {
                 prefix,
                 false,
                 Some(min),
-                Some((3., "Section width")),
+                Some((1.5, "Section width")),
                 Some(&["roundsquare"]),
             ));
             if prefix == "sheet" {

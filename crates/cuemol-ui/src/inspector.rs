@@ -1204,6 +1204,10 @@ mod tests {
                 .iter_mut()
                 .find(|row| row.key == first)
                 .unwrap();
+            if kind == "tube" {
+                assert_eq!(row.schema.as_ref().unwrap()["max"], 1.5);
+                assert_eq!(row.schema.as_ref().unwrap()["step"], 0.01);
+            }
             row.value = "2".into();
             let (tool, args) = property_change(&target, row, &inspector.committed, true);
             assert_eq!(tool, "set_node_props");
