@@ -111,12 +111,12 @@ impl Runtime {
                             } else {
                                 (&mut self.redo, &mut self.undo)
                             };
-                            let restored =
+                            let mut restored =
                                 from.pop().ok_or_else(|| format!("Nothing to {name}"))?;
-                            to.push(std::mem::replace(&mut self.state, restored));
-                            self.state
-                                .set_active_view_camera(&self.camera)
-                                .map_err(|e| e.to_string())?;
+                            restored.preserve_global_styles_from(&self.state);
+                            self.camera =
+                                restored.preserve_view_state_from(&self.state, &self.camera);
+                            to.push(self.state.replace_snapshot(restored));
                             self.session.scene_changed();
                             continue;
                         }

@@ -5312,9 +5312,9 @@ impl GuiApplication {
                 .as_ref()
                 .is_none_or(|before| !before.same_undo_state(&self.state) || camera_before != view);
             if result.is_ok() && (mutating || view_change) && changed {
-                let history_changed = undo.as_ref().is_some_and(|undo| {
-                    !undo.state.same_scene_undo_state(&self.state) || camera_before != view
-                });
+                let history_changed = undo
+                    .as_ref()
+                    .is_some_and(|undo| !undo.state.same_scene_undo_state(&self.state));
                 if let Some(undo) = undo.filter(|_| history_changed) {
                     self.push_undo_snapshot(undo);
                 }
@@ -28959,6 +28959,11 @@ impl GuiApplication {
         }
         redo.record = snapshot.record.clone();
         snapshot.state.preserve_global_styles_from(&self.state);
+        snapshot.camera = Some(
+            snapshot
+                .state
+                .preserve_view_state_from(&self.state, &camera.to_qsys_camera("__current")),
+        );
         self.restore_undo_snapshot(snapshot, camera);
         self.redo_stack.push(redo);
         self.set_status("Undo");
@@ -28975,6 +28980,11 @@ impl GuiApplication {
         }
         undo.record = snapshot.record.clone();
         snapshot.state.preserve_global_styles_from(&self.state);
+        snapshot.camera = Some(
+            snapshot
+                .state
+                .preserve_view_state_from(&self.state, &camera.to_qsys_camera("__current")),
+        );
         self.restore_undo_snapshot(snapshot, camera);
         self.undo_stack.push(undo);
         self.set_status("Redo");
@@ -40543,6 +40553,7 @@ mod tests {
             app.state.scene_manager().object(uid).unwrap().name(),
             "changed"
         );
+        assert_eq!(app.state.active_view_camera().unwrap().zoom(), 37.);
     }
 
     #[test]

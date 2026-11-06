@@ -595,6 +595,7 @@ fn camera_operations_preserve_scene_redo_and_qax_replay() {
         assert!(!state.scene_is_modified(scene));
     }
     assert_eq!(session.action_record.entry_count(), 4);
+    let navigated = camera.clone();
     assert_eq!(
         call(&mut protocol, &mut state, &mut camera, "redo", json!({}))["isError"],
         false
@@ -607,4 +608,29 @@ fn camera_operations_preserve_scene_redo_and_qax_replay() {
             .scene_attribute("bgcolor"),
         Some("red")
     );
+    assert_eq!(camera, navigated);
+    assert!(cuemol_command::console::same_camera_view(
+        &state.active_view_camera().unwrap(),
+        &navigated
+    ));
+    assert_eq!(
+        call(
+            &mut protocol,
+            &mut state,
+            &mut camera,
+            "set_view",
+            json!({"zoom":81,"center":[5,6,7]})
+        )["isError"],
+        false
+    );
+    let later = camera.clone();
+    assert_eq!(
+        call(&mut protocol, &mut state, &mut camera, "undo", json!({}))["isError"],
+        false
+    );
+    assert_eq!(camera, later);
+    assert!(cuemol_command::console::same_camera_view(
+        &state.active_view_camera().unwrap(),
+        &later
+    ));
 }

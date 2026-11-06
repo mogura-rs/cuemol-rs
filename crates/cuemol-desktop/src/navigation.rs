@@ -262,10 +262,11 @@ mod tests {
         next.set_zoom(16.);
         camera.apply_qsys_camera(&next);
         assert!(camera.trans_mms);
+        assert!(app.undo_stack.is_empty());
         app.undo(&mut camera);
-        assert_eq!(camera.stereo_mode, StereoMode::Cross);
-        assert_eq!(camera.ortho_scale, 10.);
-        assert!(camera.swap_stereo_eyes && !camera.trans_mms);
+        assert_eq!(camera.stereo_mode, StereoMode::Parallel);
+        assert_eq!(camera.ortho_scale, 8.);
+        assert!(!camera.swap_stereo_eyes && camera.trans_mms);
     }
 
     fn move_to(app: &mut GuiApplication, camera: &mut CameraController, p: egui::Pos2) {

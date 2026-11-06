@@ -7961,6 +7961,14 @@ impl AppModel {
                 .snapshot
                 .desktop
                 .preserve_global_styles_from(&self.desktop);
+            entry.snapshot.camera = entry
+                .snapshot
+                .desktop
+                .preserve_view_state_from(&self.desktop, &self.camera);
+            let options = entry.snapshot.desktop.active_view_options();
+            entry.snapshot.trans_mms = options.trans_mms;
+            entry.snapshot.rot_mms = options.rot_mms;
+            entry.snapshot.swap_stereo_eyes = options.swap_stereo_eyes;
             self.restore_undo(entry.snapshot)?;
             self.redo_stack.push(AppModelUndoEntry {
                 record: entry.record,
@@ -7987,6 +7995,14 @@ impl AppModel {
                 .snapshot
                 .desktop
                 .preserve_global_styles_from(&self.desktop);
+            entry.snapshot.camera = entry
+                .snapshot
+                .desktop
+                .preserve_view_state_from(&self.desktop, &self.camera);
+            let options = entry.snapshot.desktop.active_view_options();
+            entry.snapshot.trans_mms = options.trans_mms;
+            entry.snapshot.rot_mms = options.rot_mms;
+            entry.snapshot.swap_stereo_eyes = options.swap_stereo_eyes;
             self.restore_undo(entry.snapshot)?;
             self.undo_stack.push(AppModelUndoEntry {
                 record: entry.record,
@@ -10045,9 +10061,7 @@ fn handle_model_request(
             width,
             height,
         } => {
-            let undo = model.capture_undo();
             model.set_view_properties(properties)?;
-            model.push_undo(undo);
             let viewport = model.render(width, height);
             Ok(ModelResponse::ViewPropertiesUpdate(Box::new(
                 ViewPropertiesUpdateDto {
@@ -21074,14 +21088,14 @@ mod tests {
         assert_eq!(update.properties.center_mark, "axis");
         assert!(update.properties.swap_stereo_eyes);
         assert!(update.viewport.perspective);
-        assert!(update.snapshot.can_undo);
-        assert!(update.snapshot.scenes[0].modified);
+        assert!(!update.snapshot.can_undo);
+        assert!(!update.snapshot.scenes[0].modified);
 
         model.undo(0).unwrap();
         let restored = model.view_properties();
-        assert_eq!(restored.zoom, 50.0);
-        assert_eq!(restored.center_mark, "crosshair");
-        assert!(!restored.swap_stereo_eyes);
+        assert_eq!(restored.zoom, 75.0);
+        assert_eq!(restored.center_mark, "axis");
+        assert!(restored.swap_stereo_eyes);
 
         model
             .update_camera("center-mark-none", 0.0, 0.0, 480)
@@ -25700,6 +25714,8 @@ mod tests {
             model.desktop.scene_manager().object(uid).unwrap().name(),
             "changed"
         );
+        assert_eq!(model.camera.zoom(), 37.);
+        assert_eq!(model.desktop.active_view_camera().unwrap().zoom(), 37.);
         let repeated = (0..80)
             .map(|_| "get_scene_state")
             .collect::<Vec<_>>()
@@ -25708,11 +25724,11 @@ mod tests {
             .start_console(&repeated, cuemol_command::console::Dialect::CueMol)
             .unwrap();
         assert!(model.console_run.is_some());
-        model.camera.set_zoom(37.);
+        model.camera.set_zoom(38.);
         model.poll_console().unwrap();
         assert!(model.console_run.is_none());
         assert!(model.status.contains("cancelled"));
-        assert_eq!(model.camera.zoom(), 37.);
+        assert_eq!(model.camera.zoom(), 38.);
         let directory = tempfile::tempdir().unwrap();
         let missing = directory.path().join("missing").join("scene.qsc");
         model

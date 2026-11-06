@@ -5,6 +5,30 @@ results are historical. Generated inputs and logs stay in the ignored checkout
 cache. The current repairs and their limits appear in the completion audit;
 passing tests do not establish equivalence for every parameter combination.
 
+## Live views across scene history
+
+A scene edit followed by camera navigation previously restored the older camera
+on undo in MCP, native GUI, Tauri and WASM. Scene history now retains live views
+in every surviving scene, including views created after the snapshot. Restoring
+or removing a scene selects that scene's retained camera. Named camera bookmarks
+remain part of scene history. Snapshot replacement preserves allocated style
+identifiers without making an additional copy of the scene.
+
+JavaScript camera-only changes no longer create scene history entries. Camera
+changes inside a scene transaction survive undo, redo and rollback, matching the
+current C++ oracle. The optional camera-fit script now runs this comparison too.
+Failure rollback outside the scene-history API retains its existing behavior.
+The Tauri view-properties dialog no longer creates a scene edit. Starting an
+agent turn synchronizes its visible camera before capturing scene state.
+
+The C++ oracle and two shared view-history regressions passed. The complete
+shared core suite passed 299 tests; the shared command suite passed 218. Native
+GUI tests passed 192 cases with one optional case ignored, and macOS Tauri passed
+170 with six optional cases ignored. Rebuilt WASM passed 16 console/history
+checks, including the original WebGL/WebGPU reproduction. Five checks on the final
+WASM build also passed for scripted camera history, read-only scripts and agent
+turns. All 27 CLI tests passed.
+
 ## Current operation catalog and EMDB loading
 
 The read-only catalog check covers the current reference's 129 registrations,

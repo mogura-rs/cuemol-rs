@@ -734,7 +734,6 @@ pub struct DesktopAppState {
 #[derive(Debug, Clone, PartialEq)]
 struct DesktopSceneSnapshot {
     scene: MolScene,
-    views: Vec<View>,
     morphs: BTreeMap<Uid, MorphMol>,
     density_maps: BTreeMap<Uid, GuiDensityMapObject>,
     trajectories: BTreeMap<Uid, GuiTrajectoryData>,
@@ -2098,16 +2097,67 @@ impl DesktopAppState {
     }
 
     /// Restore state without reusing style identifiers already exposed to editors.
-    pub fn restore_snapshot(&mut self, mut snapshot: Self) {
+    pub fn restore_snapshot(&mut self, snapshot: Self) {
+        self.replace_snapshot(snapshot);
+    }
+
+    pub fn replace_snapshot(&mut self, mut snapshot: Self) -> Self {
         snapshot
             .script_styles
             .preserve_allocated_ids_from(&self.script_styles);
-        *self = snapshot;
+        std::mem::replace(self, snapshot)
     }
 
     pub fn preserve_global_styles_from(&mut self, current: &Self) {
         self.script_styles
             .preserve_global_scope_from(&current.script_styles);
+    }
+
+    /// Keep live views when restoring scene edits; saved camera bookmarks remain undoable.
+    pub fn preserve_view_state_from(
+        &mut self,
+        current: &Self,
+        camera: &cuemol_qsys::Camera,
+    ) -> cuemol_qsys::Camera {
+        let shared: BTreeSet<_> = self
+            .scene_manager()
+            .scenes()
+            .iter()
+            .map(MolScene::uid)
+            .filter(|uid| current.scene_manager().scene(*uid).is_some())
+            .collect();
+        let views = self
+            .command_manager()
+            .views()
+            .iter()
+            .filter(|view| !shared.contains(&view.scene_uid()))
+            .chain(
+                current
+                    .command_manager()
+                    .views()
+                    .iter()
+                    .filter(|view| shared.contains(&view.scene_uid())),
+            )
+            .cloned()
+            .collect();
+        self.command_manager_mut().replace_views(views);
+        for uid in shared {
+            let active = current
+                .scene_manager()
+                .scene(uid)
+                .unwrap()
+                .active_view_uid();
+            self.scene_manager_mut()
+                .scene_mut(uid)
+                .unwrap()
+                .set_active_view_uid(active);
+        }
+        if self.active_scene == current.active_scene {
+            let _ = self.set_active_view_camera(camera);
+            camera.clone()
+        } else {
+            self.active_view_camera().unwrap_or_else(|| camera.clone())
+        }
     }
 
     /// Compare state restored by application undo, excluding transient caches and services.
@@ -2122,7 +2172,6 @@ impl DesktopAppState {
     fn same_undo_state_with_global_styles(&self, other: &Self, include_global: bool) -> bool {
         let same = self.active_scene == other.active_scene
             && self.scene_manager().scenes() == other.scene_manager().scenes()
-            && self.command_manager.views() == other.command_manager.views()
             && self.config == other.config
             && self.runtime == other.runtime
             && self.morphs == other.morphs
@@ -49861,15 +49910,10 @@ impl DesktopAppState {
     fn capture_script_scene_snapshot(&self, scene_uid: Uid) -> Option<DesktopSceneSnapshot> {
         let scene = self.scene_manager().scene(scene_uid)?;
         let object_uids: BTreeSet<_> = scene.objects().iter().map(MolObject::uid).collect();
+        let mut scene = scene.clone();
+        scene.set_active_view_uid(None);
         Some(DesktopSceneSnapshot {
-            scene: scene.clone(),
-            views: self
-                .command_manager()
-                .views()
-                .iter()
-                .filter(|view| view.scene_uid() == scene_uid)
-                .cloned()
-                .collect(),
+            scene,
             morphs: self
                 .morphs
                 .iter()
@@ -49898,7 +49942,7 @@ impl DesktopAppState {
         from: &DesktopSceneSnapshot,
         to: &DesktopSceneSnapshot,
     ) {
-        use cuemol_core::snapshot::{apply_map_changes, apply_sequence_changes};
+        use cuemol_core::snapshot::apply_map_changes;
         let scene_uid = to.scene.uid();
         let Some(scene) = self.scene_manager_mut().scene_mut(scene_uid) else {
             return;
@@ -49906,15 +49950,6 @@ impl DesktopAppState {
         scene.apply_undo_changes(&from.scene, &to.scene);
         self.animation_runtimes.remove(&scene_uid);
         self.animation_players.remove(&scene_uid);
-        let mut views = self.command_manager().views().to_vec();
-        apply_sequence_changes(
-            &mut views,
-            &from.views,
-            &to.views,
-            View::uid,
-            View::apply_undo_changes,
-        );
-        self.command_manager_mut().replace_views(views);
         apply_map_changes(&mut self.morphs, &from.morphs, &to.morphs);
         apply_map_changes(&mut self.density_maps, &from.density_maps, &to.density_maps);
         apply_map_changes(&mut self.trajectories, &from.trajectories, &to.trajectories);
@@ -63143,7 +63178,7 @@ end_header
             scene.redo(0);
             print('redo='+scene.name+':'+a.pos.x+':'+b.pos.x+':'+a.bfac+':'+r.detail+':'+r.alpha.toFixed(1)+':'+v.zoom+':'+v.slab+':'+settings.width+':'+settings.height+':'+m.getRendCount());
         "#,view=created.result_view.unwrap().get())).unwrap();
-        assert_eq!(log,"undo=original:0:9:99:5:0.3:50:33:120:300:2\nredo=changed:5:9:99:8:0.3:75:33:200:300:2\n");
+        assert_eq!(log,"undo=original:0:9:99:5:0.3:75:33:120:300:2\nredo=changed:5:9:99:8:0.3:75:33:200:300:2\n");
     }
 
     #[cfg(feature = "scripting")]
@@ -63194,7 +63229,7 @@ end_header
                 .name(),
             "before"
         );
-        assert_ne!(
+        assert_eq!(
             app.command_manager()
                 .view(view_uid)
                 .expect("view remains available")

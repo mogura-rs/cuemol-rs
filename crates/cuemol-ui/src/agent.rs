@@ -149,6 +149,7 @@ impl AgentPanel {
             self.status = "Enable AI Agent first.".into();
             return;
         }
+        let _ = state.set_active_view_camera(camera);
         let snapshot = match cuemol_command::call_tool(
             state,
             camera,

@@ -245,11 +245,13 @@ impl Protocol {
             } else {
                 (&mut self.redo, &mut self.undo)
             };
-            let Some((previous, view)) = from.pop() else {
+            let Some((mut previous, _)) = from.pop() else {
                 return Err(format!("Nothing to {name}"));
             };
+            previous.preserve_global_styles_from(state);
+            let view = previous.preserve_view_state_from(state, camera);
             to.push((
-                std::mem::replace(state, previous),
+                state.replace_snapshot(previous),
                 std::mem::replace(camera, view),
             ));
             return Ok(json!({"changed":true}));
@@ -264,9 +266,9 @@ impl Protocol {
                     self.undo.clear();
                     self.redo.clear();
                 }
-                if let Some(before) = before.filter(|(previous, view)| {
-                    self.record_history && (view != camera || !previous.same_undo_state(state))
-                }) {
+                if let Some(before) = before
+                    .filter(|(previous, _)| self.record_history && !previous.same_undo_state(state))
+                {
                     state.mark_scene_changes_since(&before.0);
                     if name == "load_file" && value.get("objectId").is_none() {
                         if let Some(scene) = state.active_scene().filter(|uid| {

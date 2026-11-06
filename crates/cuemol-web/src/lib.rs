@@ -615,6 +615,9 @@ impl App {
                     self.history.push(current);
                 }
                 snapshot.state.preserve_global_styles_from(&self.state);
+                snapshot.camera = snapshot
+                    .state
+                    .preserve_view_state_from(&self.state, &self.camera);
                 self.restore_history(snapshot);
             }
             return;
@@ -669,9 +672,9 @@ impl App {
                 let changed = before.as_ref().is_none_or(|before| {
                     before.camera != self.camera || !before.state.same_undo_state(&self.state)
                 });
-                let history_changed = before.as_ref().is_some_and(|before| {
-                    before.camera != self.camera || !before.state.same_scene_undo_state(&self.state)
-                });
+                let history_changed = before
+                    .as_ref()
+                    .is_some_and(|before| !before.state.same_scene_undo_state(&self.state));
                 if changed && mutating {
                     self.navigation.cancel();
                     self.revision = self.revision.wrapping_add(1);
