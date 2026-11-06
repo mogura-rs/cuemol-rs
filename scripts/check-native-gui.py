@@ -144,6 +144,7 @@ def main():
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--selection-pane-only', action='store_true')
     parser.add_argument('--cross-selection-only', action='store_true')
+    parser.add_argument('--current-features-only', action='store_true')
     args = parser.parse_args()
     binary, work = args.binary.resolve(), args.out.resolve()
     work.mkdir(parents=True, exist_ok=True)
@@ -229,6 +230,67 @@ def main():
             def input_focused(box):
                 pixels = capture().crop(box).getdata()
                 return sum(b - r > 30 and g - r > 10 for r, g, b in pixels) > 100
+
+            if args.current_features_only:
+                primary = 'command' if sys.platform == 'darwin' else 'ctrl'
+                object_id = state['objects'][0]['id']
+
+                def submit(text):
+                    click_at(x + width * 0.52, y + height - 36)
+                    pyautogui.write(text, interval=0.015)
+                    pyautogui.press('enter')
+
+                click_at(x + 454, y + height - 169)
+                submit('select #1@O1')
+                wait_for(lambda: call('count_selection', {'objId': object_id,
+                    'selection': call('get_prop', {'path': f'#{object_id}.sel'})['value']})['count'] == 1)
+                capture('chimerax-selected.png')
+                submit('show #1 atoms; style #1 sphere; color #1 red')
+
+                def sphere():
+                    renderers = call('get_scene_state')['objects'][0]['renderers']
+                    return next((renderer for renderer in renderers if renderer['name'] == 'chx:sphere'), None)
+
+                renderer = wait_for(sphere)
+                wait_for(lambda: call('get_prop', {'path': f"#{renderer['id']}.sel"})['value'] == '*')
+                capture('chimerax-spheres.png')
+                call('set_view', {'center': [12, 23, 34], 'zoom': 51})
+                submit('undo')
+                wait_for(lambda: sphere() is None)
+                if call('get_view')['center'] != [12, 23, 34]:
+                    raise RuntimeError('ChimeraX undo restored an old camera')
+                click_at(x + width * 0.7, y + height * 0.4)
+                pyautogui.hotkey(primary, 'shift', 'z')
+                wait_for(sphere)
+                if call('get_view')['center'] != [12, 23, 34]:
+                    raise RuntimeError('Native redo restored an old camera')
+
+                second = call('load_file', {'path': str(fixture)})['objectId']
+                call('execute_script', {'source':
+                    "var delta = cuemol.createObj('Vector'); delta.x = 20; "
+                    "var matrix = cuemol.createObj('Matrix'); matrix.setTranslate(delta); "
+                    f"cuemol.getObject({second}).xformMat = matrix;"})
+                for obj in call('get_scene_state')['objects']:
+                    for item in obj['renderers']:
+                        call('delete_node', {'nodeType': 'renderer', 'nodeId': item['id']})
+                capture('multi-focus-before.png')
+                click_at(x + 96, y + 164)
+                click_at(x + 96, y + 190)
+                click_at(x + 145, y + 164)
+                pyautogui.keyDown(primary)
+                try:
+                    click_at(x + 145, y + 190)
+                finally:
+                    pyautogui.keyUp(primary)
+                capture('multi-focus-selected.png')
+                click_at(x + 95, y + 333)
+                focused = wait_for(lambda: view if (view := call('get_view'))['center'] == [9.5, 0.75, 0.0] else None)
+                capture('multi-focus-fitted.png')
+                report.update(ok=True, chimerax_console=True, chimerax_undo=True,
+                              native_redo_preserves_camera=True, multi_object_focus=True,
+                              focused_view=focused)
+                print(json.dumps(report), flush=True)
+                return
 
             if args.cross_selection_only:
                 probe = state['objects'][0]

@@ -3010,3 +3010,28 @@ browser backends passed. The broader browser regression run passed all 69 tests
 covering navigation, clipboard, scene tabs, selections and the Tauri shell.
 Existing camera fit-box oracle coverage remains
 applicable to each box before the union.
+
+
+## Current native window and workspace checks
+
+After the camera-history and atomic-save changes, the shared workspace run passed
+1,681 tests with no failures or ignored tests. Optional reference checks still
+require their documented fixtures; the current C++ camera/selection oracles and
+ChimeraX/catalog comparisons were also run separately as described above.
+
+The actual Linux native window passed `scripts/check-native-gui.py`, including
+rotation, zoom, slab, centering, clipboard, console completion/multiline undo,
+Python helpers, font pixels, Inspector editing and the Selection pane. The
+additional `--current-features-only` run clicked the ChimeraX dialect, selected
+an atom, changed representation/color, undid the submission, and redid it through
+the OS keyboard shortcut. Both history operations retained the newer camera.
+It then selected two transformed objects with the OS mouse and modifier key,
+clicked Zoom, and verified their combined fit center and viewport-scaled zoom.
+Captured pixels showed the red sphere representation and both selected rows.
+
+These runs used Xvfb and the system's software graphics path. The display tools
+were unpacked into the ignored cache without changing system packages. They
+verify Linux OS event delivery and window rendering, not hardware acceleration.
+The current macOS binary and Tauri model tests pass, but a fresh local macOS
+OS-input/screen-capture run remains unverified because this process lacks those
+permissions. Historical published multi-platform checks remain historical.
