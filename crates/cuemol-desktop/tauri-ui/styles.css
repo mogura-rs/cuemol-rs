@@ -4025,6 +4025,10 @@ body.resizing-bottom-panel {
   border: 1px solid var(--border);
 }
 
+.property-common-group[hidden] {
+  display: none;
+}
+
 .property-common-group legend {
   padding: 0 4px;
   font-weight: 600;

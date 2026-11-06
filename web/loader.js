@@ -45,13 +45,13 @@ export async function initLoader() {
   };
   const loader = {
     last: undefined,
-    parseFile(file) {
+    parseFile(file, pdbKind = undefined) {
       if (current?.pending) return Promise.reject(new Error('A file is already being loaded.'));
       return new Promise((resolve, reject) => {
         const state = acquire();
         clearTimeout(state.timer);
         state.pending = {resolve, reject};
-        try { state.worker.postMessage({file}); } catch (error) { retire(state, error); }
+        try { state.worker.postMessage({file, pdbKind}); } catch (error) { retire(state, error); }
       });
     },
     cancel() { if (current) retire(current); },

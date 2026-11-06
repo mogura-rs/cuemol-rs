@@ -270,7 +270,7 @@ struct App {
     selected: Option<Uid>,
     selection: String,
     representation: String,
-    pdb_id: String,
+    pdb_dialog: cuemol_ui::pdb_dialog::PdbDialog,
     console_tool: String,
     console_args: String,
     message: String,
@@ -282,6 +282,7 @@ struct App {
     source_generation: u64,
     source_scene: Option<Uid>,
     source_abort: Option<web_sys::AbortController>,
+    source_pdb: Option<cuemol_command::pdb::DownloadFile>,
     frame: usize,
     busy: bool,
     last_command: u32,
@@ -451,7 +452,7 @@ impl App {
             selected: None,
             selection: String::new(),
             representation: "ribbon".into(),
-            pdb_id: String::new(),
+            pdb_dialog: cuemol_ui::pdb_dialog::PdbDialog::default(),
             console_tool: "get_scene_state".into(),
             console_args: "{}".into(),
             message,
@@ -463,6 +464,7 @@ impl App {
             source_generation: 0,
             source_scene: None,
             source_abort: None,
+            source_pdb: None,
             frame: 0,
             busy: false,
             last_command: 0,
@@ -807,6 +809,7 @@ impl App {
                     if self.current_source(generation) {
                         self.source_active = false;
                         self.source_abort = None;
+                        self.source_pdb = None;
                         self.busy = false;
                         if self.source_queue.is_empty() {
                             self.source_scene = None;
@@ -815,6 +818,9 @@ impl App {
                 }
                 Event::SourceError(generation, error) => {
                     if self.current_source(generation) {
+                        if self.source_pdb.is_some() {
+                            self.source_queue.clear();
+                        }
                         self.message = error;
                     }
                 }

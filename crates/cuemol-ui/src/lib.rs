@@ -49,3 +49,6 @@ pub mod actions;
 pub mod console;
 #[cfg(feature = "console-runtime")]
 pub mod console_runtime;
+
+#[cfg(feature = "egui")]
+pub mod pdb_dialog;

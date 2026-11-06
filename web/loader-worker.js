@@ -1,7 +1,7 @@
-import init, {prepare_file} from './pkg/cuemol_web_loader.js';
+import init, {prepare_file, prepare_pdb_file} from './pkg/cuemol_web_loader.js';
 
 let initialized;
-self.onmessage = async ({data: {module, file}}) => {
+self.onmessage = async ({data: {module, file, pdbKind}}) => {
   try {
     if (module) {
       initialized = init({module_or_path: module});
@@ -12,7 +12,7 @@ self.onmessage = async ({data: {module, file}}) => {
     const runtime = await initialized;
     const input = new Uint8Array(await file.arrayBuffer());
     const started = performance.now();
-    const bytes = prepare_file(file.name, input);
+    const bytes = pdbKind ? prepare_pdb_file(file.name, input, pdbKind) : prepare_file(file.name, input);
     const metrics = {inputBytes: input.byteLength, outputBytes: bytes.byteLength,
       parseMs: performance.now() - started, memoryBytes: runtime.memory.buffer.byteLength};
     self.postMessage({bytes, metrics}, [bytes.buffer]);

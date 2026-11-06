@@ -1016,10 +1016,6 @@ type PdbDownloadMessage = std::result::Result<
     ),
     String,
 >;
-type PdbProbeMessage = (
-    crate::PdbFetchOptions,
-    std::result::Result<Vec<crate::GuiPdbFileKind>, String>,
-);
 
 fn format_download_bytes(bytes: u64) -> String {
     if bytes < 1024 {
@@ -1381,17 +1377,13 @@ struct GuiApplication {
     view_save_path: String,
     export_path: String,
     pdb_id: String,
-    pdb_history: Vec<String>,
-    pdb_history_loaded: bool,
+    pdb_dialog: cuemol_ui::pdb_dialog::PdbDialog,
+    pdb_em_maps: Vec<cuemol_command::pdb::EmMapRequest>,
     pdb_fetch_coordinates: bool,
     pdb_coordinate_source: String,
     pdb_fetch_two_fofc: bool,
     pdb_fetch_fofc: bool,
     pdb_map_source: String,
-    pdb_probe_options: Option<crate::PdbFetchOptions>,
-    pdb_probe_deadline: Option<Instant>,
-    pdb_probe_receiver: Option<mpsc::Receiver<PdbProbeMessage>>,
-    pdb_probe_result: Option<std::result::Result<Vec<crate::GuiPdbFileKind>, String>>,
     md_trajectory_draft: Option<NativeMdTrajectoryDraft>,
     merge_molecule_draft: Option<NativeMergeMoleculeDraft>,
     merge_source_object: Option<cuemol_core::Uid>,
@@ -4882,17 +4874,13 @@ impl GuiApplication {
             view_save_path: "current_view.cam".to_string(),
             export_path: "scene.pov".to_string(),
             pdb_id: String::new(),
-            pdb_history: Vec::new(),
-            pdb_history_loaded: false,
+            pdb_dialog: cuemol_ui::pdb_dialog::PdbDialog::default(),
+            pdb_em_maps: Vec::new(),
             pdb_fetch_coordinates: true,
             pdb_coordinate_source: "RCSB_CIF".to_string(),
             pdb_fetch_two_fofc: false,
             pdb_fetch_fofc: false,
             pdb_map_source: "RCSB_CIF".to_string(),
-            pdb_probe_options: None,
-            pdb_probe_deadline: None,
-            pdb_probe_receiver: None,
-            pdb_probe_result: None,
             md_trajectory_draft: None,
             merge_molecule_draft: None,
             merge_source_object: None,
@@ -5754,6 +5742,8 @@ impl GuiApplication {
                         ui.close();
                     }
                     if ui.button("Get PDB...").clicked() {
+                        self.pdb_dialog.reset();
+                        self.pdb_dialog.history = crate::load_pdb_history();
                         self.show_get_pdb = true;
                         ui.close();
                     }
@@ -18110,74 +18100,7 @@ impl GuiApplication {
             fetch_two_fofc: self.pdb_fetch_two_fofc,
             fetch_fofc: self.pdb_fetch_fofc,
             map_source: self.pdb_map_source.clone(),
-        }
-    }
-
-    fn update_pdb_probe(&mut self, ctx: &egui::Context) {
-        let options = self.pdb_fetch_options();
-        let valid = crate::normalize_pdb_id(&options.pdb_id).is_ok();
-        let any_selected =
-            options.fetch_coordinates || options.fetch_two_fofc || options.fetch_fofc;
-        if !valid || !any_selected {
-            self.pdb_probe_options = None;
-            self.pdb_probe_deadline = None;
-            self.pdb_probe_receiver = None;
-            self.pdb_probe_result = None;
-            return;
-        }
-        if self.pdb_probe_options.as_ref() != Some(&options) {
-            self.pdb_probe_options = Some(options.clone());
-            self.pdb_probe_deadline = Some(Instant::now() + Duration::from_millis(180));
-            self.pdb_probe_receiver = None;
-            self.pdb_probe_result = None;
-            ctx.request_repaint_after(Duration::from_millis(180));
-        }
-
-        if self
-            .pdb_probe_deadline
-            .is_some_and(|deadline| Instant::now() >= deadline)
-        {
-            self.pdb_probe_deadline = None;
-            let (sender, receiver) = mpsc::channel();
-            let probe_options = options.clone();
-            let result_options = options.clone();
-            let repaint = ctx.clone();
-            match std::thread::Builder::new()
-                .name("cuemol-pdb-probe".to_string())
-                .spawn(move || {
-                    let result = crate::probe_pdb_files(probe_options);
-                    let _ = sender.send((result_options, result));
-                    repaint.request_repaint();
-                }) {
-                Ok(_) => self.pdb_probe_receiver = Some(receiver),
-                Err(error) => {
-                    self.pdb_probe_result = Some(Err(format!(
-                        "failed to start PDB availability check: {error}"
-                    )));
-                }
-            }
-        } else if let Some(deadline) = self.pdb_probe_deadline {
-            ctx.request_repaint_after(deadline.saturating_duration_since(Instant::now()));
-        }
-
-        let result = self
-            .pdb_probe_receiver
-            .as_ref()
-            .map(mpsc::Receiver::try_recv);
-        match result {
-            Some(Ok((result_options, result))) => {
-                self.pdb_probe_receiver = None;
-                if self.pdb_probe_options.as_ref() == Some(&result_options) {
-                    self.pdb_probe_result = Some(result);
-                }
-            }
-            Some(Err(mpsc::TryRecvError::Disconnected)) => {
-                self.pdb_probe_receiver = None;
-                self.pdb_probe_result = Some(Err(
-                    "PDB availability check stopped unexpectedly".to_string()
-                ));
-            }
-            Some(Err(mpsc::TryRecvError::Empty)) | None => {}
+            em_maps: self.pdb_em_maps.clone(),
         }
     }
 
@@ -18190,13 +18113,11 @@ impl GuiApplication {
             self.set_status("PDB download is already running");
             return;
         }
-        let pdb_id = match crate::normalize_pdb_id(&self.pdb_id) {
-            Ok(pdb_id) => pdb_id,
-            Err(error) => {
-                self.set_status(format!("Error: {error}"));
-                return;
-            }
+        let Some(accession) = cuemol_command::pdb::Accession::parse(&self.pdb_id) else {
+            self.set_status("Error: invalid PDB or EMDB accession");
+            return;
         };
+        let pdb_id = accession.id().to_owned();
         let options = crate::PdbFetchOptions {
             pdb_id: pdb_id.clone(),
             fetch_coordinates: self.pdb_fetch_coordinates,
@@ -18204,6 +18125,7 @@ impl GuiApplication {
             fetch_two_fofc: self.pdb_fetch_two_fofc,
             fetch_fofc: self.pdb_fetch_fofc,
             map_source: self.pdb_map_source.clone(),
+            em_maps: self.pdb_em_maps.clone(),
         };
         let (sender, receiver) = mpsc::channel();
         let repaint = ctx.clone();
@@ -18239,15 +18161,16 @@ impl GuiApplication {
                 self.pdb_download_options = None;
                 self.pdb_download_canceling = false;
                 let undo = self.capture_undo();
-                let input = files
-                    .iter()
-                    .map(|file| (file.kind, file.path.clone()))
-                    .collect::<Vec<_>>();
+                let mut loaded_camera = camera.to_qsys_camera("__current");
+                let has_emdb = files.iter().any(|file| file.emdb.is_some());
                 let recenter = renderer_setup.as_ref().is_some_and(|setup| setup.recenter);
-                match self
-                    .state
-                    .open_pdb_files(&pdb_id, &input, renderer_setup.as_ref())
-                {
+                match crate::open_downloaded_pdb(
+                    &mut self.state,
+                    &mut loaded_camera,
+                    &pdb_id,
+                    &files,
+                    renderer_setup.as_ref(),
+                ) {
                     Ok(summary) => {
                         self.push_undo_snapshot(undo);
                         self.selected_object = summary.object_uid;
@@ -18269,15 +18192,11 @@ impl GuiApplication {
                             .iter()
                             .find(|file| file.kind == crate::GuiPdbFileKind::Coordinates)
                             .map(|file| file.path.clone());
-                        let normalized_id = pdb_id.to_ascii_lowercase();
-                        self.pdb_history.retain(|entry| entry != &normalized_id);
-                        self.pdb_history.insert(0, normalized_id);
-                        self.pdb_history.truncate(crate::MAX_PDB_HISTORY);
-                        if let Ok(history) = crate::remember_pdb_id(&pdb_id) {
-                            self.pdb_history = history;
-                        }
+                        let _ = crate::remember_pdb_id(&pdb_id);
                         self.rebuild_snapshot();
-                        if recenter {
+                        if has_emdb {
+                            camera.apply_qsys_camera(&loaded_camera);
+                        } else if recenter {
                             camera.fit_snapshot(&self.snapshot);
                         }
                         self.set_status(format!("Opened PDB {pdb_id}: {} file(s)", files.len()));
@@ -26823,139 +26742,31 @@ impl GuiApplication {
         if !self.show_get_pdb {
             return;
         }
-        if !self.pdb_history_loaded {
-            self.pdb_history = crate::load_pdb_history();
-            if self.pdb_id.is_empty() {
-                self.pdb_id = self.pdb_history.first().cloned().unwrap_or_default();
-            }
-            self.pdb_history_loaded = true;
-        }
-        let mut open = self.show_get_pdb;
-        let mut proceed = false;
-        egui::Window::new("Download PDB")
+        let mut open = true;
+        let mut choice = None;
+        egui::Window::new("Get PDB")
             .open(&mut open)
             .collapsible(false)
+            .default_width(560.)
+            .auto_sized()
             .show(ctx, |ui| {
-                ui.label("Enter PDB ID:");
-                let mut history_pick = None;
-                ui.horizontal(|ui| {
-                    let input_width = (ui.available_width() - 78.0).max(120.0);
-                    ui.add_sized(
-                        [input_width, 22.0],
-                        egui::TextEdit::singleline(&mut self.pdb_id),
-                    );
-                    ui.add_enabled_ui(!self.pdb_history.is_empty(), |ui| {
-                        ui.menu_button("History", |ui| {
-                            for entry in &self.pdb_history {
-                                if ui.button(entry).clicked() {
-                                    history_pick = Some(entry.clone());
-                                    ui.close();
-                                }
-                            }
-                        });
-                    });
-                });
-                if let Some(pdb_id) = history_pick {
-                    self.pdb_id = pdb_id;
-                }
-                let valid_pdb_id = crate::normalize_pdb_id(&self.pdb_id).is_ok();
-                ui.group(|ui| {
-                    ui.strong("Coordinates");
-                    ui.checkbox(&mut self.pdb_fetch_coordinates, "Fetch pdb file");
-                    ui.add_enabled_ui(self.pdb_fetch_coordinates, |ui| {
-                        egui::ComboBox::from_label("Coordinate source")
-                            .selected_text(if self.pdb_coordinate_source == "RCSB_PDB" {
-                                "RCSB (files.rcsb.org)/pdb.gz"
-                            } else {
-                                "RCSB (files.rcsb.org)/cif.gz"
-                            })
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut self.pdb_coordinate_source,
-                                    "RCSB_CIF".to_string(),
-                                    "RCSB (files.rcsb.org)/cif.gz",
-                                );
-                                ui.selectable_value(
-                                    &mut self.pdb_coordinate_source,
-                                    "RCSB_PDB".to_string(),
-                                    "RCSB (files.rcsb.org)/pdb.gz",
-                                );
-                            });
-                    });
-                });
-                ui.group(|ui| {
-                    ui.strong("Density maps");
-                    ui.checkbox(&mut self.pdb_fetch_two_fofc, "Fetch map file (2Fo-Fc)");
-                    ui.checkbox(&mut self.pdb_fetch_fofc, "Fetch map file (Fo-Fc)");
-                    ui.add_enabled_ui(self.pdb_fetch_two_fofc || self.pdb_fetch_fofc, |ui| {
-                        egui::ComboBox::from_label("Map source")
-                            .selected_text(if self.pdb_map_source == "EBI_MTZ" {
-                                "EBI (www.ebi.ac.uk)"
-                            } else {
-                                "RCSB (files.rcsb.org)"
-                            })
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut self.pdb_map_source,
-                                    "RCSB_CIF".to_string(),
-                                    "RCSB (files.rcsb.org)",
-                                );
-                                ui.selectable_value(
-                                    &mut self.pdb_map_source,
-                                    "EBI_MTZ".to_string(),
-                                    "EBI (www.ebi.ac.uk)",
-                                );
-                            });
-                    });
-                });
-                let any_selected =
-                    self.pdb_fetch_coordinates || self.pdb_fetch_two_fofc || self.pdb_fetch_fofc;
-                self.update_pdb_probe(ctx);
-                let availability_ok = self
-                    .pdb_probe_result
-                    .as_ref()
-                    .is_some_and(|result| result.as_ref().is_ok_and(Vec::is_empty));
-                let availability_message = if valid_pdb_id && !any_selected {
-                    "Neither pdb nor map selected".to_string()
-                } else if valid_pdb_id && any_selected {
-                    match self.pdb_probe_result.as_ref() {
-                        Some(Ok(unavailable)) if !unavailable.is_empty() => {
-                            let entry_type =
-                                if unavailable.contains(&crate::GuiPdbFileKind::Coordinates) {
-                                    "PDB"
-                                } else {
-                                    "Map"
-                                };
-                            format!(
-                                "{entry_type} Entry {}: not found.",
-                                self.pdb_id.trim().to_ascii_lowercase()
-                            )
-                        }
-                        Some(Err(error)) => format!("Availability check failed: {error}"),
-                        Some(Ok(_)) => String::new(),
-                        None => "Checking availability…".to_string(),
-                    }
-                } else {
-                    String::new()
-                };
-                if !availability_message.is_empty() {
-                    ui.label(availability_message);
-                }
-                if ui
-                    .add_enabled(
-                        valid_pdb_id
-                            && any_selected
-                            && availability_ok
-                            && self.pdb_download_receiver.is_none(),
-                        egui::Button::new("Download and Open"),
-                    )
-                    .clicked()
-                {
-                    proceed = true;
-                }
+                choice = self.pdb_dialog.show(ui);
             });
-        self.show_get_pdb = open && !proceed;
-        if proceed {
+        if let Some(value) = self.pdb_dialog.take_history_update() {
+            let _ = crate::remember_pdb_id(&value);
+        }
+        self.show_get_pdb = open && choice.is_none() && !self.pdb_dialog.take_cancelled();
+        if !self.show_get_pdb {
+            self.pdb_dialog.close();
+        }
+        if let Some(choice) = choice {
+            self.pdb_id = choice.accession.id().to_owned();
+            self.pdb_fetch_coordinates = choice.coordinates;
+            self.pdb_coordinate_source = choice.coordinate_source;
+            self.pdb_fetch_two_fofc = choice.two_fofc;
+            self.pdb_fetch_fofc = choice.fofc;
+            self.pdb_map_source = choice.map_source;
+            self.pdb_em_maps = choice.em_maps;
             if self.pdb_fetch_coordinates {
                 self.open_pdb_renderer_setup();
             } else {
@@ -39316,8 +39127,8 @@ mod tests {
     fn native_gui_pdb_download_defaults_match_reference_dialog() {
         let mut app = GuiApplication::new();
         assert!(app.pdb_id.is_empty());
-        assert!(app.pdb_history.is_empty());
-        assert!(!app.pdb_history_loaded);
+        assert!(app.pdb_dialog.history.is_empty());
+        assert!(app.pdb_dialog.text.is_empty());
         assert!(app.pdb_fetch_coordinates);
         assert_eq!(app.pdb_coordinate_source, "RCSB_CIF");
         assert!(!app.pdb_fetch_two_fofc);

@@ -125,6 +125,49 @@ impl PreparedFile {
         })
     }
 
+    pub fn parse_pdb_download(name: &str, bytes: &[u8], kind: GuiPdbFileKind) -> Result<Self> {
+        let lower = name.to_ascii_lowercase();
+        let plain_name = lower.strip_suffix(".gz").unwrap_or(&lower);
+        if kind == GuiPdbFileKind::Coordinates {
+            let format = if plain_name.ends_with(".pdb") {
+                "pdb"
+            } else {
+                "mmcif"
+            };
+            let options = molecule_reader_options_for_format(format).unwrap();
+            return Self::parse_with_molecule_options(name, bytes, &options);
+        }
+        if kind == GuiPdbFileKind::Emdb {
+            return Self::parse(name, bytes);
+        }
+        let (map, format) = if plain_name.ends_with(".mtz") {
+            let mut reader = Mtz2MapReader::new();
+            reader.set_grid_size(0.25);
+            reader.read_bytes(bytes)?;
+            let (amplitude, phase) = if kind == GuiPdbFileKind::FoFc {
+                ("DELFWT", "PHDELWT")
+            } else {
+                ("FWT", "PHWT")
+            };
+            reader.set_column_f(amplitude);
+            reader.set_column_phi(phase);
+            reader.select_fft_columns()?;
+            (reader.build_density_map()?, "mtzmap")
+        } else {
+            let decoded = cuemol_core::compressed::decode_bytes(bytes)?;
+            let text =
+                std::str::from_utf8(&decoded).map_err(|e| CueMolError::parse(e.to_string()))?;
+            (density_map_from_cif(text, -1.0, 0.25)?, "mmcifmap")
+        };
+        Ok(Self {
+            name: name.into(),
+            contents: PreparedContents::Map {
+                format: format.into(),
+                data: map.transfer_data(),
+            },
+        })
+    }
+
     pub fn parse(name: &str, bytes: &[u8]) -> Result<Self> {
         let lower = name.to_ascii_lowercase();
         if [".gz", ".bz2", ".xz"]

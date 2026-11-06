@@ -1,5 +1,43 @@
 # Validation evidence
 
+## Get PDB search, entry metadata and EMDB loading
+
+The current reference's Get PDB flow was missing keyword search and entry-aware
+download choices in the Rust frontends. A shared protocol now prepares RCSB
+search/GraphQL and EMDB metadata requests, restores search ranking after metadata
+lookup, handles HTTP 204 and optional administrative metadata, and bounds native
+metadata responses. The live public-service check was explicitly run and passed;
+ordinary tests keep that network-dependent check ignored.
+
+Native egui and WASM share a dialog state machine. Tauri exposes the same query
+protocol through asynchronous IPC. Checks cover pagination, method/sort changes,
+missing entries, mmCIF-only entries, direct EMDB IDs, recommended contour levels,
+metadata failures, stale searches and cancellation. Both the browser worker and
+the native loader preserve EM map dimensions/statistics, select the isosurface
+renderer, and apply the recommended absolute level. The worker also receives an
+explicit coordinate/map kind so mmCIF coordinates cannot be mistaken for map
+coefficients.
+
+The shared core, command and UI run passed 588 tests with two optional checks
+ignored. The live metadata check passed separately. Native egui passed 191 tests;
+the macOS Tauri model run passed 168 with five optional checks ignored. A later
+shared UI run also passed after constraining dialog width. The egui layout
+regression exposed an offscreen download footer and a dialog that expanded to
+the screen width; it now checks visible footer controls and bounded width at
+1280 by 900 and 760 by 650. Tauri's grid styling also overrode hidden metadata
+sections; the explicit hidden rule fixes that case.
+
+The focused WebGL/WebGPU and Tauri shell checks passed, including worker loading,
+undo and cancellation of pending metadata and file downloads. Tauri shell checks
+mock IPC and are complemented by the native model and live protocol checks.
+The broader run passed 59 checks. Three older loading checks still intercepted
+uppercase download URLs and clicked before the asynchronous dialog layout
+settled. Their fixtures now use the normalized URL, stub metadata, and wait for
+the entry choices before clicking; all three passed afterward. The 62 checks
+therefore cover the affected loading, Get PDB and Tauri shell suites. The final
+dialog screenshot was inspected at the bounded width. The WASM build,
+formatting and whitespace checks passed.
+
 ## Paint sidebar width and current default appearance
 
 The current browser baseline completed 214 checks: 207 passed and seven failed.

@@ -11019,15 +11019,10 @@ fn handle_model_request(
         } => {
             model.start_renderer_warmup();
             let undo = model.capture_undo();
-            let input = files
-                .iter()
-                .map(|file| (file.kind, file.path.clone()))
-                .collect::<Vec<_>>();
-            let recenter = renderer_setup.as_ref().is_some_and(|setup| setup.recenter);
+            let has_emdb = files.iter().any(|file| file.emdb.is_some());
+            let recenter = !has_emdb && renderer_setup.as_ref().is_some_and(|setup| setup.recenter);
             let summary =
-                match model
-                    .desktop
-                    .open_pdb_files(&pdb_id, &input, renderer_setup.as_ref())
+                match crate::open_downloaded_pdb(&mut model.desktop, &mut model.camera, &pdb_id, &files, renderer_setup.as_ref())
                 {
                     Ok(summary) => summary,
                     Err(error) => {
@@ -15050,6 +15045,20 @@ fn open_path_with_renderer_setup(
 }
 
 #[tauri::command]
+async fn get_pdb_info(
+    query: cuemol_command::pdb::Query,
+) -> Result<cuemol_command::pdb::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || cuemol_command::pdb::execute(query))
+        .await
+        .map_err(|error| format!("Entry lookup task failed: {error}"))?
+}
+
+#[tauri::command]
+fn remember_pdb_history(value: String) -> Result<Vec<String>, String> {
+    crate::remember_pdb_id(&value)
+}
+
+#[tauri::command]
 fn get_pdb_renderer_setup(
     pdb_id: String,
     state: State<'_, ManagedState>,
@@ -15100,6 +15109,7 @@ fn pdb_fetch_options(
     fetch_two_fofc: bool,
     fetch_fofc: bool,
     map_source: String,
+    em_maps: Option<Vec<cuemol_command::pdb::EmMapRequest>>,
 ) -> crate::PdbFetchOptions {
     crate::PdbFetchOptions {
         pdb_id,
@@ -15108,6 +15118,7 @@ fn pdb_fetch_options(
         fetch_two_fofc,
         fetch_fofc,
         map_source,
+        em_maps: em_maps.unwrap_or_default(),
     }
 }
 
@@ -15119,6 +15130,7 @@ async fn check_pdb_availability(
     fetch_two_fofc: bool,
     fetch_fofc: bool,
     map_source: String,
+    em_maps: Option<Vec<cuemol_command::pdb::EmMapRequest>>,
 ) -> Result<Vec<String>, String> {
     let options = pdb_fetch_options(
         pdb_id,
@@ -15127,6 +15139,7 @@ async fn check_pdb_availability(
         fetch_two_fofc,
         fetch_fofc,
         map_source,
+        em_maps,
     );
     let unavailable = tauri::async_runtime::spawn_blocking(move || crate::probe_pdb_files(options))
         .await
@@ -15137,6 +15150,7 @@ async fn check_pdb_availability(
             crate::GuiPdbFileKind::Coordinates => "coordinates",
             crate::GuiPdbFileKind::TwoFoFc => "2fofc",
             crate::GuiPdbFileKind::FoFc => "fofc",
+            crate::GuiPdbFileKind::Emdb => "emdb",
         })
         .map(str::to_string)
         .collect())
@@ -15150,6 +15164,7 @@ async fn prefetch_pdb(
     fetch_two_fofc: bool,
     fetch_fofc: bool,
     map_source: String,
+    em_maps: Option<Vec<cuemol_command::pdb::EmMapRequest>>,
 ) -> Result<(), String> {
     let options = pdb_fetch_options(
         pdb_id,
@@ -15158,6 +15173,7 @@ async fn prefetch_pdb(
         fetch_two_fofc,
         fetch_fofc,
         map_source,
+        em_maps,
     );
     tauri::async_runtime::spawn_blocking(move || crate::download_pdb_files(options))
         .await
@@ -15173,6 +15189,7 @@ fn get_pdb_download_progress(
     fetch_two_fofc: bool,
     fetch_fofc: bool,
     map_source: String,
+    em_maps: Option<Vec<cuemol_command::pdb::EmMapRequest>>,
 ) -> Result<u64, String> {
     crate::pdb_downloaded_bytes(&pdb_fetch_options(
         pdb_id,
@@ -15181,6 +15198,7 @@ fn get_pdb_download_progress(
         fetch_two_fofc,
         fetch_fofc,
         map_source,
+        em_maps,
     ))
 }
 
@@ -15192,6 +15210,7 @@ fn cancel_pdb_download(
     fetch_two_fofc: bool,
     fetch_fofc: bool,
     map_source: String,
+    em_maps: Option<Vec<cuemol_command::pdb::EmMapRequest>>,
 ) -> Result<(), String> {
     crate::cancel_pdb_download(&pdb_fetch_options(
         pdb_id,
@@ -15200,6 +15219,7 @@ fn cancel_pdb_download(
         fetch_two_fofc,
         fetch_fofc,
         map_source,
+        em_maps,
     ))?;
     Ok(())
 }
@@ -15213,12 +15233,16 @@ async fn open_pdb(
     fetch_two_fofc: bool,
     fetch_fofc: bool,
     map_source: String,
+    em_maps: Option<Vec<cuemol_command::pdb::EmMapRequest>>,
     renderer_setup: Option<RendererSetupInput>,
     width: u32,
     height: u32,
     state: State<'_, ManagedState>,
 ) -> Result<MolStructUpdateDto, String> {
-    let pdb_id = crate::normalize_pdb_id(&pdb_id)?;
+    let pdb_id = cuemol_command::pdb::Accession::parse(&pdb_id)
+        .ok_or("Invalid PDB or EMDB accession")?
+        .id()
+        .to_owned();
     let renderer_setup = renderer_setup.map(crate::GuiRendererSetup::from);
     if fetch_coordinates != renderer_setup.is_some() {
         return Err(if fetch_coordinates {
@@ -15237,6 +15261,7 @@ async fn open_pdb(
         fetch_two_fofc,
         fetch_fofc,
         map_source,
+        em_maps,
     );
     let _ = request_model(&state, ModelRequest::StartRendererWarmup)?;
     let files = tauri::async_runtime::spawn_blocking(move || crate::download_pdb_files(options))
@@ -16826,6 +16851,8 @@ pub fn run() -> Result<(), tauri::Error> {
             open_initial_paths,
             reload_scene,
             get_pdb_history,
+            get_pdb_info,
+            remember_pdb_history,
             get_file_renderer_setup,
             open_path_with_renderer_setup,
             get_pdb_renderer_setup,
@@ -21140,6 +21167,7 @@ mod tests {
                 files: vec![crate::PdbDownloadedFile {
                     kind: crate::GuiPdbFileKind::Coordinates,
                     path: path.clone(),
+                    emdb: None,
                 }],
                 renderer_setup: Some(crate::GuiRendererSetup {
                     object_name: "downloaded".to_string(),

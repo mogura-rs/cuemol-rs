@@ -3,31 +3,28 @@ use cuemol_desktop_core::PreparedFile;
 
 pub(super) enum Source {
     File(web_sys::File),
-    Pdb(String),
+    Pdb(cuemol_command::pdb::DownloadFile),
 }
 
 impl Source {
     fn name(&self) -> String {
         match self {
             Self::File(file) => file.name(),
-            Self::Pdb(id) => format!("{id}.cif"),
+            Self::Pdb(file) => file.filename.clone(),
         }
     }
 
     async fn open(self, signal: Option<web_sys::AbortSignal>) -> Result<web_sys::File, JsValue> {
-        let id = match self {
+        let download = match self {
             Self::File(file) => return Ok(file),
-            Self::Pdb(id) => id,
+            Self::Pdb(download) => download,
         };
         let options = web_sys::RequestInit::new();
         options.set_signal(signal.as_ref());
         let response = JsFuture::from(
             web_sys::window()
                 .ok_or_else(|| JsValue::from_str("Browser window is unavailable"))?
-                .fetch_with_str_and_init(
-                    &format!("https://files.rcsb.org/download/{id}.cif"),
-                    &options,
-                ),
+                .fetch_with_str_and_init(&download.url, &options),
         )
         .await?
         .dyn_into::<web_sys::Response>()?;
@@ -37,14 +34,14 @@ impl Source {
         let blob = JsFuture::from(response.blob()?).await?;
         let parts = js_sys::Array::new();
         parts.push(&blob);
-        web_sys::File::new_with_blob_sequence(&parts, &format!("{id}.cif"))
+        web_sys::File::new_with_blob_sequence(&parts, &download.filename)
     }
 }
 
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(catch, js_namespace=cuemolLoader, js_name=parseFile)]
-    async fn parse_file(file: web_sys::File) -> Result<JsValue, JsValue>;
+    async fn parse_file(file: web_sys::File, pdb_kind: Option<String>) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(js_namespace=cuemolLoader, js_name=cancel)]
     fn cancel_worker();
 }
@@ -75,6 +72,7 @@ impl App {
         }
         self.source_generation = self.source_generation.wrapping_add(1);
         self.source_queue.clear();
+        self.source_pdb = None;
         if self.source_active {
             self.busy = false;
         }
@@ -94,14 +92,39 @@ impl App {
         self.source_queue.push_back(source);
     }
 
-    pub(super) fn fetch(&mut self) {
-        let id = self.pdb_id.trim().to_uppercase();
-        if id.len() != 4 || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
-            self.message = "Enter a four-character PDB ID.".into();
-            return;
+    pub(super) fn open_get_pdb(&mut self) {
+        self.pdb_dialog.reset();
+        if let Some(storage) =
+            web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+        {
+            if let Some(text) = storage
+                .get_item("cuemol.getPdbDialog.history")
+                .ok()
+                .flatten()
+            {
+                if let Ok(history) = serde_json::from_str::<Vec<String>>(&text) {
+                    self.pdb_dialog.history = history
+                        .iter()
+                        .filter_map(|value| cuemol_command::pdb::normalize_history(value))
+                        .take(20)
+                        .collect();
+                }
+            }
         }
-        self.message = format!("Queued download {id}.");
-        self.queue_request(Source::Pdb(id));
+        self.show_get_pdb = true;
+    }
+
+    pub(super) fn queue_pdb(&mut self, choice: cuemol_command::pdb::DownloadChoice) {
+        match choice.files() {
+            Ok(files) => {
+                self.cancel_console("PDB download started; remaining console commands cancelled.");
+                for file in files {
+                    self.queue_request(Source::Pdb(file));
+                }
+                self.message = format!("Queued download {}.", choice.accession.id());
+            }
+            Err(error) => self.message = error,
+        }
     }
 
     pub(super) fn queue_bytes(&mut self, name: &str, bytes: &[u8]) {
@@ -186,6 +209,19 @@ impl App {
     }
 
     fn start_prepared_source(&mut self, source: Source, name: String, generation: u64) {
+        self.source_pdb = match &source {
+            Source::Pdb(file) => Some(file.clone()),
+            _ => None,
+        };
+        let pdb_kind = self.source_pdb.as_ref().map(|file| {
+            match file.kind {
+                cuemol_desktop_core::GuiPdbFileKind::Coordinates => "coordinates",
+                cuemol_desktop_core::GuiPdbFileKind::TwoFoFc => "2fofc",
+                cuemol_desktop_core::GuiPdbFileKind::FoFc => "fofc",
+                cuemol_desktop_core::GuiPdbFileKind::Emdb => "emdb",
+            }
+            .to_owned()
+        });
         self.source_abort = if matches!(&source, Source::Pdb(_)) {
             match web_sys::AbortController::new() {
                 Ok(abort) => Some(abort),
@@ -205,7 +241,7 @@ impl App {
         spawn_local(async move {
             let result = async {
                 let file = source.open(signal).await.map_err(js_error)?;
-                let data = parse_file(file).await.map_err(js_error)?;
+                let data = parse_file(file, pdb_kind).await.map_err(js_error)?;
                 PreparedFile::decode(&js_sys::Uint8Array::new(&data).to_vec())
                     .map_err(|error| error.to_string())
             }
@@ -228,7 +264,18 @@ impl App {
         let style_name = file.style_name();
         let previous_selection = self.selected;
         let before = self.capture_history();
-        match self.state.open_prepared(file) {
+        let result = self.state.open_prepared(file).and_then(|loaded| {
+            if let Some(download) = &self.source_pdb {
+                cuemol_command::pdb::configure_downloaded(
+                    &mut self.state,
+                    &mut self.camera,
+                    &loaded,
+                    download,
+                )?;
+            }
+            Ok(loaded)
+        });
+        match result {
             Ok(loaded) => {
                 self.source_scene = self.state.active_scene();
                 self.navigation.cancel();
@@ -272,13 +319,16 @@ impl App {
                     self.frame = 0;
                     self.playing = false;
                     self.camera = self.state.active_view_camera().unwrap_or_default();
-                } else {
+                } else if self.source_pdb.is_none() {
                     self.fit(false);
                 }
                 self.message = format!("Loaded {name}");
             }
             Err(error) => {
                 self.restore_history(before);
+                if self.source_pdb.is_some() {
+                    self.source_queue.clear();
+                }
                 self.message = error.to_string();
             }
         }

@@ -1427,6 +1427,7 @@ pub enum GuiPdbFileKind {
     Coordinates,
     TwoFoFc,
     FoFc,
+    Emdb,
 }
 
 #[derive(Debug)]
@@ -13802,12 +13803,17 @@ impl DesktopAppState {
     ) -> Result<GuiPdbLoadSummary> {
         let pdb_id = pdb_id.trim();
         let bytes = pdb_id.as_bytes();
-        if bytes.len() != 4
-            || !bytes[0].is_ascii_digit()
-            || !bytes[1..].iter().all(u8::is_ascii_alphanumeric)
-        {
+        let is_pdb = bytes.len() == 4
+            && bytes[0].is_ascii_digit()
+            && bytes[1..].iter().all(u8::is_ascii_alphanumeric);
+        let emdb = pdb_id.to_ascii_uppercase();
+        let is_emdb = emdb
+            .strip_prefix("EMD-")
+            .is_some_and(|number| number.len() >= 4 && number.bytes().all(|b| b.is_ascii_digit()))
+            && files.iter().all(|(kind, _)| *kind == GuiPdbFileKind::Emdb);
+        if !is_pdb && !is_emdb {
             return Err(CueMolError::invalid_argument(
-                "PDB ID must be four ASCII characters starting with a digit",
+                "A valid PDB or EMDB accession is required",
             ));
         }
         if files.is_empty() {
@@ -13856,19 +13862,24 @@ impl DesktopAppState {
                     object_uid = Some(loaded_uid);
                 }
                 (
-                    kind @ (GuiPdbFileKind::TwoFoFc | GuiPdbFileKind::FoFc),
+                    kind @ (GuiPdbFileKind::TwoFoFc | GuiPdbFileKind::FoFc | GuiPdbFileKind::Emdb),
                     PreparedPdbData::DensityMap { map, raw_data },
                 ) => {
                     let suffix = match kind {
                         GuiPdbFileKind::TwoFoFc => "2fofc",
                         GuiPdbFileKind::FoFc => "fofc",
+                        GuiPdbFileKind::Emdb => "em",
                         GuiPdbFileKind::Coordinates => unreachable!(),
                     };
                     let scene_uid = self.ensure_active_scene();
                     let map_uid = self.store_density_map_with_raw_data(
                         scene_uid,
                         &file.path,
-                        format!("{object_name}_{suffix}"),
+                        if kind == GuiPdbFileKind::Emdb {
+                            default_object_name(&file.path)
+                        } else {
+                            format!("{object_name}_{suffix}")
+                        },
                         file.format,
                         map,
                         raw_data,
@@ -13882,6 +13893,18 @@ impl DesktopAppState {
                             self.add_density_contour_renderer(
                                 map_uid, "neg-cont", "#FF0000", -3.0,
                             )?;
+                        }
+                        GuiPdbFileKind::Emdb => {
+                            self.set_density_map_sampling(map_uid, 1, "em")?;
+                            let loaded = GuiLoadedPath::Map { scene_uid, map_uid };
+                            let setup = GuiRendererSetup {
+                                object_name: default_object_name(&file.path),
+                                renderer_type: "isosurf".into(),
+                                renderer_name: "isosurf".into(),
+                                selection: None,
+                                recenter: false,
+                            };
+                            self.configure_loaded_bytes(&loaded, &setup, None)?;
                         }
                         GuiPdbFileKind::Coordinates => unreachable!(),
                     }
@@ -56530,6 +56553,11 @@ fn prepare_pdb_path(
                 let (column_f, column_phi) = match kind {
                     GuiPdbFileKind::TwoFoFc => ("FWT", "PHWT"),
                     GuiPdbFileKind::FoFc => ("DELFWT", "PHDELWT"),
+                    GuiPdbFileKind::Emdb => {
+                        return Err(CueMolError::invalid_argument(
+                            "EMDB maps require a volume file",
+                        ))
+                    }
                     GuiPdbFileKind::Coordinates => unreachable!(),
                 };
                 reader.set_column_f(column_f);
@@ -71697,7 +71725,7 @@ attribute \"dep\" string \"positions\"
                 None,
             )
             .unwrap_err();
-        assert!(error.to_string().contains("PDB ID must be four"));
+        assert!(error.to_string().contains("valid PDB or EMDB accession"));
         let renderer_setup = GuiRendererSetup {
             object_name: "downloaded".to_string(),
             renderer_type: "ballstick".to_string(),

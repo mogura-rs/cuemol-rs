@@ -392,9 +392,7 @@ function requestPdbHistory() {
   pdbHistoryRequest = invoke("get_pdb_history")
     .then((storedHistory) => {
       pdbHistoryEntries = Array.isArray(storedHistory)
-        ? storedHistory.filter(
-            (entry) => typeof entry === "string" && /^[0-9][0-9A-Za-z]{3}$/.test(entry),
-          )
+        ? storedHistory.map(normalizePdbHistory).filter(Boolean).slice(0, 20)
         : [];
       pdbHistoryLoaded = true;
       return pdbHistoryEntries;
@@ -406,15 +404,12 @@ function requestPdbHistory() {
   return pdbHistoryRequest;
 }
 
-function rememberPdbHistory(pdbId) {
-  const value = pdbId.trim().toLowerCase();
-  if (!/^[0-9][0-9a-z]{3}$/.test(value)) return;
-  pdbHistoryEntries = pdbHistoryEntries.filter(
-    (entry) => entry.toLowerCase() !== value,
-  );
-  pdbHistoryEntries.unshift(value);
-  pdbHistoryEntries = pdbHistoryEntries.slice(0, 10);
+function rememberPdbHistory(input) {
+  const value = normalizePdbHistory(input);
+  if (!value) return;
+  pdbHistoryEntries = [value, ...pdbHistoryEntries.filter(entry => entry !== value)].slice(0, 20);
   pdbHistoryLoaded = true;
+  void invoke("remember_pdb_history", {value}).catch(() => {});
 }
 
 function recentFileType(path) {
@@ -8960,178 +8955,7 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     renderPaths();
     dialogActions(open);
   } else if (title === "Open PDB") {
-    pdbRendererSetupCache.clear();
-    dialogTitle.textContent = "Download PDB";
-    dialogContent.append(dialogParagraph("Enter PDB ID:"));
-    const initialHistoryValue = pdbHistoryEntries[0] || "";
-    const historyRequest = requestPdbHistory();
-    const pdbHistory = pdbHistoryEntries;
-    const pdbId = dialogField("PDB ID", pdbHistory[0] || "");
-    let pdbIdEdited = false;
-    pdbId.maxLength = 4;
-    pdbId.pattern = "[0-9][0-9A-Za-z]{3}";
-    const pdbHistoryList = document.createElement("datalist");
-    pdbHistoryList.id = "open-pdb-history";
-    for (const entry of pdbHistory) {
-      const option = document.createElement("option");
-      option.value = entry;
-      pdbHistoryList.append(option);
-    }
-    pdbId.setAttribute("list", pdbHistoryList.id);
-    dialogContent.append(pdbHistoryList);
-    const coordinatesGroup = dialogGroup("Coordinates");
-    const fetchCoordinates = dialogCheckbox("Fetch pdb file", true, coordinatesGroup);
-    const coordinateSource = dialogSelect(
-      "Coordinate source",
-      [
-        ["RCSB_CIF", "RCSB (files.rcsb.org)/cif.gz"],
-        ["RCSB_PDB", "RCSB (files.rcsb.org)/pdb.gz"],
-      ],
-      "RCSB_CIF",
-      coordinatesGroup,
-    );
-    const mapsGroup = dialogGroup("Density maps");
-    const fetchTwoFofc = dialogCheckbox(
-      "Fetch map file (2Fo-Fc)",
-      false,
-      mapsGroup,
-    );
-    const fetchFofc = dialogCheckbox("Fetch map file (Fo-Fc)", false, mapsGroup);
-    const mapSource = dialogSelect(
-      "Map source",
-      [
-        ["RCSB_CIF", "RCSB (files.rcsb.org)"],
-        ["EBI_MTZ", "EBI (www.ebi.ac.uk)"],
-      ],
-      "RCSB_CIF",
-      mapsGroup,
-    );
-    const resultText = dialogParagraph("");
-    resultText.className = "dialog-note";
-    dialogContent.append(resultText);
-    let availabilityState = "idle";
-    let availabilityTimer = null;
-    let availabilitySequence = 0;
-    const availabilityArgs = () => ({
-      pdbId: pdbId.value.trim().toUpperCase(),
-      fetchCoordinates: fetchCoordinates.checked,
-      coordinateSource: coordinateSource.value,
-      fetchTwoFofc: fetchTwoFofc.checked,
-      fetchFofc: fetchFofc.checked,
-      mapSource: mapSource.value,
-    });
-    const open = button("Download and Open", "dialog-primary", async () => {
-      const args = availabilityArgs();
-      const id = args.pdbId;
-      if (!/^[0-9][0-9A-Z]{3}$/.test(id)) return;
-      const prefetchResult = invoke("prefetch_pdb", args).then(
-        () => ({ ok: true }),
-        (error) => ({ ok: false, error }),
-      );
-      const rendererSetup = args.fetchCoordinates
-        ? await showPdbRendererSetup(id)
-        : null;
-      if (args.fetchCoordinates && !rendererSetup) {
-        void prefetchResult;
-        return;
-      }
-      try {
-        if (!(await waitForPdbDownload(`Downloading PDB ${id}`, args, prefetchResult))) return;
-      } catch (error) {
-        showError(error);
-        return;
-      }
-      const changed = await mutateWithViewport("open_pdb", {
-        ...args,
-        rendererSetup,
-      });
-      if (changed) {
-        rememberPdbHistory(id);
-        if (referenceDialog.open) referenceDialog.close();
-      }
-    });
-    const updateOpenState = () => {
-      const validId = /^[0-9][0-9A-Z]{3}$/.test(pdbId.value.trim().toUpperCase());
-      const mapsSelected = fetchTwoFofc.checked || fetchFofc.checked;
-      coordinateSource.disabled = !fetchCoordinates.checked;
-      mapSource.disabled = !mapsSelected;
-      open.disabled =
-        !validId ||
-        (!fetchCoordinates.checked && !mapsSelected) ||
-        availabilityState !== "available";
-    };
-    const scheduleAvailabilityCheck = () => {
-      clearTimeout(availabilityTimer);
-      const sequence = ++availabilitySequence;
-      const args = availabilityArgs();
-      const validId = /^[0-9][0-9A-Z]{3}$/.test(args.pdbId);
-      const anySelected =
-        args.fetchCoordinates || args.fetchTwoFofc || args.fetchFofc;
-      if (!validId) {
-        availabilityState = "idle";
-        resultText.textContent = "";
-        updateOpenState();
-        return;
-      }
-      if (!anySelected) {
-        availabilityState = "idle";
-        resultText.textContent = "Neither pdb nor map selected";
-        updateOpenState();
-        return;
-      }
-      availabilityState = "checking";
-      resultText.textContent = "Checking availability…";
-      updateOpenState();
-      if (args.fetchCoordinates) {
-        void requestPdbRendererSetup(args.pdbId).catch(() => {});
-      }
-      availabilityTimer = setTimeout(async () => {
-        if (!referenceDialog.open || !pdbId.isConnected) return;
-        try {
-          const unavailable = await invoke("check_pdb_availability", args);
-          if (sequence !== availabilitySequence || !referenceDialog.open || !pdbId.isConnected) {
-            return;
-          }
-          if (unavailable.length) {
-            const entryType = unavailable.includes("coordinates") ? "PDB" : "Map";
-            resultText.textContent = `${entryType} Entry ${args.pdbId.toLowerCase()}: not found.`;
-            availabilityState = "unavailable";
-          } else {
-            resultText.textContent = "";
-            availabilityState = "available";
-          }
-        } catch (error) {
-          if (sequence !== availabilitySequence) return;
-          resultText.textContent = `Availability check failed: ${error}`;
-          availabilityState = "unavailable";
-        }
-        updateOpenState();
-      }, 100);
-    };
-    pdbId.addEventListener("input", () => {
-      pdbIdEdited = true;
-      scheduleAvailabilityCheck();
-    });
-    fetchCoordinates.addEventListener("change", scheduleAvailabilityCheck);
-    coordinateSource.addEventListener("change", scheduleAvailabilityCheck);
-    fetchTwoFofc.addEventListener("change", scheduleAvailabilityCheck);
-    fetchFofc.addEventListener("change", scheduleAvailabilityCheck);
-    mapSource.addEventListener("change", scheduleAvailabilityCheck);
-    scheduleAvailabilityCheck();
-    void historyRequest.then((history) => {
-      if (!pdbId.isConnected) return;
-      pdbHistoryList.replaceChildren();
-      for (const entry of history) {
-        const option = document.createElement("option");
-        option.value = entry;
-        pdbHistoryList.append(option);
-      }
-      if (!pdbIdEdited && pdbId.value === initialHistoryValue && history[0]) {
-        pdbId.value = history[0];
-        scheduleAvailabilityCheck();
-      }
-    });
-    dialogActions(open);
+    showGetPdbDialog();
   } else {
     dialogContent.append(dialogParagraph(`${title} dialog`));
   }
@@ -9139,6 +8963,255 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
     if (usesBondPicker && referenceDialog.show) referenceDialog.show();
     else if (referenceDialog.showModal) referenceDialog.showModal();
   }
+}
+
+function parsePdbAccession(text) {
+  const value = text.trim();
+  if (/^[0-9][0-9a-z]{3}$/i.test(value)) return {kind: 'pdb', id: value.toLowerCase()};
+  const emdb = /^emd[-_]?(\d{4,})$/i.exec(value);
+  return emdb ? {kind: 'emdb', id: `EMD-${emdb[1]}`} : null;
+}
+
+function normalizePdbHistory(text) {
+  if (typeof text !== 'string') return null;
+  const value = text.trim().replace(/\s+/g, ' ');
+  if (!value || value.length > 200) return null;
+  return parsePdbAccession(value)?.id || value;
+}
+
+function showGetPdbDialog() {
+  pdbRendererSetupCache.clear();
+  dialogTitle.textContent = 'Get PDB';
+  const text = dialogField('PDB or EMDB ID, or keywords', '');
+  text.placeholder = '1mbn, EMD-11638, or keywords';
+  const history = document.createElement('datalist');
+  history.id = 'open-pdb-history';
+  text.setAttribute('list', history.id);
+  dialogContent.append(history);
+  const fillHistory = () => {
+    history.replaceChildren(...pdbHistoryEntries.map(value => {
+      const option = document.createElement('option'); option.value = value; return option;
+    }));
+  };
+  fillHistory();
+  void requestPdbHistory().then(() => { if (text.isConnected) fillHistory(); });
+  const remember = value => { rememberPdbHistory(value); fillHistory(); };
+  const searchButton = button('Search PDB', '', () => void runSearch(false));
+  dialogContent.append(searchButton);
+  const resultsGroup = dialogGroup('Search results');
+  const method = dialogSelect('Method', [['all', 'All methods'], ['xray', 'X-ray'], ['em', 'Electron microscopy']], 'all', resultsGroup);
+  const sort = dialogSelect('Sort', [['score', 'Relevance'], ['resolution', 'Best resolution'], ['date', 'Newest']], 'score', resultsGroup);
+  const count = dialogParagraph(''); resultsGroup.append(count);
+  const rows = document.createElement('div');
+  rows.setAttribute('role', 'listbox'); rows.setAttribute('aria-label', 'PDB search results');
+  rows.style.maxHeight = '200px'; rows.style.overflowY = 'auto';
+  resultsGroup.append(rows);
+  const more = button('More', '', () => void runSearch(true)); resultsGroup.append(more);
+  const info = dialogParagraph(''); dialogContent.append(info);
+  const searchInstead = button('Search as keywords', '', () => void runSearch(false));
+  dialogContent.append(searchInstead);
+  const coordinatesGroup = dialogGroup('Coordinates');
+  const coordinates = dialogCheckbox('Fetch coordinates', true, coordinatesGroup);
+  const coordinateSource = dialogSelect('Coordinate format', [['RCSB_CIF', 'mmCIF'], ['RCSB_PDB', 'PDB']], 'RCSB_CIF', coordinatesGroup);
+  const legacyHint = dialogParagraph('This entry requires mmCIF.'); coordinatesGroup.append(legacyHint);
+  const mapsGroup = dialogGroup('Crystallographic maps');
+  const twoFofc = dialogCheckbox('2Fo-Fc', false, mapsGroup);
+  const fofc = dialogCheckbox('Fo-Fc', false, mapsGroup);
+  const mapSource = dialogSelect('Map source', [['RCSB_CIF', 'RCSB'], ['EBI_MTZ', 'EBI']], 'RCSB_CIF', mapsGroup);
+  const emGroup = dialogGroup('Cryo-EM maps');
+  const emRows = document.createElement('div'); emGroup.append(emRows);
+  const emSource = dialogSelect('EMDB source', [['WWPDB', 'wwPDB'], ['EBI', 'EBI']], 'WWPDB', emGroup);
+  let accession = null;
+  let entry = null;
+  let lookup = 'idle';
+  let lookupError = '';
+  let lookupSequence = 0;
+  let lookupTimer;
+  let searchSequence = 0;
+  let query = null;
+  let entries = [];
+  let total = 0;
+  let offset = 0;
+  let searching = false;
+  let searchError = '';
+  const mapInfo = new Map();
+  const off = new Set();
+  const alive = () => referenceDialog.open && text.isConnected;
+  const emIds = () => entry?.kind === 'em' ? entry.emdbIds : accession?.kind === 'emdb' && ['emdb', 'error'].includes(lookup) ? [accession.id] : [];
+  const hasCoordinates = () => accession?.kind === 'pdb' && lookup !== 'missing';
+  const hasXtal = () => entry?.kind === 'xtal' || accession?.kind === 'pdb' && lookup === 'error';
+  const args = () => ({
+    pdbId: accession?.id,
+    fetchCoordinates: hasCoordinates() && coordinates.checked,
+    coordinateSource: entry?.pdbFormatAvailable === false ? 'RCSB_CIF' : coordinateSource.value,
+    fetchTwoFofc: hasXtal() && twoFofc.checked,
+    fetchFofc: hasXtal() && fofc.checked,
+    mapSource: mapSource.value,
+    emMaps: emIds().filter(id => !off.has(id)).map(id => ({emdbId: id, source: emSource.value, level: mapInfo.get(id)?.recommendedLevel ?? null})),
+  });
+  const open = button('Download and Open', 'dialog-primary', async () => {
+    const request = args();
+    if (!request.pdbId || open.disabled) return;
+    open.disabled = true;
+    remember(request.pdbId);
+    clearTimeout(lookupTimer);
+    ++lookupSequence; ++searchSequence;
+    const prefetch = invoke('prefetch_pdb', request).then(() => ({ok: true}), error => ({ok: false, error}));
+    const rendererSetup = request.fetchCoordinates ? await showPdbRendererSetup(request.pdbId) : null;
+    if (request.fetchCoordinates && !rendererSetup) return;
+    try {
+      if (!(await waitForPdbDownload(`Downloading ${request.pdbId}`, request, prefetch))) return;
+      if (await mutateWithViewport('open_pdb', {...request, rendererSetup})) {
+        if (referenceDialog.open) referenceDialog.close();
+      }
+    } catch (error) { showError(error); }
+  });
+
+  function update() {
+    const typed = parsePdbAccession(text.value);
+    searchButton.hidden = Boolean(typed) || !text.value.trim();
+    searchButton.disabled = searching;
+    resultsGroup.hidden = query === null;
+    count.textContent = searchError ? `Search failed: ${searchError}` : searching ? 'Searching…' : `${entries.length} / ${total} entries`;
+    more.hidden = offset >= total; more.disabled = searching;
+    searchInstead.hidden = lookup !== 'missing';
+    coordinatesGroup.hidden = !hasCoordinates();
+    coordinateSource.disabled = !coordinates.checked;
+    const legacy = coordinateSource.querySelector('option[value="RCSB_PDB"]');
+    legacy.disabled = entry?.pdbFormatAvailable === false;
+    if (legacy.disabled) coordinateSource.value = 'RCSB_CIF';
+    legacyHint.hidden = !legacy.disabled;
+    mapsGroup.hidden = !hasXtal();
+    mapSource.disabled = !twoFofc.checked && !fofc.checked;
+    const ids = emIds(); emGroup.hidden = !ids.length;
+    emRows.replaceChildren();
+    for (const id of ids) {
+      const check = dialogCheckbox(id, !off.has(id), emRows);
+      check.addEventListener('change', () => { if (check.checked) off.delete(id); else off.add(id); update(); });
+      const value = mapInfo.get(id);
+      const parts = [];
+      if (!value) parts.push('Reading map information…');
+      else if (value.error) parts.push('Map information unavailable; the default contour level is used.');
+      else {
+        if (value.sizeBytes !== null) parts.push(`${(value.sizeBytes / 1e6).toFixed(1)} MB`);
+        if (value.dims) parts.push(value.dims.join(' × '));
+        parts.push(value.recommendedLevel === null ? 'Default contour level' : `Recommended level ${value.recommendedLevel}`);
+      }
+      emRows.append(dialogParagraph(parts.join(' | ')));
+    }
+    info.textContent = lookup === 'loading' ? 'Reading entry information…' : lookup === 'missing' ? 'No entry was found.' : lookup === 'error' ? `Entry information unavailable: ${lookupError}. The files can still be downloaded.` : entry ? `${entry.title || entry.id.toUpperCase()}\n${entry.methods.join(', ')}${entry.resolution === null ? '' : ` | ${entry.resolution.toFixed(2)} Å`}` : lookup === 'emdb' ? `${mapInfo.get(accession.id)?.title || accession.id}\nCryo-EM map, no coordinates` : '';
+    info.style.whiteSpace = 'pre-wrap';
+    for (const row of rows.children) row.setAttribute('aria-selected', String(row.dataset.id === accession?.id));
+    const request = args();
+    open.disabled = !request.pdbId || lookup === 'missing' || !(request.fetchCoordinates || request.fetchTwoFofc || request.fetchFofc || request.emMaps.length);
+  }
+
+  async function loadMap(id, sequence, direct = false) {
+    try {
+      const response = await invoke('get_pdb_info', {query: {kind: 'emdb', emdbId: id}});
+      if (sequence !== lookupSequence || !alive()) return;
+      mapInfo.set(id, response.info);
+      if (direct) lookup = 'emdb';
+    } catch (error) {
+      if (sequence !== lookupSequence || !alive()) return;
+      mapInfo.set(id, {error: String(error)});
+      if (direct) { lookup = String(error) === 'Entry not found' ? 'missing' : 'error'; lookupError = String(error); }
+    }
+    update();
+  }
+
+  function selectEntry(value) {
+    clearTimeout(lookupTimer);
+    const sequence = ++lookupSequence;
+    accession = {kind: 'pdb', id: value.id}; entry = value; lookup = 'pdb';
+    mapInfo.clear(); off.clear();
+    update();
+    for (const id of value.emdbIds) void loadMap(id, sequence);
+  }
+
+  function renderResults() {
+    rows.replaceChildren();
+    for (const value of entries) {
+      const row = button(`${value.id.toUpperCase()}  ${value.title}${value.resolution === null ? '' : ` (${value.resolution.toFixed(1)} Å)`}`, '', () => selectEntry(value));
+      row.dataset.id = value.id; row.setAttribute('role', 'option'); row.title = value.title;
+      Object.assign(row.style, {display: 'block', width: '100%', textAlign: 'left', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'});
+      rows.append(row);
+    }
+    update();
+  }
+
+  async function runSearch(moreResults) {
+    if (moreResults && searching) return;
+    const nextQuery = moreResults ? query : text.value.trim();
+    if (!nextQuery) return;
+    clearTimeout(lookupTimer);
+    if (!moreResults) {
+      ++lookupSequence;
+      accession = null; entry = null; lookup = 'idle'; mapInfo.clear(); off.clear();
+      query = nextQuery; entries = []; total = 0; offset = 0;
+      remember(query); renderResults();
+    }
+    const sequence = ++searchSequence;
+    const start = offset;
+    searching = true; searchError = ''; update();
+    try {
+      const response = await invoke('get_pdb_info', {query: {kind: 'search', query: nextQuery, method: method.value, sort: sort.value, start, rows: 25}});
+      if (sequence !== searchSequence || !alive()) return;
+      total = response.total; offset = start + 25;
+      for (const value of response.entries) if (!entries.some(entry => entry.id === value.id)) entries.push(value);
+    } catch (error) {
+      if (sequence !== searchSequence || !alive()) return;
+      searchError = String(error);
+    }
+    searching = false; renderResults();
+  }
+
+  function edited() {
+    clearTimeout(lookupTimer);
+    ++searchSequence; searching = false; searchError = ''; query = null; entries = [];
+    const sequence = ++lookupSequence;
+    accession = parsePdbAccession(text.value); entry = null; mapInfo.clear(); off.clear();
+    lookup = accession ? 'loading' : 'idle'; renderResults();
+    if (!accession) return;
+    const target = accession;
+    lookupTimer = setTimeout(async () => {
+      if (!alive() || sequence !== lookupSequence) return;
+      if (target.kind === 'emdb') { await loadMap(target.id, sequence, true); return; }
+      try {
+        const response = await invoke('get_pdb_info', {query: {kind: 'entries', pdbIds: [target.id]}});
+        if (sequence !== lookupSequence || !alive()) return;
+        const value = response.entries.find(entry => entry.id === target.id);
+        if (value) { selectEntry(value); return; }
+        lookup = 'missing';
+      } catch (error) {
+        if (sequence !== lookupSequence || !alive()) return;
+        lookup = 'error'; lookupError = String(error);
+      }
+      update();
+    }, 400);
+  }
+
+  text.addEventListener('input', edited);
+  text.addEventListener('change', () => {
+    if (!parsePdbAccession(text.value) && pdbHistoryEntries.includes(normalizePdbHistory(text.value))) void runSearch(false);
+  });
+  text.addEventListener('keydown', event => {
+    if (event.isComposing || event.keyCode === 229) return;
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      if (!parsePdbAccession(text.value) && query !== text.value.trim()) void runSearch(false);
+      else if (!open.disabled) open.click();
+    } else if (['ArrowUp', 'ArrowDown'].includes(event.key) && entries.length) {
+      event.preventDefault();
+      const current = entries.findIndex(entry => entry.id === accession?.id);
+      const next = Math.max(0, Math.min(entries.length - 1, current + (event.key === 'ArrowDown' ? 1 : -1)));
+      selectEntry(entries[next]); rows.children[next]?.scrollIntoView({block: 'nearest'});
+    }
+  });
+  for (const input of [coordinates, coordinateSource, twoFofc, fofc, mapSource, emSource]) input.addEventListener('change', update);
+  for (const input of [method, sort]) input.addEventListener('change', () => void runSearch(false));
+  referenceDialog.addEventListener('close', () => { clearTimeout(lookupTimer); ++lookupSequence; ++searchSequence; }, {once: true});
+  update(); dialogActions(open, button('Cancel', '', () => referenceDialog.close()));
 }
 
 async function chooseExecuteScriptFile() {

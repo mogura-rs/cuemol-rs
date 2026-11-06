@@ -143,6 +143,25 @@ async function openShell(page, storage = {}, options = {}) {
         return {snapshot: structuredClone(snapshot), viewport};
       }
       if (command === 'get_pdb_history') return [];
+      if (options.pdbSearch && command === 'remember_pdb_history') return [];
+      if (options.pdbSearch && command === 'get_pdb_info') {
+        const q=args.query;
+        const entry=(id,em=false)=>({id,title:`Structure ${id}`,methods:[em?'ELECTRON CRYSTALLOGRAPHY':'X-RAY DIFFRACTION'],resolution:2.1,emdbIds:em?['EMD-11638']:[],pdbFormatAvailable:!em,kind:em?'em':'xtal'});
+        if(q.kind==='search') {
+          if(q.query==='delayed')await new Promise(resolve=>window.__releasePdbSearch=resolve);
+          return {kind:'search',total:30,entries:q.start===0?[entry('1crn'),entry('7a4m',true)]:[entry('1mbn')]};
+        }
+        if(q.kind==='entries') {
+          if(q.pdbIds[0]==='9zzz')return {kind:'entries',entries:[]};
+          if(q.pdbIds[0]==='1err')throw new Error('metadata offline');
+          return {kind:'entries',entries:[entry(q.pdbIds[0])]};
+        }
+        return {kind:'emdb',info:{emdbId:q.emdbId,title:'Test EMDB map',recommendedLevel:20,sizeBytes:4096,dims:[4,4,4]}};
+      }
+      if(options.pdbSearch&&command==='prefetch_pdb')return null;
+      if(options.pdbSearch&&command==='get_pdb_download_progress')return 4096;
+      if(options.pdbSearch&&command==='open_pdb')return {snapshot,viewport};
+
       if (command === 'clipboard_kind') return window.__clipboardKind || '';
       if (command === 'clipboard_text') return window.__clipboardText || '';
       if (command === 'set_clipboard_text') { window.__clipboardText = args.text; window.__clipboardKind = ''; return 'Copied text'; }
@@ -1457,5 +1476,59 @@ test('Tauri Focus submits the selected objects together', async ({page}) => {
   expect(args.targets.every(target => target.kind === 'object')).toBe(true);
   expect(args.width).toBeGreaterThan(0);
   expect(args.height).toBeGreaterThan(0);
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri Get PDB searches, pages and downloads the selected EMDB map',async({page})=>{
+  const errors=await openShell(page,{}, {pdbSearch:true});
+  await page.getByRole('button',{name:'Get PDB',exact:true}).click();
+  const dialog=page.locator('#reference-dialog');
+  const input=dialog.getByLabel('PDB or EMDB ID, or keywords',{exact:true});
+  await input.fill('ribosome');await dialog.getByRole('button',{name:'Search PDB',exact:true}).click();
+  await expect(dialog.getByRole('listbox').getByRole('option')).toHaveCount(2);
+  await dialog.getByRole('button',{name:'More',exact:true}).click();
+  await expect(dialog.getByRole('listbox').getByRole('option')).toHaveCount(3);
+  expect(await page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='get_pdb_info'&&c.args.query.kind==='search').map(c=>c.args.query.start))).toEqual([0,25]);
+  await dialog.getByRole('option',{name:/7A4M/}).click();
+  await expect(input).toHaveValue('ribosome');
+  await expect(dialog.getByText('Recommended level 20',{exact:false})).toBeVisible();
+  await expect(dialog.getByLabel('Coordinate format')).toHaveValue('RCSB_CIF');
+  await expect(dialog.locator('option[value="RCSB_PDB"]')).toHaveJSProperty('disabled',true);
+  await dialog.getByLabel('Fetch coordinates',{exact:true}).uncheck();
+  await dialog.getByRole('button',{name:'Download and Open',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='open_pdb').length)).toBe(1);
+  const args=await page.evaluate(()=>window.__shellCalls.find(c=>c.command==='open_pdb').args);
+  expect(args.pdbId).toBe('7a4m');expect(args.fetchCoordinates).toBe(false);
+  expect(args.emMaps).toEqual([{emdbId:'EMD-11638',source:'WWPDB',level:20}]);
+  expect(errors).toEqual([]);
+});
+
+test('Tauri Get PDB handles filters, stale searches, missing IDs and metadata errors',async({page})=>{
+  const errors=await openShell(page,{}, {pdbSearch:true});
+  await page.getByRole('button',{name:'Get PDB',exact:true}).click();
+  const dialog=page.locator('#reference-dialog');
+  const input=dialog.getByLabel('PDB or EMDB ID, or keywords',{exact:true});
+  await input.fill('kinase');await input.press('Enter');
+  await expect(dialog.getByRole('listbox').getByRole('option')).toHaveCount(2);
+  await dialog.getByRole('combobox',{name:'Method',exact:true}).selectOption('em');
+  await dialog.getByRole('combobox',{name:'Sort',exact:true}).selectOption('resolution');
+  await expect.poll(()=>page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='get_pdb_info'&&c.args.query.kind==='search').at(-1)?.args.query)).toMatchObject({method:'em',sort:'resolution',start:0});
+  await input.fill('delayed');await input.press('Enter');
+  await expect.poll(()=>page.evaluate(()=>typeof window.__releasePdbSearch)).toBe('function');
+  await input.fill('EMD-11638');await page.evaluate(()=>window.__releasePdbSearch());
+  await expect(dialog.getByText('Cryo-EM map, no coordinates',{exact:false})).toBeVisible();
+  await expect(dialog.getByRole('listbox')).toBeHidden();
+  await expect(dialog.getByLabel('Fetch coordinates',{exact:true})).toBeHidden();
+  await input.fill('9zzz');await expect(dialog.getByText('No entry was found.',{exact:true})).toBeVisible();
+  await expect(dialog.getByRole('button',{name:'Download and Open',exact:true})).toBeDisabled();
+  await input.fill('1err');await expect(dialog.getByText('The files can still be downloaded.',{exact:false})).toBeVisible();
+  await expect(dialog.getByLabel('2Fo-Fc',{exact:true})).toBeVisible();
+  await expect(dialog.getByRole('button',{name:'Download and Open',exact:true})).toBeEnabled();
+  await input.fill('delayed');await input.press('Enter');
+  await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
+  await page.evaluate(()=>window.__releasePdbSearch());
+  await expect(dialog).not.toBeVisible();
+  expect(await page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='open_pdb'))).toHaveLength(0);
   expect(errors).toEqual([]);
 });

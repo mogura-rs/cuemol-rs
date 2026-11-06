@@ -222,20 +222,40 @@ impl App {
                 });
             });
         self.close_tab_dialog(ctx);
-        let mut open = self.show_get_pdb;
-        egui::Window::new("Get PDB")
-            .open(&mut open)
-            .show(ctx, |ui| {
-                ui.label("PDB identifier");
-                let response = ui.text_edit_singleline(&mut self.pdb_id);
-                self.record_ui_rect("Get PDB identifier", &response);
-                let response = ui.button("Fetch");
-                self.record_ui_rect("Fetch PDB", &response);
-                if response.clicked() {
-                    self.fetch();
+        if self.show_get_pdb {
+            let mut open = true;
+            let mut choice = None;
+            egui::Window::new("Get PDB")
+                .open(&mut open)
+                .default_width(560.)
+                .auto_sized()
+                .show(ctx, |ui| {
+                    choice = self.pdb_dialog.show(ui);
+                });
+            for (name, rect) in &self.pdb_dialog.rects {
+                self.ui_rects.insert(
+                    name.clone(),
+                    [rect.min.x, rect.min.y, rect.width(), rect.height()],
+                );
+            }
+            if self.pdb_dialog.take_history_update().is_some() {
+                if let Some(storage) =
+                    web_sys::window().and_then(|window| window.local_storage().ok().flatten())
+                {
+                    let _ = storage.set_item(
+                        "cuemol.getPdbDialog.history",
+                        &serde_json::to_string(&self.pdb_dialog.history).unwrap(),
+                    );
                 }
-            });
-        self.show_get_pdb = open;
+            }
+            self.show_get_pdb = open && choice.is_none() && !self.pdb_dialog.take_cancelled();
+            if !self.show_get_pdb {
+                self.pdb_dialog.close();
+            }
+            if let Some(choice) = choice {
+                self.queue_pdb(choice);
+            }
+        }
     }
     fn shell_menu(&mut self, ctx: &egui::Context) {
         let response = egui::TopBottomPanel::top("menubar")
@@ -256,7 +276,7 @@ impl App {
                             ui.close();
                         }
                         if ui.button("Get PDB…").clicked() {
-                            self.show_get_pdb = true;
+                            self.open_get_pdb();
                             ui.close();
                         }
                         ui.separator();
@@ -571,7 +591,7 @@ impl App {
                                     self.save_scene_download();
                                 }
                                 "Reload Scene" => self.reload_scene(),
-                                "Get PDB" => self.show_get_pdb = true,
+                                "Get PDB" => self.open_get_pdb(),
                                 "Render" => self.open_render(),
                                 "Undo" => self.call("undo", json!({})),
                                 "Redo" => self.call("redo", json!({})),

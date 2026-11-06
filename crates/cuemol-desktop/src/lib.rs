@@ -59,13 +59,15 @@ use std::path::{Path, PathBuf};
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(any(feature = "tauri-gui", all(test, feature = "egui-gui")))]
+use std::time::Instant;
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 static NEXT_DOWNLOAD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
-const MAX_PDB_HISTORY: usize = 10;
+const MAX_PDB_HISTORY: usize = 20;
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,7 +90,7 @@ impl Default for RendererSetupPreferences {
 type DownloadResult = std::result::Result<PathBuf, String>;
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PdbFetchOptions {
     pub pdb_id: String,
     pub fetch_coordinates: bool,
@@ -96,13 +98,15 @@ pub(crate) struct PdbFetchOptions {
     pub fetch_two_fofc: bool,
     pub fetch_fofc: bool,
     pub map_source: String,
+    pub em_maps: Vec<cuemol_command::pdb::EmMapRequest>,
 }
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PdbDownloadedFile {
     pub kind: GuiPdbFileKind,
     pub path: PathBuf,
+    pub emdb: Option<cuemol_command::pdb::EmMapRequest>,
 }
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
@@ -121,7 +125,7 @@ struct PdbDownloadGroup {
     entries: Vec<(usize, GuiPdbFileKind)>,
 }
 
-#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+#[cfg(any(feature = "tauri-gui", all(test, feature = "egui-gui")))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PdbProbeSpec {
     kinds: Vec<GuiPdbFileKind>,
@@ -137,16 +141,16 @@ struct DownloadGate {
     cancelled: std::sync::atomic::AtomicBool,
 }
 
-#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+#[cfg(any(feature = "tauri-gui", all(test, feature = "egui-gui")))]
 type AvailabilityResult = std::result::Result<bool, String>;
 
-#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+#[cfg(any(feature = "tauri-gui", all(test, feature = "egui-gui")))]
 struct AvailabilityGate {
     result: Mutex<Option<AvailabilityResult>>,
     ready: Condvar,
 }
 
-#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+#[cfg(any(feature = "tauri-gui", all(test, feature = "egui-gui")))]
 #[derive(Debug, Clone, Copy)]
 struct AvailabilityCacheEntry {
     available: bool,
@@ -156,20 +160,20 @@ struct AvailabilityCacheEntry {
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 type DownloadGates = Mutex<HashMap<PathBuf, Arc<DownloadGate>>>;
 
-#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+#[cfg(any(feature = "tauri-gui", all(test, feature = "egui-gui")))]
 type AvailabilityGates = Mutex<HashMap<String, Arc<AvailabilityGate>>>;
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 static DOWNLOAD_GATES: OnceLock<DownloadGates> = OnceLock::new();
 
-#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+#[cfg(any(feature = "tauri-gui", all(test, feature = "egui-gui")))]
 static PDB_AVAILABILITY_GATES: OnceLock<AvailabilityGates> = OnceLock::new();
 
-#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+#[cfg(any(feature = "tauri-gui", all(test, feature = "egui-gui")))]
 static PDB_AVAILABILITY_CACHE: OnceLock<Mutex<HashMap<String, AvailabilityCacheEntry>>> =
     OnceLock::new();
 
-#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+#[cfg(any(feature = "tauri-gui", all(test, feature = "egui-gui")))]
 const PDB_UNAVAILABLE_CACHE_TTL: Duration = Duration::from_secs(15);
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
@@ -200,7 +204,7 @@ pub(crate) fn download_cache_path(filename: &str) -> std::path::PathBuf {
     root.join("downloads").join(filename)
 }
 
-#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+#[cfg(any(feature = "tauri-gui", all(test, feature = "egui-gui")))]
 pub(crate) fn normalize_pdb_id(value: &str) -> std::result::Result<String, String> {
     let pdb_id = value.trim().to_ascii_uppercase();
     let mut characters = pdb_id.chars();
@@ -259,10 +263,9 @@ fn load_pdb_history_from(path: &Path) -> std::result::Result<Vec<String>, String
     };
     let mut history = Vec::new();
     for value in input.lines() {
-        let Ok(pdb_id) = normalize_pdb_id(value) else {
+        let Some(pdb_id) = cuemol_command::pdb::normalize_history(value) else {
             continue;
         };
-        let pdb_id = pdb_id.to_ascii_lowercase();
         if !history.contains(&pdb_id) {
             history.push(pdb_id);
         }
@@ -280,7 +283,8 @@ pub(crate) fn load_pdb_history() -> Vec<String> {
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
 fn remember_pdb_id_at(path: &Path, value: &str) -> std::result::Result<Vec<String>, String> {
-    let pdb_id = normalize_pdb_id(value)?.to_ascii_lowercase();
+    let pdb_id = cuemol_command::pdb::normalize_history(value)
+        .ok_or("History entry must contain between 1 and 200 characters")?;
     let mut history = load_pdb_history_from(path)?;
     history.retain(|entry| entry != &pdb_id);
     history.insert(0, pdb_id);
@@ -395,8 +399,19 @@ pub(crate) fn save_renderer_setup_preferences(
 fn pdb_download_specs(
     options: &PdbFetchOptions,
 ) -> std::result::Result<Vec<PdbDownloadSpec>, String> {
-    let pdb_id = normalize_pdb_id(&options.pdb_id)?;
-    if !options.fetch_coordinates && !options.fetch_two_fofc && !options.fetch_fofc {
+    let accession = cuemol_command::pdb::Accession::parse(&options.pdb_id)
+        .ok_or("Invalid PDB or EMDB accession")?;
+    let pdb_id = accession.id().to_ascii_uppercase();
+    if matches!(accession, cuemol_command::pdb::Accession::Emdb(_))
+        && (options.fetch_coordinates || options.fetch_two_fofc || options.fetch_fofc)
+    {
+        return Err("An EMDB accession only provides an EMDB map".into());
+    }
+    if !options.fetch_coordinates
+        && !options.fetch_two_fofc
+        && !options.fetch_fofc
+        && options.em_maps.is_empty()
+    {
         return Err("select coordinates or at least one density map".to_string());
     }
     let lowercase_id = pdb_id.to_ascii_lowercase();
@@ -469,6 +484,29 @@ fn pdb_download_specs(
             source => return Err(format!("unsupported PDB map source: {source}")),
         }
     }
+    for map in &options.em_maps {
+        let Some(cuemol_command::pdb::Accession::Emdb(id)) =
+            cuemol_command::pdb::Accession::parse(&map.emdb_id)
+        else {
+            return Err("Invalid EMDB map accession".into());
+        };
+        if map.level.is_some_and(|level| !level.is_finite()) {
+            return Err("EMDB contour level must be finite".into());
+        }
+        let base = match map.source.as_str() {
+            "WWPDB" => "https://files.wwpdb.org/pub/emdb/structures",
+            "EBI" => "https://ftp.ebi.ac.uk/pub/databases/emdb/structures",
+            _ => return Err("Unknown EMDB source".into()),
+        };
+        let number = id.strip_prefix("EMD-").unwrap();
+        let filename = format!("emd_{number}.map.gz");
+        specs.push(PdbDownloadSpec {
+            kind: GuiPdbFileKind::Emdb,
+            url: format!("{base}/{id}/map/{filename}"),
+            path: pdb_cached_path(&filename, None),
+        });
+    }
+
     Ok(specs)
 }
 
@@ -501,7 +539,7 @@ fn pdb_cached_path(primary_filename: &str, legacy_filename: Option<&str>) -> Pat
     }
 }
 
-#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+#[cfg(any(feature = "tauri-gui", all(test, feature = "egui-gui")))]
 fn pdb_probe_specs(options: &PdbFetchOptions) -> std::result::Result<Vec<PdbProbeSpec>, String> {
     let mut probes: Vec<PdbProbeSpec> = Vec::new();
     for spec in pdb_download_specs(options)? {
@@ -518,7 +556,7 @@ fn pdb_probe_specs(options: &PdbFetchOptions) -> std::result::Result<Vec<PdbProb
     Ok(probes)
 }
 
-#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+#[cfg(feature = "tauri-gui")]
 pub(crate) fn probe_pdb_files(
     options: PdbFetchOptions,
 ) -> std::result::Result<Vec<GuiPdbFileKind>, String> {
@@ -546,7 +584,7 @@ pub(crate) fn probe_pdb_files(
     Ok(unavailable)
 }
 
-#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+#[cfg(feature = "tauri-gui")]
 fn probe_pdb_spec(probe: PdbProbeSpec) -> std::result::Result<Vec<GuiPdbFileKind>, String> {
     if nonempty_file(&probe.path) || probe_url_available(&probe.url)? {
         Ok(Vec::new())
@@ -555,7 +593,7 @@ fn probe_pdb_spec(probe: PdbProbeSpec) -> std::result::Result<Vec<GuiPdbFileKind
     }
 }
 
-#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+#[cfg(feature = "tauri-gui")]
 fn probe_url_available(url: &str) -> std::result::Result<bool, String> {
     probe_url_available_with(url, |url| {
         let status = std::process::Command::new("curl")
@@ -579,7 +617,7 @@ fn probe_url_available(url: &str) -> std::result::Result<bool, String> {
     })
 }
 
-#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+#[cfg(any(feature = "tauri-gui", all(test, feature = "egui-gui")))]
 fn probe_url_available_with(
     url: &str,
     operation: impl FnOnce(&str) -> AvailabilityResult,
@@ -651,7 +689,7 @@ fn probe_url_available_with(
     result
 }
 
-#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+#[cfg(any(feature = "tauri-gui", all(test, feature = "egui-gui")))]
 fn cached_pdb_availability(url: &str) -> Option<bool> {
     let entry = PDB_AVAILABILITY_CACHE
         .get_or_init(Default::default)
@@ -694,10 +732,59 @@ pub(crate) fn download_pdb_files(
         downloaded
     };
     downloaded.sort_unstable_by_key(|(index, _)| *index);
+    let mut maps = options.em_maps.into_iter();
     Ok(downloaded
         .into_iter()
-        .map(|(_, file)| file)
+        .map(|(_, mut file)| {
+            if file.kind == GuiPdbFileKind::Emdb {
+                file.emdb = maps.next();
+            }
+            file
+        })
         .collect::<Vec<_>>())
+}
+
+#[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
+pub(crate) fn open_downloaded_pdb(
+    state: &mut DesktopAppState,
+    camera: &mut cuemol_qsys::Camera,
+    accession: &str,
+    files: &[PdbDownloadedFile],
+    setup: Option<&GuiRendererSetup>,
+) -> cuemol_core::Result<GuiPdbLoadSummary> {
+    let input = files
+        .iter()
+        .map(|file| (file.kind, file.path.clone()))
+        .collect::<Vec<_>>();
+    let summary = state.open_pdb_files(accession, &input, setup)?;
+    let maps = files
+        .iter()
+        .filter(|file| file.kind != GuiPdbFileKind::Coordinates);
+    for (file, uid) in maps.zip(&summary.map_uids) {
+        if let Some(emdb) = &file.emdb {
+            if let Some(level) = emdb.level {
+                let renderer = state.density_map_summary(*uid).unwrap().renderers[0].uid;
+                for (prop, value) in [
+                    ("use_abslevel", "true".to_string()),
+                    ("level", level.to_string()),
+                ] {
+                    cuemol_command::call_tool(
+                        state,
+                        camera,
+                        "set_node_prop",
+                        &serde_json::json!({"nodeId":renderer.get(),"nodeType":"renderer","prop":prop,"value":value}),
+                    )?;
+                }
+            }
+            cuemol_command::call_tool(
+                state,
+                camera,
+                "focus_nodes",
+                &serde_json::json!({"nodeIds":[uid.get()]}),
+            )?;
+        }
+    }
+    Ok(summary)
 }
 
 #[cfg(any(feature = "egui-gui", feature = "tauri-gui"))]
@@ -765,6 +852,7 @@ fn download_pdb_group(
                 PdbDownloadedFile {
                     kind,
                     path: path.clone(),
+                    emdb: None,
                 },
             )
         })
@@ -978,16 +1066,19 @@ mod download_tests {
             NEXT_DOWNLOAD_ID.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::write(&path, "invalid\n1CRN\n1crn\n2xyz\n").unwrap();
-        assert_eq!(load_pdb_history_from(&path).unwrap(), ["1crn", "2xyz"]);
+        assert_eq!(
+            load_pdb_history_from(&path).unwrap(),
+            ["invalid", "1crn", "2xyz"]
+        );
 
-        for index in 0..12 {
+        for index in 0..24 {
             let pdb_id = format!("{index:04}");
             remember_pdb_id_at(&path, &pdb_id).unwrap();
         }
         let history = remember_pdb_id_at(&path, "0005").unwrap();
         assert_eq!(history.len(), MAX_PDB_HISTORY);
         assert_eq!(history[0], "0005");
-        assert_eq!(history[1], "0011");
+        assert_eq!(history[1], "0023");
         assert_eq!(load_pdb_history_from(&path).unwrap(), history);
         std::fs::remove_file(path).unwrap();
     }
@@ -1015,6 +1106,117 @@ mod download_tests {
     }
 
     #[test]
+    fn pdb_download_specs_and_loading_preserve_emdb_levels_and_sources() {
+        let options = PdbFetchOptions {
+            pdb_id: "EMD-11638".into(),
+            fetch_coordinates: false,
+            coordinate_source: "RCSB_CIF".into(),
+            fetch_two_fofc: false,
+            fetch_fofc: false,
+            map_source: "RCSB_CIF".into(),
+            em_maps: vec![cuemol_command::pdb::EmMapRequest {
+                emdb_id: "EMD-11638".into(),
+                source: "EBI".into(),
+                level: Some(20.),
+            }],
+        };
+        let specs = pdb_download_specs(&options).unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].kind, GuiPdbFileKind::Emdb);
+        assert_eq!(
+            specs[0].url,
+            "https://ftp.ebi.ac.uk/pub/databases/emdb/structures/EMD-11638/map/emd_11638.map.gz"
+        );
+        assert!(pdb_download_specs(&PdbFetchOptions {
+            fetch_coordinates: true,
+            ..options.clone()
+        })
+        .is_err());
+        let mut invalid = options.clone();
+        invalid.em_maps[0].level = Some(f64::NAN);
+        assert!(pdb_download_specs(&invalid).is_err());
+        let mut bytes = vec![0u8; 1024 + 64 * 4];
+        for axis in 0..3 {
+            for word in [axis, axis + 7] {
+                bytes[word * 4..word * 4 + 4].copy_from_slice(&4i32.to_le_bytes());
+            }
+            for (word, value) in [(axis + 10, 8f32), (axis + 13, 90.), (axis + 49, 30.)] {
+                bytes[word * 4..word * 4 + 4].copy_from_slice(&value.to_le_bytes());
+            }
+            let word = axis + 16;
+            bytes[word * 4..word * 4 + 4].copy_from_slice(&(axis as i32 + 1).to_le_bytes());
+        }
+        bytes[12..16].copy_from_slice(&2i32.to_le_bytes());
+        for (word, value) in [(20, 63f32), (21, 31.5), (54, 18.47)] {
+            bytes[word * 4..word * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        bytes[208..212].copy_from_slice(b"MAP ");
+        for i in 0..64 {
+            bytes[1024 + i * 4..1028 + i * 4].copy_from_slice(&(i as f32).to_le_bytes());
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("emd_11638.map");
+        std::fs::write(&path, &bytes).unwrap();
+        let files = [PdbDownloadedFile {
+            kind: GuiPdbFileKind::Emdb,
+            path,
+            emdb: Some(options.em_maps[0].clone()),
+        }];
+        let mut state = DesktopAppState::new();
+        let mut camera = cuemol_qsys::Camera::new();
+        let loaded =
+            open_downloaded_pdb(&mut state, &mut camera, "EMD-11638", &files, None).unwrap();
+        assert!(loaded.object_uid.is_none());
+        let uid = loaded.map_uids[0];
+        let map = state.density_map_summary(uid).unwrap();
+        assert_eq!(map.name, "emd_11638");
+        assert_eq!(state.density_map_kind(uid).unwrap().1, "em");
+        assert_eq!(map.renderers.len(), 1);
+        assert_eq!(map.renderers[0].renderer_type, "isosurf");
+        let renderer = map.renderers[0].uid;
+        let value = cuemol_command::call_tool(
+            &mut state,
+            &mut camera,
+            "get_renderer_property",
+            &serde_json::json!({"rendId":renderer.get(),"prop":"level"}),
+        )
+        .unwrap();
+        let level = value["value"].as_str().unwrap().parse::<f64>().unwrap();
+        assert!((level - 20.).abs() < 0.5, "{level}");
+        assert!(camera.center().x > 20.);
+        let worker =
+            PreparedFile::parse_pdb_download("emd_11638.map", &bytes, GuiPdbFileKind::Emdb)
+                .unwrap();
+        let worker = PreparedFile::decode(&worker.encode().unwrap()).unwrap();
+        let mut browser = DesktopAppState::new();
+        let result = browser.open_prepared(worker).unwrap();
+        let choice = cuemol_command::pdb::DownloadChoice {
+            accession: cuemol_command::pdb::Accession::Emdb("EMD-11638".into()),
+            coordinates: false,
+            coordinate_source: "RCSB_CIF".into(),
+            two_fofc: false,
+            fofc: false,
+            map_source: "RCSB_CIF".into(),
+            em_maps: options.em_maps,
+        };
+        cuemol_command::pdb::configure_downloaded(
+            &mut browser,
+            &mut camera,
+            &result,
+            &choice.files().unwrap()[0],
+        )
+        .unwrap();
+        let GuiLoadedPath::Map { map_uid, .. } = result else {
+            panic!()
+        };
+        let restored = browser.density_map_summary(map_uid).unwrap();
+        assert_eq!(restored.counts, map.counts);
+        assert_eq!(restored.mean_density.to_bits(), map.mean_density.to_bits());
+        assert_eq!(restored.renderers.len(), 1);
+        assert_eq!(restored.renderers[0].renderer_type, "isosurf");
+    }
+
+    #[test]
     fn pdb_download_specs_match_reference_coordinate_and_map_urls() {
         let options = PdbFetchOptions {
             pdb_id: "1CRN".to_string(),
@@ -1023,6 +1225,7 @@ mod download_tests {
             fetch_two_fofc: true,
             fetch_fofc: true,
             map_source: "RCSB_CIF".to_string(),
+            em_maps: Vec::new(),
         };
         let specs = pdb_download_specs(&options).unwrap();
         assert_eq!(specs.len(), 3);
@@ -1061,6 +1264,7 @@ mod download_tests {
             fetch_two_fofc: false,
             fetch_fofc: false,
             map_source: "RCSB_CIF".to_string(),
+            em_maps: Vec::new(),
         };
         assert!(pdb_download_specs(&options).is_err());
         options.fetch_coordinates = true;
@@ -1081,6 +1285,7 @@ mod download_tests {
             fetch_two_fofc: true,
             fetch_fofc: true,
             map_source: "EBI_MTZ".to_string(),
+            em_maps: Vec::new(),
         };
         let probes = pdb_probe_specs(&options).unwrap();
         assert_eq!(probes.len(), 2);
@@ -1101,6 +1306,7 @@ mod download_tests {
             fetch_two_fofc: true,
             fetch_fofc: true,
             map_source: "EBI_MTZ".to_string(),
+            em_maps: Vec::new(),
         };
         let groups = group_pdb_download_specs(pdb_download_specs(&options).unwrap());
         assert_eq!(groups.len(), 2);

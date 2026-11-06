@@ -5,6 +5,9 @@ import {gzipSync} from 'node:zlib';
 const pdb = 'HETATM    1  C1  LIG A   1      -2.000   0.000   0.000  1.00 10.00           C  \nHETATM    2  O1  LIG A   1       0.000   0.000   0.000  1.00 10.00           O  \nEND\n';
 const downloadedCif = 'data_download\nloop_\n_atom_site.group_PDB\n_atom_site.id\n_atom_site.type_symbol\n_atom_site.label_atom_id\n_atom_site.label_comp_id\n_atom_site.label_asym_id\n_atom_site.label_seq_id\n_atom_site.Cartn_x\n_atom_site.Cartn_y\n_atom_site.Cartn_z\nHETATM 1 C C1 LIG A 1 0 0 0\n#\n';
 async function ready(page) {
+  await page.route('https://data.rcsb.org/graphql', route => route.fulfill({
+    status: 503, headers: {'access-control-allow-origin': '*'}, body: '',
+  }));
   await page.goto('./?renderer=webgl');
   await expect.poll(() => page.evaluate(() => window.cuemol?.status()?.scene?.sceneId), {timeout: 60000}).toBeGreaterThan(0);
 }
@@ -55,6 +58,8 @@ async function fetchPdb(page) {
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   await page.keyboard.press('ControlOrMeta+A');
   await page.keyboard.type('1CRN');
+  await expect.poll(() => page.evaluate(() => window.cuemol.status().ui.rects['Fetch 2Fo-Fc'])).toBeTruthy();
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   const fetch = await page.evaluate(() => window.cuemol.status().ui.rects['Fetch PDB']);
   await page.mouse.click(fetch[0] + fetch[2] / 2, fetch[1] + fetch[3] / 2);
 }
@@ -303,11 +308,11 @@ test(`PDB downloads cancel their pending request on ${action}`, async ({page}) =
   let release, requested;
   let aborted = false;
   page.on('requestfailed', request => {
-    if (request.url() === 'https://files.rcsb.org/download/1CRN.cif') aborted = true;
+    if (request.url() === 'https://files.rcsb.org/download/1crn.cif') aborted = true;
   });
   const gate = new Promise(resolve => { release = resolve; });
   const request = new Promise(resolve => { requested = resolve; });
-  await page.route('https://files.rcsb.org/download/1CRN.cif', async route => {
+  await page.route('https://files.rcsb.org/download/1crn.cif', async route => {
     requested();
     await gate;
     await route.fulfill({contentType: 'text/plain', body: downloadedCif}).catch(() => {});
@@ -340,7 +345,7 @@ test('PDB download failures do not unlock a concurrent render', async ({page}) =
   await load(page, 'render.pdb', Buffer.from(pdb));
   await loaded(page, 'render.pdb');
   let requested = 0;
-  await page.route('https://files.rcsb.org/download/1CRN.cif', route => {
+  await page.route('https://files.rcsb.org/download/1crn.cif', route => {
     requested++; return route.fulfill({status: 503, body: 'Unavailable'});
   });
   await call(page, 'set_render_settings', {settings: 'backend=umbreon; umbreon.supersample=1; umbreon.useGI=false; umbreon.denoise=None'});
@@ -350,7 +355,7 @@ test('PDB download failures do not unlock a concurrent render', async ({page}) =
   expect(await page.evaluate(() => window.cuemol.status().busy)).toBe(true);
   try {
     await fetchPdb(page);
-    await expect.poll(() => page.evaluate(() => window.cuemol.status().message)).toBe('Queued download 1CRN.');
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().message)).toBe('Queued download 1crn.');
     expect(await page.evaluate(() => window.cuemol.status().busy)).toBe(true);
     expect(requested).toBe(0);
   } finally {
@@ -359,9 +364,9 @@ test('PDB download failures do not unlock a concurrent render', async ({page}) =
   await expect.poll(() => page.evaluate(() => window.cuemol.status().message)).toContain('HTTP 503');
   await expect.poll(() => page.evaluate(() => window.cuemol.status().busy)).toBe(false);
   expect(requested).toBe(1);
-  await page.unroute('https://files.rcsb.org/download/1CRN.cif');
-  await page.route('https://files.rcsb.org/download/1CRN.cif', route => route.fulfill({contentType: 'text/plain', body: downloadedCif}));
+  await page.unroute('https://files.rcsb.org/download/1crn.cif');
+  await page.route('https://files.rcsb.org/download/1crn.cif', route => route.fulfill({contentType: 'text/plain', body: downloadedCif}));
   await fetchPdb(page);
-  await loaded(page, '1CRN.cif');
+  await loaded(page, '1crn.cif');
   expect((await page.evaluate(() => window.cuemol.status())).scene.objects).toHaveLength(2);
 });

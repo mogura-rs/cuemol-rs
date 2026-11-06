@@ -33,6 +33,15 @@ Open files on the command line, through the file dialog, or by drag and drop.
 Browser file parsing runs in a worker so navigation and edits remain available.
 Use **Cancel loading** or Escape to stop the current input and discard queued
 files. **Get PDB** uses the same queue and also cancels its network request.
+In the native and browser dialogs, enter a PDB ID, an EMDB ID such as
+`EMD-11638`, or keywords. Keyword results can be filtered by experimental method,
+sorted by relevance, resolution or release date, and expanded with **More**.
+Selecting a result keeps the search text and list available. Entry metadata
+determines which coordinate and map choices are shown; entries without the legacy
+PDB format use mmCIF. Associated EMDB maps use the archive's recommended contour
+level when available. A metadata-service error still allows a direct download,
+while a confirmed missing entry disables it. Recent IDs and keyword queries
+share the history menu. Closing the dialog discards late metadata results.
 The shared console also accepts `fetch_emdb EMD-1010` or a PDB identifier with
 an associated EM map. It uses the archive's recommended contour when available;
 an explicit `level` overrides it. `mapCenterPolicy` controls whether loading or
