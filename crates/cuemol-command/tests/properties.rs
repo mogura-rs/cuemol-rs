@@ -921,3 +921,30 @@ fn transient_numeric_edits_restore_defaults_and_leave_other_properties_alone() {
     state.destroy_renderer_in_object(object, renderer).unwrap();
     assert!(cuemol_command::prepare_property_edit(&mut state, &mut camera, &args).is_err());
 }
+
+#[test]
+fn adding_a_density_unit_cell_preserves_the_view() {
+    let mut state = DesktopAppState::new();
+    let sid = state.new_scene("cell", true).result_scene;
+    let mut map = cuemol_xtal::DensityMap::new();
+    map.set_map_byte_array(&[0, 1, 2, 3, 4, 5, 6, 7], [2; 3], 0., 7., 3.5, 2.);
+    map.set_map_params([0; 3], [2; 3]);
+    map.set_xtal_params(2., 2., 2., 90., 90., 90.);
+    let uid = state.add_density_map(sid, "em", map);
+    state.set_density_map_type(uid, "em").unwrap();
+    let mut camera = Camera::new();
+    camera.set_center(Vector4::new3(11., 22., 33.));
+    camera.set_zoom(17.);
+    let before = camera.clone();
+    call(
+        &mut state,
+        &mut camera,
+        "create_renderer",
+        json!({"objId":uid.get(),"rendererType":"*unitcell","name":"unitcell"}),
+    );
+    assert_eq!(camera, before);
+    assert_eq!(
+        state.density_map_summary(uid).unwrap().renderers[0].renderer_type,
+        "*unitcell"
+    );
+}

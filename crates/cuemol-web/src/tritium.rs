@@ -185,7 +185,13 @@ impl App {
                 );
             }
         }
+        self.density_panel.rects.clear();
         self.shell_sidebar(ctx);
+        if self.density_panel.rects.is_empty() {
+            for (tool, args) in self.density_panel.cancel() {
+                self.call(tool, args);
+            }
+        }
         if self.activity == Some(Activity::Actions) {
             for (tool, args) in self.inspector.cancel_numeric_edit() {
                 self.call(tool, args);
@@ -844,14 +850,15 @@ impl App {
                                 Activity::View => self.view_controls(ui),
                                 Activity::Selection => self.selection_controls(ui),
                                 Activity::Crystal => {
-                                    for (label, tool) in [
-                                        ("Fetch map…", "fetch_map"),
-                                        ("Create density renderer…", "create_renderer"),
-                                        ("Map properties…", "list_node_props"),
-                                    ] {
-                                        if ui.button(label).clicked() {
-                                            self.select_tool(tool);
-                                        }
+                                    let changes = self.density_panel.show(
+                                        ui,
+                                        &self.state,
+                                        &self.camera,
+                                        None,
+                                    );
+                                    self.ui_rects.extend(self.density_panel.rects.clone());
+                                    for (tool, args) in changes {
+                                        self.call(tool, args);
                                     }
                                 }
                                 Activity::Actions => {

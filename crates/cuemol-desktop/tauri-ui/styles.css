@@ -4707,3 +4707,10 @@ svg { flex: none; }
 .selection-builder-operations { display:grid; grid-template-columns:1fr 1fr; gap:4px; }
 .selection-builder-popup button.active,.selection-builder-inline button.active { background:var(--selection); }
 .selection-builder-status.error { color:#f59191; opacity:1; }
+
+.density-number { display: grid; grid-template-columns: 56px minmax(0, 1fr) auto; align-items: center; gap: 6px; }
+.density-number input { min-width: 0; width: 100%; }
+.density-color-row { display: flex; align-items: center; gap: 6px; }
+.density-color-row input[type="text"] { min-width: 0; flex: 1; }
+.density-color-row input[type="color"] { width: 28px; }
+.density-level-hint { color: var(--text-muted); font-size: 11px; }

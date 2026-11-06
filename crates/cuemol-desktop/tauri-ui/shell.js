@@ -58,6 +58,7 @@ function setCueMolPaletteCollapsed(collapsed, save = true) {
 }
 
 function selectCueMolActivity(name, toggle = true) {
+  void cancelCueMolNumericDrag();
   cueMolActivity = toggle && cueMolActivity === name ? null : name;
   document.querySelectorAll("[data-activity]").forEach((item) => {
     const active = item.dataset.activity === cueMolActivity;
@@ -100,20 +101,20 @@ function cancelCueMolNumericDrag() {
   return cueMolNumericDrag?.finish('abort');
 }
 
-function attachCueMolNumericDrag(input, label, row, commit) {
+function attachCueMolNumericDrag(input, label, row, commit, owner = cueMolPropertyInspector) {
   label.style.cursor = 'ew-resize';
   const start = event => {
     if (event.button !== 0 || input.disabled || input.value === '' || !Number.isFinite(Number(input.value)) || cueMolNumericDrag) return;
     if (event.target === input && event.clientX >= input.getBoundingClientRect().right - 18) return;
     event.preventDefault();
-    const inspector = cueMolPropertyInspector;
+    const inspector = owner;
     const original = row.value;
     const args = {...inspector.target, sceneId:snapshot.activeSceneUid, prop:row.key, originalValue:original, originalWasDefault:Boolean(row.isdefault)};
-    const drag = {key:inspector.key, value:original, moved:false, ending:false, pending:null, running:null, finish:null};
+    const drag = {owner, key:inspector.key, value:original, moved:false, ending:false, pending:null, running:null, finish:null};
     cueMolNumericDrag = drag;
     const apply = async (mode, value) => {
       const result = await invoke('inspector_request', {tool:'edit_node_property', args:{...args, mode, value}});
-      if (result.snapshot && cueMolNumericDrag === drag) {
+      if (result.snapshot && cueMolNumericDrag === drag && owner.key === drag.key) {
         snapshot = result.snapshot;
         void renderViewport();
       }
@@ -207,7 +208,7 @@ function renderTritiumInspector(owner, camera, style) {
   const target = context || renderer || owner || camera || style;
   const key = target ? `${snapshot?.activeSceneUid}:${workspaceSelectionKind}:${target.uid ?? target.name}` : "";
   if (key !== cueMolInspectorTarget) {
-    void cancelCueMolNumericDrag();
+    if (cueMolNumericDrag?.owner === cueMolPropertyInspector) void cancelCueMolNumericDrag();
     cueMolSelectionPicker?.cancel();
     cueMolInspectorTarget = key;
     cueMolInspectorClosed = false;
@@ -272,7 +273,7 @@ async function editCueMolProperty(tool, args) {
 }
 
 function paintCueMolProperties() {
-  if (cueMolNumericDrag && !cueMolNumericDrag.ending) { void cancelCueMolNumericDrag(); return; }
+  if (cueMolNumericDrag?.owner === cueMolPropertyInspector && !cueMolNumericDrag.ending) { void cancelCueMolNumericDrag(); return; }
   const inspector = cueMolPropertyInspector;
   const fields = document.getElementById('inspector-fields');
   const active = fields.contains(document.activeElement) ? document.activeElement : null;
@@ -325,7 +326,7 @@ function inspectorDashValue(value) {
 }
 
 function paintCueMolPropertyRows() {
-  if (cueMolNumericDrag && !cueMolNumericDrag.ending) { void cancelCueMolNumericDrag(); return; }
+  if (cueMolNumericDrag?.owner === cueMolPropertyInspector && !cueMolNumericDrag.ending) { void cancelCueMolNumericDrag(); return; }
   const inspector = cueMolPropertyInspector;
   const host = document.querySelector('.inspector-property-rows');
   if (!host) return;

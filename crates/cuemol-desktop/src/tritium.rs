@@ -25,8 +25,14 @@ impl GuiApplication {
                 self.activity.map(Activity::key).unwrap_or("none"),
             );
         }
+        self.density_panel.rects.clear();
         if self.show_workspace {
             self.tritium_sidebar(ctx, camera);
+        }
+        if self.density_panel.rects.is_empty() {
+            for (tool, args) in self.density_panel.cancel() {
+                self.tritium_command(tool, args, camera);
+            }
         }
         if let Some(context) = &mut self.inspector_context {
             context.id = if context.kind == "scene" {
@@ -336,6 +342,9 @@ impl GuiApplication {
         }
         if cuemol_command::tool_changes_scene(name) {
             for (tool, args) in self.inspector.cancel_numeric_edit() {
+                self.tritium_command(tool, args, camera);
+            }
+            for (tool, args) in self.density_panel.cancel() {
                 self.tritium_command(tool, args, camera);
             }
         }

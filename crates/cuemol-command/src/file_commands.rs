@@ -242,6 +242,18 @@ pub(crate) fn apply_map_renderer_center_policy(
     if state.density_map_kind(map_uid).is_none() {
         return Ok(());
     }
+    let summary = state
+        .density_map_summary(map_uid)
+        .ok_or_else(|| CueMolError::not_found("density map"))?;
+    let is_unit_cell = |id: &Uid| {
+        summary.renderers.iter().any(|renderer| {
+            renderer.uid == *id
+                && matches!(renderer.renderer_type.as_str(), "*unitcell" | "unitcell")
+        })
+    };
+    if !renderers.is_empty() && renderers.iter().all(is_unit_cell) {
+        return Ok(());
+    }
     let move_view = match policy {
         "auto" => state
             .density_map_kind(map_uid)
@@ -255,7 +267,9 @@ pub(crate) fn apply_map_renderer_center_policy(
         *camera = view.camera();
     } else {
         for &renderer in renderers {
-            state.set_density_renderer_center(map_uid, renderer, camera.center())?;
+            if !is_unit_cell(&renderer) {
+                state.set_density_renderer_center(map_uid, renderer, camera.center())?;
+            }
         }
     }
     Ok(())

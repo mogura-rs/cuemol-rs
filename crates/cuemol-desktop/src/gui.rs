@@ -1460,6 +1460,7 @@ struct GuiApplication {
     density_solid_mesh: Option<cuemol_render::RenderMesh>,
     /// Renderer chosen independently in the Density map panel.
     densitymap_target: Option<(cuemol_core::Uid, cuemol_core::Uid)>,
+    density_panel: cuemol_ui::density::DensityPanel,
     /// Relative degree accumulators shown by the View panel rotation fake-dials.
     view_rotation_delta: Vec3,
     /// Molecular-surface (SES) display: the toggle + a cached mesh (the SES is
@@ -4943,6 +4944,7 @@ impl GuiApplication {
             show_density_solid: false,
             density_solid_mesh: None,
             densitymap_target: None,
+            density_panel: Default::default(),
             view_rotation_delta: Vec3::ZERO,
             show_surface: false,
             surface_mesh: None,
@@ -12417,340 +12419,21 @@ impl GuiApplication {
 
     /// Density-map renderer controls (`densitymap-panel.xul`).
     fn densitymap_section(&mut self, ui: &mut egui::Ui, camera: &mut CameraController) {
-        let maps = self.state.active_density_map_summaries();
-        let targets = maps
-            .iter()
-            .flat_map(|map| {
-                map.renderers
-                    .iter()
-                    .filter(|renderer| {
-                        matches!(
-                            renderer.renderer_type.as_str(),
-                            "contour" | "isosurf" | "gpu_mapmesh" | "gpu_mapvol"
-                        )
-                    })
-                    .map(|renderer| {
-                        (
-                            (map.uid, renderer.uid),
-                            format!("{} → {}", map.name, renderer.name),
-                        )
-                    })
-            })
-            .collect::<Vec<_>>();
-        let workspace_target = match self.workspace_aux_selection {
-            Some(WorkspaceAuxSelection::DensityMap {
-                map_uid,
-                renderer_uid: Some(renderer_uid),
-                ..
-            }) => Some((map_uid, renderer_uid)),
-            _ => None,
-        };
-        let mut selected = self
+        let preferred = self
             .densitymap_target
-            .filter(|target| targets.iter().any(|(candidate, _)| candidate == target))
-            .or_else(|| {
-                workspace_target
-                    .filter(|target| targets.iter().any(|(candidate, _)| candidate == target))
-            })
-            .or_else(|| targets.first().map(|(target, _)| *target));
-        let mut menu_change: Option<(&str, String)> = None;
-        ui.horizontal(|ui| {
-            let selected_name = targets
-                .iter()
-                .find(|(target, _)| Some(*target) == selected)
-                .map(|(_, name)| name.as_str())
-                .unwrap_or("(none)");
-            ui.add_enabled_ui(!targets.is_empty(), |ui| {
-                egui::ComboBox::from_id_salt("densitymap-renderer-target")
-                    .selected_text(selected_name)
-                    .show_ui(ui, |ui| {
-                        for (target, name) in &targets {
-                            ui.selectable_value(&mut selected, Some(*target), name);
-                        }
-                    });
+            .or_else(|| match self.workspace_aux_selection {
+                Some(WorkspaceAuxSelection::DensityMap {
+                    map_uid,
+                    renderer_uid: Some(renderer_uid),
+                    ..
+                }) => Some((map_uid, renderer_uid)),
+                _ => None,
             });
-            let selected_renderer = selected.and_then(|(map_uid, renderer_uid)| {
-                maps.iter().find(|map| map.uid == map_uid).and_then(|map| {
-                    map.renderers
-                        .iter()
-                        .find(|renderer| renderer.uid == renderer_uid)
-                })
-            });
-            let use_abslevel = selected_renderer
-                .and_then(|renderer| renderer.specific.get("use_abslevel"))
-                .is_some_and(|value| value_is_true(value));
-            let is_percent = selected_renderer
-                .and_then(|r| r.specific.get("map_type_resolved"))
-                .is_some_and(|kind| kind == "em");
-            let color_mode = selected_renderer
-                .and_then(|renderer| renderer.specific.get("colormode"))
-                .map(String::as_str)
-                .unwrap_or("solid");
-            ui.add_enabled_ui(selected_renderer.is_some(), |ui| {
-                ui.menu_button("▾", |ui| {
-                    if ui
-                        .selectable_label(
-                            !use_abslevel,
-                            if is_percent {
-                                "Use top-percent contour level"
-                            } else {
-                                "Use sigma contour level"
-                            },
-                        )
-                        .clicked()
-                    {
-                        menu_change = Some(("use_abslevel", "false".to_string()));
-                        ui.close();
-                    }
-                    if ui
-                        .selectable_label(use_abslevel, "Use absolute contour level")
-                        .clicked()
-                    {
-                        menu_change = Some(("use_abslevel", "true".to_string()));
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui
-                        .selectable_label(color_mode == "solid", "Solid coloring")
-                        .clicked()
-                    {
-                        menu_change = Some(("colormode", "solid".to_string()));
-                        ui.close();
-                    }
-                    if ui
-                        .selectable_label(color_mode == "multigrad", "Multi gradient")
-                        .clicked()
-                    {
-                        menu_change = Some(("colormode", "multigrad".to_string()));
-                        ui.close();
-                    }
-                });
-            });
-        });
-        self.densitymap_target = selected;
-        let Some((map_uid, renderer_uid)) = selected else {
-            ui.weak(if maps.is_empty() {
-                "No density map loaded."
-            } else {
-                "No density renderer."
-            });
-            return;
-        };
-        let Some(map) = maps.iter().find(|map| map.uid == map_uid).cloned() else {
-            return;
-        };
-        let Some(renderer) = map
-            .renderers
-            .iter()
-            .find(|renderer| renderer.uid == renderer_uid)
-            .cloned()
-        else {
-            return;
-        };
-        let Some(mut draft) =
-            NativeRendererProperties::from_density_state(&self.state, map_uid, renderer_uid)
-        else {
-            return;
-        };
-        let mut changed = false;
-        if let Some((name, value)) = menu_change {
-            draft.specific.insert(name.to_string(), value);
-            changed = true;
-        }
-
-        let has_unit_cell = map
-            .renderers
-            .iter()
-            .any(|renderer| matches!(renderer.renderer_type.as_str(), "*unitcell" | "unitcell"));
-        ui.horizontal(|ui| {
-            if ui.button("Redraw").clicked() {
-                self.redraw_densitymap_renderer(map_uid, renderer_uid, camera.target);
-            }
-            if ui
-                .add_enabled(!has_unit_cell, egui::Button::new("Cell"))
-                .clicked()
-            {
-                self.show_densitymap_cell(map_uid);
-            }
-            if draft.specific_value("colormode", "solid") == "multigrad" {
-                if ui.button("Edit color...").clicked() {
-                    self.coloring_target = Some(NativeColoringTarget::DensityRenderer {
-                        map_uid,
-                        renderer_uid,
-                    });
-                    self.coloring_gradient_selected = None;
-                    self.set_status("Density multi-gradient selected in Coloring panel");
-                }
-            } else {
-                let color = draft
-                    .specific
-                    .entry("color".to_string())
-                    .or_insert_with(|| {
-                        if renderer.renderer_type == "contour" {
-                            "#0000ff".to_string()
-                        } else {
-                            "#00ff00".to_string()
-                        }
-                    });
-                changed |= native_coloring_color_ui(ui, "", color);
-            }
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("Transp:");
-            changed |= ui
-                .add(egui::Slider::new(&mut draft.alpha, 0.0..=1.0).step_by(0.1))
-                .changed();
-        });
-
-        let use_abslevel = draft
-            .specific
-            .get("use_abslevel")
-            .is_some_and(|value| value_is_true(value));
-        let scalar = |key: &str, fallback: f64| {
-            renderer
-                .specific
-                .get(key)
-                .and_then(|v| v.parse::<f64>().ok())
-                .unwrap_or(fallback)
-        };
-        let is_percent = renderer
-            .specific
-            .get("map_type_resolved")
-            .is_some_and(|kind| kind == "em");
-        let mut level = if use_abslevel {
-            scalar("level", 0.)
-        } else {
-            scalar("siglevel_effective", 1.1)
-        };
-        let mut level_min = scalar(
-            if use_abslevel {
-                "ui_abslevel_min"
-            } else {
-                "ui_level_min"
-            },
-            -10.,
-        );
-        let mut level_max = scalar(
-            if use_abslevel {
-                "ui_abslevel_max"
-            } else {
-                "ui_level_max"
-            },
-            10.,
-        );
-        let enabled = level_min.is_finite() && level_max.is_finite() && level_max > level_min;
-        if !enabled {
-            level_min = level - 1.;
-            level_max = level + 1.;
-        }
-        let range = (level_max - level_min).abs();
-        let step = if use_abslevel {
-            self.state
-                .density_quantization_step(map_uid)
-                .max(10.0_f64.powf((range / 100.).log10().floor()))
-        } else if is_percent {
-            0.01
-        } else {
-            0.1
-        };
-        ui.horizontal(|ui| {
-            ui.label("Level:");
-            let response = ui.add_enabled(
-                enabled,
-                egui::Slider::new(&mut level, level_min..=level_max)
-                    .step_by(step)
-                    .clamping(egui::SliderClamping::Edits)
-                    .suffix(if use_abslevel {
-                        ""
-                    } else if is_percent {
-                        " %"
-                    } else {
-                        " σ"
-                    }),
-            );
-            if response.changed() {
-                let native = if use_abslevel {
-                    self.state
-                        .density_native_level_from_absolute(map_uid, level)
-                        .unwrap_or(0.)
-                } else {
-                    level
-                };
-                draft.density_level_edited = true;
-                draft
-                    .specific
-                    .insert("siglevel".to_string(), native.to_string());
-                changed = true;
-            }
-        });
-
-        let max_extent = renderer
-            .specific
-            .get("maxExtent")
-            .and_then(|value| value.parse::<f64>().ok())
-            .filter(|value| value.is_finite() && *value > 0.0)
-            .unwrap_or_else(|| map.radius.max(1.0));
-        let mut extent = draft
-            .specific_value("extent", "15")
-            .parse::<f64>()
-            .unwrap_or(15.0)
-            .min(max_extent);
-        ui.horizontal(|ui| {
-            ui.label("Extent:");
-            if ui
-                .add(
-                    egui::Slider::new(&mut extent, 0.0..=max_extent)
-                        .step_by(1.0)
-                        .suffix(" Å"),
-                )
-                .changed()
-            {
-                draft
-                    .specific
-                    .insert("extent".to_string(), extent.to_string());
-                changed = true;
-            }
-        });
-
-        if changed {
-            if let Err(error) = self.apply_renderer_properties(&draft) {
-                self.set_status(format!("Density map properties error: {error}"));
-            }
-        }
-    }
-
-    fn redraw_densitymap_renderer(
-        &mut self,
-        map_uid: cuemol_core::Uid,
-        renderer_uid: cuemol_core::Uid,
-        center: Vec3,
-    ) {
-        let Some(map) = self.state.density_map_summary(map_uid) else {
-            return;
-        };
-        let current = map
-            .renderers
-            .iter()
-            .find(|renderer| renderer.uid == renderer_uid)
-            .and_then(|renderer| renderer.specific.get("center"))
-            .and_then(|value| parse_densitymap_center(value));
-        if current.is_some_and(|current| current.distance(center) < 0.1) {
-            return;
-        }
-        let undo = self.capture_undo();
-        match self.state.set_density_renderer_center(
-            map_uid,
-            renderer_uid,
-            Vector4::new3(center.x as f64, center.y as f64, center.z as f64),
-        ) {
-            Ok(()) => {
-                self.push_undo_snapshot(undo);
-                self.state.mark_scene_modified(map.scene_uid);
-                self.rebuild_snapshot();
-                self.set_status("Density map redrawn");
-            }
-            Err(error) => self.set_status(format!("Density map redraw error: {error}")),
+        let view = camera.to_qsys_camera("__current");
+        let changes = self.density_panel.show(ui, &self.state, &view, preferred);
+        self.densitymap_target = self.density_panel.target;
+        for (tool, args) in changes {
+            self.tritium_command(tool, args, camera);
         }
     }
 
@@ -37513,6 +37196,105 @@ mod tests {
     }
 
     #[test]
+    fn native_density_drag_previews_cancels_and_commits_one_undo() {
+        fn frame(
+            app: &mut GuiApplication,
+            camera: &mut CameraController,
+            ctx: &egui::Context,
+            events: Vec<egui::Event>,
+        ) {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(300., 550.),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default()
+                        .show(ctx, |ui| app.densitymap_section(ui, camera));
+                },
+            );
+        }
+        let mut app = GuiApplication::new();
+        let scene = app.state.active_scene().unwrap();
+        let map = app
+            .state
+            .add_density_map(scene, "map", synthetic_gaussian_map());
+        let renderer = app.state.add_density_renderer(map, "contour").unwrap();
+        let mut camera = CameraController::default();
+        let ctx = egui::Context::default();
+        frame(&mut app, &mut camera, &ctx, vec![]);
+        frame(&mut app, &mut camera, &ctx, vec![]);
+        let [x, y, w, h] = app.density_panel.rects["Density opacity"];
+        let start = egui::pos2(x + w * 0.5, y + h * 0.5);
+        let end = start - egui::vec2(6., 0.);
+        let pointer = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let alpha =
+            |app: &GuiApplication| app.state.density_map_summary(map).unwrap().renderers[0].alpha;
+        for abort in [true, false] {
+            frame(
+                &mut app,
+                &mut camera,
+                &ctx,
+                vec![egui::Event::PointerMoved(start), pointer(start, true)],
+            );
+            frame(
+                &mut app,
+                &mut camera,
+                &ctx,
+                vec![egui::Event::PointerMoved(end)],
+            );
+            frame(
+                &mut app,
+                &mut camera,
+                &ctx,
+                vec![egui::Event::PointerMoved(end - egui::vec2(2., 0.))],
+            );
+            assert!(alpha(&app) < 1.);
+            assert!(app.undo_stack.is_empty());
+            if abort {
+                frame(
+                    &mut app,
+                    &mut camera,
+                    &ctx,
+                    vec![egui::Event::Key {
+                        key: egui::Key::Escape,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                );
+            }
+            frame(&mut app, &mut camera, &ctx, vec![pointer(end, false)]);
+            frame(&mut app, &mut camera, &ctx, vec![]);
+            if abort {
+                assert_eq!(alpha(&app), 1.);
+                assert!(app.undo_stack.is_empty());
+                assert!(!app
+                    .state
+                    .auxiliary_renderer_explicit_properties(map, renderer)
+                    .unwrap()
+                    .contains("alpha"));
+            }
+        }
+        let committed = alpha(&app);
+        assert_eq!(app.undo_stack.len(), 1);
+        app.undo(&mut camera);
+        assert_eq!(alpha(&app), 1.);
+        app.redo(&mut camera);
+        assert_eq!(alpha(&app), committed);
+    }
+
+    #[test]
     fn native_densitymap_panel_edits_redraws_and_adds_cell_with_undo() {
         let mut app = GuiApplication::new();
         let scene_uid = app.state.active_scene().unwrap();
@@ -37573,7 +37355,7 @@ mod tests {
         assert_eq!(renderer.specific["colormode"], "multigrad");
 
         let center = Vec3::new(3.0, 4.0, 5.0);
-        app.redraw_densitymap_renderer(map_uid, renderer_uid, center);
+        assert!(app.try_tritium_command("set_node_prop", serde_json::json!({"nodeType":"renderer", "nodeId":renderer_uid.get(), "prop":"center", "value":"(3,4,5)"}), &mut camera));
         assert_eq!(
             parse_densitymap_center(
                 &app.state.density_map_summary(map_uid).unwrap().renderers[0].specific["center"]
@@ -37581,7 +37363,7 @@ mod tests {
             Some(center)
         );
         let undo_count = app.undo_stack.len();
-        app.redraw_densitymap_renderer(map_uid, renderer_uid, center);
+        assert!(app.try_tritium_command("set_node_prop", serde_json::json!({"nodeType":"renderer", "nodeId":renderer_uid.get(), "prop":"center", "value":"(3,4,5)"}), &mut camera));
         assert_eq!(app.undo_stack.len(), undo_count);
         app.undo(&mut camera);
         assert_eq!(

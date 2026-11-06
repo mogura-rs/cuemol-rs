@@ -9615,6 +9615,7 @@ function syncSidePanelVisibility() {
 
 function closeSidePanelCard(card) {
   if (!card) return;
+  if (card.contains(densityContent)) void cancelCueMolNumericDrag();
   card.hidden = true;
   syncSidePanelVisibility();
   saveSidePanelState();
@@ -14322,7 +14323,7 @@ function coloringTargets() {
         kind: "densityRenderer",
         objectUid: map.uid,
         rendererUid: renderer.uid,
-        name: `${map.name} → ${renderer.name}`,
+        name: `${map.name}/${renderer.name}`,
         state: renderer,
       });
     }
@@ -15380,7 +15381,7 @@ function densityPanelTargets() {
         key: `${map.uid}:${renderer.uid}`,
         map,
         renderer,
-        name: `${map.name} → ${renderer.name}`,
+        name: `${map.name}/${renderer.name}`,
       })),
   );
 }
@@ -15401,226 +15402,122 @@ function selectedDensityPanelTarget() {
   return target;
 }
 
-function densityPanelProperties(target, changes = {}) {
-  const { map, renderer } = target;
-  return {
-    objectUid: map.uid,
-    rendererUid: renderer.uid,
-    name: renderer.name,
-    selection: renderer.selection,
-    visible: renderer.visible,
-    locked: renderer.locked,
-    material: renderer.material,
-    alpha: changes.alpha ?? renderer.alpha,
-    edgeType: renderer.edgeType,
-    edgeWidth: renderer.edgeWidth,
-    edgeColor: renderer.edgeColor,
-    lineWidth: renderer.lineWidth,
-    detail: renderer.detail,
-    bondWidth: renderer.bondWidth,
-    sphereRadius: renderer.sphereRadius,
-    showRing: renderer.showRing,
-    ringThickness: renderer.ringThickness,
-    ringColor: renderer.ringColor,
-    specific: { ...(changes.specific || {}) },
-  };
+const cueMolDensityEditor = {key:'', target:null, source:null, rows:[], serial:0, error:''};
+
+async function editDensityProperty(target, prop, value) {
+  await cancelCueMolNumericDrag();
+  try {
+    const result = await invoke('inspector_request', {tool:'set_node_prop', args:{nodeType:'renderer',nodeId:target.renderer.uid,prop,value:String(value)}});
+    snapshot = result.snapshot;
+    cueMolDensityEditor.error = '';
+    renderShell();
+    void renderViewport();
+  } catch (error) { cueMolDensityEditor.error=String(error); renderDensity(); }
 }
 
-function updateDensityPanelRenderer(target, changes) {
-  return mutate("set_density_renderer_properties", {
-    properties: densityPanelProperties(target, changes),
+function densityPanelNumber(target, labelText, prop, value, minimum, maximum, step, unit, {enabled=true,realtime=false}={}) {
+  const row=document.createElement('div'); row.className='density-number';
+  const label=document.createElement('label'); label.textContent=labelText;
+  const input=document.createElement('input'); input.type='number';
+  input.id=`density-number-${prop}`; label.htmlFor=input.id;
+  input.setAttribute('aria-label',`Density ${prop==='alpha'?'opacity':prop==='siglevel'?'level':prop}`);
+  input.min=minimum; input.max=maximum; input.step=step/10; input.value=value;
+  const metadata=cueMolDensityEditor.rows.find(row=>row.key===prop);
+  input.disabled=!enabled || realtime && !metadata;
+  const commit=value=>{
+    if (!Number.isFinite(Number(value)) || value==='') return;
+    const clamped=Math.max(minimum,Math.min(maximum,Number(value)));
+    if (clamped!==Number(input.dataset.initialValue)) void editDensityProperty(target,prop,String(clamped));
+  };
+  input.dataset.initialValue=String(value);
+  input.addEventListener('change',()=>{ if (!cueMolNumericDrag) commit(input.value); });
+  input.addEventListener('keydown',event=>{
+    if(event.isComposing)return;
+    if(event.key==='Escape'){event.preventDefault();input.value=String(value);input.blur();}
+    else if(event.key==='Enter'){event.preventDefault();input.blur();}
   });
-}
-
-function openDensityGradientEditor(target) {
-  coloringTargetKey = `densityRenderer:${target.map.uid}:${target.renderer.uid}`;
-  coloringPaintSelectedIndex = -1;
-  coloringGradientSelectedIndex = -1;
-  const card = sidePanelCard("Coloring");
-  if (!card) return;
-  card.hidden = false;
-  card.classList.add("open");
-  card.querySelector("[data-panel-toggle]")?.setAttribute("aria-expanded", "true");
-  const disclosure = card.querySelector(".disclosure");
-  if (disclosure) disclosure.textContent = "▾";
-  syncSidePanelVisibility();
-  renderColoring();
-  card.scrollIntoView({ block: "nearest" });
-}
-
-function densityPanelRange(labelText, value, minimum, maximum, step, unit, onChange) {
-  const row = document.createElement("label");
-  row.className = "density-range";
-  const label = document.createElement("span");
-  label.textContent = labelText;
-  const slider = document.createElement("input");
-  slider.type = "range";
-  slider.min = String(minimum);
-  slider.max = String(maximum);
-  slider.step = String(step);
-  slider.value = String(Math.min(maximum, Math.max(minimum, value)));
-  const output = document.createElement("output");
-  const decimals = step >= 1 ? 0 : Math.min(6, Math.max(1, -Math.floor(Math.log10(step))));
-  const refresh = () => {
-    output.textContent = `${Number(slider.value).toFixed(decimals)}${unit}`;
-  };
-  refresh();
-  slider.addEventListener("input", refresh);
-  slider.addEventListener("change", () => onChange(Number(slider.value)));
-  row.append(label, slider, output);
-  return { row, slider };
+  attachCueMolNumericDrag(input,label,{key:prop,value:String(value),type:'real',isdefault:metadata?.isdefault,schema:{min:minimum,max:maximum,step,realtime}},commit,cueMolDensityEditor);
+  row.append(label,input);
+  if(unit){const suffix=document.createElement('span');suffix.textContent=unit;row.append(suffix);}
+  return row;
 }
 
 function renderDensity() {
-  densityContent.replaceChildren();
   const targets = densityPanelTargets();
   const target = selectedDensityPanelTarget();
-  const selectorRow = document.createElement("div");
-  selectorRow.className = "density-target-row";
-  const selector = document.createElement("select");
-  selector.className = "density-target";
-  selector.disabled = targets.length === 0;
-  if (targets.length === 0) {
-    selector.append(new Option("(none)", ""));
-  } else {
-    for (const candidate of targets) selector.append(new Option(candidate.name, candidate.key));
-    selector.value = target.key;
+  const editor=cueMolDensityEditor;
+  const key=target?`${snapshot.activeSceneUid}:${target.key}`:'';
+  if(cueMolNumericDrag?.owner===editor && !cueMolNumericDrag.ending) {
+    if(editor.key!==key)void cancelCueMolNumericDrag();
+    else return;
   }
-  selector.addEventListener("change", () => {
-    densityPanelTargetKey = selector.value || null;
-    renderDensity();
-  });
-
-  const options = document.createElement("details");
-  options.className = "density-options";
-  const optionsSummary = document.createElement("summary");
-  optionsSummary.setAttribute("aria-label", "Density map options");
-  const optionsPopup = document.createElement("div");
-  optionsPopup.className = "density-options-popup";
-  if (target) {
-    const useAbsolute = target.renderer.specific.use_abslevel === "true";
-    const colorMode = target.renderer.specific.colormode || "solid";
-    for (const [label, key, value, selected] of [
-      [target.renderer.specific.map_type_resolved === "em" ? "Use top-percent contour level" : "Use sigma contour level", "use_abslevel", "false", !useAbsolute],
-      ["Use absolute contour level", "use_abslevel", "true", useAbsolute],
-      ["Solid coloring", "colormode", "solid", colorMode === "solid"],
-      ["Multi gradient", "colormode", "multigrad", colorMode === "multigrad"],
-    ]) {
-      const item = button(label, selected ? "selected" : "", async () => {
-        options.open = false;
-        await updateDensityPanelRenderer(target, { specific: { [key]: value } });
-      });
-      optionsPopup.append(item);
-    }
+  const targetChanged=editor.key!==key;
+  if(targetChanged){editor.rows=[];editor.source=null;editor.key=key;editor.error='';editor.serial+=1;}
+  editor.target=target?{nodeType:'renderer',nodeId:target.renderer.uid}:null;
+  if(target && editor.source!==snapshot){
+    editor.source=snapshot;
+    const serial=++editor.serial;
+    void invoke('inspector_request',{tool:'list_node_props',args:editor.target}).then(result=>{
+      if(editor.serial!==serial || editor.key!==key)return;
+      editor.rows=result.properties||[];
+      renderDensity();
+    }).catch(error=>{if(editor.serial===serial){editor.error=String(error);renderDensity();}});
   }
-  options.classList.toggle("disabled", !target);
-  optionsSummary.addEventListener("click", (event) => {
-    if (!target) event.preventDefault();
-  });
-  options.append(optionsSummary, optionsPopup);
-  selectorRow.append(selector, options);
-  densityContent.append(selectorRow);
-
-  if (!target) {
-    const empty = document.createElement("p");
-    empty.textContent = snapshot.densityMaps.length
-      ? "No density renderer."
-      : "No density map loaded.";
-    densityContent.append(empty);
-    return;
+  const focused=!targetChanged&&densityContent.contains(document.activeElement)?document.activeElement:null;
+  const optionsOpen=!targetChanged&&Boolean(densityContent.querySelector('.density-options')?.open);
+  const draft=focused?.id?{id:focused.id,value:focused.value,initial:focused.dataset.initialValue}:null;
+  densityContent.replaceChildren();
+  const selectorRow=document.createElement('div');selectorRow.className='density-target-row';
+  const selector=document.createElement('select');selector.className='density-target';selector.setAttribute('aria-label','Density renderer');selector.disabled=!targets.length;
+  if(!targets.length)selector.append(new Option('(none)',''));
+  else {for(const candidate of targets)selector.append(new Option(candidate.name,candidate.key));selector.value=target.key;}
+  selector.addEventListener('change',async()=>{await cancelCueMolNumericDrag();densityPanelTargetKey=selector.value||null;renderDensity();});
+  const options=document.createElement('details');options.className='density-options';options.open=optionsOpen;
+  const optionsSummary=document.createElement('summary');optionsSummary.setAttribute('aria-label','Density map options');
+  const optionsPopup=document.createElement('div');optionsPopup.className='density-options-popup';
+  if(target){
+    const absolute=target.renderer.specific.use_abslevel==='true';
+    const solid=(target.renderer.specific.colormode||'solid')==='solid';
+    for(const [label,prop,value,selected] of [
+      [target.renderer.specific.map_type_resolved==='em'?'Use top-percent contour level':'Use sigma contour level','use_abslevel','false',!absolute],
+      ['Use absolute contour level','use_abslevel','true',absolute],
+      ['Solid color','colormode','solid',solid],
+    ])optionsPopup.append(button(label,selected?'selected':'',()=>{options.open=false;if(!selected)void editDensityProperty(target,prop,value);}));
   }
-
-  const { map, renderer } = target;
-  const controls = document.createElement("div");
-  controls.className = "density-controls";
-  const actions = document.createElement("div");
-  actions.className = "density-actions";
-  actions.append(
-    button("Redraw", "", () =>
-      mutate("redraw_density_renderer", { mapUid: map.uid, rendererUid: renderer.uid }),
-    ),
-  );
-  const hasUnitCell = map.renderers.some((item) =>
-    ["*unitcell", "unitcell"].includes(item.rendererType),
-  );
-  const cell = button("Cell", "", () =>
-    mutate("show_unit_cell", { targetKind: "density", objectUid: map.uid }),
-  );
-  cell.disabled = hasUnitCell;
-  actions.append(cell);
-  if ((renderer.specific.colormode || "solid") === "multigrad") {
-    actions.append(button("Edit color...", "density-color-edit", () => openDensityGradientEditor(target)));
-  } else {
-    const color = document.createElement("input");
-    color.type = "color";
-    const fallback = renderer.rendererType === "contour" ? "#0000ff" : "#00ff00";
-    color.value = /^#[0-9a-f]{6}$/i.test(renderer.specific.color || "")
-      ? renderer.specific.color
-      : fallback;
-    color.setAttribute("aria-label", "Density color");
-    color.addEventListener("change", () =>
-      updateDensityPanelRenderer(target, { specific: { color: color.value } }),
-    );
-    actions.append(color);
-  }
-  controls.append(actions);
-
-  const transparency = densityPanelRange(
-    "Transp:",
-    renderer.alpha,
-    0,
-    1,
-    0.1,
-    "",
-    (value) => updateDensityPanelRenderer(target, { alpha: value }),
-  );
-  controls.append(transparency.row);
-
-  const useAbsolute = renderer.specific.use_abslevel === "true";
-  const isPercent = renderer.specific.map_type_resolved === "em";
-  const currentLevel = Number(renderer.specific[useAbsolute ? "level" : "siglevel_effective"] ?? 1.1);
-  let levelMinimum = Number(renderer.specific[useAbsolute ? "ui_abslevel_min" : "ui_level_min"] ?? -10);
-  let levelMaximum = Number(renderer.specific[useAbsolute ? "ui_abslevel_max" : "ui_level_max"] ?? 10);
-  const levelEnabled = Number.isFinite(levelMinimum) && Number.isFinite(levelMaximum) && levelMaximum > levelMinimum;
-  if (!Number.isFinite(levelMinimum) || !Number.isFinite(levelMaximum) || levelMinimum === levelMaximum) {
-    levelMinimum = -10;
-    levelMaximum = 10;
-  }
-  if (levelMinimum > levelMaximum) [levelMinimum, levelMaximum] = [levelMaximum, levelMinimum];
-  const levelRange = Math.abs(levelMaximum - levelMinimum);
-  const levelStep = useAbsolute && levelRange > 0
-    ? 10 ** Math.floor(Math.log10(levelRange / 100))
-    : isPercent ? 0.01 : 0.1;
-  const level = densityPanelRange(
-    "Level:",
-    currentLevel,
-    levelMinimum,
-    levelMaximum,
-    levelStep,
-    useAbsolute ? "" : isPercent ? " %" : " σ",
-    (value) =>
-      updateDensityPanelRenderer(target, {
-        specific: { [useAbsolute ? "level" : "siglevel"]: String(value) },
-      }),
-  );
-  level.slider.disabled = !levelEnabled;
-  controls.append(level.row);
-
-  const configuredMaxExtent = Number(renderer.specific.maxExtent);
-  const maximumExtent = Number.isFinite(configuredMaxExtent) && configuredMaxExtent > 0
-    ? configuredMaxExtent
-    : 100;
-  const extent = densityPanelRange(
-    "Extent:",
-    Number(renderer.specific.extent ?? 15),
-    0,
-    maximumExtent,
-    1,
-    " Å",
-    (value) => updateDensityPanelRenderer(target, { specific: { extent: String(value) } }),
-  );
-  controls.append(extent.row);
+  options.classList.toggle('disabled',!target);optionsSummary.addEventListener('click',event=>{if(!target)event.preventDefault();});
+  options.append(optionsSummary,optionsPopup);selectorRow.append(selector,options);densityContent.append(selectorRow);
+  if(!target){const empty=document.createElement('p');empty.textContent=snapshot.densityMaps.length?'No density renderer.':'No density map loaded.';densityContent.append(empty);return;}
+  const {map,renderer}=target;
+  const values=renderer.specific;
+  const controls=document.createElement('div');controls.className='density-controls';
+  const actions=document.createElement('div');actions.className='density-actions';
+  actions.append(button('Redraw','',()=>mutate('redraw_density_renderer',{mapUid:map.uid,rendererUid:renderer.uid})));
+  const cell=button('Cell','',()=>mutate('show_unit_cell',{targetKind:'density',objectUid:map.uid}));
+  cell.disabled=map.renderers.some(item=>['*unitcell','unitcell'].includes(item.rendererType));actions.append(cell);controls.append(actions);
+  const solid=(values.colormode||'solid')==='solid';
+  const colorRow=document.createElement('div');colorRow.className='density-color-row';
+  const color=document.createElement('input');color.type='color';color.disabled=!solid;color.setAttribute('aria-label','Choose density color');
+  const rgba=editor.rows.find(row=>row.key==='color')?.rgba;
+  color.value=rgba?'#'+rgba.slice(0,3).map(value=>value.toString(16).padStart(2,'0')).join(''):/^#[0-9a-f]{6}$/i.test(values.color||'')?values.color:'#00ff00';
+  color.addEventListener('change',()=>void editDensityProperty(target,'color',color.value));
+  const text=document.createElement('input');text.type='text';text.id='density-color';text.value=values.color||'#00ff00';text.dataset.initialValue=text.value;text.disabled=!solid;text.setAttribute('aria-label','Density color');
+  text.addEventListener('change',()=>{if(text.value!==text.dataset.initialValue)void editDensityProperty(target,'color',text.value);});
+  text.addEventListener('keydown',event=>{if(event.key==='Escape'){text.value=text.dataset.initialValue;text.blur();}else if(event.key==='Enter')text.blur();});
+  colorRow.append(color,text);controls.append(colorRow);
+  controls.append(densityPanelNumber(target,'Transp','alpha',renderer.alpha,0,1,0.1,'',{realtime:true}));
+  const absolute=values.use_abslevel==='true';const percent=values.map_type_resolved==='em';
+  const minimum=Number(values[absolute?'ui_abslevel_min':'ui_level_min']??(percent?0:-10));
+  const maximum=Number(values[absolute?'ui_abslevel_max':'ui_level_max']??10);
+  const enabled=Number.isFinite(minimum)&&Number.isFinite(maximum)&&maximum>minimum;
+  const step=absolute&&enabled?10**Math.floor(Math.log10((maximum-minimum)/100)):percent?0.01:0.1;
+  controls.append(densityPanelNumber(target,'Level',absolute?'level':'siglevel',Number(values[absolute?'level':'siglevel_effective']??1.1),minimum,Math.max(minimum,maximum),step,absolute?'':percent?'%':'σ',{enabled}));
+  const hint=document.createElement('span');hint.className='density-level-hint';
+  hint.textContent=absolute?percent?`= top ${Number(values.siglevel_effective).toFixed(2)} % of grid points`:`= ${Number(values.siglevel_effective).toFixed(2)} σ`:`= ${Number(values.level).toPrecision(3)} (absolute)`;controls.append(hint);
+  const extentMax=Number(values.maxExtent);
+  controls.append(densityPanelNumber(target,'Extent','extent',Number(values.extent??15),0,Number.isFinite(extentMax)&&extentMax>0?extentMax:100,1,'Å',{enabled:values.region_mode_resolved!=='full'}));
+  if(editor.error){const error=document.createElement('p');error.className='inspector-error';error.setAttribute('role','alert');error.textContent=editor.error;controls.append(error);}
   densityContent.append(controls);
+  if(draft){const input=document.getElementById(draft.id);if(input&&!input.disabled){if(draft.value!==draft.initial)input.value=draft.value;input.focus({preventScroll:true});}}
 }
 
 function viewDialWheel(label, action, step = 1) {
@@ -18134,6 +18031,7 @@ document.querySelectorAll("[data-panel-toggle]").forEach((element) => {
     element.setAttribute("aria-expanded", String(open));
     element.querySelector(".disclosure").textContent = open ? "▾" : "▸";
     const name = sidePanelCardName(card);
+    if (!open && name === "Density map") void cancelCueMolNumericDrag();
     if (open && name) renderSidePanel(name);
     syncSidePanelSplitters();
     saveSidePanelState();

@@ -55,3 +55,9 @@ pub mod console_runtime;
 
 #[cfg(feature = "egui")]
 pub mod pdb_dialog;
+
+#[cfg(feature = "egui")]
+mod numeric;
+
+#[cfg(feature = "egui")]
+pub mod density;

@@ -188,6 +188,16 @@ standard deviations. Default EM levels are capped by occupied voxels; explicitly
 setting the same numeric level overrides that cap. Reset and embedded scene
 storage preserve this distinction, and both desktop panels expose the matching
 absolute or native level range.
+The Crystal activity's Density map pane selects any contour, isosurface, map
+mesh or volume renderer. Its Options menu switches between native and absolute
+levels; the hint below Level shows the other unit. Extent is disabled for a
+full-map region. Transp edits opacity (0 is transparent and 1 is opaque), with
+live dragging, Escape cancellation and one undo step on release. Level and
+Extent commit after dragging or typing. The color field accepts named colors
+and is enabled in Solid color mode; other coloring modes remain in Coloring.
+Redraw moves the map's extraction center to the current view. Cell adds a unit
+cell without moving that view.
+
 `gpu_mapvol` uses interpolated 3D density textures and the reference rainbow
 opacity table. Native, WebGL and WebGPU views share the same volume pipeline;
 CPU rendering also composites volume samples with molecular geometry. Volume

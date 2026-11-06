@@ -230,6 +230,7 @@ struct App {
     agent: cuemol_ui::AgentPanel,
     activity: Option<cuemol_ui::shell::Activity>,
     inspector: cuemol_ui::Inspector,
+    density_panel: cuemol_ui::density::DensityPanel,
     navigation: Navigation,
     lasso_points: Vec<egui::Pos2>,
     hover_hit: Option<AtomHit>,
@@ -402,6 +403,7 @@ impl App {
                 .map(|s| cuemol_ui::shell::Activity::parse(&s))
                 .unwrap_or(Some(cuemol_ui::shell::Activity::Explorer)),
             inspector: Default::default(),
+            density_panel: Default::default(),
             navigation: Navigation::default(),
             lasso_points: Vec::new(),
             hover_hit: None,
@@ -561,6 +563,9 @@ impl App {
             || matches!(name, "undo" | "redo" | "clear_undo")
         {
             for (tool, args) in self.inspector.cancel_numeric_edit() {
+                self.call(tool, args);
+            }
+            for (tool, args) in self.density_panel.cancel() {
                 self.call(tool, args);
             }
             self.cancel_console("Scene changed outside the console; remaining commands cancelled.");

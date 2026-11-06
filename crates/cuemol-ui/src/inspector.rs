@@ -1,3 +1,4 @@
+use crate::numeric::{NumericDrag, NumericEdit};
 use cuemol_desktop_core::DesktopAppState;
 use cuemol_qsys::Camera;
 use serde_json::{json, Value};
@@ -42,24 +43,6 @@ impl Property {
 struct ColorDraft {
     key: String,
     rgba: egui::Color32,
-}
-
-#[derive(Debug, Clone)]
-struct NumericDrag {
-    original: String,
-    was_default: bool,
-    realtime: bool,
-}
-
-#[derive(Debug, Default)]
-struct NumericEdit {
-    id: Option<egui::Id>,
-    value: Option<f64>,
-    dirty: bool,
-    optional_value: Option<f64>,
-    drag: Option<NumericDrag>,
-    action: Option<(&'static str, NumericDrag, String)>,
-    cancelled: bool,
 }
 
 #[derive(Debug)]
@@ -692,7 +675,7 @@ impl Inspector {
     }
 }
 
-fn numeric_change(
+pub(crate) fn numeric_change(
     target: &InspectorTarget,
     scene: Option<u64>,
     key: &str,
@@ -955,135 +938,21 @@ fn edit_field(
         && value_text.parse::<f64>().is_ok()
         && !schema.is_some_and(|schema| schema["blankNegative"] == true)
     {
-        let mut value = value_text.parse::<f64>().unwrap();
-        let edit = numeric_edits.entry(row.key.clone()).or_default();
-        let optional = schema.and_then(|schema| schema.get("optional"));
-        let mut optional_on = value >= 0.;
-        let mut toggled = false;
-        if let Some(optional) = optional {
-            if optional_on {
-                edit.optional_value = Some(value);
-            }
-            let gate = ui
-                .checkbox(&mut optional_on, "")
-                .on_hover_text(optional["label"].as_str().unwrap_or("Enabled"));
-            record(rects, &format!("Enable {}", row.key), gate.rect);
-            if gate.changed() {
-                value = if optional_on {
-                    edit.optional_value
-                        .unwrap_or(optional["on"].as_f64().unwrap_or(0.))
-                } else {
-                    optional["off"].as_f64().unwrap_or(-1.)
-                };
-                *value_text = value.to_string();
-                toggled = true;
-            }
-            if !optional_on {
-                value = edit
-                    .optional_value
-                    .unwrap_or(optional["on"].as_f64().unwrap_or(0.));
-            }
-        }
-        if edit.value != Some(value) && !edit.dirty {
-            if let Some(id) = edit.id {
-                ui.data_mut(|data| data.remove::<String>(id));
-            }
-        }
-        let previous = value;
-        let step = schema
-            .and_then(|schema| schema["step"].as_f64())
-            .unwrap_or(if row.kind == "integer" { 1. } else { 0.01 });
-        let speed = ui.input(|input| {
-            if input.modifiers.ctrl || input.modifiers.command {
-                schema
-                    .and_then(|schema| schema["coarseStep"].as_f64())
-                    .unwrap_or(step * 10.)
-            } else if input.modifiers.shift_only() {
-                schema
-                    .and_then(|schema| schema["fineStep"].as_f64())
-                    .map_or(step, |fine| fine * 10.)
-            } else {
-                step
-            }
-        });
-        let mut editor = egui::DragValue::new(&mut value)
-            .speed(speed)
-            .update_while_editing(false);
-        if let Some(schema) = schema {
-            if let Some((min, max)) = schema["min"].as_f64().zip(schema["max"].as_f64()) {
-                editor = editor.range(min..=max).clamp_existing_to_range(false);
-            }
-            if let Some(decimals) = schema["decimals"].as_u64() {
-                editor = editor.max_decimals(decimals as usize);
-            }
-            if let Some(unit) = schema["unit"].as_str().filter(|unit| !unit.is_empty()) {
-                editor = editor.suffix(format!(" {unit}"));
-            }
-        }
-        if row.kind == "integer" {
-            editor = editor.max_decimals(0);
-        }
-        let response = ui
-            .add_enabled_ui(optional.is_none() || optional_on, |ui| {
-                ui.add_sized([ui.available_width(), 22.], editor)
-            })
-            .inner;
-        if value != previous && schema.is_some() {
-            let fine = schema
-                .and_then(|schema| schema["fineStep"].as_f64())
-                .unwrap_or(step / 10.);
-            if fine.is_finite() && fine > 0. {
-                let scale = 10_f64.powf((-fine.log10().floor()).max(0.));
-                value = (value * scale).round() / scale;
-            }
-        }
-        if response.drag_started() && !edit.cancelled {
-            edit.drag = Some(NumericDrag {
-                original: committed
-                    .get(&row.key)
-                    .cloned()
-                    .unwrap_or_else(|| previous.to_string()),
-                was_default: row.is_default,
-                realtime: schema.is_some_and(|schema| schema["realtime"] == true),
-            });
-        }
-        if edit.cancelled {
-            value = committed
-                .get(&row.key)
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(previous);
-            *value_text = value.to_string();
-            if !ui.input(|input| input.pointer.primary_down()) {
-                edit.cancelled = false;
-            }
-            edit.id = Some(response.id);
-            edit.value = Some(value);
-            edit.dirty = false;
-            return false;
-        }
-        edit.id = Some(response.id);
-        edit.value = Some(value);
-        edit.dirty =
-            response.has_focus() && (edit.dirty || response.changed() && value == previous);
-        if response.changed() && (optional.is_none() || optional_on) {
-            *value_text = value.to_string();
-        }
-        let mut changed =
-            toggled || (response.changed() && !response.dragged()) || response.drag_stopped();
-        if let Some(drag) = &edit.drag {
-            if drag.realtime {
-                changed = toggled;
-                if response.drag_stopped() {
-                    edit.action = Some(("commit", drag.clone(), value_text.clone()));
-                } else if response.changed() {
-                    edit.action = Some(("preview", drag.clone(), value_text.clone()));
-                }
-            }
-        }
-        if response.drag_stopped() {
-            edit.drag = None;
-        }
-        (response, changed)
+        let original = committed
+            .get(&row.key)
+            .cloned()
+            .unwrap_or_else(|| value_text.clone());
+        crate::numeric::field(
+            ui,
+            &row.key,
+            &row.kind,
+            value_text,
+            schema,
+            &original,
+            row.is_default,
+            numeric_edits.entry(row.key.clone()).or_default(),
+            rects,
+        )
     } else {
         if row.kind == "color" {
             if let Some(rgba) = row.rgba {

@@ -43,6 +43,13 @@ async function openShell(page, storage = {}, options = {}) {
       canUndo: false, canRedo: false, undoDescriptions: [], redoDescriptions: [], openedPaths: [],
       materialNames: [], logLines: [], status: 'Ready',
     };
+    if (options.density) {
+      scene.mapCount=1;
+      const specific={color:'blue',colormode:'solid',use_abslevel:'false',siglevel:'1.1',siglevel_effective:'1.1',level:'0.183',ui_level_min:'-10',ui_level_max:'10',ui_abslevel_min:'0',ui_abslevel_max:'1',extent:'15',maxExtent:'50',map_type_resolved:'xtal',region_mode_resolved:'box'};
+      if(options.density==='em')Object.assign(specific,{map_type_resolved:'em',region_mode_resolved:'full',siglevel:'20',siglevel_effective:'20',ui_level_min:'0',ui_level_max:'100'});
+      const densityRenderer={...renderer,uid:11,name:'Contour',rendererType:'contour',specific};
+      snapshot.densityMaps=[{uid:10,sceneUid:1,name:'Density',source:'density.dx',sourceType:'dx',className:'ElePotMap',uiOrder:1,uiCollapsed:false,visible:true,locked:false,counts:[9,9,9],starts:[0,0,0],intervals:[9,9,9],origin:[0,0,0],spacing:[1,1,1],minimum:0,maximum:1,mean:0.1,rmsd:0.16,renderers:[densityRenderer,{...densityRenderer,uid:12,name:'Other',specific:{...specific},alpha:0.5}]}];
+    }
     const styleDocuments = new Map();
     if (options.styles) {
       snapshot.styles = [
@@ -218,7 +225,25 @@ async function openShell(page, storage = {}, options = {}) {
         return {snapshot: structuredClone(snapshot), running: window.__actionsRunning || command !== 'console_stop' && Boolean(options.consoleRunning)};
       }
       if (command === 'console_complete') return [{display: 'Probe', replacement: 'select Probe'}];
+      if(options.density && command==='show_unit_cell') {
+        snapshot.densityMaps[0].renderers.push({...renderer,uid:13,name:'Cell',rendererType:'*unitcell'});
+        return structuredClone(snapshot);
+      }
+      if(options.density && command==='redraw_density_renderer') return structuredClone(snapshot);
       if (command === 'inspector_request') {
+        if(options.density && [11,12].includes(args.args.nodeId)) {
+          const target=snapshot.densityMaps[0].renderers.find(item=>item.uid===args.args.nodeId);
+          const values=()=>({alpha:String(target.alpha),...target.specific});
+          const rows=()=>Object.entries(values()).map(([key,value])=>({key,value,type:key==='color'?'color':'real',isdefault:key==='alpha'&&target.alpha===1,hasdefault:key==='alpha',rgba:key==='color'?[0,0,255,255]:undefined}));
+          if(args.tool==='list_node_props')return {properties:rows()};
+          const edit=args.args;
+          if(args.tool==='edit_node_property' && edit.mode==='preview' && window.__holdNumericPreview)await window.__holdNumericPreview;
+          const value=edit.mode==='abort'?edit.originalValue:edit.value;
+          if(edit.prop==='alpha')target.alpha=Number(value);
+          else {target.specific[edit.prop]=value;if(edit.prop==='siglevel')target.specific.siglevel_effective=value;}
+          if(args.tool==='set_node_prop'||edit.mode==='commit'){snapshot.canUndo=true;snapshot.undoDescriptions.push('Change density');}
+          return {snapshot:structuredClone(snapshot)};
+        }
         if(options.styles && args.tool==='style_edit') {
           if(window.__holdStyleEdit)await window.__holdStyleEdit;
           const request=args.args, style=styleFor(request.target);
@@ -1595,5 +1620,55 @@ test('Tauri numeric dragging coalesces previews and cancels an in-flight edit', 
   await expect.poll(async()=>(await writes()).at(-1).mode).toBe('commit');
   expect((await writes()).filter(edit=>edit.mode==='commit')).toHaveLength(1);
   await expect(page.getByRole('button',{name:'Reset alpha',exact:true})).toBeEnabled();
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri density pane edits units and coalesces opacity previews independently of the inspector', async({page})=>{
+  const errors=await openShell(page,{}, {density:'xtal'});
+  await page.getByRole('button',{name:'Crystal',exact:true}).click();
+  const pane=page.locator('#density-content');
+  const level=pane.getByLabel('Density level',{exact:true});
+  await expect(level).toHaveValue('1.1');
+  await level.fill('2'); await level.press('Enter');
+  const writes=()=>page.evaluate(()=>window.__shellCalls.filter(call=>call.command==='inspector_request'&&call.args.tool!=='list_node_props').map(call=>({tool:call.args.tool,...call.args.args})));
+  await expect.poll(async()=>(await writes()).filter(edit=>edit.prop==='siglevel').at(-1)?.value).toBe('2');
+  await pane.getByLabel('Density map options').click();
+  await pane.getByRole('button',{name:'Use absolute contour level',exact:true}).click();
+  await expect(pane.getByLabel('Density level',{exact:true})).toHaveAttribute('max','1');
+  const alpha=pane.getByLabel('Density opacity',{exact:true});
+  await expect(alpha).toBeEnabled();
+  await page.evaluate(()=>{window.__holdNumericPreview=new Promise(resolve=>{window.__releaseNumericPreview=()=>{window.__holdNumericPreview=null;resolve();};});});
+  const box=await alpha.boundingBox();
+  await page.mouse.move(box.x+box.width/2,box.y+box.height/2);await page.mouse.down();
+  await page.mouse.move(box.x+box.width/2-4,box.y+box.height/2,{steps:4});
+  await expect.poll(async()=>(await writes()).filter(edit=>edit.mode==='preview').length).toBe(1);
+  await page.mouse.move(box.x+8,box.y+box.height/2,{steps:8});
+  expect((await writes()).filter(edit=>edit.mode==='preview')).toHaveLength(1);
+  await page.keyboard.press('Escape');await page.mouse.up();
+  await page.evaluate(()=>window.__releaseNumericPreview());
+  await expect(alpha).toHaveValue('1');
+  expect((await writes()).filter(edit=>edit.mode).map(edit=>edit.mode)).toEqual(['preview','abort']);
+  expect((await writes()).find(edit=>edit.mode==='abort')).toMatchObject({nodeId:11,originalWasDefault:true});
+  await page.mouse.move(box.x+box.width/2,box.y+box.height/2);await page.mouse.down();
+  await page.mouse.move(box.x+box.width/2-4,box.y+box.height/2,{steps:4});await page.mouse.up();
+  await expect.poll(async()=>(await writes()).filter(edit=>edit.mode==='commit').length).toBe(1);
+  await pane.getByLabel('Density renderer').selectOption('10:12');
+  await expect(alpha).toHaveValue('0.5');
+  await pane.getByRole('button',{name:'Cell',exact:true}).click();
+  await expect(pane.getByRole('button',{name:'Cell',exact:true})).toBeDisabled();
+  expect(errors).toEqual([]);
+});
+
+test('Tauri EM density pane uses top-percent limits and disables full-region extent', async({page})=>{
+  const errors=await openShell(page,{}, {density:'em'});
+  await page.getByRole('button',{name:'Crystal',exact:true}).click();
+  const pane=page.locator('#density-content');
+  await expect(pane.getByLabel('Density level',{exact:true})).toHaveValue('20');
+  await expect(pane.getByLabel('Density level',{exact:true})).toHaveAttribute('min','0');
+  await expect(pane.getByLabel('Density level',{exact:true})).toHaveAttribute('max','100');
+  await expect(pane.getByLabel('Density extent',{exact:true})).toBeDisabled();
+  await pane.getByLabel('Density map options').click();
+  await expect(pane.getByRole('button',{name:/Use top-percent contour level$/})).toBeVisible();
   expect(errors).toEqual([]);
 });

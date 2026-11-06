@@ -1,5 +1,37 @@
 # Validation evidence
 
+## Density map pane and shared numeric controls
+
+The browser's former three-button placeholder now uses the same Rust Density
+map pane as the native window. Both select all four map renderer families,
+switch native/absolute units, show the corresponding level hint and range,
+edit solid colors, and disable extent for a full region. The native pane's
+former immediate slider writes are replaced by the Inspector's shared numeric
+editor: opacity previews without history and commits one undo step; level and
+extent commit on release. Tauri uses the same transient property protocol,
+coalesces opacity requests and keeps density edits separate from the Inspector.
+Hidden panes and changed targets cancel active previews.
+
+A command regression reproduced an EM unit cell moving the view from its
+chosen center/zoom to the map. Unit-cell creation now bypasses the map renderer
+centering policy; mixed renderer creation also leaves unit-cell centers alone.
+The focused command suite passed all 13 cases. All 32 shared UI, 192 native GUI
+and 169 macOS Tauri model checks passed; five optional Tauri checks remained
+ignored. The native input-event regression drives an actual density field and
+checks preview, default restoration, cancellation and one-step undo/redo.
+
+WebGL and WebGPU mouse checks cover level typing, unit switching, opacity
+preview/cancel/commit/undo/redo and Cell insertion without a camera change.
+Tauri shell checks cover a delayed preview cancellation, renderer switching,
+EM percent limits, disabled full-region extent and unit-cell state. All 62
+Inspector/Tauri shell regression cases passed. The two WebGL/WebGPU density
+cases passed after correcting their gesture, for 64 passing affected cases;
+the full run's two initial failures were those uncorrected test gestures.
+The final screenshots were inspected. A checked
+menu item's decorative marker and the numeric drag threshold required test
+selector/motion corrections; these were not runtime defects. Generated logs
+and screenshots remain in the ignored cache.
+
 ## Inspector numeric drag previews
 
 Structured renderer controls now follow the current reference's realtime flags:
