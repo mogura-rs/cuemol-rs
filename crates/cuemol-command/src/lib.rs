@@ -1,4 +1,5 @@
 //! Shared native, browser, and MCP command dispatch.
+pub mod about;
 mod advanced;
 mod animation;
 pub mod clipboard;

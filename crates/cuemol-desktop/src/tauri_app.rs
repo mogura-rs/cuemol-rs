@@ -1072,6 +1072,7 @@ struct ConfigEntryDto {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ApplicationInfoDto {
+    about_rows: cuemol_command::about::Rows,
     product_name: &'static str,
     version: &'static str,
     target: String,
@@ -2684,6 +2685,7 @@ impl AppModel {
             })
             .collect();
         ApplicationInfoDto {
+            about_rows: cuemol_command::about::native_rows(cuemol_command::about::Frontend::Tauri),
             product_name: "cuemol-rs",
             version: cuemol_command::update::current_version(),
             target: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),

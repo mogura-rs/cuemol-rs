@@ -27,6 +27,13 @@ Hardware quad-buffer stereo is unavailable on the wgpu frontends.
 Center marks invert the displayed colors so they remain visible over molecular
 geometry. Crosses, axes and labels retain their logical size on HiDPI displays.
 
+Use **Help → About cuemol-rs** to inspect the version, source commit, build time,
+compiler, target and the libraries used by the selected frontend. **Copy** puts
+these rows on the clipboard for bug reports. Native builds include the OS
+release; browser and Tauri builds also include the browser or WebView user agent.
+Builds without Git metadata display `unavailable` for the commit. Reproducible
+builds can set `SOURCE_DATE_EPOCH` to control the reported UTC build time.
+
 ### Representations and rendering
 
 Open files on the command line, through the file dialog, or by drag and drop.

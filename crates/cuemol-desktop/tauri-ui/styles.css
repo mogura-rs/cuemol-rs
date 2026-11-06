@@ -3672,6 +3672,11 @@ body.resizing-bottom-panel {
   margin-bottom: 12px;
 }
 
+.application-properties dd {
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
 .info-toolbar {
   display: grid;
   grid-template-columns: minmax(180px, 1fr) minmax(150px, 220px) auto;

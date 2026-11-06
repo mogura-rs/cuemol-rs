@@ -5679,14 +5679,20 @@ async function showReferenceDialog(title, initialTrajectoryPaths = []) {
       dialogParagraph("Molecular visualization system — Rust desktop implementation."),
     );
     if (applicationInfo) {
-      dialogContent.append(
-        applicationDefinitionList([
-          ["Version", applicationInfo.version],
-          ["Target", applicationInfo.target],
-          ["Frontend", "Tauri"],
-          ["Renderer", "wgpu"],
-        ]),
-      );
+      const rows = [...applicationInfo.aboutRows, ["WebView", navigator.userAgent]];
+      dialogContent.append(applicationDefinitionList(rows));
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.textContent = "Copy";
+      copy.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText([applicationInfo.productName, ...rows.map(([label, value]) => `${label}: ${value}`)].join("\n"));
+          copy.textContent = "Copied";
+        } catch (error) {
+          showError(error);
+        }
+      });
+      dialogContent.append(copy);
     }
   } else if (title === "Options") {
     if (optionPreferences) {

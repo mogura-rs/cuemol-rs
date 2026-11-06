@@ -1,5 +1,26 @@
 # Validation evidence
 
+## About build metadata and clipboard
+
+The current reference added runtime details and a Copy button. Native egui and
+WASM now share this dialog, and Tauri displays the same metadata through its
+application-info response. The listed versions describe the actual Rust build:
+compiler, target, source commit, UTC build time, wgpu, the selected GUI toolkit
+and the enabled Boa engine. OS release or browser/WebView details are resolved
+at runtime. Build dependencies come from Cargo.lock; no network lookup runs
+when opening the dialog. SOURCE_DATE_EPOCH controls reproducible timestamps.
+
+All 32 shared UI tests, 191 native GUI tests and 168 macOS Tauri model tests
+passed; five optional Tauri checks remained ignored. A Linux native window was
+opened through OS mouse input, its screenshot inspected, and its Copy result
+read from the system clipboard with all expected runtime fields present.
+WebGL and WebGPU checks copied the generated metadata, verified the WASM target
+and browser details, and checked that footer buttons remain visible at 700 by
+650. Their screenshot was inspected. The Tauri shell check verified row display,
+copy output and clipboard failure reporting. The broader browser shell, Tauri
+shell and camera-history run passed all 55 checks. The WASM and native binary
+builds, formatting and whitespace checks passed.
+
 ## Failed undo, redo and rollback callbacks
 
 The low-level UndoManager previously moved a failed transaction to the other

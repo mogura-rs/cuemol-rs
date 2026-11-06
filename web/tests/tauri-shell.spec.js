@@ -98,6 +98,10 @@ async function openShell(page, storage = {}, options = {}) {
       window.__shellCalls.push({command, args});
       if (command === 'get_initial_state') return {snapshot, viewport, preferences: {}, startupPathsPending: false};
       if (command === 'get_snapshot') return snapshot;
+      if (command === 'get_application_info') return {
+        productName: 'cuemol-rs', version: 'test-version', target: 'test-target', features: [], plugins: [], config: [],
+        aboutRows: [['Version', 'test-version'], ['Commit', 'abc123'], ['Date', '2026-11-01T00:00:00Z'], ['Rust', 'rustc test'], ['wgpu', 'test-wgpu'], ['Tauri', 'test-tauri'], ['OS', 'test-os']],
+      };
       if (options.styles && command === 'copy_workspace_style') {
         if(window.__holdStyleCopy)await window.__holdStyleCopy;
         const style=styleFor(args.input);
@@ -1530,5 +1534,26 @@ test('Tauri Get PDB handles filters, stale searches, missing IDs and metadata er
   await page.evaluate(()=>window.__releasePdbSearch());
   await expect(dialog).not.toBeVisible();
   expect(await page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='open_pdb'))).toHaveLength(0);
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri About displays and copies runtime rows and handles clipboard failure', async ({page}) => {
+  const errors = await openShell(page);
+  await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', {configurable: true, value: {
+    writeText: async text => { window.__aboutCopied = text; },
+  }}));
+  await page.getByRole('banner').getByText('Help', {exact: true}).click();
+  await page.getByText('About cuemol-rs', {exact: true}).click();
+  const dialog = page.locator('#reference-dialog');
+  await expect(dialog).toContainText('test-wgpu');
+  await expect(dialog).toContainText('test-tauri');
+  await dialog.getByRole('button', {name: 'Copy', exact: true}).click();
+  await expect(dialog.getByRole('button', {name: 'Copied', exact: true})).toBeVisible();
+  const copied = await page.evaluate(() => window.__aboutCopied);
+  expect(copied).toMatch(/^cuemol-rs\nVersion: test-version\nCommit: abc123\nDate: 2026-11-01T00:00:00Z\nRust: rustc test\nwgpu: test-wgpu\nTauri: test-tauri\nOS: test-os\nWebView: Mozilla\//);
+  await page.evaluate(() => { navigator.clipboard.writeText = async () => { throw new Error('Clipboard unavailable'); }; });
+  await dialog.getByRole('button', {name: 'Copied', exact: true}).click();
+  await expect(page.locator('#error-alert-dialog')).toContainText('Clipboard unavailable');
   expect(errors).toEqual([]);
 });

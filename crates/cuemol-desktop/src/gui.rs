@@ -1562,7 +1562,7 @@ struct GuiApplication {
     renderer_group_rename_draft: Option<NativeRendererGroupRenameDraft>,
     surface_regenerate_draft: Option<NativeSurfaceRegenerateDraft>,
     show_bottom_panel: bool,
-    show_about: bool,
+    about: cuemol_ui::about::AboutDialog,
     updates: updates::Updates,
     show_options: bool,
     options_pane: OptionsPane,
@@ -5024,7 +5024,7 @@ impl GuiApplication {
             renderer_group_rename_draft: None,
             surface_regenerate_draft: None,
             show_bottom_panel,
-            show_about: false,
+            about: cuemol_ui::about::AboutDialog::default(),
             updates: Default::default(),
             show_options: false,
             options_pane: OptionsPane::Misc,
@@ -6067,7 +6067,9 @@ impl GuiApplication {
                 });
                 ui.menu_button("Help", |ui| {
                     if ui.button("About cuemol-rs").clicked() {
-                        self.show_about = true;
+                        self.about.open(cuemol_command::about::native_rows(
+                            cuemol_command::about::Frontend::Egui,
+                        ));
                         ui.close();
                     }
                     ui.separator();
@@ -19972,27 +19974,7 @@ impl GuiApplication {
     }
 
     fn about_dialog(&mut self, ctx: &egui::Context) {
-        if !self.show_about {
-            return;
-        }
-        let mut open = self.show_about;
-        let mut close = false;
-        egui::Window::new("About cuemol-rs")
-            .open(&mut open)
-            .collapsible(false)
-            .show(ctx, |ui| {
-                cuemol_ui::shell::logo(ui, 96.);
-                ui.heading("cuemol-rs");
-                ui.label("Molecular visualization system — Rust desktop implementation.");
-                ui.label(format!(
-                    "Version {}",
-                    cuemol_command::update::current_version()
-                ));
-                if ui.button("Close").clicked() {
-                    close = true;
-                }
-            });
-        self.show_about = open && !close;
+        self.about.show(ctx);
     }
 
     fn open_options_dialog(&mut self) {

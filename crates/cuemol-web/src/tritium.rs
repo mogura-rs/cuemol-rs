@@ -222,6 +222,13 @@ impl App {
                 });
             });
         self.close_tab_dialog(ctx);
+        self.about.show(ctx);
+        for (name, rect) in &self.about.rects {
+            self.ui_rects.insert(
+                name.clone(),
+                [rect.min.x, rect.min.y, rect.width(), rect.height()],
+            );
+        }
         if self.show_get_pdb {
             let mut open = true;
             let mut choice = None;
@@ -494,13 +501,21 @@ impl App {
                             }
                         }
                     });
-                    ui.menu_button("Help", |ui| {
+                    let help = ui.menu_button("Help", |ui| {
+                        let about = ui.button("About cuemol-rs");
+                        self.record_ui_rect("About cuemol-rs", &about);
+                        if about.clicked() {
+                            let runtime = web_sys::window().and_then(|window| window.navigator().user_agent().ok()).unwrap_or_else(|| "unavailable".into());
+                            self.about.open(cuemol_command::about::rows(cuemol_command::about::Frontend::Browser, &runtime));
+                            ui.close();
+                        }
                         if ui.button("Mouse and keyboard").clicked() {
                             self.show_help = true;
                             ui.close();
                         }
                         ui.hyperlink_to("CueMol documentation", "https://www.cuemol.org/");
                     });
+                    self.record_ui_rect("Help menu", &help.response);
                 });
             });
         self.clipboard_focus.menu(response.response.rect);

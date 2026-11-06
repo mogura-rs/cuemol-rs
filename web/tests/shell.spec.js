@@ -150,3 +150,40 @@ test('browser alternate tab shortcuts use physical keys under an Option layout',
   })));
   await expect.poll(async()=>(await status(page)).scene.sceneId).toBe(original);
 });
+
+
+for (const renderer of ['webgl', 'webgpu']) {
+  test(`About copies the actual build and runtime on ${renderer}`, async ({page, context}, testInfo) => {
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+    await page.setViewportSize({width: 700, height: 650});
+    await page.goto(`./?renderer=${renderer}`);
+    await expect.poll(() => page.evaluate(() => window.cuemol?.status()?.scene?.sceneId), {timeout: 60000}).toBeGreaterThan(0);
+    await click(page, 'Help menu');
+    await click(page, 'About cuemol-rs');
+    await click(page, 'Copy About');
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('Browser / OS: Mozilla/');
+    const text = await page.evaluate(() => navigator.clipboard.readText());
+    expect(text).toMatch(/^cuemol-rs\nVersion: .+\nCommit: [a-f0-9]{40}\nDate: \d{4}-\d\d-\d\dT/);
+    expect(text).toContain('Target: wasm32-unknown-unknown');
+    expect(text).toMatch(/\nRust: rustc \d/);
+    expect(text).toContain('Frontend: Browser (WASM)');
+    expect(text).toMatch(/\nwgpu: \d/);
+    expect(text).toMatch(/\negui: \d/);
+    expect(text).toMatch(/\nBoa JavaScript: \d/);
+    expect(text).not.toContain('Electron:');
+    for (const name of ['Copy About', 'Close About']) {
+      const [x, y, w, h] = (await status(page)).ui.rects[name];
+      expect(x).toBeGreaterThanOrEqual(0);
+      expect(y).toBeGreaterThanOrEqual(0);
+      expect(x + w).toBeLessThanOrEqual(700);
+      expect(y + h).toBeLessThanOrEqual(650);
+    }
+    await page.screenshot({path: testInfo.outputPath('about.png')});
+    await click(page, 'Close About');
+    await expect.poll(async () => (await status(page)).ui.rects['Copy About']).toBeUndefined();
+    await click(page, 'Help menu');
+    await click(page, 'About cuemol-rs');
+    await page.keyboard.press('Escape');
+    await expect.poll(async () => (await status(page)).ui.rects['Copy About']).toBeUndefined();
+  });
+}
