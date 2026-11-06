@@ -3033,7 +3033,12 @@ fn native_coloring_color_ui(ui: &mut egui::Ui, label: &str, value: &mut String) 
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.label(label);
-        changed |= ui.text_edit_singleline(value).changed();
+        let width =
+            (ui.available_width() - ui.spacing().interact_size.x - ui.spacing().item_spacing.x)
+                .max(1.);
+        changed |= ui
+            .add(egui::TextEdit::singleline(value).desired_width(width))
+            .changed();
         if let Some(mut color) = native_style_color(value) {
             if ui.color_edit_button_srgba(&mut color).changed() {
                 *value = native_style_color_string(color);
@@ -11269,9 +11274,13 @@ impl GuiApplication {
                                 egui::Layout::left_to_right(egui::Align::Center),
                                 |ui| {
                                     ui.set_min_width(selection_width);
-                                    ui.selectable_label(
-                                        self.coloring_paint_selected == Some(index),
-                                        selection,
+                                    ui.add_sized(
+                                        [selection_width, row_height],
+                                        egui::Button::selectable(
+                                            self.coloring_paint_selected == Some(index),
+                                            selection,
+                                        )
+                                        .truncate(),
                                     )
                                 },
                             )
@@ -11305,7 +11314,8 @@ impl GuiApplication {
                                         ),
                                     );
                                 }
-                                ui.label(color);
+                                ui.add(egui::Label::new(color).truncate())
+                                    .on_hover_text(color);
                             },
                         );
                     });
@@ -11316,7 +11326,12 @@ impl GuiApplication {
             if let Some((selection, color)) = paint_entries.get_mut(index) {
                 ui.horizontal(|ui| {
                     ui.label("Selection");
-                    changed |= ui.text_edit_singleline(selection).changed();
+                    changed |= ui
+                        .add(
+                            egui::TextEdit::singleline(selection)
+                                .desired_width(ui.available_width()),
+                        )
+                        .changed();
                 });
                 changed |= native_coloring_color_ui(ui, "Color", color);
             }
@@ -39887,6 +39902,42 @@ mod tests {
         assert!(app.status.starts_with("Surface cut:"));
         app.undo(&mut camera);
         assert_eq!(app.state.active_surface_summaries().len(), 1);
+    }
+
+    #[test]
+    fn native_paint_entries_do_not_expand_the_sidebar() {
+        let ctx = egui::Context::default();
+        cuemol_ui::shell::theme(&ctx, false);
+        let mut app = GuiApplication::new();
+        let mut entries = vec![(
+            "chain A and not (name C1 or name C2 or name C3)".into(),
+            "okabeito_1{mod_s:-0.6;mod_b:0.1}".into(),
+        )];
+        for selected in [None, Some(0), Some(0)] {
+            app.coloring_paint_selected = selected;
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(760., 650.),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::SidePanel::left("paint-width-test")
+                        .exact_width(260.)
+                        .show(ctx, |ui| {
+                            let available = ui.available_width();
+                            app.object_paint_coloring_ui(ui, &mut entries);
+                            assert!(
+                                ui.min_rect().width() <= available + 1.,
+                                "paint row expanded from {available} to {}",
+                                ui.min_rect().width()
+                            );
+                        });
+                },
+            );
+        }
     }
 
     /// Exercise the whole shell + every left-panel section headlessly so a runtime

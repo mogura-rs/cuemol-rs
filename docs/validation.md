@@ -1,5 +1,27 @@
 # Validation evidence
 
+## Paint sidebar width and current default appearance
+
+The current browser baseline completed 214 checks: 207 passed and seven failed.
+Three failures still asserted the older palette or default dimensions. The other
+four exposed a layout defect: long named Paint colors expanded the Explorer and
+removed the usable viewport at narrow widths. Fixed mouse coordinates then fell
+outside the viewport even in some wider-window checks.
+
+Paint selection and color rows now stay within their assigned columns in both
+egui frontends. Truncated color names retain full-text tooltips. The native
+inline editors also reserve space for their color picker. A native regression
+uses long selections and color modifiers with the application theme and checks
+both selected and unselected rows. All 190 native GUI tests passed.
+
+The appearance assertions now use the current CueMol3 styles and canonical
+color strings. The swatch values were checked with the current C++ color
+conversion functions, and the trace fixture includes a valid peptide backbone.
+The WASM build passed. All 62 checks in the affected default-appearance,
+render-panel and viewer suites passed, including all seven previous failures.
+The 760-pixel screenshot was inspected: the viewport remains visible alongside
+the Explorer and Inspector, and the bottom tabs remain reachable.
+
 ## Native Python Umbreon helper and dictionary results
 
 The current reference includes cuemol.umbreon_render; importing that module

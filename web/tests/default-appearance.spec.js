@@ -2,11 +2,14 @@ import {test, expect} from '@playwright/test';
 import {PNG} from 'pngjs';
 import {load, call} from './support.js';
 
-const protein = `ATOM      1  CA  ALA A   1       0.000   0.000   0.000  1.00 10.00           C
-ATOM      2  CA  ALA A   2       3.800   0.000   0.000  1.00 10.00           N
-ATOM      3  CA  ALA A   3       7.600   0.000   0.000  1.00 10.00           C
-END
-`;
+const protein = Array.from({length:6}, (_, residue) => [
+  [' N  ', 'N', -1.3, 0], [' CA ', 'C', 0, 0], [' C  ', 'C', 1.2, 0], [' O  ', 'O', 1.2, 1.2],
+].map(([name, element, dx, dy], atom) => {
+  const serial = residue * 4 + atom + 1;
+  const x = (residue * 3.8 - 9.5 + dx).toFixed(3).padStart(8);
+  const y = (Math.sin(residue * 0.5) * 2 + dy).toFixed(3).padStart(8);
+  return `ATOM  ${String(serial).padStart(5)} ${name} ALA A${String(residue + 1).padStart(4)}    ${x}${y}   0.000  1.00 10.00           ${element}`;
+}).join('\n')).join('\n') + '\nEND\n';
 const nucleic = `ATOM      1  P     A B   1       0.000   0.000   0.000  1.00 10.00           P
 ATOM      2  P     A B   2       6.000   0.000   0.000  1.00 10.00           P
 ATOM      3  P     A B   3      12.000   0.000   0.000  1.00 10.00           P
@@ -29,7 +32,7 @@ for (const backend of ['webgl', 'webgpu']) {
       var entries = [];
       for (var i = 0; i < paint.size; i++) {
         var color = paint.getColorAt(i);
-        entries.push([paint.getSelAt(i).toString(), color.r(), color.g(), color.b()]);
+        entries.push([paint.getSelAt(i).toString(), color.toString()]);
       }
       print(JSON.stringify(entries));
       var ribbon = object.getRendererByType('ribbon');
@@ -37,8 +40,11 @@ for (const backend of ['webgl', 'webgpu']) {
       ribbon.visible = false;
     `});
     const output = JSON.parse(state.message).log.trim().split('\n').map(line => JSON.parse(line));
-    expect(output[0]).toEqual([['sheet',70,130,180], ['helix',240,230,140], ['nucleic',255,255,0], ['*',255,250,240]]);
-    expect(output[1]).toEqual([6,0.2,7,0.2,0.35]);
+    expect(output[0]).toEqual([
+      ['sheet','okabeito_1'], ['helix','okabeito_1'],
+      ['nucleic','okabeito_1{mod_h:15}'], ['*','okabeito_1{mod_b:0.1;mod_s:-0.6}'],
+    ]);
+    expect(output[1]).toEqual([6.5,0.18,6.5,0.18,0.2]);
     state = await call(page, 'create_renderer', {objId:object.id, rendererType:'tracestick'});
     const trace = state.scene.objects[0].renderers.find(renderer => renderer.type === 'tracestick');
     state = await call(page, 'execute_script', {source:`
@@ -50,12 +56,12 @@ for (const backend of ['webgl', 'webgpu']) {
     const clip = {x:viewport[0]+viewport[2]/4, y:viewport[1]+viewport[3]/4, width:viewport[2]/2, height:viewport[3]/2};
     await expect.poll(async () => {
       const image = PNG.sync.read(await page.screenshot({clip}));
-      let neutral = 0;
+      let warm = 0;
       for (let i = 0; i < image.data.length; i += 4) {
         const [r,g,b] = image.data.subarray(i,i+3);
-        if (r > 80 && g > r*0.9 && b > r*0.9) neutral++;
+        if (r > 80 && g > r*0.6 && r > b*1.15) warm++;
       }
-      return neutral;
+      return warm;
     }).toBeGreaterThan(100);
     await page.screenshot({path:testInfo.outputPath(`default-tracestick-${backend}.png`)});
     await load(page, 'nucleic.pdb', Buffer.from(nucleic));
@@ -67,6 +73,6 @@ for (const backend of ['webgl', 'webgpu']) {
       var bases = cuemol.getRenderer(${bases.id});
       print(JSON.stringify([bases.section.type, bases.section.width, bases.section.tuber, bases.base_size, bases.base_thick]));
     `});
-    expect(JSON.parse(JSON.parse(state.message).log.trim())).toEqual(['elliptical',0.5,2.5,0.5,0.5]);
+    expect(JSON.parse(JSON.parse(state.message).log.trim())).toEqual(['roundsquare',0.4,2.5,0.3,0.3]);
   });
 }

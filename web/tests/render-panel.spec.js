@@ -97,7 +97,7 @@ test('Scene eye controls, collapsed children and paint entries update live state
   const swatches = [];
   for (let i=0;i<4;i++) swatches.push(await rect(page,`paint-swatch:${i}`));
   const screenshot = PNG.sync.read(await page.screenshot({scale:'css'}));
-  for (const [i,expected] of [[0,[70,130,180]],[1,[240,230,140]],[2,[255,255,0]],[3,[255,250,240]]]) {
+  for (const [i,expected] of [[0,[230,159,0]],[1,[230,159,0]],[2,[230,217,0]],[3,[255,224,153]]]) {
     const [x,y,w,h]=swatches[i], offset=(Math.floor(y+h/2)*screenshot.width+Math.floor(x+w/2))*4;
     expect([...screenshot.data.subarray(offset,offset+3)]).toEqual(expected);
   }
@@ -108,7 +108,7 @@ test('Scene eye controls, collapsed children and paint entries update live state
   expect(JSON.parse(painted.message).entries[0].color).toBe('#ff00ff');
   await call(page,'undo');
   const restored=await call(page,'list_paint',{nodeType:'object',nodeId:object.id});
-  expect(JSON.parse(restored.message).entries[0].color).toBe('SteelBlue');
+  expect(JSON.parse(restored.message).entries[0].color).toBe('okabeito_1');
   await click(page,'Add paint');
   let entries=JSON.parse((await call(page,'list_paint',{nodeType:'object',nodeId:object.id})).message).entries;
   expect(entries).toHaveLength(5);expect(entries[4].color).toBe('white');
@@ -117,7 +117,7 @@ test('Scene eye controls, collapsed children and paint entries update live state
   expect(entries[3].color).toBe('white');
   await click(page,'Delete paint');
   entries=JSON.parse((await call(page,'list_paint',{nodeType:'object',nodeId:object.id})).message).entries;
-  expect(entries).toHaveLength(4);expect(entries[3].color).toBe('FloralWhite');
+  expect(entries).toHaveLength(4);expect(entries[3].color).toBe('okabeito_1{mod_s:-0.6;mod_b:0.1}');
   await click(page,'Color mode');await click(page,'Color mode CPK');
   expect(JSON.parse((await call(page,'list_paint',{nodeType:'object',nodeId:object.id})).message).entries).toEqual([]);
   await expect.poll(()=>page.evaluate(()=>window.cuemol.status().ui.rects['paint-swatch:0'])).toBeUndefined();
@@ -152,6 +152,7 @@ test(`Bottom tabs remain reachable beside the Inspector at ${width}px`,async({pa
   const object=(await page.evaluate(()=>window.cuemol.status())).scene.objects[0];
   await click(page,`object:${object.id}`);
   const viewport=await rect(page,'Viewport');
+  expect(viewport[2]).toBeGreaterThan(100);
   for (const name of ['Console','Output','Sequence','Animation','MD Trajectory']) {
     const target=await rect(page,name);
     if (target[0]+target[2]>viewport[0]+viewport[2]-24) {

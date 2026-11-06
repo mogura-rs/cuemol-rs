@@ -1272,15 +1272,23 @@ impl App {
                 }
             });
             ui.separator();
+            let column_width = ((ui.available_width() - ui.spacing().item_spacing.x) * 0.5).max(1.);
             egui::Grid::new(("paint-entries", id.get()))
                 .num_columns(2)
-                .min_col_width((ui.available_width() - 12.) * 0.45)
+                .min_col_width(column_width)
+                .max_col_width(column_width)
                 .show(ui, |ui| {
                     ui.weak("Selection");
                     ui.weak("Color");
                     ui.end_row();
                     for (index, (selection, color)) in entries.iter().enumerate() {
-                        let response = ui.selectable_label(self.paint_selected == index, selection);
+                        let response = ui
+                            .add_sized(
+                                [column_width, ui.spacing().interact_size.y],
+                                egui::Button::selectable(self.paint_selected == index, selection)
+                                    .truncate(),
+                            )
+                            .on_hover_text(selection);
                         self.record_ui_rect(&format!("paint:{index}"), &response);
                         if response.clicked() {
                             self.paint_selected = index;
@@ -1296,6 +1304,7 @@ impl App {
                         }
                         let response = ui
                             .horizontal(|ui| {
+                                ui.set_width(column_width);
                                 let rgb = self.state.active_style_color(color);
                                 let (rect, _) = ui.allocate_exact_size(
                                     egui::vec2(14., 12.),
@@ -1312,7 +1321,11 @@ impl App {
                                         egui::Color32::from_rgb(c.r, c.g, c.b),
                                     );
                                 }
-                                ui.selectable_label(false, color)
+                                ui.add_sized(
+                                    [ui.available_width(), ui.spacing().interact_size.y],
+                                    egui::Button::selectable(false, color).truncate(),
+                                )
+                                .on_hover_text(color)
                             })
                             .inner;
                         self.record_ui_rect(&format!("paint-color:{index}"), &response);
