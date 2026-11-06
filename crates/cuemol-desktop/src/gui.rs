@@ -10061,7 +10061,8 @@ impl GuiApplication {
                 WorkspaceAuxSelection::DensityMap { .. }
                     | WorkspaceAuxSelection::Surface { .. }
                     | WorkspaceAuxSelection::Lightweight { .. }
-            ) && self.workspace_aux_group_summary(selection).is_none()
+            ) && (matches!(selection, WorkspaceAuxSelection::DensityMap { .. })
+                || self.workspace_aux_group_summary(selection).is_none())
         })
     }
 
@@ -38527,6 +38528,17 @@ mod tests {
         assert!((camera.target.x - 10.0).abs() < 1.0e-5);
         assert!((camera.target.y - 5.0).abs() < 1.0e-5);
         assert!((camera.ortho_scale - 5.0).abs() < 1.0e-4);
+        let group_uid = app
+            .state
+            .create_renderer_group(map_uid, "density group")
+            .unwrap();
+        app.workspace_aux_selection = Some(WorkspaceAuxSelection::DensityMap {
+            scene_uid,
+            map_uid,
+            renderer_uid: Some(group_uid),
+        });
+        assert!(app.workspace_selection_can_zoom());
+        assert!(app.fit_workspace_selection(&mut camera).unwrap());
         app.workspace_multiple_selection = vec![
             NativeWorkspaceTarget::Renderer {
                 scene_uid,
