@@ -240,11 +240,16 @@ fn applied_named_selections_follow_definitions_in_sequences_and_overlays() {
 fn pane_definitions_use_writable_scene_styles_and_preserve_locked_sets() {
     let (mut state, id) = fixture();
     let mut camera = Camera::new();
+    assert!(state
+        .style_summaries(state.active_scene().unwrap())
+        .iter()
+        .any(|style| style.local_index.is_some() && style.name == "default"));
+    let saved = tempfile::tempdir().unwrap();
     call_tool(
         &mut state,
         &mut camera,
-        "create_style_set",
-        &json!({"name":"default"}),
+        "save_style_file",
+        &json!({"styleSet":"default","path":saved.path().join("colors.xml")}),
     )
     .unwrap();
     call_tool(
@@ -261,7 +266,6 @@ fn pane_definitions_use_writable_scene_styles_and_preserve_locked_sets() {
         selection::evaluate(&state, Some(id), "carbon").count,
         Some(1)
     );
-    let saved = tempfile::tempdir().unwrap();
     call_tool(
         &mut state,
         &mut camera,

@@ -20841,8 +20841,8 @@ mod tests {
             .iter()
             .find(|renderer| renderer.uid == nucl_uid.get())
             .unwrap();
-        assert_eq!(nucl.specific["section.width"], "0.5");
-        assert_eq!(nucl.specific["section.type"], "elliptical");
+        assert_eq!(nucl.specific["section.width"], "0.4");
+        assert_eq!(nucl.specific["section.type"], "roundsquare");
         assert_eq!(nucl.specific["section.tuber"], "2.5");
         assert_eq!(nucl.specific["axialdetail"], "8");
         assert_eq!(nucl.specific["pivotatom"], "P");

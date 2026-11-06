@@ -16,6 +16,7 @@ use std::sync::{
 /// Bundled renderer presets and named colors. Geometry defaults follow the
 /// distributed CueMol 2.4.1 styles; newer molecule palettes remain opt-in.
 const DEFAULT_STYLE_XML: &str = include_str!("../data/default_style.xml");
+const CUEMOL3_STYLE_XML: &str = include_str!("../data/cuemol3_style.xml");
 
 pub const MATERIAL_AMBIENT: usize = 0;
 pub const MATERIAL_DIFFUSE: usize = 1;
@@ -1475,6 +1476,18 @@ impl StyleManager {
         set.set_source("<builtin>/default_style.xml");
         set.set_read_only(true);
         self.scopes.entry(scope_id).or_default().push(set);
+        uid
+    }
+
+    /// Load CueMol3 overrides ahead of the base system styles.
+    pub fn load_builtin_cuemol3_styles(&mut self, scope_id: u64) -> u64 {
+        if self.has_style_set("cuemol3", scope_id) != INVALID_UID {
+            return INVALID_UID;
+        }
+        let uid = self.load_style_set_from_xml(scope_id, "cuemol3", CUEMOL3_STYLE_XML, true);
+        if let Some(set) = self.get_style_set_mut(uid) {
+            set.set_source("<builtin>/cuemol3_style.xml");
+        }
         uid
     }
 

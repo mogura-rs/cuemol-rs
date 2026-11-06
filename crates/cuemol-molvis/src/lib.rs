@@ -3954,9 +3954,8 @@ pub fn molecule_render_options_for_renderer(renderer_type: &str) -> MoleculeRend
 /// by [`default_style_manager`]. Renderer style resolution should query this id.
 pub const DEFAULT_STYLE_SCOPE: u64 = 0;
 
-/// A [`StyleManager`] pre-loaded with the bundled `default_style.xml` presets in
-/// [`DEFAULT_STYLE_SCOPE`] — the startup state C++ `StyleMgr` reaches after
-/// reading the system style sheet. Use it to resolve a scene renderer's
+/// A [`StyleManager`] pre-loaded with the base and CueMol3 style presets in
+/// [`DEFAULT_STYLE_SCOPE`]. Use it to resolve a scene renderer's
 /// `style="..."` references when no per-scene style set is present.
 pub fn default_style_manager() -> StyleManager {
     static DEFAULT_STYLES: OnceLock<StyleManager> = OnceLock::new();
@@ -3965,6 +3964,7 @@ pub fn default_style_manager() -> StyleManager {
         .get_or_init(|| {
             let mut styles = StyleManager::new();
             styles.load_builtin_default_styles(DEFAULT_STYLE_SCOPE);
+            styles.load_builtin_cuemol3_styles(DEFAULT_STYLE_SCOPE);
             styles
         })
         .clone()

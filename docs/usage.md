@@ -44,13 +44,17 @@ cancelling queued inputs leaves that render running and cancellable.
 The initial representation uses a protein ribbon, the nucleic-acid (`nucl`) renderer, and
 ball-and-stick geometry for other atoms. The renderer controls remain available
 for adding or changing representations, selections, coloring, and materials.
-New molecules use CueMol's secondary-structure colors: SteelBlue for sheets,
-khaki for helices, yellow for nucleic acids and FloralWhite otherwise.
-A scene style can opt into molecule-order colors with
-`<palette id="default_paint" value="okabe_ito"/>`; `classic` restores the default
-for subsequently loaded molecules. Explicit palettes retain their named color
-definitions in saved scenes. Renderer `$molcol` colors inherit the object's coloring scheme,
-including hue, saturation, brightness and alpha modifiers.
+New molecules use CueMol3's Okabe-Ito palette in molecule load order. Helices and
+sheets share the molecule's base color, nucleic acids shift its hue, and coils
+use a lighter, less saturated color. The default ribbon and nucleotide geometry
+also follows CueMol3. A global user style or scene style can change the palette
+with `<palette id="default_paint" value="tolbright"/>`. Other bundled themes are
+`okabeito`, `tolvibrant`, `tolmuted`, `tollight`, `brewerset2`, `brewerdark2` and
+`tableau10`. The `classic` extension keeps the earlier secondary-structure colors.
+Palette changes affect subsequently loaded molecules. Used colors are stored in
+the scene, so a later global edit does not recolor saved molecules. Renderer
+`$molcol` colors inherit the object's coloring scheme, including hue, saturation,
+brightness and alpha modifiers.
 The browser accepts Unicode text and IME composition in its text fields.
 Its UI includes a Japanese fallback font; Console input and object names use
 the same text-input path.

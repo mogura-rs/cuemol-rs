@@ -283,7 +283,11 @@ def main():
                 finally:
                     pyautogui.keyUp(primary)
                 capture('multi-focus-selected.png')
-                click_at(x + 95, y + 333)
+                style_count = int(call('execute_script', {'source':
+                    "var styles=cuemol.getService('StyleManager');"
+                    "print(JSON.parse(styles.getStyleSetsJSON(0)).length + "
+                    "JSON.parse(styles.getStyleSetsJSON(scene.uid)).length);"})['log'].strip())
+                click_at(x + 95, y + 281 + 26 * style_count)
                 focused = wait_for(lambda: view if (view := call('get_view'))['center'] == [9.5, 0.75, 0.0] else None)
                 capture('multi-focus-fitted.png')
                 report.update(ok=True, chimerax_console=True, chimerax_undo=True,

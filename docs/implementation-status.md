@@ -14,7 +14,7 @@ and checked across the shared command, native and browser frontends. Camera comm
 rotation, slab fitting and undo separation also pass focused cross-frontend
 checks. Object export selection, format and source-link options also pass native and
 browser checks. The current ChimeraX console command set is implemented and passes native,
-Tauri and WebGL/WebGPU checks. The current operation inventory is complete; newly added operation behavior has focused coverage. The reference checkout is read-only.
+Tauri and WebGL/WebGPU checks. The current operation inventory is complete; newly added operation behavior has focused coverage. Current CueMol3 style overrides, molecule-order palettes and named Paint colors now pass reference and cross-frontend checks. The reference checkout is read-only.
 
 | Requirement | Existing implementation and next verification |
 | --- | --- |
@@ -32,7 +32,7 @@ Tauri and WebGL/WebGPU checks. The current operation inventory is complete; newl
 | WASM and browser interaction | Parser worker, WebGPU/WebGL2 viewer and Pages deployment exist. Build and run relevant browser checks after shared behavior changes. |
 | Installer and self-upgrade | Raw GitHub installers, checksums, rollback and binary/app self-upgrade pass current Linux and macOS local-fixture checks. Current source changes have not been published as a release. |
 | Configuration and startup | Shared configuration, preferences and startup scripts are implemented. CLI regressions for persistence and read-only commands that must not execute startup scripts pass in the current workspace run. |
-| Default representations and navigation | Protein ribbons, nucleotide cartoons, other-atom ball-and-stick, mouse presets, slab and centering exist. Recheck current reference defaults and selection-sensitive behavior. |
+| Default representations and navigation | Protein ribbons, nucleotide cartoons, other-atom ball-and-stick, mouse presets, slab and centering exist. Current CueMol3 ribbon/nucleotide dimensions and palette themes pass reference comparisons and WebGL/WebGPU rendering and scene reload; native OS input also passes with the new style rows. |
 | Build time and Actions cost | Headless default builds, split crates, debug-free dev/test profiles, Cargo/tool caches and one shared browser artifact exist. Baseline CI took about 12 minutes; the five-target Release build took about 36 minutes including browser validation. Investigate the critical path before adding jobs. |
 | Incremental commits | Commit coherent implementations after focused verification; preserve unrelated working-tree changes. |
 

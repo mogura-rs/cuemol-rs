@@ -13176,52 +13176,8 @@ impl DesktopAppState {
             .scene_manager()
             .scene(scene_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("scene {}", scene_uid.get())))?;
-        let styles = self.scene_styles(scene);
+        let styles = self.build_script_styles();
         let theme = styles.get_str_data("palette", "default_paint", scene_uid.get());
-        if !scene
-            .objects()
-            .iter()
-            .any(|object| object.uid() == object_uid)
-        {
-            return Err(CueMolError::NotFound(format!(
-                "object {}",
-                object_uid.get()
-            )));
-        }
-        if theme.trim().is_empty() || theme.trim().eq_ignore_ascii_case("classic") {
-            return Ok([
-                ("sheet", "SteelBlue"),
-                ("helix", "khaki"),
-                ("nucleic", "yellow"),
-                ("*", "FloralWhite"),
-            ]
-            .into_iter()
-            .map(|(selection, color)| (selection.to_string(), color.to_string()))
-            .collect());
-        }
-        let global = cuemol_molvis::default_style_manager();
-        let names = global.color_names(0);
-        let colors = |theme: &str| {
-            let prefix = format!("{theme}_");
-            let mut values = names
-                .iter()
-                .filter_map(|name| {
-                    Some((
-                        name.strip_prefix(&prefix)?.parse::<u32>().ok()?,
-                        name.clone(),
-                    ))
-                })
-                .collect::<Vec<_>>();
-            values.sort_by_key(|(index, _)| *index);
-            values.into_iter().map(|(_, name)| name).collect::<Vec<_>>()
-        };
-        let mut palette = colors(theme.trim());
-        if palette.is_empty() {
-            palette = colors("okabe_ito");
-        }
-        if palette.is_empty() {
-            return Ok(Vec::new());
-        }
         let mut ids = scene
             .objects()
             .iter()
@@ -13232,27 +13188,77 @@ impl DesktopAppState {
             .iter()
             .position(|uid| *uid == object_uid)
             .ok_or_else(|| CueMolError::NotFound(format!("object {}", object_uid.get())))?;
+        if theme.trim().eq_ignore_ascii_case("classic") {
+            return Ok([
+                ("sheet", "SteelBlue"),
+                ("helix", "khaki"),
+                ("nucleic", "yellow"),
+                ("*", "FloralWhite"),
+            ]
+            .into_iter()
+            .map(|(selection, color)| (selection.to_string(), color.to_string()))
+            .collect());
+        }
+        let global = self.global_styles();
+        let names = global.color_names(0);
+        let colors = |theme: &str| {
+            let theme = theme
+                .chars()
+                .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+                .collect::<String>();
+            let prefix = format!("{theme}_");
+            let mut values = names
+                .iter()
+                .filter_map(|name| {
+                    let number = name.strip_prefix(&prefix)?;
+                    if number.is_empty() || !number.bytes().all(|ch| ch.is_ascii_digit()) {
+                        return None;
+                    }
+                    Some((number.parse::<f64>().ok()?, name.clone()))
+                })
+                .collect::<Vec<_>>();
+            values.sort_by(|(left, _), (right, _)| left.total_cmp(right));
+            values.into_iter().map(|(_, name)| name).collect::<Vec<_>>()
+        };
+        let mut palette = colors(theme.trim());
+        if palette.is_empty() {
+            palette = colors("okabeito");
+        }
+        if palette.is_empty() {
+            return Ok(Vec::new());
+        }
         let base = &palette[index % palette.len()];
-        let saved = scene.loaded_styles().iter().any(|style| {
-            parse_ldom2_xml(&style.data).ok().is_some_and(|tree| {
-                tree.top()
-                    .children()
-                    .iter()
-                    .any(|node| node.tag_name() == "color" && node.str_attr("id").as_str() == base)
-            })
-        });
+        let saved = styles
+            .style_sets(scene_uid.get())
+            .iter()
+            .any(|set| set.get_color(base).is_some());
         if !saved {
-            let mut node = LDom2Node::new();
-            node.set_tag_name("styles");
-            node.set_str_attr("id", self.suggest_style_name(scene_uid)?);
-            let entry = node.append_child("color");
-            entry.set_str_attr("id", base);
-            entry.set_str_attr("value", global.compile_color(base, 0).script_string());
-            let data = write_ldom2_xml(&LDom2Tree::from(node.clone()));
-            self.scene_manager_mut()
-                .scene_mut(scene_uid)
-                .unwrap()
-                .add_loaded_style(LoadedStyle::new(node, data));
+            let color = global.compile_color(base, 0);
+            let hex = format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b());
+            let summaries = self.style_summaries(scene_uid);
+            let target = if let Some(style) = summaries
+                .iter()
+                .rev()
+                .find(|style| style.local_index.is_some() && !style.read_only)
+            {
+                style.target
+            } else {
+                let name = std::iter::once("default".to_string())
+                    .chain((0_u64..).map(|index| format!("default_{index}")))
+                    .find(|name| {
+                        !summaries
+                            .iter()
+                            .any(|style| style.local_index.is_some() && style.name == *name)
+                    })
+                    .expect("the style name space cannot be exhausted");
+                let index = self.create_scene_style(scene_uid, &name)?;
+                self.style_summaries(scene_uid)
+                    .into_iter()
+                    .find(|style| style.local_index == Some(index))
+                    .unwrap()
+                    .target
+            };
+            self.edit_style_entry(target, "color", base, Some(&hex))?;
         }
         Ok([
             ("sheet", ""),
@@ -37818,7 +37824,7 @@ impl DesktopAppState {
                 ctx,
             )?
             .to_string();
-            let color = solid_color_from_script_value(
+            let color = style_color_from_script_value(
                 args.get(color_index).unwrap_or(&JsValue::undefined()),
                 ctx,
             )?
@@ -37894,12 +37900,9 @@ impl DesktopAppState {
                 return Ok(JsValue::null());
             };
             let scope_id = script_renderer(uid)?.scene_uid;
-            let rgba = resolve_script_color_in_scope(spec, scope_id)
-                .ok_or_else(|| script_error(format!("invalid PaintColoring color value {spec}")))?;
-            Ok(make_color(
-                cuemol_gfx::SolidColor::from_rgba_u8(rgba.r, rgba.g, rgba.b, rgba.a),
-                ctx,
-            ))
+            let color = cuemol_qsys::StyleColor::from_expression(spec, scope_id)
+                .map_err(|error| script_error(error.to_string()))?;
+            make_style_color(color, ctx)
         }
         fn renderer_paint_get_sel(
             this: &JsValue,
@@ -38053,7 +38056,7 @@ impl DesktopAppState {
                     );
                     paint.set_str_attr(
                         "color",
-                        solid_color_from_script_value(&color, ctx)?.script_string(),
+                        style_color_from_script_value(&color, ctx)?.script_string(),
                     );
                 }
             }
@@ -38406,12 +38409,9 @@ impl DesktopAppState {
                 return Ok(JsValue::null());
             };
             let scope_id = script_object(uid)?.scene_uid;
-            let rgba = resolve_script_color_in_scope(spec, scope_id)
-                .ok_or_else(|| script_error(format!("invalid PaintColoring color value {spec}")))?;
-            Ok(make_color(
-                cuemol_gfx::SolidColor::from_rgba_u8(rgba.r, rgba.g, rgba.b, rgba.a),
-                ctx,
-            ))
+            let color = cuemol_qsys::StyleColor::from_expression(spec, scope_id)
+                .map_err(|error| script_error(error.to_string()))?;
+            make_style_color(color, ctx)
         }
         fn object_paint_get_sel(
             this: &JsValue,
@@ -64101,8 +64101,8 @@ end_header
         assert_eq!(
             object.paint_coloring(),
             &[
-                ("name CA".to_string(), "#FF0000".to_string()),
-                ("name N".to_string(), "#0000FF".to_string()),
+                ("name CA".to_string(), "red".to_string()),
+                ("name N".to_string(), "blue".to_string()),
             ]
         );
         let qsc = app
@@ -64111,7 +64111,7 @@ end_header
             .expect("MolCoord scene remains available")
             .write_qsc_string();
         assert!(qsc.contains("<coloring type=\"PaintColoring\">"));
-        assert!(qsc.contains("<paint sel=\"name N\" color=\"#0000FF\"/>"));
+        assert!(qsc.contains("<paint sel=\"name N\" color=\"blue\"/>"));
         let renderer = object.renderer_by_name("r2").expect("script renderer");
         assert!(!renderer.is_visible());
         assert_eq!(renderer.qsc_attr("material"), Some("matte"));
@@ -70186,9 +70186,20 @@ end_header
     }
 
     #[test]
-    fn default_molecule_paint_matches_cuemol_and_survives_scene_reload() {
+    fn explicit_classic_molecule_paint_survives_scene_reload() {
         let pdb = b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n";
         let mut app = DesktopAppState::new();
+        let target = app
+            .style_summaries(Uid::new(0))
+            .into_iter()
+            .find(|style| style.name == "user")
+            .unwrap()
+            .target;
+        app.edit_style(
+            target,
+            r#"<styles id="user"><palette id="default_paint" value="classic"/></styles>"#,
+        )
+        .unwrap();
         app.open_bytes("first.pdb", pdb).unwrap();
         app.open_bytes("second.pdb", pdb).unwrap();
         let check = |app: &DesktopAppState| {
@@ -70267,16 +70278,15 @@ end_header
             .bonds
             .iter()
             .all(|bond| (bond.radius - 0.25).abs() < 1.0e-6));
+        let expected = app
+            .resolve_style_color(scene_uid, "okabeito_1{mod_s:-0.6;mod_b:0.1}")
+            .unwrap();
         assert!(snapshot.atoms.iter().all(|atom| atom
             .color
             .as_ref()
             .and_then(cuemol_gfx::ColorSpec::rgba8)
-            == Some(cuemol_gfx::Rgba8 {
-                r: 255,
-                g: 250,
-                b: 240,
-                a: 255
-            })));
+            .map(|color| [color.r, color.g, color.b, color.a])
+            == Some([expected.r(), expected.g(), expected.b(), expected.a()])));
     }
 
     #[test]
@@ -71682,10 +71692,13 @@ attribute \"dep\" string \"positions\"
         assert_eq!(
             object.paint_coloring(),
             [
-                ("sheet".to_string(), "SteelBlue".to_string()),
-                ("helix".to_string(), "khaki".to_string()),
-                ("nucleic".to_string(), "yellow".to_string()),
-                ("*".to_string(), "FloralWhite".to_string()),
+                ("sheet".to_string(), "okabeito_1".to_string()),
+                ("helix".to_string(), "okabeito_1".to_string()),
+                ("nucleic".to_string(), "okabeito_1{mod_h:15}".to_string()),
+                (
+                    "*".to_string(),
+                    "okabeito_1{mod_s:-0.6;mod_b:0.1}".to_string()
+                ),
             ]
         );
         let atoms = object
@@ -71705,8 +71718,8 @@ attribute \"dep\" string \"positions\"
             .any(|renderer| renderer.name() == "simple"));
         let scene_uid = app.active_scene().unwrap();
         let setup_options = app.molecule_renderer_setup_options(scene_uid).unwrap();
-        assert_eq!(setup_options[0].name, "Default1RendPreset");
-        assert_eq!(setup_options[0].description, "Default preset 1");
+        assert_eq!(setup_options[0].name, "DefaultPymRendPreset");
+        assert_eq!(setup_options[0].description, "PyMOL-like preset");
         assert!(setup_options[0].preset);
         let maps = app.active_density_map_summaries();
         assert_eq!(maps.len(), 2);

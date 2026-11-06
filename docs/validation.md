@@ -5,6 +5,53 @@ results are historical. Generated inputs and logs stay in the ignored checkout
 cache. The current repairs and their limits appear in the completion audit;
 passing tests do not establish equivalence for every parameter combination.
 
+## Current CueMol3 defaults and live paint colors
+
+The shared default style manager now loads the current reference's
+`cuemol3_style.xml` after its base stylesheet. The override changes ribbon
+sections, nucleotide bases and backbone sections, the PyMOL preset and the
+available palette themes. Lower-priority properties still fall back individually
+to the base styles; user and scene definitions override both built-in sets.
+The explicit `classic` palette extension retains the earlier color scheme.
+
+New molecules now take the current Okabe-Ito palette in molecule UID order.
+Previously, custom global palettes were ignored because initialization read a
+separate static style manager, and each new color created another scene style.
+Initialization now reads live global definitions, sorts numeric suffixes,
+reuses a writable scene style and retains existing local colors. Saved scenes
+carry the used RGB definitions independently of subsequent global edits.
+
+A read-only TypeScript comparison executed the reference default-paint helper
+for 132 cases across all eight current themes, custom numeric order and fallback
+choices. Shared regressions also cover local overrides, read-only style sets,
+scene reload and property fallback. Paint scripting exposed another defect:
+object/renderer `getColorAt`, insertion and attachment converted named colors
+to fixed RGB. These paths now keep names and modifiers, and retained color
+values respond to scene palette notifications. The native script regression
+also verifies serialized color expressions.
+
+The final shared core/command checks passed 545 cases, including the explicitly
+enabled TypeScript oracle. The affected qsys/molvis/core/command run passed 769
+cases before the additional script regression. Native GUI checks passed 192
+cases with one optional case ignored, and macOS Tauri passed 170 with six
+optional cases ignored; the final paint change also passed its four console
+checks. Linux OS input passed ChimeraX, camera-preserving history and combined
+Zoom after accounting for the additional style rows. Rebuilt WebGL2 and WebGPU
+checks passed current palette/geometry values, visible ribbon pixels, and QSC
+save/reload. Their screenshots were inspected. The first synthetic structure
+had no peptide bonds and produced no ribbon; the corrected fixture includes a
+complete backbone and excludes UI controls from the pixel check.
+The final browser console, Inspector and selection regression run passed all 35
+cases. The complete Linux OS-input suite also passed its navigation, selection,
+clipboard, Python, console, font and Inspector checks on the updated binary.
+
+Reproduce the optional palette comparison with an absolute reference directory:
+
+```sh
+CUEMOL_DEFAULT_PAINT_REFERENCE="$(cd ../cuemol2 && pwd)" \
+  cargo test --locked -p cuemol-desktop-core --features scripting --test current_styles
+```
+
 ## Scene save failure and linked files
 
 A failed QSC write previously overwrote writable linked styles before reporting

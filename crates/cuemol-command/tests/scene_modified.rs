@@ -83,8 +83,16 @@ fn command_edits_and_history_share_the_scene_modified_property() {
 #[cfg(feature = "scripting")]
 #[test]
 fn script_transactions_report_object_changes_and_undo() {
-    let (_, mut state, _) = protocol();
+    let (mut protocol, mut state, mut camera) = protocol();
     state.open_bytes("one.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C\nEND\n").unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    call(
+        &mut protocol,
+        &mut state,
+        &mut camera,
+        "save_scene",
+        json!({"path":directory.path().join("baseline.qsc"),"embedAll":true}),
+    );
     let object = state.active_object_summaries()[0].uid.get();
     let (log, _) = state
         .run_script_js(&format!(
