@@ -46,7 +46,7 @@ test('workspace clipboard survives source deletion and paste has one undo step',
 });
 
 test('Edit clipboard commands preserve text focus across the menu', async ({page,context}) => {
-  await setup(page,context);
+  const object = await setup(page,context);
   await click(page,'Console');
   await click(page,'Console input');
   await page.keyboard.insertText('set_view zoom=17');
@@ -59,12 +59,14 @@ test('Edit clipboard commands preserve text focus across the menu', async ({page
   await page.keyboard.press('Enter');
   await expect.poll(async () => (await status(page)).view.zoom).toBe(17);
   expect((await status(page)).scene.objects).toHaveLength(1);
+  await call(page,'rename_node',{nodeType:'object',nodeId:object.id,name:'undo menu probe'});
   await call(page,'set_view',{zoom:29});
   await click(page,'Console input');
   await page.keyboard.press('Escape');
   await present(page);
   await menu(page,'Undo');
-  await expect.poll(async () => (await status(page)).view.zoom).toBe(17);
+  await expect.poll(async () => (await status(page)).scene.objects[0]?.name).toBe(object.name);
+  expect((await status(page)).view.zoom).toBe(29);
 });
 
 test('denied or delayed clipboard writes cannot cut a changed scene', async ({page,context}) => {

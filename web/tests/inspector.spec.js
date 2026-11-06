@@ -206,7 +206,7 @@ test('Selection pane applies live builder choices and preserves hand edits acros
   expect((await status(page)).ui.rects['Selection expression'][2]).toBeCloseTo(paneWidth,0);
   await type('Selection value','O1');
   await choose('Selection Add');
-  await expect.poll(()=>prop(page,object.id,'sel')).toBe('(pane_carbon) or (name O1)');
+  await expect.poll(()=>prop(page,object.id,'sel')).toBe('pane_carbon or name O1');
   await expect.poll(async()=>(await command(page,'count_selection',{objId:object.id,selection:await prop(page,object.id,'sel')})).count).toBe(2);
   const composed=await prop(page,object.id,'sel');
   await choose('Selection tab History');

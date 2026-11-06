@@ -3075,8 +3075,11 @@ continue to preserve coordinates, cell parameters and the current frame.
 The affected shared suite passed 617 tests. Native GUI model tests passed 192
 with one existing optional test ignored; Tauri passed 170 with six optional
 tests ignored. The final coordinate iterator passed its two focused regressions
-and the WASM target check. Browser execution of the new MD path is checked
-separately after rebuilding the browser application.
+and the WASM target check. After rebuilding the browser application, all three affected browser MD checks
+passed: indexed File seeking, agent-driven seeking with undo, and multi-object
+trajectory append/undo/export/reload. Both corrected UI expectations also passed.
+The preceding full browser run passed 210 of 212 cases; its two failures were
+the older camera-undo and selection-string expectations corrected in that run.
 
 The current Linux GUI binary also passed the real Python helper, APBS potential,
 POV-Ray image and OIDN image checks. PDB2PQR and FFmpeg reported their versions.
