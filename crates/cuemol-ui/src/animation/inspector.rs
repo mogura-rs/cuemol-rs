@@ -31,6 +31,7 @@ impl ElementInspector {
                     "abort",
                     original.clone(),
                     original,
+                    false,
                 ));
             }
         }
@@ -45,6 +46,7 @@ impl ElementInspector {
                             "abort",
                             json!(drag.original),
                             json!(drag.original),
+                            drag.was_default,
                         ));
                     }
                 }
@@ -136,10 +138,11 @@ impl ElementInspector {
             if previous_tab != self.generic { changes.extend(self.cancel()); }
             if !self.error.is_empty() {ui.colored_label(ui.visuals().error_fg_color,&self.error);return;}
             if let Some(error)=self.data["resolveError"].as_str() {ui.colored_label(ui.visuals().warn_fg_color,error);}
-            let reset=ui.button("Reset all to default");
+            let modified_keys=self.data["metadata"].as_object().into_iter().flatten().filter(|(key,_)|modified(&self.data,key)).map(|(key,_)|key.as_str()).collect::<Vec<_>>();
+            let reset=ui.add_enabled(!modified_keys.is_empty(), egui::Button::new("Reset all to default"));
             record(&mut self.rects,"Animation reset all",reset.rect);
             if reset.clicked() {
-                let keys=self.data["properties"].as_object().into_iter().flatten().map(|(key,_)|key.as_str()).filter(|key|resettable(key)).collect::<Vec<_>>();
+                let keys=modified_keys;
                 if !keys.is_empty() {changes.push(("reset_anim_prop",json!({"element":element_arg(uid),"props":keys.join(",")})));self.revision=None;}
             }
             egui::ScrollArea::vertical().id_salt("animation_properties_scroll").show(ui,|ui| {
@@ -157,7 +160,7 @@ impl ElementInspector {
                     self.field(ui,uid,"quadric","Quadric",Some(json!({"min":0,"max":50,"step":5,"unit":"%","decimals":0})),&mut changes);
                     ui.separator();
                     ui.strong(text(&self.data,"type"));
-                    let keys=self.data["properties"].as_object().into_iter().flatten().map(|(key,_)|key.clone()).filter(|key|!matches!(key.as_str(),"uid"|"name"|"disabled"|"timeRefName"|"start"|"end"|"quadric")).collect::<Vec<_>>();
+                    let keys=self.data["properties"].as_object().into_iter().flatten().map(|(key,_)|key.clone()).filter(|key|!matches!(key.as_str(),"uid"|"name"|"disabled"|"timeRefName"|"start"|"end"|"absStart"|"absEnd"|"quadric")).collect::<Vec<_>>();
                     for key in keys {
                         let (label,schema)=match key.as_str() {
                             "angle"=>("Rotation angle",Some(json!({"step":5,"unit":"°","decimals":0}))),
@@ -270,7 +273,9 @@ impl ElementInspector {
                     }
                 }
             });
-            let reset = ui.small_button("↺").on_hover_text("Reset to default");
+            let reset = ui
+                .add_enabled(modified(&self.data, "axis"), egui::Button::new("↺").small())
+                .on_hover_text("Reset to default");
             record(&mut self.rects, "Animation reset axis", reset.rect);
             if reset.clicked() {
                 changes.push((
@@ -303,7 +308,12 @@ impl ElementInspector {
             }
             _ => text(&self.data["properties"], key).to_string(),
         };
-        let readonly = matches!(key, "uid" | "start" | "end" | "absStart" | "absEnd");
+        let readonly = self.data["metadata"][key]["readonly"] == true;
+        let was_default = self.data["metadata"][key]["isDefault"] == true;
+        let kind = self.data["metadata"][key]["type"]
+            .as_str()
+            .unwrap_or("string")
+            .to_string();
         let percent = key == "quadric" && !self.generic;
         if percent {
             let percent_value = value.parse::<f64>().unwrap_or(0.) * 100.;
@@ -409,7 +419,7 @@ impl ElementInspector {
                                         if let Some(anchor) = self.timing_anchor.clone() {
                                             let mode = if response.drag_stopped() {"commit"} else {"preview"};
                                             if let Some((scene, _)) = self.target {
-                                                changes.push(edit_command(scene, uid, "timing", mode, json!({"startMs":start,"endMs":start+duration.max(0.)}), anchor));
+                                                changes.push(edit_command(scene, uid, "timing", mode, json!({"startMs":start,"endMs":start+duration.max(0.)}), anchor, false));
                                             }
                                             if response.drag_stopped() {self.timing_anchor = None; self.revision = None;}
                                         }
@@ -419,7 +429,7 @@ impl ElementInspector {
                                     edit.drag = None;
                                 }
                                 value = number.to_string();
-                            } else if value == "true" || value == "false" {
+                            } else if kind == "boolean" {
                                 let mut enabled = value == "true";
                                 let response = ui.checkbox(&mut enabled, "");
                                 record(
@@ -429,11 +439,7 @@ impl ElementInspector {
                                 );
                                 changed = response.changed();
                                 value = enabled.to_string();
-                            } else if value.parse::<f64>().is_ok()
-                                && !matches!(
-                                    key,
-                                    "name" | "timeRefName" | "rend" | "mol" | "endcam"
-                                )
+                            } else if matches!(kind.as_str(), "integer" | "real") && value.parse::<f64>().is_ok()
                             {
                                 let original_display = if percent {
                                     (original.parse::<f64>().unwrap_or(0.) * 100.).to_string()
@@ -444,11 +450,11 @@ impl ElementInspector {
                                 let (response, commit) = crate::numeric::field(
                                     ui,
                                     &format!("Animation property {key}"),
-                                    "real",
+                                    &kind,
                                     &mut value,
                                     schema.as_ref(),
                                     &original_display,
-                                    false,
+                                    was_default,
                                     self.numeric.entry(key.into()).or_default(),
                                     &mut self.rects,
                                 );
@@ -460,7 +466,7 @@ impl ElementInspector {
                                 changed = commit;
                                 if let Some((mode, drag, value)) = self.numeric.get_mut(key).and_then(|edit|edit.action.take()) {
                                     if let Some((scene, _)) = self.target {
-                                        changes.push(edit_command(scene, uid, key, mode, json!(value), json!(drag.original)));
+                                        changes.push(edit_command(scene, uid, key, mode, json!(value), json!(drag.original), drag.was_default));
                                     }
                                     if mode == "commit" {self.revision = None;}
                                 }
@@ -549,8 +555,8 @@ impl ElementInspector {
                     });
                     record(&mut self.rects,"Animation direction preset",combo.response.rect);
                 }
-                if resettable(key) {
-                    let response = ui.small_button("↺").on_hover_text("Reset to default");
+                if resettable(&self.data,key) {
+                    let response = ui.add_enabled(modified(&self.data,key), egui::Button::new("↺").small()).on_hover_text("Reset to default");
                     record(
                         &mut self.rects,
                         format!("Animation reset {key}"),
@@ -598,19 +604,11 @@ impl ElementInspector {
         }
     }
 }
-fn resettable(key: &str) -> bool {
-    !matches!(
-        key,
-        "name"
-            | "timeRefName"
-            | "start"
-            | "end"
-            | "uid"
-            | "absStart"
-            | "absEnd"
-            | "startMs"
-            | "durationMs"
-    )
+fn resettable(data: &Value, key: &str) -> bool {
+    data["metadata"][key]["hasDefault"] == true
+}
+fn modified(data: &Value, key: &str) -> bool {
+    resettable(data, key) && data["metadata"][key]["isDefault"] == false
 }
 
 fn edit_command(
@@ -620,10 +618,11 @@ fn edit_command(
     mode: &str,
     value: Value,
     original: Value,
+    was_default: bool,
 ) -> Command {
     (
         "edit_animation_property",
-        json!({"sceneId":scene,"uid":uid,"prop":prop,"mode":mode,"value":value,"originalValue":original}),
+        json!({"sceneId":scene,"uid":uid,"prop":prop,"mode":mode,"value":value,"originalValue":original,"originalWasDefault":was_default}),
     )
 }
 fn morph_range(kind: &str) -> Option<Value> {

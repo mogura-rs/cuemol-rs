@@ -250,17 +250,12 @@ pub fn call_tool(
                     .split(|c: char| c.is_whitespace() || c == ',')
                     .filter(|p| !p.is_empty())
                 {
-                    if matches!(
-                        prop,
-                        "name" | "uid" | "timeRefName" | "start" | "end" | "absStart" | "absEnd"
-                    ) {
+                    if mgr.motions()[index]
+                        .property_spec(prop)
+                        .is_none_or(|spec| spec.default.is_none())
+                    {
                         return Err(CueMolError::invalid_argument(format!(
                             "{prop} has no writable default"
-                        )));
-                    }
-                    if !node.children().iter().any(|child| child.tag_name() == prop) {
-                        return Err(CueMolError::invalid_argument(format!(
-                            "unknown property {prop}"
                         )));
                     }
                     node.remove_child(prop);
@@ -316,25 +311,13 @@ pub fn call_tool(
                         node.set_str_attr("timeRefName", value);
                     }
                 } else {
-                    if !node.children().iter().any(|child| child.tag_name() == prop)
-                        && !matches!(
-                            prop,
-                            "axis"
-                                | "name"
-                                | "timeRefName"
-                                | "endcam"
-                                | "rend"
-                                | "mol"
-                                | "disabled"
-                                | "quadric"
-                        )
-                    {
+                    let spec = mgr.motions()[index].property_spec(prop).ok_or_else(|| {
+                        CueMolError::invalid_argument(format!("unknown property {prop}"))
+                    })?;
+                    if spec.read_only {
                         return Err(CueMolError::invalid_argument(format!(
-                            "unknown property {prop}"
+                            "{prop} is read-only"
                         )));
-                    }
-                    if prop == "uid" {
-                        return Err(CueMolError::invalid_argument("identity is read-only"));
                     }
                     if prop == "axis" && name == "set_anim_prop" {
                         let values = value
@@ -380,6 +363,9 @@ pub fn call_tool(
                     } else {
                         node.set_str_attr(prop, value);
                     }
+                    if let Some(child) = node.find_child_mut(prop) {
+                        child.set_default_flag(false);
+                    }
                 }
             }
             let mut motion = AnimMotion::from_ldom2_node(&node)?;
@@ -414,7 +400,7 @@ pub fn prepare_animation_edit(
     let index = element(&mgr, &format!("#{}", uid.get()))?;
     let prop = text(args, "prop")?;
     let current = &mgr.motions()[index];
-    let motion_for = |value: &Value| -> Result<AnimMotion> {
+    let motion_for = |value: &Value, was_default: bool| -> Result<AnimMotion> {
         let mut node = current.to_ldom2_node();
         if prop == "timing" {
             let (start, end) = value["startMs"]
@@ -450,15 +436,42 @@ pub fn prepare_animation_edit(
                     CueMolError::invalid_argument("numeric edits require finite values")
                 })?;
             node.set_str_attr(prop, number.to_string());
+            node.find_child_mut(prop).unwrap().set_default_flag(false);
+            if was_default
+                && current
+                    .property_spec(prop)
+                    .is_some_and(|spec| spec.default.is_some())
+            {
+                node.remove_child(prop);
+            }
         }
         let mut motion = AnimMotion::from_ldom2_node(&node)?;
         motion.base_mut().set_abs_start(current.base().abs_start());
         motion.base_mut().set_abs_end(current.base().abs_end());
         Ok(motion)
     };
-    let value = motion_for(&args["value"])?;
-    let original = motion_for(&args["originalValue"])?;
-    let unchanged = value.to_ldom2_node() == original.to_ldom2_node();
+    let value = motion_for(&args["value"], false)?;
+    let original = motion_for(
+        &args["originalValue"],
+        args["originalWasDefault"].as_bool().unwrap_or(false),
+    )?;
+    let unchanged = if prop == "timing" {
+        (value.base().rel_start(), value.base().rel_end())
+            == (original.base().rel_start(), original.base().rel_end())
+    } else {
+        value
+            .to_ldom2_node()
+            .str_attr(prop)
+            .as_str()
+            .parse::<f64>()
+            .ok()
+            == original
+                .to_ldom2_node()
+                .str_attr(prop)
+                .as_str()
+                .parse::<f64>()
+                .ok()
+    };
     mgr.motions_mut()[index] = if mode == "preview" {
         value.clone()
     } else {
@@ -547,13 +560,37 @@ pub fn animation_element_detail(state: &DesktopAppState, uid: u64) -> Result<Val
     let index = element(&manager, &format!("#{uid}"))?;
     let motion = &manager.motions()[index];
     let node = motion.to_ldom2_node();
-    let properties: serde_json::Map<String, Value> = node
+    let mut properties: serde_json::Map<String, Value> = node
         .children()
         .iter()
         .filter(|child| child.is_attr())
         .map(|child| (child.tag_name().into(), json!(child.value())))
         .collect();
     let graph = Graph::read(&manager);
+    for (name, nanos) in [
+        ("start", motion.base().rel_start()),
+        ("end", motion.base().rel_end()),
+        ("absStart", motion.base().abs_start()),
+        ("absEnd", motion.base().abs_end()),
+    ] {
+        let millis = if name == "absStart" {
+            graph.nodes[index]
+                .abs_start_ms
+                .unwrap_or_else(|| time_to_milliseconds(nanos))
+        } else if name == "absEnd" {
+            graph.nodes[index]
+                .abs_end_ms
+                .unwrap_or_else(|| time_to_milliseconds(nanos))
+        } else {
+            time_to_milliseconds(nanos)
+        };
+        let mut time = cuemol_core::LScrTime::new();
+        time.set_milli_sec_real(millis);
+        properties.insert(name.into(), json!(time.script_string()));
+    }
+    let metadata: serde_json::Map<String, Value> = motion.property_specs().map(|spec| (
+        spec.name.into(), json!({"type":spec.type_name,"readonly":spec.read_only || matches!(spec.name,"start"|"end"),"hasDefault":spec.default.is_some(),"isDefault":motion.is_property_default(spec.name),"defaultValue":spec.default})
+    )).collect();
     let references = graph
         .first
         .keys()
@@ -595,7 +632,7 @@ pub fn animation_element_detail(state: &DesktopAppState, uid: u64) -> Result<Val
         }
     }
     Ok(
-        json!({"sceneId":sid.get(),"uid":uid,"type":motion.type_name(),"properties":properties,
+        json!({"sceneId":sid.get(),"uid":uid,"type":motion.type_name(),"properties":properties,"metadata":metadata,
         "startMs":time_to_milliseconds(motion.base().rel_start()),"endMs":time_to_milliseconds(motion.base().rel_end()),
         "resolveError":graph.nodes[index].error,"references":references,
         "cameras":state.camera_summaries(sid).into_iter().map(|c|c.name).collect::<Vec<_>>(),

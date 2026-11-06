@@ -4,9 +4,11 @@ use cuemol_qsys::{
     AnimObjEvent, Camera, Renderer, Scene, SceneExporter, ScrEventManager, ScrEventManagerHandle,
     View,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
+mod properties;
 mod runtime;
+pub use properties::AnimPropertySpec;
 
 pub type TimeValue = i64;
 
@@ -38,6 +40,7 @@ pub struct AnimObj {
     coeff: f64,
     absc: f64,
     grad: f64,
+    modified_defaults: BTreeSet<String>,
 }
 
 impl Default for AnimObj {
@@ -55,13 +58,22 @@ impl Default for AnimObj {
             coeff: 0.0,
             absc: 0.0,
             grad: 1.0,
+            modified_defaults: BTreeSet::new(),
         };
         value.set_quadric(0.0);
+        value.modified_defaults.clear();
         value
     }
 }
 
 impl AnimObj {
+    pub fn set_property_default(&mut self, name: &str, is_default: bool) {
+        if is_default {
+            self.modified_defaults.remove(name);
+        } else {
+            self.modified_defaults.insert(name.into());
+        }
+    }
     pub const AO_PRE: i32 = 0;
     pub const AO_ACTIVE: i32 = 1;
     pub const AO_POST: i32 = 2;
@@ -105,6 +117,7 @@ impl AnimObj {
     }
 
     pub fn set_disabled(&mut self, value: bool) {
+        self.set_property_default("disabled", false);
         self.disabled = value;
     }
 
@@ -207,6 +220,7 @@ impl AnimObj {
     }
 
     pub fn set_quadric(&mut self, value: f64) {
+        self.set_property_default("quadric", false);
         if value < 0.01 {
             self.quadric = -0.0;
             self.coeff = 0.0;
@@ -333,6 +347,7 @@ impl CamMotion {
     }
 
     pub fn set_ignorecenter(&mut self, value: bool) {
+        self.base_mut().set_property_default("ignorecenter", false);
         self.ignorecenter = value;
     }
 
@@ -341,6 +356,7 @@ impl CamMotion {
     }
 
     pub fn set_ignorerotate(&mut self, value: bool) {
+        self.base_mut().set_property_default("ignorerotate", false);
         self.ignorerotate = value;
     }
 
@@ -349,6 +365,7 @@ impl CamMotion {
     }
 
     pub fn set_ignorezoom(&mut self, value: bool) {
+        self.base_mut().set_property_default("ignorezoom", false);
         self.ignorezoom = value;
     }
 
@@ -357,6 +374,7 @@ impl CamMotion {
     }
 
     pub fn set_ignoreslab(&mut self, value: bool) {
+        self.base_mut().set_property_default("ignoreslab", false);
         self.ignoreslab = value;
     }
 
@@ -365,6 +383,8 @@ impl CamMotion {
     }
 
     pub fn set_keepquatpositive(&mut self, value: bool) {
+        self.base_mut()
+            .set_property_default("keepquatpositive", false);
         self.keepquatpositive = value;
     }
 }
@@ -786,6 +806,7 @@ impl ShowHideAnim {
     }
 
     pub fn set_hide(&mut self, value: bool) {
+        self.base_mut().set_property_default("hide", false);
         self.hide = value;
     }
 
@@ -798,6 +819,7 @@ impl ShowHideAnim {
     }
 
     pub fn set_fade(&mut self, value: bool) {
+        self.base_mut().set_property_default("fade", false);
         self.fade = value;
     }
 
@@ -826,6 +848,7 @@ impl ShowHideAnim {
     }
 
     pub fn set_tgt_alpha(&mut self, value: f64) {
+        self.base_mut().set_property_default("tgt_alpha", false);
         self.tgt_alpha = value;
     }
 
@@ -883,6 +906,7 @@ impl SimpleSpin {
     }
 
     pub fn set_angle(&mut self, value: f64) {
+        self.base_mut().set_property_default("angle", false);
         self.angle = value;
     }
 
@@ -899,6 +923,7 @@ impl SimpleSpin {
         if len.abs() < 1.0e-8 {
             return false;
         }
+        self.base_mut().set_property_default("axis", false);
         self.axis = value / len;
         true
     }
@@ -977,6 +1002,7 @@ impl SlideInOutAnim {
     }
 
     pub fn set_hide(&mut self, value: bool) {
+        self.base_mut().set_property_default("hide", false);
         self.hide = value;
     }
 
@@ -989,6 +1015,7 @@ impl SlideInOutAnim {
     }
 
     pub fn set_direction(&mut self, value: f64) {
+        self.base_mut().set_property_default("direction", false);
         self.direction = value;
     }
 
@@ -1001,6 +1028,7 @@ impl SlideInOutAnim {
     }
 
     pub fn set_distance(&mut self, value: f64) {
+        self.base_mut().set_property_default("distance", false);
         self.distance = value;
     }
 
@@ -1212,6 +1240,17 @@ impl AnimMotion {
             }
             Self::Noop(_) | Self::Unknown { .. } => {}
         }
+        let modified = motion
+            .property_specs()
+            .filter(|spec| {
+                spec.default.is_some()
+                    && node
+                        .find_child(spec.name)
+                        .is_some_and(|child| !child.is_default())
+            })
+            .map(|spec| spec.name.to_string())
+            .collect();
+        motion.base_mut().modified_defaults = modified;
         Ok(motion)
     }
 
@@ -1267,6 +1306,9 @@ impl AnimMotion {
                 node.set_str_attr("distance", value.distance().to_string());
             }
             Self::Noop(_) | Self::Unknown { .. } => {}
+        }
+        for child in node.children_mut() {
+            child.set_default_flag(self.is_property_default(child.tag_name()));
         }
         node
     }

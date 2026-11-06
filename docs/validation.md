@@ -1,5 +1,41 @@
 # Validation evidence
 
+## Animation property metadata and reset state
+
+The animation model now retains declared defaults separately from explicit
+values. Its property list covers all eight current element classes, including
+read-only absolute times. A C++ oracle checks property names, types, read-only
+flags, default availability and values across initial, explicit-equal and reset
+states: 24 class/state cases pass. A serialization regression confirms that
+explicit values equal to a default remain present, while reset values are
+omitted and regain default state when loaded.
+
+A command reproducer showed that resetting a mixed list could clear a renderer
+target that has no declared default. Such requests now fail atomically. The
+Inspectors enable per-property and Reset-all controls only for modified declared
+defaults. Numeric previews restore the default flag on cancellation and before
+the final undo snapshot. The legacy native/Tauri reset dialogs and JavaScript
+`cuemol.resetProp` use the same model semantics. A stale Tauri form cannot rename
+the current element during a reset. Typed Generic fields also keep a name such
+as `true` as text, and real-property values retain their unrestricted range.
+
+The shared animation, command and UI suites passed 306 checks with two unrelated
+optional checks ignored. This run explicitly enabled both the geometry and
+property oracles. All 15 affected desktop-core animation checks and 28 native
+animation checks passed. The macOS Tauri model passed 25 checks with one optional
+GPU case ignored; its final reset regression passed again with a stale form.
+All four affected Tauri shell cases passed, including default-state cancellation,
+reset/undo, string field types and unrestricted real-property inputs.
+The rebuilt WebGL/WebGPU viewer passed all 12 affected animation cases, including
+cancelled default-value drags, disabled resets preserving redo, string names and
+saved reference chains. The current Linux OS-input probe also passed the strip
+and timing preview/cancel/undo checks. The final screenshots were inspected.
+
+The reference `propModel.ts` comment describes scalar default annotations as
+future work, but its current C++ `getPropsJSON` already emits those defaults.
+The implementation follows the emitted property metadata. The earlier animation
+milestones below retain their historical scope.
+
 ## Animation preview transactions and Tauri strips
 
 The native, browser and Tauri element Inspectors now preview paired start/end
@@ -41,8 +77,8 @@ checks passed; generated evidence remains in the ignored cache.
 
 The earlier strip-timeline milestone below describes its state at that commit.
 Its remaining Tauri, preset and realtime-preview items are covered above.
-Default-state metadata and the remaining reference Inspector details are still
-under audit; this does not establish complete feature or appearance parity.
+Default-state metadata was still under audit at this milestone and is covered
+above. Remaining Inspector details and broader appearance parity stay open.
 
 ## Animation strip timeline and shared element Inspector
 

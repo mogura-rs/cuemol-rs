@@ -58,6 +58,12 @@ Spin axes support X/Y/Z presets and Cartesian components, and renderer slide
 directions support cardinal presets. Structured controls retain their type's
 ranges; generic real-property values are not restricted to morph fractions.
 
+Reset buttons follow each property's declared default. Reset all restores only
+modified properties that have a default and retains names, timing and targets.
+An explicit value equal to the default remains an explicit setting until reset;
+this distinction survives undo, preview cancellation and scene reload. Generic
+fields use their declared types and show resolved absolute times as read-only.
+
 Animation elements can start relative to another element's end. Renaming the
 reference updates its dependent elements, and deleting it keeps their current
 absolute times. Changing a reference preserves the span unless it must move

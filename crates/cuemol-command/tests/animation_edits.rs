@@ -23,6 +23,51 @@ fn fixture() -> (DesktopAppState, Camera) {
 }
 
 #[test]
+fn animation_reset_requires_a_declared_default_and_preserves_explicit_state() {
+    let (mut state, mut camera) = fixture();
+    let result = call(
+        &mut state,
+        &mut camera,
+        "add_anim",
+        json!({"type":"show","name":"visibility"}),
+    );
+    let uid = result["elements"][3]["uid"].as_u64().unwrap();
+    call(
+        &mut state,
+        &mut camera,
+        "set_anim_prop",
+        json!({"element":"visibility","prop":"rend","value":"named renderer"}),
+    );
+    let before = state.clone();
+    assert!(call_tool(
+        &mut state,
+        &mut camera,
+        "reset_anim_prop",
+        &json!({"element":"visibility","props":"hide,rend"})
+    )
+    .is_err());
+    assert!(before.same_undo_state(&state));
+    let detail =
+        |state: &DesktopAppState| cuemol_command::animation_element_detail(state, uid).unwrap();
+    assert_eq!(detail(&state)["metadata"]["quadric"]["isDefault"], true);
+    call(
+        &mut state,
+        &mut camera,
+        "set_anim_generic_prop",
+        json!({"element":"visibility","prop":"quadric","value":"0"}),
+    );
+    assert_eq!(detail(&state)["metadata"]["quadric"]["isDefault"], false);
+    call(
+        &mut state,
+        &mut camera,
+        "reset_anim_prop",
+        json!({"element":"visibility","props":"quadric"}),
+    );
+    assert_eq!(detail(&state)["metadata"]["quadric"]["isDefault"], true);
+    assert_eq!(detail(&state)["properties"]["rend"], "named renderer");
+}
+
+#[test]
 fn nonfinite_animation_numeric_edits_are_rejected_without_mutation() {
     let (mut state, mut camera) = fixture();
     for (kind, name) in [
@@ -452,7 +497,7 @@ fn animation_numeric_previews_reject_invalid_targets_and_values_atomically() {
     let uid = data["elements"][0]["uid"].as_u64().unwrap();
     let scene = state.active_scene().unwrap().get();
     let anchor = state.clone();
-    let mut edit = json!({"sceneId":scene,"uid":uid,"prop":"quadric","mode":"preview","value":"0.25","originalValue":"0"});
+    let mut edit = json!({"sceneId":scene,"uid":uid,"prop":"quadric","mode":"preview","value":"0.25","originalValue":"0","originalWasDefault":true});
     cuemol_command::prepare_animation_edit(&mut state, &mut camera, &edit).unwrap();
     assert_eq!(
         call(&mut state, &mut camera, "list_anims", json!({}))["elements"][0]["quadric"],

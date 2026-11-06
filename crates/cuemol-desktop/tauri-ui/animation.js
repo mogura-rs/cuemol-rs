@@ -240,17 +240,19 @@ function paintAnimationInspector() {
   for(const tab of ['Properties','Generic']){const control=button(tab,'',async()=>{await cancelCueMolNumericDrag();if(editor.key!==key)return;editor.tab=tab;paintAnimationInspector();});control.setAttribute('aria-label',`Animation ${tab} tab`);control.setAttribute('aria-selected',String(editor.tab===tab));tabs.append(control);}
   fields.append(tabs);
   if(data.resolveError){const warning=document.createElement('p');warning.className='inspector-error';warning.textContent=data.resolveError;fields.append(warning);}
-  const resettable=prop=>!['name','timeRefName','start','end','uid','absStart','absEnd'].includes(prop);
+  const resettable=prop=>data.metadata?.[prop]?.hasDefault===true;
+  const modified=prop=>resettable(prop)&&data.metadata[prop].isDefault===false;
   const reset=props=>editCueMolAnimation('reset_anim_prop',{element:`#${target.uid}`,props},target.sceneId);
-  fields.append(button('Reset all to default','',()=>void reset(Object.keys(data.properties).filter(resettable).join(','))));
+  const modifiedKeys=Object.keys(data.properties).filter(modified);
+  const resetAll=button('Reset all to default','',()=>void reset(modifiedKeys.join(',')));resetAll.disabled=!modifiedKeys.length;fields.append(resetAll);
   const add=(prop,labelText,value,{readonly=false,options=null,schema=null,timing=false,percent=false}={})=>{
     const row=document.createElement('div');row.className='inspector-property';
     const label=document.createElement('label');label.textContent=labelText;
     const holder=document.createElement('div');holder.className='inspector-property-input';
     const input=document.createElement(options?'select':'input');input.id=`animation-inspector-${prop}`;label.htmlFor=input.id;input.setAttribute('aria-label',`Animation property ${prop}`);
     if(options){for(const option of options){const item=document.createElement('option');item.value=option.value;item.textContent=option.label;item.disabled=Boolean(option.error);if(option.error)item.title=option.error;input.append(item);}input.value=value;input.addEventListener('change',()=>void commit(prop,input.value));}
-    else if(value==='true'||value==='false'){input.type='checkbox';input.checked=value==='true';input.addEventListener('change',()=>void commit(prop,input.checked));}
-    else if(timing || value!==''&&Number.isFinite(Number(value))&&!['name','timeRefName','rend','mol','endcam'].includes(prop)) {
+    else if(data.metadata?.[prop]?.type==='boolean'){input.type='checkbox';input.checked=value==='true';input.addEventListener('change',()=>void commit(prop,input.checked));}
+    else if(timing || ['real','integer'].includes(data.metadata?.[prop]?.type)&&value!==''&&Number.isFinite(Number(value))) {
       input.type=timing?'text':'number';const original=String(value);const display=v=>timing?animationClock(Number(v)):String(v);
       input.value=display(original);if(!timing){if(schema?.min!==undefined)input.min=schema.min;if(schema?.max!==undefined)input.max=schema.max;input.step=schema?.step??0.01;}
       const write=value=>{
@@ -262,20 +264,20 @@ function paintAnimationInspector() {
       };
       input.addEventListener('change',()=>{if(!cueMolNumericDrag)write(input.value);});
       input.addEventListener('keydown',event=>{if(event.key==='Enter')input.blur();if(event.key==='Escape'){event.preventDefault();input.value=display(original);input.blur();}});
-      if(!readonly)attachCueMolNumericDrag(input,label,{key:prop,value:original,type:'real',schema:{...schema,realtime:timing||editor.tab==='Generic'},format:timing?display:null,parse:timing?animationParseClock:null,timing,span:{startMs:data.startMs,endMs:data.endMs}},value=>write(display(value)),editor);
+      if(!readonly)attachCueMolNumericDrag(input,label,{key:prop,value:original,type:'real',isDefault:data.metadata?.[prop]?.isDefault===true,schema:{...schema,realtime:timing||editor.tab==='Generic'},format:timing?display:null,parse:timing?animationParseClock:null,timing,span:{startMs:data.startMs,endMs:data.endMs}},value=>write(display(value)),editor);
     } else {input.value=value;input.addEventListener('change',()=>{if(input.value!==value)void commit(prop,input.value);});input.addEventListener('keydown',event=>{if(event.key==='Enter')input.blur();if(event.key==='Escape'){input.value=value;input.blur();}});}
     input.disabled=readonly;holder.append(input);row.append(label,holder);
-    if(resettable(prop)&&!timing&&!readonly){const control=button('↺','',()=>void reset(prop));control.title='Reset to default';control.setAttribute('aria-label',`Animation reset ${prop}`);row.append(control);}
+    if(resettable(prop)&&!timing&&!readonly){const control=button('↺','',()=>void reset(prop));control.title='Reset to default';control.disabled=!modified(prop);control.setAttribute('aria-label',`Animation reset ${prop}`);row.append(control);}
     fields.append(row);return {row,input,holder};
   };
   editor.editRequest=(row,mode,value,args)=>{
     let final=value,original=row.value,prop=row.key;
     if(row.timing){prop='timing';const span=row.span;const start=row.key==='startMs'?Number(value):span.startMs;const duration=row.key==='durationMs'?Number(value):span.endMs-span.startMs;final={startMs:start,endMs:start+duration};original=span;}
-    return {tool:'edit_animation_property',args:{...args,...target,prop,mode,value:final,originalValue:original}};
+    return {tool:'edit_animation_property',args:{...args,...target,prop,mode,value:final,originalValue:original,originalWasDefault:row.isDefault===true}};
   };
   editor.onPreview=()=>renderAnimation();
   if(editor.tab==='Generic') {
-    for(const [prop,value] of Object.entries(data.properties))add(prop,prop,value,{readonly:['uid','start','end','absStart','absEnd'].includes(prop)});
+    for(const [prop,value] of Object.entries(data.properties))add(prop,prop,value,{readonly:data.metadata?.[prop]?.readonly===true});
     return;
   }
   add('name','Name',data.properties.name);add('disabled','Disabled',data.properties.disabled);
@@ -288,7 +290,7 @@ function paintAnimationInspector() {
   add('durationMs','Duration',data.endMs-data.startMs,{timing:true,schema:{min:0,step:10}});
   add('quadric','Quadric',Number(data.properties.quadric)*100,{schema:animationNumericSchema('quadric',data.type),percent:true});
   for(const [prop,value] of Object.entries(data.properties)) {
-    if(['uid','name','disabled','timeRefName','start','end','quadric'].includes(prop))continue;
+    if(['uid','name','disabled','timeRefName','start','end','absStart','absEnd','quadric'].includes(prop))continue;
     if(prop==='axis') {
       const values=value.replace(/[()]/g,'').trim().split(/[,\s]+/).map(Number).slice(0,3);
       const derived=values[0]===1&&values[1]===0&&values[2]===0?'x':values[0]===0&&values[1]===1&&values[2]===0?'y':values[0]===0&&values[1]===0&&values[2]===1?'z':'cart';
@@ -300,7 +302,7 @@ function paintAnimationInspector() {
       label.append(select);row.append(label);
       const xyz=document.createElement('div');xyz.className='animation-axis-components';
       for(const [index,axis]of ['x','y','z'].entries()){const box=document.createElement('input');box.type='number';box.step='0.0001';box.value=String(Math.round(values[index]*1e4)/1e4);box.disabled=select.value!=='cart';box.setAttribute('aria-label',`Animation axis component ${axis}`);box.addEventListener('change',()=>{const updated=values.slice();updated[index]=Number(box.value);if(box.value!==''&&updated.every(Number.isFinite)&&Math.hypot(...updated)>=1e-6)void commit('axis',updated.join(' '),'set_anim_prop');else box.value=String(values[index]);});xyz.append(box);}
-      xyz.append(button('↺','',()=>void reset('axis')));row.append(xyz);fields.append(row);continue;
+      const resetAxis=button('↺','',()=>void reset('axis'));resetAxis.disabled=!modified('axis');resetAxis.setAttribute('aria-label','Animation reset axis');xyz.append(resetAxis);row.append(xyz);fields.append(row);continue;
     }
     if(prop==='rend') {
       const row=document.createElement('div');row.className='animation-renderer-choices';row.textContent='Target renderers';

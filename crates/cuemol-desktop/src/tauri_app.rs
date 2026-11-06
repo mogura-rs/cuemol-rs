@@ -12546,14 +12546,15 @@ fn handle_model_request(
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::ResetAnimationObjectProperties(input) => {
-            let animation = model.prepare_animation_object_properties(&input)?;
-            model.restore_animation_playback(false)?;
-            model.animation_elapsed = 0.0;
-            let undo = model.capture_undo();
-            model.set_active_animation_manager(&animation)?;
-            model.reset_animation_playback();
+            let animation = model.active_animation_manager()?;
+            let motion = if let Some(uid) = input.uid {
+                animation.motions().iter().find(|motion|motion.base().uid().get()==uid)
+            } else { animation.motions().get(input.index) }.ok_or("Animation element was not found")?;
+            let props = motion.property_specs().filter(|spec|spec.default.is_some() && !motion.is_property_default(spec.name)).map(|spec|spec.name).collect::<Vec<_>>();
+            if !props.is_empty() {
+                model.inspector_request("reset_anim_prop", &serde_json::json!({"sceneId":model.desktop.active_scene().unwrap().get(),"element":format!("#{}",motion.base().uid().get()),"props":props.join(",")}))?;
+            }
             model.status = "Reset all to default".to_string();
-            model.push_undo(undo);
             Ok(ModelResponse::Snapshot(Box::new(model.snapshot())))
         }
         ModelRequest::AnimationControl(action) => {
@@ -24835,6 +24836,7 @@ mod tests {
         defaults.quadric = 0.0;
         defaults.angle = Some(0.0);
         defaults.axis = Some([0.0, 1.0, 0.0]);
+        defaults.name = "stale form value".into();
         let undo_count = model.undo_stack.len();
         handle_model_request(
             &mut model,
@@ -24849,6 +24851,11 @@ mod tests {
         assert_eq!(reset.axis, Some([0.0, 1.0, 0.0]));
         assert_eq!(model.status, "Reset all to default");
         assert_eq!(model.undo_stack.len(), undo_count + 1);
+
+        let animation = model.active_animation_manager().unwrap();
+        for property in ["disabled", "quadric", "angle", "axis"] {
+            assert!(animation.motions()[0].is_property_default(property));
+        }
 
         handle_model_request(&mut model, ModelRequest::Undo(0)).unwrap();
         let restored = &model.snapshot().animation_objects[0];

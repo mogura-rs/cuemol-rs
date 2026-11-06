@@ -32974,6 +32974,12 @@ impl DesktopAppState {
                 object.delete_property_or_throw(JsString::from(name), ctx)?;
                 return Ok(JsValue::undefined());
             };
+            if runtime_implements(&class_name, "AnimObj") {
+                let uid = anim_proxy_uid(&value, ctx)?;
+                with_script_anim_motion_mut(uid, &name, |motion| motion.reset_property(&name))?
+                    .map_err(|error| script_error(error.to_string()))?;
+                return Ok(JsValue::undefined());
+            }
             if matches!(class_name.as_str(), "TubeSection" | "JctTable") {
                 let kind = if class_name == "JctTable" {
                     RendererChildKind::Junction
@@ -61882,6 +61888,31 @@ end_header
             "types=7:CamMotion:RealPropAnim:MolAnim:RendXformAnim:ShowHideAnim:SimpleSpin:SlideInOutAnim"
         ));
         assert!(persisted_log.contains("values=dest:4.5:target-mol:6:0.4:1:2.5"));
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn run_script_js_animation_reset_preserves_default_flags_and_targets() {
+        let mut app = DesktopAppState::new();
+        app.new_scene("animation-defaults", true);
+        let scene = app.active_scene().unwrap();
+        app.run_script_js("var spin=cuemol.SimpleSpin(); spin.name='rotation'; spin.angle=0; var manager=scene.getAnimMgr(); manager.append(spin);").unwrap();
+        let animation = app.scene_animation(scene).unwrap().unwrap();
+        assert!(!animation.motions()[0].is_property_default("angle"));
+        app.run_script_js("var spin=scene.getAnimMgr().getAt(0); cuemol.resetProp(spin,'angle');")
+            .unwrap();
+        let animation = app.scene_animation(scene).unwrap().unwrap();
+        assert!(animation.motions()[0].is_property_default("angle"));
+        assert_eq!(animation.motions()[0].base().name(), "rotation");
+        assert!(app
+            .run_script_js("cuemol.resetProp(scene.getAnimMgr().getAt(0),'name');")
+            .is_err());
+        assert_eq!(
+            app.scene_animation(scene).unwrap().unwrap().motions()[0]
+                .base()
+                .name(),
+            "rotation"
+        );
     }
 
     #[cfg(feature = "scripting")]

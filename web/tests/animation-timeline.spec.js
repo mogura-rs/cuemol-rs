@@ -81,11 +81,32 @@ for(const backend of ['webgl','webgpu']) {
     await click(page,'Animation Generic tab');await call(page,'clear_undo');
     await begin('Animation property quadric',20);expect((await timeline(page)).elements[0].quadric).toBeGreaterThan(0);await page.mouse.up();await settle(page);
     const quadric=(await timeline(page)).elements[0].quadric;await call(page,'undo');expect((await timeline(page)).elements[0].quadric).toBeCloseTo(0,12);
+    await click(page,'Animation reset quadric');
     await call(page,'redo');expect((await timeline(page)).elements[0].quadric).toBe(quadric);
     await click(page,'Animation Properties tab');
     await click(page,'Animation axis preset');await click(page,'Animation axis x');
     await click(page,'Animation axis preset');await click(page,'Animation axis cart');
     await enter(page,'Animation axis component y','2');
     await page.screenshot({path:testInfo.outputPath('animation-inspector-presets.png')});
+  });
+  test(`Animation default flags ${backend} survive cancelled drags reset and redo`,async({page},testInfo)=>{
+    await page.goto(`./?renderer=${backend}`);
+    await expect.poll(async()=>Boolean((await status(page))?.scene.sceneId),{timeout:60000}).toBe(true);
+    await call(page,'add_anim',{type:'spin',name:'base'});await call(page,'add_anim',{type:'wait',name:'child'});
+    await click(page,'Animation');await click(page,'Animation label base');
+    await click(page,'Animation reset all');await call(page,'undo');
+    await click(page,'Animation Generic tab');
+    const [x,y,w,h]=await rect(page,'Animation property quadric'),px=x+w/2,py=y+h/2;
+    await page.mouse.move(px,py);await page.mouse.down();await settle(page);await page.mouse.move(px+20,py,{steps:5});await settle(page);
+    expect((await timeline(page)).elements[0].quadric).toBeGreaterThan(0);
+    await page.keyboard.press('Escape');await page.mouse.up();await settle(page);
+    await click(page,'Animation reset quadric');await call(page,'redo');
+    await click(page,'Animation Properties tab');
+    await enter(page,'Animation property name','true');expect((await timeline(page)).elements[0].name).toBe('true');
+    await call(page,'undo');await click(page,'Animation reset all');await call(page,'redo');
+    const elements=(await timeline(page)).elements;
+    expect(elements[0].name).toBe('true');expect(elements[1].timeRefName).toBe('true');
+    expect(elements[0].endMs).toBe(1000);expect(elements[0].quadric).toBeCloseTo(0,12);
+    await click(page,'Animation Generic tab');await page.screenshot({path:testInfo.outputPath('animation-default-flags.png')});
   });
 }

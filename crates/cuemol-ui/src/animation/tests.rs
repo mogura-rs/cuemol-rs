@@ -322,6 +322,39 @@ fn generic_animation_numeric_preview_aborts_and_commits_once() {
 }
 
 #[test]
+fn animation_resets_and_preview_cancellation_preserve_default_flags() {
+    let mut h = InspectorHarness::new();
+    h.click("Animation reset all");
+    assert_eq!(h.detail()["properties"]["angle"], "0");
+    assert_eq!(h.detail()["metadata"]["angle"]["isDefault"], true);
+    assert_eq!(h.detail()["properties"]["name"], "base");
+    assert_eq!(h.detail()["endMs"], 1000.);
+    h.click("Animation reset all");
+    assert_eq!(h.history.len(), 1);
+    h.click("Animation Generic tab");
+    let anchor = h.state.clone();
+    let p = point(h.editor.rects["Animation property quadric"]);
+    h.step(pointer(p, true));
+    h.step(vec![egui::Event::PointerMoved(p + vec2(15., 0.))]);
+    assert_eq!(h.detail()["metadata"]["quadric"]["isDefault"], false);
+    h.step(vec![escape()]);
+    h.step(pointer(p + vec2(15., 0.), false));
+    assert!(anchor.same_scene_undo_state(&h.state));
+    assert_eq!(h.detail()["metadata"]["quadric"]["isDefault"], true);
+    h.step(vec![]);
+    let p = point(h.editor.rects["Animation property quadric"]);
+    h.step(pointer(p, true));
+    h.step(vec![egui::Event::PointerMoved(p + vec2(15., 0.))]);
+    h.step(pointer(p + vec2(15., 0.), false));
+    assert_eq!(h.history.len(), 2);
+    assert!(anchor.same_scene_undo_state(&h.history[1]));
+    h.step(vec![]);
+    h.click("Animation reset quadric");
+    assert!(anchor.same_scene_undo_state(&h.state));
+    assert_eq!(h.history.len(), 3);
+}
+
+#[test]
 fn spin_axis_presets_and_cartesian_components_preserve_explicit_mode() {
     let mut h = InspectorHarness::new();
     h.click("Animation axis preset");

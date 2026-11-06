@@ -62,7 +62,9 @@ async function openShell(page, storage = {}, options = {}) {
       snapshot.animationObjects.forEach((object,index)=>{object.index=index;resolve(object);});snapshot.animationDuration=Math.max(0,...snapshot.animationObjects.map(object=>object.end));
     };
     if(options.animationTimeline){
-      snapshot.animationObjects=['base','child','last'].map((name,index)=>({uid:20+index,index,name,typeName:'SimpleSpin',disabled:false,timeRefName:index?['base','child'][index-1]:'',relativeStart:0,duration:1,quadric:0,angle:360,axis:[0,1,0],resolveError:null}));resolveAnimation();
+      snapshot.animationObjects=['base','child','last'].map((name,index)=>({uid:20+index,index,name,typeName:'SimpleSpin',disabled:false,timeRefName:index?['base','child'][index-1]:'',relativeStart:0,duration:1,quadric:0,angle:360,axis:[0,1,0],modifiedDefaults:['angle'],resolveError:null}));
+      if(options.animationRealProperty)Object.assign(snapshot.animationObjects[0],{typeName:'RealPropAnim',startValue:-2,endValue:3,prop:'alpha',rend:'target',modifiedDefaults:[]});
+      resolveAnimation();
       window.__animationState=()=>structuredClone(snapshot.animationObjects);
       window.__reverseAnimations=()=>{snapshot.animationObjects.reverse();resolveAnimation();};
     }
@@ -255,16 +257,31 @@ async function openShell(page, storage = {}, options = {}) {
         if((options.animationTimeline||options.brokenAnimation) && (args.tool.includes('anim')||args.tool==='animation_selection')) {
           const request=args.args,uid=request.uid??Number(request.element?.slice(1));
           const object=snapshot.animationObjects.find(object=>object.uid===uid);
-          if(args.tool==='animation_element_detail')return {sceneId:1,uid,type:object.typeName,startMs:object.relativeStart*1000,endMs:(object.relativeStart+object.duration)*1000,properties:{uid:String(uid),name:object.name,disabled:String(object.disabled),timeRefName:object.timeRefName,start:String(object.relativeStart*1e9),end:String((object.relativeStart+object.duration)*1e9),quadric:String(object.quadric),angle:String(object.angle),axis:`(${(object.axis??[0,1,0]).join(',')})`},references:snapshot.animationObjects.map(item=>({name:item.name,error:item.uid===uid?'Self reference':null})),cameras:[],renderers:[],molecules:[]};
+          const defaultNames=object?.typeName==='SimpleSpin'?['disabled','quadric','angle','axis']:['disabled','quadric'];
+          const markDefault=(prop,isDefault)=>{if(!defaultNames.includes(prop))return;const changed=new Set(object.modifiedDefaults||[]);if(isDefault)changed.delete(prop);else changed.add(prop);object.modifiedDefaults=[...changed];};
+          if(args.tool==='animation_element_detail') {
+            const properties={uid:String(uid),name:object.name,disabled:String(object.disabled),timeRefName:object.timeRefName,start:String(object.relativeStart),end:String(object.relativeStart+object.duration),absStart:String(object.start),absEnd:String(object.end),quadric:String(object.quadric)};
+            if(object.typeName==='SimpleSpin')Object.assign(properties,{angle:String(object.angle),axis:`(${(object.axis??[0,1,0]).join(',')})`});
+            if(object.typeName==='RealPropAnim')Object.assign(properties,{startValue:String(object.startValue),endValue:String(object.endValue),prop:object.prop,rend:object.rend});
+            const metadata=Object.fromEntries(Object.keys(properties).map(prop=>[prop,{type:prop==='disabled'?'boolean':['quadric','angle','startValue','endValue'].includes(prop)?'real':prop==='uid'?'integer':prop==='axis'?'object<Vector>':['start','end','absStart','absEnd'].includes(prop)?'object<TimeValue>':'string',readonly:['uid','start','end','absStart','absEnd'].includes(prop),hasDefault:defaultNames.includes(prop),isDefault:defaultNames.includes(prop)&&!(object.modifiedDefaults||[]).includes(prop)}]));
+            return {sceneId:1,uid,type:object.typeName,startMs:object.relativeStart*1000,endMs:(object.relativeStart+object.duration)*1000,properties,metadata,references:snapshot.animationObjects.map(item=>({name:item.name,error:item.uid===uid?'Self reference':null})),cameras:[],renderers:[],molecules:[]};
+          }
           const record=()=>{animationUndo.push(structuredClone(snapshot.animationObjects));animationRedo.splice(0);snapshot.canUndo=true;snapshot.canRedo=false;};
           const timing=value=>{object.relativeStart=value.startMs/1000;object.duration=(value.endMs-value.startMs)/1000;};
           if(args.tool==='edit_animation_property') {
             if(request.mode==='preview'&&window.__holdAnimationPreview)await window.__holdAnimationPreview;
-            const write=value=>request.prop==='timing'?timing(value):object[request.prop]=Number(value);
-            if(request.mode==='commit'){write(request.originalValue);record();write(request.value);}else write(request.mode==='abort'?request.originalValue:request.value);
-          } else if(args.tool==='add_anim'){record();const before=snapshot.animationObjects.findIndex(object=>`#${object.uid}`===request.before),index=before<0?snapshot.animationObjects.length:before,previous=snapshot.animationObjects[index-1];snapshot.animationObjects.splice(index,0,{uid:Math.max(0,...snapshot.animationObjects.map(object=>object.uid))+1,index,name:'SimpleSpin0',typeName:'SimpleSpin',disabled:false,timeRefName:previous?.name||'',relativeStart:0,duration:1,quadric:0,angle:360,axis:[0,1,0],resolveError:null});}
+            const write=(value,isDefault=false)=>{if(request.prop==='timing')timing(value);else {object[request.prop]=Number(value);markDefault(request.prop,isDefault);}};
+            if(request.mode==='commit'){write(request.originalValue,request.originalWasDefault);if(JSON.stringify(request.value)!==JSON.stringify(request.originalValue)){record();write(request.value);}}
+            else if(request.mode==='abort')write(request.originalValue,request.originalWasDefault);else write(request.value);
+          } else if(args.tool==='add_anim'){record();const before=snapshot.animationObjects.findIndex(object=>`#${object.uid}`===request.before),index=before<0?snapshot.animationObjects.length:before,previous=snapshot.animationObjects[index-1];snapshot.animationObjects.splice(index,0,{uid:Math.max(0,...snapshot.animationObjects.map(object=>object.uid))+1,index,name:'SimpleSpin0',typeName:'SimpleSpin',disabled:false,timeRefName:previous?.name||'',relativeStart:0,duration:1,quadric:0,angle:360,axis:[0,1,0],modifiedDefaults:['angle'],resolveError:null});}
           else if(args.tool==='set_anim_time'){record();timing(request);}
-          else if(args.tool==='set_anim_generic_prop'||args.tool==='set_anim_prop'){record();if(request.prop==='name'){const before=object.name;for(const child of snapshot.animationObjects)if(child.timeRefName===before)child.timeRefName=request.value;object.name=request.value;}else if(request.prop==='axis')object.axis=request.value.split(/\s+/).map(Number);else object[request.prop]=Number.isFinite(Number(request.value))&&request.value!==''?Number(request.value):request.value;}
+          else if(args.tool==='set_anim_generic_prop'||args.tool==='set_anim_prop'){
+            record();markDefault(request.prop,false);
+            if(request.prop==='name'){const before=object.name;for(const child of snapshot.animationObjects)if(child.timeRefName===before)child.timeRefName=request.value;object.name=request.value;}
+            else if(request.prop==='axis'){const axis=request.value.replace(/[()]/g,'').split(/[,\s]+/).map(Number),norm=Math.hypot(...axis);object.axis=axis.map(value=>value/norm);}
+            else object[request.prop]=['quadric','angle','startValue','endValue'].includes(request.prop)?Number(request.value):request.prop==='disabled'?request.value==='true':request.value;
+          }
+          else if(args.tool==='reset_anim_prop'){record();for(const prop of request.props.split(',')){if(!defaultNames.includes(prop))throw new Error('No default');object[prop]=prop==='axis'?[0,1,0]:prop==='disabled'?false:0;markDefault(prop,true);}}
           else if(args.tool==='animation_selection'){record();if(request.action==='delete')snapshot.animationObjects=snapshot.animationObjects.filter(object=>!request.uids.includes(object.uid));else {const index=snapshot.animationObjects.findIndex(object=>object.uid===request.uids[0]),target=index+(request.action==='up'?-1:1);[snapshot.animationObjects[index],snapshot.animationObjects[target]]=[snapshot.animationObjects[target],snapshot.animationObjects[index]];}}
           resolveAnimation();return {snapshot:structuredClone(snapshot)};
         }
@@ -1782,6 +1799,41 @@ test('Tauri animation Inspector previews timing and aborts queued numeric edits'
   await page.getByLabel('Animation Properties tab',{exact:true}).click();await page.getByLabel('Animation axis preset',{exact:true}).selectOption('x');
   await expect.poll(async()=>(await state())[0].axis).toEqual([1,0,0]);
   await page.getByLabel('Animation axis preset',{exact:true}).selectOption('cart');await page.getByLabel('Animation axis component y',{exact:true}).fill('2');await page.getByLabel('Animation axis component y',{exact:true}).press('Tab');
-  await expect.poll(async()=>(await state())[0].axis).toEqual([1,2,0]);
+  await expect.poll(async()=>{const axis=(await state())[0].axis;return axis[1]/axis[0];}).toBeCloseTo(2,6);
+  expect(errors).toEqual([]);
+});
+
+test('Tauri animation resets only declared defaults and keeps generic field types',async({page})=>{
+  const errors=await openShell(page,{}, {animationTimeline:true,animationRealProperty:true});
+  await page.locator('[data-bottom-select="animation"]').click();
+  await page.getByRole('button',{name:'Animation element base',exact:true}).click();
+  const name=page.getByLabel('Animation property name',{exact:true});
+  await name.fill('true');await name.press('Tab');
+  expect(await name.evaluate(input=>input.type)).toBe('text');
+  await expect(name).toHaveValue('true');
+  await expect(page.getByText('Reset all to default',{exact:true})).toBeDisabled();
+  await expect(page.getByLabel('Animation reset startValue',{exact:true})).toHaveCount(0);
+  const start=page.getByLabel('Animation property startValue',{exact:true});
+  await expect(start).toHaveValue('-2');await start.fill('-5');await start.press('Tab');
+  await expect(start).toHaveValue('-5');
+  await page.getByLabel('Animation Generic tab',{exact:true}).click();
+  await expect(page.getByLabel('Animation property absStart',{exact:true})).toBeDisabled();
+  await expect(page.getByLabel('Animation reset rend',{exact:true})).toHaveCount(0);
+  const quadric=page.getByLabel('Animation property quadric',{exact:true});
+  const reset=page.getByLabel('Animation reset quadric',{exact:true});
+  await expect(reset).toBeDisabled();
+  const box=await quadric.boundingBox();
+  await page.mouse.move(box.x+box.width/2,box.y+box.height/2);await page.mouse.down();
+  await page.mouse.move(box.x+box.width/2+15,box.y+box.height/2,{steps:4});
+  await expect.poll(()=>page.evaluate(()=>window.__animationState()[0].quadric)).toBeGreaterThan(0);
+  await page.keyboard.press('Escape');await page.mouse.up();
+  await expect(quadric).toHaveValue('0');await expect(reset).toBeDisabled();
+  await quadric.fill('0.2');await quadric.press('Tab');await expect(reset).toBeEnabled();
+  await page.getByText('Reset all to default',{exact:true}).click();await expect(reset).toBeDisabled();
+  await expect(page.getByLabel('Animation property name',{exact:true})).toHaveValue('true');
+  await expect(page.getByLabel('Animation property startValue',{exact:true})).toHaveValue('-5');
+  await expect(page.getByLabel('Animation property rend',{exact:true})).toHaveValue('target');
+  await page.evaluate(async()=>{snapshot=await invoke('undo',{index:0});renderShell();});
+  await expect(quadric).toHaveValue('0.2');await expect(reset).toBeEnabled();
   expect(errors).toEqual([]);
 });

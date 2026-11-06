@@ -2244,47 +2244,6 @@ impl NativeAnimationProperties {
         }
         draft
     }
-
-    fn reset_defaultable(&mut self) {
-        self.disabled = false;
-        self.quadric = 0.0;
-        if self.angle.is_some() {
-            self.angle = Some(0.0);
-        }
-        if self.axis.is_some() {
-            self.axis = Some([0.0, 1.0, 0.0]);
-        }
-        if self.ignore_center.is_some() {
-            self.ignore_center = Some(false);
-        }
-        if self.ignore_rotate.is_some() {
-            self.ignore_rotate = Some(false);
-        }
-        if self.ignore_zoom.is_some() {
-            self.ignore_zoom = Some(false);
-        }
-        if self.ignore_slab.is_some() {
-            self.ignore_slab = Some(false);
-        }
-        if self.keep_quaternion_positive.is_some() {
-            self.keep_quaternion_positive = Some(true);
-        }
-        if self.hide.is_some() {
-            self.hide = Some(false);
-        }
-        if self.fade.is_some() {
-            self.fade = Some(true);
-        }
-        if self.target_alpha.is_some() {
-            self.target_alpha = Some(1.0);
-        }
-        if self.direction.is_some() {
-            self.direction = Some(0.0);
-        }
-        if self.distance.is_some() {
-            self.distance = Some(1.0);
-        }
-    }
 }
 
 struct AnimationFrameTask {
@@ -13527,16 +13486,20 @@ impl GuiApplication {
         index: usize,
         camera: &mut CameraController,
     ) -> std::result::Result<(), String> {
-        let mut draft = {
-            let animation = self.active_animation_manager()?;
-            let motion = animation
-                .motions()
-                .get(index)
-                .ok_or_else(|| format!("animation object {index} was not found"))?;
-            NativeAnimationProperties::from_motion(index, motion)
-        };
-        draft.reset_defaultable();
-        self.apply_animation_properties(&draft, camera)?;
+        let animation = self.active_animation_manager()?;
+        let motion = animation
+            .motions()
+            .get(index)
+            .ok_or_else(|| format!("animation object {index} was not found"))?;
+        let props = motion
+            .property_specs()
+            .filter(|spec| spec.default.is_some() && !motion.is_property_default(spec.name))
+            .map(|spec| spec.name)
+            .collect::<Vec<_>>();
+        if !props.is_empty() && !self.try_tritium_command("reset_anim_prop",
+            serde_json::json!({"element":format!("#{}",motion.base().uid().get()),"props":props.join(",")}),camera) {
+            return Err(self.status.clone());
+        }
         self.set_status("Reset all to default");
         Ok(())
     }
@@ -41376,61 +41339,46 @@ mod tests {
 
     #[test]
     fn native_animation_property_reset_matches_qif_defaults() {
-        let mut camera =
-            NativeAnimationProperties::from_motion(0, &AnimMotion::Camera(CamMotion::new()));
-        camera.disabled = true;
-        camera.quadric = 0.25;
-        camera.target_camera = Some("saved-camera".to_string());
-        camera.ignore_center = Some(true);
-        camera.ignore_rotate = Some(true);
-        camera.ignore_zoom = Some(true);
-        camera.ignore_slab = Some(true);
-        camera.keep_quaternion_positive = Some(false);
-        camera.reset_defaultable();
-        assert!(!camera.disabled);
-        assert_eq!(camera.quadric, 0.0);
-        assert_eq!(camera.target_camera.as_deref(), Some("saved-camera"));
-        assert_eq!(camera.ignore_center, Some(false));
-        assert_eq!(camera.ignore_rotate, Some(false));
-        assert_eq!(camera.ignore_zoom, Some(false));
-        assert_eq!(camera.ignore_slab, Some(false));
-        assert_eq!(camera.keep_quaternion_positive, Some(true));
-
-        let mut show =
-            NativeAnimationProperties::from_motion(0, &AnimMotion::ShowHide(ShowHideAnim::new()));
-        show.renderer_names = Some("target".to_string());
-        show.hide = Some(true);
-        show.fade = Some(false);
-        show.target_alpha = Some(0.25);
-        show.reset_defaultable();
-        assert_eq!(show.renderer_names.as_deref(), Some("target"));
-        assert_eq!(show.hide, Some(false));
-        assert_eq!(show.fade, Some(true));
-        assert_eq!(show.target_alpha, Some(1.0));
-
-        let mut slide =
-            NativeAnimationProperties::from_motion(0, &AnimMotion::Slide(SlideInOutAnim::new()));
-        slide.renderer_names = Some("target".to_string());
-        slide.hide = Some(true);
-        slide.direction = Some(45.0);
-        slide.distance = Some(2.0);
-        slide.reset_defaultable();
-        assert_eq!(slide.renderer_names.as_deref(), Some("target"));
-        assert_eq!(slide.hide, Some(false));
-        assert_eq!(slide.direction, Some(0.0));
-        assert_eq!(slide.distance, Some(1.0));
-
-        let mut molecule =
-            NativeAnimationProperties::from_motion(0, &AnimMotion::Molecule(MolAnim::new()));
-        molecule.molecule_name = Some("morph".to_string());
-        molecule.property_name = Some("frame".to_string());
-        molecule.start_value = Some(2.0);
-        molecule.end_value = Some(4.0);
-        molecule.reset_defaultable();
-        assert_eq!(molecule.molecule_name.as_deref(), Some("morph"));
-        assert_eq!(molecule.property_name.as_deref(), Some("frame"));
-        assert_eq!(molecule.start_value, Some(2.0));
-        assert_eq!(molecule.end_value, Some(4.0));
+        let mut app = GuiApplication::new();
+        let mut camera = CameraController::default();
+        let scene = app.state.active_scene().unwrap();
+        let mut manager = AnimMgr::new();
+        for xml in [
+            r#"<motion type="CamMotion" name="camera" endcam="saved-camera" ignorecenter="true" keepquatpositive="false"/>"#,
+            r#"<motion type="ShowHideAnim" name="show" rend="target" hide="true" fade="false" tgt_alpha="0.2"/>"#,
+            r#"<motion type="SlideInOutAnim" name="slide" rend="target" hide="true" direction="45" distance="2"/>"#,
+            r#"<motion type="MolAnim" name="molecule" mol="morph" prop="frame" startValue="2" endValue="4"/>"#,
+        ] {
+            let mut motion =
+                AnimMotion::from_ldom2_node(cuemol_core::parse_ldom2_xml(xml).unwrap().top())
+                    .unwrap();
+            motion.base_mut().set_disabled(true);
+            manager.append_motion(motion);
+        }
+        app.state
+            .set_scene_animation(scene, Some(&manager))
+            .unwrap();
+        for (index, original) in manager.motions().iter().enumerate() {
+            let undo_count = app.undo_stack.len();
+            app.reset_animation_properties_to_defaults(index, &mut camera)
+                .unwrap();
+            assert_eq!(app.undo_stack.len(), undo_count + 1);
+            let current = app.state.scene_animation(scene).unwrap().unwrap();
+            let reset = &current.motions()[index];
+            for spec in reset.property_specs() {
+                if spec.default.is_some() {
+                    assert!(reset.is_property_default(spec.name), "{}", spec.name);
+                } else {
+                    assert_eq!(
+                        reset.to_ldom2_node().str_attr(spec.name),
+                        original.to_ldom2_node().str_attr(spec.name)
+                    );
+                }
+            }
+            app.reset_animation_properties_to_defaults(index, &mut camera)
+                .unwrap();
+            assert_eq!(app.undo_stack.len(), undo_count + 1);
+        }
     }
 
     #[test]
