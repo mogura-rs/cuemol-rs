@@ -472,7 +472,7 @@ impl RealPropAnim {
     }
 
     pub fn set_rend(&mut self, value: impl Into<String>) {
-        self.rend = value.into();
+        self.rend = normalize_renderer_names(&value.into());
     }
 
     pub fn set_rend_names(&mut self, value: impl Into<String>) {
@@ -531,30 +531,33 @@ impl RendPropAnim {
     /// dropped from the normalized string).
     pub fn set_rend_names(&mut self, value: &str) {
         self.rend_name_list.clear();
-        let mut normalized: Vec<String> = Vec::new();
         for elem in value.split(',') {
-            let (sobj, srend) = match elem.find('/') {
-                Some(pos) => (
-                    elem[..pos].trim().to_string(),
-                    elem[pos + 1..].trim().to_string(),
-                ),
-                None => (String::new(), elem.trim().to_string()),
-            };
-            if sobj.is_empty() {
-                if !srend.is_empty() {
-                    normalized.push(srend.clone());
-                }
-            } else if !srend.is_empty() {
-                normalized.push(format!("{sobj}/{srend}"));
-            }
-            self.rend_name_list.push((sobj, srend));
+            let (object, renderer) = elem.split_once('/').unwrap_or(("", elem));
+            self.rend_name_list
+                .push((object.trim().into(), renderer.trim().into()));
         }
-        self.rend_names = normalized.join(",");
+        self.rend_names = normalize_renderer_names(value);
     }
 
     pub fn rend_name_list(&self) -> &[(String, String)] {
         &self.rend_name_list
     }
+}
+
+fn normalize_renderer_names(value: &str) -> String {
+    value
+        .split(',')
+        .filter_map(|entry| {
+            if let Some((object, renderer)) = entry.split_once('/') {
+                let (object, renderer) = (object.trim(), renderer.trim());
+                (!object.is_empty() && !renderer.is_empty()).then(|| format!("{object}/{renderer}"))
+            } else {
+                let renderer = entry.trim();
+                (!renderer.is_empty()).then(|| renderer.to_string())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -711,7 +714,7 @@ impl RendXformAnim {
     }
 
     pub fn set_rend(&mut self, value: impl Into<String>) {
-        self.rend = value.into();
+        self.rend = normalize_renderer_names(&value.into());
     }
 
     pub fn set_rend_names(&mut self, value: impl Into<String>) {
@@ -832,7 +835,7 @@ impl ShowHideAnim {
     }
 
     pub fn set_rend(&mut self, value: impl Into<String>) {
-        self.rend = value.into();
+        self.rend = normalize_renderer_names(&value.into());
     }
 
     pub fn set_rend_names(&mut self, value: impl Into<String>) {
@@ -920,7 +923,7 @@ impl SimpleSpin {
 
     pub fn set_axis(&mut self, value: Vector4) -> bool {
         let len = value.length();
-        if len.abs() < 1.0e-8 {
+        if len.abs() < 1.0e-4 {
             return false;
         }
         self.base_mut().set_property_default("axis", false);
@@ -986,7 +989,7 @@ impl SlideInOutAnim {
     }
 
     pub fn set_rend(&mut self, value: impl Into<String>) {
-        self.rend = value.into();
+        self.rend = normalize_renderer_names(&value.into());
     }
 
     pub fn set_rend_names(&mut self, value: impl Into<String>) {
@@ -1228,9 +1231,7 @@ impl AnimMotion {
             Self::Spin(value) => {
                 value.set_angle(read_f64_attr(node, "angle", 0.0)?);
                 let axis = read_vector_attr(node, "axis", Vector4::new4(0.0, 1.0, 0.0, 0.0))?;
-                if !value.set_axis(axis) {
-                    return Err(CueMolError::parse("SimpleSpin axis is zero"));
-                }
+                value.set_axis(axis);
             }
             Self::Slide(value) => {
                 value.set_rend(node.str_attr("rend").to_string());

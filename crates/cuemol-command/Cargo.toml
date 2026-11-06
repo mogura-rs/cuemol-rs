@@ -24,6 +24,7 @@ base64 = "0.22"
 png = "0.17"
 shlex.workspace = true
 regex.workspace = true
+ryu-js = "1.0.2"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }

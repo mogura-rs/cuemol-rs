@@ -1,5 +1,36 @@
 # Validation evidence
 
+## Animation command value conversions
+
+Four failing regressions exposed boolean aliases being misread, non-decimal
+numbers being rejected, generic values bypassing native type checks, and
+near-zero spin axes losing the prior direction. The command layer now converts
+structured and generic values separately. Renderer target names also use the
+reference comma/slash normalization, including incomplete target exclusion.
+Serialized near-zero spin axes retain the constructor's default direction.
+
+`scripts/check-reference-animation-values.py` reads the current reference's
+TypeScript conversion functions and applies their typed outputs to its C++
+animation wrappers. All 98 cases pass, including finite radix numbers beyond
+exact integer precision, generic type rejection, axis thresholds and target
+normalization. Generated inputs, binaries and results stay in the ignored cache.
+The runner needs Node with `stripTypeScriptTypes`, the reference build and its
+configuration; ordinary Rust tests skip the external oracle when its paths are
+unset. Independent regressions still execute without the reference tree.
+
+Shared animation/command tests passed 233 checks with two unrelated optional
+cases ignored. This run included the existing 24-case C++ property/default
+comparison and the new scene-deserialization regression. Native animation tests
+passed 28 checks; the macOS Tauri model passed 25 with one unrelated optional
+encoder check ignored. Rebuilt WebGL/WebGPU passed all ten affected browser
+checks: eight timeline/Inspector cases and two command-value scenarios. The
+new scenarios confirm that rejected generic writes preserve redo.
+
+The reference generic-command description advertises vectors as `"x y z"`, but
+its C++ string conversion accepts parenthesized comma-separated vectors.
+The implementation and usage guide follow the parser; the structured command
+continues to accept space-separated axes.
+
 ## Shared View transforms
 
 A failing reproducer showed that changing camera distance also reduced the slab

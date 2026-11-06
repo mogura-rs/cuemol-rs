@@ -1522,6 +1522,7 @@ dependencies = [
  "js-sys",
  "png 0.17.16",
  "regex",
+ "ryu-js",
  "semver",
  "serde",
  "serde_json",

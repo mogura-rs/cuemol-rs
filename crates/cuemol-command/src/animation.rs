@@ -268,12 +268,15 @@ pub fn call_tool(
                     requested
                 };
                 let value = text(args, "value")?;
+                let structured = name == "set_anim_prop";
                 if matches!(prop, "start" | "end") {
                     return Err(CueMolError::invalid_argument(
                         "start and end are edited together through set_anim_time",
                     ));
                 }
                 if matches!(prop, "name" | "timeRefName") {
+                    let converted = crate::animation_value::guarded(value, structured);
+                    let value = converted.as_str();
                     let graph = Graph::read(&mgr);
                     let original = &graph.nodes[index];
                     if prop == "name" {
@@ -319,50 +322,13 @@ pub fn call_tool(
                             "{prop} is read-only"
                         )));
                     }
-                    if prop == "axis" && name == "set_anim_prop" {
-                        let values = value
-                            .split_whitespace()
-                            .map(str::parse::<f64>)
-                            .collect::<std::result::Result<Vec<_>, _>>()
-                            .map_err(|_| {
-                                CueMolError::invalid_argument(
-                                    "axis takes three finite numbers separated by spaces",
-                                )
-                            })?;
-                        if values.len() != 3 || values.iter().any(|value| !value.is_finite()) {
-                            return Err(CueMolError::invalid_argument(
-                                "axis takes three finite numbers separated by spaces",
-                            ));
-                        }
-                        node.set_str_attr(
-                            prop,
-                            cuemol_core::Vector4::new3(values[0], values[1], values[2])
-                                .script_string(),
-                        );
-                    } else if matches!(
-                        prop,
-                        "quadric"
-                            | "angle"
-                            | "tgt_alpha"
-                            | "direction"
-                            | "distance"
-                            | "startValue"
-                            | "endValue"
-                    ) {
-                        let numeric = value
-                            .trim()
-                            .parse::<f64>()
-                            .ok()
-                            .filter(|v| v.is_finite())
-                            .ok_or_else(|| {
-                                CueMolError::invalid_argument(format!(
-                                    "{prop} takes a finite number"
-                                ))
-                            })?;
-                        node.set_str_attr(prop, numeric.to_string());
-                    } else {
-                        node.set_str_attr(prop, value);
-                    }
+                    let value = crate::animation_value::property(
+                        &mgr.motions()[index],
+                        spec,
+                        value,
+                        structured,
+                    )?;
+                    node.set_str_attr(prop, value);
                     if let Some(child) = node.find_child_mut(prop) {
                         child.set_default_flag(false);
                     }

@@ -41,6 +41,21 @@ fn animation_defaults_roundtrip_without_losing_explicit_equal_values() {
 }
 
 #[test]
+fn small_serialized_spin_axes_keep_the_default_direction() {
+    for axis in ["(0,0,0)", "(0.00001,0,0)"] {
+        let mut node = motion("SimpleSpin").to_ldom2_node();
+        node.set_str_attr("axis", axis);
+        node.find_child_mut("axis").unwrap().set_default_flag(false);
+        let loaded = AnimMotion::from_ldom2_node(&node).unwrap();
+        let AnimMotion::Spin(spin) = &loaded else {
+            unreachable!()
+        };
+        assert_eq!(spin.axis(), Vector4::new3(0., 1., 0.));
+        assert!(!loaded.is_property_default("axis"));
+    }
+}
+
+#[test]
 fn animation_property_metadata_matches_the_current_reference() {
     let Ok(path) = std::env::var("CUEMOL_ANIM_PROPERTY_ORACLE") else {
         eprintln!("Skipped reference animation properties: CUEMOL_ANIM_PROPERTY_ORACLE is unset");

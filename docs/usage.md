@@ -105,6 +105,14 @@ An explicit value equal to the default remains an explicit setting until reset;
 this distinction survives undo, preview cancellation and scene reload. Generic
 fields use their declared types and show resolved absolute times as read-only.
 
+`set_anim_prop` accepts boolean aliases such as `on`, `yes`, `1` and their
+opposites, without case sensitivity. Numeric text accepts decimal, hexadecimal,
+octal and binary notation. The generic command first interprets numeric and
+lowercase boolean text as typed values; incompatible property types fail.
+For spin axes, use `"0 1 0"` with the structured command and `"(0,1,0)"` with
+`set_anim_generic_prop`. Axes shorter than 0.0001 retain the previous direction.
+Renderer target lists normalize spaces around comma-separated names and `/`.
+
 Animation elements can start relative to another element's end. Renaming the
 reference updates its dependent elements, and deleting it keeps their current
 absolute times. Changing a reference preserves the span unless it must move
