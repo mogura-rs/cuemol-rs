@@ -449,9 +449,14 @@ impl GuiApplication {
         });
         match cuemol_command::call_tool(&mut self.state, &mut view, name, &args) {
             Ok(_) => {
-                if let Some(undo) =
+                if let Some(mut undo) =
                     undo.filter(|before| !before.state.same_scene_undo_state(&self.state))
                 {
+                    cuemol_command::retain_animation_seed_in_undo(
+                        &mut undo.state,
+                        &self.state,
+                        name,
+                    );
                     self.push_undo_snapshot(undo);
                 }
                 *camera = CameraController::from_qsys_camera(&view);

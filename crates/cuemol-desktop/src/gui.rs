@@ -815,6 +815,7 @@ impl NativeRunner {
             });
             let mut camera = gpu.camera.to_qsys_camera("__current");
             let script_call = name == "execute_script";
+            let command_name = name.to_string();
             let response = self
                 .protocol
                 .handle(request.message, &mut app.state, &mut camera);
@@ -822,7 +823,12 @@ impl NativeRunner {
                 value.get("result").is_some() && value["result"]["isError"] != true
             });
             if (mutating || view_change) && success {
-                if let Some(undo) = undo {
+                if let Some(mut undo) = undo {
+                    cuemol_command::retain_animation_seed_in_undo(
+                        &mut undo.state,
+                        &app.state,
+                        &command_name,
+                    );
                     if script_call {
                         app.push_script_undo_snapshot(undo);
                     } else if !undo.state.same_scene_undo_state(&app.state) {
@@ -5175,7 +5181,12 @@ impl GuiApplication {
                 let history_changed = undo
                     .as_ref()
                     .is_some_and(|undo| !undo.state.same_scene_undo_state(&self.state));
-                if let Some(undo) = undo.filter(|_| history_changed) {
+                if let Some(mut undo) = undo.filter(|_| history_changed) {
+                    cuemol_command::retain_animation_seed_in_undo(
+                        &mut undo.state,
+                        &self.state,
+                        &name,
+                    );
                     self.push_undo_snapshot(undo);
                 }
                 self.agent.changed_scene |= history_changed;
@@ -12668,26 +12679,9 @@ impl GuiApplication {
         draft: &NativeAnimationProperties,
         camera: &mut CameraController,
     ) -> std::result::Result<(), String> {
-        let undo = self.capture_undo();
+        let mut undo = self.capture_undo();
         let rollback = undo.clone();
         let mut animation = self.active_animation_manager()?;
-        if animation.startcam().is_empty() {
-            let scene_uid = self
-                .state
-                .active_scene()
-                .ok_or_else(|| "no active scene".to_string())?;
-            if !self
-                .state
-                .camera_summaries(scene_uid)
-                .iter()
-                .any(|summary| summary.name == "__current")
-            {
-                self.state
-                    .save_scene_camera(scene_uid, camera.to_qsys_camera("__current"), false)
-                    .map_err(|error| error.to_string())?;
-            }
-            animation.set_startcam("__current");
-        }
         let insertion_index = insertion_index.min(animation.size());
         let reference = AnimationGraph::read(&animation).auto_chain_name(insertion_index);
         let name = unique_native_animation_name(&animation, native_animation_name_prefix(kind));
@@ -12704,6 +12698,14 @@ impl GuiApplication {
             self.restore_gui_undo_state(rollback);
             return Err(error);
         }
+        if let Err(error) = cuemol_command::initialize_animation_start_camera(
+            &mut self.state,
+            &camera.to_qsys_camera("__current"),
+        ) {
+            self.restore_gui_undo_state(rollback);
+            return Err(error.to_string());
+        }
+        cuemol_command::retain_animation_seed_in_undo(&mut undo.state, &self.state, "add_anim");
         let _intermediate_undo = self.undo_stack.pop();
         self.push_undo_snapshot(undo);
         self.set_animation_selection(insertion_index);
@@ -13813,6 +13815,7 @@ impl GuiApplication {
         }
         if changed && run.checkpoint.scene_changed() && cuemol_command::tool_records_history(name) {
             if let Some(mut before) = run.undo.take() {
+                cuemol_command::retain_animation_seed_in_undo(&mut before.state, &self.state, name);
                 before.record = self.console_session.action_record.clone();
                 self.push_undo_snapshot(before);
             }
@@ -39447,6 +39450,45 @@ mod tests {
             .renderer_summaries(id)
             .iter()
             .any(|r| r.name == "chx:sphere"));
+    }
+
+    #[test]
+    fn animation_authoring_camera_survives_native_panel_and_console_undo() {
+        for console in [false, true] {
+            let mut app = GuiApplication::new();
+            app.config_path.clear();
+            let scene = app.state.new_scene("animation", true).result_scene;
+            let mut camera = CameraController::default();
+            let mut view = camera.to_qsys_camera("__current");
+            view.set_zoom(87.);
+            camera.apply_qsys_camera(&view);
+            app.state.set_active_view_camera(&view).unwrap();
+            if console {
+                app.console.source = "add_anim wait".into();
+                app.execute_console_input();
+            } else {
+                assert!(app.try_tritium_command(
+                    "add_anim",
+                    serde_json::json!({"type":"wait"}),
+                    &mut camera
+                ));
+            }
+            assert_eq!(app.undo_stack.len(), 1);
+            app.undo(&mut camera);
+            let animation = app.state.scene_animation(scene).unwrap().unwrap();
+            assert_eq!(animation.size(), 0);
+            assert_eq!(animation.startcam(), "__current");
+            assert_eq!(
+                app.state
+                    .scene_manager()
+                    .scene(scene)
+                    .unwrap()
+                    .camera_by_name("__current")
+                    .unwrap()
+                    .zoom(),
+                87.
+            );
+        }
     }
 
     #[test]

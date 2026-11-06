@@ -24,7 +24,8 @@ pub use object_export::{prepare_save_object, PreparedObjectSave};
 mod properties;
 pub mod selection;
 pub use animation::{
-    advance_animation, animation_element_detail, animation_timeline, prepare_animation_edit,
+    advance_animation, animation_element_detail, animation_timeline,
+    initialize_animation_start_camera, prepare_animation_edit, retain_animation_seed_in_undo,
 };
 pub use properties::{focus_nodes, render_settings};
 pub mod config;

@@ -39,7 +39,7 @@ impl AppModel {
     ) -> Result<Update, String> {
         let runner = ConsoleRunner::library(source, macro_name, targets)?;
         self.stop_console();
-        self.persist_camera()?;
+        self.sync_view_camera()?;
         self.console_session
             .begin_submission(label, Dialect::CueMol);
         self.console_session.sync_revision(self.snapshot_revision);
@@ -65,7 +65,7 @@ impl AppModel {
         self.console_run = None;
         self.console_session.finish_submission()?;
         self.console_session.begin_submission(source, dialect);
-        self.persist_camera()?;
+        self.sync_view_camera()?;
         self.console_session.sync_revision(self.snapshot_revision);
         self.console_run = Some(Execution {
             checkpoint: cuemol_ui::console_runtime::ConsoleCheckpoint::new(
@@ -134,7 +134,12 @@ impl AppModel {
             }
         }
         if changed && run.checkpoint.scene_changed() && cuemol_command::tool_records_history(name) {
-            if let Some(before) = run.undo.take() {
+            if let Some(mut before) = run.undo.take() {
+                cuemol_command::retain_animation_seed_in_undo(
+                    &mut before.desktop,
+                    &self.desktop,
+                    name,
+                );
                 self.status = "Console command".into();
                 self.push_undo(before);
                 if let Some(entry) = self.undo_stack.last_mut() {

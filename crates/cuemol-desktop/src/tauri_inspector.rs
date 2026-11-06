@@ -123,7 +123,7 @@ impl AppModel {
                 .map_err(|error| error.to_string());
         }
         self.stop_console();
-        let before = self.capture_undo();
+        let mut before = self.capture_undo();
         let record = cuemol_command::console::actions::Record::operation(&self.desktop, tool, args);
         let result = cuemol_command::call_tool(&mut self.desktop, &mut self.camera, tool, args)
             .map_err(|error| error.to_string())?;
@@ -141,6 +141,11 @@ impl AppModel {
                 format!("Change property: {}", args["prop"].as_str().unwrap_or(""))
             };
             if args["nodeType"] != "view" && changed {
+                cuemol_command::retain_animation_seed_in_undo(
+                    &mut before.desktop,
+                    &self.desktop,
+                    tool,
+                );
                 self.push_undo(before);
                 if let Some(entry) = self.undo_stack.last_mut() {
                     entry.record = record;

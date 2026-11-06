@@ -92,6 +92,12 @@ which includes common and type-specific properties, target choices and a
 Generic tab. Add inserts after the selection; Delete retains the next available
 selection, and the arrow buttons reorder the selected element.
 
+Adding an element creates `__current` from the live view only when that saved
+camera is absent. An empty start-camera choice adopts it; an explicit choice is
+preserved. Undoing the added element leaves this initialization in place. Moving
+the view afterwards does not change the saved animation start. Tauri keeps live
+view synchronization separate from camera-file/export persistence.
+
 Start and duration fields preview the resolved timeline while dragging. Numeric
 fields in the Generic tab also preview their values. Release records one undo
 step; Escape, focus loss or changing the target restores the original value.

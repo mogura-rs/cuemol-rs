@@ -6347,7 +6347,7 @@ impl AppModel {
             .then(|| self.desktop.active_scene())
             .flatten();
         if reusable_scene.is_none() && self.desktop.active_scene().is_some() {
-            self.persist_camera()?;
+            self.sync_view_camera()?;
         }
         let scene_uid = self
             .desktop
@@ -6884,15 +6884,20 @@ impl AppModel {
         self.swap_stereo_eyes = options.swap_stereo_eyes;
     }
 
-    fn persist_camera(&mut self) -> Result<(), String> {
+    fn sync_view_camera(&mut self) -> Result<(), String> {
         self.store_view_options();
-        let mut camera = self.camera.clone();
-        camera.set_name("__current");
         if self.desktop.active_view_summary().is_some() {
             self.desktop
-                .set_active_view_camera(&camera)
+                .set_active_view_camera(&self.camera)
                 .map_err(|error| error.to_string())?;
         }
+        Ok(())
+    }
+
+    fn persist_camera(&mut self) -> Result<(), String> {
+        self.sync_view_camera()?;
+        let mut camera = self.camera.clone();
+        camera.set_name("__current");
         self.desktop
             .set_active_scene_camera(camera)
             .map_err(|error| error.to_string())
@@ -7270,12 +7275,8 @@ impl AppModel {
         let kind = animation_kind(kind).ok_or_else(|| format!("unsupported animation: {kind}"))?;
         self.restore_animation_playback(false)?;
         self.animation_elapsed = 0.0;
-        let undo = self.capture_undo();
+        let mut undo = self.capture_undo();
         let mut animation = self.active_animation_manager()?;
-        if animation.startcam().is_empty() {
-            self.persist_camera()?;
-            animation.set_startcam("__current");
-        }
         let prefix = animation_name_prefix(kind);
         let name = unique_animation_name(&animation, prefix);
         let insertion_index = after_index
@@ -7297,6 +7298,13 @@ impl AppModel {
                 return Err(error);
             }
         }
+        if let Err(error) =
+            cuemol_command::initialize_animation_start_camera(&mut self.desktop, &self.camera)
+        {
+            self.restore_undo(undo)?;
+            return Err(error.to_string());
+        }
+        cuemol_command::retain_animation_seed_in_undo(&mut undo.desktop, &self.desktop, "add_anim");
         self.reset_animation_playback();
         self.status = format!("Added {} animation", kind.label());
         self.push_undo(undo);
@@ -7673,7 +7681,7 @@ impl AppModel {
             return Err(error.to_string());
         }
         if self.shared_animation_scene().is_none() && !self.animation_started_from_ui {
-            self.persist_camera()?;
+            self.sync_view_camera()?;
             self.animation_start_camera = Some(self.camera.clone());
             self.animation_started_from_ui = true;
         }
@@ -11114,7 +11122,7 @@ fn handle_model_request(
             let undo = model.capture_undo();
             let previous_scene = model.desktop.active_scene();
             if model.desktop.active_scene().is_some() {
-                model.persist_camera()?;
+                model.sync_view_camera()?;
             }
             let name = name.trim();
             match mode.as_str() {
@@ -11156,7 +11164,7 @@ fn handle_model_request(
             model.animation_elapsed = 0.0;
             let previous_scene = model.desktop.active_scene();
             if model.desktop.active_scene().is_some() {
-                model.persist_camera()?;
+                model.sync_view_camera()?;
             }
             if !model.desktop.set_active_scene(Some(Uid::new(scene_uid))) {
                 return Err(format!("scene {scene_uid} was not found"));
@@ -11176,7 +11184,7 @@ fn handle_model_request(
             model.restore_animation_playback(false)?;
             model.animation_elapsed = 0.0;
             let previous_scene = model.desktop.active_scene();
-            model.persist_camera()?;
+            model.sync_view_camera()?;
             model.camera = model
                 .desktop
                 .activate_view(Uid::new(view_uid))
@@ -12623,7 +12631,7 @@ fn handle_model_request(
             if script.is_empty() {
                 return Ok(ModelResponse::Snapshot(Box::new(model.snapshot())));
             }
-            model.persist_camera()?;
+            model.sync_view_camera()?;
             let undo = model.capture_script_undo();
             model.log_lines.push(format!("> {script}"));
             match model.desktop.run_script_js(script) {
@@ -12653,7 +12661,7 @@ fn handle_model_request(
             if script.trim().is_empty() {
                 return Err("a script is required".to_string());
             }
-            model.persist_camera()?;
+            model.sync_view_camera()?;
             let undo = model.capture_script_undo();
             let (log, selection) = model
                 .desktop
@@ -24395,6 +24403,84 @@ mod tests {
     }
 
     #[test]
+    fn animation_authoring_camera_survives_undo_play_and_console_navigation() {
+        let mut model = model_without_gpu();
+        let scene = model.desktop.active_scene().unwrap();
+        model.camera.set_zoom(87.);
+        model
+            .add_animation_object("simple-spin", None, None)
+            .unwrap();
+        model.undo(0).unwrap();
+        assert_eq!(model.active_animation_manager().unwrap().size(), 0);
+        assert_eq!(
+            model.active_animation_manager().unwrap().startcam(),
+            "__current"
+        );
+        assert_eq!(
+            model
+                .desktop
+                .scene_manager()
+                .scene(scene)
+                .unwrap()
+                .camera_by_name("__current")
+                .unwrap()
+                .zoom(),
+            87.
+        );
+        model.redo(0).unwrap();
+        model.camera.set_zoom(23.);
+        model.begin_animation_playback().unwrap();
+        handle_model_request(&mut model, ModelRequest::TickAnimation(0.1)).unwrap();
+        assert_eq!(model.camera.zoom(), 87.);
+        handle_model_request(&mut model, ModelRequest::AnimationControl("stop".into())).unwrap();
+        model.camera.set_zoom(41.);
+        handle_model_request(
+            &mut model,
+            ModelRequest::ExecuteScript("print(view.zoom);".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            model
+                .desktop
+                .scene_manager()
+                .scene(scene)
+                .unwrap()
+                .camera_by_name("__current")
+                .unwrap()
+                .zoom(),
+            87.
+        );
+        model
+            .start_console("get_scene_state", cuemol_command::console::Dialect::CueMol)
+            .unwrap();
+        assert_eq!(
+            model
+                .desktop
+                .scene_manager()
+                .scene(scene)
+                .unwrap()
+                .camera_by_name("__current")
+                .unwrap()
+                .zoom(),
+            87.
+        );
+        handle_model_request(&mut model, ModelRequest::NewScene(Some("other".into()))).unwrap();
+        assert_eq!(
+            model
+                .desktop
+                .scene_manager()
+                .scene(scene)
+                .unwrap()
+                .camera_by_name("__current")
+                .unwrap()
+                .zoom(),
+            87.
+        );
+        handle_model_request(&mut model, ModelRequest::ActivateScene(scene.get())).unwrap();
+        assert_eq!(model.camera.zoom(), 41.);
+    }
+
+    #[test]
     fn animation_timeline_is_scene_specific_and_qsc_backed() {
         let mut model = model_without_gpu();
         let first_scene = model.desktop.active_scene().unwrap();
@@ -26791,6 +26877,22 @@ mod tests {
         assert_eq!(added.animation_objects[2].uid, uid);
         assert_eq!(model.undo_stack.len(), undo_count + 1);
         model.undo(0).unwrap();
-        assert!(before.same_scene_undo_state(&model.desktop));
+        let restored = model.active_animation_manager().unwrap();
+        assert_eq!(
+            restored.motions(),
+            before
+                .scene_animation(Uid::new(scene))
+                .unwrap()
+                .unwrap()
+                .motions()
+        );
+        assert_eq!(restored.startcam(), "__current");
+        assert!(model
+            .desktop
+            .scene_manager()
+            .scene(Uid::new(scene))
+            .unwrap()
+            .camera_by_name("__current")
+            .is_some());
     }
 }

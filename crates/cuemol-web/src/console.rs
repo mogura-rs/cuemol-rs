@@ -166,6 +166,7 @@ impl App {
         );
         if changed && run.checkpoint.scene_changed() && cuemol_command::tool_records_history(name) {
             if let Some(mut before) = run.undo.take() {
+                cuemol_command::retain_animation_seed_in_undo(&mut before.state, &self.state, name);
                 before.record = self.console_session.action_record.clone();
                 self.state.mark_scene_changes_since(&before.state);
                 self.history.push(before);

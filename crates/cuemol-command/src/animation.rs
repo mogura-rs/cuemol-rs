@@ -20,6 +20,82 @@ fn element(mgr: &AnimMgr, spec: &str) -> Result<usize> {
     };
     index.ok_or_else(|| CueMolError::not_found(format!("animation element {spec}")))
 }
+
+fn seed_start_camera(
+    state: &mut DesktopAppState,
+    camera: &Camera,
+    sid: Uid,
+    mgr: &mut AnimMgr,
+) -> Result<()> {
+    if state
+        .scene_manager()
+        .scene(sid)
+        .and_then(|s| s.camera_by_name("__current"))
+        .is_none()
+    {
+        let mut saved = camera.clone();
+        saved.set_name("__current");
+        state.save_scene_camera(sid, saved, false)?;
+    }
+    if mgr.startcam().is_empty() {
+        mgr.set_startcam("__current");
+    }
+    Ok(())
+}
+
+pub fn initialize_animation_start_camera(
+    state: &mut DesktopAppState,
+    camera: &Camera,
+) -> Result<()> {
+    let sid = scene(state)?;
+    let mut mgr = state.scene_animation(sid)?.unwrap_or_default();
+    seed_start_camera(state, camera, sid, &mut mgr)?;
+    state.set_scene_animation(sid, Some(&mgr))
+}
+
+/// Keep the reference's implicit camera initialization outside the element undo step.
+pub fn retain_animation_seed_in_undo(
+    before: &mut DesktopAppState,
+    after: &DesktopAppState,
+    tool: &str,
+) {
+    if tool != "add_anim" || before.active_scene() != after.active_scene() {
+        return;
+    }
+    let Some(sid) = after.active_scene() else {
+        return;
+    };
+    let Some(scene) = after.scene_manager().scene(sid) else {
+        return;
+    };
+    let Some(camera) = scene.camera_by_name("__current") else {
+        return;
+    };
+    let Ok(Some(current)) = after.scene_animation(sid) else {
+        return;
+    };
+    let Ok(previous) = before.scene_animation(sid) else {
+        return;
+    };
+    let mut previous = previous.unwrap_or_default();
+    if before
+        .scene_manager()
+        .scene(sid)
+        .and_then(|s| s.camera_by_name("__current"))
+        .is_none()
+    {
+        if before
+            .save_scene_camera(sid, camera.clone(), false)
+            .is_err()
+        {
+            return;
+        }
+    }
+    if previous.startcam().is_empty() && current.startcam() == "__current" {
+        previous.set_startcam("__current");
+        let _ = before.set_scene_animation(sid, Some(&previous));
+    }
+}
 pub fn animation_timeline(state: &DesktopAppState) -> Result<Value> {
     let sid = scene(state)?;
     let mgr = state.scene_animation(sid)?.unwrap_or_default();
@@ -218,10 +294,11 @@ pub fn call_tool(
             node.set_str_attr("startValue", "0");
             node.set_str_attr("endValue", "1");
         }
-        if kind == "hide" || kind == "slideout" {
-            node.set_str_attr("hide", "true");
+        if matches!(kind, "hide" | "show" | "slideout" | "slidein") {
+            node.set_str_attr("hide", (kind == "hide" || kind == "slideout").to_string());
         }
         mgr.insert_motion_before(before, AnimMotion::from_ldom2_node(&node)?);
+        seed_start_camera(state, camera, sid, &mut mgr)?;
     } else {
         let index = element(&mgr, text(args, "element")?)?;
         if name == "remove_anim" {
@@ -246,10 +323,15 @@ pub fn call_tool(
                 node.set_str_attr("start", editor_time_ms(start).to_string());
                 node.set_str_attr("end", editor_time_ms(end).to_string());
             } else if name == "reset_anim_prop" {
-                for prop in text(args, "props")?
-                    .split(|c: char| c.is_whitespace() || c == ',')
+                let properties = text(args, "props")?
+                    .split(',')
+                    .map(crate::animation_value::trim)
                     .filter(|p| !p.is_empty())
-                {
+                    .collect::<Vec<_>>();
+                if properties.is_empty() {
+                    return Err(CueMolError::invalid_argument("no properties to reset"));
+                }
+                for prop in properties {
                     if mgr.motions()[index]
                         .property_spec(prop)
                         .is_none_or(|spec| spec.default.is_none())

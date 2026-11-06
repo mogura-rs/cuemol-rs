@@ -125,7 +125,14 @@ impl App {
                 let history_changed = undo.as_ref().is_some_and(|undo| {
                     undo.camera != self.camera || !undo.state.same_scene_undo_state(&self.state)
                 });
-                if let Some(undo) = undo.filter(|_| history_changed && !self.agent.changed_scene) {
+                if let Some(mut undo) =
+                    undo.filter(|_| history_changed && !self.agent.changed_scene)
+                {
+                    cuemol_command::retain_animation_seed_in_undo(
+                        &mut undo.state,
+                        &self.state,
+                        &name,
+                    );
                     self.state.mark_scene_changes_since(&undo.state);
                     self.history.push(undo);
                     self.future.clear();

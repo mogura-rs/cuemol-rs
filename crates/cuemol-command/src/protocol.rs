@@ -266,9 +266,10 @@ impl Protocol {
                     self.undo.clear();
                     self.redo.clear();
                 }
-                if let Some(before) = before
+                if let Some(mut before) = before
                     .filter(|(previous, _)| self.record_history && !previous.same_undo_state(state))
                 {
+                    crate::retain_animation_seed_in_undo(&mut before.0, state, name);
                     state.mark_scene_changes_since(&before.0);
                     if name == "load_file" && value.get("objectId").is_none() {
                         if let Some(scene) = state.active_scene().filter(|uid| {

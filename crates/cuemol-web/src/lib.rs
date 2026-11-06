@@ -738,7 +738,12 @@ impl App {
                     self.navigation.cancel();
                     self.revision = self.revision.wrapping_add(1);
                 }
-                if let Some(before) = before.filter(|_| history_changed) {
+                if let Some(mut before) = before.filter(|_| history_changed) {
+                    cuemol_command::retain_animation_seed_in_undo(
+                        &mut before.state,
+                        &self.state,
+                        name,
+                    );
                     self.state.mark_scene_changes_since(&before.state);
                     self.history.push(before);
                     if self.history.len() > 12 {

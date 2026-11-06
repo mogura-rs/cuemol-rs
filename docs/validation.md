@@ -1,5 +1,36 @@
 # Validation evidence
 
+## Animation authoring cameras and default state
+
+Failing regressions showed that shared `add_anim` commands did not save the
+authoring view, while the Tauri playback path overwrote an existing `__current`
+camera. The current reference initializes this camera only when absent, adopts
+it only for an empty start-camera choice, and excludes that initialization from
+the element's undo transaction. The command, native dialog and Tauri add paths
+now follow these rules. History snapshots retain the initialization for panel,
+console, MCP and agent adds. An invalid add still leaves the scene unchanged.
+
+Tauri now synchronizes the live view separately from export-camera persistence.
+Playback, script/console execution, view/scene switching and scene opening no
+longer overwrite a saved animation start. A model regression covers first-add
+undo/redo, playback after moving the view, read-only scripts, console execution
+and scene switching. The native regression exercises both the shared panel
+command and actual console execution before undo.
+
+Show and Slide-in additions now record their explicit `hide=false` defaults,
+matching the reference Add behavior. Empty reset lists and names joined only by
+spaces are rejected before changing the animation; reset lists use commas.
+The earlier Tauri Inspector test expected an exact pre-add scene after undo.
+Its updated assertion verifies unchanged elements and the retained start camera,
+consistent with the reference service.
+
+The shared command suite passed 221 checks with two unrelated optional cases
+ignored. Native GUI tests passed 200 checks, and the macOS Tauri model passed
+174 with five optional cases ignored. Rebuilt WebGL/WebGPU passed 12 affected
+browser cases, including actual Add-menu clicks, console adds, first-add undo,
+playback anchoring, invalid reset lists and the existing timeline/value tests.
+These finite checks do not establish complete appearance parity.
+
 ## Animation command value conversions
 
 Four failing regressions exposed boolean aliases being misread, non-decimal
