@@ -1368,7 +1368,7 @@ fn is_valid_namd_coor_header(bytes: &[u8], big_endian: bool) -> bool {
     [4, 12, 20]
         .into_iter()
         .map(|offset| read_f64(bytes, offset, big_endian))
-        .all(|value| value.is_finite() && value.abs() <= 10_000.0)
+        .all(|value| (value == 0.0 || value.is_normal()) && value.abs() <= 10_000.0)
 }
 
 fn read_i32(bytes: &[u8], offset: usize, big_endian: bool) -> i32 {

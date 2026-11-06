@@ -698,6 +698,53 @@ fn reference_test_data_root() -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
+#[test]
+fn namd_content_sniff_rejects_ccp4_headers_and_subnormal_coordinates() {
+    use cuemol_molstr::ContentVerdict::{Unknown, Yes};
+    let manager = StreamManager::new();
+    let path = temp_file("namd-content-boundaries.map");
+    let mut map = vec![0u8; 1024];
+    for (i, word) in [240i32, 240, 240, 2, 0, 0, 0].into_iter().enumerate() {
+        map[4 * i..4 * i + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    map[208..212].copy_from_slice(b"MAP ");
+    fs::write(&path, map).unwrap();
+    assert_eq!(
+        manager.sniff_content(&path, HandlerSniffer::NamdCoor, 0),
+        Unknown
+    );
+    assert_eq!(
+        manager.search_reader_by_content(&path, "", HandlerCategory::ObjReader, false, 0),
+        "ccp4map"
+    );
+    for swapped in [false, true] {
+        for value in [0., -0., f64::MIN_POSITIVE, -f64::MIN_POSITIVE, -2., 10_000.] {
+            fs::write(&path, namd_header(100, value, 1., -3., swapped)).unwrap();
+            assert_eq!(
+                manager.sniff_content(&path, HandlerSniffer::NamdCoor, 0),
+                Yes,
+                "{value:?}, swapped={swapped}"
+            );
+        }
+        for value in [
+            f64::from_bits(1),
+            -f64::from_bits(1),
+            f64::MIN_POSITIVE / 2.,
+            10_001.,
+            f64::INFINITY,
+            f64::NAN,
+        ] {
+            fs::write(&path, namd_header(100, value, 1., -3., swapped)).unwrap();
+            assert_eq!(
+                manager.sniff_content(&path, HandlerSniffer::NamdCoor, 0),
+                Unknown,
+                "{value:?}, swapped={swapped}"
+            );
+        }
+    }
+    fs::remove_file(path).unwrap();
+}
+
 fn temp_file(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("cuemol2-rs-{}-{name}", std::process::id()))
 }

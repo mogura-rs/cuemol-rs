@@ -1,5 +1,20 @@
 # Validation evidence
 
+## NAMD coordinate sniffing and binary map headers
+
+The current reference rejects subnormal values when sniffing NAMD coordinates.
+The Rust sniffer still accepted them, so a CCP4 header made from small integer
+words passed as coordinates near zero. The new regression failed before the
+repair with a NAMD verdict of Yes for the CCP4 header.
+
+The sniffer now accepts zero or normal finite coordinates within its existing
+magnitude bound. All 18 stream compatibility tests passed with the reference
+fixture directory present. The added case checks a CCP4 header and unrestricted
+reader selection, both byte orders, signed zero, the smallest normal values,
+subnormal values, oversized coordinates, infinity and NaN. This changes format
+identification; explicitly selected NAMD readers retain their existing decoding
+rules.
+
 ## Get PDB search, entry metadata and EMDB loading
 
 The current reference's Get PDB flow was missing keyword search and entry-aware
