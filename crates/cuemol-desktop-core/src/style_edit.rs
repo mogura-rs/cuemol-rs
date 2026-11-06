@@ -11,11 +11,8 @@ pub(crate) struct PreparedSceneStyles {
 }
 
 impl PreparedSceneStyles {
-    pub fn write_sources(&self) -> Result<()> {
-        for (path, xml) in &self.writes {
-            std::fs::write(path, xml)?;
-        }
-        Ok(())
+    pub fn write_scene(&self, path: &Path, document: &[u8]) -> Result<()> {
+        crate::scene_save::write_scene_files(path, document, &self.writes)
     }
 
     pub fn apply(self, scene: &mut cuemol_molstr::qsys::MolScene) {

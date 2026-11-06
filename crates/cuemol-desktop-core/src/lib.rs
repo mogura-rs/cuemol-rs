@@ -2,6 +2,7 @@ mod animation;
 mod clipboard;
 mod config_io;
 pub use clipboard::GuiClipboardPayload;
+mod scene_save;
 mod selection_support;
 mod sequence;
 mod style_edit;
@@ -4614,7 +4615,7 @@ impl DesktopAppState {
         let name = style.node.str_attr("id").to_string();
         tree.top_mut().set_str_attr("id", &name);
         let data = write_ldom2_xml(&tree);
-        fs::write(&resolved_path, &data)?;
+        scene_save::write_scene_files(&resolved_path, data.as_bytes(), &[])?;
 
         let mut node = style.node.clone();
         node.retain_children(LDom2Node::is_attr);
@@ -14417,8 +14418,7 @@ impl DesktopAppState {
             embedded_objects,
             styles,
         } = self.prepare_scene_save(scene_uid, options, source_path.parent(), camera.as_ref())?;
-        styles.write_sources()?;
-        fs::write(path, document)?;
+        styles.write_scene(Path::new(path), &document)?;
         let scene = self
             .scene_manager_mut()
             .scene_mut(scene_uid)
@@ -48485,8 +48485,7 @@ impl DesktopAppState {
             styles,
             ..
         } = self.prepare_scene_save(scene_uid, options, source_path.parent(), None)?;
-        styles.write_sources()?;
-        fs::write(path, document)?;
+        styles.write_scene(Path::new(path), &document)?;
         let scene = self
             .scene_manager_mut()
             .scene_mut(scene_uid)

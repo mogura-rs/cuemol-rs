@@ -5,6 +5,30 @@ results are historical. Generated inputs and logs stay in the ignored checkout
 cache. The current repairs and their limits appear in the completion audit;
 passing tests do not establish equivalence for every parameter combination.
 
+## Scene save failure and linked files
+
+A failed QSC write previously overwrote writable linked styles before reporting
+that the scene could not be saved. Native and script scene writers now prepare
+all destination files before replacing any original. Each replacement uses a
+temporary file in the destination directory. An ordinary replacement error rolls
+back earlier replacements; a rollback error retains its backup and reports the
+recovery path. A process or system crash between replacements can still leave
+mixed versions across files.
+
+Existing file permissions and symlink destinations are preserved. Conflicting
+scene/style destinations are rejected before writing. The final scene file uses
+one atomic replacement, so its old contents do not require a backup copy. Earlier
+style files use hard-link backups when available and a bounded copy fallback.
+The reference's same-source modified-flag behavior remains unchanged.
+
+Six regressions passed on Linux and macOS for invalid scene/style destinations,
+script writers, successful saves, path collisions, symlinks and file permissions.
+A separate test forces a destination to become a directory after preparation and
+checks that an already replaced file is restored without temporary-file leaks.
+The complete shared core and command suites passed 300 and 218 tests respectively.
+The browser target also passed compilation with native temporary-file handling
+excluded.
+
 ## Live views across scene history
 
 A scene edit followed by camera navigation previously restored the older camera
