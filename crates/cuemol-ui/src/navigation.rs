@@ -55,7 +55,7 @@ pub fn context_menu(
             if button(ui, &label) {
                 if let Ok(mut text) = navigation::selection_for_hit(state, hit, level) {
                     if add && !current.is_empty() {
-                        text = format!("({current}) or ({text})");
+                        text = navigation::add_selection_expression(current, &text);
                     }
                     action = Some(ContextAction::Command(navigation::selection_command(
                         hit.object, text,
@@ -72,47 +72,32 @@ pub fn context_menu(
         )));
     }
     if button(ui, "Invert Selection") {
-        let text = if current.is_empty() {
-            "*".into()
-        } else if let Some(inner) = current.strip_prefix("!(").and_then(|s| s.strip_suffix(')')) {
-            inner.into()
-        } else {
-            format!("!({current})")
-        };
-        action = Some(ContextAction::Command(navigation::selection_command(
-            hit.object, text,
-        )));
+        if let Ok(text) = cuemol_command::selection::rewrite_expression(current, "invert", 0.) {
+            action = Some(ContextAction::Command(navigation::selection_command(
+                hit.object, text,
+            )));
+        }
     }
     if button(ui, "Toggle Sidechain") && !current.is_empty() {
-        let text = current
-            .strip_prefix("bysidech ")
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("bysidech {current}"));
-        action = Some(ContextAction::Command(navigation::selection_command(
-            hit.object, text,
-        )));
+        if let Ok(text) = cuemol_command::selection::rewrite_expression(current, "sidechain", 0.) {
+            action = Some(ContextAction::Command(navigation::selection_command(
+                hit.object, text,
+            )));
+        }
     }
     for (label, byres) in [("Around Byres", true), ("Around", false)] {
         ui.menu_button(label, |ui| {
             for radius in [3, 5, 7, 10] {
                 if button(ui, &format!("{radius} Å")) && !current.is_empty() {
-                    let mut base = current;
-                    if let Some((candidate, distance)) = base.rsplit_once(" around ") {
-                        if distance.parse::<f64>().is_ok() {
-                            base = candidate.strip_prefix("byres ").unwrap_or(candidate);
-                            base = base
-                                .strip_prefix('(')
-                                .and_then(|s| s.strip_suffix(')'))
-                                .unwrap_or(base);
-                        }
+                    if let Ok(text) = cuemol_command::selection::rewrite_expression(
+                        current,
+                        if byres { "around-byres" } else { "around" },
+                        radius as f64,
+                    ) {
+                        action = Some(ContextAction::Command(navigation::selection_command(
+                            hit.object, text,
+                        )));
                     }
-                    let text = format!(
-                        "{}({base}) around {radius}",
-                        if byres { "byres " } else { "" }
-                    );
-                    action = Some(ContextAction::Command(navigation::selection_command(
-                        hit.object, text,
-                    )));
                     ui.close();
                 }
             }

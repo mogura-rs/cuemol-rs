@@ -468,12 +468,34 @@ impl DensityMap {
         (center, radius)
     }
 
+    pub fn get_fit_box(&self, view: &View) -> (Vector4, Vector4) {
+        self.get_fit_box_with_xform(view, Matrix4::IDENTITY)
+    }
+
+    pub fn get_fit_box_with_xform(&self, view: &View, object_xform: Matrix4) -> (Vector4, Vector4) {
+        let xform = Matrix4::make_rot_mat(view.rot_quat())
+            .mul_mat(object_xform)
+            .mul_mat(Matrix4::make_trans_mat(self.origin))
+            .mul_mat(self.get_orth_mat());
+        let corners = std::array::from_fn::<_, 8, _>(|i| {
+            Vector4::new4(
+                if i & 1 == 0 { 0. } else { 1. },
+                if i & 2 == 0 { 0. } else { 1. },
+                if i & 4 == 0 { 0. } else { 1. },
+                1.0,
+            )
+        });
+        transformed_bounds(xform, &corners)
+    }
+
     pub fn fit_view(&self, view: &mut View, _dummy: bool) {
         self.fit_view_with_xform(view, Matrix4::IDENTITY);
     }
 
     pub fn fit_view_with_xform(&self, view: &mut View, object_xform: Matrix4) {
-        let orth = object_xform.mul_mat(self.get_orth_mat());
+        let orth = object_xform
+            .mul_mat(Matrix4::make_trans_mat(self.origin))
+            .mul_mat(self.get_orth_mat());
         let eye = orth.mul_mat(Matrix4::make_rot_mat(view.rot_quat()));
         let corners = [
             Vector4::new4(0.0, 0.0, 0.0, 1.0),

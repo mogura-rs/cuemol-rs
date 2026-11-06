@@ -28,9 +28,21 @@ def main():
         str(reference / 'src/qlib/MatrixHelper.cpp'),
         '-L' + str(build / 'src'), '-lcuemol2', '-Wl,-rpath,' + str(build / 'src'),
         '-o', str(oracle)], check=True, cwd=ROOT)
-    environment = dict(os.environ, CUEMOL_CAMERA_FIT_ORACLE=str(oracle), CUEMOL_CAMERA_FIT_CONFIG=str(config))
+    map_oracle = output / 'map-oracle'
+    subprocess.run(shlex.split(os.environ.get('CXX', 'c++')) + [
+        '-O2', '-std=c++20', '-DHAVE_CONFIG_H', '-DNO_SCRIPT',
+        '-I' + str(reference / 'src'), '-I' + str(build / 'src'),
+        '-I' + str(build / '_deps/spdlog-src/include'),
+        str(ROOT / 'crates/cuemol-xtal/tests/reference_fit_box.cpp'),
+        '-L' + str(build / 'src'), '-lcuemol2', '-Wl,-rpath,' + str(build / 'src'),
+        '-o', str(map_oracle)], check=True, cwd=ROOT)
+    environment = dict(os.environ, CUEMOL_CAMERA_FIT_ORACLE=str(oracle),
+                       CUEMOL_MAP_FIT_BOX_ORACLE=str(map_oracle),
+                       CUEMOL_CAMERA_FIT_CONFIG=str(config))
     subprocess.run(['cargo', 'test', '--locked', '-p', 'cuemol-molstr', '--test',
                     'camera_fit_compat', '--', '--nocapture'], check=True, cwd=ROOT, env=environment)
+    subprocess.run(['cargo', 'test', '--locked', '-p', 'cuemol-xtal', '--test',
+                    'fit_box_compat', '--', '--nocapture'], check=True, cwd=ROOT, env=environment)
 
 
 if __name__ == '__main__':

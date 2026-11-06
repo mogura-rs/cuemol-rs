@@ -10034,25 +10034,23 @@ async function saveWorkspaceCameraFile(scene, camera, saveAs) {
   }
 }
 
-function invertWorkspaceSelection(selection) {
-  const current = selection.trim();
-  if (!current) return "*";
-  const inverted = current.match(/^!\((.*)\)$/s);
-  return inverted ? inverted[1] : `!(${current})`;
-}
-
-function toggleWorkspaceSidechain(selection) {
-  const current = selection.trim();
-  return current.startsWith("bysidech ") ? current.slice(9).trim() : `bysidech ${current}`;
-}
-
-function aroundWorkspaceSelection(selection, radius, byResidue) {
-  let base = selection.trim();
-  if (base.startsWith("byres ")) base = base.slice(6).trim();
-  const previous = base.match(/^\((.*)\)\s+around\s+[-+]?\d+(?:\.\d+)?$/s);
-  if (previous) base = previous[1];
-  const expression = `(${base}) around ${radius}`;
-  return byResidue ? `byres ${expression}` : expression;
+async function rewriteWorkspaceSelection(object, operation, distance = 5) {
+  if (!invoke) return false;
+  const scene = snapshot?.activeSceneUid;
+  const current = object.selection || "";
+  setBusy(true);
+  try {
+    const result = await invoke("inspector_request", {tool: "selection_info", args: {
+      moleculeId: object.uid, action: "rewrite", current, operation, distance,
+    }});
+    if (snapshot?.activeSceneUid !== scene) return false;
+    return await runMoleculeSelectionAction(object.uid, result.expression, "select");
+  } catch (error) {
+    showError(error);
+    return false;
+  } finally {
+    setBusy(false);
+  }
 }
 
 async function copyWorkspaceRenderer(objectUid, rendererUid) {
@@ -10790,11 +10788,10 @@ function workspaceStyleContextItems(scene, style = null) {
 function workspaceObjectContextItems(scene, object) {
   const select = (selection) => () =>
     runMoleculeSelectionAction(object.uid, selection, "select");
-  const current = object.selection || "";
   const around = (byResidue) =>
     [3, 5, 7, 10].map((radius) => ({
       label: `${radius} Å`,
-      action: select(aroundWorkspaceSelection(current, radius, byResidue)),
+      action: () => rewriteWorkspaceSelection(object, byResidue ? "around-byres" : "around", radius),
     }));
   const items = [
     {
@@ -10802,10 +10799,10 @@ function workspaceObjectContextItems(scene, object) {
       children: [
         { label: "Select All", action: select("*") },
         { label: "Unselect", action: select("") },
-        { label: "Invert", action: select(invertWorkspaceSelection(current)) },
+        { label: "Invert", action: () => rewriteWorkspaceSelection(object, "invert") },
         {
           label: "Toggle Sidechain",
-          action: select(toggleWorkspaceSidechain(current)),
+          action: () => rewriteWorkspaceSelection(object, "sidechain"),
         },
         { label: "Around Byresid", children: around(true) },
         { label: "Around", children: around(false) },

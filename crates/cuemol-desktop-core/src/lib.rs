@@ -23254,6 +23254,58 @@ impl DesktopAppState {
                 .ok_or_else(|| script_error("SelCommand receiver is not an object"))?
                 .get(js_string!("expression"), ctx)
         }
+        fn selection_command_for_rewrite(
+            this: &JsValue,
+            ctx: &mut Context,
+        ) -> JsResult<cuemol_molstr::SelCommand> {
+            let mut selection = cuemol_molstr::SelCommand::new();
+            selection
+                .compile_result(&this_string_prop(this, "expression", ctx))
+                .map_err(|error| script_error(error.to_string()))?;
+            Ok(selection)
+        }
+        fn js_sel_simplify(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            Ok(JsString::from(selection_command_for_rewrite(this, ctx)?.simplify()).into())
+        }
+        fn js_sel_invert(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            Ok(
+                JsString::from(selection_command_for_rewrite(this, ctx)?.invert_simplified())
+                    .into(),
+            )
+        }
+        fn js_sel_toggle_sidechain(
+            this: &JsValue,
+            _args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            Ok(JsString::from(selection_command_for_rewrite(this, ctx)?.toggle_sidechain()).into())
+        }
+        fn js_sel_rewrite_around(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let distance = args
+                .first()
+                .unwrap_or(&JsValue::undefined())
+                .to_number(ctx)?;
+            if !distance.is_finite() {
+                return Err(script_error("selection distance must be finite"));
+            }
+            let by_residue = args.get(1).is_some_and(JsValue::to_boolean);
+            Ok(JsString::from(
+                selection_command_for_rewrite(this, ctx)?.rewrite_around(distance, by_residue),
+            )
+            .into())
+        }
         fn js_sel_is_empty(
             this: &JsValue,
             _args: &[JsValue],
@@ -23369,6 +23421,26 @@ impl DesktopAppState {
                 .function(
                     NativeFunction::from_fn_ptr(js_sel_compile),
                     js_string!("compile"),
+                    2,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_sel_simplify),
+                    js_string!("simplify"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_sel_invert),
+                    js_string!("invertSimplified"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_sel_toggle_sidechain),
+                    js_string!("toggleSidechain"),
+                    0,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_sel_rewrite_around),
+                    js_string!("rewriteAround"),
                     2,
                 )
                 .function(
@@ -24187,6 +24259,7 @@ impl DesktopAppState {
                     ("getBoundBoxMax", 1, js_object_bound_max),
                     ("fitView", 2, js_object_fit_view),
                     ("fitView2", 2, js_object_fit_view_selection),
+                    ("getFitBoxJSON", 2, js_object_fit_box),
                     ("orientView", 2, js_object_orient_view),
                     ("getChainNameCandsJSON", 0, js_object_chain_candidates),
                     ("getResidNameCandsJSON", 0, js_object_residue_candidates),
@@ -25844,6 +25917,16 @@ impl DesktopAppState {
             with_script_view_mut(this, ctx, |view| view.size_changed(width, height))?;
             Ok(JsValue::undefined())
         }
+        fn js_view_fit_to_box(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let min = vector_from_value(args.first().unwrap_or(&JsValue::undefined()), ctx)?;
+            let max = vector_from_value(args.get(1).unwrap_or(&JsValue::undefined()), ctx)?;
+            with_script_view_mut(this, ctx, |view| view.fit_to_box(min, max))?;
+            Ok(JsValue::undefined())
+        }
         fn js_view_set_scale(
             this: &JsValue,
             args: &[JsValue],
@@ -26801,6 +26884,11 @@ impl DesktopAppState {
                 .function(
                     NativeFunction::from_fn_ptr(js_view_size_changed),
                     js_string!("sizeChanged"),
+                    2,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_view_fit_to_box),
+                    js_string!("fitToBox"),
                     2,
                 )
                 .function(
@@ -33968,6 +34056,54 @@ impl DesktopAppState {
             })?;
             Ok(JsValue::undefined())
         }
+        fn fit_box_json(bounds: Option<(Vector4, Vector4)>) -> JsValue {
+            let text = bounds
+                .map(|(min, max)| {
+                    serde_json::json!({
+                        "min": [min.x, min.y, min.z], "max": [max.x, max.y, max.z],
+                    })
+                    .to_string()
+                })
+                .unwrap_or_default();
+            JsString::from(text).into()
+        }
+        fn js_object_fit_box(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let uid = object_proxy_uid(this, ctx)?;
+            let target_view = view_uid(args.first().unwrap_or(&JsValue::undefined()), ctx)?;
+            let selector = args
+                .get(1)
+                .filter(|value| !value.is_null_or_undefined())
+                .map(|value| molecule_selector_from_script_value(value, uid, ctx))
+                .transpose()?;
+            script_env::with(|env| {
+                let molecule = env
+                    .molecules
+                    .iter()
+                    .find(|molecule| molecule.uid == uid)
+                    .ok_or_else(|| script_error(format!("Molecule {uid} is not available")))?;
+                let view = env
+                    .views
+                    .iter()
+                    .find(|view| view.uid() == target_view)
+                    .ok_or_else(|| {
+                        script_error(format!("View {} is not available", target_view.get()))
+                    })?;
+                let xform = env
+                    .objects
+                    .iter()
+                    .find(|object| object.uid == uid)
+                    .map_or(Matrix4::IDENTITY, |object| object.xform);
+                Ok(fit_box_json(molecule.molecule.get_fit_box_with_xform(
+                    view,
+                    selector.as_ref(),
+                    xform,
+                )))
+            })
+        }
         fn fit_molecule_view(
             this: &JsValue,
             args: &[JsValue],
@@ -33976,48 +34112,53 @@ impl DesktopAppState {
             ctx: &mut Context,
         ) -> JsResult<JsValue> {
             let uid = object_proxy_uid(this, ctx)?;
-            let view_value = args.first().cloned().unwrap_or(JsValue::undefined());
-            let target_view = view_uid(&view_value, ctx)?;
+            let target_view = view_uid(args.first().unwrap_or(&JsValue::undefined()), ctx)?;
             let selector = if explicit_selection {
                 args.get(1)
                     .filter(|value| !value.is_null_or_undefined())
-                    .map(|value| selector_from_script_value(value, ctx))
+                    .map(|value| molecule_selector_from_script_value(value, uid, ctx))
                     .transpose()?
+            } else if args.get(1).is_some_and(JsValue::to_boolean) {
+                script_env::with(|env| {
+                    env.molecules
+                        .iter()
+                        .find(|molecule| molecule.uid == uid)
+                        .map(|source| {
+                            selector_in_script_scene(env, source, source.molecule.selection())
+                        })
+                })
             } else {
                 None
             };
-            let selected = !explicit_selection && args.get(1).is_some_and(JsValue::to_boolean);
-            let molecule = script_env::with(|env| {
-                env.molecules
+            script_env::with_mut(|env| {
+                let molecule = env
+                    .molecules
                     .iter()
                     .find(|molecule| molecule.uid == uid)
-                    .map(|molecule| molecule.molecule.clone())
-            })
-            .ok_or_else(|| script_error(format!("Molecule {uid} is not available")))?;
-            let transform = script_env::with(|env| {
-                env.objects
+                    .ok_or_else(|| script_error(format!("Molecule {uid} is not available")))?;
+                let transform = env
+                    .objects
                     .iter()
                     .find(|object| object.uid == uid)
-                    .map(|object| object.xform)
-                    .unwrap_or(Matrix4::IDENTITY)
-            });
-            script_env::with_mut(|env| {
-                env.views
+                    .map_or(Matrix4::IDENTITY, |object| object.xform);
+                let view = env
+                    .views
                     .iter_mut()
                     .find(|view| view.uid() == target_view)
-                    .map(|view| {
-                        let selection = selector
-                            .as_ref()
-                            .or_else(|| selected.then_some(molecule.selection()));
-                        if orient {
-                            molecule.orient_view_with_xform(view, selection, transform)
-                        } else {
-                            molecule.fit_view_with_xform(view, selection, transform)
-                        }
-                    })
+                    .ok_or_else(|| {
+                        script_error(format!("View {} is not available", target_view.get()))
+                    })?;
+                if orient {
+                    molecule
+                        .molecule
+                        .orient_view_with_xform(view, selector.as_ref(), transform);
+                } else {
+                    molecule
+                        .molecule
+                        .fit_view_with_xform(view, selector.as_ref(), transform);
+                }
+                Ok(JsValue::undefined())
             })
-            .ok_or_else(|| script_error(format!("View {} is not available", target_view.get())))?;
-            Ok(JsValue::undefined())
         }
         fn js_object_fit_view(
             this: &JsValue,
@@ -34351,6 +34492,7 @@ impl DesktopAppState {
                 ("den_quant_step", ScalarMapProperty::QuantStep, false),
             ];
             if class_name == "DensityMap" {
+                install_script_function(value, "getFitBoxJSON", 1, js_scalar_map_fit_box, ctx);
                 properties.extend([
                     ("map_type", ScalarMapProperty::MapType, true),
                     ("map_type_resolved", ScalarMapProperty::ResolvedType, false),
@@ -34421,6 +34563,23 @@ impl DesktopAppState {
             let map = script_target_density_map(this, ctx)?;
             Ok(JsString::from(map.get_histogram_json(min, max, bins as usize)).into())
         }
+        fn js_scalar_map_fit_box(
+            this: &JsValue,
+            args: &[JsValue],
+            ctx: &mut Context,
+        ) -> JsResult<JsValue> {
+            let uid = object_proxy_uid(this, ctx)?;
+            let map = script_target_density_map(this, ctx)?;
+            let xform = script_env::with(|env| {
+                env.objects
+                    .iter()
+                    .find(|object| object.uid == uid)
+                    .map_or(Matrix4::IDENTITY, |object| object.xform)
+            });
+            with_script_view(args.first().unwrap_or(&JsValue::undefined()), ctx, |view| {
+                fit_box_json(Some(map.get_fit_box_with_xform(view, xform)))
+            })
+        }
         fn js_scalar_map_fit_view(
             this: &JsValue,
             args: &[JsValue],
@@ -34429,7 +34588,6 @@ impl DesktopAppState {
             let uid = object_proxy_uid(this, ctx)?;
             let target_view =
                 view_uid(&args.first().cloned().unwrap_or(JsValue::undefined()), ctx)?;
-            let dummy = args.get(1).is_some_and(JsValue::to_boolean);
             let object = script_object(uid)?;
             let map = object
                 .scalar_map
@@ -34438,7 +34596,7 @@ impl DesktopAppState {
                 env.views
                     .iter_mut()
                     .find(|view| view.uid() == target_view)
-                    .map(|view| map.fit_view(view, dummy))
+                    .map(|view| map.fit_view_with_xform(view, object.xform))
             })
             .ok_or_else(|| script_error(format!("View {} is not available", target_view.get())))?;
             Ok(JsValue::undefined())
@@ -35705,6 +35863,11 @@ impl DesktopAppState {
                 .function(
                     NativeFunction::from_fn_ptr(js_object_fit_view),
                     js_string!("fitView"),
+                    2,
+                )
+                .function(
+                    NativeFunction::from_fn_ptr(js_object_fit_box),
+                    js_string!("getFitBoxJSON"),
                     2,
                 )
                 .function(
@@ -61041,6 +61204,38 @@ end_header
             ))
             .expect("View state is queryable in the next script");
         assert!(second_log.contains("persist=script-view:33"));
+    }
+
+    #[cfg(feature = "scripting")]
+    #[test]
+    fn script_fit_box_queries_preserve_origin_transform_and_view_state() {
+        let mut app = DesktopAppState::new();
+        let created = app.new_scene("fit-box", true);
+        let mut map = DensityMap::new();
+        map.set_map_byte_array(&[0; 8], [2; 3], 0., 1., 0.5, 0.25);
+        map.set_map_params([-3, 2, 4], [10, 12, 14]);
+        map.set_xtal_params(10., 12., 14., 90., 90., 90.);
+        map.set_origin(Vector4::new3(3., -2., 5.));
+        app.add_density_map(created.result_scene, "offset-map", map);
+        let (log, _) = app.run_script_js(r#"
+            var view = scene.getView(scene.activeViewID);
+            var map = cuemol.getObject('offset-map');
+            var matrix = cuemol.createObj('Matrix');
+            matrix.setTranslate(cuemol.Vector('(4,5,6)')); map.xformMat = matrix;
+            view.sizeChanged(200, 100); view.zoom = 77;
+            var box = JSON.parse(map.getFitBoxJSON(view));
+            print(JSON.stringify(box.min.map(Math.round)));
+            print(JSON.stringify(box.max.map(Math.round)));
+            print(view.zoom);
+            view.fitToBox(cuemol.Vector('('+box.min.join(',')+')'), cuemol.Vector('('+box.max.join(',')+')'));
+            print([view.center.x,view.center.y,view.center.z,view.zoom,view.slab].map(Math.round).join(','));
+            view.center = cuemol.Vector('(0,0,0)'); map.fitView(view, false);
+            print([view.center.x,view.center.y,view.center.z].map(Math.round).join(','));
+        "#).unwrap();
+        assert_eq!(
+            log.trim(),
+            "[7,3,11]\n[17,15,25]\n77\n12,9,18,12,14\n12,9,18"
+        );
     }
 
     #[cfg(feature = "scripting")]

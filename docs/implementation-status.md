@@ -9,15 +9,15 @@ ignored `.cache` directory.
 The current reference is the sibling CueMol checkout at `794fe4ac` (3.0.0.554).
 Earlier comparisons in [parity-audit.md](parity-audit.md) used 2.4.1.547.
 The newer reference adds a ChimeraX console, selection simplification, combined
-node framing and additional command options. Those additions must be included
-before claiming full support. The reference checkout is read-only.
+node framing and additional command options. Selection rewriting and fit-box APIs are now implemented and checked. ChimeraX
+and combined node framing remain required before claiming full support. The reference checkout is read-only.
 
 | Requirement | Existing implementation and next verification |
 | --- | --- |
 | Complete feature and appearance compatibility | Open. Reconcile the older feature checklist with the current reference, then execute behavior checks for each added or changed interface. |
 | Rust implementation and wgpu | Shared Rust scene, command, GUI and rendering crates exist. Native and browser viewports use wgpu. Vendored numerical kernels and bundled external executables retain their provenance. |
-| Molecular structures, maps, surfaces and editing | Readers, representations, map controls, selections, labels, measurements, editing and undo exist. Recheck current QIF declarations and numerical oracles. |
-| Console and scripting | CueMol, PyMOL, JavaScript and persistent native Python exist. ChimeraX and the new selection methods are under comparison. |
+| Molecular structures, maps, surfaces and editing | Readers, representations, map controls, selections, labels, measurements, editing and undo exist. Current QIF method/property coverage passes; the new selection and fit-box numerical oracles pass. Continue the remaining behavior audit. |
+| Console and scripting | CueMol, PyMOL, JavaScript and persistent native Python exist. The current selection methods pass C++ and frontend comparisons. ChimeraX remains to be ported. |
 | Unified command and MCP | `cuemol` owns GUI launch, scripts, MCP, tools, web builds, installation diagnostics and updates. Recheck new reference operation names, schemas and behavior. |
 | Native appearance and input | Shared Tritium shell, inspectors, selection/style/render panels and native OS input checks exist. Recheck changed controls with real window input. |
 | MD loading, seeking and playback | Indexed DCD, XTC, TRR, NetCDF and MDCRD exist. Audit format boundaries, repeated frame decoding, shared snapshots and playback memory. |

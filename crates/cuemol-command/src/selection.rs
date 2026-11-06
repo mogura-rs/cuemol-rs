@@ -214,12 +214,12 @@ impl Draft {
         }
         if matches!(operation, "set" | "add" | "sub" | "intersect") {
             let term = self.term()?;
-            return Some(match operation {
+            return Some(simplify_expression(&match operation {
                 "set" => term,
                 "add" => format!("({current}) or ({term})"),
                 "sub" => format!("({current}) and not ({term})"),
                 _ => format!("({current}) and ({term})"),
-            });
+            }));
         }
         let prefix = match operation {
             "not" => "not",
@@ -232,11 +232,32 @@ impl Draft {
                     .parse::<f64>()
                     .ok()
                     .filter(|v| v.is_finite() && *v >= 0.)?;
-                return Some(format!("({current}) {operation} {distance}"));
+                return Some(simplify_expression(&format!(
+                    "({current}) {operation} {distance}"
+                )));
             }
             _ => return None,
         };
-        Some(format!("{prefix} ({current})"))
+        Some(simplify_expression(&format!("{prefix} ({current})")))
+    }
+}
+
+pub fn simplify_expression(expression: &str) -> String {
+    cuemol_molstr::parse_selector(expression)
+        .map(|selection| selection.simplified_expression())
+        .unwrap_or_else(|_| expression.to_string())
+}
+
+pub fn rewrite_expression(current: &str, operation: &str, distance: f64) -> Result<String> {
+    let mut selection = cuemol_molstr::SelCommand::new();
+    selection.compile_result(current.trim())?;
+    match operation {
+        "invert" => Ok(selection.invert_simplified()),
+        "sidechain" => Ok(selection.toggle_sidechain()),
+        "around" | "around-byres" if distance.is_finite() && distance >= 0. => {
+            Ok(selection.rewrite_around(distance, operation == "around-byres"))
+        }
+        _ => Err(CueMolError::invalid_argument("Invalid selection rewrite")),
     }
 }
 
@@ -449,6 +470,11 @@ pub fn request(state: &DesktopAppState, args: &Value) -> Result<Value> {
             molecule,
             crate::commands::text(args, "expression")?
         )),
+        "rewrite" => json!({"expression": rewrite_expression(
+            crate::commands::text(args, "current")?,
+            crate::commands::text(args, "operation")?,
+            args["distance"].as_f64().unwrap_or(5.),
+        )?}),
         "compose" => {
             let draft: Draft = serde_json::from_value(args["draft"].clone())
                 .map_err(|error| CueMolError::invalid_argument(error.to_string()))?;

@@ -681,43 +681,17 @@ fn menu_button(ui: &mut egui::Ui, rects: &mut BTreeMap<String, [f32; 4]>, label:
 }
 
 fn invert_selection_expression(current: &str) -> String {
-    let current = current.trim();
-    if current.is_empty() {
-        return "*".to_string();
-    }
-    if let Some(inner) = current
-        .strip_prefix("!(")
-        .and_then(|inner| inner.strip_suffix(')'))
-    {
-        inner.trim().to_string()
-    } else {
-        format!("!({current})")
-    }
+    cuemol_command::selection::rewrite_expression(current, "invert", 0.)
+        .unwrap_or_else(|_| current.to_string())
 }
 
 fn around_selection_expression(current: &str, radius: f64, by_residue: bool) -> String {
-    let current = current.trim();
-    let mut base = current;
-    if let Some((candidate, distance)) = current.rsplit_once(" around ") {
-        if distance.trim().parse::<f64>().is_ok() {
-            base = candidate.trim();
-            if let Some(without_byres) = base.strip_prefix("byres ") {
-                base = without_byres.trim();
-            }
-            if let Some(inner) = base
-                .strip_prefix('(')
-                .and_then(|inner| inner.strip_suffix(')'))
-            {
-                base = inner.trim();
-            }
-        }
-    }
-    let base = if by_residue {
-        format!("byres ({base})")
-    } else {
-        format!("({base})")
-    };
-    format!("{base} around {radius}")
+    cuemol_command::selection::rewrite_expression(
+        current,
+        if by_residue { "around-byres" } else { "around" },
+        radius,
+    )
+    .unwrap_or_else(|_| current.to_string())
 }
 
 #[cfg(test)]

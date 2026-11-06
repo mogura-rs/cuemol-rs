@@ -309,7 +309,7 @@ pub fn add_selection_expression(current: &str, addition: &str) -> String {
     if current.is_empty() {
         addition.trim().to_string()
     } else {
-        format!("({current}) or ({})", addition.trim())
+        crate::selection::simplify_expression(&format!("({current}) or ({})", addition.trim()))
     }
 }
 

@@ -103,12 +103,13 @@ fn fitting_and_orientation_match_cpp_including_degenerate_clouds() {
             view.set_view_center(Vector4::new3(1., 2., 3.));
             view.rotate_view(17., -31., 23.);
             let molecule = molecule(points);
+            let bounds = molecule.get_fit_box(&view, None);
             if orient {
                 molecule.orient_view(&mut view, None);
             } else {
                 molecule.fit_view2(&mut view, None);
             }
-            expected.push(view.camera());
+            expected.push((view.camera(), bounds));
         }
     }
     let mut child = Command::new(oracle)
@@ -128,7 +129,26 @@ fn fitting_and_orientation_match_cpp_including_degenerate_clouds() {
     let rows = fs::read_to_string(output).unwrap();
     let rows = rows.lines().collect::<Vec<_>>();
     assert_eq!(rows.len(), expected.len());
-    for (i, (line, camera)) in rows.iter().zip(expected).enumerate() {
+    for (i, (line, (camera, bounds))) in rows.iter().zip(expected).enumerate() {
+        let (line, json) = line.split_once('\t').unwrap();
+        if let Some((min, max)) = bounds {
+            let values: Vec<f64> = json
+                .split_whitespace()
+                .map(|v| v.parse().unwrap())
+                .collect();
+            assert_eq!(values.len(), 6);
+            for (actual, reference) in [min.x, min.y, min.z, max.x, max.y, max.z]
+                .into_iter()
+                .zip(values)
+            {
+                assert!(
+                    (actual - reference).abs() < 1e-7,
+                    "case {i}: fit box {actual} != {reference}"
+                );
+            }
+        } else {
+            assert!(json.is_empty(), "case {i}: empty molecule bounds");
+        }
         let v = line
             .split_whitespace()
             .map(|v| v.parse::<f64>().unwrap())

@@ -32669,52 +32669,22 @@ fn apply_default_extension(mut path: PathBuf, spec: NativeFileDialogSpec) -> Pat
 }
 
 fn invert_selection_expression(current: &str) -> String {
-    let current = current.trim();
-    if current.is_empty() {
-        return "*".to_string();
-    }
-    if let Some(inner) = current
-        .strip_prefix("!(")
-        .and_then(|inner| inner.strip_suffix(')'))
-    {
-        inner.trim().to_string()
-    } else {
-        format!("!({current})")
-    }
+    cuemol_command::selection::rewrite_expression(current, "invert", 0.)
+        .unwrap_or_else(|_| current.to_string())
 }
 
 fn toggle_sidechain_expression(current: &str) -> String {
-    let current = current.trim();
-    current
-        .strip_prefix("bysidech ")
-        .map(str::trim)
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("bysidech {current}"))
+    cuemol_command::selection::rewrite_expression(current, "sidechain", 0.)
+        .unwrap_or_else(|_| current.to_string())
 }
 
 fn around_selection_expression(current: &str, radius: f64, by_residue: bool) -> String {
-    let current = current.trim();
-    let mut base = current;
-    if let Some((candidate, distance)) = current.rsplit_once(" around ") {
-        if distance.trim().parse::<f64>().is_ok() {
-            base = candidate.trim();
-            if let Some(without_byres) = base.strip_prefix("byres ") {
-                base = without_byres.trim();
-            }
-            if let Some(inner) = base
-                .strip_prefix('(')
-                .and_then(|inner| inner.strip_suffix(')'))
-            {
-                base = inner.trim();
-            }
-        }
-    }
-    let base = if by_residue {
-        format!("byres ({base})")
-    } else {
-        format!("({base})")
-    };
-    format!("{base} around {radius}")
+    cuemol_command::selection::rewrite_expression(
+        current,
+        if by_residue { "around-byres" } else { "around" },
+        radius,
+    )
+    .unwrap_or_else(|_| current.to_string())
 }
 
 fn default_animation_render_concurrency() -> u32 {
@@ -39952,22 +39922,19 @@ mod tests {
     fn navigation_selection_expressions_match_cuemol2_operations() {
         assert_eq!(atom_id_selection(&[7, 3, 2, 1, 7, 10]), "aid 1:3,7,10");
         assert_eq!(add_selection_expression("", "aid 2"), "aid 2");
-        assert_eq!(
-            add_selection_expression("aid 1", "aid 2"),
-            "(aid 1) or (aid 2)"
-        );
+        assert_eq!(add_selection_expression("aid 1", "aid 2"), "aid 1:2");
         assert_eq!(invert_selection_expression(""), "*");
-        assert_eq!(invert_selection_expression("aid 1"), "!(aid 1)");
+        assert_eq!(invert_selection_expression("aid 1"), "not aid 1");
         assert_eq!(invert_selection_expression("!(aid 1)"), "aid 1");
         assert_eq!(toggle_sidechain_expression("aid 1"), "bysidech aid 1");
         assert_eq!(toggle_sidechain_expression("bysidech aid 1"), "aid 1");
         assert_eq!(
             around_selection_expression("byres (aid 1) around 3", 5.0, false),
-            "(aid 1) around 5"
+            "(aid 1) around 5.0"
         );
         assert_eq!(
             around_selection_expression("(aid 1) around 5", 10.0, true),
-            "byres (aid 1) around 10"
+            "byres ((aid 1) around 10.0)"
         );
         for expression in [
             atom_id_selection(&[1, 2, 3, 7]),

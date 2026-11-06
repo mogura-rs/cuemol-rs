@@ -325,7 +325,7 @@ fn composed_terms_preserve_case_ranges_and_operator_grouping() {
     assert!(draft.apply("", "add").is_none());
     assert_eq!(
         draft.apply(&term, "not").as_deref(),
-        Some("not ('A'.-2:-1.*)")
+        Some("not 'A'.-2:-1.*")
     );
     assert_eq!(
         selection::evaluate(&state, Some(id), &draft.apply(&term, "not").unwrap()).count,
@@ -338,7 +338,7 @@ fn composed_terms_preserve_case_ranges_and_operator_grouping() {
     draft.distance = "5".into();
     assert_eq!(
         draft.apply(&term, "expand").as_deref(),
-        Some("('A'.-2:-1.*) expand 5")
+        Some("('A'.-2:-1.*) expand 5.0")
     );
     draft.set_keyword("hierarchical");
     draft.fields.insert("chain".into(), "*,1,/a/,'B'".into());

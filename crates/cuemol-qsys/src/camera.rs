@@ -300,18 +300,15 @@ impl Camera {
         self.set_rotation(rotation);
     }
 
-    pub fn fit_positions(
-        &mut self,
+    pub fn get_fit_box(
+        &self,
         positions: impl IntoIterator<Item = Vector4>,
-        aspect: f64,
-    ) -> bool {
+    ) -> Option<(Vector4, Vector4)> {
         let rotation = Matrix4::make_rot_mat(self.rotation);
         let mut positions = positions
             .into_iter()
             .map(|position| rotation.mul_vec(position));
-        let Some(mut min) = positions.next() else {
-            return false;
-        };
+        let mut min = positions.next()?;
         let mut max = min;
         for position in positions {
             min.x = min.x.min(position.x);
@@ -321,6 +318,33 @@ impl Camera {
             max.y = max.y.max(position.y);
             max.z = max.z.max(position.z);
         }
+        let margin = (max - min).scale(0.2);
+        Some((min - margin, max + margin))
+    }
+
+    pub fn fit_positions(
+        &mut self,
+        positions: impl IntoIterator<Item = Vector4>,
+        aspect: f64,
+    ) -> bool {
+        let Some((min, max)) = self.get_fit_box(positions) else {
+            return false;
+        };
+        self.fit_to_box(min, max, aspect)
+    }
+
+    /// Fit bounds expressed in the camera's rotated coordinate frame.
+    pub fn fit_to_box(&mut self, min: Vector4, max: Vector4, aspect: f64) -> bool {
+        if [min.x, min.y, min.z, max.x, max.y, max.z]
+            .iter()
+            .any(|v| !v.is_finite())
+            || min.x > max.x
+            || min.y > max.y
+            || min.z > max.z
+        {
+            return false;
+        }
+        let rotation = Matrix4::make_rot_mat(self.rotation);
         let inverse = rotation.invert().unwrap_or(Matrix4::IDENTITY);
         self.set_center(inverse.mul_vec((min + max).scale(0.5)));
         let aspect = if aspect.is_finite() && aspect > 0.0 {
@@ -328,7 +352,7 @@ impl Camera {
         } else {
             1.0
         };
-        let extent = (max - min).scale(1.4);
+        let extent = max - min;
         self.set_zoom((extent.x.max(4.0) / aspect).max(extent.y.max(4.0)));
         self.set_slab_depth(extent.z.max(4.0));
         true

@@ -75,3 +75,34 @@ for (const backend of ['webgl', 'webgpu']) {
     expect(missing.equals(empty)).toBe(true);
   });
 }
+
+for (const backend of ['webgl', 'webgpu']) {
+  test(`selection rewriting and fit-box APIs work in ${backend}`, async ({page}) => {
+    await page.goto(`./?renderer=${backend}`);
+    await expect.poll(() => page.evaluate(() => window.cuemol?.status()?.scene?.sceneId), {timeout:60000}).toBeGreaterThan(0);
+    await page.locator('#files').setInputFiles({name:'Probe.pdb',mimeType:'application/octet-stream',buffer:Buffer.from(pdb)});
+    await expect.poll(async () => (await status(page)).scene.objects.length).toBe(1);
+    const object=(await status(page)).scene.objects[0];
+    const result=await command(page,'execute_script',{source:`
+      var mol=cuemol.getObject(${object.id});
+      var view=scene.getView(scene.activeViewID);
+      var selection=cuemol.makeSel('aid 1 or aid 2 or aid 1');
+      print(selection.simplify());
+      print(selection.toString());
+      selection.compile('not chain A or not chain B',scene.uid);
+      print(selection.invertSimplified());
+      selection.compile('byres resn ALA around 3',scene.uid);
+      print(selection.rewriteAround(5,false));
+      view.rotQuat=cuemol.Quat();
+      var bounds=JSON.parse(mol.getFitBoxJSON(view,cuemol.makeSel('aid 1')));
+      print(JSON.stringify(bounds));
+      view.fitToBox(cuemol.Vector('('+bounds.min.join(',')+')'),cuemol.Vector('('+bounds.max.join(',')+')'));
+      print([view.center.x,view.center.y,view.center.z,view.slab].join(','));
+    `});
+    const lines=result.log.trim().split('\n');
+    expect(lines.slice(0,4)).toEqual(['aid 1:2','aid 1 or aid 2 or aid 1','not (not chain A or not chain B)','(resn ALA) around 5.0']);
+    expect(JSON.parse(lines[4])).toEqual({min:[-2,0,0],max:[-2,0,0]});
+    expect(lines[5]).toBe('-2,0,0,4');
+    expect((await command(page,'count_selection',{objId:object.id,selection:lines[0]})).count).toBe(2);
+  });
+}

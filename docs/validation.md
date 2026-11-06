@@ -5,6 +5,51 @@ results are historical. Generated inputs and logs stay in the ignored checkout
 cache. The current repairs and their limits appear in the completion audit;
 passing tests do not establish equivalence for every parameter combination.
 
+## Current-reference selection and fit-box APIs
+
+The current CueMol 3.0.0.554 source (`794fe4ac`) adds selection rewriting and
+view-frame bounds after the published compatibility baseline. The script
+registry now exposes every method/property name in that checkout's QIF files.
+This inventory check establishes API presence, not equivalence of every method.
+
+`SelCommand.simplify`, `invertSimplified`, `toggleSidechain` and `rewriteAround`
+now share a Rust syntax-tree rewriter. It preserves the typed expression while
+folding boolean identities, duplicate terms, common factors and compatible leaf
+unions. Repeated representation changes no longer grow redundant selections.
+Native, browser and Tauri selection actions use the same parser instead of
+removing prefixes or parentheses from arbitrary text. Serialization retains
+quoted property values, named references, insertion codes and f64 thresholds.
+A C++ oracle compared 125 expressions and 625 rewrite/serialization results.
+
+Molecules and density maps expose `getFitBoxJSON`; views expose `fitToBox`.
+Bounds use the view's rotated axes, molecule margins, map cell origins and
+object transforms. Empty selections leave the view unchanged, and thin axes
+retain the reference minimum extent. Molecule fitting now resolves scene-scoped
+names and cross-object operands and borrows molecule storage instead of cloning
+it. All-atom fitting avoids allocating a full vector of atom indices. Direct
+map fitting also retains its origin and object transform.
+
+The rebuilt current C++ reference matched 136 molecule camera/bounds cases and
+16 density-map bounds cases, including skew cells, origins and rotations.
+Script regressions cover named selections, a different target view, empty and
+inverted boxes, and map transforms. The affected final source passed 1,633
+workspace tests, 191 native GUI model tests (one optional test ignored), and 169
+Tauri model tests on macOS (six optional tests ignored). The Tauri DOM suite
+passed 39 existing cases plus the new parser-routing/error case. Rebuilt WASM
+passed 21 WebGL/WebGPU selection, navigation and sequence cases. These model and
+browser checks do not replace OS-input validation or prove complete UI parity.
+
+```sh
+uv run --no-project python scripts/check-reference-selection.py \
+  --build-dir .cache/reference-build --config .cache/reference-prefix/share/sysconfig.xml
+uv run --no-project python scripts/check-reference-camera-fit.py \
+  --build-dir .cache/reference-build --config .cache/reference-prefix/share/sysconfig.xml
+```
+
+The C++ checks require a compatible current reference library in the selected
+build directory. Keep the reference source read-only and generated files in the
+build/cache directories.
+
 ## MDCRD decoding and current-reference audit
 
 An MDCRD regression accepted whitespace-separated rows during indexing but

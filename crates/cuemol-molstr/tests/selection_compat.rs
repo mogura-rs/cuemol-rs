@@ -53,8 +53,8 @@ fn altconf_selection_dump_matches_reference_cases() {
     for (expression, expected) in [
         ("alt A", "alt A"),
         ("alt A,B,C", "alt C,B,A"),
-        ("alt null", "alt (empty)"),
-        ("alt A,null,B", "alt B,(empty),A"),
+        ("alt null", "alt null"),
+        ("alt A,null,B", "alt B,null,A"),
         ("alt /^A/", "alt /^A/"),
         ("alt A:B,C", "alt C,A:B"),
         ("alt 1,2", "alt 2,1"),
@@ -79,7 +79,7 @@ fn hierarchical_selection_dump_matches_reference_cases() {
         ("A.*.CA", "A.*.CA"),
         ("A,B,C.1:10.CA", "C,B,A.1:10.CA"),
         ("\"A\",\"B\".1.\"CA\",\"N\"", "\"B\",\"A\".1.\"N\",\"CA\""),
-        ("null.1.CA", "(empty).1.CA"),
+        ("null.1.CA", "null.1.CA"),
         ("A . 1 . CA", "A.1.CA"),
         ("A.10A,10B.CA", "A.10A:10B.CA"),
     ] {
@@ -96,31 +96,22 @@ fn hierarchical_selection_dump_matches_reference_cases() {
 fn around_and_unary_selection_dump_matches_reference_cases() {
     let mut cmd = SelCommand::new();
     for (expression, expected) in [
-        ("name CA around 3", "(name CA) around 3.000000"),
-        ("name CA a;3.5", "(name CA) around 3.500000"),
+        ("name CA around 3", "(name CA) around 3.0"),
+        ("name CA a;3.5", "(name CA) around 3.5"),
         (
             "chain A & name CA around 3",
-            "(chain A) and ((name CA) around 3.000000)",
+            "(chain A) and ((name CA) around 3.0)",
         ),
         (
             "name CA around 3 & chain A",
-            "((name CA) around 3.000000) and (chain A)",
+            "((name CA) around 3.0) and (chain A)",
         ),
-        (
-            "name CA around 3 [mol1]",
-            "(name CA) around 3.000000 [\"mol1\"]",
-        ),
-        (
-            "name CA around [mol1] 3",
-            "(name CA) around 3.000000 [\"mol1\"]",
-        ),
-        (
-            "byres name CA around 3",
-            "byres ((name CA) around 3.000000)",
-        ),
+        ("name CA around 3 [mol1]", "(name CA) around 3.0 [\"mol1\"]"),
+        ("name CA around [mol1] 3", "(name CA) around 3.0 [\"mol1\"]"),
+        ("byres name CA around 3", "byres ((name CA) around 3.0)"),
         (
             "bysidech name CA expand 3",
-            "bysidech ((name CA) expand 3.000000)",
+            "bysidech ((name CA) expand 3.0)",
         ),
     ] {
         assert!(
@@ -140,11 +131,11 @@ fn rprop_selection_dump_matches_reference_cases() {
         ("rprop secondary = helix", "rprop secondary=helix"),
         (
             "rprop propname = \"value name\"",
-            "rprop propname=value name",
+            "rprop propname=\"value name\"",
         ),
-        ("rprop secondary=/^hel/", "rprop secondary=^hel"),
-        ("rprop count=1.23", "rprop count=1.230000"),
-        ("rprop index=-5.6", "rprop index=-5.600000"),
+        ("rprop secondary=/^hel/", "rprop secondary=\"^hel\""),
+        ("rprop count=1.23", "rprop count=\"1.230000\""),
+        ("rprop index=-5.6", "rprop index=\"-5.600000\""),
     ] {
         assert!(
             cmd.compile(expression, 0),

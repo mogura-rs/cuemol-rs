@@ -28,7 +28,7 @@ async function openShell(page, storage = {}, options = {}) {
     };
     const molecule = {
       uid: 3, sceneUid: 1, name: 'Probe', source: '', sourceType: 'pdb', uiOrder: 0,
-      uiCollapsed: false, selection: '*', visible: true, locked: false,
+      uiCollapsed: false, selection: options.selectionExpression || '*', visible: true, locked: false,
       atomCount: 3, residueCount: 1, bondCount: 2, coloringType: 'CPKColoring',
       coloringAttrs: {}, paintEntries: [], defaultColor: '#cccccc', renderers: [renderer],
     };
@@ -185,6 +185,10 @@ async function openShell(page, storage = {}, options = {}) {
         return structuredClone(snapshot);
       }
       if (options.shortcuts && ['undo', 'redo', 'close_active_scene'].includes(command)) return structuredClone(snapshot);
+      if (options.rewrite && command === 'molecule_selection_action') {
+        molecule.selection=args.selection;
+        return {snapshot:structuredClone(snapshot),viewport};
+      }
       if (options.shortcuts && command === 'molecule_selection_action') return {snapshot:structuredClone(snapshot),viewport};
       if (command === 'console_start' || command === 'console_stop' || command === 'console_poll') {
         if (command === 'console_stop') window.__actionsRunning = false;
@@ -233,6 +237,10 @@ async function openShell(page, storage = {}, options = {}) {
         }
         if (args.tool === 'selection_info') {
           const request=args.args;
+          if(request.action==='rewrite' && options.rewrite) {
+            if(window.__rewriteError)throw new Error('Rewrite failed');
+            return {expression:window.__rewriteResult};
+          }
           if(request.action==='context') return {current:request.moleculeId?molecule.selection:'name O1',scene:[...selectionNames],global:['protein'],history:[...selectionHistory],keywords:[
             {key:'hierarchical',label:'hier',kind:'hierarchical'},
             {key:'name',label:'name',kind:'nameList',candidates:'aname'},
@@ -1399,5 +1407,31 @@ test('Tauri Scene and View inspectors share presets and refresh after camera inp
   await expect(name).toHaveValue('External view');
   await page.locator('.tree-object').filter({hasText:'Probe'}).click();
   await expect(name).toHaveValue('Probe');
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri workspace selection actions apply the shared parser result', async ({page}) => {
+  const errors=await openShell(page,{}, {rewrite:true,selectionExpression:'not chain A or not chain B'});
+  const row=()=>page.locator('#scene-tree button').filter({hasText:'Probe'}).first();
+  const select=async(label, output)=>{
+    await page.evaluate(value=>{window.__rewriteResult=value;}, output);
+    await row().click({button:'right'});
+    await page.locator('.workspace-context-menu').getByRole('button',{name:/^Selection/}).hover();
+    await page.locator('.workspace-context-menu').getByRole('menuitem',{name:label,exact:true}).click();
+  };
+  await select('Invert','not (not chain A or not chain B)');
+  await expect.poll(()=>page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='molecule_selection_action').length)).toBe(1);
+  await select('Toggle Sidechain','bysidech (not (not chain A or not chain B))');
+  await expect.poll(()=>page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='molecule_selection_action').length)).toBe(2);
+  const calls=await page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='inspector_request'&&c.args.tool==='selection_info'&&c.args.args.action==='rewrite').map(c=>c.args.args));
+  expect(calls).toEqual([
+    {moleculeId:3,action:'rewrite',current:'not chain A or not chain B',operation:'invert',distance:5},
+    {moleculeId:3,action:'rewrite',current:'not (not chain A or not chain B)',operation:'sidechain',distance:5},
+  ]);
+  await page.evaluate(()=>{window.__rewriteError=true;});
+  await select('Invert','unused');
+  await expect(page.locator('#error-alert-dialog')).toContainText('Rewrite failed');
+  expect(await page.evaluate(()=>window.__shellCalls.filter(c=>c.command==='molecule_selection_action').length)).toBe(2);
   expect(errors).toEqual([]);
 });

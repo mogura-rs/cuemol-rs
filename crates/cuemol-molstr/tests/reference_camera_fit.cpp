@@ -29,12 +29,17 @@ int main(int argc, char **argv) {
         view.setViewSize(width, height);
         view.setViewCenter(qlib::Vector4D(1,2,3));
         view.rotateView(17,-31,23);
+        qlib::Vector4D min, max;
+        const bool hasBounds = molecule->getFitBox(viewPtr, molstr::SelectionPtr(), min, max);
         if (orient) molecule->orientView(viewPtr, molstr::SelectionPtr());
         else molecule->fitView2(viewPtr, molstr::SelectionPtr());
         auto center = view.getViewCenter();
         auto q = view.getRotQuat();
         out << center.x() << ' ' << center.y() << ' ' << center.z() << ' '
             << q.Vx() << ' ' << q.Vy() << ' ' << q.Vz() << ' ' << q.a() << ' '
-            << view.getZoom() << ' ' << view.getSlabDepth() << '\n';
+            << view.getZoom() << ' ' << view.getSlabDepth() << '\t';
+        if (hasBounds) out << min.x() << ' ' << min.y() << ' ' << min.z() << ' '
+                           << max.x() << ' ' << max.y() << ' ' << max.z();
+        out << '\n';
     }
 }

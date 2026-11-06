@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 
 mod batch;
+mod simplify;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Selector {
@@ -29,7 +30,7 @@ pub enum Selector {
     Comparison {
         property: NumericProperty,
         op: CompareOp,
-        value: f32,
+        value: f64,
     },
     Distance {
         op: DistanceOp,
@@ -735,7 +736,7 @@ impl Selector {
         let nested = |selector: &Selector| selector.format_expression(preserve_references);
         match self {
             Selector::All => "*".to_string(),
-            Selector::None => "!*".to_string(),
+            Selector::None => "none".to_string(),
             Selector::Name(values) => format!("name {}", dump_name_list(values)),
             Selector::Chain(values) => format!("chain {}", dump_name_list(values)),
             Selector::Element(values) => format!("elem {}", dump_name_list(values)),
@@ -743,13 +744,22 @@ impl Selector {
             Selector::ResidueName(values) => format!("resn {}", dump_name_list(values)),
             Selector::ResidueId(value) => format!("resi {value}"),
             Selector::Aid(values) => format!("aid {values}"),
-            Selector::RProp { name, value } => format!("rprop {name}={value}"),
-            Selector::AProp { name, value } => format!("aprop {name}={value}"),
+            Selector::RProp { name, value } => {
+                format!("rprop {name}={}", simplify::quote_value(value))
+            }
+            Selector::AProp { name, value } => {
+                format!("aprop {name}={}", simplify::quote_value(value))
+            }
             Selector::Comparison {
                 property,
                 op,
                 value,
-            } => format!("{} {} {:.6}", property.dump(), op.dump(), value),
+            } => format!(
+                "{} {} {}",
+                property.dump(),
+                op.dump(),
+                simplify::format_number(*value)
+            ),
             Selector::Distance {
                 op,
                 inner,
@@ -758,32 +768,16 @@ impl Selector {
             } => {
                 let mol = molecule
                     .as_ref()
-                    .map(|name| {
-                        if preserve_references && name.contains('"') {
-                            if name.contains('\'') {
-                                format!(" [{name}]")
-                            } else {
-                                format!(" ['{name}']")
-                            }
-                        } else {
-                            format!(" [\"{name}\"]")
-                        }
-                    })
+                    .map(|name| format!(" [{}]", simplify::quote_name(name)))
                     .unwrap_or_default();
-                let fixed = format!("{distance:.6}");
-                let number = if fixed.parse::<f64>().ok() == Some(*distance) {
-                    fixed
-                } else {
-                    distance.to_string()
-                };
+                let number = simplify::format_number(*distance);
                 format!("({}) {} {number}{mol}", nested(inner), op.dump())
             }
             Selector::Unary { op, inner } => format!("{} ({})", op.dump(), nested(inner)),
             Selector::Not(inner) => format!("!({})", nested(inner)),
             Selector::And(lhs, rhs) => format!("({}) and ({})", nested(lhs), nested(rhs)),
             Selector::Or(lhs, rhs) => format!("({}) or ({})", nested(lhs), nested(rhs)),
-            Selector::Ref(name) if preserve_references => name.clone(),
-            Selector::Ref(name) => format!("Ref({name})"),
+            Selector::Ref(name) => name.clone(),
             Selector::Hier(value) => value.dump(),
             Selector::Prepared(value) => nested(&value.expression),
         }
@@ -1033,7 +1027,7 @@ fn is_side_chain_atom(atom: &Atom) -> bool {
 
 impl NamePattern {
     fn bare(display: String) -> Self {
-        let kind = if display == "(empty)" {
+        let kind = if display == "(empty)" || display == "null" {
             NamePatternKind::Empty
         } else {
             NamePatternKind::Bare(display.clone())
@@ -1056,7 +1050,11 @@ impl NamePattern {
     }
 
     fn display(&self) -> &str {
-        &self.display
+        if matches!(self.kind, NamePatternKind::Empty) {
+            "null"
+        } else {
+            &self.display
+        }
     }
 
     fn matches_bare(&self, value: &str) -> bool {
@@ -1098,11 +1096,12 @@ impl CompareOp {
         }
     }
 
-    fn matches(self, lhs: f32, rhs: f32) -> bool {
+    fn matches(self, lhs: f32, rhs: f64) -> bool {
+        let lhs = f64::from(lhs);
         match self {
             Self::Less => lhs < rhs,
             Self::Greater => lhs > rhs,
-            Self::Equal => (lhs - rhs).abs() < f32::EPSILON,
+            Self::Equal => lhs == rhs,
         }
     }
 }
@@ -1204,21 +1203,21 @@ impl<'a> Parser<'a> {
             return Ok(Selector::Not(Box::new(inner)));
         }
         if self.consume_word("byres") {
-            let inner = self.parse_distance()?;
+            let inner = self.parse_unary()?;
             return Ok(Selector::Unary {
                 op: UnaryOp::ByRes,
                 inner: Box::new(inner),
             });
         }
         if self.consume_word("bysidech") {
-            let inner = self.parse_distance()?;
+            let inner = self.parse_unary()?;
             return Ok(Selector::Unary {
                 op: UnaryOp::BySideChain,
                 inner: Box::new(inner),
             });
         }
         if self.consume_word("bymainch") {
-            let inner = self.parse_distance()?;
+            let inner = self.parse_unary()?;
             return Ok(Selector::Unary {
                 op: UnaryOp::ByMainChain,
                 inner: Box::new(inner),
@@ -1924,7 +1923,7 @@ fn parse_comparison(property: NumericProperty, input: &str) -> Result<Selector> 
         }
     }
     let value = value_text
-        .parse::<f32>()
+        .parse::<f64>()
         .map_err(|_| CueMolError::parse("invalid comparison value"))?;
     Ok(Selector::Comparison {
         property,
@@ -1985,6 +1984,9 @@ fn normalize_rprop_value(input: &str) -> Result<String> {
     }
     if let Some(value) = parse_quoted(input)? {
         return Ok(value);
+    }
+    if input == "null" {
+        return Ok("null".to_string());
     }
     if input.starts_with('/') {
         if input.len() < 2 || !input.ends_with('/') {
@@ -2196,7 +2198,7 @@ mod tests {
         for (input, expected) in [
             ("*", "*"),
             ("all", "*"),
-            ("none", "!*"),
+            ("none", "none"),
             ("chain A,B,C", "chain C,B,A"),
             ("c; A", "chain A"),
             ("elem C,N,O", "elem O,N,C"),
@@ -2205,8 +2207,8 @@ mod tests {
             ("n; CA", "name CA"),
             ("resn ALA,VAL", "resn VAL,ALA"),
             ("aid 1,2,3,4,5", "aid 1:5"),
-            ("bfac>50", "bfac > 50.000000"),
-            ("occ < 0.5", "occ < 0.500000"),
+            ("bfac>50", "bfac > 50.0"),
+            ("occ < 0.5", "occ < 0.5"),
         ] {
             assert!(cmd.compile(input, 0), "{input}: {}", cmd.error_msg);
             assert_eq!(cmd.dump_nodes(), expected, "{input}");
@@ -2228,7 +2230,7 @@ mod tests {
             ),
             (
                 "all and not chain A or none",
-                "((*) and (!(chain A))) or (!*)",
+                "((*) and (!(chain A))) or (none)",
             ),
         ] {
             assert!(cmd.compile(input, 0), "{input}: {}", cmd.error_msg);
@@ -2370,7 +2372,7 @@ ATOM      3  C   THR B   2      15.685  12.755   5.133  1.00  9.19           C
         assert_eq!(mol.select_indices(&sel), vec![1]);
 
         // The unresolved reference retains its name.
-        assert_eq!(parse_selector("chainA").unwrap().dump(), "Ref(chainA)");
+        assert_eq!(parse_selector("chainA").unwrap().dump(), "chainA");
 
         // An unknown name is an error.
         assert!(parse_named_selector("nope", &registry).is_err());

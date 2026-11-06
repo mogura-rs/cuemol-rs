@@ -1295,18 +1295,42 @@ impl MolCoord {
         self.fit_view_with_xform(view, selector, Matrix4::IDENTITY)
     }
 
+    pub fn get_fit_box(
+        &self,
+        view: &View,
+        selector: Option<&Selector>,
+    ) -> Option<(Vector4, Vector4)> {
+        self.get_fit_box_with_xform(view, selector, Matrix4::IDENTITY)
+    }
+
+    pub fn get_fit_box_with_xform(
+        &self,
+        view: &View,
+        selector: Option<&Selector>,
+        transform: Matrix4,
+    ) -> Option<(Vector4, Vector4)> {
+        let selected = selector
+            .filter(|s| !matches!(s, Selector::All))
+            .map(|s| self.select_indices(s));
+        let count = selected.as_ref().map_or(self.atoms.len(), Vec::len);
+        view.camera().get_fit_box((0..count).map(|offset| {
+            let index = selected.as_ref().map_or(offset, |indices| indices[offset]);
+            let mut position = self.atoms[index].position;
+            transform.xform3d(&mut position);
+            position
+        }))
+    }
+
     pub fn fit_view_with_xform(
         &self,
         view: &mut View,
         selector: Option<&Selector>,
         transform: Matrix4,
     ) -> bool {
-        let indices = selected_or_all_indices(self, selector);
-        view.fit_positions(indices.into_iter().map(|index| {
-            let mut position = self.atoms[index].position;
-            transform.xform3d(&mut position);
-            position
-        }))
+        let Some((min, max)) = self.get_fit_box_with_xform(view, selector, transform) else {
+            return false;
+        };
+        view.fit_to_box(min, max)
     }
 
     pub fn orient_view(&self, view: &mut View, selector: Option<&Selector>) -> bool {

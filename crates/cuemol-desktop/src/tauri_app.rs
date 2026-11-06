@@ -4705,16 +4705,9 @@ impl AppModel {
             }
             "invert" => {
                 let current = self.molecule_selection_for_sequence(object_uid)?;
-                let selection = if current.is_empty() {
-                    "*".to_string()
-                } else if let Some(inner) = current
-                    .strip_prefix("!(")
-                    .and_then(|value| value.strip_suffix(')'))
-                {
-                    inner.trim().to_string()
-                } else {
-                    format!("!({current})")
-                };
+                let selection =
+                    cuemol_command::selection::rewrite_expression(&current, "invert", 0.)
+                        .map_err(|error| error.to_string())?;
                 self.set_sequence_selection(object_uid, selection)?;
                 (true, "Invert sel")
             }
@@ -4727,26 +4720,9 @@ impl AppModel {
                     .radius
                     .filter(|radius| [3.0, 5.0, 7.0, 10.0].contains(radius))
                     .ok_or_else(|| "unsupported sequence selection radius".to_string())?;
-                let mut base = current.trim();
-                if let Some((candidate, distance)) = base.rsplit_once(" around ") {
-                    if distance.trim().parse::<f64>().is_ok() {
-                        base = candidate.trim();
-                        if let Some(without_byres) = base.strip_prefix("byres ") {
-                            base = without_byres.trim();
-                        }
-                        if let Some(inner) = base
-                            .strip_prefix('(')
-                            .and_then(|value| value.strip_suffix(')'))
-                        {
-                            base = inner.trim();
-                        }
-                    }
-                }
-                let selection = if input.action == "around-byres" {
-                    format!("byres {base} around {radius}")
-                } else {
-                    format!("{base} around {radius}")
-                };
+                let selection =
+                    cuemol_command::selection::rewrite_expression(&current, &input.action, radius)
+                        .map_err(|error| error.to_string())?;
                 self.set_sequence_selection(object_uid, selection)?;
                 (true, "Around mol selection")
             }
@@ -23401,7 +23377,7 @@ mod tests {
         model
             .apply_sequence_action(&input("invert", "'A'.2.*", "", None))
             .unwrap();
-        assert_eq!(model.selection, "!(*)");
+        assert_eq!(model.selection, "none");
         model
             .apply_sequence_action(&input("clear", "'A'.2.*", "", None))
             .unwrap();
@@ -23413,7 +23389,7 @@ mod tests {
         model
             .apply_sequence_action(&input("around-byres", "'A'.2.*", "", Some(5.0)))
             .unwrap();
-        assert_eq!(model.selection, "byres 'A'.2.* around 5");
+        assert_eq!(model.selection, "byres (('A'.2.*) around 5.0)");
 
         let before = model.selection.clone();
         model

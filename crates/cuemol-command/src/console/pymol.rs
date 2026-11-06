@@ -329,9 +329,15 @@ fn representation_actions(
                 };
                 let next = match operation {
                     "hide" if all(source) => "none".to_string(),
-                    "hide" => format!("({current}) and not ({})", item.expression),
+                    "hide" => crate::selection::simplify_expression(&format!(
+                        "({current}) and not ({})",
+                        item.expression
+                    )),
                     "as" => item.expression.clone(),
-                    _ => format!("({current}) or ({})", item.expression),
+                    _ => crate::selection::simplify_expression(&format!(
+                        "({current}) or ({})",
+                        item.expression
+                    )),
                 };
                 actions.push(tool(
                     "set_renderer_selection",

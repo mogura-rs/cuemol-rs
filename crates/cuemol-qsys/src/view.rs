@@ -488,13 +488,20 @@ impl View {
     }
 
     pub fn fit_positions(&mut self, positions: impl IntoIterator<Item = Vector4>) -> bool {
+        let Some((min, max)) = self.camera().get_fit_box(positions) else {
+            return false;
+        };
+        self.fit_to_box(min, max)
+    }
+
+    pub fn fit_to_box(&mut self, min: Vector4, max: Vector4) -> bool {
         let mut camera = self.camera();
         let aspect = if self.width() > 0 && self.height() > 0 {
             f64::from(self.width()) / f64::from(self.height())
         } else {
             1.0
         };
-        if !camera.fit_positions(positions, aspect) {
+        if !camera.fit_to_box(min, max, aspect) {
             return false;
         }
         self.set_view_center(camera.center());
