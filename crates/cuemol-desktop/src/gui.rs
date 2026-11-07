@@ -16982,6 +16982,18 @@ impl GuiApplication {
     }
 
     fn request_application_exit(&mut self) {
+        self.exit_ready = false;
+        self.exit_confirmation = false;
+        let mut camera = self
+            .state
+            .active_view_camera()
+            .unwrap_or_else(cuemol_qsys::Camera::new);
+        if !self.flush_native_render_settings(&mut camera, 0., true) {
+            let message = self.ray_panel.message.clone();
+            self.error_alert = Some(message.clone());
+            self.set_status(message);
+            return;
+        }
         let has_modified_scene = self
             .state
             .scene_summaries()
@@ -32179,6 +32191,33 @@ mod tests {
         app.close_current_tab_unchecked(&mut camera);
         assert!(app.state.scene_summaries().is_empty());
         assert!(app.state.view_summaries().is_empty());
+    }
+
+    #[test]
+    fn native_application_exit_flushes_pending_render_settings() {
+        let mut app = GuiApplication::new();
+        let scene = app.state.active_scene().unwrap();
+        app.open_native_render();
+        app.state.clear_scene_modified(scene);
+        let camera = app.state.active_view_camera();
+        let depth = app.undo_stack.len();
+        app.ray_panel
+            .editor
+            .values
+            .insert("width".into(), serde_json::json!(84));
+        app.ray_panel.editor.edited(1.);
+        assert!(!app.state.scene_is_modified(scene));
+        app.request_application_exit();
+        assert!(!app.exit_ready);
+        assert!(app.exit_confirmation);
+        assert!(app.state.scene_is_modified(scene));
+        assert_eq!(app.undo_stack.len(), depth + 1);
+        assert_eq!(app.state.active_view_camera(), camera);
+        assert_eq!(
+            cuemol_command::render_settings(&app.state).unwrap()["width"],
+            84.
+        );
+        assert!(!app.ray_panel.editor.pending());
     }
 
     #[test]

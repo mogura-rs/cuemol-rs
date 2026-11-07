@@ -1,5 +1,22 @@
 # Validation evidence
 
+## Native exit with pending Rendering edits
+
+Native egui now forces the shared Rendering editor to commit pending settings
+before deciding whether application exit needs confirmation. A failed commit
+keeps the application open and displays the error. This covers the OS close
+request, File > Quit and the Rendering window's Ctrl/Command-Q path through the
+same method. Previously an immediate exit could precede the editor's quiet-period
+commit and miss the new modification.
+
+All 240 native GUI/library tests pass. The new regression starts with a clean
+scene and a pending width edit, then verifies that exit requests confirmation,
+records one Undo entry, stores the edit and preserves the view camera. The
+normal Linux native build also passes. This changes the exit decision without
+changing window routing or rendering, so no browser code or browser build is
+involved. Evidence is in `.cache/current-audit/cuemol-native-close-pending-final.log`
+and `.cache/current-audit/native-close-pending-build.log`.
+
 ## Tauri Rendering as a separate OS window
 
 Tauri now opens Rendering in a lazily created, independently decorated webview
