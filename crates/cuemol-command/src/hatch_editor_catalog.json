@@ -1,0 +1,578 @@
+{
+  "layer": [
+    {
+      "key": "angle",
+      "type": "num",
+      "def": 45,
+      "label": "Angle",
+      "place": "primary",
+      "min": -180,
+      "max": 180,
+      "step": 1,
+      "unit": "deg"
+    },
+    {
+      "key": "spacing",
+      "type": "num",
+      "def": 10,
+      "label": "Spacing",
+      "place": "primary",
+      "min": 0.25,
+      "max": 64,
+      "step": 0.25,
+      "unit": "px"
+    },
+    {
+      "key": "subdiv",
+      "type": "int",
+      "def": 2,
+      "label": "Nesting levels",
+      "place": "advanced",
+      "min": 0,
+      "max": 5,
+      "step": 1,
+      "kinds": [
+        "line",
+        "dot"
+      ]
+    },
+    {
+      "key": "width",
+      "type": "num",
+      "def": 1.1,
+      "label": "Width",
+      "place": "primary",
+      "min": 0.1,
+      "max": 8,
+      "step": 0.05,
+      "unit": "px",
+      "kinds": [
+        "line"
+      ]
+    },
+    {
+      "key": "dotscale",
+      "type": "num",
+      "def": 1,
+      "label": "Dot scale",
+      "place": "primary",
+      "min": 0.1,
+      "max": 8,
+      "step": 0.05,
+      "kinds": [
+        "dot",
+        "stipple"
+      ]
+    },
+    {
+      "key": "tonehi",
+      "type": "num",
+      "def": 0.95,
+      "label": "Tone high",
+      "place": "primary",
+      "min": 0,
+      "max": 1,
+      "step": 0.01
+    },
+    {
+      "key": "tonelo",
+      "type": "num",
+      "def": 0.55,
+      "label": "Tone low",
+      "place": "primary",
+      "min": 0,
+      "max": 1,
+      "step": 0.01
+    },
+    {
+      "key": "fade",
+      "type": "num",
+      "def": 16,
+      "label": "Fade (0 = auto)",
+      "place": "primary",
+      "min": 0,
+      "max": 64,
+      "step": 1
+    },
+    {
+      "key": "opacity",
+      "type": "num",
+      "def": 1,
+      "label": "Opacity",
+      "place": "primary",
+      "min": 0,
+      "max": 1,
+      "step": 0.05
+    },
+    {
+      "key": "inkscale",
+      "type": "num",
+      "def": 1,
+      "label": "Ink darkness",
+      "place": "primary",
+      "min": 0,
+      "max": 1,
+      "step": 0.02
+    },
+    {
+      "key": "soft",
+      "type": "num",
+      "def": 0.5,
+      "label": "Edge softness",
+      "place": "advanced",
+      "min": 0.5,
+      "max": 2,
+      "step": 0.05,
+      "unit": "px"
+    },
+    {
+      "key": "seed",
+      "type": "int",
+      "def": 0,
+      "label": "Seed",
+      "place": "advanced",
+      "min": 0,
+      "max": 9999,
+      "step": 1
+    },
+    {
+      "key": "jitter",
+      "type": "num",
+      "def": 0,
+      "label": "Position jitter",
+      "place": "advanced",
+      "min": 0,
+      "max": 0.5,
+      "step": 0.01
+    },
+    {
+      "key": "wobble",
+      "type": "num",
+      "def": 0,
+      "label": "Wobble",
+      "place": "advanced",
+      "min": 0,
+      "max": 8,
+      "step": 0.1,
+      "unit": "px",
+      "kinds": [
+        "line"
+      ]
+    },
+    {
+      "key": "wobwave",
+      "type": "num",
+      "def": 40,
+      "label": "Wobble wavelength",
+      "place": "advanced",
+      "min": 2,
+      "max": 200,
+      "step": 1,
+      "unit": "px",
+      "kinds": [
+        "line"
+      ]
+    },
+    {
+      "key": "wjitter",
+      "type": "num",
+      "def": 0,
+      "label": "Width jitter",
+      "place": "advanced",
+      "min": 0,
+      "max": 1,
+      "step": 0.05,
+      "kinds": [
+        "line"
+      ]
+    },
+    {
+      "key": "slen",
+      "type": "num",
+      "def": 0,
+      "label": "Stroke length",
+      "place": "advanced",
+      "min": 0,
+      "max": 200,
+      "step": 1,
+      "unit": "px",
+      "kinds": [
+        "line"
+      ]
+    },
+    {
+      "key": "sgap",
+      "type": "num",
+      "def": 0,
+      "label": "Stroke gap",
+      "place": "advanced",
+      "min": 0,
+      "max": 50,
+      "step": 0.5,
+      "unit": "px",
+      "kinds": [
+        "line"
+      ]
+    },
+    {
+      "key": "taper",
+      "type": "num",
+      "def": 0.3,
+      "label": "Stroke taper",
+      "place": "advanced",
+      "min": 0,
+      "max": 0.9,
+      "step": 0.05,
+      "kinds": [
+        "line"
+      ]
+    },
+    {
+      "key": "anglejitter",
+      "type": "num",
+      "def": 0,
+      "label": "Angle jitter",
+      "place": "advanced",
+      "min": 0,
+      "max": 15,
+      "step": 0.5,
+      "unit": "deg",
+      "kinds": [
+        "line"
+      ]
+    },
+    {
+      "key": "lenjitter",
+      "type": "num",
+      "def": 0,
+      "label": "Length jitter",
+      "place": "advanced",
+      "min": 0,
+      "max": 0.9,
+      "step": 0.05,
+      "kinds": [
+        "line"
+      ]
+    },
+    {
+      "key": "shape",
+      "type": "num",
+      "def": 2,
+      "label": "Shape exponent",
+      "place": "advanced",
+      "min": 1,
+      "max": 16,
+      "step": 0.5,
+      "kinds": [
+        "dot",
+        "stipple"
+      ]
+    },
+    {
+      "key": "aspect",
+      "type": "num",
+      "def": 1,
+      "label": "Aspect",
+      "place": "advanced",
+      "min": 0.5,
+      "max": 2,
+      "step": 0.05,
+      "kinds": [
+        "dot",
+        "stipple"
+      ]
+    },
+    {
+      "key": "dotangle",
+      "type": "num",
+      "def": 0,
+      "label": "Dot angle",
+      "place": "advanced",
+      "min": -90,
+      "max": 90,
+      "step": 1,
+      "unit": "deg",
+      "kinds": [
+        "dot",
+        "stipple"
+      ]
+    },
+    {
+      "key": "invert",
+      "type": "bool",
+      "def": true,
+      "label": "Merge to solid",
+      "place": "advanced",
+      "kinds": [
+        "dot"
+      ]
+    },
+    {
+      "key": "tooth",
+      "type": "num",
+      "def": 0,
+      "label": "Paper tooth",
+      "place": "advanced",
+      "min": 0,
+      "max": 1,
+      "step": 0.05
+    },
+    {
+      "key": "toothscale",
+      "type": "num",
+      "def": 3,
+      "label": "Tooth scale",
+      "place": "advanced",
+      "min": 0.5,
+      "max": 20,
+      "step": 0.5,
+      "unit": "px"
+    }
+  ],
+  "tone": [
+    {
+      "key": "strength",
+      "type": "num",
+      "def": 1,
+      "label": "Strength",
+      "place": "primary",
+      "min": 0.25,
+      "max": 3,
+      "step": 0.05
+    },
+    {
+      "key": "curve",
+      "type": "num",
+      "def": 1,
+      "label": "Curve",
+      "place": "primary",
+      "min": 0.5,
+      "max": 2,
+      "step": 0.05
+    },
+    {
+      "key": "diffuse",
+      "type": "num",
+      "def": 1,
+      "label": "Diffuse weight",
+      "place": "advanced",
+      "min": 0,
+      "max": 2,
+      "step": 0.05
+    },
+    {
+      "key": "ambient",
+      "type": "num",
+      "def": 0.12,
+      "label": "Ambient",
+      "place": "advanced",
+      "min": 0,
+      "max": 0.5,
+      "step": 0.01
+    },
+    {
+      "key": "wrap",
+      "type": "num",
+      "def": 0,
+      "label": "Wrap",
+      "place": "advanced",
+      "min": 0,
+      "max": 1,
+      "step": 0.05
+    },
+    {
+      "key": "rim",
+      "type": "num",
+      "def": 0,
+      "label": "Contour darkening",
+      "place": "advanced",
+      "min": 0,
+      "max": 1,
+      "step": 0.05
+    },
+    {
+      "key": "rimpow",
+      "type": "num",
+      "def": 1,
+      "label": "Contour power",
+      "place": "advanced",
+      "min": 0.5,
+      "max": 8,
+      "step": 0.1
+    },
+    {
+      "key": "rimbias",
+      "type": "num",
+      "def": 0.6,
+      "label": "Contour light bias",
+      "place": "advanced",
+      "min": 0,
+      "max": 1,
+      "step": 0.05
+    },
+    {
+      "key": "contact",
+      "type": "num",
+      "def": 1,
+      "label": "Contact AO",
+      "place": "advanced",
+      "min": 0,
+      "max": 2,
+      "step": 0.05
+    },
+    {
+      "key": "shape",
+      "type": "num",
+      "def": 0.6,
+      "label": "Shape AO",
+      "place": "advanced",
+      "min": 0,
+      "max": 2,
+      "step": 0.05
+    },
+    {
+      "key": "black",
+      "type": "num",
+      "def": 0,
+      "label": "Black point",
+      "place": "advanced",
+      "min": 0,
+      "max": 0.5,
+      "step": 0.01
+    },
+    {
+      "key": "white",
+      "type": "num",
+      "def": 1,
+      "label": "White point",
+      "place": "advanced",
+      "min": 0.5,
+      "max": 2,
+      "step": 0.01
+    },
+    {
+      "key": "hl",
+      "type": "num",
+      "def": 1,
+      "label": "Highlight knee",
+      "place": "advanced",
+      "min": 0.5,
+      "max": 1,
+      "step": 0.01
+    },
+    {
+      "key": "hlsoft",
+      "type": "num",
+      "def": 0.06,
+      "label": "Highlight softness",
+      "place": "advanced",
+      "min": 0,
+      "max": 0.3,
+      "step": 0.01
+    },
+    {
+      "key": "gamma",
+      "type": "num",
+      "def": 1,
+      "label": "Gamma",
+      "place": "advanced",
+      "min": 0.2,
+      "max": 4,
+      "step": 0.05
+    },
+    {
+      "key": "speccut",
+      "type": "num",
+      "def": 0,
+      "label": "Specular cut",
+      "place": "advanced",
+      "min": 0,
+      "max": 2,
+      "step": 0.05
+    },
+    {
+      "key": "levels",
+      "type": "int",
+      "def": 0,
+      "label": "Tone levels",
+      "place": "advanced",
+      "min": 0,
+      "max": 16,
+      "step": 1
+    }
+  ],
+  "ink": [
+    {
+      "key": "mode",
+      "type": "str",
+      "def": "ink",
+      "label": "Mode",
+      "place": "advanced"
+    },
+    {
+      "key": "base",
+      "type": "str",
+      "def": "paper",
+      "label": "Base",
+      "place": "advanced"
+    },
+    {
+      "key": "ink",
+      "type": "str",
+      "def": "fixed",
+      "label": "Ink",
+      "place": "advanced"
+    },
+    {
+      "key": "inkcolor",
+      "type": "str",
+      "def": "#000000",
+      "label": "Ink color",
+      "place": "advanced"
+    },
+    {
+      "key": "papercolor",
+      "type": "str",
+      "def": "#ffffff",
+      "label": "Paper color",
+      "place": "advanced"
+    },
+    {
+      "key": "mincontrast",
+      "type": "num",
+      "def": 0.25,
+      "label": "Min contrast",
+      "place": "advanced",
+      "min": 0,
+      "max": 1,
+      "step": 0.05
+    },
+    {
+      "key": "inkshade",
+      "type": "num",
+      "def": 1,
+      "label": "Ink shade",
+      "place": "advanced",
+      "min": 0,
+      "max": 1,
+      "step": 0.05
+    },
+    {
+      "key": "tonefog",
+      "type": "bool",
+      "def": true,
+      "label": "Tone fog",
+      "place": "advanced"
+    },
+    {
+      "key": "albedoquant",
+      "type": "int",
+      "def": 0,
+      "label": "Fill posterize",
+      "place": "advanced",
+      "min": 0,
+      "max": 16,
+      "step": 1
+    }
+  ]
+}

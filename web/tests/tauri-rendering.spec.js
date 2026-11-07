@@ -4,6 +4,7 @@ import {PNG} from 'pngjs';
 
 const root = new URL('../../crates/cuemol-desktop/tauri-ui/',import.meta.url);
 const catalog = JSON.parse(await readFile(new URL('../../crates/cuemol-command/src/render_editor_catalog.json',import.meta.url),'utf8'));
+const hatchCatalog = JSON.parse(await readFile(new URL('../../crates/cuemol-command/src/hatch_editor_catalog.json',import.meta.url),'utf8'));
 const picture = new PNG({width:3000,height:2500});
 for(let i=0;i<picture.data.length;i+=4){picture.data[i]=30;picture.data[i+1]=100;picture.data[i+2]=150;picture.data[i+3]=160;}
 const image = `data:image/png;base64,${PNG.sync.write(picture).toString('base64')}`;
@@ -15,18 +16,32 @@ async function open(page) {
     if(!path){await route.fulfill({contentType:'text/html',body:'<html><head><meta charset="utf-8"><link rel="stylesheet" href="styles.css"><link rel="stylesheet" href="rendering.css"><script src="rendering.js"></script></head><body></body></html>'});return;}
     await route.fulfill({contentType:path.endsWith('.js')?'text/javascript':'text/css',body:await readFile(new URL(path,root))});
   });
-  await page.addInitScript(({catalog,image})=>{
+  await page.addInitScript(({catalog,hatchCatalog,image})=>{
     const values={backend:'umbreon',width:1200,height:1200,unit:'px',dpi:600,transparentBg:false};
     for(const [prefix,rows]of Object.entries(catalog))for(const row of rows){const key=prefix==='common'?row.key:`${prefix}.${row.key}`;if(key in values)continue;values[key]=row.type==='boolean'?false:row.type==='color'?'#000000':row.type==='enum'?(row.enumValues||row.options)[0]:row.min??1;}
     values['umbreon_npr.hatchStyle']='pencil';values['umbreon_npr.hatchLayersSpec']='';values['umbreon_npr.hatchToneSpec']='';
     const layer='layer:kind=line,spacing=10,angle=45,width=1,dotscale=1,tonehi=0.95,tonelo=0.55,fade=16,opacity=1,inkscale=1,soft=0.5,jitter=0,tooth=0,toothscale=3,seed=0,subdiv=2,wobble=0,wobwave=40,wjitter=0,slen=0,sgap=0,taper=0.3,anglejitter=0,lenjitter=0,shape=2,aspect=1,dotangle=0,invert=true';
-    const tone='tone:diffuse=1,ambient=0.12,wrap=0,rim=0,rimpow=1,rimbias=0.6,contact=1,shape=0.6,black=0,white=1,hl=1,hlsoft=0.06,gamma=1,speccut=0\nink:inkshade=1,mincontrast=0.25,mode=ink,tonefog=true,levels=0,albedoquant=0';
+    const tone='tone:diffuse=1,ambient=0.12,wrap=0,rim=0,rimpow=1,rimbias=0.6,contact=1,shape=0.6,black=0,white=1,hl=1,hlsoft=0.06,gamma=1,speccut=0,strength=1,curve=1,levels=0\nink:inkshade=1,mincontrast=0.25,mode=ink,tonefog=true,albedoquant=0';
     const state={values,sceneId:1,viewId:11,targets:[{sceneId:1,viewId:11,label:'First / Main'},{sceneId:2,viewId:22,label:'Second / Main'}],pixels:[1200,1200],lighting:'gi',quality:{},historyLength:0,selected:null,current:null,running:false,message:'No render result',catalog,hatchSpec:`${layer}\n${tone}`,defaultLayer:layer};
     for(const axis of ['aa','ao','giLighting','shadows'])state.quality[axis]={selected:'medium',steps:[{id:'low',label:'Low'},{id:'medium',label:'Medium'},{id:'high',label:'High'}]};
     Object.assign(state,{movieMode:false,movieOptions:{useTempDir:true,outputDir:'temporary',baseName:'movie',fps:30,makeMovie:true,movieFormat:'mp4_h264',dupLastFrame:true,bitrateKbps:1024},movieFormats:[['mp4_h264','MP4 (H.264)'],['gifanim','Animated GIF']],movieSizes:[['QVGA (320 × 240)',[320,240]],['VGA (640 × 480)',[640,480]]],availableFrames:0,hasMovieOutputs:false,livePreview:false});
     const records=[];let next=1;
     window.dialog={open:async()=>'/chosen movie folder'};
 
+    const metadata={};
+    window.hatchMetadata=(section,key,patch)=>{metadata[`${section}:${key}`]=patch;};
+    function hatchEditor() {
+      const result={layers:[],tone:[],ink:[],dirty:!!(values['umbreon_npr.hatchLayersSpec']||values['umbreon_npr.hatchToneSpec'])};
+      for(const line of state.hatchSpec.split('\n').filter(Boolean)){
+        const [section,entries]=line.split(':');
+        const part=Object.fromEntries(entries.split(',').map(entry=>entry.split('=')));
+        const fields=hatchCatalog[section].filter(field=>field.type!=='str'&&(!field.kinds||field.kinds.includes(part.kind))).map(field=>({
+          ...field,value:field.type==='bool'?part[field.key]==='true':Number(part[field.key]??field.def),enabled:true,hint:null,...metadata[`${section}:${field.key}`],
+        }));
+        if(section==='layer')result.layers.push(fields);else result[section]=fields;
+      }
+      return result;
+    }
     window.renderCalls=[];window.savedPaths=[];window.confirmClear=false;
     window.chooseOutputPath=async()=>{window.savedPaths.push(state.current.id);return 'image.png';};
     window.showConfirmationDialog=async()=>window.confirmClear;
@@ -56,6 +71,7 @@ async function open(page) {
       if(operation==='select'){state.selected=args.index;state.current=records[args.index];}
       if(operation==='clear'){records.length=0;state.historyLength=0;state.selected=null;state.current=null;}
       state.povError=values.backend==='povray'?'POV-Ray executable is unavailable':null;
+      state.hatchEditor=hatchEditor();
       const result=structuredClone(state);
       result.imageKey=`${result.current?.id}/${result.frame}/${result.livePreview}`;
       if(result.imageKey!==args.imageKey)result.image=result.current||result.livePreview?image:null;
@@ -64,7 +80,7 @@ async function open(page) {
     };
     window.finishRender=()=>{state.running=false;state.message='Rendered 3000 × 2500';state.livePreview=false;state.preview=null;const record={id:next++,size:state.movieMode?[values.width,values.height]:[3000,2500],source:{scene_name:`Scene ${state.sceneId}`,settings:structuredClone(values)},elapsed_seconds:0.1};if(state.movieMode){record.movie={frameCount:3,framesAvailable:true,moviePath:'temporary/movie.mp4',options:structuredClone(state.movieOptions)};state.frame=2;state.availableFrames=3;state.hasMovieOutputs=true;}records.push(record);state.historyLength=records.length;state.selected=records.length-1;state.current=record;};
     window.liveMovieFrame=()=>{state.livePreview=true;state.preview={size:[3000,2500],frame:0};state.progress={completed:1,total:3};};
-  },{catalog,image});
+  },{catalog,hatchCatalog,image});
   await page.goto('http://rendering.test/');
   await page.evaluate(()=>CueMolRendering.open());
   return errors;
@@ -168,9 +184,10 @@ test('Tauri Rendering edits targets, backend controls and successive NPR layer v
   await expect.poll(()=>page.evaluate(()=>window.renderCalls.filter(call=>call.operation==='hatch').at(-1)?.args.layersSpec)).toContain('spacing=13,angle=37');
   await panel.getByRole('button',{name:'Add dot',exact:true}).click();
   await panel.getByText('Layer 2 · dot',{exact:true}).click();
-  await expect(panel.getByLabel('Merge dark dots',{exact:true})).toBeVisible();
+  await panel.getByText('Randomness / Advanced',{exact:true}).nth(1).click();
+  await expect(panel.getByLabel('Merge to solid',{exact:true})).toBeVisible();
   await panel.getByLabel('Dot scale',{exact:true}).fill('2.5');
-  await panel.getByText('Advanced shading',{exact:true}).click();
+  await panel.getByText('Advanced',{exact:true}).click();
   await panel.getByLabel('Gamma',{exact:true}).fill('1.4');
   await expect.poll(()=>page.evaluate(()=>window.renderCalls.filter(call=>call.operation==='hatch').at(-1)?.args.toneSpec)).toContain('gamma=1.4');
   await panel.getByRole('button',{name:'Close Rendering',exact:true}).click();
@@ -232,5 +249,32 @@ test('Tauri movie controls share the viewer and confirm output replacement and c
   expect(await page.evaluate(()=>renderCalls.find(call=>call.operation==='movieEdit'&&call.args.key==='fps')?.args.value)).toBe(29.97);
   await page.setViewportSize({width:700,height:480});
   await expect(panel.getByRole('button',{name:'Close Rendering',exact:true})).toBeInViewport();
+  expect(errors).toEqual([]);
+});
+
+
+test('Tauri NPR Detail follows shared field metadata, primary tone edits, reset and backend tabs',async({page})=>{
+  const errors=await open(page),panel=page.getByRole('dialog',{name:'Rendering',exact:true});
+  await expect(panel.getByRole('tab',{name:'NPR Detail',exact:true})).not.toBeVisible();
+  await panel.getByLabel('Render backend',{exact:true}).selectOption('umbreon_npr');
+  await panel.getByRole('tab',{name:'NPR Detail',exact:true}).click();
+  await expect(panel.getByRole('button',{name:'Reset to style',exact:true})).toBeDisabled();
+  await expect(panel.getByRole('button',{name:'Remove',exact:true})).toBeDisabled();
+  await expect(panel.getByLabel('Strength',{exact:true})).toHaveAttribute('min','0.25');
+  await expect(panel.getByLabel('Strength',{exact:true})).toHaveAttribute('max','3');
+  await panel.getByLabel('Strength',{exact:true}).fill('1.5');
+  await panel.getByLabel('Curve',{exact:true}).fill('0.75');
+  await expect.poll(()=>page.evaluate(()=>window.renderCalls.filter(call=>call.operation==='hatch').at(-1)?.args.toneSpec)).toContain('strength=1.5,curve=0.75');
+  await panel.getByText('Advanced',{exact:true}).click();
+  await page.evaluate(()=>hatchMetadata('tone','contact',{enabled:false}));
+  await expect(panel.getByLabel('Contact AO',{exact:true})).toBeDisabled();
+  await page.evaluate(()=>hatchMetadata('tone','contact',{enabled:true}));
+  await expect(panel.getByLabel('Contact AO',{exact:true})).toBeEnabled();
+  await panel.getByRole('button',{name:'Reset to style',exact:true}).click();
+  await expect(panel.getByLabel('Strength',{exact:true})).toHaveValue('1');
+  await expect(panel.getByRole('button',{name:'Reset to style',exact:true})).toBeDisabled();
+  await panel.getByLabel('Render backend',{exact:true}).selectOption('umbreon');
+  await expect(panel.getByRole('tab',{name:'NPR Detail',exact:true})).not.toBeVisible();
+  await expect(panel.getByRole('tab',{name:'Render',exact:true})).toHaveAttribute('aria-selected','true');
   expect(errors).toEqual([]);
 });

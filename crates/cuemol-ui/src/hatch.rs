@@ -1,14 +1,8 @@
-use cuemol_render::{HatchLayer, HatchLayerKind, HatchLook, HatchRenderParams, HATCH_STYLES};
+use cuemol_command::hatch_editor::{self, Environment, HatchEditor, Values};
+use cuemol_render::{HatchRenderParams, HATCH_STYLES};
 use egui::{ComboBox, DragValue, Ui};
+use serde_json::json;
 
-fn real(ui: &mut Ui, label: &str, value: &mut f32, range: std::ops::RangeInclusive<f32>) -> bool {
-    ui.horizontal(|ui| {
-        ui.label(label);
-        ui.add(DragValue::new(value).speed(0.05).range(range))
-            .changed()
-    })
-    .inner
-}
 pub fn hatch_controls(ui: &mut Ui, params: &mut HatchRenderParams) {
     let before = params.style.clone();
     ui.horizontal(|ui| {
@@ -84,191 +78,275 @@ pub fn hatch_controls(ui: &mut Ui, params: &mut HatchRenderParams) {
                 .range(0.1..=10.),
         );
     });
-    hatch_detail_controls(ui, params);
+    hatch_detail_controls(ui, params, true, 3., &mut |_, _| {});
 }
 
-pub fn hatch_detail_controls(ui: &mut Ui, params: &mut HatchRenderParams) {
-    let mut look = HatchLook::style(&params.style).unwrap_or_default();
-    if let Err(error) = look
-        .apply_spec(&params.layers_spec, 1)
-        .and_then(|_| look.apply_spec(&params.tone_spec, 6))
-    {
-        ui.colored_label(egui::Color32::RED, error.to_string());
+fn fields(
+    ui: &mut Ui,
+    section: &str,
+    values: &mut Values,
+    env: Environment,
+    place: &str,
+    prefix: &str,
+    record: &mut dyn FnMut(&str, &egui::Response),
+) -> bool {
+    let mut changed = false;
+    for field in HatchEditor::fields(section, values, env) {
+        if field["place"] != place {
+            continue;
+        }
+        let key = field["key"].as_str().unwrap();
+        let label = field["label"].as_str().unwrap();
+        let enabled = field["enabled"].as_bool().unwrap();
+        let response = ui
+            .add_enabled_ui(enabled, |ui| {
+                if field["type"] == "bool" {
+                    let mut value = values[key].as_bool().unwrap_or(false);
+                    let response = ui.checkbox(&mut value, label);
+                    if response.changed() {
+                        values.insert(key.into(), json!(value));
+                    }
+                    response
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.label(label);
+                        let mut value = values[key].as_f64().unwrap_or(0.);
+                        let mut widget = DragValue::new(&mut value)
+                            .clamp_existing_to_range(false)
+                            .speed(field["step"].as_f64().unwrap_or(0.05))
+                            .range(
+                                field["min"].as_f64().unwrap_or(0.)
+                                    ..=field["max"].as_f64().unwrap_or(1.),
+                            );
+                        if field["type"] == "int" {
+                            widget = widget.max_decimals(0);
+                        }
+                        if let Some(unit) = field["unit"].as_str() {
+                            widget = widget.suffix(format!(" {unit}"));
+                        }
+                        let response = ui.add(widget);
+                        if response.changed() {
+                            values.insert(key.into(), json!(value));
+                        }
+                        response
+                    })
+                    .inner
+                }
+            })
+            .inner;
+        record(&format!("NPR {prefix} {label}"), &response);
+        changed |= response.changed();
+        if let Some(hint) = field["hint"].as_str() {
+            ui.weak(hint);
+        }
+    }
+    changed
+}
+
+pub fn hatch_detail_controls(
+    ui: &mut Ui,
+    params: &mut HatchRenderParams,
+    ao_enabled: bool,
+    supersample: f64,
+    record: &mut dyn FnMut(&str, &egui::Response),
+) {
+    ui.weak(format!("Style template: {}", params.style));
+    if params.density != 1. || params.width_scale != 1. {
+        ui.weak(format!(
+            "Render tab multipliers: Mark density ×{}, Mark width ×{}",
+            params.density, params.width_scale
+        ));
+    }
+    let mut editor = match HatchEditor::load(params) {
+        Ok(editor) => editor,
+        Err(error) => {
+            ui.colored_label(egui::Color32::RED, error);
+            if ui.button("Reset to style").clicked() {
+                params.layers_spec.clear();
+                params.tone_spec.clear();
+            }
+            specification(ui, params);
+            return;
+        }
+    };
+    let env = Environment::new(params, &editor, ao_enabled, supersample);
+    let dirty = editor.dirty();
+    let reset = ui
+        .horizontal(|ui| {
+            let response = ui.add_enabled(dirty, egui::Button::new("Reset to style"));
+            if dirty {
+                ui.weak("Edited");
+            }
+            response
+        })
+        .inner;
+    record("NPR Reset to style", &reset);
+    if reset.clicked() {
+        params.layers_spec.clear();
+        params.tone_spec.clear();
+        return;
     }
     let mut layer_changed = false;
     let mut tone_changed = false;
-    ui.collapsing("Layers", |ui| {
-        let mut remove = None;
-        let mut duplicate = None;
-        for (i, layer) in look.layers.iter_mut().enumerate() {
-            ui.push_id(i, |ui| {
-                ui.collapsing(format!("Layer {} · {:?}", i + 1, layer.kind), |ui| {
-                    ui.horizontal(|ui| {
-                        ComboBox::from_id_salt("kind")
-                            .selected_text(format!("{:?}", layer.kind))
-                            .show_ui(ui, |ui| {
-                                for kind in [
-                                    HatchLayerKind::Line,
-                                    HatchLayerKind::Dot,
-                                    HatchLayerKind::Stipple,
-                                ] {
-                                    layer_changed |= ui
-                                        .selectable_value(
-                                            &mut layer.kind,
+    let layers = egui::CollapsingHeader::new("Layers")
+        .default_open(true)
+        .show(ui, |ui| {
+            let mut remove = None;
+            let mut duplicate = None;
+            let count = editor.layers.len();
+            for (i, layer) in editor.layers.iter_mut().enumerate() {
+                ui.push_id(i, |ui| {
+                    let kind = layer["kind"].as_str().unwrap_or("line");
+                    let response = egui::CollapsingHeader::new(format!("Layer {} · {kind}", i + 1))
+                        .id_salt("layer")
+                        .default_open(i == 0)
+                        .show(ui, |ui| {
+                            let response = ComboBox::from_id_salt("kind")
+                                .selected_text(layer["kind"].as_str().unwrap_or("line"))
+                                .show_ui(ui, |ui| {
+                                    for kind in ["line", "dot", "stipple"] {
+                                        let response = ui.selectable_value(
+                                            layer.get_mut("kind").unwrap(),
+                                            json!(kind),
                                             kind,
-                                            format!("{kind:?}"),
-                                        )
-                                        .changed();
+                                        );
+                                        record(
+                                            &format!("NPR layer {} kind {kind}", i + 1),
+                                            &response,
+                                        );
+                                        layer_changed |= response.changed();
+                                    }
+                                })
+                                .response;
+                            record(&format!("NPR layer {} Kind", i + 1), &response);
+                            ui.horizontal(|ui| {
+                                let response =
+                                    ui.add_enabled(count < 64, egui::Button::new("Duplicate"));
+                                record(&format!("NPR layer {} Duplicate", i + 1), &response);
+                                if response.clicked() {
+                                    duplicate = Some(i);
+                                }
+                                let response =
+                                    ui.add_enabled(count > 1, egui::Button::new("Remove"));
+                                record(&format!("NPR layer {} Remove", i + 1), &response);
+                                if response.clicked() {
+                                    remove = Some(i);
                                 }
                             });
-                        if ui.small_button("Duplicate").clicked() {
-                            duplicate = Some(i);
-                        }
-                        if ui.small_button("Remove").clicked() {
-                            remove = Some(i);
-                        }
-                    });
-                    layer_changed |= real(ui, "Angle", &mut layer.angle, -180. ..=180.);
-                    layer_changed |= real(ui, "Spacing", &mut layer.spacing, 0.1..=100.);
-                    if layer.kind == HatchLayerKind::Line {
-                        layer_changed |= real(ui, "Width", &mut layer.width, 0.1..=8.);
-                    } else {
-                        layer_changed |= real(ui, "Dot scale", &mut layer.dotscale, 0.1..=8.);
-                    }
-                    layer_changed |= real(ui, "Light tone", &mut layer.tonehi, 0. ..=1.);
-                    layer_changed |= real(ui, "Dark tone", &mut layer.tonelo, 0. ..=1.);
-                    layer_changed |= real(ui, "Fade", &mut layer.fade, 0. ..=100.);
-                    layer_changed |= real(ui, "Opacity", &mut layer.opacity, 0. ..=1.);
-                    layer_changed |= real(ui, "Ink darkness", &mut layer.inkscale, 0. ..=1.);
-                    ui.collapsing("Randomness and geometry", |ui| {
-                        layer_changed |= real(ui, "Softness", &mut layer.soft, 0.5..=2.);
-                        layer_changed |= real(ui, "Jitter", &mut layer.jitter, 0. ..=0.5);
-                        layer_changed |= real(ui, "Paper tooth", &mut layer.tooth, 0. ..=1.);
-                        layer_changed |= real(ui, "Tooth scale", &mut layer.toothscale, 0.5..=100.);
-                        ui.horizontal(|ui| {
-                            ui.label("Seed");
-                            layer_changed |= ui.add(DragValue::new(&mut layer.seed)).changed();
+                            let prefix = format!("layer {}", i + 1);
+                            layer_changed |=
+                                fields(ui, "layer", layer, env, "primary", &prefix, record);
+                            let advanced = ui.collapsing("Randomness / Advanced", |ui| {
+                                layer_changed |=
+                                    fields(ui, "layer", layer, env, "advanced", &prefix, record);
+                            });
+                            record(
+                                &format!("NPR layer {} Advanced", i + 1),
+                                &advanced.header_response,
+                            );
                         });
-                        if layer.kind != HatchLayerKind::Stipple {
-                            ui.horizontal(|ui| {
-                                ui.label("Subdivisions");
-                                layer_changed |= ui
-                                    .add(DragValue::new(&mut layer.subdiv).range(0..=10))
-                                    .changed();
-                            });
-                        }
-                        if layer.kind == HatchLayerKind::Line {
-                            layer_changed |= real(ui, "Wobble", &mut layer.wobble, 0. ..=20.);
-                            layer_changed |= real(ui, "Wavelength", &mut layer.wobwave, 2. ..=200.);
-                            layer_changed |= real(ui, "Width jitter", &mut layer.wjitter, 0. ..=1.);
-                            layer_changed |= real(ui, "Stroke length", &mut layer.slen, 0. ..=500.);
-                            ui.add_enabled_ui(layer.slen > 0., |ui| {
-                                layer_changed |=
-                                    real(ui, "Stroke gap", &mut layer.sgap, 0. ..=100.);
-                                layer_changed |= real(ui, "Taper", &mut layer.taper, 0. ..=0.9);
-                                layer_changed |=
-                                    real(ui, "Angle jitter", &mut layer.anglejitter, 0. ..=15.);
-                                layer_changed |=
-                                    real(ui, "Length jitter", &mut layer.lenjitter, 0. ..=0.9);
-                            });
-                        } else {
-                            layer_changed |=
-                                real(ui, "Shape exponent", &mut layer.shape, 1. ..=64.);
-                            layer_changed |= real(ui, "Aspect", &mut layer.aspect, 0.5..=2.);
-                            layer_changed |=
-                                real(ui, "Dot angle", &mut layer.dotangle, -180. ..=180.);
-                            if layer.kind == HatchLayerKind::Dot {
-                                layer_changed |=
-                                    ui.checkbox(&mut layer.invert, "Merge dark dots").changed();
-                            }
-                        }
-                    });
+                    record(&format!("NPR layer {}", i + 1), &response.header_response);
                 });
-            });
-        }
-        if let Some(i) = duplicate {
-            look.layers.insert(i + 1, look.layers[i].clone());
-            layer_changed = true;
-        }
-        if let Some(i) = remove {
-            if look.layers.len() > 1 {
-                look.layers.remove(i);
+            }
+            if let Some(i) = duplicate {
+                editor.layers.insert(i + 1, editor.layers[i].clone());
                 layer_changed = true;
             }
-        }
-        ui.horizontal(|ui| {
-            for (label, kind) in [
-                ("Add line", HatchLayerKind::Line),
-                ("Add dot", HatchLayerKind::Dot),
-                ("Add stipple", HatchLayerKind::Stipple),
-            ] {
-                if ui.button(label).clicked() {
-                    look.layers.push(HatchLayer {
-                        kind,
-                        ..Default::default()
-                    });
-                    layer_changed = true;
-                }
+            if let Some(i) = remove {
+                editor.layers.remove(i);
+                layer_changed = true;
             }
+            ui.horizontal_wrapped(|ui| {
+                for kind in ["line", "dot", "stipple"] {
+                    let response = ui.add_enabled(
+                        editor.layers.len() < 64,
+                        egui::Button::new(format!("Add {kind}")),
+                    );
+                    record(&format!("NPR Add {kind}"), &response);
+                    if response.clicked() {
+                        editor.layers.push(hatch_editor::new_layer(kind));
+                        layer_changed = true;
+                    }
+                }
+            });
         });
-    });
-    ui.collapsing("Advanced shading", |ui| {
-        let t = &mut look.tone;
-        for (label, value) in [
-            ("Diffuse", &mut t.diffuse),
-            ("Ambient", &mut t.ambient),
-            ("Wrap", &mut t.wrap),
-            ("Rim darkening", &mut t.rim),
-            ("Rim power", &mut t.rimpow),
-            ("Rim light bias", &mut t.rimbias),
-            ("Contact AO", &mut t.contact),
-            ("Shape AO", &mut t.shape),
-            ("Black point", &mut t.black),
-            ("White point", &mut t.white),
-            ("Highlight", &mut t.hl),
-            ("Highlight softness", &mut t.hlsoft),
-            ("Gamma", &mut t.gamma),
-            ("Specular cut", &mut t.speccut),
-        ] {
-            tone_changed |= real(ui, label, value, 0. ..=8.);
+    record("NPR Layers", &layers.header_response);
+    let shading = egui::CollapsingHeader::new("Shading")
+        .default_open(true)
+        .show(ui, |ui| {
+            tone_changed |= fields(
+                ui,
+                "tone",
+                &mut editor.tone,
+                env,
+                "primary",
+                "shading",
+                record,
+            );
+            let advanced = ui.collapsing("Advanced", |ui| {
+                tone_changed |= fields(
+                    ui,
+                    "tone",
+                    &mut editor.tone,
+                    env,
+                    "advanced",
+                    "shading",
+                    record,
+                );
+                tone_changed |= fields(ui, "ink", &mut editor.ink, env, "advanced", "ink", record);
+            });
+            record("NPR Shading Advanced", &advanced.header_response);
+        });
+    record("NPR Shading", &shading.header_response);
+    if layer_changed || tone_changed {
+        let (layers, tone) = editor.specs();
+        if layer_changed {
+            params.layers_spec = layers;
         }
-        tone_changed |= real(ui, "Ink shade", &mut look.inkshade, 0. ..=1.);
-        tone_changed |= real(ui, "Minimum contrast", &mut look.mincontrast, 0. ..=1.);
-        tone_changed |= ui
-            .checkbox(&mut look.over, "Overlay shaded color")
-            .changed();
-        tone_changed |= ui.checkbox(&mut look.tonefog, "Fade tone in fog").changed();
-        ui.horizontal(|ui| {
-            ui.label("Tone levels");
-            tone_changed |= ui
-                .add(DragValue::new(&mut look.levels).range(0..=64))
-                .changed();
-            ui.label("Fill levels");
-            tone_changed |= ui
-                .add(DragValue::new(&mut look.albedoquant).range(0..=64))
-                .changed();
-        });
-    });
-    if layer_changed {
-        params.layers_spec = look
-            .spec()
-            .lines()
-            .filter(|line| line.starts_with("layer:"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        if tone_changed {
+            params.tone_spec = tone;
+        }
     }
-    if tone_changed {
-        params.tone_spec = look
-            .spec()
-            .lines()
-            .filter(|line| !line.starts_with("layer:"))
-            .collect::<Vec<_>>()
-            .join("\n");
-    }
+    specification(ui, params);
+}
+
+fn specification(ui: &mut Ui, params: &mut HatchRenderParams) {
     ui.collapsing("Specification text", |ui| {
         ui.label("Layers");
         ui.text_edit_multiline(&mut params.layers_spec);
         ui.label("Tone and ink");
         ui.text_edit_multiline(&mut params.tone_spec);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn showing_hatch_details_preserves_values_outside_control_ranges() {
+        let ctx = egui::Context::default();
+        let mut params = HatchRenderParams {
+            style: "pencil".into(),
+            layers_spec: "layer:spacing=128,width=10".into(),
+            tone_spec: "tone:strength=4,curve=3".into(),
+            ..Default::default()
+        };
+        let before = (params.layers_spec.clone(), params.tone_spec.clone());
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200., 1000.),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    hatch_detail_controls(ui, &mut params, false, 1., &mut |_, _| {})
+                });
+            },
+        );
+        assert_eq!((params.layers_spec, params.tone_spec), before);
+    }
 }

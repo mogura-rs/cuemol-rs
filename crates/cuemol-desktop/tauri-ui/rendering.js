@@ -148,56 +148,68 @@ const CueMolRendering = (() => {
       return {layersSpec:parts.filter(part=>part.kind==='layer').map(specLine).join('\n'),toneSpec:parts.filter(part=>part.kind!=='layer').map(specLine).join('\n')};
     });
   }
-  const layerFields = [
-    ['angle','Angle',-180,180],['spacing','Spacing',0.1,100],['width','Width',0.1,8,'line'],['dotscale','Dot scale',0.1,8,'dots'],
-    ['tonehi','Light tone',0,1],['tonelo','Dark tone',0,1],['fade','Fade',0,100],['opacity','Opacity',0,1],['inkscale','Ink darkness',0,1],
-    ['soft','Softness',0.5,2],['jitter','Jitter',0,0.5],['tooth','Paper tooth',0,1],['toothscale','Tooth scale',0.5,100],['seed','Seed',0,4294967295],['subdiv','Subdivisions',0,10,'notStipple'],
-    ['wobble','Wobble',0,20,'line'],['wobwave','Wavelength',2,200,'line'],['wjitter','Width jitter',0,1,'line'],['slen','Stroke length',0,500,'line'],['sgap','Stroke gap',0,100,'line'],['taper','Taper',0,0.9,'line'],['anglejitter','Angle jitter',0,15,'line'],['lenjitter','Length jitter',0,0.9,'line'],
-    ['shape','Shape exponent',1,64,'dots'],['aspect','Aspect',0.5,2,'dots'],['dotangle','Dot angle',-180,180,'dots'],
-  ];
-  function hatchField(parent,index,key,label,type,options={}) {
-    const part = parseSpec(state.hatchSpec)[index];
-    const raw = part.values[key];
-    const value = type==='boolean'?raw==='true':type==='enum'?raw:Number(raw);
-    const control = field(label,type,value,value=>changeHatch(parts=>{parts[index].values[key]=String(value);}),options);
+  function hatchField(parent,index,definition) {
+    const {key,label,type,min,max,step,hint}=definition;
+    const control = field(label,type==='bool'?'boolean':type==='int'?'integer':'real',definition.value,
+      value=>changeHatch(parts=>{parts[index].values[key]=String(value);}),{min,max,step});
     fieldNodes.set(`hatch:${index}:${key}`,control); parent.append(control.row);
+    if(['spacing','width','dotscale'].includes(key)){const node=element('p',hint||'','rendering-hatch-hint');node.hidden=!hint;node.dataset.hatchHint=`${index}:${key}`;parent.append(node);}
   }
   function buildHatch(parent) {
-    if (state.values.backend !== 'umbreon_npr') { parent.append(element('p','Select Umbreon NPR to edit hatching.')); return; }
+    if (state.values.backend !== 'umbreon_npr') return;
+    parent.append(element('p',`Style template: ${state.values['umbreon_npr.hatchStyle']}`));
+    const density=state.values['umbreon_npr.hatchDensity']??1, width=state.values['umbreon_npr.hatchWidthScale']??1;
+    if(density!==1||width!==1)parent.append(element('p',`Render tab multipliers: Mark density ×${density}, Mark width ×${width}`));
     if (state.hatchError) parent.append(element('p',state.hatchError));
+    const reset=button('Reset to style',()=>send('hatch',{layersSpec:'',toneSpec:''}));
+    reset.dataset.hatchReset='true';parent.append(reset);
+    const edited=element('span','Edited');edited.dataset.hatchEdited='true';parent.append(edited);
     const parts = parseSpec(state.hatchSpec);
     const layers = section('Layers',parent);
+    let layerIndex=0;
     parts.forEach((part,index)=>{
       if (part.kind !== 'layer') return;
-      const kind = part.values.kind;
-      const box = section(`Layer ${index+1} · ${kind}`,layers,index===0);
-      hatchField(box,index,'kind','Layer kind','enum',{choices:[['line','Line'],['dot','Dot'],['stipple','Stipple']]});
+      const kind = part.values.kind, definitions=state.hatchEditor?.layers[layerIndex++]||[];
+      const box = section(`Layer ${layerIndex} · ${kind}`,layers,layerIndex===1);
+      const kindField=field('Layer kind','enum',kind,value=>changeHatch(parts=>{parts[index].values.kind=value;}),{choices:[['line','Line'],['dot','Dot screen'],['stipple','Stipple']]});
+      fieldNodes.set(`hatch:${index}:kind`,kindField);box.append(kindField.row);
       const actions = element('div',undefined,'rendering-row');
-      actions.append(button('Duplicate',()=>changeHatch(parts=>parts.splice(index+1,0,structuredClone(parts[index])))),button('Remove',()=>changeHatch(parts=>{if(parts.filter(part=>part.kind==='layer').length>1)parts.splice(index,1);}))); box.append(actions);
-      for (const [key,label,min,max,only] of layerFields) {
-        if ((only==='line' && kind!=='line') || (only==='dots' && kind==='line') || (only==='notStipple' && kind==='stipple')) continue;
-        hatchField(box,index,key,label,['seed','subdiv'].includes(key)?'integer':'real',{min,max});
-      }
-      if(kind==='dot')hatchField(box,index,'invert','Merge dark dots','boolean');
+      const duplicate=button('Duplicate',()=>changeHatch(parts=>parts.splice(index+1,0,structuredClone(parts[index]))));duplicate.dataset.hatchDuplicate='true';
+      const remove=button('Remove',()=>changeHatch(parts=>{if(parts.filter(part=>part.kind==='layer').length>1)parts.splice(index,1);}));remove.dataset.hatchRemove='true';
+      actions.append(duplicate,remove); box.append(actions);
+      for(const definition of definitions.filter(field=>field.place==='primary'))hatchField(box,index,definition);
+      const advanced=section('Randomness / Advanced',box,false);
+      for(const definition of definitions.filter(field=>field.place==='advanced'))hatchField(advanced,index,definition);
     });
     const add = element('div',undefined,'rendering-row');
-    for (const kind of ['line','dot','stipple']) add.append(button(`Add ${kind}`,()=>changeHatch(parts=>{const layer=parseSpec(state.defaultLayer)[0];layer.values.kind=kind;parts.splice(parts.filter(part=>part.kind==='layer').length,0,layer);}))); layers.append(add);
-    const shading = section('Advanced shading',parent,false);
-    const tone = parts.findIndex(part=>part.kind==='tone'), ink=parts.findIndex(part=>part.kind==='ink');
-    if(tone>=0)for (const [key,label] of [['diffuse','Diffuse'],['ambient','Ambient'],['wrap','Wrap'],['rim','Rim darkening'],['rimpow','Rim power'],['rimbias','Rim light bias'],['contact','Contact AO'],['shape','Shape AO'],['black','Black point'],['white','White point'],['hl','Highlight'],['hlsoft','Highlight softness'],['gamma','Gamma'],['speccut','Specular cut']])hatchField(shading,tone,key,label,'real',{min:0,max:8});
-    if(ink>=0){
-      for(const [key,label]of [['inkshade','Ink shade'],['mincontrast','Minimum contrast']])hatchField(shading,ink,key,label,'real',{min:0,max:1});
-      hatchField(shading,ink,'mode','Ink mode','enum',{choices:[['ink','Ink'],['over','Overlay shaded color']]});
-      hatchField(shading,ink,'tonefog','Fade tone in fog','boolean');
-      for(const [key,label]of [['levels','Tone levels'],['albedoquant','Fill levels']])hatchField(shading,ink,key,label,'integer',{min:0,max:64});
+    for (const kind of ['line','dot','stipple']) {
+      const node=button(`Add ${kind}`,()=>changeHatch(parts=>{const layer=parseSpec(state.defaultLayer)[0];layer.values.kind=kind;parts.splice(parts.filter(part=>part.kind==='layer').length,0,layer);}));
+      node.dataset.hatchAdd='true';add.append(node);
     }
+    layers.append(add);
+    const shading = section('Shading',parent);
+    const tone = parts.findIndex(part=>part.kind==='tone'), ink=parts.findIndex(part=>part.kind==='ink');
+    if(tone>=0)for(const definition of state.hatchEditor?.tone.filter(field=>field.place==='primary')||[])hatchField(shading,tone,definition);
+    const advanced=section('Advanced',shading,false);
+    if(tone>=0)for(const definition of state.hatchEditor?.tone.filter(field=>field.place==='advanced')||[])hatchField(advanced,tone,definition);
+    if(ink>=0)for(const definition of state.hatchEditor?.ink||[])hatchField(advanced,ink,definition);
     const text = section('Specification text',parent,false);
     for(const [key,label]of [['hatchLayersSpec','Layers specification'],['hatchToneSpec','Tone and ink specification']])property({key,label,type:'text'},true,text);
-    text.append(button('Reset details',()=>send('hatch',{layersSpec:'',toneSpec:''})));
+  }
+  function hatchDefinition(index,key) {
+    const parts=parseSpec(state.hatchSpec),part=parts[index];
+    if(!part)return;
+    const fields=part.kind==='layer'?state.hatchEditor?.layers[parts.slice(0,index).filter(part=>part.kind==='layer').length]:state.hatchEditor?.[part.kind];
+    return fields?.find(field=>field.key===key);
   }
   function renderControls() {
+    if(tab==='NPR Detail'&&state.values.backend!=='umbreon_npr')tab='Render';
+    nodes.tabs.querySelectorAll('button').forEach(node=>{
+      node.hidden=node.textContent==='NPR Detail'&&state.values.backend!=='umbreon_npr';
+      node.setAttribute('aria-selected',String(node.textContent===tab));
+    });
     const structure = parseSpec(state.hatchSpec).map(part=>part.kind==='layer'?part.values.kind:part.kind).join(',');
-    const key = `${state.sceneId}/${state.viewId}|${state.movieMode}|${tab}|${state.values.backend}|${state.lighting}|${structure}`;
+    const key = `${state.sceneId}/${state.viewId}|${state.movieMode}|${tab}|${state.values.backend}|${state.lighting}|${structure}|${state.values['umbreon_npr.hatchDensity']}|${state.values['umbreon_npr.hatchWidthScale']}`;
     if(key!==controlsKey){
       controlsKey=key; fieldNodes.clear(); nodes.controls.replaceChildren();
       ({Image:buildImage,Render:buildRender,'NPR Detail':buildHatch})[tab](nodes.controls);
@@ -205,13 +217,25 @@ const CueMolRendering = (() => {
     const parts=parseSpec(state.hatchSpec);
     const busy=state.running||switchingTargets>0;
     nodes.controls.querySelectorAll('input,select,textarea,button').forEach(node=>{node.disabled=busy;});
+    const layerCount=parts.filter(part=>part.kind==='layer').length;
+    nodes.controls.querySelectorAll('[data-hatch-reset]').forEach(node=>{node.disabled=busy||(!state.hatchEditor?.dirty&&!state.hatchError);});
+    nodes.controls.querySelectorAll('[data-hatch-edited]').forEach(node=>{node.hidden=!state.hatchEditor?.dirty;});
+    nodes.controls.querySelectorAll('[data-hatch-remove]').forEach(node=>{node.disabled=busy||layerCount<2;});
+    nodes.controls.querySelectorAll('[data-hatch-duplicate],[data-hatch-add]').forEach(node=>{node.disabled=busy||layerCount>=64;});
+
     for(const [key,control]of fieldNodes){
       let value=state.values[key];
       if(key==='@lighting')value=state.lighting;
       else if(key.startsWith('movie:'))value=state.movieOptions[key.slice(6)];
       else if(key.startsWith('@'))value=state.quality[key.slice(1)].selected;
-      else if(key.startsWith('hatch:')){const [,index,name]=key.split(':');value=parts[Number(index)]?.values[name];if(control.type==='boolean')value=value==='true';else if(control.type!=='enum')value=Number(value);}
+      else if(key.startsWith('hatch:')){const [,index,name]=key.split(':');value=hatchDefinition(Number(index),name)?.value??parts[Number(index)]?.values[name];if(control.type==='boolean')value=value===true||value==='true'||value==='on';else if(control.type!=='enum')value=Number(value);}
       control.input.disabled=busy || (key==='movie:outputDir'&&state.movieOptions.useTempDir) || (['movie:movieFormat','movie:bitrateKbps'].includes(key)&&!state.movieOptions.makeMovie) || (key.endsWith('.hatchInkColor')&&!state.values[`${state.values.backend}.hatchCustomInk`]) || (key.endsWith('.hatchPaperColor')&&!state.values[`${state.values.backend}.hatchCustomPaper`]);
+      if(key.startsWith('hatch:')){
+        const [,index,name]=key.split(':'), definition=hatchDefinition(Number(index),name);
+        control.input.disabled ||= definition?.enabled===false;
+        const hint=nodes.controls.querySelector(`[data-hatch-hint="${index}:${name}"]`);
+        if(hint){hint.textContent=definition?.hint||'';hint.hidden=!definition?.hint;}
+      }
       if(document.activeElement===control.input)continue;
       if(control.type==='boolean')control.input.checked=!!value;
       else control.input.value=control.type==='enum'?JSON.stringify(value):value??'';
@@ -324,7 +348,7 @@ const CueMolRendering = (() => {
     nodes.backend.addEventListener('change',()=>send('edit',{key:'backend',value:nodes.backend.value}));run.prepend(nodes.start);run.append(nodes.backend);left.append(run);
     nodes.target=element('select');nodes.target.setAttribute('aria-label','Render target');nodes.target.addEventListener('change',()=>send('target',{viewId:Number(nodes.target.value)}));left.append(nodes.target);
     nodes.message=element('pre',undefined,'rendering-message');left.append(nodes.message);
-    const tabs=element('div',undefined,'rendering-tabs');tabs.setAttribute('role','tablist');
+    const tabs=element('div',undefined,'rendering-tabs');nodes.tabs=tabs;tabs.setAttribute('role','tablist');
     for(const label of ['Image','Render','NPR Detail']){const node=button(label,()=>{tab=label;tabs.querySelectorAll('button').forEach(item=>item.setAttribute('aria-selected',String(item===node)));renderControls();});node.setAttribute('role','tab');node.setAttribute('aria-selected',String(label===tab));tabs.append(node);}
     nodes.controls=element('div',undefined,'rendering-controls');right.append(tabs,nodes.controls);
     dialogElement.addEventListener('cancel',event=>{event.preventDefault();close();});

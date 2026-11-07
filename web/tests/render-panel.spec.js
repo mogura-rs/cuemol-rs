@@ -515,3 +515,32 @@ for (const backend of ['webgl','webgpu']) {
     expect(errors).toEqual([]);
   });
 }
+
+for(const renderer of ['webgl','webgpu']) {
+test(`NPR Detail ${renderer} exposes tone controls, resets the style and leaves Detail when the backend changes`, async ({page}) => {
+  await open(page,renderer);
+  await call(page,'set_render_settings',{settings:'backend=umbreon_npr; umbreon_npr.hatchStyle=pencil; umbreon_npr.aoEnabled=false; umbreon_npr.useGI=false'});
+  await click(page,'Render settings Detail');
+  await click(page,'NPR Layers');
+  await field(page,'NPR shading Strength',1.5);
+  await field(page,'NPR shading Curve',0.75);
+  await expect.poll(async()=>{
+    const result=await call(page,'execute_script',{source:"print(scene.getAppData('render').umbreon_npr.hatchToneSpec);"});
+    return JSON.parse(result.message).log;
+  }).toContain('strength=1.5');
+  await expect.poll(async()=>{
+    const result=await call(page,'execute_script',{source:"print(scene.getAppData('render').umbreon_npr.hatchToneSpec);"});
+    return JSON.parse(result.message).log;
+  }).toContain('curve=0.75');
+  await page.screenshot({path:test.info().outputPath('npr-detail.png')});
+  await click(page,'NPR Reset to style');
+  await expect.poll(async()=>{
+    const result=await call(page,'execute_script',{source:"print(scene.getAppData('render').umbreon_npr.hatchToneSpec);"});
+    return JSON.parse(result.message).log;
+  }).toBe('\n');
+  await call(page,'set_render_settings',{settings:'backend=umbreon'});
+  await expect.poll(()=>page.evaluate(()=>window.cuemol.status().ui.rects['Render lighting']?.length)).toBe(4);
+  expect(await page.evaluate(()=>window.cuemol.status().ui.rects['Render settings Detail'])).toBeUndefined();
+});
+
+}

@@ -538,14 +538,23 @@ impl Rendering {
             value["catalog"] = catalog().clone();
         }
         if self.editor.backend() == "umbreon_npr" {
-            let mut look =
-                cuemol_render::HatchLook::style(self.editor.text("umbreon_npr.hatchStyle"))
-                    .map_err(|error| error.to_string())?;
-            match look
-                .apply_spec(self.editor.text("umbreon_npr.hatchLayersSpec"), 1)
-                .and_then(|_| look.apply_spec(self.editor.text("umbreon_npr.hatchToneSpec"), 6))
-            {
-                Ok(()) => value["hatchSpec"] = json!(look.spec()),
+            let params = cuemol_command::hatch_params(&self.editor.values, "umbreon_npr")
+                .map_err(|error| error.to_string());
+            match params.and_then(|params| {
+                cuemol_command::hatch_editor::HatchEditor::load(&params)
+                    .map(|editor| (params, editor))
+            }) {
+                Ok((params, editor)) => {
+                    let (layers, tone) = editor.specs();
+                    value["hatchSpec"] = json!(format!("{layers}\n{tone}"));
+                    let env = cuemol_command::hatch_editor::Environment::new(
+                        &params,
+                        &editor,
+                        self.editor.lighting() == "ao",
+                        self.editor.number("umbreon_npr.supersample"),
+                    );
+                    value["hatchEditor"] = editor.snapshot(env);
+                }
                 Err(error) => value["hatchError"] = json!(error.to_string()),
             }
             let mut default = cuemol_render::HatchLook::default();
@@ -924,6 +933,55 @@ mod tests {
         model.rendering_request("close", &json!({})).unwrap();
         let state = model.rendering_request("open", &json!({})).unwrap();
         assert_eq!(state["values"]["umbreon_npr.hatchLayersSpec"], layers);
+    }
+
+    #[test]
+    fn rendering_hatch_editor_preserves_primary_tone_controls_and_context_through_undo() {
+        let mut model = model();
+        model
+            .rendering_request("open", &json!({"backend":"umbreon_npr"}))
+            .unwrap();
+        edit(&mut model, "umbreon_npr.hatchStyle", json!("pencil"));
+        let scene = model.rendering.editor.scene();
+        let field = |state: &Value, section: &str, key: &str| {
+            state["hatchEditor"][section]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|field| field["key"] == key)
+                .unwrap()
+                .clone()
+        };
+        let state = model
+            .rendering_request("lighting", &json!({"sceneId":scene,"value":"none"}))
+            .unwrap();
+        assert_eq!(field(&state, "tone", "strength")["value"], 1.);
+        assert_eq!(field(&state, "tone", "contact")["enabled"], false);
+        assert_eq!(field(&state, "ink", "albedoquant")["enabled"], false);
+        assert_eq!(state["hatchEditor"]["dirty"], false);
+        let state = model.rendering_request("hatch", &json!({"sceneId":scene,"layersSpec":"", "toneSpec":"tone:strength=1.5,curve=0.75,levels=4"})).unwrap();
+        assert_eq!(field(&state, "tone", "strength")["value"], 1.5);
+        assert_eq!(field(&state, "tone", "curve")["value"], 0.75);
+        assert_eq!(field(&state, "tone", "levels")["value"], 4);
+        assert_eq!(state["hatchEditor"]["dirty"], true);
+        model.rendering_request("close", &json!({})).unwrap();
+        model.rendering_request("open", &json!({})).unwrap();
+        let state = model
+            .rendering_request("undo", &json!({"sceneId":scene}))
+            .unwrap();
+        assert_eq!(field(&state, "tone", "strength")["value"], 1.);
+        let state = model
+            .rendering_request("redo", &json!({"sceneId":scene}))
+            .unwrap();
+        assert_eq!(field(&state, "tone", "strength")["value"], 1.5);
+        let state = model
+            .rendering_request(
+                "hatch",
+                &json!({"sceneId":scene,"layersSpec":"", "toneSpec":""}),
+            )
+            .unwrap();
+        assert_eq!(field(&state, "tone", "strength")["value"], 1.);
+        assert_eq!(state["hatchEditor"]["dirty"], false);
     }
 
     #[test]

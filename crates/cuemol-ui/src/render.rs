@@ -700,6 +700,9 @@ impl RenderPanel {
     fn settings(&mut self, ui: &mut egui::Ui, running: bool, controls: &RenderControls) {
         crate::shell::header(ui, "Render Settings");
         let before = self.editor.values.clone();
+        if self.tab == 2 && self.editor.backend() != "umbreon_npr" {
+            self.tab = 1;
+        }
         ui.horizontal(|ui| {
             for (i, label) in [(0, "Image"), (1, "Render"), (2, "Detail")] {
                 if i == 2 && self.editor.backend() != "umbreon_npr" {
@@ -722,7 +725,13 @@ impl RenderPanel {
                             {
                                 let old_layers = hatch.layers_spec.clone();
                                 let old_tone = hatch.tone_spec.clone();
-                                crate::hatch::hatch_detail_controls(ui, &mut hatch);
+                                crate::hatch::hatch_detail_controls(
+                                    ui,
+                                    &mut hatch,
+                                    self.editor.lighting() == "ao",
+                                    self.editor.number("umbreon_npr.supersample"),
+                                    &mut |name, response| self.record(name, response),
+                                );
                                 if hatch.layers_spec != old_layers {
                                     self.editor.values.insert(
                                         "umbreon_npr.hatchLayersSpec".into(),
@@ -1159,6 +1168,35 @@ impl ImageFraming {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn leaving_npr_detail_shows_render_controls_without_editing_settings() {
+        let ctx = Context::default();
+        let mut panel = RenderPanel::default();
+        panel
+            .editor
+            .sync(Some(1), json!({"backend":"umbreon"}).as_object().unwrap());
+        panel.tab = 2;
+        let original = panel.editor.values.clone();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                panel.settings(
+                    ui,
+                    false,
+                    &RenderControls {
+                        can_start: true,
+                        pov_error: None,
+                        movie_error: None,
+                        view_size: [640, 480],
+                    },
+                )
+            });
+        });
+        assert_eq!(panel.tab, 1);
+        assert!(!panel.rects.contains_key("Render settings Detail"));
+        assert_eq!(panel.editor.values, original);
+        assert!(!panel.editor.pending());
+    }
 
     fn rendered(color: [u8; 4], size: [u32; 2]) -> Value {
         let image = image::RgbaImage::from_pixel(size[0], size[1], image::Rgba(color));

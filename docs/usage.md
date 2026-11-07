@@ -855,6 +855,15 @@ its Detail tab edits hatch layers and tone specifications. Selecting a quality
 step changes its own settings, while manual edits are reflected as Custom.
 Switching the rendering backend retains each backend's scene settings.
 
+NPR Detail includes primary Strength/Curve, editable line/dot/stipple layers,
+advanced variation controls and shading/ink settings. Controls become available
+when their prerequisites apply, such as AO for Contact/Shape and color fill for
+albedo quantization. Spacing and mark-width hints show the effective values.
+Reset restores the selected style and clears its Edited marker. At least one
+layer is retained because an empty specification restores template layers;
+up to 64 layers are supported. Opening Detail does not clamp saved values to the
+controls' input ranges, and changing away from NPR returns to the Render tab.
+
 The native egui and Tauri windows also offer POV-Ray, including radiosity, lighting, shadows,
 stereo, clipping and post-blending. The POV-Ray menu opens this same window.
 It uses the executable and include directory selected in Settings > Tools,

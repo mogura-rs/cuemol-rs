@@ -1,5 +1,40 @@
 # Validation evidence
 
+## NPR Detail controls and value preservation
+
+All three frontends now use the shared hatch-field definitions, including primary
+Strength/Curve, tone levels, kind-specific layer controls and contextual
+enablement. Effective-size hints account for mark density, width and
+supersampling. Reset restores the selected style, the Edited indicator stays on
+the same row, and leaving NPR returns an open Detail tab to Render. Opening the
+editor preserves saved values outside the controls' ordinary input ranges.
+
+The optional comparison against the actual reference TypeScript passes for all
+53 field definitions and 2,016 dependency cases. Shared checks round-trip all
+nine styles and preserve tone levels. Two regressions first reproduced the
+obsolete Detail tab and egui's automatic range clamping, then passed after their
+fixes. All 98 command checks pass with four explicit external/GPU checks excluded;
+all 232 native and 204 Tauri model checks pass, with six explicit Tauri checks
+excluded. Five shared Rendering checks, the separate range-preservation check
+and five Tauri Rendering DOM checks pass. The final native build and optimized
+WASM build pass.
+
+The affected browser run passed 23 of 25 cases. The two new NPR cases read the
+second edit before its debounce completed; after waiting for both stored values,
+both WebGL and WebGPU cases pass against the final build. The entire 25-case run
+was not repeated. A real Tauri Rust-model/Chrome run and an actual Linux egui
+window run verify Strength/Curve edits, reopening, Undo/Redo, Reset and backend
+switching; the former also verifies AO/color-fill dependencies. Screenshots were
+inspected. These runs do not establish native Tauri WebView OS input, and the
+authorized macOS host still reports missing screen/input permissions.
+
+The reference TypeScript form permits removing the final layer, but the C++
+renderer interprets an empty layer specification as keeping the style template.
+The port therefore retains at least one layer, disables Remove at that boundary
+and limits additions to the renderer's 64-layer capacity. Earlier documentation
+described editable tone specifications without noting the missing primary tone
+controls or contextual field rules; those omissions are now corrected.
+
 ## Browser movie output in the shared Rendering window
 
 The browser now captures an isolated Rust movie scene, renders sequential frames
