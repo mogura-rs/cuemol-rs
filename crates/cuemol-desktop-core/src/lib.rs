@@ -2870,22 +2870,41 @@ impl DesktopAppState {
     /// when LittleCMS and an external profile were used, or `false` when the
     /// profile-independent Generic CMYK fallback was used.
     pub fn apply_scene_color_proof(&self, snapshot: &mut RenderSceneSnapshot) -> Result<bool> {
-        let enabled = self
-            .active_scene()
-            .and_then(|id| self.scene_manager().scene(id))
-            .and_then(|scene| scene.scene_attribute("use_colproof"))
+        let Some(scene) = self.active_scene() else {
+            return Ok(false);
+        };
+        self.apply_scene_color_proof_for(scene, snapshot)
+    }
+
+    pub fn apply_scene_color_proof_for(
+        &self,
+        scene_uid: Uid,
+        snapshot: &mut RenderSceneSnapshot,
+    ) -> Result<bool> {
+        let scene = self
+            .scene_manager()
+            .scene(scene_uid)
+            .ok_or_else(|| CueMolError::not_found("render scene"))?;
+        let enabled = scene
+            .scene_attribute("use_colproof")
             .is_some_and(|value| value == "true" || value == "1");
         if enabled {
-            self.apply_color_proof(snapshot)
+            self.apply_color_proof_for_scene(Some(scene_uid), snapshot)
         } else {
             Ok(false)
         }
     }
 
     pub fn apply_color_proof(&self, snapshot: &mut RenderSceneSnapshot) -> Result<bool> {
-        let scene = self
-            .active_scene()
-            .and_then(|id| self.scene_manager().scene(id));
+        self.apply_color_proof_for_scene(self.active_scene(), snapshot)
+    }
+
+    fn apply_color_proof_for_scene(
+        &self,
+        scene_uid: Option<Uid>,
+        snapshot: &mut RenderSceneSnapshot,
+    ) -> Result<bool> {
+        let scene = scene_uid.and_then(|id| self.scene_manager().scene(id));
         let profile = scene
             .and_then(|scene| scene.scene_attribute("icc_filename"))
             .filter(|name| !name.is_empty())
@@ -15362,9 +15381,16 @@ impl DesktopAppState {
     }
 
     pub fn active_background_color(&self) -> Result<[f32; 4]> {
+        self.scene_background_color(
+            self.active_scene
+                .ok_or_else(|| CueMolError::not_found("scene"))?,
+        )
+    }
+
+    pub fn scene_background_color(&self, scene_uid: Uid) -> Result<[f32; 4]> {
         let scene = self
-            .active_scene
-            .and_then(|id| self.scene_manager().scene(id))
+            .scene_manager()
+            .scene(scene_uid)
             .ok_or_else(|| CueMolError::not_found("scene"))?;
         scene_background_color(scene, &self.scene_styles(scene))
     }

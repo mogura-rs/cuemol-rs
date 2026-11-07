@@ -32,6 +32,73 @@ pub fn argument(values: &Map<String, Value>) -> String {
         .join("; ")
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct RenderTarget {
+    pub scene: u64,
+    pub view: u64,
+    pub label: String,
+    pub size: [u32; 2],
+}
+
+#[derive(Debug, Default)]
+pub struct RenderTargets {
+    pub views: Vec<RenderTarget>,
+    selected: Option<u64>,
+    active: Option<u64>,
+}
+
+impl RenderTargets {
+    pub fn refresh(&mut self, state: &cuemol_desktop_core::DesktopAppState) {
+        let views = state.view_summaries();
+        let active = views
+            .iter()
+            .find(|view| view.active)
+            .map(|view| view.uid.get());
+        self.views = views
+            .into_iter()
+            .filter_map(|view| {
+                let scene = state.scene_manager().scene(view.scene_uid)?;
+                let size = state
+                    .command_manager()
+                    .view(view.uid)
+                    .map(|view| [view.width(), view.height()])?;
+                Some(RenderTarget {
+                    scene: view.scene_uid.get(),
+                    view: view.uid.get(),
+                    label: format!("{} / {}", scene.name(), view.name),
+                    size,
+                })
+            })
+            .collect();
+        if (active != self.active && active.is_some()) || self.current().is_none() {
+            self.selected = active.or_else(|| self.views.first().map(|view| view.view));
+        }
+        self.active = active;
+    }
+
+    pub fn select(&mut self, view: u64) -> bool {
+        if self.views.iter().any(|target| target.view == view) {
+            self.selected = Some(view);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn current(&self) -> Option<&RenderTarget> {
+        self.views
+            .iter()
+            .find(|target| Some(target.view) == self.selected)
+    }
+
+    pub fn scene(&self) -> Option<u64> {
+        self.current().map(|target| target.scene)
+    }
+    pub fn view(&self) -> Option<u64> {
+        self.current().map(|target| target.view)
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct RenderEditor {
     pub values: Map<String, Value>,
@@ -548,5 +615,45 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod target_tests {
+    use super::*;
+    #[test]
+    fn targets_follow_active_view_changes_without_overwriting_manual_choices() {
+        let mut state = cuemol_desktop_core::DesktopAppState::new();
+        let mut targets = RenderTargets::default();
+        targets.refresh(&state);
+        assert!(targets.current().is_none());
+        let first = state.new_scene("first", true).result_scene;
+        targets.refresh(&state);
+        let first_view = targets.view().unwrap();
+        assert_eq!(targets.scene(), Some(first.get()));
+        let second = state.new_scene("second", true).result_scene;
+        targets.refresh(&state);
+        assert_eq!(targets.scene(), Some(second.get()));
+        let second_view = targets.view().unwrap();
+        assert!(targets.select(first_view));
+        targets.refresh(&state);
+        assert_eq!(targets.view(), Some(first_view));
+        assert!(!targets.select(u64::MAX));
+        assert_eq!(targets.view(), Some(first_view));
+        assert_eq!(state.active_scene(), Some(second));
+        state
+            .command_manager_mut()
+            .view_mut(cuemol_core::Uid::new(first_view))
+            .unwrap()
+            .set_name("renamed");
+        targets.refresh(&state);
+        assert!(targets.current().unwrap().label.ends_with(" / renamed"));
+        state.close_active_view().unwrap();
+        targets.refresh(&state);
+        assert_eq!(targets.view(), Some(first_view));
+        assert!(!targets.select(second_view));
+        state.close_active_view().unwrap();
+        targets.refresh(&state);
+        assert!(targets.current().is_none());
     }
 }

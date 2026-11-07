@@ -858,16 +858,23 @@ Switching the rendering backend retains each backend's scene settings.
 Settings edits are stored after a short quiet period and grouped into one Undo
 entry. Closing the window, switching scenes or starting a render flushes pending
 edits to their original scene. Undo/Redo and other scene-setting edits reload the
-open editor. Start Render uses the current values and view. Stop and failures
+open editor. Target selects a scene and view without activating it. Its settings,
+geometry, background and saved camera are used for rendering; the active view
+uses its live camera. Changing the main window's active view also changes the
+render target, while ordinary scene updates retain a manual target choice.
+Start Render uses these target values. Stop and failures
 retain completed results. Current view and fixed image-size presets are available;
 when dimensions use inches, centimeters or millimeters, changing DPI preserves
 physical size and updates the output pixel count. The command APIs retain their
-direct image/download behavior.
+direct image/download behavior. `capture_view`, `get_screenshot` and `render_image`
+also accept optional `sceneId` and `viewId` targets. A view from a different
+scene or an invalid ID fails without falling back to the active scene.
 
 Previous and Next browse up to 50 completed results without changing the scene.
 Save exports the displayed image with its original DPI metadata; Copy puts that
 image on the system clipboard. Settings shows the captured values, and Use
-settings restores the common settings and the active backend in one Undo step.
+settings restores the common settings and the captured backend to the selected
+target scene in one Undo step.
 Other backend settings remain unchanged. Clear asks before discarding the image
 history and leaves scenes untouched. Native images use owned temporary files;
 the browser also limits compressed history to 128 MiB, retaining the latest

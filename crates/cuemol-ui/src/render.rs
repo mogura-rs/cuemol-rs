@@ -16,6 +16,7 @@ pub enum RenderAction {
     Save,
     Copy,
     UseSettings,
+    Target(u64),
 }
 
 pub struct RenderControls {
@@ -26,6 +27,7 @@ pub struct RenderControls {
 pub struct RenderPanel {
     tab: usize,
     pub editor: RenderEditor,
+    pub targets: cuemol_command::render_editor::RenderTargets,
     preview: Option<TextureHandle>,
     pub png: Option<Arc<[u8]>>,
     pub history: RenderHistory,
@@ -51,6 +53,7 @@ impl Default for RenderPanel {
         Self {
             tab: 0,
             editor: RenderEditor::default(),
+            targets: Default::default(),
             preview: None,
             png: None,
             history: RenderHistory::default(),
@@ -451,6 +454,33 @@ impl RenderPanel {
                         self.tab = 1;
                     }
                 }
+            });
+        });
+        ui.add_enabled_ui(!running, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Target");
+                let current = self.targets.view();
+                let label = self
+                    .targets
+                    .current()
+                    .map_or("No render target", |target| target.label.as_str())
+                    .to_string();
+                let targets = self.targets.views.clone();
+                let response = egui::ComboBox::from_id_salt("render-target")
+                    .selected_text(label)
+                    .width(ui.available_width().min(360.))
+                    .show_ui(ui, |ui| {
+                        for target in targets {
+                            let response =
+                                ui.selectable_label(current == Some(target.view), &target.label);
+                            self.record(&format!("Render target {}", target.view), &response);
+                            if response.clicked() {
+                                action = RenderAction::Target(target.view);
+                            }
+                        }
+                    })
+                    .response;
+                self.record("Render target", &response);
             });
         });
         ui.separator();

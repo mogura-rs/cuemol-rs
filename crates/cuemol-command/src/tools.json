@@ -77,7 +77,7 @@
   },
   {
     "name": "capture_view",
-    "description": "Return a PNG of the current view.",
+    "description": "Return a PNG of the current view. Optional sceneId and viewId select a target without changing the active view.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -86,6 +86,22 @@
             "integer",
             "null"
           ]
+        },
+        "sceneId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "Optional render scene. Defaults to the selected view's scene or the active scene."
+        },
+        "viewId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "Optional render view. Its saved camera is used unless it is the active view."
         }
       },
       "required": [],
@@ -602,7 +618,7 @@
   },
   {
     "name": "get_screenshot",
-    "description": "Return a PNG of the current scene.",
+    "description": "Return a PNG of the current scene. Optional sceneId and viewId select a target without changing the active view.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -617,6 +633,22 @@
             "integer",
             "null"
           ]
+        },
+        "sceneId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "Optional render scene. Defaults to the selected view's scene or the active scene."
+        },
+        "viewId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "Optional render view. Its saved camera is used unless it is the active view."
         }
       },
       "required": [],
@@ -1001,7 +1033,7 @@
   },
   {
     "name": "render_image",
-    "description": "Render PNG using the bundled Rust Umbreon renderer.",
+    "description": "Render PNG using the bundled Rust Umbreon renderer. Optional sceneId and viewId select a target without changing the active view.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1030,6 +1062,22 @@
             "npr",
             null
           ]
+        },
+        "sceneId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "Optional render scene. Defaults to the selected view's scene or the active scene."
+        },
+        "viewId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "Optional render view. Its saved camera is used unless it is the active view."
         }
       },
       "required": [

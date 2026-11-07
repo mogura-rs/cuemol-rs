@@ -13,7 +13,17 @@ pub struct RenderSource {
 
 impl RenderSource {
     pub fn capture(state: &cuemol_desktop_core::DesktopAppState) -> cuemol_core::Result<Self> {
-        let mut settings = crate::render_settings(state)?;
+        let scene = state
+            .active_scene()
+            .ok_or_else(|| cuemol_core::CueMolError::not_found("render scene"))?;
+        Self::capture_scene(state, scene)
+    }
+
+    pub fn capture_scene(
+        state: &cuemol_desktop_core::DesktopAppState,
+        scene: cuemol_core::Uid,
+    ) -> cuemol_core::Result<Self> {
+        let mut settings = crate::scene_render_settings(state, scene)?;
         let backend = settings
             .get("backend")
             .and_then(Value::as_str)
@@ -22,8 +32,8 @@ impl RenderSource {
             .to_string();
         settings.retain(|key, _| !key.contains('.') || key.starts_with(&format!("{backend}.")));
         let scene_name = state
-            .active_scene()
-            .and_then(|uid| state.scene_manager().scene(uid))
+            .scene_manager()
+            .scene(scene)
             .map(|scene| scene.name().to_string())
             .unwrap_or_default();
         Ok(Self {

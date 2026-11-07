@@ -483,13 +483,73 @@ fn set_coloring(state: &mut DesktopAppState, args: &Value) -> Result<Value> {
     Ok(json!({"nodeId":id.get()}))
 }
 
+/// Resolve a render view without changing the application's active scene or camera.
+pub fn render_target(
+    state: &DesktopAppState,
+    active_camera: &Camera,
+    args: &Value,
+) -> Result<(cuemol_core::Uid, cuemol_core::Uid, Camera)> {
+    let uid = |key: &str| -> Result<Option<cuemol_core::Uid>> {
+        if args[key].is_null() {
+            return Ok(None);
+        }
+        args[key]
+            .as_u64()
+            .filter(|id| *id > 0)
+            .map(cuemol_core::Uid::new)
+            .map(Some)
+            .ok_or_else(|| {
+                CueMolError::invalid_argument(format!("{key} must be a positive integer"))
+            })
+    };
+    let requested_scene = uid("sceneId")?;
+    let requested_view = uid("viewId")?;
+    let view_scene = requested_view
+        .map(|id| {
+            state
+                .command_manager()
+                .view(id)
+                .map(|view| view.scene_uid())
+                .ok_or_else(|| CueMolError::not_found("render view"))
+        })
+        .transpose()?;
+    if requested_scene.zip(view_scene).is_some_and(|(a, b)| a != b) {
+        return Err(CueMolError::invalid_argument(
+            "render view does not belong to the requested scene",
+        ));
+    }
+    let scene_uid = requested_scene
+        .or(view_scene)
+        .or(state.active_scene())
+        .ok_or_else(|| CueMolError::not_found("render scene"))?;
+    let scene = state
+        .scene_manager()
+        .scene(scene_uid)
+        .ok_or_else(|| CueMolError::not_found("render scene"))?;
+    let view_uid = requested_view
+        .or(scene.active_view_uid())
+        .ok_or_else(|| CueMolError::not_found("render view"))?;
+    let camera = if state
+        .active_view_summary()
+        .is_some_and(|view| view.uid == view_uid)
+    {
+        active_camera.clone()
+    } else {
+        state
+            .view_camera(view_uid)
+            .ok_or_else(|| CueMolError::not_found("render camera"))?
+    };
+    Ok((scene_uid, view_uid, camera))
+}
+
 pub fn prepare_render(
     state: &DesktopAppState,
     camera: &Camera,
     name: &str,
     args: &Value,
 ) -> Result<PreparedRender> {
-    let settings = crate::properties::render_settings(state)?;
+    let (scene_uid, view_uid, camera) = render_target(state, camera, args)?;
+    let settings = crate::properties::scene_render_settings(state, scene_uid)?;
     let size = |key: &str, default: usize| -> Result<usize> {
         if !args[key].is_null() {
             return integer(args, key, default);
@@ -537,8 +597,8 @@ pub fn prepare_render(
             "render size must be positive and at most 32 megapixels",
         ));
     }
-    let mut snapshot = state.active_render_snapshot("")?;
-    state.apply_scene_color_proof(&mut snapshot)?;
+    let mut snapshot = state.render_snapshot(scene_uid, "")?;
+    state.apply_scene_color_proof_for(scene_uid, &mut snapshot)?;
     let npr = args["style"]
         .as_str()
         .map(|style| style == "npr")
@@ -569,8 +629,11 @@ pub fn prepare_render(
             params.ambient_fraction = 0.16;
         }
     }
-    params.swap_stereo_eyes = state.active_view_options().swap_stereo_eyes;
-    let background = state.active_background_color()?;
+    params.swap_stereo_eyes = state
+        .command_manager()
+        .view(view_uid)
+        .is_some_and(|view| view.swap_stereo_eyes());
+    let background = state.scene_background_color(scene_uid)?;
     let hatch = if npr {
         Some(hatch_params(&settings, prefix)?)
     } else {
@@ -872,4 +935,82 @@ pub(crate) fn render(
     args: &Value,
 ) -> Result<Value> {
     prepare_render(state, camera, name, args)?.run()
+}
+
+#[cfg(test)]
+mod render_target_tests {
+    use super::*;
+    use cuemol_core::Uid;
+
+    #[test]
+    fn selected_render_scene_owns_geometry_settings_background_proof_and_camera() {
+        let mut state = DesktopAppState::new();
+        state.open_bytes("first.pdb", b"HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00 10.00           C  \nEND\n").unwrap();
+        let first = state.active_scene().unwrap();
+        let first_view = state.active_view_summary().unwrap().uid;
+        let mut camera = Camera::new();
+        camera.set_zoom(8.);
+        state.set_active_view_camera(&camera).unwrap();
+        call_tool(&mut state, &mut camera, "set_render_settings", &json!({"settings":"width=64; height=48; unit=px; dpi=72; backend=umbreon; umbreon.useGI=false; umbreon.aoEnabled=false; umbreon.supersample=1"})).unwrap();
+        let scene = state.scene_manager_mut().scene_mut(first).unwrap();
+        scene.set_scene_attribute("bgcolor", "#ff0000");
+        scene.set_scene_attribute("use_colproof", "true");
+        let mut expected = state.render_snapshot(first, "").unwrap();
+        state.apply_scene_color_proof(&mut expected).unwrap();
+        let second = state.new_scene("other", true).result_scene;
+        let second_view = state.active_view_summary().unwrap().uid;
+        camera.set_zoom(300.);
+        state.set_active_view_camera(&camera).unwrap();
+        let before = state.clone();
+        let args = json!({"sceneId":first.get(), "viewId":first_view.get()});
+        let render = prepare_render(&state, &camera, "get_screenshot", &args).unwrap();
+        assert_eq!(render.snapshot, expected);
+        assert_eq!(render.camera.zoom(), 8.);
+        assert_eq!(render.background, [1., 0., 0., 1.]);
+        assert_eq!(
+            (render.params.width, render.params.height, render.dpi),
+            (64, 48, 72.)
+        );
+        assert_eq!(state.active_scene(), Some(second));
+        assert!(before.same_undo_state(&state));
+        assert_eq!(
+            crate::render_history::RenderSource::capture_scene(&state, first)
+                .unwrap()
+                .settings["dpi"],
+            72.
+        );
+        let default = prepare_render(&state, &camera, "get_screenshot", &json!({})).unwrap();
+        assert_eq!(default.camera.zoom(), 300.);
+        assert_eq!(default.snapshot.atom_count(), 0);
+        for bad in [
+            json!({"sceneId":first.get(),"viewId":second_view.get()}),
+            json!({"sceneId":0}),
+            json!({"viewId":-1}),
+            json!({"viewId":"1"}),
+            json!({"sceneId":u64::MAX}),
+            json!({"viewId":u64::MAX}),
+        ] {
+            assert!(prepare_render(&state, &camera, "get_screenshot", &bad).is_err());
+        }
+        assert_eq!(
+            render_target(&state, &camera, &json!({"viewId":first_view.get()}))
+                .unwrap()
+                .0,
+            first
+        );
+        assert_eq!(
+            render_target(&state, &camera, &json!({"sceneId":first.get()}))
+                .unwrap()
+                .1,
+            first_view
+        );
+        assert_eq!(
+            render_target(&state, &camera, &json!({"viewId":second_view.get()}))
+                .unwrap()
+                .2
+                .zoom(),
+            300.
+        );
+        assert!(render_target(&state, &camera, &json!({"sceneId":Uid::new(0).get()})).is_err());
+    }
 }

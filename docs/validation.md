@@ -1,5 +1,40 @@
 # Validation evidence
 
+## Render targets and scene-local rendering
+
+Native egui and browser Rendering windows now select any existing scene/view.
+The selector follows active-view changes, retains manual choices across ordinary
+scene updates, and falls back when a view closes. Target changes flush pending
+settings to their original scene. Settings and history restoration edit the
+selected target without activating it. The current-view size preset uses the
+selected view's dimensions.
+
+The old shared preparation always fetched active-scene geometry, background,
+settings and color proofing. Preparation now resolves an optional sceneId/viewId
+pair and consistently reads that target. The active view uses the host's live
+camera; other views use their saved camera. Stereo eye order also belongs to
+the selected view. Invalid, deleted or mismatched targets fail explicitly. The
+public screenshot and image schemas expose these optional IDs, while omitted
+IDs preserve the active-scene behavior. Render history captures the target
+scene name and settings. Usage text previously described active-view rendering
+only and has been updated.
+
+Focused regressions cover target lifetime/selection, saved camera, geometry,
+background, scene-local proofing, dimensions/DPI, invalid IDs and inactive-scene
+Undo/Redo. All 79 command tests pass with two existing ignored tests, and all
+230 native and 67 shared egui tests pass. Three browser cases pass: WebGL/WebGPU
+target selection, real PNG output compared with the public command, Undo/Redo,
+history restoration to a different target, unchanged active camera/scene, and
+the small-window layout check. Native and WASM builds pass.
+
+An actual Linux window run selects a different scene, edits its DPI, undoes and
+redoes the edit, renders/copies both targets at distinct dimensions, and verifies
+that the active scene and camera remain unchanged. Screenshots were inspected.
+These checks cover native egui/browser still images. Tauri integration and
+unified POV-Ray/movie rendering remain open. GUI Undo still uses the existing
+application-wide history; the reference window routes Undo to its target
+scene's history.
+
 ## Shared render settings and scene edit transactions
 
 Native egui and the browser now use a shared typed rendering editor. Values come
@@ -48,7 +83,8 @@ uses Undo/Redo, renders and copies a PNG of the expected size, changes AO qualit
 switches to NPR and back, opens Detail, and verifies unchanged camera state.
 Screenshots of native and WebGPU settings were inspected. The native and WASM
 builds pass. These checks cover the Umbreon/NPR still-image editor; the unified
-POV-Ray, selectable render target, movie mode and Tauri window remain open.
+POV-Ray, movie mode and Tauri window remain open; selectable targets are covered
+in the later target audit above.
 
 ## Render image history and shared result viewer
 

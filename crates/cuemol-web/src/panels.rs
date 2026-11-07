@@ -175,14 +175,20 @@ impl App {
     }
 
     pub(super) fn sync_render_settings(&mut self) {
-        let scene = self.state.active_scene().map(|id| id.get());
-        let settings = cuemol_command::render_settings(&self.state).unwrap_or_default();
+        self.render_panel.targets.refresh(&self.state);
+        let scene = self.render_panel.targets.scene();
+        let settings = scene
+            .and_then(|id| {
+                cuemol_command::scene_render_settings(&self.state, cuemol_core::Uid::new(id)).ok()
+            })
+            .unwrap_or_default();
         self.render_panel.editor.sync(scene, &settings);
         self.render_size = self.render_panel.editor.pixels();
     }
 
     pub(super) fn flush_render_settings(&mut self, now: f64, force: bool) -> bool {
-        let scene = self.state.active_scene().map(|id| id.get());
+        self.render_panel.targets.refresh(&self.state);
+        let scene = self.render_panel.targets.scene();
         if !self.render_panel.editor.due(scene, now, force) {
             return true;
         }
@@ -221,17 +227,28 @@ impl App {
             &mut open,
             self.render_cancel.is_some(),
             cuemol_ui::RenderControls {
-                can_start: !self.busy && self.state.active_scene().is_some(),
-                view_size: self
-                    .target
-                    .as_ref()
-                    .map_or(self.render_size, |target| target.size),
+                can_start: !self.busy && self.render_panel.targets.current().is_some(),
+                view_size: if self.state.active_view_summary().map(|view| view.uid.get())
+                    != self.render_panel.targets.view()
+                {
+                    self.render_panel
+                        .targets
+                        .current()
+                        .map(|target| target.size)
+                        .unwrap_or(self.render_size)
+                } else {
+                    self.target
+                        .as_ref()
+                        .map_or(self.render_size, |target| target.size)
+                },
             },
         );
         self.render_size = self.render_panel.editor.pixels();
         if matches!(
             action,
-            cuemol_ui::RenderAction::Start | cuemol_ui::RenderAction::UseSettings
+            cuemol_ui::RenderAction::Start
+                | cuemol_ui::RenderAction::UseSettings
+                | cuemol_ui::RenderAction::Target(_)
         ) || !open
         {
             if !self.flush_render_settings(ctx.input(|i| i.time), true) {
@@ -240,6 +257,10 @@ impl App {
         }
         self.ui_rects.extend(self.render_panel.rects.clone());
         self.show_render = open;
+        if let cuemol_ui::RenderAction::Target(view) = action {
+            self.render_panel.targets.select(view);
+            self.sync_render_settings();
+        }
         if action == cuemol_ui::RenderAction::Stop {
             self.call("cancel_render", json!({}));
         }
@@ -264,7 +285,7 @@ impl App {
             {
                 if self.call_shared(
                     "set_render_settings",
-                    json!({"settings": source.settings_argument()}),
+                    json!({"settings": source.settings_argument(), "sceneId":self.render_panel.targets.scene()}),
                 ) {
                     self.open_render();
                 } else {
@@ -275,15 +296,27 @@ impl App {
         let render = action == cuemol_ui::RenderAction::Start;
         if render {
             let settings = self.render_panel.editor.settings_argument();
-            if self.call_shared("set_render_settings", json!({"settings":settings})) {
+            if self.call_shared(
+                "set_render_settings",
+                json!({"settings":settings,"sceneId":self.render_panel.targets.scene()}),
+            ) {
                 self.render_panel.begin(
                     ctx,
-                    cuemol_command::render_history::RenderSource::capture(&self.state)
+                    self.render_panel
+                        .targets
+                        .scene()
+                        .and_then(|id| {
+                            cuemol_command::render_history::RenderSource::capture_scene(
+                                &self.state,
+                                cuemol_core::Uid::new(id),
+                            )
+                            .ok()
+                        })
                         .unwrap_or_default(),
                 );
                 self.render_async(
                     "get_screenshot",
-                    &json!({"width":self.render_size[0],"height":self.render_size[1]}),
+                    &json!({"width":self.render_size[0],"height":self.render_size[1],"sceneId":self.render_panel.targets.scene(),"viewId":self.render_panel.targets.view()}),
                     None,
                     true,
                 );

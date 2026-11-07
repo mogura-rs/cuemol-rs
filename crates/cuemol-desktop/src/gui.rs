@@ -15003,8 +15003,13 @@ impl GuiApplication {
     }
 
     fn sync_native_render_settings(&mut self) {
-        let scene = self.state.active_scene().map(|id| id.get());
-        let settings = cuemol_command::render_settings(&self.state).unwrap_or_default();
+        self.ray_panel.targets.refresh(&self.state);
+        let scene = self.ray_panel.targets.scene();
+        let settings = scene
+            .and_then(|id| {
+                cuemol_command::scene_render_settings(&self.state, cuemol_core::Uid::new(id)).ok()
+            })
+            .unwrap_or_default();
         self.ray_panel.editor.sync(scene, &settings);
         self.ray_size = self.ray_panel.editor.pixels();
     }
@@ -15015,7 +15020,8 @@ impl GuiApplication {
         now: f64,
         force: bool,
     ) -> bool {
-        let scene = self.state.active_scene().map(|id| id.get());
+        self.ray_panel.targets.refresh(&self.state);
+        let scene = self.ray_panel.targets.scene();
         if !self.ray_panel.editor.due(scene, now, force) {
             return true;
         }
@@ -15061,22 +15067,33 @@ impl GuiApplication {
             &mut open,
             self.ray_job.is_some(),
             cuemol_ui::RenderControls {
-                can_start: self.state.active_scene().is_some(),
-                view_size: self
-                    .viewport_rect
-                    .map(|rect| {
-                        [
-                            rect.width().round().max(1.) as u32,
-                            rect.height().round().max(1.) as u32,
-                        ]
-                    })
-                    .unwrap_or(self.ray_size),
+                can_start: self.ray_panel.targets.current().is_some(),
+                view_size: if self.state.active_view_summary().map(|view| view.uid.get())
+                    != self.ray_panel.targets.view()
+                {
+                    self.ray_panel
+                        .targets
+                        .current()
+                        .map(|target| target.size)
+                        .unwrap_or(self.ray_size)
+                } else {
+                    self.viewport_rect
+                        .map(|rect| {
+                            [
+                                rect.width().round().max(1.) as u32,
+                                rect.height().round().max(1.) as u32,
+                            ]
+                        })
+                        .unwrap_or(self.ray_size)
+                },
             },
         );
         self.ray_size = self.ray_panel.editor.pixels();
         if matches!(
             action,
-            cuemol_ui::RenderAction::Start | cuemol_ui::RenderAction::UseSettings
+            cuemol_ui::RenderAction::Start
+                | cuemol_ui::RenderAction::UseSettings
+                | cuemol_ui::RenderAction::Target(_)
         ) || !open
         {
             if !self.flush_native_render_settings(&mut current, now, true) {
@@ -15084,6 +15101,10 @@ impl GuiApplication {
             }
         }
         match action {
+            cuemol_ui::RenderAction::Target(view) => {
+                self.ray_panel.targets.select(view);
+                self.sync_native_render_settings();
+            }
             cuemol_ui::RenderAction::Stop => {
                 if let Some(cancel) = &self.ray_cancel {
                     cancel.store(true, Ordering::Relaxed);
@@ -15120,9 +15141,11 @@ impl GuiApplication {
                     .map(|entry| entry.source.clone())
                 {
                     let mut current = camera.to_qsys_camera("__current");
-                    match self
-                        .apply_native_render_settings(&source.settings_argument(), &mut current)
-                    {
+                    match self.apply_native_render_settings_to(
+                        self.ray_panel.targets.scene(),
+                        &source.settings_argument(),
+                        &mut current,
+                    ) {
                         Ok(()) => {
                             self.open_native_render();
                         }
@@ -15132,7 +15155,11 @@ impl GuiApplication {
             }
             cuemol_ui::RenderAction::Start => {
                 let settings = self.ray_panel.editor.settings_argument();
-                if let Err(error) = self.apply_native_render_settings(&settings, &mut current) {
+                if let Err(error) = self.apply_native_render_settings_to(
+                    self.ray_panel.targets.scene(),
+                    &settings,
+                    &mut current,
+                ) {
                     self.ray_panel.failed(error.to_string());
                     return;
                 }
@@ -15140,7 +15167,7 @@ impl GuiApplication {
                     &self.state,
                     &current,
                     "get_screenshot",
-                    &serde_json::json!({}),
+                    &serde_json::json!({"sceneId": self.ray_panel.targets.scene(), "viewId": self.ray_panel.targets.view()}),
                 );
                 match result {
                     Ok(prepared) => {
@@ -15153,7 +15180,16 @@ impl GuiApplication {
                         });
                         self.ray_panel.begin(
                             ctx,
-                            cuemol_command::render_history::RenderSource::capture(&self.state)
+                            self.ray_panel
+                                .targets
+                                .scene()
+                                .and_then(|id| {
+                                    cuemol_command::render_history::RenderSource::capture_scene(
+                                        &self.state,
+                                        cuemol_core::Uid::new(id),
+                                    )
+                                    .ok()
+                                })
                                 .unwrap_or_default(),
                         );
                         self.ray_job = Some(receiver);
@@ -31551,6 +31587,45 @@ mod tests {
             150.
         );
         assert_eq!(app.ray_panel.editor.number("dpi"), 150.);
+    }
+
+    #[test]
+    fn native_render_target_edits_only_the_selected_scene_and_preserves_active_view() {
+        let mut app = GuiApplication::new();
+        let first = app.state.new_scene("first", true).result_scene;
+        let first_view = app.state.active_view_summary().unwrap().uid.get();
+        let second = app.state.new_scene("second", true).result_scene;
+        app.open_native_render();
+        let mut camera = cuemol_qsys::Camera::new();
+        assert!(app.ray_panel.targets.select(first_view));
+        app.sync_native_render_settings();
+        assert_eq!(app.ray_panel.editor.scene(), Some(first.get()));
+        app.ray_panel
+            .editor
+            .values
+            .insert("dpi".into(), serde_json::json!(72));
+        app.ray_panel.editor.edited(1.);
+        assert!(app.flush_native_render_settings(&mut camera, 1.5, false));
+        assert_eq!(
+            cuemol_command::scene_render_settings(&app.state, first).unwrap()["dpi"],
+            72.
+        );
+        assert!(cuemol_command::scene_render_settings(&app.state, second)
+            .unwrap()
+            .is_empty());
+        assert_eq!(app.state.active_scene(), Some(second));
+        assert_eq!(app.undo_stack.len(), 1);
+        let mut controller = CameraController::default();
+        app.undo(&mut controller);
+        app.sync_native_render_settings();
+        assert_eq!(app.ray_panel.editor.number("dpi"), 600.);
+        assert_eq!(app.state.active_scene(), Some(second));
+        app.redo(&mut controller);
+        app.sync_native_render_settings();
+        assert_eq!(app.ray_panel.editor.number("dpi"), 72.);
+        app.open_native_render();
+        assert_eq!(app.ray_panel.targets.view(), Some(first_view));
+        assert_eq!(app.ray_panel.editor.number("dpi"), 72.);
     }
 
     #[test]

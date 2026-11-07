@@ -367,3 +367,48 @@ for (const backend of ['webgl', 'webgpu']) {
     expect(errors).toEqual([]);
   });
 }
+
+for (const backend of ['webgl', 'webgpu']) {
+  test(`Render target owns settings and camera while the active view stays unchanged (${backend})`, async ({page}, testInfo) => {
+    const errors = []; page.on('pageerror', error => errors.push(error.message));
+    await open(page, backend);
+    const script = async source => JSON.parse((await call(page, 'execute_script', {source})).message).log.trim();
+    const first = (await page.evaluate(() => window.cuemol.status())).scene.sceneId;
+    const firstView = Number(await script('print(scene.activeViewID);'));
+    await call(page, 'set_node_prop', {nodeType:'scene', prop:'bgcolor', value:'#ff0000'});
+    await call(page, 'create_scene', {name:'Other target'});
+    const second = (await page.evaluate(() => window.cuemol.status())).scene.sceneId;
+    const secondView = Number(await script('print(scene.activeViewID);'));
+    await call(page,'set_render_settings',{settings:'backend=umbreon; width=80; height=60; unit=px; dpi=150; umbreon.useGI=false; umbreon.aoEnabled=false; umbreon.supersample=1; umbreon.denoise=None'});
+    const viewBefore = await page.evaluate(() => window.cuemol.status().view);
+    await click(page, 'Render target');
+    await click(page, `Render target ${firstView}`);
+    await field(page, 'Render DPI', 72);
+    await expect.poll(() => script(`print(cuemol.getScene(${first}).getAppData('render').dpi);`)).toBe('72');
+    expect(await script(`print(cuemol.getScene(${second}).getAppData('render').dpi);`)).toBe('150');
+    await call(page,'undo');
+    expect(await script(`print(cuemol.getScene(${first}).getAppData('render').dpi);`)).toBe('300');
+    await call(page,'redo');
+    await click(page,'Start Render');
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().message)).toContain('Rendered 64 × 48');
+    const firstPng = await save(page), firstImage = PNG.sync.read(firstPng);
+    expect([firstImage.width,firstImage.height]).toEqual([64,48]);
+    expect([...firstImage.data.subarray(0,3)]).toEqual([255,0,0]);
+    const direct = JSON.parse((await call(page,'get_screenshot',{sceneId:first,viewId:firstView})).message);
+    expect(PNG.sync.read(Buffer.from(direct._image,'base64')).data.equals(firstImage.data)).toBe(true);
+    await click(page, 'Render target'); await click(page, `Render target ${secondView}`);
+    await click(page,'Start Render');
+    await expect.poll(() => page.evaluate(() => window.cuemol.status().message)).toContain('Rendered 80 × 60');
+    await click(page,'Previous render');
+    await click(page,'Use render settings');
+    expect(await script(`print(cuemol.getScene(${second}).getAppData('render').width);`)).toBe('64');
+    expect(await script(`print(cuemol.getScene(${first}).getAppData('render').width);`)).toBe('64');
+    await call(page,'undo');
+    expect(await script(`print(cuemol.getScene(${second}).getAppData('render').width);`)).toBe('80');
+    expect((await page.evaluate(() => window.cuemol.status())).scene.sceneId).toBe(second);
+    expect(await page.evaluate(() => window.cuemol.status().view)).toEqual(viewBefore);
+    await click(page, 'Render target');
+    await page.screenshot({path:testInfo.outputPath(`render-target-${backend}.png`)});
+    expect(errors).toEqual([]);
+  });
+}
