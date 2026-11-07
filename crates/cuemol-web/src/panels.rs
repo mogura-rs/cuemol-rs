@@ -174,10 +174,47 @@ impl App {
         }
     }
 
+    pub(super) fn sync_render_settings(&mut self) {
+        let scene = self.state.active_scene().map(|id| id.get());
+        let settings = cuemol_command::render_settings(&self.state).unwrap_or_default();
+        self.render_panel.editor.sync(scene, &settings);
+        self.render_size = self.render_panel.editor.pixels();
+    }
+
+    pub(super) fn flush_render_settings(&mut self, now: f64, force: bool) -> bool {
+        let scene = self.state.active_scene().map(|id| id.get());
+        if !self.render_panel.editor.due(scene, now, force) {
+            return true;
+        }
+        let target = self.render_panel.editor.scene();
+        let argument = self.render_panel.editor.settings_argument();
+        let message = self.message.clone();
+        if self.call_shared(
+            "set_render_settings",
+            json!({"settings":argument,"sceneId":target}),
+        ) {
+            self.message = message;
+            let stored = target
+                .and_then(|id| {
+                    cuemol_command::scene_render_settings(&self.state, cuemol_core::Uid::new(id))
+                        .ok()
+                })
+                .unwrap_or_default();
+            self.render_panel.editor.saved(&stored);
+            true
+        } else {
+            self.render_panel.message = self.message.clone();
+            self.render_panel.editor.discard_pending();
+            false
+        }
+    }
+
     pub(super) fn render_ui(&mut self, ctx: &egui::Context) {
+        self.flush_render_settings(ctx.input(|i| i.time), !self.show_render);
         if !self.show_render {
             return;
         }
+        self.sync_render_settings();
         let mut open = true;
         let action = self.render_panel.show(
             ctx,
@@ -185,13 +222,22 @@ impl App {
             self.render_cancel.is_some(),
             cuemol_ui::RenderControls {
                 can_start: !self.busy && self.state.active_scene().is_some(),
-                size: &mut self.render_size,
-                transparent: &mut self.render_transparent,
-                hatching: &mut self.render_hatching,
-                lighting: &mut self.render_lighting,
-                hatch: &mut self.render_hatch,
+                view_size: self
+                    .target
+                    .as_ref()
+                    .map_or(self.render_size, |target| target.size),
             },
         );
+        self.render_size = self.render_panel.editor.pixels();
+        if matches!(
+            action,
+            cuemol_ui::RenderAction::Start | cuemol_ui::RenderAction::UseSettings
+        ) || !open
+        {
+            if !self.flush_render_settings(ctx.input(|i| i.time), true) {
+                return;
+            }
+        }
         self.ui_rects.extend(self.render_panel.rects.clone());
         self.show_render = open;
         if action == cuemol_ui::RenderAction::Stop {
@@ -228,31 +274,7 @@ impl App {
         }
         let render = action == cuemol_ui::RenderAction::Start;
         if render {
-            let backend = if self.render_hatching {
-                "umbreon_npr"
-            } else {
-                "umbreon"
-            };
-            let mut settings = format!(
-                "backend={backend}; {}; transparentBg={}; projection={}; clipPlane={}",
-                self.render_panel.image_settings(self.render_size),
-                self.render_transparent,
-                if self.render_lighting.perspective {
-                    "perspective"
-                } else {
-                    "orthographic"
-                },
-                self.render_lighting.use_clip_z
-            );
-            settings.push_str("; ");
-            settings.push_str(&cuemol_command::rendering_settings(
-                &self.render_lighting,
-                backend,
-            ));
-            if self.render_hatching {
-                settings.push_str("; ");
-                settings.push_str(&cuemol_command::hatch_settings(&self.render_hatch));
-            }
+            let settings = self.render_panel.editor.settings_argument();
             if self.call_shared("set_render_settings", json!({"settings":settings})) {
                 self.render_panel.begin(
                     ctx,

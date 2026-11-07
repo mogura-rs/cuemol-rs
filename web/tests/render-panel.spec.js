@@ -311,3 +311,59 @@ for (const backend of ['webgl', 'webgpu']) {
     expect(errors).toEqual([]);
   });
 }
+
+
+for (const backend of ['webgl', 'webgpu']) {
+  test(`Render editor persists independent backend values and follows Undo (${backend})`, async ({page}, testInfo) => {
+    const errors=[];page.on('pageerror',e=>errors.push(e.message));
+    await open(page,backend);
+    const read = async expression => {
+      const result=await call(page,'execute_script',{source:`var s=scene.getAppData('render'); print(${expression});`});
+      return JSON.parse(result.message).log.trim();
+    };
+    await call(page,'clear_undo');
+    const camera=await page.evaluate(()=>window.cuemol.status().view);
+    await field(page,'Render DPI',150);
+    await expect.poll(()=>read('s.dpi')).toBe('150');
+    await call(page,'undo');
+    expect(await read('s.dpi')).toBe('300');
+    await call(page,'redo');
+    expect(await read('s.dpi')).toBe('150');
+    await click(page,'Render size unit');await click(page,'Render unit in');
+    await expect.poll(()=>read('s.unit')).toBe('in');
+    await field(page,'Render Width',2);
+    await field(page,'Render Height',1);
+    await expect.poll(()=>read('s.width+":"+s.height+":"+s.dpi')).toBe('2:1:150');
+    await click(page,'Render size unit');await click(page,'Render unit px');
+    await expect.poll(()=>read('s.width+":"+s.height+":"+s.unit')).toBe('300:150:px');
+    await click(page,'Render settings Render');
+    await click(page,'Render lighting');await click(page,'Render lighting ao');
+    await click(page,'Render AO quality');await click(page,'Render quality ao high');
+    await click(page,'Render Shadows');await click(page,'Render quality shadows soft');
+    await expect.poll(()=>read('s.umbreon.aoSamples+":"+s.umbreon.shadowSamples')).toBe('256:16');
+    await click(page,'Render backend');await click(page,'Render backend umbreon_npr');
+    await expect.poll(()=>read('s.backend+":"+s.umbreon_npr.shadowSamples+":"+s.umbreon_npr.aoEnabled')).toBe('umbreon_npr:1:false');
+    await click(page,'Render lighting');
+    expect(await page.evaluate(()=>window.cuemol.status().ui.rects['Render lighting gi'])).toBeUndefined();
+    await click(page,'Render lighting ao');
+    await click(page,'Render AO quality');await click(page,'Render quality ao low');
+    await expect.poll(()=>read('s.umbreon_npr.aoSamples')).toBe('16');
+    await click(page,'Render settings Detail');
+    await page.screenshot({path:testInfo.outputPath(`render-detail-${backend}.png`)});
+    await click(page,'Render backend');await click(page,'Render backend umbreon');
+    await expect.poll(()=>read('s.backend+":"+s.umbreon.aoSamples+":"+s.umbreon.shadowSamples')).toBe('umbreon:256:16');
+    await click(page,'Render lighting');await click(page,'Render lighting gi');
+    await expect.poll(()=>read('s.umbreon.lightIntensity+":"+s.umbreon.flashFraction+":"+s.umbreon.ambientFraction')).toBe('1.3:0:0.6');
+    await click(page,'Render GI lighting');await click(page,'Render quality giLighting 2');
+    await expect.poll(()=>read('s.umbreon.lightIntensity+":"+s.umbreon.flashFraction+":"+s.umbreon.ambientFraction')).toBe('1.37:0.3:0.46');
+    await call(page,'undo');
+    expect(await read('s.umbreon.lightIntensity+":"+s.umbreon.flashFraction+":"+s.umbreon.ambientFraction')).toBe('1.3:0:0.6');
+    await click(page,'Render lighting');await click(page,'Render lighting none');
+    await expect.poll(()=>read('s.umbreon.lightIntensity+":"+s.umbreon.flashFraction')).toBe('1.55:0.6');
+    await click(page,'Render lighting');await click(page,'Render lighting gi');
+    await expect.poll(()=>read('s.umbreon.lightIntensity+":"+s.umbreon.flashFraction')).toBe('1.3:0');
+    expect(await page.evaluate(()=>window.cuemol.status().view)).toEqual(camera);
+    await page.screenshot({path:testInfo.outputPath(`render-settings-${backend}.png`)});
+    expect(errors).toEqual([]);
+  });
+}

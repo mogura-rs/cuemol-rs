@@ -1,0 +1,657 @@
+{
+  "common": [
+    {
+      "key": "width",
+      "label": "Width",
+      "type": "integer",
+      "group": "Image",
+      "min": 100.0,
+      "max": 10000.0,
+      "step": 100.0
+    },
+    {
+      "key": "height",
+      "label": "Height",
+      "type": "integer",
+      "group": "Image",
+      "min": 100.0,
+      "max": 10000.0,
+      "step": 100.0
+    },
+    {
+      "key": "unit",
+      "label": "Size unit",
+      "type": "enum",
+      "group": "Image",
+      "options": [
+        "px",
+        "in",
+        "mm",
+        "cm"
+      ]
+    },
+    {
+      "key": "dpi",
+      "label": "DPI",
+      "type": "combo",
+      "group": "Image",
+      "options": [
+        "72",
+        "150",
+        "300",
+        "600",
+        "1200",
+        "2400"
+      ]
+    },
+    {
+      "key": "transparentBg",
+      "label": "Transparent background",
+      "type": "boolean",
+      "group": "Image"
+    },
+    {
+      "key": "postBlend",
+      "label": "Post-render alpha blending",
+      "type": "boolean",
+      "group": "Image"
+    },
+    {
+      "key": "pixelLabels",
+      "label": "Pixel labels",
+      "type": "boolean",
+      "group": "Image"
+    },
+    {
+      "key": "projection",
+      "label": "Projection",
+      "type": "enum",
+      "group": "Camera",
+      "options": [
+        "perspective",
+        "orthographic"
+      ]
+    },
+    {
+      "key": "stereoMode",
+      "label": "Stereo mode",
+      "type": "enum",
+      "group": "Camera",
+      "options": [
+        "none",
+        "left",
+        "right"
+      ]
+    },
+    {
+      "key": "stereoDepth",
+      "label": "Stereo depth",
+      "type": "real",
+      "group": "Camera",
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.01
+    },
+    {
+      "key": "clipPlane",
+      "label": "Enable clip plane",
+      "type": "boolean",
+      "group": "Camera"
+    },
+    {
+      "key": "numThreads",
+      "label": "CPU threads",
+      "type": "integer",
+      "group": "Quality",
+      "min": 1.0,
+      "max": 32.0,
+      "step": 1.0
+    },
+    {
+      "key": "edgeLines",
+      "label": "Edge lines",
+      "type": "boolean",
+      "group": "Edges"
+    }
+  ],
+  "povray": [
+    {
+      "key": "radiosityMode",
+      "label": "Radiosity mode",
+      "type": "enum",
+      "group": "POV-Ray",
+      "options": [
+        "Disable",
+        "Default",
+        "Debug",
+        "Fast",
+        "Normal",
+        "2-Bounce",
+        "Final",
+        "Outdoor LQ",
+        "Outdoor HQ",
+        "Outdoor Light",
+        "Indoor LQ",
+        "Indoor HQ"
+      ]
+    },
+    {
+      "key": "shadow",
+      "label": "Enable shadow",
+      "type": "boolean",
+      "group": "POV-Ray"
+    },
+    {
+      "key": "lightDefault",
+      "label": "Use default lighting",
+      "type": "boolean",
+      "group": "POV-Ray"
+    },
+    {
+      "key": "lightSpread",
+      "label": "Light spread",
+      "type": "integer",
+      "group": "POV-Ray",
+      "min": 1.0,
+      "max": 10.0,
+      "step": 1.0
+    },
+    {
+      "key": "lightIntensity",
+      "label": "Light intensity",
+      "type": "real",
+      "group": "POV-Ray",
+      "min": 0.0,
+      "max": 2.0,
+      "step": 0.1
+    },
+    {
+      "key": "flashFraction",
+      "label": "Flash fraction",
+      "type": "real",
+      "group": "POV-Ray",
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.1
+    },
+    {
+      "key": "ambientFraction",
+      "label": "Ambient fraction",
+      "type": "real",
+      "group": "POV-Ray",
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.1
+    }
+  ],
+  "umbreon": [
+    {
+      "key": "supersample",
+      "label": "Supersampling",
+      "type": "integer",
+      "group": "Antialiasing",
+      "min": 1.0,
+      "max": 8.0,
+      "step": 1.0
+    },
+    {
+      "key": "aoEnabled",
+      "label": "Enable AO",
+      "type": "boolean",
+      "group": "Ambient Occlusion"
+    },
+    {
+      "key": "aoSamples",
+      "label": "AO samples",
+      "type": "integer",
+      "group": "Ambient Occlusion",
+      "min": 1.0,
+      "max": 256.0,
+      "step": 8.0
+    },
+    {
+      "key": "aoDistance",
+      "label": "AO distance (0 = auto)",
+      "type": "real",
+      "group": "Ambient Occlusion",
+      "min": 0.0,
+      "max": 1000.0,
+      "step": 10.0
+    },
+    {
+      "key": "aoIntensity",
+      "label": "AO intensity",
+      "type": "real",
+      "group": "Ambient Occlusion",
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.1
+    },
+    {
+      "key": "aoDiffuseFactor",
+      "label": "AO on direct light",
+      "type": "real",
+      "group": "Ambient Occlusion",
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.1
+    },
+    {
+      "key": "aoMultiScale",
+      "label": "Multi-scale AO",
+      "type": "boolean",
+      "group": "Ambient Occlusion"
+    },
+    {
+      "key": "aoBentNormal",
+      "label": "Bent normal",
+      "type": "boolean",
+      "group": "Ambient Occlusion"
+    },
+    {
+      "key": "aoLowDiscrepancy",
+      "label": "Low-discrepancy sampling",
+      "type": "boolean",
+      "group": "Ambient Occlusion"
+    },
+    {
+      "key": "aoGather",
+      "label": "AO gather",
+      "type": "enum",
+      "group": "Ambient Occlusion",
+      "options": [
+        "Per output pixel",
+        "Per shading hit"
+      ]
+    },
+    {
+      "key": "shadows",
+      "label": "Cast shadows",
+      "type": "boolean",
+      "group": "Shadows"
+    },
+    {
+      "key": "shadowSamples",
+      "label": "Shadow samples",
+      "type": "integer",
+      "group": "Shadows",
+      "min": 1.0,
+      "max": 64.0,
+      "step": 1.0
+    },
+    {
+      "key": "lightRadius",
+      "label": "Light radius (deg)",
+      "type": "real",
+      "group": "Shadows",
+      "min": 0.0,
+      "max": 30.0,
+      "step": 0.5
+    },
+    {
+      "key": "creaseLimit",
+      "label": "Crease angle (deg)",
+      "type": "enum",
+      "group": "Edges",
+      "options": [
+        "Off",
+        "15",
+        "30",
+        "45",
+        "60",
+        "90",
+        "120"
+      ],
+      "enumValues": [
+        -1,
+        15,
+        30,
+        45,
+        60,
+        90,
+        120
+      ]
+    },
+    {
+      "key": "contactEdges",
+      "label": "Contact edges",
+      "type": "boolean",
+      "group": "Edges"
+    },
+    {
+      "key": "outlineFarDepth",
+      "label": "Outline far depth",
+      "type": "real",
+      "group": "Edges",
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.01
+    },
+    {
+      "key": "perPixelBlend",
+      "label": "Per-pixel transparency",
+      "type": "boolean",
+      "group": "Transparency"
+    },
+    {
+      "key": "useGI",
+      "label": "Enable GI",
+      "type": "boolean",
+      "group": "Global Illumination"
+    },
+    {
+      "key": "giSamples",
+      "label": "GI samples",
+      "type": "enum",
+      "group": "Global Illumination",
+      "options": [
+        "8",
+        "32",
+        "64",
+        "256"
+      ],
+      "enumValues": [
+        8,
+        32,
+        64,
+        256
+      ]
+    },
+    {
+      "key": "denoise",
+      "label": "Denoise",
+      "type": "enum",
+      "group": "Global Illumination",
+      "options": [
+        "OIDN",
+        "A-trous",
+        "None"
+      ]
+    },
+    {
+      "key": "ambientFraction",
+      "label": "Ambient fraction",
+      "type": "real",
+      "group": "Global Illumination",
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.02
+    },
+    {
+      "key": "giSkyGradient",
+      "label": "Sky gradient",
+      "type": "boolean",
+      "group": "Global Illumination"
+    },
+    {
+      "key": "giGroundColor",
+      "label": "Ground color",
+      "type": "color",
+      "group": "Global Illumination"
+    },
+    {
+      "key": "lightIntensity",
+      "label": "Light intensity",
+      "type": "real",
+      "group": "Lights",
+      "min": 0.0,
+      "max": 3.0,
+      "step": 0.05
+    },
+    {
+      "key": "flashFraction",
+      "label": "Flash fraction",
+      "type": "real",
+      "group": "Lights",
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.05
+    }
+  ],
+  "umbreon_npr": [
+    {
+      "key": "hatchStyle",
+      "label": "Style",
+      "type": "enum",
+      "group": "Hatching",
+      "options": [
+        "richardson",
+        "ink-cross",
+        "manga",
+        "pen-cross",
+        "pencil",
+        "engraving",
+        "stipple",
+        "screentone-60",
+        "manga-square"
+      ]
+    },
+    {
+      "key": "hatchColoring",
+      "label": "Coloring",
+      "type": "enum",
+      "group": "Hatching",
+      "options": [
+        "Style default",
+        "Ink on paper",
+        "Colored ink on paper",
+        "Ink on color fill",
+        "Colored ink on color fill"
+      ]
+    },
+    {
+      "key": "hatchDensity",
+      "label": "Mark density",
+      "type": "real",
+      "group": "Hatching",
+      "min": 0.25,
+      "max": 4.0,
+      "step": 0.05
+    },
+    {
+      "key": "hatchWidthScale",
+      "label": "Mark width",
+      "type": "real",
+      "group": "Hatching",
+      "min": 0.25,
+      "max": 4.0,
+      "step": 0.05
+    },
+    {
+      "key": "hatchCustomInk",
+      "label": "Custom ink color",
+      "type": "boolean",
+      "group": "Hatching"
+    },
+    {
+      "key": "hatchInkColor",
+      "label": "Ink color",
+      "type": "color",
+      "group": "Hatching"
+    },
+    {
+      "key": "hatchCustomPaper",
+      "label": "Custom paper color",
+      "type": "boolean",
+      "group": "Hatching"
+    },
+    {
+      "key": "hatchPaperColor",
+      "label": "Paper color",
+      "type": "color",
+      "group": "Hatching"
+    },
+    {
+      "key": "hatchDefaultEdges",
+      "label": "Default contour edges",
+      "type": "boolean",
+      "group": "Hatching"
+    },
+    {
+      "key": "supersample",
+      "label": "Supersampling",
+      "type": "integer",
+      "group": "Antialiasing",
+      "min": 1.0,
+      "max": 8.0,
+      "step": 1.0
+    },
+    {
+      "key": "aoEnabled",
+      "label": "Enable AO",
+      "type": "boolean",
+      "group": "Ambient Occlusion"
+    },
+    {
+      "key": "aoSamples",
+      "label": "AO samples",
+      "type": "integer",
+      "group": "Ambient Occlusion",
+      "min": 1.0,
+      "max": 256.0,
+      "step": 8.0
+    },
+    {
+      "key": "aoDistance",
+      "label": "AO distance (0 = auto)",
+      "type": "real",
+      "group": "Ambient Occlusion",
+      "min": 0.0,
+      "max": 1000.0,
+      "step": 10.0
+    },
+    {
+      "key": "aoIntensity",
+      "label": "AO intensity",
+      "type": "real",
+      "group": "Ambient Occlusion",
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.1
+    },
+    {
+      "key": "aoDiffuseFactor",
+      "label": "AO on direct light",
+      "type": "real",
+      "group": "Ambient Occlusion",
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.1
+    },
+    {
+      "key": "aoMultiScale",
+      "label": "Multi-scale AO",
+      "type": "boolean",
+      "group": "Ambient Occlusion"
+    },
+    {
+      "key": "aoBentNormal",
+      "label": "Bent normal",
+      "type": "boolean",
+      "group": "Ambient Occlusion"
+    },
+    {
+      "key": "aoLowDiscrepancy",
+      "label": "Low-discrepancy sampling",
+      "type": "boolean",
+      "group": "Ambient Occlusion"
+    },
+    {
+      "key": "aoGather",
+      "label": "AO gather",
+      "type": "enum",
+      "group": "Ambient Occlusion",
+      "options": [
+        "Per output pixel",
+        "Per shading hit"
+      ]
+    },
+    {
+      "key": "shadows",
+      "label": "Cast shadows",
+      "type": "boolean",
+      "group": "Shadows"
+    },
+    {
+      "key": "shadowSamples",
+      "label": "Shadow samples",
+      "type": "integer",
+      "group": "Shadows",
+      "min": 1.0,
+      "max": 64.0,
+      "step": 1.0
+    },
+    {
+      "key": "lightRadius",
+      "label": "Light radius (deg)",
+      "type": "real",
+      "group": "Shadows",
+      "min": 0.0,
+      "max": 30.0,
+      "step": 0.5
+    },
+    {
+      "key": "creaseLimit",
+      "label": "Crease angle (deg)",
+      "type": "enum",
+      "group": "Edges",
+      "options": [
+        "Off",
+        "15",
+        "30",
+        "45",
+        "60",
+        "90",
+        "120"
+      ],
+      "enumValues": [
+        -1,
+        15,
+        30,
+        45,
+        60,
+        90,
+        120
+      ]
+    },
+    {
+      "key": "contactEdges",
+      "label": "Contact edges",
+      "type": "boolean",
+      "group": "Edges"
+    },
+    {
+      "key": "outlineFarDepth",
+      "label": "Outline far depth",
+      "type": "real",
+      "group": "Edges",
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.01
+    },
+    {
+      "key": "perPixelBlend",
+      "label": "Per-pixel transparency",
+      "type": "boolean",
+      "group": "Transparency"
+    },
+    {
+      "key": "lightIntensity",
+      "label": "Light intensity",
+      "type": "real",
+      "group": "Lights",
+      "min": 0.0,
+      "max": 3.0,
+      "step": 0.05
+    },
+    {
+      "key": "flashFraction",
+      "label": "Flash fraction",
+      "type": "real",
+      "group": "Lights",
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.05
+    }
+  ]
+}

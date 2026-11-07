@@ -1452,12 +1452,8 @@ struct GuiApplication {
     render_backend: String,
     umbreon_denoise: UmbreonDenoiseMode,
     ray_size: [u32; 2],
-    ray_hatching: bool,
-    ray_hatch: cuemol_render::HatchRenderParams,
-    ray_transparent: bool,
     ray_panel: cuemol_ui::RenderPanel,
     ray_cancel: Option<Arc<AtomicBool>>,
-    ray_lighting: cuemol_render::UmbreonRenderParams,
     ray_job: Option<mpsc::Receiver<std::result::Result<serde_json::Value, String>>>,
     pov_render_settings: NativePovRenderSettings,
     pov_render_job: Option<NativePovRenderJob>,
@@ -4722,13 +4718,8 @@ impl GuiApplication {
             render_backend: "POV-Ray".to_string(),
             umbreon_denoise: UmbreonDenoiseMode::default(),
             ray_size: [1200, 900],
-            ray_hatching: false,
-            ray_hatch: Default::default(),
-            ray_transparent: false,
             ray_panel: cuemol_ui::RenderPanel::default(),
             ray_cancel: None,
-            ray_lighting: cuemol_command::rendering_params(&serde_json::Map::new(), "umbreon")
-                .unwrap(),
             ray_job: None,
             mcp_listen_port: None,
             pov_render_settings: NativePovRenderSettings::default(),
@@ -14962,27 +14953,12 @@ impl GuiApplication {
     }
 
     fn open_native_render(&mut self) {
-        if let Ok(settings) = cuemol_command::render_settings(&self.state) {
-            self.ray_panel.read_settings(&settings, &mut self.ray_size);
-            self.ray_hatching = settings.get("backend").is_some_and(|v| v == "umbreon_npr");
-            if let Ok(params) = cuemol_command::rendering_params(
-                &settings,
-                if self.ray_hatching {
-                    "umbreon_npr"
-                } else {
-                    "umbreon"
-                },
-            ) {
-                self.ray_lighting = params;
-            }
-            if let Ok(hatch) = cuemol_command::hatch_params(&settings, "umbreon_npr") {
-                self.ray_hatch = hatch;
-            }
-            self.ray_lighting.perspective = settings
-                .get("projection")
-                .is_some_and(|v| v == "perspective");
-            self.ray_transparent = settings.get("transparentBg").is_some_and(|v| v == true);
-        }
+        let mut camera = self
+            .state
+            .active_view_camera()
+            .unwrap_or_else(cuemol_qsys::Camera::new);
+        self.flush_native_render_settings(&mut camera, 0., true);
+        self.sync_native_render_settings();
         if self.export_path.is_empty() || !self.export_path.ends_with(".png") {
             self.export_path = "render.png".into();
         }
@@ -14994,9 +14970,25 @@ impl GuiApplication {
         settings: &str,
         camera: &mut cuemol_qsys::Camera,
     ) -> cuemol_core::Result<()> {
+        self.apply_native_render_settings_to(
+            self.state.active_scene().map(|id| id.get()),
+            settings,
+            camera,
+        )
+    }
+
+    fn apply_native_render_settings_to(
+        &mut self,
+        scene: Option<u64>,
+        settings: &str,
+        camera: &mut cuemol_qsys::Camera,
+    ) -> cuemol_core::Result<()> {
         self.cancel_console("Scene changed outside the console; remaining commands cancelled.");
         let mut before = self.capture_script_undo();
-        let args = serde_json::json!({"settings": settings});
+        let mut args = serde_json::json!({"settings": settings});
+        if let Some(scene) = scene {
+            args["sceneId"] = serde_json::json!(scene);
+        }
         before.record = cuemol_command::console::actions::Record::operation(
             &self.state,
             "set_render_settings",
@@ -15004,16 +14996,65 @@ impl GuiApplication {
         );
         cuemol_command::call_tool(&mut self.state, camera, "set_render_settings", &args)?;
         if !before.state.same_scene_undo_state(&self.state) {
-            self.push_undo_snapshot(before);
+            self.push_undo_snapshot_for_scene(before, scene.map(cuemol_core::Uid::new));
             self.rebuild_snapshot();
         }
         Ok(())
     }
 
+    fn sync_native_render_settings(&mut self) {
+        let scene = self.state.active_scene().map(|id| id.get());
+        let settings = cuemol_command::render_settings(&self.state).unwrap_or_default();
+        self.ray_panel.editor.sync(scene, &settings);
+        self.ray_size = self.ray_panel.editor.pixels();
+    }
+
+    fn flush_native_render_settings(
+        &mut self,
+        camera: &mut cuemol_qsys::Camera,
+        now: f64,
+        force: bool,
+    ) -> bool {
+        let scene = self.state.active_scene().map(|id| id.get());
+        if !self.ray_panel.editor.due(scene, now, force) {
+            return true;
+        }
+        let target = self.ray_panel.editor.scene();
+        let argument = self.ray_panel.editor.settings_argument();
+        match self.apply_native_render_settings_to(target, &argument, camera) {
+            Ok(()) => {
+                let stored = target
+                    .and_then(|id| {
+                        cuemol_command::scene_render_settings(
+                            &self.state,
+                            cuemol_core::Uid::new(id),
+                        )
+                        .ok()
+                    })
+                    .unwrap_or_default();
+                self.ray_panel.editor.saved(&stored);
+                true
+            }
+            Err(error) => {
+                self.ray_panel.message = error.to_string();
+                self.ray_panel.editor.discard_pending();
+                false
+            }
+        }
+    }
+
     fn native_render_dialog(&mut self, ctx: &egui::Context, camera: &CameraController) {
+        let mut current = camera.to_qsys_camera("__current");
+        let now = ctx.input(|i| i.time);
+        self.flush_native_render_settings(
+            &mut current,
+            now,
+            self.tool_dialog.as_deref() != Some("Native rendering"),
+        );
         if self.tool_dialog.as_deref() != Some("Native rendering") {
             return;
         }
+        self.sync_native_render_settings();
         let mut open = true;
         let action = self.ray_panel.show(
             ctx,
@@ -15021,13 +15062,27 @@ impl GuiApplication {
             self.ray_job.is_some(),
             cuemol_ui::RenderControls {
                 can_start: self.state.active_scene().is_some(),
-                size: &mut self.ray_size,
-                transparent: &mut self.ray_transparent,
-                hatching: &mut self.ray_hatching,
-                lighting: &mut self.ray_lighting,
-                hatch: &mut self.ray_hatch,
+                view_size: self
+                    .viewport_rect
+                    .map(|rect| {
+                        [
+                            rect.width().round().max(1.) as u32,
+                            rect.height().round().max(1.) as u32,
+                        ]
+                    })
+                    .unwrap_or(self.ray_size),
             },
         );
+        self.ray_size = self.ray_panel.editor.pixels();
+        if matches!(
+            action,
+            cuemol_ui::RenderAction::Start | cuemol_ui::RenderAction::UseSettings
+        ) || !open
+        {
+            if !self.flush_native_render_settings(&mut current, now, true) {
+                return;
+            }
+        }
         match action {
             cuemol_ui::RenderAction::Stop => {
                 if let Some(cancel) = &self.ray_cancel {
@@ -15076,37 +15131,17 @@ impl GuiApplication {
                 }
             }
             cuemol_ui::RenderAction::Start => {
-                let mut current = camera.to_qsys_camera("__current");
-                let backend = if self.ray_hatching {
-                    "umbreon_npr"
-                } else {
-                    "umbreon"
-                };
-                let mut settings = format!(
-                    "{}; transparentBg={}; backend={backend}; projection={}; clipPlane={}; {}",
-                    self.ray_panel.image_settings(self.ray_size),
-                    self.ray_transparent,
-                    if self.ray_lighting.perspective {
-                        "perspective"
-                    } else {
-                        "orthographic"
-                    },
-                    self.ray_lighting.use_clip_z,
-                    cuemol_command::rendering_settings(&self.ray_lighting, backend)
-                );
-                if self.ray_hatching {
-                    settings.push_str("; ");
-                    settings.push_str(&cuemol_command::hatch_settings(&self.ray_hatch));
+                let settings = self.ray_panel.editor.settings_argument();
+                if let Err(error) = self.apply_native_render_settings(&settings, &mut current) {
+                    self.ray_panel.failed(error.to_string());
+                    return;
                 }
-                let result = self.apply_native_render_settings(&settings, &mut current)
-                .and_then(|_| {
-                    cuemol_command::prepare_render(
-                        &self.state,
-                        &current,
-                        "get_screenshot",
-                        &serde_json::json!({"width":self.ray_size[0],"height":self.ray_size[1]}),
-                    )
-                });
+                let result = cuemol_command::prepare_render(
+                    &self.state,
+                    &current,
+                    "get_screenshot",
+                    &serde_json::json!({}),
+                );
                 match result {
                     Ok(prepared) => {
                         let (sender, receiver) = mpsc::channel();
@@ -31454,6 +31489,68 @@ mod tests {
             }],
         );
         assert!(!flags[3], "dragging must not activate the row");
+    }
+
+    #[test]
+    fn native_render_settings_debounce_target_undo_and_reopen() {
+        let mut app = GuiApplication::new();
+        let first = app.state.new_scene("first", true).result_scene;
+        app.open_native_render();
+        let mut camera = cuemol_qsys::Camera::new();
+        app.ray_panel
+            .editor
+            .values
+            .insert("dpi".into(), serde_json::json!(300));
+        app.ray_panel.editor.edited(1.);
+        assert!(app.flush_native_render_settings(&mut camera, 1.1, false));
+        assert!(app.undo_stack.is_empty());
+        app.ray_panel
+            .editor
+            .values
+            .insert("dpi".into(), serde_json::json!(72));
+        app.ray_panel.editor.edited(1.2);
+        assert!(app.flush_native_render_settings(&mut camera, 1.6, false));
+        assert_eq!(app.undo_stack.len(), 1);
+        assert_eq!(
+            cuemol_command::render_settings(&app.state).unwrap()["dpi"],
+            72.
+        );
+        let mut controller = CameraController::default();
+        app.undo(&mut controller);
+        app.sync_native_render_settings();
+        assert_eq!(app.ray_panel.editor.number("dpi"), 600.);
+        app.redo(&mut controller);
+        app.sync_native_render_settings();
+        assert_eq!(app.ray_panel.editor.number("dpi"), 72.);
+        app.ray_panel
+            .editor
+            .values
+            .insert("dpi".into(), serde_json::json!(300));
+        app.ray_panel.editor.edited(2.);
+        let second = app.state.new_scene("second", true).result_scene;
+        app.sync_active_scene_properties();
+        assert!(app.flush_native_render_settings(&mut camera, 2.1, false));
+        app.sync_native_render_settings();
+        assert_eq!(app.state.active_scene(), Some(second));
+        assert_eq!(app.ray_panel.editor.number("dpi"), 600.);
+        assert_eq!(
+            cuemol_command::scene_render_settings(&app.state, first).unwrap()["dpi"],
+            300.
+        );
+        assert!(cuemol_command::render_settings(&app.state)
+            .unwrap()
+            .is_empty());
+        app.ray_panel
+            .editor
+            .values
+            .insert("dpi".into(), serde_json::json!(150));
+        app.ray_panel.editor.edited(3.);
+        app.open_native_render();
+        assert_eq!(
+            cuemol_command::render_settings(&app.state).unwrap()["dpi"],
+            150.
+        );
+        assert_eq!(app.ray_panel.editor.number("dpi"), 150.);
     }
 
     #[test]

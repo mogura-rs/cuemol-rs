@@ -1,8 +1,9 @@
 use base64::Engine;
+use cuemol_command::render_editor::{catalog, quality_steps, RenderEditor};
 use cuemol_command::render_history::{RenderHistory, RenderSource};
-use cuemol_render::{HatchRenderParams, UmbreonRenderParams};
 use egui::{Context, Response, TextureHandle};
-use serde_json::{Map, Value};
+use serde_json::json;
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -17,20 +18,14 @@ pub enum RenderAction {
     UseSettings,
 }
 
-pub struct RenderControls<'a> {
+pub struct RenderControls {
     pub can_start: bool,
-    pub size: &'a mut [u32; 2],
-    pub transparent: &'a mut bool,
-    pub hatching: &'a mut bool,
-    pub lighting: &'a mut UmbreonRenderParams,
-    pub hatch: &'a mut HatchRenderParams,
+    pub view_size: [u32; 2],
 }
 
 pub struct RenderPanel {
     tab: usize,
-    dpi: f64,
-    unit: String,
-    dimensions: [f64; 2],
+    pub editor: RenderEditor,
     preview: Option<TextureHandle>,
     pub png: Option<Arc<[u8]>>,
     pub history: RenderHistory,
@@ -45,8 +40,7 @@ pub struct RenderPanel {
 impl std::fmt::Debug for RenderPanel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RenderPanel")
-            .field("dpi", &self.dpi)
-            .field("unit", &self.unit)
+            .field("editor", &self.editor)
             .field("has_preview", &self.preview.is_some())
             .finish_non_exhaustive()
     }
@@ -56,9 +50,7 @@ impl Default for RenderPanel {
     fn default() -> Self {
         Self {
             tab: 0,
-            dpi: 600.,
-            unit: "px".into(),
-            dimensions: [1200.; 2],
+            editor: RenderEditor::default(),
             preview: None,
             png: None,
             history: RenderHistory::default(),
@@ -73,55 +65,6 @@ impl Default for RenderPanel {
 }
 
 impl RenderPanel {
-    pub fn read_settings(&mut self, settings: &Map<String, Value>, size: &mut [u32; 2]) {
-        self.dpi = settings
-            .get("dpi")
-            .and_then(Value::as_f64)
-            .unwrap_or(600.)
-            .clamp(1., 4800.);
-        self.unit = settings
-            .get("unit")
-            .and_then(Value::as_str)
-            .filter(|u| ["px", "in", "cm", "mm"].contains(u))
-            .unwrap_or("px")
-            .into();
-        for (i, key) in ["width", "height"].iter().enumerate() {
-            let value = settings
-                .get(*key)
-                .and_then(Value::as_f64)
-                .unwrap_or(size[i] as f64 / self.scale());
-            self.dimensions[i] = value;
-            size[i] = (value * self.scale()).round().clamp(1., 8192.) as u32;
-        }
-    }
-
-    fn scale(&self) -> f64 {
-        match self.unit.as_str() {
-            "in" => self.dpi,
-            "cm" => self.dpi / 2.54,
-            "mm" => self.dpi / 25.4,
-            _ => 1.,
-        }
-    }
-
-    pub fn image_settings(&self, size: [u32; 2]) -> String {
-        format!(
-            "width={}; height={}; unit={}; dpi={}",
-            if self.unit == "px" {
-                size[0] as f64
-            } else {
-                self.dimensions[0]
-            },
-            if self.unit == "px" {
-                size[1] as f64
-            } else {
-                self.dimensions[1]
-            },
-            self.unit,
-            self.dpi
-        )
-    }
-
     pub fn begin(&mut self, ctx: &Context, source: RenderSource) {
         self.started = Some(ctx.input(|i| i.time));
         self.pending_source = Some(source);
@@ -211,7 +154,7 @@ impl RenderPanel {
         ctx: &Context,
         open: &mut bool,
         running: bool,
-        mut controls: RenderControls<'_>,
+        controls: RenderControls,
     ) -> RenderAction {
         self.rects.clear();
         let mut action = RenderAction::None;
@@ -238,12 +181,7 @@ impl RenderPanel {
                             egui::Layout::top_down(egui::Align::LEFT),
                             |ui| {
                                 action = self.preview(ui, (height - 176.).max(120.), running);
-                                let run = self.actions(
-                                    ui,
-                                    running,
-                                    controls.can_start,
-                                    controls.hatching,
-                                );
+                                let run = self.actions(ui, running, controls.can_start);
                                 if run != RenderAction::None {
                                     action = run;
                                 }
@@ -254,18 +192,18 @@ impl RenderPanel {
                             egui::vec2(288., height),
                             egui::Layout::top_down(egui::Align::LEFT),
                             |ui| {
-                                self.settings(ui, running, &mut controls);
+                                self.settings(ui, running, &controls);
                             },
                         );
                     });
                 } else {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         action = self.preview(ui, 240., running);
-                        let run = self.actions(ui, running, controls.can_start, controls.hatching);
+                        let run = self.actions(ui, running, controls.can_start);
                         if run != RenderAction::None {
                             action = run;
                         }
-                        self.settings(ui, running, &mut controls);
+                        self.settings(ui, running, &controls);
                     });
                 }
             });
@@ -470,13 +408,7 @@ impl RenderPanel {
         action
     }
 
-    fn actions(
-        &mut self,
-        ui: &mut egui::Ui,
-        running: bool,
-        can_start: bool,
-        hatching: &mut bool,
-    ) -> RenderAction {
+    fn actions(&mut self, ui: &mut egui::Ui, running: bool, can_start: bool) -> RenderAction {
         let mut action = RenderAction::None;
         ui.separator();
         ui.horizontal_wrapped(|ui| {
@@ -494,16 +426,31 @@ impl RenderPanel {
                 }
             }
             ui.add_enabled_ui(!running, |ui| {
-                egui::ComboBox::from_id_salt("render-backend")
-                    .selected_text(if *hatching {
+                let before = self.editor.backend().to_string();
+                let mut backend = before.clone();
+                let response = egui::ComboBox::from_id_salt("render-backend")
+                    .selected_text(if backend == "umbreon_npr" {
                         "Umbreon (NPR)"
                     } else {
                         "Umbreon"
                     })
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(hatching, false, "Umbreon");
-                        ui.selectable_value(hatching, true, "Umbreon (NPR)");
-                    });
+                        for (id, label) in
+                            [("umbreon", "Umbreon"), ("umbreon_npr", "Umbreon (NPR)")]
+                        {
+                            let response = ui.selectable_value(&mut backend, id.into(), label);
+                            self.record(&format!("Render backend {id}"), &response);
+                        }
+                    })
+                    .response;
+                self.record("Render backend", &response);
+                if backend != before {
+                    self.editor.values.insert("backend".into(), json!(backend));
+                    self.editor.edited(ui.input(|i| i.time));
+                    if self.tab == 2 {
+                        self.tab = 1;
+                    }
+                }
             });
         });
         ui.separator();
@@ -518,10 +465,14 @@ impl RenderPanel {
         action
     }
 
-    fn settings(&mut self, ui: &mut egui::Ui, running: bool, controls: &mut RenderControls<'_>) {
+    fn settings(&mut self, ui: &mut egui::Ui, running: bool, controls: &RenderControls) {
         crate::shell::header(ui, "Render Settings");
+        let before = self.editor.values.clone();
         ui.horizontal(|ui| {
-            for (i, label) in [(0, "Image"), (1, "Render")] {
+            for (i, label) in [(0, "Image"), (1, "Render"), (2, "Detail")] {
+                if i == 2 && self.editor.backend() != "umbreon_npr" {
+                    continue;
+                }
                 let response = ui.selectable_value(&mut self.tab, i, label);
                 self.record(&format!("Render settings {label}"), &response);
             }
@@ -530,157 +481,381 @@ impl RenderPanel {
         egui::ScrollArea::vertical()
             .id_salt("render-settings-scroll")
             .show(ui, |ui| {
-                ui.add_enabled_ui(!running, |ui| {
-                    if self.tab == 0 {
-                        ui.strong("Size");
-                        ui.label("Preset");
-                        egui::ComboBox::from_id_salt("render-size-preset")
-                            .width(ui.available_width() - 8.)
-                            .selected_text(format!(
-                                "{} × {} ({} dpi)",
-                                controls.size[0], controls.size[1], self.dpi
-                            ))
-                            .show_ui(ui, |ui| {
-                                for (label, size, dpi) in [
-                                    ("640 × 480 (72 dpi)", [640, 480], 72.),
-                                    ("1200 × 1200 (600 dpi)", [1200, 1200], 600.),
-                                    ("1920 × 1080 (300 dpi)", [1920, 1080], 300.),
-                                    ("2400 × 2400 (600 dpi)", [2400, 2400], 600.),
-                                ] {
-                                    if ui
-                                        .selectable_label(
-                                            *controls.size == size && self.dpi == dpi,
-                                            label,
-                                        )
-                                        .clicked()
-                                    {
-                                        *controls.size = size;
-                                        self.dpi = dpi;
-                                        self.unit = "px".into();
-                                    }
+                ui.add_enabled_ui(!running && self.editor.scene().is_some(), |ui| {
+                    match self.tab {
+                        0 => self.image_controls(ui, controls.view_size),
+                        2 => {
+                            if let Ok(mut hatch) =
+                                cuemol_command::hatch_params(&self.editor.values, "umbreon_npr")
+                            {
+                                let old_layers = hatch.layers_spec.clone();
+                                let old_tone = hatch.tone_spec.clone();
+                                crate::hatch::hatch_detail_controls(ui, &mut hatch);
+                                if hatch.layers_spec != old_layers {
+                                    self.editor.values.insert(
+                                        "umbreon_npr.hatchLayersSpec".into(),
+                                        json!(hatch.layers_spec),
+                                    );
                                 }
-                            });
-                        ui.horizontal(|ui| {
-                            for (i, label) in [(0, "Width"), (1, "Height")] {
-                                let scale = self.scale();
-                                let mut value = if self.unit == "px" {
-                                    controls.size[i] as f64
-                                } else {
-                                    self.dimensions[i]
-                                };
-                                ui.label(label);
-                                let response = ui.add(
-                                    egui::DragValue::new(&mut value)
-                                        .range(1. / scale..=8192. / scale)
-                                        .speed(1. / scale)
-                                        .max_decimals(if self.unit == "px" { 0 } else { 3 }),
-                                );
-                                self.record(&format!("Render {label}"), &response);
-                                if response.changed() {
-                                    self.dimensions[i] = value;
-                                    controls.size[i] =
-                                        (value * scale).round().clamp(1., 8192.) as u32;
+                                if hatch.tone_spec != old_tone {
+                                    self.editor.values.insert(
+                                        "umbreon_npr.hatchToneSpec".into(),
+                                        json!(hatch.tone_spec),
+                                    );
                                 }
                             }
-                        });
-                        ui.label("Size unit");
-                        let old_unit = self.unit.clone();
-                        let old_scale = self.scale();
-                        egui::ComboBox::from_id_salt("render-unit")
-                            .selected_text(&self.unit)
-                            .show_ui(ui, |ui| {
-                                for unit in ["px", "in", "cm", "mm"] {
-                                    ui.selectable_value(&mut self.unit, unit.into(), unit);
-                                }
-                            });
-                        if self.unit != old_unit {
-                            for i in 0..2 {
-                                let pixels = if old_unit == "px" {
-                                    controls.size[i] as f64
-                                } else {
-                                    self.dimensions[i] * old_scale
-                                };
-                                self.dimensions[i] = pixels / self.scale();
-                            }
                         }
-                        ui.horizontal(|ui| {
-                            ui.label("DPI");
-                            let response = ui.add(
-                                egui::DragValue::new(&mut self.dpi)
-                                    .range(1.0..=4800.0)
-                                    .max_decimals(3),
-                            );
-                            if response.changed() && self.unit != "px" {
-                                for (i, dimension) in controls.size.iter_mut().enumerate() {
-                                    *dimension = (self.dimensions[i] * self.scale())
-                                        .round()
-                                        .clamp(1., 8192.)
-                                        as u32;
-                                }
-                            }
-                            self.record("Render DPI", &response);
-                        });
-                        ui.add_space(8.);
-                        ui.strong("Output");
-                        let response = ui.checkbox(controls.transparent, "Transparent background");
-                        self.record("Render transparent", &response);
-                    } else {
-                        ui.strong("Quality");
-                        let p = &mut controls.lighting;
-                        let mut quality = if p.use_gi {
-                            2
-                        } else if p.ao_samples > 0 {
-                            1
-                        } else {
-                            0
-                        };
-                        let before = quality;
-                        egui::ComboBox::from_label("Lighting")
-                            .selected_text(
-                                ["Raytrace only", "Ambient occlusion", "Global illumination"]
-                                    [quality],
-                            )
-                            .show_ui(ui, |ui| {
-                                for (i, label) in
-                                    ["Raytrace only", "Ambient occlusion", "Global illumination"]
-                                        .iter()
-                                        .enumerate()
-                                {
-                                    ui.selectable_value(&mut quality, i, *label);
-                                }
-                            });
-                        if quality != before {
-                            p.use_gi = quality == 2;
-                            p.ao_samples = if quality == 1 { 64 } else { 0 };
-                        }
-                        ui.horizontal(|ui| {
-                            ui.label("Supersampling");
-                            ui.add(
-                                egui::DragValue::new(&mut p.supersample)
-                                    .range(1..=8)
-                                    .suffix("×"),
-                            );
-                        });
-                        ui.separator();
-                        ui.strong("Camera");
-                        egui::ComboBox::from_label("Projection")
-                            .selected_text(if p.perspective {
-                                "Perspective"
-                            } else {
-                                "Orthographic"
-                            })
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut p.perspective, false, "Orthographic");
-                                ui.selectable_value(&mut p.perspective, true, "Perspective");
-                            });
-                        ui.checkbox(&mut p.use_clip_z, "Enable clip plane");
-                        crate::lighting_controls(ui, p, *controls.hatching);
-                        if *controls.hatching {
-                            crate::hatch_controls(ui, controls.hatch);
-                        }
+                        _ => self.render_controls(ui),
                     }
                 });
             });
+        if self.editor.values != before {
+            self.editor.edited(ui.input(|i| i.time));
+        }
+        if self.editor.pending() {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(300));
+        }
+    }
+
+    fn image_controls(&mut self, ui: &mut egui::Ui, view_size: [u32; 2]) {
+        ui.strong("Size");
+        let size = self.editor.pixels();
+        let presets = [
+            ("Current view", view_size, None),
+            ("100 × 100 (72 dpi)", [100, 100], Some(72.)),
+            ("300 × 300 (300 dpi)", [300, 300], Some(300.)),
+            ("600 × 600 (300 dpi)", [600, 600], Some(300.)),
+            ("1200 × 1200 (600 dpi)", [1200, 1200], Some(600.)),
+        ];
+        let label = presets
+            .iter()
+            .skip(1)
+            .find(|(_, pixels, dpi)| *pixels == size && *dpi == Some(self.editor.number("dpi")))
+            .map_or("Custom", |(label, _, _)| *label);
+        let response = egui::ComboBox::from_id_salt("render-size-preset")
+            .selected_text(label)
+            .width(ui.available_width() - 8.)
+            .show_ui(ui, |ui| {
+                ui.selectable_label(label == "Custom", "Custom").clicked();
+                for (label, pixels, dpi) in presets {
+                    if ui.selectable_label(false, label).clicked() {
+                        self.editor.set_size(pixels, dpi);
+                    }
+                }
+            })
+            .response;
+        self.record("Render size preset", &response);
+        for key in ["width", "height"] {
+            let label = if key == "width" { "Width" } else { "Height" };
+            let mut value = self.editor.number(key);
+            let unit = self.editor.text("unit").to_string();
+            let (min, max, speed) = match unit.as_str() {
+                "in" => (0.1, 60., 0.5),
+                "mm" => (1., 1500., 10.),
+                "cm" => (0.1, 150., 1.),
+                _ => (1., 8192., 100.),
+            };
+            let response = ui
+                .horizontal(|ui| {
+                    ui.label(label);
+                    ui.add(
+                        egui::DragValue::new(&mut value)
+                            .range(min..=max)
+                            .speed(speed)
+                            .max_decimals(if unit == "px" { 0 } else { 3 })
+                            .suffix(format!(" {unit}")),
+                    )
+                })
+                .inner;
+            self.record(&format!("Render {label}"), &response);
+            if response.changed() {
+                self.editor.values.insert(key.into(), json!(value));
+            }
+        }
+        let old_unit = self.editor.text("unit").to_string();
+        let mut unit = old_unit.clone();
+        let response = egui::ComboBox::from_label("Size unit")
+            .selected_text(&unit)
+            .show_ui(ui, |ui| {
+                for value in ["px", "in", "mm", "cm"] {
+                    let response = ui.selectable_value(&mut unit, value.into(), value);
+                    self.record(&format!("Render unit {value}"), &response);
+                }
+            })
+            .response;
+        self.record("Render size unit", &response);
+        if unit != old_unit {
+            self.editor.set_unit(&unit);
+        }
+        ui.horizontal(|ui| {
+            ui.label("DPI");
+            let mut dpi = self.editor.number("dpi");
+            let response = ui.add(
+                egui::DragValue::new(&mut dpi)
+                    .range(1. ..=4800.)
+                    .max_decimals(3),
+            );
+            self.record("Render DPI", &response);
+            if response.changed() {
+                self.editor.values.insert("dpi".into(), json!(dpi));
+            }
+            egui::ComboBox::from_id_salt("render-dpi-preset")
+                .selected_text("Presets")
+                .show_ui(ui, |ui| {
+                    for dpi in [72, 150, 300, 600, 1200, 2400] {
+                        if ui.selectable_label(false, dpi.to_string()).clicked() {
+                            self.editor.values.insert("dpi".into(), json!(dpi));
+                        }
+                    }
+                });
+        });
+        ui.weak(format!(
+            "{} × {} pixels",
+            self.editor.pixels()[0],
+            self.editor.pixels()[1]
+        ));
+        ui.separator();
+        ui.strong("Output");
+        let rows = catalog()["common"].as_array().unwrap();
+        for row in rows
+            .iter()
+            .filter(|row| row["group"] == "Image" && row["type"] == "boolean")
+        {
+            if self.editor.backend() != "povray" && row["key"] != "transparentBg" {
+                continue;
+            }
+            self.property(ui, row, false);
+        }
+    }
+
+    fn render_controls(&mut self, ui: &mut egui::Ui) {
+        if self.editor.backend() != "povray" {
+            ui.strong("Quality");
+            let before = self.editor.lighting();
+            let mut lighting = before.to_string();
+            let response = egui::ComboBox::from_label("Lighting")
+                .selected_text(match before {
+                    "gi" => "Global Illumination",
+                    "ao" => "Ambient Occlusion",
+                    _ => "Raytrace only",
+                })
+                .show_ui(ui, |ui| {
+                    for (id, label) in [
+                        ("none", "Raytrace only"),
+                        ("ao", "Ambient Occlusion"),
+                        ("gi", "Global Illumination"),
+                    ] {
+                        if id == "gi" && self.editor.backend() == "umbreon_npr" {
+                            continue;
+                        }
+                        let response = ui.selectable_value(&mut lighting, id.into(), label);
+                        self.record(&format!("Render lighting {id}"), &response);
+                    }
+                })
+                .response;
+            self.record("Render lighting", &response);
+            if lighting != before {
+                self.editor.apply_lighting(&lighting);
+            }
+            for (axis, label) in [
+                ("aa", "Supersampling"),
+                ("ao", "AO quality"),
+                ("giLighting", "GI lighting"),
+                ("shadows", "Shadows"),
+            ] {
+                if (axis == "ao" && self.editor.lighting() != "ao")
+                    || (axis == "giLighting" && self.editor.lighting() != "gi")
+                {
+                    continue;
+                }
+                let before = self.editor.quality_step(axis).to_string();
+                let mut selected = before.clone();
+                let choices = quality_steps(axis);
+                let current = choices
+                    .iter()
+                    .find(|(id, _, _)| *id == before)
+                    .map_or("Custom", |(_, label, _)| *label);
+                let response = egui::ComboBox::from_label(label)
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        if before == "custom" {
+                            ui.label("Custom");
+                        }
+                        for (id, label, _) in choices {
+                            let response = ui.selectable_value(&mut selected, id.into(), label);
+                            self.record(&format!("Render quality {axis} {id}"), &response);
+                        }
+                    })
+                    .response;
+                self.record(&format!("Render {label}"), &response);
+                if selected != before {
+                    self.editor.apply_quality(axis, &selected);
+                }
+            }
+        }
+        let backend = self.editor.backend().to_string();
+        let rows = catalog()[&backend].as_array().cloned().unwrap_or_default();
+        let common = catalog()["common"].as_array().unwrap();
+        let groups = [
+            "Camera",
+            "Quality",
+            "Hatching",
+            "Antialiasing",
+            "Lights",
+            "Ambient Occlusion",
+            "Shadows",
+            "Edges",
+            "Transparency",
+            "Global Illumination",
+            "POV-Ray",
+        ];
+        for group in groups {
+            if (group == "Quality" && backend != "povray")
+                || (group == "Ambient Occlusion" && self.editor.lighting() != "ao")
+                || (group == "Global Illumination"
+                    && (backend == "umbreon_npr" || self.editor.lighting() != "gi"))
+            {
+                continue;
+            }
+            let selected = common
+                .iter()
+                .map(|p| (p, false))
+                .chain(rows.iter().map(|p| (p, true)))
+                .filter(|(row, _)| row["group"] == group)
+                .filter(|(row, _)| !matches!(row["key"].as_str(), Some("aoEnabled" | "useGI")))
+                .filter(|(row, _)| {
+                    backend == "povray"
+                        || !matches!(
+                            row["key"].as_str(),
+                            Some("stereoMode" | "stereoDepth" | "numThreads")
+                        )
+                })
+                .collect::<Vec<_>>();
+            if selected.is_empty() {
+                continue;
+            }
+            let response = egui::CollapsingHeader::new(group)
+                .id_salt(("render-group", group))
+                .default_open(matches!(group, "Camera" | "Hatching"))
+                .show(ui, |ui| {
+                    for (row, local) in selected {
+                        self.property(ui, row, local);
+                    }
+                });
+            self.record(&format!("Render group {group}"), &response.header_response);
+        }
+    }
+
+    fn property(&mut self, ui: &mut egui::Ui, row: &Value, local: bool) {
+        let key = row["key"].as_str().unwrap();
+        let path = if local {
+            self.editor.key(key)
+        } else {
+            key.into()
+        };
+        let label = row["label"].as_str().unwrap();
+        let before = self
+            .editor
+            .values
+            .get(&path)
+            .cloned()
+            .unwrap_or(Value::Null);
+        let mut value = before.clone();
+        let enabled = match key {
+            "hatchInkColor" => self.editor.flag(&self.editor.key("hatchCustomInk")),
+            "hatchPaperColor" => self.editor.flag(&self.editor.key("hatchCustomPaper")),
+            _ => true,
+        };
+        ui.push_id(&path, |ui| {
+            ui.add_enabled_ui(enabled, |ui| match row["type"].as_str().unwrap() {
+                "boolean" => {
+                    let mut checked = value.as_bool().unwrap_or(false);
+                    let response = ui.checkbox(&mut checked, label);
+                    self.record(
+                        if key == "transparentBg" {
+                            "Render transparent"
+                        } else {
+                            label
+                        },
+                        &response,
+                    );
+                    value = json!(checked);
+                }
+                "enum" => {
+                    let options = row["options"].as_array().unwrap();
+                    let values = row["enumValues"].as_array().unwrap_or(options);
+                    let index = values.iter().position(|v| {
+                        *v == value || v.as_f64().zip(value.as_f64()).is_some_and(|(a, b)| a == b)
+                    });
+                    let current = index
+                        .map(|i| options[i].as_str().unwrap())
+                        .unwrap_or("Custom");
+                    let response = egui::ComboBox::from_label(label)
+                        .selected_text(current)
+                        .show_ui(ui, |ui| {
+                            for (choice, stored) in options.iter().zip(values) {
+                                ui.selectable_value(
+                                    &mut value,
+                                    stored.clone(),
+                                    choice.as_str().unwrap(),
+                                );
+                            }
+                        })
+                        .response;
+                    self.record(label, &response);
+                }
+                "color" => {
+                    let text = value.as_str().unwrap_or("#000000");
+                    let parsed = u32::from_str_radix(text.trim_start_matches('#'), 16).unwrap_or(0);
+                    let mut rgb = [(parsed >> 16) as u8, (parsed >> 8) as u8, parsed as u8];
+                    let response = ui
+                        .horizontal(|ui| {
+                            ui.label(label);
+                            ui.color_edit_button_srgb(&mut rgb)
+                        })
+                        .inner;
+                    self.record(label, &response);
+                    if response.changed() {
+                        value = json!(format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2]));
+                    }
+                }
+                _ => {
+                    let integer = row["type"] == "integer";
+                    let mut number = value.as_f64().unwrap_or(0.);
+                    let response = ui
+                        .horizontal(|ui| {
+                            ui.label(label);
+                            ui.add(
+                                egui::DragValue::new(&mut number)
+                                    .range(
+                                        row["min"].as_f64().unwrap_or(0.)
+                                            ..=row["max"].as_f64().unwrap_or(10000.),
+                                    )
+                                    .speed(row["step"].as_f64().unwrap_or(0.1))
+                                    .max_decimals(if integer { 0 } else { 3 }),
+                            )
+                        })
+                        .inner;
+                    self.record(label, &response);
+                    if response.changed() {
+                        value = if integer {
+                            json!(number.round() as i32)
+                        } else {
+                            json!(number)
+                        };
+                    }
+                }
+            });
+        });
+        if value != before {
+            self.editor.values.insert(path, value);
+            if key == "hatchStyle" {
+                for key in ["hatchLayersSpec", "hatchToneSpec"] {
+                    self.editor.values.insert(self.editor.key(key), json!(""));
+                }
+            }
+        }
     }
 }
 

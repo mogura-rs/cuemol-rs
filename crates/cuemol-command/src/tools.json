@@ -5218,6 +5218,10 @@
     "inputSchema": {
       "type": "object",
       "properties": {
+        "sceneId": {
+          "type": "integer",
+          "description": "Optional target scene; defaults to the active scene."
+        },
         "settings": {
           "type": "string",
           "description": "The settings, e.g. \"width=1600; height=1200\"."

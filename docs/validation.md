@@ -1,5 +1,55 @@
 # Validation evidence
 
+## Shared render settings and scene edit transactions
+
+Native egui and the browser now use a shared typed rendering editor. Values come
+from the scene's RenderSettings classes; display metadata describes labels,
+groups, bounds and choices. Backend switches retain independent Umbreon/NPR
+blocks, including edits made immediately before another switch. The common
+image/camera controls, independent quality axes, conditional AO/GI groups,
+reference image-size presets and NPR Detail tab replace the previous flattened
+lighting controls. Lighting changes retain supersampling and shadow choices;
+returning to GI applies its default lighting balance. Manual changes derive a
+Custom quality step from the actual properties. Unsupported NPR GI and
+common fields unsupported by Umbreon are omitted.
+
+Settings previously reached the scene only at Start Render, despite being edited
+in a separate window. Changes now persist after a 300 ms quiet period, with one
+Undo entry for an edit burst. Closing, rendering and target-scene changes flush
+pending values. Each write captures its original scene ID, so switching scenes
+cannot redirect the edit. Deleted, negative and zero targets fail without
+falling back to the active scene. Undo/Redo and external settings changes reload
+the editor without producing another write. Native scoped writes mark the
+correct scene modified. The shared command accepts an optional sceneId; omitted
+IDs retain the existing active-scene behavior.
+
+The audit also exposed a legacy numeric AO override taking precedence over the
+editor's gather selector. Canonical gather edits supersede that override, while
+explicit numeric scripting overrides remain supported. The editor preserves
+legacy per-backend/global values until that gather choice changes, and updates
+only the affected backend. Browser auto-save originally replaced the message of
+an unrelated completed command; successful auto-save now preserves that message.
+The usage text claiming settings were saved only at Start was updated. Image
+fields retain the existing Rust limit of 8192 pixels per dimension and support
+small images; the reference editor's pixel field uses 100 through 10000. The
+renderer additionally enforces its existing 32-megapixel allocation limit.
+
+Validation: five focused command/model regressions cover defaults/catalog types,
+quality independence, backend isolation, unit/DPI conversion, delayed writes,
+scene switches, legacy AO precedence and atomic invalid-target handling. The
+full shared command suite passes 77 tests with two existing ignored tests. All 67 shared UI tests,
+229 native tests and 195 macOS Tauri model tests pass; five existing Tauri tests
+remain ignored. Ten existing browser cases pass. Two additional WebGL/WebGPU
+cases pass after the auto-save message repair, exercising real controls,
+per-backend values, quality transitions, physical dimensions and Undo/Redo.
+
+An actual Linux window run edits dimensions and DPI, waits for persistence,
+uses Undo/Redo, renders and copies a PNG of the expected size, changes AO quality,
+switches to NPR and back, opens Detail, and verifies unchanged camera state.
+Screenshots of native and WebGPU settings were inspected. The native and WASM
+builds pass. These checks cover the Umbreon/NPR still-image editor; the unified
+POV-Ray, selectable render target, movie mode and Tauri window remain open.
+
 ## Render image history and shared result viewer
 
 Native egui and browser still-image windows now retain completed images with

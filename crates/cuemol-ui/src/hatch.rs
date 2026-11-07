@@ -84,6 +84,10 @@ pub fn hatch_controls(ui: &mut Ui, params: &mut HatchRenderParams) {
                 .range(0.1..=10.),
         );
     });
+    hatch_detail_controls(ui, params);
+}
+
+pub fn hatch_detail_controls(ui: &mut Ui, params: &mut HatchRenderParams) {
     let mut look = HatchLook::style(&params.style).unwrap_or_default();
     if let Err(error) = look
         .apply_spec(&params.layers_spec, 1)

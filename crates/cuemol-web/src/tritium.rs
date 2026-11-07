@@ -802,28 +802,8 @@ impl App {
         }
     }
     pub(super) fn open_render(&mut self) {
-        if let Ok(settings) = cuemol_command::render_settings(&self.state) {
-            self.render_panel
-                .read_settings(&settings, &mut self.render_size);
-            self.render_hatching = settings.get("backend").is_some_and(|v| v == "umbreon_npr");
-            if let Ok(params) = cuemol_command::rendering_params(
-                &settings,
-                if self.render_hatching {
-                    "umbreon_npr"
-                } else {
-                    "umbreon"
-                },
-            ) {
-                self.render_lighting = params;
-            }
-            self.render_lighting.perspective = settings
-                .get("projection")
-                .is_some_and(|v| v == "perspective");
-            self.render_transparent = settings.get("transparentBg").is_some_and(|v| v == true);
-            if let Ok(hatch) = cuemol_command::hatch_params(&settings, "umbreon_npr") {
-                self.render_hatch = hatch;
-            }
-        }
+        self.flush_render_settings(0., true);
+        self.sync_render_settings();
         self.show_render = true;
     }
     fn shell_sidebar(&mut self, ctx: &egui::Context) {

@@ -157,8 +157,12 @@ pub fn call_tool(
         }
         "move_node" => move_node(state, args),
         "set_render_settings" => {
-            let sid = scene(state)?;
-            let mut settings = render_settings(state)?;
+            let sid = if args.get("sceneId").is_some() {
+                uid(args, "sceneId")?
+            } else {
+                scene(state)?
+            };
+            let mut settings = scene_render_settings(state, sid)?;
             let mut updates = Vec::new();
             for part in split_settings(text(args, "settings")?)?
                 .into_iter()
@@ -250,6 +254,15 @@ pub fn call_tool(
                 updates.push((key.to_string(), parsed.clone()));
                 settings.insert(key.into(), parsed);
             }
+            for prefix in ["", "umbreon.", "umbreon_npr."] {
+                let canonical = format!("{prefix}aoGather");
+                let legacy = format!("{prefix}aoResDiv");
+                if updates.iter().any(|(key, _)| key == &canonical)
+                    && !updates.iter().any(|(key, _)| key == &legacy)
+                {
+                    settings.remove(&legacy);
+                }
+            }
             crate::commands::hatch_params(&settings, "umbreon_npr")?;
             crate::commands::rendering_params(&settings, "umbreon")?;
             crate::commands::rendering_params(&settings, "umbreon_npr")?;
@@ -275,7 +288,7 @@ pub fn call_tool(
             } else {
                 target.set_scene_attribute("render_settings", json!(extensions).to_string());
             }
-            Ok(json!({"settings":render_settings(state)?}))
+            Ok(json!({"settings":scene_render_settings(state, sid)?}))
         }
         "export_image" | "export_scene" => export(state, camera, name, args),
         "superpose" => {
@@ -489,7 +502,17 @@ fn store_render_setting(
 }
 
 pub fn render_settings(state: &DesktopAppState) -> Result<serde_json::Map<String, Value>> {
-    let scene = state.scene_manager().scene(scene(state)?).unwrap();
+    scene_render_settings(state, scene(state)?)
+}
+
+pub fn scene_render_settings(
+    state: &DesktopAppState,
+    sid: Uid,
+) -> Result<serde_json::Map<String, Value>> {
+    let scene = state
+        .scene_manager()
+        .scene(sid)
+        .ok_or_else(|| CueMolError::not_found("render target scene"))?;
     let legacy = scene
         .scene_attribute("render_settings")
         .and_then(|v| serde_json::from_str::<Value>(v).ok())

@@ -848,12 +848,21 @@ the mock Inspector retain separate values; only Reset clears a modified flag.
 ### Image rendering
 
 In the native egui and browser frontends, open Render to preview an image before
-saving it. The Image tab sets size, physical units, DPI and transparency; the
-Render tab controls quality, projection, lighting and NPR settings. Start Render
-stores the edited settings as one undoable scene change and renders the current
-view. Stop and failures retain completed results. When dimensions use inches,
-centimeters or millimeters, changing DPI preserves physical size and updates the
-output pixel count. The command APIs retain their direct image/download behavior.
+saving it. The Image tab sets size, physical units, DPI and transparency. The
+Render tab contains independent supersampling, lighting, AO quality, GI lighting
+and shadow choices, with grouped advanced controls. NPR offers raytracing or AO;
+its Detail tab edits hatch layers and tone specifications. Selecting a quality
+step changes its own settings, while manual edits are reflected as Custom.
+Switching the rendering backend retains each backend's scene settings.
+
+Settings edits are stored after a short quiet period and grouped into one Undo
+entry. Closing the window, switching scenes or starting a render flushes pending
+edits to their original scene. Undo/Redo and other scene-setting edits reload the
+open editor. Start Render uses the current values and view. Stop and failures
+retain completed results. Current view and fixed image-size presets are available;
+when dimensions use inches, centimeters or millimeters, changing DPI preserves
+physical size and updates the output pixel count. The command APIs retain their
+direct image/download behavior.
 
 Previous and Next browse up to 50 completed results without changing the scene.
 Save exports the displayed image with its original DPI metadata; Copy puts that
